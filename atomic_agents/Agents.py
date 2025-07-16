@@ -151,11 +151,10 @@ class PlannerAgent(Agent):
         
         # guarantee last step is "return"
         if not plan["steps"] or plan["steps"][-1]["function"] != "return":
-            last_index = len(plan["steps"]) - 1
             plan["steps"].append(
                 {
                     "function": "return",
-                    "args": {"val": f"{{{{step{last_index}}}}}" if plan["steps"][-1] else None},
+                    "args": {"val": None},
                 }
             )
         return plan

@@ -38,7 +38,7 @@ writer   = Agent("StoryWriter", WRITER_PROMPT)
 reviewer = Agent("DraftReviewer", REVIEWER_PROMPT)
 
 # ───────────────────────────  ORCHESTRATOR  ─────────────────────
-orch = PlannerAgent(name = "story-maker", debug=True)
+orch = PlannerAgent(name = "StoryPlanner", debug=True)
 orch.register_agent(outliner,
                     description="Flesh out a full outline from a brief idea description.")
 orch.register_agent(reviewer,
