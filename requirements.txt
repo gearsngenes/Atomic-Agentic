@@ -1,0 +1,3 @@
+# Requirements for Agentic Explorations
+python-dotenv
+openai

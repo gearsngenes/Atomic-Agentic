@@ -1,0 +1,4 @@
+.venv/
+output_markdowns/
+atomic_agents/__pycache__/
+.env
