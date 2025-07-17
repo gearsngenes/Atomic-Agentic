@@ -45,9 +45,8 @@ class PlanExecutor(_ExecutorBase):
     """
     Blocking execution: steps run sequentially on the caller’s thread.
     """
-    def __init__(self, debug=False):
+    def __init__(self):
         super().__init__()
-        self.debug = debug
     def execute(self, plan: Dict[str, Any]) -> Any:
         steps: List[Dict] = plan["steps"]
         tools: Dict[str, Dict] = plan["tools"]
@@ -60,8 +59,7 @@ class PlanExecutor(_ExecutorBase):
                     f"Function '{step['function']}' is async; "
                     "use AsyncPlanExecutor instead."
                 )
-            if self.debug:
-                logging.info(f"[TOOL] {step["function"]}, args: {step["args"]}")
+            logging.info(f"[TOOL] {step["function"]}, args: {step["args"]}")
             args    = self._resolve(step.get("args", {}))
             result  = fn(**args)
             self.ctx[f"step{idx}"] = {**step, "result": result}
@@ -79,11 +77,9 @@ class AsyncPlanExecutor(_ExecutorBase):
     •  invoke      → convenience wrapper (runs its own loop)
     """
 
-    def __init__(self, debug = False, max_workers: int | None = None):
+    def __init__(self, max_workers: int | None = None):
         super().__init__()
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
-        self.debug = debug
-
     # ------------- public API -----------------------------------
     async def execute_async(self, plan: Dict[str, Any]) -> Any:
         steps  = plan["steps"]
@@ -102,8 +98,7 @@ class AsyncPlanExecutor(_ExecutorBase):
             fn_meta = tools[step["function"]]
             fn     = fn_meta["callable"]
             args   = self._resolve(step.get("args", {}))
-            if self.debug:
-                logging.info(f"[TOOL] {step["function"]}, args: {step["args"]}")
+            logging.info(f"[TOOL] {step["function"]}, args: {step["args"]}")
             if self._is_async_fn(fn):
                 return await fn(**args)
             # run blocking code in thread-pool

@@ -48,7 +48,7 @@ class PlannerAgent(Agent):
     methods as tools which it can run`.
     """
 
-    def __init__(self, name: str, model: str = "gpt-4o-mini", is_async = True, debug = False):
+    def __init__(self, name: str, model: str = "gpt-4o-mini", is_async = False):
         super().__init__(name = name, role_prompt = Prompts.AGENTIC_PLANNER_PROMPT, model=model)
 
         # registries -------------------------------------------------
@@ -57,10 +57,9 @@ class PlannerAgent(Agent):
 
         # always provide a simple "return" helper
         self.register_tool("return", lambda val: val, "return(val:any) – identity helper for the final step.")
-        self.debug = debug
         
         # debug / executor
-        self.executor = AsyncPlanExecutor(debug=debug) if is_async else PlanExecutor(debug=debug)
+        self.executor = AsyncPlanExecutor() if is_async else PlanExecutor()
 
     @staticmethod
     def _build_signature(func: callable) -> str:
@@ -108,10 +107,25 @@ class PlannerAgent(Agent):
         # Build signature string "(arg: type, …) → return"
         signature = self._build_signature(agent.invoke)
 
-        # Compose description
+        # Determine agent type for description
+        if isinstance(agent, PlannerAgent):
+            agent_type_desc = (
+                f"Invokes the {agent.name} planner agent. "
+                "This agent expects a full task prompt (str) describing a complex objective. "
+                "It will generate and execute a multi-step plan using its registered tools and return the final result. "
+                "Use this when you want the agent to autonomously break down and solve a task."
+            )
+        else:
+            agent_type_desc = (
+                
+                f"Invokes the {agent.name} basic agent. "
+                "This agent takes a prompt (str) and generates a text response according to its role-prompt description. "
+                "Use this for single-turn LLM completions or simple text generation."
+            )
+
         desc_lines = [
-            f"{agent.name}.invoke signature: {signature} -- "
-            f"Invokes the {agent.name} agent.",
+            f"{agent.name}.invoke signature: {signature} -- ",
+            agent_type_desc,
             f"Agent description: {description}",
         ]
 
@@ -167,11 +181,18 @@ class PlannerAgent(Agent):
         Returns
         -------
         { "steps": list[dict], "tools": dict[str, meta] }
-        """      
+        """
+        logging.info(f"+---{"-"*len(self.name+" Starting")}---+")
+        logging.info(f"|   {self.name} Starting   |")
+        logging.info(f"+---{"-"*len(self.name+" Starting")}---+")
+        
         plan = self.create_plan(prompt)
-        if self.debug:
-            plan_steps = "\n".join(f"STEP {i}:\n{json.dumps(s, indent = 2)}" for i, s in enumerate(plan["steps"]))
-            logging.info(f"[PLAN] STEPS BELOW:\n\n{plan_steps}")
+        logging.info(f"{self.name} created plan with {len(plan['steps'])} steps")
+        
         plan_result = self.execute_plan(plan)
+        
+        logging.info(f"+---{"-"*len(self.name+" Finished")}---+")
+        logging.info(f"|   {self.name} Finished   |")
+        logging.info(f"+---{"-"*len(self.name+" Finished")}---+\n\n")
         return plan_result
     

@@ -1,9 +1,12 @@
-from atomic_agents.Agents import Agent, PlannerAgent
-from atomic_agents.Plugins import ConsolePlugin, MathPlugin
 import logging
+import time
+# ----------------- Atomic Agents ----------------
+from atomic_agents.Agents import Agent, PlannerAgent
 
+# ----------------- Setup Logging ----------------
 logging.basicConfig(level=logging.INFO)
-# Haiku writer agent
+
+# Define a haiku-writing agent
 haiku_writer = Agent(
     name="HaikuWriter",
     role_prompt=(
@@ -20,16 +23,32 @@ haiku_writer = Agent(
     )
 )
 
-poem_writer = Agent(
-    name="PoemWriter",
-    role_prompt=(
-        "You are a master of writing poems. Given a topic, write a "
-        "short poem about it, following a rhythmic pattern. Do not simply re-state the topic "
-        "in the poem, be creative!"
-    )
+# Define a simple formatted print function for haikus
+def print_haiku(haiku_topic, haiku):
+    print(f"---\n**{haiku_topic}**\n{haiku}\n---")
+
+# Create a PlannerAgent that uses the haiku writer and print tool
+agent = PlannerAgent(
+    "AsyncHaikuPlanner",
+    is_async=True,  # Toggle to False to use synchronous planning. Test
+                    # how long it takes to complete with async vs sync
+)
+
+# Register the haiku writer agent
+agent.register_agent(
+    haiku_writer,
+    description = "Writes a haiku about a given topic."
+)
+
+# Register the print_haiku tool
+agent.register_tool(
+    "print_haiku",
+    print_haiku,
+    "Prints a haiku formatted with topic as the title."
 )
 
 if __name__ == "__main__":
+    # List of haiku topics to write about
     topics = [
         "The morning frost",
         "A gentle breeze",
@@ -42,23 +61,17 @@ if __name__ == "__main__":
         "An ancient mountain",
         "A running river",
     ]
-    # Toggle 'is_async' to test both sync and async planners
-    agent = PlannerAgent("AsyncHaikuPlanner", is_async=True, debug=False)
-    agent.register_plugin(ConsolePlugin())
-    agent.register_agent(haiku_writer, description="Writes a haiku about a given topic.")
-
-    # Compose the prompt for the planner agent
+    
+    # Compose the prompt for the planner agent: batch-writing haikus
     prompt = (
         "Given the following list of topics, separately send each topic to the HaikuWriter. "
         "The HaikuWriter should be given only ONE HAIKU TOPIC at a time. "
-        "Print the resulting haikus after they are written, formatted exactly as such:\n"
-        "---\n**<Topic here>**\n"
-        "<haiku here>\n---"
+        "Use the haiku print method to print the formatted haikus after they are written."
         "Topics:\n"
         + "\n- Topic ".join(f'{i}: {t}' for i, t in enumerate(topics)) + "."
     )
 
-    import time
+    # Invoke the planner agent and time it
     start = time.time()
     result = agent.invoke(prompt)
     end = time.time()
