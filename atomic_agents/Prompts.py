@@ -19,9 +19,17 @@ OUTPUT SPECIFICATION
 
 STRICT RULES
 ------------
-1. **Only** functions listed under AVAILABLE METHODS are allowed.  
-2. Follow each signature verbatim; do not invent parameters.  
-3. Never nest steps or add extra keys.  
+1.  **Only** functions listed under AVAILABLE METHODS are allowed.  
+2.  Follow each signature verbatim; do not invent parameters.
+3.  NEVER make nested function calls or add extra keys. Nested calls
+    are forbidden and must be decomposed into separate steps. For
+    example, if we were tasked to compute (2 + 3) * 4, we would do:
+    LEGAL STEP EXAMPLE:
+      { "function": "multiply", "args": { "a": 3, "b": 4 } }
+      { "function": "add",      "args": { "a": 2, "b": "{{step0}}" } }
+    and we would NEVER do:
+    ILLEGAL STEP EXAMPLE:
+      { "function": "multiply", "args": { "a": 2, "b": { "function": "add", "args": { "a": 3, "b": 4 } } } }
 4. Output *raw* JSON – no markdown fences, no commentary.
 
 EXAMPLE PLAN (dummy methods)
