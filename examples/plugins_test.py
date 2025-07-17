@@ -1,13 +1,18 @@
+import sys
+from pathlib import Path
+# Setting the root
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 import logging
 # math_console_demo.py
-from atomic_agents.Agents  import PlannerAgent
-from atomic_agents.Plugins import ParserPlugin, MathPlugin, ConsolePlugin, PythonPlugin
+from modules.Agents  import PlannerAgent
+from modules.Plugins import ParserPlugin, MathPlugin, ConsolePlugin, PythonPlugin
 
 logging.basicConfig(level=logging.INFO)
 print("\n───────────────────────────────\n")
 print("Testing MathPlugin + ConsolePlugin …")
 # ──────────────────────────  SET-UP  ───────────────────────────
-planner = PlannerAgent(name="math-console-tester", debug=True)
+planner = PlannerAgent(name="math-console-tester")
 planner.register_plugin(MathPlugin())
 planner.register_plugin(ConsolePlugin())      # for `print`
 
@@ -20,9 +25,8 @@ TASK 1:
 • Compute the area of a circle with a radius of 5.
 
 TASK 2:
-• A triangle with an angle of 30 degrees has two sides of
-  lengths 3 and 4 making up the angle. Compute the length
-  of the third side using the law of cosines.
+• You have two legs of a right triangle: a=3, b=4.
+  Compute the length of the hypotenuse c.
 
 AFTERWARDS:
 • Print your answers for each task, preceded by a label for what
@@ -37,15 +41,15 @@ print(f"\nReturned value → {result}\n")
 # ────────────────────────  PARSER + MATH DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
 print("Now testing ParserPlugin + MathPlugin …")
-planner = PlannerAgent(name="parser-math-tester", debug=True)
+planner = PlannerAgent(name="parser-math-tester")
 planner.register_plugin(ParserPlugin())
 planner.register_plugin(MathPlugin())
 planner.register_plugin(ConsolePlugin())
 
 task_prompt = """
 TASK
-Given the text: "Temperatures (C): [23.4, 25.1, 22.8]"
-1. Extract a json string from the text
+Given the string ae9w8r98[23.4, 25.1, 22.8]afdadfew
+1. Extract the JSON list of numbers from the string.
 2. Print the extracted json string
 3. Then parse it as a list.
 4. Then calculate the average temperature of the list.
@@ -58,7 +62,7 @@ print(f"\nMean returned → {mean_val}\n")
 # ────────────────────────  PYTHON + CONSOLE DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
 print("Now testing PythonPlugin + ConsolePlugin …")
-planner = PlannerAgent(name="python-type-tester", debug=True)
+planner = PlannerAgent(name="python-type-tester")
 planner.register_plugin(PythonPlugin())
 planner.register_plugin(ConsolePlugin())
 

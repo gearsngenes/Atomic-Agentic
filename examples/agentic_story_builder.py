@@ -1,11 +1,15 @@
-import re, datetime
+import sys
 from pathlib import Path
+# Setting the root
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+import re, datetime
 import logging
 
 logging.basicConfig(level=logging.INFO)
 # ───────────────────────────  local imports  ────────────────────
-from atomic_agents.Agents import Agent, PlannerAgent
-from atomic_agents.Plugins import ConsolePlugin
+from modules.Agents import Agent, PlannerAgent
+from modules.Plugins import ConsolePlugin
 # ───────────────────────────  ROLE PROMPTS  ─────────────────────
 OUTLINER_PROMPT = """
 You are the *Story Outliner*.
@@ -38,7 +42,7 @@ writer   = Agent("StoryWriter", WRITER_PROMPT)
 reviewer = Agent("DraftReviewer", REVIEWER_PROMPT)
 
 # ───────────────────────────  ORCHESTRATOR  ─────────────────────
-orch = PlannerAgent(name = "StoryPlanner", debug=True)
+orch = PlannerAgent(name = "StoryPlanner")
 orch.register_agent(outliner,
                     description="Flesh out a full outline from a brief idea description.")
 orch.register_agent(reviewer,
@@ -79,7 +83,7 @@ if __name__ == "__main__":
     print(final_draft_md)
 
     # ───────────── save markdown file ─────────────
-    out_dir = Path("output_markdowns")
+    out_dir = Path("examples/output_markdowns")
     out_dir.mkdir(exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     filename  = f"{slugify(idea)}-{timestamp}.md"

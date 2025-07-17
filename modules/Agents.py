@@ -6,9 +6,9 @@ from typing import Any
 load_dotenv()
 
 # internal imports
-from atomic_agents.Plugins import *
-from atomic_agents.PlanExecutors import PlanExecutor, AsyncPlanExecutor
-import atomic_agents.Prompts as Prompts
+from modules.Plugins import *
+from modules.PlanExecutors import PlanExecutor, AsyncPlanExecutor
+import modules.Prompts as Prompts
 
 # ────────────────────────────────────────────────────────────────
 # 1.  Agent  (LLM responds to prompts)

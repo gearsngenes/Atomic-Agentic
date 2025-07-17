@@ -4,14 +4,20 @@ Three Planner Agents
 - batch_math_planner: solves multiple math problems using math plugin
 - super_planner: delegates tasks to the above planners
 """
+import sys
+from pathlib import Path
+# Setting the root
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+# ───────────────────────────  imports  ───────────────────────────
 import time
 import logging
 
 logging.basicConfig(level=logging.INFO)
 
 # --- Atomic Agentic Imports ---
-from atomic_agents.Agents import PlannerAgent, Agent
-from atomic_agents.Plugins import ConsolePlugin, MathPlugin
+from modules.Agents import PlannerAgent, Agent
+from modules.Plugins import ConsolePlugin, MathPlugin
 
 # -------------------------------------
 # ----- Build Batch Haiku Planner -----

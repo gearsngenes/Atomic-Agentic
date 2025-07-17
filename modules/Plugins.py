@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+# Setting the root
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 from abc import ABC
 from typing import Dict, Any, List
 import re

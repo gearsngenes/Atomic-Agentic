@@ -1,7 +1,12 @@
+import sys
+from pathlib import Path
+# Setting the root
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 import logging
 import time
 # ----------------- Atomic Agents ----------------
-from atomic_agents.Agents import Agent, PlannerAgent
+from modules.Agents import Agent, PlannerAgent
 
 # ----------------- Setup Logging ----------------
 logging.basicConfig(level=logging.INFO)
