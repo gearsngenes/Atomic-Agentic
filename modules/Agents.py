@@ -238,7 +238,7 @@ class PolymerAgent(Agent):
             self.preprocessor.append(func)
 
 
-    def sends_to(self, other: 'PolymerAgent'):
+    def talks_to(self, other: 'PolymerAgent'):
         if not isinstance(other, PolymerAgent):
             raise TypeError("other must be a PolymerAgent instance")
         self.tail = other

@@ -40,7 +40,7 @@ if __name__ == "__main__":
 
     # Writer agent
     writer = PolymerAgent(seed=Agent(name="Writer", role_prompt=WRITER_PROMPT))
-    outliner.sends_to(writer)
+    outliner.talks_to(writer)
 
     # Single review-rewrite pair
     reviewer = PolymerAgent(
@@ -48,8 +48,8 @@ if __name__ == "__main__":
     rewriter = PolymerAgent(
         seed=Agent(name="Rewriter-1", role_prompt=REWRITER_PROMPT))
     
-    writer.sends_to(reviewer)
-    reviewer.sends_to(rewriter)
+    writer.talks_to(reviewer)
+    reviewer.talks_to(rewriter)
 
     # Final output agent: saves markdown
     final_draft = outliner.invoke(story_prompt)

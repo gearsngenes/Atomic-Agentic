@@ -76,7 +76,7 @@ batch_math_planner.register_plugin(MathPlugin())
 batch_math_planner.register_tool(
     "print_solution",
     print_math_solution,
-    "Prints a math problem and its solution formatted."
+    "Prints the formatted math problem its solution."
 )
 
 
@@ -126,9 +126,7 @@ haiku_task = (
 
 # --- 2. Batch Math Planner task ---
 math_task = f"For each math problem in the provided list seen here:\n{math_problems}\n"
-"Do the following:\n"
-"Solve the math problem. Then PRINT each problem and its solution formatted exactly as:\n"
-"'Question: <math problem>\nAnswer: <solution>'"
+"Solve each math problem, then call the print_solution method for each of them."
 
 
 # --- 3. Super Planner Demo ---
