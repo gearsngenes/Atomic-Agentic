@@ -10,14 +10,17 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 # ───────────────────────────  imports  ───────────────────────────
-import time
-import logging
+import time, logging
 
 logging.basicConfig(level=logging.INFO)
 
 # --- Atomic Agentic Imports ---
 from modules.Agents import PlannerAgent, Agent
-from modules.Plugins import ConsolePlugin, MathPlugin
+from modules.Plugins import MathPlugin
+from modules.LLMNuclei import *
+
+# define a global nucleus to give to each of our agents
+nucleus = OpenAINucleus(model = "gpt-4o-mini")
 
 # -------------------------------------
 # ----- Build Batch Haiku Planner -----
@@ -25,8 +28,9 @@ from modules.Plugins import ConsolePlugin, MathPlugin
 
 # Define Haiku Writing Agent
 haiku_agent = Agent(
-    name="HaikuWriter",
-    role_prompt=(
+    name        = "HaikuWriter",
+    nucleus     = nucleus,
+    role_prompt = (
         "You are a master of writing haiku. Given a topic, write a "
         "3-line haiku about it, following a 5-syllable, 7-syllable, "
         "5-syllable rhythmic patter. Do not simply re-state the topic "
@@ -42,8 +46,9 @@ haiku_agent = Agent(
 
 # Define Batch Haiku Planner
 batch_haiku_planner = PlannerAgent(
-    name="BatchHaikuPlanner", 
-    is_async=True,
+    name    ="BatchHaikuPlanner",
+    nucleus = nucleus,
+    is_async= True,
 )
 
 # Register Haiku Writing Agent
@@ -65,14 +70,17 @@ batch_haiku_planner.register_tool(
 
 # Define Batch Math Planner
 batch_math_planner = PlannerAgent(
-    name="BatchMathPlanner",
-    is_async=True,
+    name    = "BatchMathPlanner",
+    nucleus = nucleus,
+    is_async= True,
 )
 
-# Register Math and Console Plugins
+# Register Math Plugin and print method
+batch_math_planner.register_plugin(MathPlugin())
+
 def print_math_solution(problem, solution):
     print(f"Question: {problem}\nAnswer: {solution}")
-batch_math_planner.register_plugin(MathPlugin())
+
 batch_math_planner.register_tool(
     "print_solution",
     print_math_solution,
@@ -86,8 +94,9 @@ batch_math_planner.register_tool(
 
 # Define Super Planner
 super_planner = PlannerAgent(
-    name="SuperPlanner",
-    is_async=False,
+    name    = "SuperPlanner",
+    nucleus = nucleus,
+    is_async= False,
 )
 
 # Register the two batch planners to the super planner
@@ -126,7 +135,7 @@ haiku_task = (
 
 # --- 2. Batch Math Planner task ---
 math_task = f"For each math problem in the provided list seen here:\n{math_problems}\n"
-"Solve each math problem, then call the print_solution method for each of them."
+"Solve and PRINT(using print_solution) each math problem and its solution."
 
 
 # --- 3. Super Planner Demo ---

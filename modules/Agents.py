@@ -1,6 +1,5 @@
-import os, json, re, inspect, logging
+import json, re, inspect, logging
 from dotenv import load_dotenv
-from openai import OpenAI
 from typing import get_type_hints
 from typing import Any
 load_dotenv()
@@ -9,15 +8,15 @@ load_dotenv()
 from modules.Plugins import *
 from modules.PlanExecutors import PlanExecutor, AsyncPlanExecutor
 import modules.Prompts as Prompts
+from modules.LLMNuclei import *
 
 # ────────────────────────────────────────────────────────────────
 # 1.  Agent  (LLM responds to prompts)
 # ────────────────────────────────────────────────────────────────
 class Agent:
-    def __init__(self, name, role_prompt: str = Prompts.DEFAULT_PROMPT, llm=None, model: str = "gpt-4o-mini", context_enabled: bool = False):
+    def __init__(self, name, nucleus:LLMNucleus, role_prompt: str = Prompts.DEFAULT_PROMPT, context_enabled: bool = False):
         self.name = name
-        self.llm = llm or OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.model = model
+        self.nucleus: LLMNucleus = nucleus
         self.role_prompt = role_prompt
         self.context_enabled = context_enabled
         self.history = []
@@ -27,12 +26,7 @@ class Agent:
         if self.context_enabled:
             messages.extend(self.history)  # Include previous messages if context is enabled
         messages.append({"role": "user", "content": prompt})
-        response = self.llm.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0.1,
-        )
-        response = response.choices[0].message.content.strip()
+        response = self.nucleus.invoke(messages).strip()
         if self.context_enabled:
             self.history.append({"role": "user", "content": prompt})
             self.history.append({"role": "assistant", "content": response})
@@ -48,8 +42,8 @@ class PlannerAgent(Agent):
     methods as tools which it can run`.
     """
 
-    def __init__(self, name: str, model: str = "gpt-4o-mini", is_async = False):
-        super().__init__(name = name, role_prompt = Prompts.AGENTIC_PLANNER_PROMPT, model=model)
+    def __init__(self, name: str, nucleus:LLMNucleus, is_async = False):
+        super().__init__(name = name, nucleus=nucleus, role_prompt = Prompts.AGENTIC_PLANNER_PROMPT)
 
         # registries -------------------------------------------------
         self.toolbox: dict[str, dict] = {}
@@ -206,26 +200,21 @@ class PolymerAgent(Agent):
     Each PolymerAgent wraps a seed Agent, can be linked to head/tail PolymerAgents,
     and processes outputs through a chain of preprocessor callables.
     """
-    def __init__(self, seed: Agent = None, name: str = None, role_prompt: str = None, llm=None, model: str = None, context_enabled: bool = False):
-        if not isinstance(seed, Agent):
-            raise TypeError("seed must be an Agent instance")
-        # initialize the head, tail, and preprocessor list
+    def __init__(self, seed: Agent):
+        if not seed:
+            raise ValueError("'seed' argument must be a non-null Agent instance")
+        
+        # New Polymer inherits all from the seed agent
+        self.seed = seed
+        self.name = seed.name
+        
+        # define the head and tails
         self.head:PolymerAgent = None
         self.tail:PolymerAgent = None
+        # define the preprocessor list
         self.preprocessor: list[callable] = []
-        # if no seed, create a new Agent with given name and role_prompt
-        if not seed:
-            self.name = name
-            # If no name is provided, raise error
-            if not name:
-                raise ValueError("Name must be provided if seed is None")
-            self.seed = super().__init__(name=name, role_prompt=role_prompt or Prompts.DEFAULT_PROMPT, llm=llm, model=model or "gpt-4o-mini", context_enabled=context_enabled)
-        else:
-            # Otherwise, use the seed agent's name and initialize seed to input
-            self.name:str = seed.name
-            self.seed = seed
-        
 
+    # adds a new tool to the preprocessor chain
     def register_tool(self, func: callable, index: int = None):
         # Only allow callables that do not return None
         hints = get_type_hints(func)
@@ -237,15 +226,15 @@ class PolymerAgent(Agent):
         else:
             self.preprocessor.append(func)
 
-
-    def talks_to(self, other: 'PolymerAgent'):
-        if not isinstance(other, PolymerAgent):
+    # Chains together one agent to the next
+    def talks_to(self, agent_b: 'PolymerAgent'):
+        if not isinstance(agent_b, PolymerAgent):
             raise TypeError("other must be a PolymerAgent instance")
-        self.tail = other
-        other.head = self
+        self.tail = agent_b
+        agent_b.head = self
         return
     
-    
+    # invoke calls the seed's invoke
     def invoke(self, prompt: str) -> Any:
         # 1. Pass prompt to seed agent
         result = self.seed.invoke(prompt)
@@ -264,10 +253,11 @@ class PolymerAgent(Agent):
                     raise ValueError(f"Preprocessor tool {func.__name__} expects {len(params)} args but got {len(result)}")
                 else:
                     result = func(result)
-        # 3. If tail exists, pass stringified output to tail.invoke
+        # 3. If tail exists, recursively pass stringified output to tail.invoke
         if self.tail:
             # If result is not str, convert to str
             out = str(result)
+            # recursively call the tail.invoke() method
             return self.tail.invoke(out)
         else:
             return result

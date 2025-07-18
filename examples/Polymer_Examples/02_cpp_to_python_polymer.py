@@ -4,6 +4,10 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from modules.Agents import Agent, PolymerAgent
+from modules.LLMNuclei import *
+
+# define a global nucleus to give to each of our agents
+nucleus = OpenAINucleus(model = "gpt-4o-mini")
 
 # Prompts for each agent
 CPP_2_ENG = """
@@ -17,10 +21,12 @@ program, write equivalent Python code that performs the same core
 functionality. Respond ONLY with valid Python code, no extra text or tags.
 """
 
-# Preprocessor to execute Python code and print output
-import io
-import sys
+# Preprocessor to print cpp to english output
+def print_and_pass(val):
+    print(val)
+    return val
 
+# helper to execute the function
 def exec_python(code: str) -> str:
     try:
         result = exec(code, globals())
@@ -28,10 +34,6 @@ def exec_python(code: str) -> str:
         return result if result else f"{code} returns 'None'"
     except Exception as e:
         return f"Erroneous Code:\n{code}\n\nError: {e}"
-
-def print_and_pass(val):
-    print(val)
-    return val
 
 if __name__ == "__main__":
     cpp_code = '''
@@ -78,10 +80,24 @@ int main() {
     print("C++ code:\n", cpp_code)
 
     # Translator agent: C++ to English
-    cpp2eng = PolymerAgent(seed=Agent(name="Translator", role_prompt=CPP_2_ENG))
+    cpp2eng = PolymerAgent(
+        seed    = Agent(
+            name        ="Translator",
+            nucleus     = nucleus,
+            role_prompt =CPP_2_ENG
+        )
+    )
+    # to 
     cpp2eng.register_tool(print_and_pass)
+    
     # Adapter agent: English to Python
-    eng2py = PolymerAgent(seed=Agent(name="Adapter", role_prompt=ENG_2_PY))
+    eng2py = PolymerAgent(
+        seed    = Agent(
+            name        = "Adapter",
+            nucleus     = nucleus,
+            role_prompt = ENG_2_PY
+        )
+    )
     cpp2eng.talks_to(eng2py)
 
     # Run the chain

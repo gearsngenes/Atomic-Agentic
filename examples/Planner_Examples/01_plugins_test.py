@@ -1,4 +1,4 @@
-import sys
+import sys,os
 from pathlib import Path
 # Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
@@ -7,12 +7,17 @@ import logging
 # math_console_demo.py
 from modules.Agents  import PlannerAgent
 from modules.Plugins import ParserPlugin, MathPlugin, ConsolePlugin, PythonPlugin
+from modules.LLMNuclei import *
 
 logging.basicConfig(level=logging.INFO)
+
 print("\n───────────────────────────────\n")
 print("Testing MathPlugin + ConsolePlugin …")
 # ──────────────────────────  SET-UP  ───────────────────────────
-planner = PlannerAgent(name="math-console-tester")
+# define a global nucleus to give to each of our agents
+nucleus = OpenAINucleus(model = "gpt-4o-mini")
+
+planner = PlannerAgent(name="math-console-tester", nucleus=nucleus)
 planner.register_plugin(MathPlugin())
 planner.register_plugin(ConsolePlugin())      # for `print`
 
@@ -41,7 +46,7 @@ print(f"\nReturned value → {result}\n")
 # ────────────────────────  PARSER + MATH DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
 print("Now testing ParserPlugin + MathPlugin …")
-planner = PlannerAgent(name="parser-math-tester")
+planner = PlannerAgent(name="parser-math-tester", nucleus=nucleus)
 planner.register_plugin(ParserPlugin())
 planner.register_plugin(MathPlugin())
 planner.register_plugin(ConsolePlugin())
@@ -62,7 +67,7 @@ print(f"\nMean returned → {mean_val}\n")
 # ────────────────────────  PYTHON + CONSOLE DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
 print("Now testing PythonPlugin + ConsolePlugin …")
-planner = PlannerAgent(name="python-type-tester")
+planner = PlannerAgent(name="python-type-tester", nucleus=nucleus)
 planner.register_plugin(PythonPlugin())
 planner.register_plugin(ConsolePlugin())
 

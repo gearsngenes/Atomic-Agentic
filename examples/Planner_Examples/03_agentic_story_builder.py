@@ -1,4 +1,4 @@
-import sys
+import sys, os
 from pathlib import Path
 # Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
@@ -9,6 +9,11 @@ logging.basicConfig(level=logging.INFO)
 # ───────────────────────────  local imports  ────────────────────
 from modules.Agents import Agent, PlannerAgent
 from modules.Plugins import ConsolePlugin
+from modules.LLMNuclei import *
+
+# define a global nucleus to give to each of our agents
+nucleus = OpenAINucleus(model = "gpt-4o-mini")
+
 # ───────────────────────────  ROLE PROMPTS  ─────────────────────
 OUTLINER_PROMPT = """
 You are the *Story Outliner*.
@@ -36,19 +41,20 @@ Output: bullet-point critique ONLY (max 8 bullets).  No rewriting.
 """.strip()
 
 # ───────────────────────────  WORKER AGENTS  ────────────────────
-outliner = Agent("StoryOutliner", OUTLINER_PROMPT)
-writer   = Agent("StoryWriter", WRITER_PROMPT)
-reviewer = Agent("DraftReviewer", REVIEWER_PROMPT)
+outliner = Agent("StoryOutliner", nucleus, OUTLINER_PROMPT)
+writer   = Agent("StoryWriter",   nucleus, WRITER_PROMPT)
+reviewer = Agent("DraftReviewer", nucleus, REVIEWER_PROMPT)
 
 # ───────────────────────────  ORCHESTRATOR  ─────────────────────
-orch = PlannerAgent(name = "StoryPlanner")
-orch.register_agent(outliner,
-                    description="Flesh out a full outline from a brief idea description.")
-orch.register_agent(reviewer,
-                    description="Reviews story drafts, provides revision notes back to the writer.")
+orch = PlannerAgent(name = "StoryPlanner", nucleus=nucleus)
+
+orch.register_agent(agent       = outliner,
+                    description = "Flesh out a full outline from a brief idea description.")
+orch.register_agent(agent       = reviewer,
+                    description = "Reviews story drafts, provides revision notes back to the writer.")
 # writer & reviewer are exposed as ordinary tools (not agent-tools)
-orch.register_agent(writer,
-                   "Writes a draft based on the story outline, plus any additional context (i.e. revision notes, prior drafts)")
+orch.register_agent(agent       = writer,
+                    description = "Writes a draft based on the story outline, plus any additional context (i.e. revision notes, prior drafts)")
 
 # register the print method from ConsolePlugin
 orch.register_plugin(ConsolePlugin())

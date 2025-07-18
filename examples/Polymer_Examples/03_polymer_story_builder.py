@@ -5,6 +5,10 @@ import os
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from modules.Agents import Agent, PolymerAgent
+from modules.LLMNuclei import *
+
+# define a global nucleus to give to each of our agents
+nucleus = OpenAINucleus(model = "gpt-4o-mini")
 
 OUTPUT_DIR = "examples/output_markdowns"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -36,17 +40,17 @@ if __name__ == "__main__":
     output_filename = f"{OUTPUT_DIR}/polymer_story.md"
 
     # Outliner agent
-    outliner = PolymerAgent(seed=Agent(name="Outliner", role_prompt=OUTLINER_PROMPT))
+    outliner = PolymerAgent(seed=Agent(name="Outliner", nucleus=nucleus, role_prompt=OUTLINER_PROMPT))
 
     # Writer agent
-    writer = PolymerAgent(seed=Agent(name="Writer", role_prompt=WRITER_PROMPT))
+    writer = PolymerAgent(seed=Agent(name="Writer", nucleus=nucleus, role_prompt=WRITER_PROMPT))
     outliner.talks_to(writer)
 
     # Single review-rewrite pair
     reviewer = PolymerAgent(
-        seed=Agent(name="Reviewer-1", role_prompt=REVIEWER_PROMPT))
+        seed=Agent(name="Reviewer-1", nucleus=nucleus, role_prompt=REVIEWER_PROMPT))
     rewriter = PolymerAgent(
-        seed=Agent(name="Rewriter-1", role_prompt=REWRITER_PROMPT))
+        seed=Agent(name="Rewriter-1", nucleus=nucleus, role_prompt=REWRITER_PROMPT))
     
     writer.talks_to(reviewer)
     reviewer.talks_to(rewriter)

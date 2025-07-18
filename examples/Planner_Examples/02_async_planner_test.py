@@ -1,20 +1,23 @@
-import sys
+import sys, os, logging, time
 from pathlib import Path
 # Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
-import logging
-import time
 # ----------------- Atomic Agents ----------------
 from modules.Agents import Agent, PlannerAgent
+from modules.LLMNuclei import *
 
 # ----------------- Setup Logging ----------------
 logging.basicConfig(level=logging.INFO)
 
+# define a global nucleus to give to each of our agents
+nucleus = OpenAINucleus(model = "gpt-4o-mini")
+
 # Define a haiku-writing agent
 haiku_writer = Agent(
-    name="HaikuWriter",
-    role_prompt=(
+    name        = "HaikuWriter",
+    nucleus     = nucleus,
+    role_prompt = (
         "You are a master of writing haiku. Given a topic, write a "
         "3-line haiku about it, following a 5-syllable, 7-syllable, "
         "5-syllable rhythmic patter. Do not simply re-state the topic "
@@ -28,28 +31,27 @@ haiku_writer = Agent(
     )
 )
 
-# Define a simple formatted print function for haikus
-def print_haiku(haiku_topic, haiku):
-    print(f"---\n**{haiku_topic}**\n{haiku}\n---")
-
 # Create a PlannerAgent that uses the haiku writer and print tool
-agent = PlannerAgent(
-    "AsyncHaikuPlanner",
-    is_async=True,  # Toggle to False to use synchronous planning. Test
-                    # how long it takes to complete with async vs sync
+async_batch_writer = PlannerAgent(
+    name =      "AsyncBatchHaikuPlanner",
+    nucleus =   nucleus,
+    is_async =  True,   # Toggle between async and sync planning
 )
 
 # Register the haiku writer agent
-agent.register_agent(
-    haiku_writer,
-    description = "Writes a haiku about a given topic."
+async_batch_writer.register_agent(
+    agent =         haiku_writer,
+    description =   "Writes a haiku about a given topic."
 )
 
-# Register the print_haiku tool
-agent.register_tool(
-    "print_haiku",
-    print_haiku,
-    "Prints a haiku formatted with topic as the title."
+# Define and register a simple formatted print function for haikus
+def print_haiku(haiku_topic, haiku):
+    print(f"---\n**{haiku_topic}**\n{haiku}\n---")
+
+async_batch_writer.register_tool(
+    name =          "print_haiku",
+    func =          print_haiku,
+    description =   "Prints a haiku formatted with topic as the title."
 )
 
 if __name__ == "__main__":
@@ -78,6 +80,6 @@ if __name__ == "__main__":
 
     # Invoke the planner agent and time it
     start = time.time()
-    result = agent.invoke(prompt)
+    result = async_batch_writer.invoke(prompt)
     end = time.time()
     print("Time taken:", end - start, "seconds")
