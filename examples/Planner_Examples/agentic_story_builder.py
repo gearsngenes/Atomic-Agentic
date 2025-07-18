@@ -1,9 +1,8 @@
 import sys
 from pathlib import Path
 # Setting the root
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
-import re, datetime
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -54,12 +53,6 @@ orch.register_agent(writer,
 # register the print method from ConsolePlugin
 orch.register_plugin(ConsolePlugin())
 
-# ───────────────────────────  HELPERS  ──────────────────────────
-def slugify(text: str, maxlen: int = 60) -> str:
-    text = re.sub(r"[^\w\s-]", "", text).strip().lower()
-    text = re.sub(r"[\s_-]+", "-", text)
-    return text[:maxlen] or "story"
-
 # ─────────────────────────────  MAIN  ───────────────────────────
 if __name__ == "__main__":
     idea  = input("\nStory idea: ").strip()
@@ -85,8 +78,7 @@ if __name__ == "__main__":
     # ───────────── save markdown file ─────────────
     out_dir = Path("examples/output_markdowns")
     out_dir.mkdir(exist_ok=True)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    filename  = f"{slugify(idea)}-{timestamp}.md"
+    filename  = "planner_story.md"
     filepath  = out_dir / filename
     filepath.write_text(final_draft_md, encoding="utf-8")
 

@@ -7,7 +7,7 @@ Three Planner Agents
 import sys
 from pathlib import Path
 # Setting the root
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 # ───────────────────────────  imports  ───────────────────────────
 import time
@@ -70,8 +70,14 @@ batch_math_planner = PlannerAgent(
 )
 
 # Register Math and Console Plugins
+def print_math_solution(problem, solution):
+    print(f"Question: {problem}\nAnswer: {solution}")
 batch_math_planner.register_plugin(MathPlugin())
-batch_math_planner.register_plugin(ConsolePlugin())
+batch_math_planner.register_tool(
+    "print_solution",
+    print_math_solution,
+    "Prints a math problem and its solution formatted."
+)
 
 
 # --------------------------------------
@@ -97,30 +103,32 @@ super_planner.register_agent(batch_math_planner, description="Handles batch math
 haiku_prompts = [
     "A frog jumps in pond",
     "Autumn leaves falling",
-    "Snow on mountain peak"
+    "Snow on mountain peak",
+    "A roaring fire",
+    "balsam flowers"
 ]
 
 # Define an example batch of math problems
 math_problems = [
     "12 * 8 + 5",
-    "sqrt(144) + 7",
-    "(3 + 4) * 2"
+    "9 plus 7",
+    "(3 + 4) * 2",
+    "2^5-3",
+    "maximum of [3, 7, 2, 9, 4]"
 ]
 
-# --- 1. Batch Haiku Planner Demo ---
+# --- 1. Batch Haiku Planner task ---
 haiku_task = (
     f"For each topic in the provided list seen here:\n{haiku_prompts}\n"
     "Do the following:\n"
     "Write a haiku for the given topic. Then print the formatted result."
 )
-haiku_result = batch_haiku_planner.invoke(haiku_task)
 
-
-# --- 2. Batch Math Planner Demo ---
-math_task = f"Solve each of the following math problems and print the questions and their answers to the console:\n{math_problems}\n"
-"When printing each answer, format it exactly as:\n"
-"Question: <math problem>\nAnswer: <solution>\n"
-math_result = batch_math_planner.invoke(math_task)
+# --- 2. Batch Math Planner task ---
+math_task = f"For each math problem in the provided list seen here:\n{math_problems}\n"
+"Do the following:\n"
+"Solve the math problem. Then PRINT each problem and its solution formatted exactly as:\n"
+"'Question: <math problem>\nAnswer: <solution>'"
 
 
 # --- 3. Super Planner Demo ---
@@ -130,7 +138,7 @@ super_task = (
     f"<task_string>\n{haiku_task}</task_string>\n"
     "TASK 2: For the BatchMathPlanner:\n"
     f"<task_string>{math_task}</task_string>\n"
-    "Send each task_string to the appropriate planner EXACTLY as written."
+    "Send each task_string EXACTLY as written to the appropriate planner."
 )
 start = time.time()
 super_result = super_planner.invoke(super_task)

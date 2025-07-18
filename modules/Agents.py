@@ -195,4 +195,79 @@ class PlannerAgent(Agent):
         logging.info(f"|   {self.name} Finished   |")
         logging.info(f"+---{"-"*len(self.name+" Finished")}---+\n\n")
         return plan_result
+
+
+# ────────────────────────────────────────────────────────────────
+# 3.  PolymerAgent  (Invokes a chain of Agents)
+# ────────────────────────────────────────────────────────────────
+class PolymerAgent(Agent):
+    """
+    Doubly linked-list analogue of Agent.
+    Each PolymerAgent wraps a seed Agent, can be linked to head/tail PolymerAgents,
+    and processes outputs through a chain of preprocessor callables.
+    """
+    def __init__(self, seed: Agent = None, name: str = None, role_prompt: str = None, llm=None, model: str = None, context_enabled: bool = False):
+        if not isinstance(seed, Agent):
+            raise TypeError("seed must be an Agent instance")
+        # initialize the head, tail, and preprocessor list
+        self.head:PolymerAgent = None
+        self.tail:PolymerAgent = None
+        self.preprocessor: list[callable] = []
+        # if no seed, create a new Agent with given name and role_prompt
+        if not seed:
+            self.name = name
+            # If no name is provided, raise error
+            if not name:
+                raise ValueError("Name must be provided if seed is None")
+            self.seed = super().__init__(name=name, role_prompt=role_prompt or Prompts.DEFAULT_PROMPT, llm=llm, model=model or "gpt-4o-mini", context_enabled=context_enabled)
+        else:
+            # Otherwise, use the seed agent's name and initialize seed to input
+            self.name:str = seed.name
+            self.seed = seed
+        
+
+    def register_tool(self, func: callable, index: int = None):
+        # Only allow callables that do not return None
+        hints = get_type_hints(func)
+        rtype = hints.get('return', Any)
+        if rtype is type(None):
+            raise ValueError("Preprocessor tool cannot have return type None")
+        if index is not None:
+            self.preprocessor.insert(index, func)
+        else:
+            self.preprocessor.append(func)
+
+
+    def sends_to(self, other: 'PolymerAgent'):
+        if not isinstance(other, PolymerAgent):
+            raise TypeError("other must be a PolymerAgent instance")
+        self.tail = other
+        other.head = self
+        return
     
+    
+    def invoke(self, prompt: str) -> Any:
+        # 1. Pass prompt to seed agent
+        result = self.seed.invoke(prompt)
+        # 2. Pass through preprocessor chain
+        for func in self.preprocessor:
+            # Try to match argument count: if func takes >1 arg, pass result as first arg
+            sig = inspect.signature(func)
+            params = list(sig.parameters.values())
+            if len(params) == 1:
+                result = func(result)
+            else:
+                # If more than one arg, try to unpack if result is tuple/list
+                if isinstance(result, (tuple, list)) and len(result) == len(params):
+                    result = func(*result)
+                elif isinstance(result, (tuple, list)) and len(result) != len(params):
+                    raise ValueError(f"Preprocessor tool {func.__name__} expects {len(params)} args but got {len(result)}")
+                else:
+                    result = func(result)
+        # 3. If tail exists, pass stringified output to tail.invoke
+        if self.tail:
+            # If result is not str, convert to str
+            out = str(result)
+            return self.tail.invoke(out)
+        else:
+            return result

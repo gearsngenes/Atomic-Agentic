@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 # Setting the root
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 import logging
 import time
