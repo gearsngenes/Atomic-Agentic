@@ -23,7 +23,7 @@ functionality. Respond ONLY with valid Python code, no extra text or tags.
 
 # Preprocessor to print cpp to english output
 def print_and_pass(val):
-    print(val)
+    print(f"\n\nTransformed Code:\n{val}\n\n")
     return val
 
 # helper to execute the function
@@ -79,29 +79,29 @@ int main() {
 '''
     print("C++ code:\n", cpp_code)
 
-    # Translator agent: C++ to English
-    cpp2eng = PolymerAgent(
-        seed    = Agent(
-            name        ="Translator",
-            nucleus     = nucleus,
-            role_prompt =CPP_2_ENG
-        )
+    # Create our polymer agents
+    chain_cpp2eng = PolymerAgent(
+        seed = Agent(name= "C++_to_English",
+                nucleus= nucleus,
+                role_prompt = CPP_2_ENG)
     )
-    # to 
-    cpp2eng.register_tool(print_and_pass)
+    # register a method to print the english tranformed code
+    chain_cpp2eng.register_tool(print_and_pass)
     
-    # Adapter agent: English to Python
-    eng2py = PolymerAgent(
-        seed    = Agent(
-            name        = "Adapter",
-            nucleus     = nucleus,
-            role_prompt = ENG_2_PY
-        )
+    # Register a python execution tool
+    chain_eng2py = PolymerAgent(
+        seed = Agent(name= "English_to_Python",
+                    nucleus= nucleus,
+                    role_prompt= ENG_2_PY)
     )
-    cpp2eng.talks_to(eng2py)
-
-    # Run the chain
-    result = cpp2eng.invoke(cpp_code)
-    print("\nPython translation:\n", result,"\n")
-    print("...RUNING CODE...")
-    exec_python(result)
+    # Register a method to print the python transformed code
+    chain_eng2py.register_tool(print_and_pass)
+    # Register a method to run the python code
+    chain_eng2py.register_tool(exec_python)
+    
+    # Link the c++ to english translator to the english to python translator
+    chain_cpp2eng.talks_to(chain_eng2py)
+    
+    # Invoke the chain method to see the full output
+    chain_cpp2eng.invoke(cpp_code)
+    
