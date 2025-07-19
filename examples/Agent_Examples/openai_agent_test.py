@@ -1,5 +1,6 @@
 import sys, os
 from pathlib import Path
+from dotenv import load_dotenv
 # Set root to repo root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
@@ -8,7 +9,10 @@ from modules.Agents import Agent
 from modules.LLMNuclei import OpenAINucleus
 
 # --- define our agent's nucleus (openai, bedrock, azure, etc.) ---
-nucleus = OpenAINucleus(model = "gpt-4o-mini")
+load_dotenv()
+nucleus = OpenAINucleus(
+    api_key=os.getenv("OPENAI_API_KEY"), # in LLMNuclei.py this is the default api key environment variable name
+    model = "gpt-4o-mini")
 
 # --- define our agent ---
 Agent_Atom = Agent(
