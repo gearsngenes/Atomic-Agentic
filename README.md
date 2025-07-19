@@ -135,11 +135,12 @@ nucleus = OpenAINucleus(api_key="your-api-key", model="your-model")
 outliner = Agent(nucleus=nucleus, name="Outliner", role_prompt="You are a story outliner that creates full writing outlines from initial story ideas.")
 writer = Agent(nucleus=nucleus, name="Writer", role_prompt="You turn story outlines into full, markdown formatted stories.")
 
-# Chain them together in a PolymerAgent
-outliner.talks_to(writer)
+#Create a chain in a PolymerAgent
+story_chain = PolymerAgent(outliner)
+story_chain.talks_to(PolymerAgent(writer))
 
 # Use the polymer agent to process a story idea
-final_story = outliner.invoke("A detective solves a mystery in Paris.")
+final_story = story_chain.invoke("A detective solves a mystery in Paris.")
 print(final_story)
 ```
 
