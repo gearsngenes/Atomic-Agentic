@@ -1,3 +1,4 @@
+from llama_cpp import Llama
 import os
 from dotenv import load_dotenv
 from abc import ABC, abstractmethod
@@ -25,6 +26,29 @@ class OpenAINucleus(LLMNucleus):
             temperature=self.temperature,
         )
         return response.choices[0].message.content.strip()
+
+class LlamaCppNucleus(LLMNucleus):
+    def __init__(self,
+                    model_path: str = None,
+                    repo_id: str = None, 
+                    filename: str = None, 
+                    n_ctx: int = 2048, 
+                    verbose = False):
+        self.llm = None
+        # Prefer file path if available
+        if model_path:
+            self.llm = Llama(model_path=model_path, n_ctx=n_ctx, verbose=verbose)
+        elif repo_id and filename:
+            self.llm = Llama.from_pretrained(repo_id=repo_id, filename=filename, n_ctx=n_ctx, verbose=verbose)
+        else:
+            raise ValueError("Must provide either model_path or both repo_id and filename.")
+
+    def invoke(self, messages: list[dict]) -> str:
+        if not self.llm:
+            raise RuntimeError("Llama model not loaded.")
+        # llama-cpp-python expects messages in OpenAI format
+        response = self.llm.create_chat_completion(messages=messages)
+        return response["choices"][0]["message"]["content"].strip()
 
 class AzureOpenAINucleus(LLMNucleus):
     def __init__(self, api_key: str, endpoint: str, api_version: str, model: str):
