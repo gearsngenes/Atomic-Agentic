@@ -15,21 +15,57 @@ from modules.LLMNuclei import *
 # ────────────────────────────────────────────────────────────────
 class Agent:
     def __init__(self, name, nucleus:LLMNucleus, role_prompt: str = Prompts.DEFAULT_PROMPT, context_enabled: bool = False):
-        self.name = name
-        self.nucleus: LLMNucleus = nucleus
-        self.role_prompt = role_prompt
-        self.context_enabled = context_enabled
-        self.history = []
+        self._name = name
+        self._nucleus: LLMNucleus = nucleus
+        self._role_prompt = role_prompt
+        self._context_enabled = context_enabled
+        self._history = []
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def role_prompt(self):
+        return self._role_prompt
+
+    @property
+    def context_enabled(self):
+        return self.context_enabled
+
+    @property
+    def nucleus(self):
+        return self._nucleus
+
+    @property
+    def history(self):
+        return self._history.copy()
+
+    @context_enabled.setter
+    def context_enabled(self, value:bool):
+        self._context_enabled = value
+
+    @nucleus.setter
+    def nucleus(self, value: LLMNucleus):
+        self._nucleus = value
+
+    @name.setter
+    def name(self, value: str):
+        self._name = value
+
+    @role_prompt.setter
+    def role_prompt(self, value: str):
+        self._role_prompt = value
 
     def invoke(self, prompt: str) -> str:
-        messages = [{"role": "system", "content": self.role_prompt}]
-        if self.context_enabled:
-            messages.extend(self.history)  # Include previous messages if context is enabled
+        messages = [{"role": "system", "content": self._role_prompt}]
+        if self._context_enabled:
+            messages.extend(self._history)  # Include previous messages if context is enabled
         messages.append({"role": "user", "content": prompt})
-        response = self.nucleus.invoke(messages).strip()
-        if self.context_enabled:
-            self.history.append({"role": "user", "content": prompt})
-            self.history.append({"role": "assistant", "content": response})
+        response = self._nucleus.invoke(messages).strip()
+        if self._context_enabled:
+            self._history.append({"role": "user", "content": prompt})
+            self._history.append({"role": "assistant", "content": response})
         return response
 
 # ────────────────────────────────────────────────────────────────
@@ -46,14 +82,46 @@ class PlannerAgent(Agent):
         super().__init__(name = name, nucleus=nucleus, role_prompt = Prompts.AGENTIC_PLANNER_PROMPT)
 
         # registries -------------------------------------------------
-        self.toolbox: dict[str, dict] = {}
-        self.plugin_list: list[str] = []
+        self._toolbox: dict[str, dict] = {}
+        self._plugin_list: list[str] = []
+        self._agent_list: list[str] = []
 
         # always provide a simple "return" helper
         self.register_tool("return", lambda val: val, "return(val:any) – identity helper for the final step.")
         
-        # debug / executor
-        self.executor = AsyncPlanExecutor() if is_async else PlanExecutor()
+        # is_async/executor
+        self._is_async = is_async
+        self._executor = AsyncPlanExecutor() if is_async else PlanExecutor()
+
+    @property # role prompt cannot be changed in PlannerAgent
+    def role_prompt(self):
+        return self._role_prompt
+    
+    @property # planner should not be remembering chat-history
+    def context_enabled(self):
+        return self._context_enabled
+    
+    @property # toolbox should not be editable from the outside
+    def toolbox(self):
+        return self._toolbox
+    
+    @property
+    def plugin_list(self):
+        return self._plugin_list
+    
+    @property
+    def is_async(self):
+        return self._is_async
+    
+    @property
+    def executor(self):
+        return self._executor
+    
+    @is_async.setter
+    def is_async(self, value: bool):
+        self._is_async = value
+        self._executor = AsyncPlanExecutor() if value else PlanExecutor()
+    
 
     @staticmethod
     def _build_signature(func: callable) -> str:
@@ -68,7 +136,7 @@ class PlannerAgent(Agent):
         return f"({', '.join(params)}) → {rtype}"
 
     def register_tool(self, name: str, func: callable, description: str, plugin: str = "", agent: str ="") -> None:
-        self.toolbox[name] = {
+        self._toolbox[name] = {
             "agent":        agent if agent else "__base_agent__",
             "plugin":       plugin if plugin else "__base_registry__",
             "callable":     func,
@@ -78,9 +146,9 @@ class PlannerAgent(Agent):
 
     def register_plugin(self, plugin: Plugin) -> None:
         pname = plugin.__class__.__name__
-        if pname in self.plugin_list:
+        if pname in self._plugin_list:
             raise ValueError(f"Plugin “{pname}” already registered.")
-        self.plugin_list.append(pname)
+        self._plugin_list.append(pname)
         for method_name, meta in plugin.method_map().items():
             self.register_tool(
                 name =          method_name,
@@ -100,6 +168,11 @@ class PlannerAgent(Agent):
         """
         # Build signature string "(arg: type, …) → return"
         signature = self._build_signature(agent.invoke)
+        
+        if agent.name in self._agent_list:
+            raise ValueError(f"'{agent.name}' already exists in {self.name}'s list of registered agents.")
+
+        self._agent_list.append(agent.name)
 
         # Determine agent type for description
         if isinstance(agent, PlannerAgent):
@@ -108,6 +181,15 @@ class PlannerAgent(Agent):
                 "This agent expects a full task prompt (str) describing a complex objective. "
                 "It will generate and execute a multi-step plan using its registered tools and return the final result. "
                 "Use this when you want the agent to autonomously break down and solve a task."
+            )
+        elif isinstance(agent, PolymerAgent):
+            agent_type_desc = (
+                
+                f"Invokes the {agent.name} polymer agent. "
+                "This agent takes a prompt (str) and passes it through a chain of other agents, each with their own "
+                "'invoke' logic, and before passing their results further down the chain, they preprocess their "
+                "result through a queue of methods and then send that preprocessed result to the next agent in the chain. "
+                "Use this for deterministic, multi-step, tasks that require chains of LLM completions and method calls."
             )
         else:
             agent_type_desc = (
@@ -132,7 +214,7 @@ class PlannerAgent(Agent):
 
     def create_plan(self, prompt: str) -> dict:
         methods_block = "\n".join(
-            f"-{name}: {meta['description']}" for name, meta in self.toolbox.items()
+            f"-{name}: {meta['description']}" for name, meta in self._toolbox.items()
         )
 
         # 2. Craft user prompt ---------------------------------------
@@ -151,11 +233,11 @@ class PlannerAgent(Agent):
         except Exception as e:
             raise ValueError(f"JSON parse error: {e}\nLLM output:\n{raw}")
 
-        unknown = [s["function"] for s in steps if s["function"] not in self.toolbox]
+        unknown = [s["function"] for s in steps if s["function"] not in self._toolbox]
         if unknown:
             raise ValueError(f"Plan uses unknown functions: {unknown}")
         
-        plan = {"steps": steps, "tools": self.toolbox}
+        plan = {"steps": steps, "tools": self._toolbox}
         
         # guarantee last step is "return"
         if not plan["steps"] or plan["steps"][-1]["function"] != "return":
@@ -176,18 +258,18 @@ class PlannerAgent(Agent):
         -------
         { "steps": list[dict], "tools": dict[str, meta] }
         """
-        logging.info(f"+---{"-"*len(self.name+" Starting")}---+")
-        logging.info(f"|   {self.name} Starting   |")
-        logging.info(f"+---{"-"*len(self.name+" Starting")}---+")
+        logging.info(f"+---{"-"*len(self._name+" Starting")}---+")
+        logging.info(f"|   {self._name} Starting   |")
+        logging.info(f"+---{"-"*len(self._name+" Starting")}---+")
         
         plan = self.create_plan(prompt)
-        logging.info(f"{self.name} created plan with {len(plan['steps'])} steps")
+        logging.info(f"{self._name} created plan with {len(plan['steps'])} steps")
         
         plan_result = self.execute_plan(plan)
         
-        logging.info(f"+---{"-"*len(self.name+" Finished")}---+")
-        logging.info(f"|   {self.name} Finished   |")
-        logging.info(f"+---{"-"*len(self.name+" Finished")}---+\n\n")
+        logging.info(f"+---{"-"*len(self._name+" Finished")}---+")
+        logging.info(f"|   {self._name} Finished   |")
+        logging.info(f"+---{"-"*len(self._name+" Finished")}---+\n\n")
         return plan_result
 
 
@@ -200,19 +282,58 @@ class PolymerAgent(Agent):
     Each PolymerAgent wraps a seed Agent, can be linked to head/tail PolymerAgents,
     and processes outputs through a chain of preprocessor callables.
     """
-    def __init__(self, seed: Agent):
+    def __init__(self, seed: Agent, name: str|None = None):
         if not seed:
             raise ValueError("'seed' argument must be a non-null Agent instance")
         
         # New Polymer inherits all from the seed agent
-        self.seed = seed
-        self.name = seed.name
+        self._seed = seed
+        
+        # If a name is not provided, then name is automatically set to the seed agent's name 
+        self._name = name if name else seed.name
         
         # define the head and tails
-        self.head:PolymerAgent = None
-        self.tail:PolymerAgent = None
+        self._head:PolymerAgent = None
+        self._tail:PolymerAgent = None
+
         # define the preprocessor list
-        self.preprocessor: list[callable] = []
+        self._preprocessor: list[callable] = []
+
+    # should be settable
+    @property
+    def seed(self):
+        return self._seed
+    @property
+    def preprocessor(self):
+        return self._preprocessor.copy()
+    @seed.setter
+    def seed(self, value: Agent):
+        self._seed = value
+    @preprocessor.setter # should be capable of being set in batches
+    def preprocessor(self, value: list[callable]):
+        self._preprocessor = value
+
+    # should not be settable
+    @property
+    def head(self):
+        return self._head
+    @property
+    def tail(self):
+        return self._tail
+    
+    # should not be mutable at all, only seed values
+    @property
+    def role_prompt(self):
+        return self.seed.role_prompt
+    @property
+    def nucleus(self):
+        return self.seed.nucleus
+    @property
+    def context_enabled(self):
+        return self.seed.context_enabled
+    @property
+    def history(self):
+        return self.seed.history
 
     # adds a new tool to the preprocessor chain
     def register_tool(self, func: callable, index: int = None):
@@ -222,16 +343,16 @@ class PolymerAgent(Agent):
         if rtype is type(None):
             raise ValueError("Preprocessor tool cannot have return type None")
         if index is not None:
-            self.preprocessor.insert(index, func)
+            self._preprocessor.insert(index, func)
         else:
-            self.preprocessor.append(func)
+            self._preprocessor.append(func)
 
     # Chains together one agent to the next
     def talks_to(self, agent_b: 'PolymerAgent'):
         if not isinstance(agent_b, PolymerAgent):
             raise TypeError("other must be a PolymerAgent instance")
-        self.tail = agent_b
-        agent_b.head = self
+        self._tail = agent_b
+        agent_b._head = self
         return
     
     # invoke calls the seed's invoke
@@ -239,7 +360,7 @@ class PolymerAgent(Agent):
         # 1. Pass prompt to seed agent
         result = self.seed.invoke(prompt)
         # 2. Pass through preprocessor chain
-        for func in self.preprocessor:
+        for func in self._preprocessor:
             # Try to match argument count: if func takes >1 arg, pass result as first arg
             sig = inspect.signature(func)
             params = list(sig.parameters.values())
@@ -254,10 +375,10 @@ class PolymerAgent(Agent):
                 else:
                     result = func(result)
         # 3. If tail exists, recursively pass stringified output to tail.invoke
-        if self.tail:
+        if self._tail:
             # If result is not str, convert to str
             out = str(result)
             # recursively call the tail.invoke() method
-            return self.tail.invoke(out)
+            return self._tail.invoke(out)
         else:
             return result
