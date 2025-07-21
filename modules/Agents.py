@@ -348,13 +348,53 @@ class PolymerAgent(Agent):
             self._preprocessor.append(func)
 
     # Chains together one agent to the next
-    def talks_to(self, agent_b: 'PolymerAgent'):
+    def talks_to(self, agent_b: 'PolymerAgent') -> None:
+        if not agent_b:
+            raise TypeError("Cannot link a PolymerAgent to a 'NoneType'")
         if not isinstance(agent_b, PolymerAgent):
-            raise TypeError("other must be a PolymerAgent instance")
+            raise TypeError("Must link a PolymerAgent to another PolymerAgent")
+        # if a tail agent already exists, decouple it
+        tail = self._tail
+        if tail:
+            tail._head = None
         self._tail = agent_b
         agent_b._head = self
+
+        # Cycle detection: traverse from self, check for repeated agents
+        visited = set()
+        current = self
+        while current:
+            agent_id = id(current)
+            if agent_id in visited:
+                # decouple from agent_b
+                agent_b._head = None
+                # re-attach previous tail
+                self._tail = tail
+                if tail:
+                    tail._head = self
+                raise ValueError(f"Cycle detected in attempting to link agent '{self.name}' to agent '{agent_b.name}'")
+            visited.add(agent_id)
+            current = current._tail
         return
     
+    def pop(self, idx=0)->'PolymerAgent':
+        def helper(index,current:PolymerAgent):
+            # if reached the end, and not at index 0, return error
+            if index and not current._tail:
+                raise IndexError("Index is larger than the number of available agents")
+            # if reached the desired agent:
+            if not idx:
+                # Decouple from head
+                head, tail = current._head, current._tail
+                current._head = None
+                current._tail = None
+                if head:
+                    head._tail = tail
+                if tail:
+                    tail._head = head
+                return current
+            return helper(index-1, current._tail)
+        return helper(idx, self)
     # invoke calls the seed's invoke
     def invoke(self, prompt: str) -> Any:
         # 1. Pass prompt to seed agent
