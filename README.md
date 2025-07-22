@@ -1,9 +1,9 @@
 # Atomic-Agentic
 
-Atomic-Agentic is a Python toolkit for building, orchestrating, and experimenting with agentic AI structures. It provides a set of modular agent classes and planning/orchestration tools, designed to be both powerful for advanced users and approachable for newcomers.
+Atomic-Agentic is a Python toolkit for building, orchestrating, and experimenting with agentic AI structures. It provides a framework to modularly build advanced design patterns with agents and perform advancedorchestration. This allows us to construct powerful architecture with agentic AI while also being approachable for newcomers.
 
 ## Mission Statement
-Atomic-Agentic is built around the philosophy that **agentic AI should exist in an Object-Oriented framework**. That agents can and should exist
+Atomic-Agentic is built around the philosophy that **agentic AI should exist in an Object-Oriented and Design-Pattern-centric framework**. That agents can and should exist
 as clear and distinct instances. If we can design them to abide: breaking down agent behaviors into modular, composable, and reusable classes that follow object-oriented programming (OOP) principles. This makes it easy to extend, customize, and orchestrate agents for complex workflows.
 
 This repository aims to:
@@ -13,8 +13,6 @@ This repository aims to:
 - Supply practical examples and templates for real-world agentic applications.
 
 ## Philosophy & Inspiration: Atomizing Agentic AI for OOP
-A little context for what Atomic-Agentic encourages.
-### Core Design Philosophy
 Atomic-Agentic is built on five core principles:
 
 1. **Platform-Agnostic LLMs:** Agents are designed to work seamlessly with any large language model (LLM)—whether Azure, Bedrock, Huggingface, OpenAI, or others. The underlying LLMs are abstracted so that, regardless of provider, agents interact with them in a unified, consistent way.
@@ -27,14 +25,6 @@ Atomic-Agentic is built on five core principles:
 
 5. **Composability & Orchestration:** Advanced agent classes can build structures composed of other agents or orchestrations of agents. These composite agents can themselves be treated as singular agents, enabling scalable, hierarchical, and collaborative workflows.
 
-### Inspiration from Nature: Agents as Atoms & Molecules
-The inspiration for Atomic-Agentic comes from chemistry:
-- **LLMs = Atomic Nuclei:** The LLM is the nucleus at the center of each agent, holding it together and providing its core intelligence.
-- **Agents = Atoms & Molecules:** Each agent is like an atom, with its own identity and properties. When agents interact or bond, they form molecules—composite agents or orchestrations with emergent behaviors.
-- **Tools/Plugins = Electrons:** The tools and plugins registered to agents are like electrons orbiting atoms and molecules. They enable agents to interact with their environment and with each other, just as electrons drive chemical reactions and bonding.
-
-This chemistry-inspired, OOP-friendly design makes it easy to build, extend, and orchestrate agentic AI systems that are modular, reusable, and platform-agnostic.
-
 ## Repository Structure
 
 ```
@@ -42,7 +32,7 @@ Atomic-Agentic/
 │
 ├── modules/
 │   ├── Agents.py         # Core agent class and agent subclasses
-│   ├── LLMNuclei.py      # Language model wrapper platform-specific subclasses
+│   ├── LLMEngines.py      # Language model wrapper platform-specific subclasses
 │   ├── PlanExecutors.py  # Execution logic for Planner-Agent generated plans
 │   ├── Plugins.py        # Plugin/batch-tool system for agents
 │   └── Prompts.py        # Prompt templates and utilities
@@ -52,20 +42,19 @@ Atomic-Agentic/
 │   │   ├── openai_agent_test.py    # Example: OpenAI agent usage
 │   │   └── slm_agent_test.py       # Example: SLM agent usage
 │   ├── Planner_Examples/
-│   │   ├── 01_plugins_test.py      # Generate plans with plugin methods
-│   │   ├── 02_async_planner_test.py  # Asynchronous plan execution
+│   │   ├── 01_plugins_test.py         # Generate plans with plugin methods
+│   │   ├── 02_async_planner_test.py   # Asynchronous plan execution
 │   │   ├── 03_agentic_story_builder.py   # Multi-agent story workflow
 │   │   └── 04_orchestrating_planners.py  # Orchestrating planners
-│   ├── Polymer_Examples/
-│   │   ├── 01_monomer_programmer.py    # Monomer agent programming
-│   │   ├── 02_cpp_to_python_polymer.py # C++ to Python polymer agent
-│   │   └── 03_polymer_story_builder.py # Polymer agent story builder
-│   └── output_markdowns/
-│       ├── planner_story.md
-│       └── polymer_story.md
+│   ├── PrePost_Examples
+│   │   └── 01_coder_build_and_run.py  # Generates & executes code
+│   └── ChainSequence_Examples/
+│       ├── 01_unit_chain_programmer.py       # Single unit ChainSequence agent programming
+│       ├── 02_cpp_to_python_chainsequence.py # C++ to Python ChainSequence agent
+│       └── 03_chainsequence_story_builder.py # ChainSequence agent story builder
 │
-├── README.md                       # <---- You are here
-└── requirements.txt                # Python requirements
+├── README.md        # <---- You are here
+└── requirements.txt # Python requirements
 ```
 
 ## Key Classes
@@ -73,41 +62,41 @@ Now, let's run through some of the key classes that are used in Atomic-Agentic, 
 ### Agents
 Atomic-Agentic agents are designed to be modular and composable, progressing from simple wrappers to complex orchestrators:
 
-**1. LLMNucleus** (`modules/LLMNuclei.py`)
-The LLM nucleus is analogous to the nucleus of an atom: the simplest unit of language models in Atomic-Agentic. At the moment, subclasses for Llama-CPP and OpenAI are available.
-- Does not retain any context of prior messages sent to it.
-- Provides subclasses to initialize LLMs from various platforms (OpenAI, Azure, Huggingface, Bedrock, etc.), while providing a unified interface for prompt completion and model interaction.
-- Can be used as a standalone llm object or as the core of more advanced agents.
+**1. LLMEngine** (`modules/LLMEngines.py`)
+The LLM Engine is the simplest unit of language models in Atomic-Agentic. They offer provider and model-agnostic interface to call LLMs. At the moment, subclasses tailoring the engines to Llama-CPP and OpenAI are available.
+- **Stateless**: Does not retain any context of prior messages sent to it.
+- **Polymorphic**: Provides subclasses to formatted for various platforms (OpenAI, Azure, Huggingface, Bedrock, etc.).
+- **Reusable**: Can be used as a standalone llm object or as the core of more advanced agents.
 
 **Example:**
 ```python
-from modules.LLMNuclei import OpenAINucleus
+from modules.LLMEngines import OpenAIEngine
 
-nucleus = OpenAINucleus(
+llm_engine = OpenAIEngine(
    api_key = "your-api-key",
    model = "your-model")
 
-# Use the nucleus directly
-response = nucleus.invoke("What is the capital of France?")
+# Use the llm_engine directly
+response = llm_engine.invoke("What is the capital of France?")
 print(response)
 ```
 
 **2. Agent** (`modules/Agents.py`)
 The base Agent class, representing an atomic unit of reasoning and action.
 - Encapsulates a role, prompt, and interaction logic.
-- Each instance is tied to a specific LLMNucleus instance and can be extended with custom attributes or behaviors.
+- Each instance is tied to a specific LLMEngine instance and can be extended with custom attributes or behaviors.
 
 **Example:**
 ```python
-from modules.LLMNuclei import OpenAINucleus
+from modules.LLMEngines import OpenAIEngine
 from modules.Agents import Agent
 
-nucleus = OpenAINucleus(api_key="your-api-key", model="your-model")
+llm_engine = OpenAIEngine(api_key="your-api-key", model="your-model")
 
 my_agent = Agent(
    name = "Fact_Checker"
-   nucleus=nucleus,
-   role_prompt = "You are a helpful fact-checking assistant.",
+   llm_engine=llm_engine,
+   role_prompt = "You are a helpful fact-checking assistant. Whenever you see a mistake, start your response with 'WAIT.' before continuing. .",
    context_enabled = True # Mark as true to remember prior messages
 )
 
@@ -117,51 +106,57 @@ q2_result = my_agent.invoke("If not, then where?")
 print(f"{q1_result}\n{q2_result}")
 ```
 
-**3. PolymerAgent** (see `Polymer_Examples/`)
+**3. PrePostAgent** see (`/PrePost_Examples/`)
 
-As their chemistry-inspired namesake implies, the PolymerAgent can chain together multiple individual agents into one large composite agent to perform more advanced tasks or reasoning. In terms of design patterns, the PolymerAgent acts as a doubly linked list.
+This is the most basic of the Tool-Using agents in Atomic-Agentic. It can register specific methods and arrange them in specific orders before and after the LLM invocation.
+- `.preprocessors` for adding any operations to apply to the input before the LLM
+- `.postprocessors` for adding any operations to the output of the LLM.
+- Provides extra flexibility and deterministic logic to filtering inputs and outputs for agents.
+
+**4. ChainSequenceAgent** (see `ChainSequence_Examples/`)
+
+As their name implies, the ChainSequence can chain together multiple individual agents in a sequence one large composite agent to perform more advanced tasks or reasoning. In terms of design patterns, the ChainSequence acts as a doubly linked list.
 - Enables multi-step reasoning, transformation, and collaborative workflows.
-- Allows users to register specific methods to clean up or preprocess PolymerAgent outputs before feeding them to the next agent in the chain.
-- Each PolymerAgent must register an agent to dictate its specific logic. That internal 'seed' agent can be a base Agent, or in itself be another polymer agent chain, or even a planner agent.
+- Each ChainSequence must register a 'seed agent' to dictate its specific, internal logic. That internal seed agent can be a base Agent, or another ChainSequence agent, or even a planner agent.
 
 **Example:**
 ```python
-from modules.LLMNuclei import OpenAINucleus
-from modules.Agents import Agent, PolymerAgent
+from modules.LLMEngines import OpenAIEngine
+from modules.Agents import Agent, ChainSequence
 
-nucleus = OpenAINucleus(api_key="your-api-key", model="your-model")
+llm_engine = OpenAIEngine(api_key="your-api-key", model="your-model")
 
 # Define two simple agents
-outliner = Agent(nucleus=nucleus, name="Outliner", role_prompt="You are a story outliner that creates full writing outlines from initial story ideas.")
-writer = Agent(nucleus=nucleus, name="Writer", role_prompt="You turn story outlines into full, markdown formatted stories.")
+outliner = Agent(llm_engine=llm_engine, name="Outliner", role_prompt="You are a story outliner that creates full writing outlines from initial story ideas.")
+writer = Agent(llm_engine=llm_engine, name="Writer", role_prompt="You turn story outlines into full, markdown formatted stories.")
 
-#Create a chain in a PolymerAgent
-story_chain = PolymerAgent(outliner)
-story_chain.talks_to(PolymerAgent(writer))
+#Create a chain in a ChainSequence
+story_chain = ChainSequence(outliner)
+story_chain.talks_to(ChainSequence(writer))
 
-# Use the polymer agent to process a story idea
+# Use the ChainSequence agent to process a story idea
 final_story = story_chain.invoke("A detective solves a mystery in Paris.")
 print(final_story)
 ```
 
 **4. PlannerAgent** (`modules/Agents.py`)
 
-The most advanced agent capable of orchestrating tools and other agents in multi-step plans. However, unlike PolymerAgents that create chains of a fixed order of execution, the PlannerAgent creates a chain of execution *at runtime*.
+The most advanced agent capable of orchestrating tools and other agents in multi-step plans. However, unlike ChainSequences that create chains of a fixed order of execution, the PlannerAgent creates a chain of execution *at runtime*.
 - Registers tools/plugins with textual description as context
-- Like the Polymer Agent, it can orchestrate tasks involving other agents (including other planners), but it is non-deterministic, and determined at runtime whether the registered agent is used.
+- Like the ChainSequenceAgent, it can orchestrate tasks involving other agents (including other planners), but it is non-deterministic, and determined at runtime whether the registered agent is used.
 - Feeds the descriptions and user prompts to the llm to generate an executable workflow of function calls and their arguments.
 - Supports running the generated plans synchronously and asynchronously, for scalable, concurrent tasks.
 
 **Example:**
 ```python
-from modules.LLMNuclei import OpenAINucleus
+from modules.LLMEngines import OpenAIEngine
 from modules.Agents import PlannerAgent
 from modules.Plugins import ConsolePlugin, MathPlugin
 
-nucleus = OpenAINucleus(api_key="your-api-key", model="gpt-3.5-turbo")
+llm_engine = OpenAIEngine(api_key="your-api-key", model="gpt-3.5-turbo")
 
 # Define a planner agent
-planner = PlannerAgent(nucleus=nucleus, name="Workflow Orchestrator")
+planner = PlannerAgent(llm_engine=llm_engine, name="Workflow Orchestrator")
 
 # Register plugins/tools
 planner.register_plugin(ConsolePlugin()) # for methods related to logging, printing, etc.
@@ -188,7 +183,7 @@ Plugins extend PlannerAgent capabilities, allowing agents to interact with their
 - Custom plugins: Users can define their own plugins for domain-specific tasks (e.g., file I/O, web requests, data processing).
 
 
-Plugins can be registered to any agent, including PlannerAgents and PolymerAgents, making the system highly extensible and adaptable to new environments or requirements.
+Plugins can be registered to any agent, including PlannerAgents and ChainSequences, making the system highly extensible and adaptable to new environments or requirements.
 
 
 ## Getting Started
