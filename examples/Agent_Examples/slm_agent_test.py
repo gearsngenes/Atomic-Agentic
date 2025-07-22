@@ -4,18 +4,18 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from modules.Agents import Agent
-from modules.LLMNuclei import LlamaCppNucleus
+from modules.LLMEngines import LlamaCppEngine
 
-nucleus = LlamaCppNucleus(
+nucleus = LlamaCppEngine(
     repo_id = "unsloth/phi-4-GGUF",
     filename= "phi-4-Q4_K_M.gguf",
-    n_ctx   = 2048,
+    n_ctx   = 512,
     verbose = False
 )
 
 Agent_Atom = Agent(
     name        = "SLM-Agent Atom",
-    nucleus     = nucleus,
+    llm_engine     = nucleus,
     role_prompt = "You are a helpful assistant named SLM-Agent Atom!",
     context_enabled=True
 )
