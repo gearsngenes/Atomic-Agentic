@@ -8,15 +8,15 @@ load_dotenv()
 from modules.Plugins import *
 from modules.PlanExecutors import PlanExecutor, AsyncPlanExecutor
 import modules.Prompts as Prompts
-from modules.LLMNuclei import *
+from modules.LLMEngines import *
 
 # ────────────────────────────────────────────────────────────────
 # 1.  Agent  (LLM responds to prompts)
 # ────────────────────────────────────────────────────────────────
 class Agent:
-    def __init__(self, name, nucleus:LLMNucleus, role_prompt: str = Prompts.DEFAULT_PROMPT, context_enabled: bool = False):
+    def __init__(self, name, llm_engine:LLMEngine, role_prompt: str = Prompts.DEFAULT_PROMPT, context_enabled: bool = False):
         self._name = name
-        self._nucleus: LLMNucleus = nucleus
+        self._llm_engine: LLMEngine = llm_engine
         self._role_prompt = role_prompt
         self._context_enabled = context_enabled
         self._history = []
@@ -34,8 +34,8 @@ class Agent:
         return self.context_enabled
 
     @property
-    def nucleus(self):
-        return self._nucleus
+    def llm_engine(self):
+        return self._llm_engine
 
     @property
     def history(self):
@@ -45,9 +45,9 @@ class Agent:
     def context_enabled(self, value:bool):
         self._context_enabled = value
 
-    @nucleus.setter
-    def nucleus(self, value: LLMNucleus):
-        self._nucleus = value
+    @llm_engine.setter
+    def llm_engine(self, value: LLMEngine):
+        self._llm_engine = value
 
     @name.setter
     def name(self, value: str):
@@ -62,14 +62,215 @@ class Agent:
         if self._context_enabled:
             messages.extend(self._history)  # Include previous messages if context is enabled
         messages.append({"role": "user", "content": prompt})
-        response = self._nucleus.invoke(messages).strip()
+        response = self._llm_engine.invoke(messages).strip()
         if self._context_enabled:
             self._history.append({"role": "user", "content": prompt})
             self._history.append({"role": "assistant", "content": response})
         return response
 
+# ───────────────────────────────────────────────────────────────────────────────
+# 2.  PrePostAgent  (calls methods to preprocess and postprocess an Agent's output
+# ───────────────────────────────────────────────────────────────────────────────
+class PrePostAgent(Agent):
+    def __init__(self, name, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT, context_enabled = False):
+        super().__init__(name, llm_engine, role_prompt, context_enabled)
+        self._preprocessors: list[callable] = []
+        self._postprocessors: list[callable] = []
+    
+    # adds a new tool to the preprocessor chain
+    def add_prestep(self, func: callable, index: int = None):
+        # Only allow callables that do not return None
+        hints = get_type_hints(func)
+        rtype = hints.get('return', Any)
+        if rtype is type(None):
+            raise ValueError("Preprocessor tool cannot have return type None")
+        if index is not None:
+            self._preprocessors.insert(index, func)
+        else:
+            self._preprocessors.append(func)
+
+    # adds a new tool to the postprocessor chain
+    def add_poststep(self, func: callable, index: int = None):
+        # Only allow callables that do not return None
+        hints = get_type_hints(func)
+        rtype = hints.get('return', Any)
+        if rtype is type(None):
+            raise ValueError("Preprocessor tool cannot have return type None")
+        if index is not None:
+            self._postprocessors.insert(index, func)
+        else:
+            self._postprocessors.append(func)
+    def invoke(self, prompt: str):
+        # 1. Pass prompt through preprocessor chain
+        preprocessed = prompt
+        for func in self._preprocessors:
+            # Try to match argument count: if func takes >1 arg, pass result as first arg
+            sig = inspect.signature(func)
+            params = list(sig.parameters.values())
+            if len(params) == 1:
+                preprocessed = func(preprocessed)
+            else:
+                # If more than one arg, try to unpack if result is tuple/list
+                if isinstance(preprocessed, (tuple, list)) and len(preprocessed) == len(params):
+                    preprocessed = func(*preprocessed)
+                elif isinstance(preprocessed, (tuple, list)) and len(preprocessed) != len(params):
+                    raise ValueError(f"Preprocessor tool {func.__name__} expects {len(params)} args but got {len(preprocessed)}")
+                else:
+                    preprocessed = func(preprocessed)
+        # 2. pass preprocessed result through the LLM
+        processed = super().invoke(str(preprocessed))
+        # 3. pass the processed prompt through the postprocessors
+        postprocessed = processed
+        for func in self._postprocessors:
+            # Try to match argument count: if func takes >1 arg, pass result as first arg
+            sig = inspect.signature(func)
+            params = list(sig.parameters.values())
+            if len(params) == 1:
+                postprocessed = func(postprocessed)
+            else:
+                # If more than one arg, try to unpack if result is tuple/list
+                if isinstance(postprocessed, (tuple, list)) and len(postprocessed) == len(params):
+                    postprocessed = func(*postprocessed)
+                elif isinstance(postprocessed, (tuple, list)) and len(postprocessed) != len(params):
+                    raise ValueError(f"Preprocessor tool {func.__name__} expects {len(params)} args but got {len(preprocessed)}")
+                else:
+                    postprocessed = func(postprocessed)
+        # 4. return post-processed result
+        return postprocessed
+
+    @property
+    def preprocessors(self):
+        return self._preprocessors.copy()
+    @preprocessors.setter # should be capable of being set in batches
+    def preprocessor(self, value: list[callable]):
+        self._preprocessors = value
+    @property
+    def postprocessors(self):
+        return self._postprocessors.copy()
+    @postprocessors.setter # should be capable of being set in batches
+    def postprocessors(self, value: list[callable]):
+        self._postprocessors = value
+
+
 # ────────────────────────────────────────────────────────────────
-# 2.  Planner Agent  (plans and executes)
+# 3.  PolymerAgent  (Invokes a chain of Agents)
+# ────────────────────────────────────────────────────────────────
+class ChainSequenceAgent(Agent):
+    """
+    Doubly linked-list analogue of Agent.
+    Each PolymerAgent wraps a seed Agent, can be linked to head/tail PolymerAgents,
+    and processes outputs through a chain of preprocessor callables.
+    """
+    def __init__(self, seed: Agent, name: str|None = None):
+        if not seed:
+            raise ValueError("'seed' argument must be a non-null Agent instance")
+        
+        # New Polymer inherits all from the seed agent
+        self._seed = seed
+        
+        # If a name is not provided, then name is automatically set to the seed agent's name 
+        self._name = name if name else seed.name
+        
+        # define the head and tails
+        self._head:ChainSequenceAgent = None
+        self._tail:ChainSequenceAgent = None
+
+        # define the preprocessor list
+        self._preprocessor: list[callable] = []
+
+    # should be settable
+    @property
+    def seed(self):
+        return self._seed
+    @seed.setter
+    def seed(self, value: Agent):
+        self._seed = value
+
+    # should not be settable
+    @property
+    def head(self):
+        return self._head
+    @property
+    def tail(self):
+        return self._tail
+    
+    # should not be mutable at all, only seed values
+    @property
+    def role_prompt(self):
+        return self.seed.role_prompt
+    @property
+    def llm_engine(self):
+        return self.seed.llm_engine
+    @property
+    def context_enabled(self):
+        return self.seed.context_enabled
+    @property
+    def history(self):
+        return self.seed.history
+
+    # Chains together one agent to the next
+    def talks_to(self, agent_b: 'ChainSequenceAgent') -> None:
+        if not agent_b:
+            raise TypeError("Cannot link a PolymerAgent to a 'NoneType'")
+        if not isinstance(agent_b, ChainSequenceAgent):
+            raise TypeError("Must link a PolymerAgent to another PolymerAgent")
+        # if a tail agent already exists, decouple it
+        tail = self._tail
+        if tail:
+            tail._head = None
+        self._tail = agent_b
+        agent_b._head = self
+
+        # Cycle detection: traverse from self, check for repeated agents
+        visited = set()
+        current = self
+        while current:
+            agent_id = id(current)
+            if agent_id in visited:
+                # decouple from agent_b
+                agent_b._head = None
+                # re-attach previous tail
+                self._tail = tail
+                if tail:
+                    tail._head = self
+                raise ValueError(f"Cycle detected in attempting to link agent '{self.name}' to agent '{agent_b.name}'")
+            visited.add(agent_id)
+            current = current._tail
+        return
+    
+    def pop(self, idx=0)->'ChainSequenceAgent':
+        def helper(index,current:ChainSequenceAgent):
+            # if reached the end, and not at index 0, return error
+            if index and not current._tail:
+                raise IndexError("Index is larger than the number of available agents")
+            # if reached the desired agent:
+            if not idx:
+                # Decouple from head
+                head, tail = current._head, current._tail
+                current._head = None
+                current._tail = None
+                if head:
+                    head._tail = tail
+                if tail:
+                    tail._head = head
+                return current
+            return helper(index-1, current._tail)
+        return helper(idx, self)
+    # invoke calls the seed's invoke
+    def invoke(self, prompt: str) -> Any:
+        # 1. Pass prompt to seed agent
+        result = self.seed.invoke(prompt)
+        # 2. If tail exists, recursively pass stringified output to tail.invoke
+        if self._tail:
+            # If result is not str, convert to str
+            result = str(result)
+            # recursively call the tail.invoke() method
+            return self._tail.invoke(result)
+        else:
+            return result
+
+# ────────────────────────────────────────────────────────────────
+# 4.  PlannerAgent  (plans and executes)
 # ────────────────────────────────────────────────────────────────
 class PlannerAgent(Agent):
     """
@@ -78,8 +279,8 @@ class PlannerAgent(Agent):
     methods as tools which it can run`.
     """
 
-    def __init__(self, name: str, nucleus:LLMNucleus, is_async = False):
-        super().__init__(name = name, nucleus=nucleus, role_prompt = Prompts.AGENTIC_PLANNER_PROMPT)
+    def __init__(self, name: str, llm_engine:LLMEngine, is_async = False):
+        super().__init__(name = name, llm_engine=llm_engine, role_prompt = Prompts.AGENTIC_PLANNER_PROMPT)
 
         # registries -------------------------------------------------
         self._toolbox: dict[str, dict] = {}
@@ -182,7 +383,7 @@ class PlannerAgent(Agent):
                 "It will generate and execute a multi-step plan using its registered tools and return the final result. "
                 "Use this when you want the agent to autonomously break down and solve a task."
             )
-        elif isinstance(agent, PolymerAgent):
+        elif isinstance(agent, ChainSequenceAgent):
             agent_type_desc = (
                 
                 f"Invokes the {agent.name} polymer agent. "
@@ -271,154 +472,3 @@ class PlannerAgent(Agent):
         logging.info(f"|   {self._name} Finished   |")
         logging.info(f"+---{"-"*len(self._name+" Finished")}---+\n\n")
         return plan_result
-
-
-# ────────────────────────────────────────────────────────────────
-# 3.  PolymerAgent  (Invokes a chain of Agents)
-# ────────────────────────────────────────────────────────────────
-class PolymerAgent(Agent):
-    """
-    Doubly linked-list analogue of Agent.
-    Each PolymerAgent wraps a seed Agent, can be linked to head/tail PolymerAgents,
-    and processes outputs through a chain of preprocessor callables.
-    """
-    def __init__(self, seed: Agent, name: str|None = None):
-        if not seed:
-            raise ValueError("'seed' argument must be a non-null Agent instance")
-        
-        # New Polymer inherits all from the seed agent
-        self._seed = seed
-        
-        # If a name is not provided, then name is automatically set to the seed agent's name 
-        self._name = name if name else seed.name
-        
-        # define the head and tails
-        self._head:PolymerAgent = None
-        self._tail:PolymerAgent = None
-
-        # define the preprocessor list
-        self._preprocessor: list[callable] = []
-
-    # should be settable
-    @property
-    def seed(self):
-        return self._seed
-    @property
-    def preprocessor(self):
-        return self._preprocessor.copy()
-    @seed.setter
-    def seed(self, value: Agent):
-        self._seed = value
-    @preprocessor.setter # should be capable of being set in batches
-    def preprocessor(self, value: list[callable]):
-        self._preprocessor = value
-
-    # should not be settable
-    @property
-    def head(self):
-        return self._head
-    @property
-    def tail(self):
-        return self._tail
-    
-    # should not be mutable at all, only seed values
-    @property
-    def role_prompt(self):
-        return self.seed.role_prompt
-    @property
-    def nucleus(self):
-        return self.seed.nucleus
-    @property
-    def context_enabled(self):
-        return self.seed.context_enabled
-    @property
-    def history(self):
-        return self.seed.history
-
-    # adds a new tool to the preprocessor chain
-    def register_tool(self, func: callable, index: int = None):
-        # Only allow callables that do not return None
-        hints = get_type_hints(func)
-        rtype = hints.get('return', Any)
-        if rtype is type(None):
-            raise ValueError("Preprocessor tool cannot have return type None")
-        if index is not None:
-            self._preprocessor.insert(index, func)
-        else:
-            self._preprocessor.append(func)
-
-    # Chains together one agent to the next
-    def talks_to(self, agent_b: 'PolymerAgent') -> None:
-        if not agent_b:
-            raise TypeError("Cannot link a PolymerAgent to a 'NoneType'")
-        if not isinstance(agent_b, PolymerAgent):
-            raise TypeError("Must link a PolymerAgent to another PolymerAgent")
-        # if a tail agent already exists, decouple it
-        tail = self._tail
-        if tail:
-            tail._head = None
-        self._tail = agent_b
-        agent_b._head = self
-
-        # Cycle detection: traverse from self, check for repeated agents
-        visited = set()
-        current = self
-        while current:
-            agent_id = id(current)
-            if agent_id in visited:
-                # decouple from agent_b
-                agent_b._head = None
-                # re-attach previous tail
-                self._tail = tail
-                if tail:
-                    tail._head = self
-                raise ValueError(f"Cycle detected in attempting to link agent '{self.name}' to agent '{agent_b.name}'")
-            visited.add(agent_id)
-            current = current._tail
-        return
-    
-    def pop(self, idx=0)->'PolymerAgent':
-        def helper(index,current:PolymerAgent):
-            # if reached the end, and not at index 0, return error
-            if index and not current._tail:
-                raise IndexError("Index is larger than the number of available agents")
-            # if reached the desired agent:
-            if not idx:
-                # Decouple from head
-                head, tail = current._head, current._tail
-                current._head = None
-                current._tail = None
-                if head:
-                    head._tail = tail
-                if tail:
-                    tail._head = head
-                return current
-            return helper(index-1, current._tail)
-        return helper(idx, self)
-    # invoke calls the seed's invoke
-    def invoke(self, prompt: str) -> Any:
-        # 1. Pass prompt to seed agent
-        result = self.seed.invoke(prompt)
-        # 2. Pass through preprocessor chain
-        for func in self._preprocessor:
-            # Try to match argument count: if func takes >1 arg, pass result as first arg
-            sig = inspect.signature(func)
-            params = list(sig.parameters.values())
-            if len(params) == 1:
-                result = func(result)
-            else:
-                # If more than one arg, try to unpack if result is tuple/list
-                if isinstance(result, (tuple, list)) and len(result) == len(params):
-                    result = func(*result)
-                elif isinstance(result, (tuple, list)) and len(result) != len(params):
-                    raise ValueError(f"Preprocessor tool {func.__name__} expects {len(params)} args but got {len(result)}")
-                else:
-                    result = func(result)
-        # 3. If tail exists, recursively pass stringified output to tail.invoke
-        if self._tail:
-            # If result is not str, convert to str
-            out = str(result)
-            # recursively call the tail.invoke() method
-            return self._tail.invoke(out)
-        else:
-            return result

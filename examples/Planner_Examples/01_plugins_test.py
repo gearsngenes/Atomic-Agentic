@@ -7,17 +7,17 @@ import logging
 # math_console_demo.py
 from modules.Agents  import PlannerAgent
 from modules.Plugins import ParserPlugin, MathPlugin, ConsolePlugin, PythonPlugin
-from modules.LLMNuclei import *
+from modules.LLMEngines import *
 
 logging.basicConfig(level=logging.INFO)
 
 print("\n───────────────────────────────\n")
 print("Testing MathPlugin + ConsolePlugin …")
 # ──────────────────────────  SET-UP  ───────────────────────────
-# define a global nucleus to give to each of our agents
-nucleus = OpenAINucleus(model = "gpt-4o-mini")
+# define a global llm_engine to give to each of our agents
+llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
-planner = PlannerAgent(name="math-console-tester", nucleus=nucleus)
+planner = PlannerAgent(name="math-console-tester", llm_engine=llm_engine)
 planner.register_plugin(MathPlugin())
 planner.register_plugin(ConsolePlugin())      # for `print`
 
@@ -46,7 +46,7 @@ print(f"\nReturned value → {result}\n")
 # ────────────────────────  PARSER + MATH DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
 print("Now testing ParserPlugin + MathPlugin …")
-planner = PlannerAgent(name="parser-math-tester", nucleus=nucleus)
+planner = PlannerAgent(name="parser-math-tester", llm_engine=llm_engine)
 planner.register_plugin(ParserPlugin())
 planner.register_plugin(MathPlugin())
 planner.register_plugin(ConsolePlugin())
@@ -67,7 +67,7 @@ print(f"\nMean returned → {mean_val}\n")
 # ────────────────────────  PYTHON + CONSOLE DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
 print("Now testing PythonPlugin + ConsolePlugin …")
-planner = PlannerAgent(name="python-type-tester", nucleus=nucleus)
+planner = PlannerAgent(name="python-type-tester", llm_engine=llm_engine)
 planner.register_plugin(PythonPlugin())
 planner.register_plugin(ConsolePlugin())
 

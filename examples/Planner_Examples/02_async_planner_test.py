@@ -5,18 +5,18 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 # ----------------- Atomic Agents ----------------
 from modules.Agents import Agent, PlannerAgent
-from modules.LLMNuclei import *
+from modules.LLMEngines import *
 
 # ----------------- Setup Logging ----------------
 logging.basicConfig(level=logging.INFO)
 
-# define a global nucleus to give to each of our agents
-nucleus = OpenAINucleus(model = "gpt-4o-mini")
+# define a global llm engine to give to each of our agents
+llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
 # Define a haiku-writing agent
 haiku_writer = Agent(
     name        = "HaikuWriter",
-    nucleus     = nucleus,
+    llm_engine     = llm_engine,
     role_prompt = (
         "You are a master of writing haiku. Given a topic, write a "
         "3-line haiku about it, following a 5-syllable, 7-syllable, "
@@ -34,7 +34,7 @@ haiku_writer = Agent(
 # Create a PlannerAgent that uses the haiku writer and print tool
 async_batch_writer = PlannerAgent(
     name =      "AsyncBatchHaikuPlanner",
-    nucleus =   nucleus,
+    llm_engine =   llm_engine,
     is_async =  True,   # Toggle between async and sync planning
 )
 

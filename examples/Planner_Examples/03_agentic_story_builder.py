@@ -9,10 +9,10 @@ logging.basicConfig(level=logging.INFO)
 # ───────────────────────────  local imports  ────────────────────
 from modules.Agents import Agent, PlannerAgent
 from modules.Plugins import ConsolePlugin
-from modules.LLMNuclei import *
+from modules.LLMEngines import *
 
-# define a global nucleus to give to each of our agents
-nucleus = OpenAINucleus(model = "gpt-4o-mini")
+# define a global llm engine to give to each of our agents
+llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
 # ───────────────────────────  ROLE PROMPTS  ─────────────────────
 OUTLINER_PROMPT = """
@@ -41,12 +41,12 @@ Output: bullet-point critique ONLY (max 8 bullets).  No rewriting.
 """.strip()
 
 # ───────────────────────────  WORKER AGENTS  ────────────────────
-outliner = Agent("StoryOutliner", nucleus, OUTLINER_PROMPT)
-writer   = Agent("StoryWriter",   nucleus, WRITER_PROMPT)
-reviewer = Agent("DraftReviewer", nucleus, REVIEWER_PROMPT)
+outliner = Agent("StoryOutliner", llm_engine, OUTLINER_PROMPT)
+writer   = Agent("StoryWriter",   llm_engine, WRITER_PROMPT)
+reviewer = Agent("DraftReviewer", llm_engine, REVIEWER_PROMPT)
 
 # ───────────────────────────  ORCHESTRATOR  ─────────────────────
-orch = PlannerAgent(name = "StoryPlanner", nucleus=nucleus)
+orch = PlannerAgent(name = "StoryPlanner", llm_engine=llm_engine)
 
 orch.register_agent(agent       = outliner,
                     description = "Flesh out a full outline from a brief idea description.")

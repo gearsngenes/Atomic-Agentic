@@ -17,10 +17,10 @@ logging.basicConfig(level=logging.INFO)
 # --- Atomic Agentic Imports ---
 from modules.Agents import PlannerAgent, Agent
 from modules.Plugins import MathPlugin
-from modules.LLMNuclei import *
+from modules.LLMEngines import *
 
-# define a global nucleus to give to each of our agents
-nucleus = OpenAINucleus(model = "gpt-4o-mini")
+# define a global llm engine to give to each of our agents
+llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
 # -------------------------------------
 # ----- Build Batch Haiku Planner -----
@@ -29,7 +29,7 @@ nucleus = OpenAINucleus(model = "gpt-4o-mini")
 # Define Haiku Writing Agent
 haiku_agent = Agent(
     name        = "HaikuWriter",
-    nucleus     = nucleus,
+    llm_engine     = llm_engine,
     role_prompt = (
         "You are a master of writing haiku. Given a topic, write a "
         "3-line haiku about it, following a 5-syllable, 7-syllable, "
@@ -47,7 +47,7 @@ haiku_agent = Agent(
 # Define Batch Haiku Planner
 batch_haiku_planner = PlannerAgent(
     name    ="BatchHaikuPlanner",
-    nucleus = nucleus,
+    llm_engine = llm_engine,
     is_async= True,
 )
 
@@ -71,7 +71,7 @@ batch_haiku_planner.register_tool(
 # Define Batch Math Planner
 batch_math_planner = PlannerAgent(
     name    = "BatchMathPlanner",
-    nucleus = nucleus,
+    llm_engine = llm_engine,
     is_async= True,
 )
 
@@ -95,7 +95,7 @@ batch_math_planner.register_tool(
 # Define Super Planner
 super_planner = PlannerAgent(
     name    = "SuperPlanner",
-    nucleus = nucleus,
+    llm_engine = llm_engine,
     is_async= False,
 )
 
@@ -150,4 +150,4 @@ super_task = (
 start = time.time()
 super_result = super_planner.invoke(super_task)
 end = time.time()
-print(f"Super Planner completed task in {end-start:.2f} seconds")
+print(f"Super Planner result: {super_result}\n Completed task in {end-start:.2f} seconds")
