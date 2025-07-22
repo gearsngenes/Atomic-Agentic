@@ -385,16 +385,20 @@ class PlannerAgent(Agent):
             )
         elif isinstance(agent, ChainSequenceAgent):
             agent_type_desc = (
-                
-                f"Invokes the {agent.name} polymer agent. "
+                f"Invokes the {agent.name} chain-sequence agent. "
                 "This agent takes a prompt (str) and passes it through a chain of other agents, each with their own "
-                "'invoke' logic, and before passing their results further down the chain, they preprocess their "
-                "result through a queue of methods and then send that preprocessed result to the next agent in the chain. "
-                "Use this for deterministic, multi-step, tasks that require chains of LLM completions and method calls."
+                "'invoke' logic, and then send their result to the next agent in the chain sequenc, specifically the "
+                "agent at their tail pointer. If no next agent is available, they return their result."
+            )
+        elif isinstance(agent, PrePostAgent):
+            agent_type_desc = (
+                f"Invokes the {agent.name} Pre-Post agent. "
+                "This agent takes a prompt (str) and passes it through a set of preprocessing methods before "
+                "feeding the input to the standard invoke() method, and the resulting llm output is then sent "
+                "through another set of postprocessing methods and then return the final result."
             )
         else:
             agent_type_desc = (
-                
                 f"Invokes the {agent.name} basic agent. "
                 "This agent takes a prompt (str) and generates a text response according to its role-prompt description. "
                 "Use this for single-turn LLM completions or simple text generation."
