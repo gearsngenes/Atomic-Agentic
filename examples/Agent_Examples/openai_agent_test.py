@@ -10,14 +10,14 @@ from modules.LLMEngines import OpenAIEngine
 
 # --- define our agent's nucleus (openai, bedrock, azure, etc.) ---
 load_dotenv()
-nucleus = OpenAIEngine(
+llm_engine = OpenAIEngine(
     api_key=os.getenv("OPENAI_API_KEY"), # in LLMNuclei.py this is the default api key environment variable name
     model = "gpt-4o-mini")
 
 # --- define our agent ---
 Agent_Atom = Agent(
     name = "Agent Atom",
-    llm_engine = nucleus,
+    llm_engine = llm_engine,
     role_prompt = "You are a helpful and enthusiastic assistant named Agent Atom.",
     context_enabled=True)
 

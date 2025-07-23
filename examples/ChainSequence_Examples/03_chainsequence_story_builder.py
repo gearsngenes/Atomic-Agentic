@@ -18,7 +18,7 @@ OUTLINER_PROMPT = """
 You are a story outliner. Given a story prompt, respond ONLY with a bullet-point outline of the story's major beats, no extra text.
 """
 WRITER_PROMPT = """
-You are a story writer. Given a bullet-point outline, write a full draft of the story. Respond ONLY with the story text, no extra commentary.
+You are a story writer. Given a bullet-point outline, write a full draft of the story. Respond ONLY with the story text, no extra commentary. If instead of an outline you get revision notes from a third party reviewer agent, then rewrite your last draft with those critiques addressed. 
 """
 REVIEWER_PROMPT = """
 You are a story reviewer. Given a story draft, respond ONLY with a list of constructive feedback points for improvement. No extra text.
@@ -26,36 +26,33 @@ You are a story reviewer. Given a story draft, respond ONLY with a list of const
 REWRITER_PROMPT = """
 You are a story rewriter. Given a story draft and a list of feedback points, revise the story to address the feedback. Respond ONLY with the revised story text.
 """
+# Define our agents
+outliner = Agent(name="Outliner", llm_engine=llm_engine, role_prompt=OUTLINER_PROMPT)
+writer = Agent(name="Writer", llm_engine=llm_engine, role_prompt=WRITER_PROMPT, context_enabled=True)
+reviewer = Agent(name="Reviewer", llm_engine=llm_engine, role_prompt=REVIEWER_PROMPT, context_enabled=True)
 
-# Preprocessors for each agent
-
+# helper save method
 def save_markdown(text, filename):
     with open(filename, "w", encoding="utf-8") as f:
         f.write(text)
     return f"Saved to {filename}"
 
+chain_story_writer = ChainSequenceAgent("Sequential Story Writer")
+# Build our sequential chain: outline, write, then review and rewrite twice
+chain_story_writer.add(outliner)
+chain_story_writer.add(writer)
+chain_story_writer.add(reviewer)
+chain_story_writer.add(writer)
+chain_story_writer.add(reviewer)
+chain_story_writer.add(writer)
+
 # Build chain sequence
 if __name__ == "__main__":
-    story_prompt = "A young fox must outwit a pack of wolves to save its family."
-    output_filename = f"{OUTPUT_DIR}/chainsequence_story.md"
-
-    # Outliner agent
-    outliner = ChainSequenceAgent(seed=Agent(name="Outliner", llm_engine=llm_engine, role_prompt=OUTLINER_PROMPT))
-
-    # Writer agent
-    writer = ChainSequenceAgent(seed=Agent(name="Writer", llm_engine=llm_engine, role_prompt=WRITER_PROMPT))
-    outliner.talks_to(writer)
-
-    # Single review-rewrite pair
-    reviewer = ChainSequenceAgent(
-        seed=Agent(name="Reviewer-1", llm_engine=llm_engine, role_prompt=REVIEWER_PROMPT))
-    rewriter = ChainSequenceAgent(
-        seed=Agent(name="Rewriter-1", llm_engine=llm_engine, role_prompt=REWRITER_PROMPT))
+    # 1. get story idea
+    story_prompt = input("Story Idea (brief description): ")
+    # 2. create story
+    final_draft = chain_story_writer.invoke(story_prompt)
     
-    writer.talks_to(reviewer)
-    reviewer.talks_to(rewriter)
-
-    # Final output agent: saves markdown
-    final_draft = outliner.invoke(story_prompt)
+    output_filename = f"{OUTPUT_DIR}/chainsequence_story.md"
     save_markdown(final_draft, output_filename)
     print("Final draft saved at:", output_filename)

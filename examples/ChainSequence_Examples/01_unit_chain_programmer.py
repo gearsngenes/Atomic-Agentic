@@ -25,7 +25,7 @@ variable it is saved in is called 'output'.
 """
 
 # Define our seed agent
-coder = PrePostAgent(
+_internal_coder = PrePostAgent(
     name         = "Coder",
     llm_engine      = llm_engine,
     role_prompt  = CODE_WRITER_PROMPT)
@@ -44,11 +44,11 @@ def _exec(code: str) -> Any:
         return f"Erroneous Code:\n{code}\n\nError: {e}"
 
 # Register the execution method with the coder
-coder.add_poststep(_exec)
+_internal_coder.add_poststep(_exec)
 
 # Define our 1-unit polymer agent
-monomer_coder = ChainSequenceAgent(coder)
-
+single_link_programmer = ChainSequenceAgent("Programmer")
+single_link_programmer.add(_internal_coder)
 # Set up example
 math_function = "3x^3 + 2x + 1"
 x_equals = 1
@@ -61,5 +61,5 @@ return the final result as a string formatted as:
 'Derivative of f(x = {x_equals}) = {{result here}}'.
 """
 # invoke the monomer_programmer and print the result string
-result = monomer_coder.invoke(prompt)
-print(f"[MONOMER OUTPUT] CODE RESULT: {result}")
+result = single_link_programmer.invoke(prompt)
+print(f"[SINGLE LINK OUTPUT] CODE RESULT: {result}")

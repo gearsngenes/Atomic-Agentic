@@ -6,7 +6,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from modules.Agents import Agent
 from modules.LLMEngines import LlamaCppEngine
 
-nucleus = LlamaCppEngine(
+llm_engine = LlamaCppEngine(
     repo_id = "unsloth/phi-4-GGUF",
     filename= "phi-4-Q4_K_M.gguf",
     n_ctx   = 512,
@@ -15,7 +15,7 @@ nucleus = LlamaCppEngine(
 
 Agent_Atom = Agent(
     name        = "SLM-Agent Atom",
-    llm_engine     = nucleus,
+    llm_engine     = llm_engine,
     role_prompt = "You are a helpful assistant named SLM-Agent Atom!",
     context_enabled=True
 )

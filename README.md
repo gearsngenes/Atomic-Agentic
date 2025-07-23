@@ -115,24 +115,23 @@ This is the most basic of the Tool-Using agents in Atomic-Agentic. It can regist
 
 **4. ChainSequenceAgent** (see `ChainSequence_Examples/`)
 
-As their name implies, the ChainSequence can chain together multiple individual agents in a sequence one large composite agent to perform more advanced tasks or reasoning. In terms of design patterns, the ChainSequence acts as a doubly linked list.
-- Enables multi-step reasoning, transformation, and collaborative workflows.
-- Each ChainSequence must register a 'seed agent' to dictate its specific, internal logic. That internal seed agent can be a base Agent, or another ChainSequence agent, or even a planner agent.
+As their name implies, the ChainSequence can chain together multiple individual agents in a sequence one large composite agent to perform more advanced tasks or reasoning. This agent only needs to be invoked once to run the entire chain. You can also 'add' or 'pop' agents from the chain to edit it.
 
 **Example:**
+Below is an abbreviated version of the ChainSequence Storybuilder example.
+
 ```python
 from modules.LLMEngines import OpenAIEngine
 from modules.Agents import Agent, ChainSequence
 
-llm_engine = OpenAIEngine(api_key="your-api-key", model="your-model")
-
-# Define two simple agents
-outliner = Agent(llm_engine=llm_engine, name="Outliner", role_prompt="You are a story outliner that creates full writing outlines from initial story ideas.")
-writer = Agent(llm_engine=llm_engine, name="Writer", role_prompt="You turn story outlines into full, markdown formatted stories.")
+# Define two simple agents, assume 
+outliner = Agent(...)
+writer = Agent(...)
 
 #Create a chain in a ChainSequence
-story_chain = ChainSequence(outliner)
-story_chain.talks_to(ChainSequence(writer))
+story_chain = ChainSequenceAgent("Story-Builder-chain")
+story_chain.add(outliner)
+story_chain.add(writer)
 
 # Use the ChainSequence agent to process a story idea
 final_story = story_chain.invoke("A detective solves a mystery in Paris.")
@@ -153,9 +152,7 @@ from modules.LLMEngines import OpenAIEngine
 from modules.Agents import PlannerAgent
 from modules.Plugins import ConsolePlugin, MathPlugin
 
-llm_engine = OpenAIEngine(api_key="your-api-key", model="gpt-3.5-turbo")
-
-# Define a planner agent
+# Define a planner agent, assume pre-defined LLM_engine
 planner = PlannerAgent(llm_engine=llm_engine, name="Workflow Orchestrator")
 
 # Register plugins/tools

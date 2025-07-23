@@ -153,121 +153,54 @@ class PrePostAgent(Agent):
 
 
 # ────────────────────────────────────────────────────────────────
-# 3.  PolymerAgent  (Invokes a chain of Agents)
+# 3.  ChainSequenceAgent  (Invokes a chain of Agents)
 # ────────────────────────────────────────────────────────────────
 class ChainSequenceAgent(Agent):
     """
-    Doubly linked-list analogue of Agent.
-    Each PolymerAgent wraps a seed Agent, can be linked to head/tail PolymerAgents,
-    and processes outputs through a chain of preprocessor callables.
+    A sequential Chain-of-Agents. Uses a flat internal list.
+    Each agent's output is passed as input to the next.
     """
-    def __init__(self, seed: Agent, name: str|None = None):
-        if not seed:
-            raise ValueError("'seed' argument must be a non-null Agent instance")
-        
-        # New Polymer inherits all from the seed agent
-        self._seed = seed
-        
-        # If a name is not provided, then name is automatically set to the seed agent's name 
-        self._name = name if name else seed.name
-        
-        # define the head and tails
-        self._head:ChainSequenceAgent = None
-        self._tail:ChainSequenceAgent = None
-
-        # define the preprocessor list
-        self._preprocessor: list[callable] = []
-
-    # should be settable
+    def __init__(self, name: str | None = None, context_enabled: bool = False):
+        self._agents:list[Agent] = []
+        self._name = name or "ChainSequence"
+        self._context_enabled = context_enabled
+        self._role_prompt = ""
+        self._history = []
+        self._llm_engine = None
     @property
-    def seed(self):
-        return self._seed
-    @seed.setter
-    def seed(self, value: Agent):
-        self._seed = value
+    def agents(self) -> list[Agent]:
+        return self._agents
 
-    # should not be settable
-    @property
-    def head(self):
-        return self._head
-    @property
-    def tail(self):
-        return self._tail
-    
-    # should not be mutable at all, only seed values
     @property
     def role_prompt(self):
-        return self.seed.role_prompt
+        desc = "You are a chain-sequence agent. You sequentially invoke the following agents:\n"
+        return desc + "\n".join(f"- {agent.name}" for agent in self._agents)
+
     @property
     def llm_engine(self):
-        return self.seed.llm_engine
-    @property
-    def context_enabled(self):
-        return self.seed.context_enabled
-    @property
-    def history(self):
-        return self.seed.history
-
-    # Chains together one agent to the next
-    def talks_to(self, agent_b: 'ChainSequenceAgent') -> None:
-        if not agent_b:
-            raise TypeError("Cannot link a PolymerAgent to a 'NoneType'")
-        if not isinstance(agent_b, ChainSequenceAgent):
-            raise TypeError("Must link a PolymerAgent to another PolymerAgent")
-        # if a tail agent already exists, decouple it
-        tail = self._tail
-        if tail:
-            tail._head = None
-        self._tail = agent_b
-        agent_b._head = self
-
-        # Cycle detection: traverse from self, check for repeated agents
-        visited = set()
-        current = self
-        while current:
-            agent_id = id(current)
-            if agent_id in visited:
-                # decouple from agent_b
-                agent_b._head = None
-                # re-attach previous tail
-                self._tail = tail
-                if tail:
-                    tail._head = self
-                raise ValueError(f"Cycle detected in attempting to link agent '{self.name}' to agent '{agent_b.name}'")
-            visited.add(agent_id)
-            current = current._tail
-        return
+        return self._agents[0].llm_engine if self._agents else None
     
-    def pop(self, idx=0)->'ChainSequenceAgent':
-        def helper(index,current:ChainSequenceAgent):
-            # if reached the end, and not at index 0, return error
-            if index and not current._tail:
-                raise IndexError("Index is larger than the number of available agents")
-            # if reached the desired agent:
-            if not idx:
-                # Decouple from head
-                head, tail = current._head, current._tail
-                current._head = None
-                current._tail = None
-                if head:
-                    head._tail = tail
-                if tail:
-                    tail._head = head
-                return current
-            return helper(index-1, current._tail)
-        return helper(idx, self)
-    # invoke calls the seed's invoke
-    def invoke(self, prompt: str) -> Any:
-        # 1. Pass prompt to seed agent
-        result = self.seed.invoke(prompt)
-        # 2. If tail exists, recursively pass stringified output to tail.invoke
-        if self._tail:
-            # If result is not str, convert to str
-            result = str(result)
-            # recursively call the tail.invoke() method
-            return self._tail.invoke(result)
+    def add(self, agent:Agent, idx:int|None = None):
+        if idx != None:
+            self._agents.insert(idx, agent)
         else:
-            return result
+            self._agents.append(agent)
+    
+    def pop(self, idx:int|None = None) -> Agent:
+        if idx != None:
+            return self._agents.pop(idx)
+        return self._agents.pop()
+    
+    def invoke(self, prompt: str):
+        result = prompt
+        if not self._agents:
+            raise RuntimeError(f"Agents list is empty for ChainSequenceAgent '{self.name}'")
+        for agent in self._agents:
+            result = agent.invoke(str(result))
+        if self._context_enabled:
+            self._history.append({"role": "user", "content": prompt})
+            self._history.append({"role": "assistant", "content": str(result)})
+        return result
 
 # ────────────────────────────────────────────────────────────────
 # 4.  PlannerAgent  (plans and executes)

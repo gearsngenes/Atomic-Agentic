@@ -48,6 +48,12 @@ eng_2_py = PrePostAgent(name= "English_to_Python",
 eng_2_py.add_poststep(print_and_pass)
 eng_2_py.add_poststep(exec_python)
 
+
+# Build our ChainSequence C++ to Python translator
+cpp_2_py = ChainSequenceAgent("C++_to_Python-Translator")
+cpp_2_py.add(cpp_2_eng)
+cpp_2_py.add(eng_2_py)
+
 if __name__ == "__main__":
     cpp_code = '''
 #include <iostream>
@@ -91,20 +97,4 @@ int main() {
 }
 '''
     print("C++ code:\n", cpp_code)
-
-    # Create our polymer agents
-    chain_cpp2eng = ChainSequenceAgent(
-        seed = cpp_2_eng
-    )
-    
-    # Register a python execution tool
-    chain_eng2py = ChainSequenceAgent(
-        seed = eng_2_py
-    )
-    
-    # Link the c++ to english translator to the english to python translator
-    chain_cpp2eng.talks_to(chain_eng2py)
-    
-    # Invoke the chain method to see the full output
-    chain_cpp2eng.invoke(cpp_code)
-    
+    cpp_2_py.invoke(cpp_code)
