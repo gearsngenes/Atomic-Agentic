@@ -3,3 +3,7 @@ python-dotenv
 openai
 llama-cpp-python
 huggingface-hub
+uv
+mcp
+mcpo
+requests

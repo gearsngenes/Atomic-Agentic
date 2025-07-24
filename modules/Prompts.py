@@ -64,3 +64,41 @@ ADDITIONAL ORCHESTRATION RULES
 • You may freely combine agent calls with ordinary tools, all linked
   via {{stepN}} placeholders.
 """
+
+MCPO_PLANNER_PROMPT = f"""
+{AGENTIC_PLANNER_PROMPT}
+────────────────────────────────────────────────────────────────
+MCPO SERVER INTEGRATION RULES
+• You have access to an additional function called 'invoke_mcpo_server'.
+  This lets you call tools registered to any valid MCP-O compliant server.
+
+• To use 'invoke_mcpo_server', pass:
+    - server_host (str): the base URL of the MCP server (e.g., "http://localhost:8000")
+    - path        (str): the endpoint for the tool you wish to call (e.g., "/add")
+    - payload     (dict): a dictionary representing the tool's required arguments.
+
+• Every tool path and its required arguments are defined in the OpenAPI spec 
+  returned by calling the MCP server at /openapi.json. You may assume these paths
+  support POST requests with a JSON body that matches the tool’s argument schema.
+
+EXAMPLE LEGAL USAGE:
+---------------------
+{{
+  "function": "invoke_mcpo_server",
+  "args": {{
+    "server_host": "http://localhost:8000",
+    "path": "/add",
+    "payload": {{
+      "a": 3,
+      "b": 4
+    }}
+  }}
+}}
+
+STRICT RULES:
+-------------
+1. Only call 'invoke_mcpo_server' using known, registered server paths.
+2. You must follow the OpenAPI schema exactly for arguments inside 'payload'.
+3. You may freely combine MCP tool calls with agent invokes and other tools.
+
+""".strip()

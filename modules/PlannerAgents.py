@@ -1,4 +1,4 @@
-import logging
+import logging, requests
 from typing import Any, get_type_hints
 from abc import abstractmethod
 from modules.Agents import Agent, ChainSequenceAgent, PrePostAgent
@@ -7,7 +7,7 @@ import modules.Prompts as Prompts
 from modules.PlanExecutors import *
 from modules.Plugins import Plugin
 # ────────────────────────────────────────────────────────────────
-# 4.  PlannerAgent  Abstract class
+# 1. _PlannerAgent  Abstract class
 # ────────────────────────────────────────────────────────────────
 class _PlannerAgent(Agent):
     def __init__(self, name, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT):
@@ -22,6 +22,9 @@ class _PlannerAgent(Agent):
     def register(self, tool: Any, description: str|None = None) -> None:
         pass
 
+# ────────────────────────────────────────────────────────────────
+# 2. Concrete PlannerAgent class
+# ────────────────────────────────────────────────────────────────
 class PlannerAgent(_PlannerAgent):
     """
     Generates and runs an executable plan as a tool.
@@ -182,6 +185,9 @@ class PlannerAgent(_PlannerAgent):
         logging.info(f"+---{"-"*len(self._name+" Finished")}---+\n\n")
         return plan_result
 
+# ────────────────────────────────────────────────────────────────
+# 3. Agentic PlannerAgent class
+# ────────────────────────────────────────────────────────────────
 class AgenticPlannerAgent(PlannerAgent):
     """
     Generates and runs an executable plan as a tool.
@@ -326,3 +332,86 @@ class AgenticPlannerAgent(PlannerAgent):
         logging.info(f"|   {self._name} Finished   |")
         logging.info(f"+---{"-"*len(self._name+" Finished")}---+\n\n")
         return plan_result
+
+
+# ────────────────────────────────────────────────────────────────
+# 4. MCPO PlannerAgent class
+# ────────────────────────────────────────────────────────────────
+class McpoPlannerAgent(AgenticPlannerAgent):
+    def __init__(self, name, llm_engine, granular = True, is_async=False):
+        super().__init__(name, llm_engine, granular, is_async)
+        def invoke_mcpo_server(server_host:str, path:str, payload:dict):
+            url = f"{server_host}{path}"
+            response = requests.post(url, json=payload)
+            return response.json()
+        self.register(invoke_mcpo_server,
+                      ("This method directly requests a response from an MCP server (hosted with MCP-O) "
+                       "once it specifies 1) the server host url, 2) the path to the specific tool it wants to call, and 3) the payload of arguments to send to it"))
+        self._toolbox["MCP-O_servers"] = {}
+        self._role_prompt = Prompts.MCPO_PLANNER_PROMPT
+    def register(self, tool:Any, description: str|None = None):
+        if isinstance(tool, str):
+            try:
+                response = requests.get(tool+"/openapi.json")
+                response.raise_for_status()
+                openapi_json = response.json()
+            except:
+                raise ValueError("Tool must be a valid MCP-OpenAPI-hosted server")
+            self._toolbox["MCP-O_servers"][tool] = {path:meta["post"]["description"] for path,meta in openapi_json["paths"].items()}
+        else:
+            super().register(tool, description=description)
+    def create_plan(self, prompt: str) -> dict:
+        # 1. Define the set of methods to be used:
+        developer_methods = (
+            "DEVELOPER-REGISTERED METHODS:"
+            "\n* ".join(meta['description'] for _, meta in self._toolbox["dev_tools"].items())
+        )
+        tools = {name:func["callable"] for name, func in self._toolbox["dev_tools"].items()}
+        
+        plugin_methods = "\nPLUGIN-REGISTERED METHODS\n"
+        for _plugin, _tools in self._toolbox["plugin_tools"].items():
+            plugin_methods += f"* PLUGIN: {_plugin}:{"".join(f"\n\t** {meta['description']}" for meta in _tools.values())}"
+            tools.update({_name:meta["callable"] for _name,meta in _tools.items()})
+        
+        agent_methods = (
+            "\nAGENT-REGISTERED INVOKE METHODS\n"
+            "".join(f"\n* {name}.invoke: {meta["description"]}\n" for name, meta in self._toolbox["agents"].items())
+        )
+        tools.update({f"{name}.invoke":meta["callable"] for name, meta in self._toolbox["agents"].items()})
+        mcpo_paths = (
+            "MCP-O REGISTERED SERVERS & THEIR PATHS"
+            "".join(f"\n* Server Host: {host_link}{"".join(f"\n\t** Path: {path}\n\t   Description: {description}" for path, description in paths.items())}" for host_link, paths in self._toolbox["MCP-O_servers"].items())
+        )
+        methods_block = f"{developer_methods}\n{plugin_methods}\n{agent_methods}\n{mcpo_paths}"
+        
+        # 2. Craft user prompt ---------------------------------------
+        user_prompt = (
+            f"**AVAILABLE METHODS**\n{methods_block}\n\n"
+            f"**TASK**\n{prompt}\n\n"
+            "Respond *only* with the JSON plan."
+        )
+
+        # 3. Ask the LLM via BasicAgent ------------------------------
+        raw = Agent.invoke(self, user_prompt).strip()
+        raw = re.sub(r'^```[a-zA-Z]*|```$', '', raw)  # scrub fences if any
+
+        try:
+            steps = json.loads(raw)
+        except Exception as e:
+            raise ValueError(f"JSON parse error: {e}\nLLM output:\n{raw}")
+
+        unknown = [s["function"] for s in steps if s["function"] not in tools]
+        if unknown:
+            raise ValueError(f"Plan uses unknown functions: {unknown}")
+        
+        plan = {"steps": steps, "tools": tools}
+        
+        # guarantee last step is "_return"
+        if not plan["steps"] or plan["steps"][-1]["function"] != "_return":
+            plan["steps"].append(
+                {
+                    "function": "_return",
+                    "args": {"val": None},
+                }
+            )
+        return plan

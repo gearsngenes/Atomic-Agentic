@@ -32,7 +32,8 @@ Atomic-Agentic/
 │
 ├── modules/
 │   ├── Agents.py         # Core agent class and agent subclasses
-│   ├── LLMEngines.py      # Language model wrapper platform-specific subclasses
+│   ├── PlannerAgents.py  # Planner Agent and its subclasses
+│   ├── LLMEngines.py     # Language model wrapper platform-specific subclasses
 │   ├── PlanExecutors.py  # Execution logic for Planner-Agent generated plans
 │   ├── Plugins.py        # Plugin/batch-tool system for agents
 │   └── Prompts.py        # Prompt templates and utilities
@@ -45,7 +46,10 @@ Atomic-Agentic/
 │   │   ├── 01_plugins_test.py         # Generate plans with plugin methods
 │   │   ├── 02_async_planner_test.py   # Asynchronous plan execution
 │   │   ├── 03_agentic_story_builder.py   # Multi-agent story workflow
-│   │   └── 04_orchestrating_planners.py  # Orchestrating planners
+│   │   ├── 04_orchestrating_planners.py  # Orchestrating planners
+│   │   ├── 05_mcpo_planner_test.py       # Running a test server
+|   |   └── sample_mcp_server.py       # Run this in a separate terminal
+│   │   
 │   ├── PrePost_Examples
 │   │   └── 01_coder_build_and_run.py  # Generates & executes code
 │   └── ChainSequence_Examples/
@@ -106,12 +110,63 @@ q2_result = my_agent.invoke("If not, then where?")
 print(f"{q1_result}\n{q2_result}")
 ```
 
-**3. PrePostAgent** see (`/PrePost_Examples/`)
+**3.🧼 PrePostAgent: Input & Output Processing Agent**
+The PrePostAgent is a specialized subclass of the base Agent, designed to allow custom preprocessing and postprocessing logic to be injected before and after the LLM's response. This gives users a flexible and deterministic way to manipulate input and output data surrounding the core LLM invocation.
 
-This is the most basic of the Tool-Using agents in Atomic-Agentic. It can register specific methods and arrange them in specific orders before and after the LLM invocation.
-- `.preprocessors` for adding any operations to apply to the input before the LLM
-- `.postprocessors` for adding any operations to the output of the LLM.
-- Provides extra flexibility and deterministic logic to filtering inputs and outputs for agents.
+Preprocessors: Functions that transform the raw user prompt before it’s sent to the LLM.
+
+Postprocessors: Functions that transform the LLM response before it’s returned.
+
+Composable Steps: Both processors are defined as ordered lists of Python functions and can be updated incrementally or all at once.
+
+This is especially useful for tasks such as:
+
+- Auto-formatting user input (e.g., strip whitespace, enforce structure)
+- Parsing or validating output (e.g., extracting JSON, evaluating code)
+- Adding dynamic control logic around a standard agent
+
+Key Properties:
+- .preprocessors — Returns a list of pre-processing functions
+- .postprocessors — Returns a list of post-processing functions
+- .add_prestep(func) — Adds a new preprocessor function
+- .add_poststep(func) — Adds a new postprocessor function
+
+**Example:**
+Here, we have an example of a pre-post agent being used to remove a specific prefix from any input the agent receives before answering. This allows us to to have more control and cleaner inputs for our Agent.
+```python
+from modules.LLMEngines import OpenAIEngine
+from modules.Agents import PrePostAgent
+
+# Preprocessing tool — removes 'Input: ' prefix if present
+def strip_translate_prefix(text: str) -> str:
+    return text.replace("Input: ", "").strip()
+
+# Postprocessing tool — converts all output to uppercase
+def shoutify(text: str) -> str:
+    return text.upper()
+
+# LLM Engine
+engine = OpenAIEngine(api_key="...", model="gpt-4o")
+
+# Define PrePost agent
+translator = PrePostAgent(
+    name="UppercaseTranslator",
+    llm_engine=engine,
+    role_prompt="You are a translator that translates English text to French."
+)
+
+# Add preprocessing and postprocessing functions
+translator.add_prestep(strip_translate_prefix)
+translator.add_poststep(shoutify)
+
+# Run the agent
+response = translator.invoke("Input: Hello, how are you?")
+print(response)
+# Output (uppercase French translation): BONJOUR, COMMENT ÇA VA ?
+```
+This pattern is powerful for tasks where deterministic transformation or formatting of inputs/outputs is needed around otherwise generative agents. You can build a stack of custom behaviors without modifying the agent’s core logic.
+
+Let me know if you'd like this formatted into a pull-request-style snippet or if you want similar entries added for other classes.
 
 **4. ChainSequenceAgent** (see `ChainSequence_Examples/`)
 
@@ -181,19 +236,96 @@ Plugins extend PlannerAgent capabilities, allowing agents to interact with their
 
 
 Plugins can be registered to any agent, including PlannerAgents and ChainSequences, making the system highly extensible and adaptable to new environments or requirements.
+## Planner Agents: Tool-Oriented Reasoners
 
-### AgenticPlannerAgent
-This sublcass of PlannerAgent can register other agents, themselves, and as a result, it can perform more advanced tasks. Note, that in the constructor, there is also a `granular` parameter. This is set to `False` by default, but it effectively determines whether the user can register individual methods and plugins (as by default, it focuses only on accepting other agents).
+Planner Agents are one of the most powerful constructs in Atomic-Agentic. Unlike reactive agents (like `Agent` or `ChainSequenceAgent`), planners **autonomously generate execution plans**—dynamic chains of function calls based on the task prompt and available tools.
 
-## Getting Started
+### 🧠 `PlannerAgent`: The Runtime Plan Generator
 
-1. **Install dependencies**
-   Once you've cloned the repository, install the python dependencies like so:
-   ```
-   pip install -r requirements.txt
-   ```
-2. **Run examples**
-   Navigate to any of the available examples/ sub folders and run the example. For instance, the basic OpenAI agent example would be run like so:
-   ```
-   python .\examples\Agent_Examples\openai_agent_test.py
-   ```
+The `PlannerAgent` generates and executes structured multi-step plans using developer-defined tools and plugin methods. It is the first agent capable of autonomous orchestration based on a user’s natural language instruction.
+
+- **Tool Registration**: Supports registering functions or `Plugin` collections.
+- **Plan Execution**: Steps are executed one-by-one (synchronously or asynchronously).
+- **No agent-to-agent orchestration yet**—just local tool use.
+
+**Example:**
+```python
+from modules.PlannerAgents import PlannerAgent
+from modules.LLMEngines import OpenAIEngine
+from modules.Plugins import MathPlugin, ConsolePlugin
+
+llm = OpenAIEngine(api_key="...", model="gpt-4o")
+planner = PlannerAgent("SimplePlanner", llm_engine=llm)
+
+planner.register(MathPlugin())
+planner.register(ConsolePlugin())
+
+result = planner.invoke("Multiply 8 by 6, then print the result.")
+```
+
+---
+
+### 🔁 `AgenticPlannerAgent`: Adds Multi-Agent Planning
+
+This subclass expands `PlannerAgent` by allowing it to **invoke other registered agents**—essentially treating each agent as a callable tool (`<agent_name>.invoke`). This enables planners to **delegate subtasks** to other agents dynamically.
+
+- **Agent Registration**: Register other agents and invoke them via plan steps.
+- **Granular Mode**: Optional flag (`granular=True`) allows this planner to also register plugins/methods like a basic `PlannerAgent`.
+
+**Example:**
+```python
+from modules.PlannerAgents import AgenticPlannerAgent
+from modules.Agents import Agent
+from modules.LLMEngines import OpenAIEngine
+
+llm = OpenAIEngine(api_key="...", model="gpt-4o")
+agentic = AgenticPlannerAgent("MetaPlanner", llm_engine=llm, granular=True)
+
+helper = Agent("SimpleHelper", llm_engine=llm, role_prompt="Summarize input text.")
+agentic.register(helper, description="Summarizes a given passage.")
+
+# This will delegate the summarization to the registered helper agent
+agentic.invoke("Summarize: 'The Eiffel Tower is located in Paris. It was built in 1889.'")
+```
+
+---
+
+### 🌐 `McpoPlannerAgent`: Calls External MCP Servers
+
+With MCP becoming an integral part of Agentic AI communication and tool-use, I wanted to make sure that Atomic-Agentic could be compatible with MCP or its extensions. Therfore, introducing the MCP-O Planner Agent. This is the most powerful subclass. In addition to tools and agents, the `McpoPlannerAgent` can **call external tools hosted on any OpenAPI-compliant MCP-O server**. These external tools appear as remote function HTTP-compatible endpoints (`/add`, `/classify`, etc.), but connect to MCP-running servers. This allows us to retrieve tool-context remotely, and could potentially remove the burden of providing context on developers.
+
+- **MCP-O Tool Registration**: Use `register("http://localhost:8000")` to pull in tool paths from a server's OpenAPI schema.
+- **MCP Server Invocation**: The plan can include steps that send POST requests to any known MCP-O server.
+
+**Example:**
+
+First and foremost, make sure you have a link to a working MCP server hosted on MCPO. In our `Planner_Examples/` folder, there is a `sample_mcp_server.py` file that you can run. Make sure to start the server before running any agents that use this server, using the command seen here:
+
+`mcpo --port 8000 -- python sample_server.py`
+
+
+As a loose example, here is how we'd use an instance of McpoPlannerAgent.
+
+```python
+from modules.PlannerAgents import McpoPlannerAgent
+from modules.LLMEngines import OpenAIEngine
+
+llm = OpenAIEngine(api_key="...", model="gpt-4o")
+mcpo = McpoPlannerAgent("CrossServerPlanner", llm_engine=llm)
+
+# Register an MCP server
+mcpo.register("http://localhost:8000") # our sample server
+
+# The following user prompt will invoke one of the external tools (like /add)
+result = mcpo.invoke("Use the MCP server to calculate the derivative of x**3 at x = 1")
+```
+
+---
+
+### Summary Table
+
+| Class Name            | Key Features                                                       | Tools Allowed           | Can Call Agents | Can Call MCP Servers |
+|----------------------|---------------------------------------------------------------------|--------------------------|------------------|-----------------------|
+| `PlannerAgent`        | Basic multi-step plans using registered methods/plugins            | ✅ Plugins + functions   | ❌               | ❌                    |
+| `AgenticPlannerAgent` | Adds agent-to-agent tool usage via `<agent_name>.invoke` syntax    | ✅ (if `granular=True`)  | ✅               | ❌                    |
+| `McpoPlannerAgent`    | Adds support for external MCP-O tool servers                        | ✅ + Agents + MCP tools  | ✅               | ✅                    |

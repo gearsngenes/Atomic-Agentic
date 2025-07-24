@@ -158,21 +158,20 @@ class ChainSequenceAgent(Agent):
     A sequential Chain-of-Agents. Uses a flat internal list.
     Each agent's output is passed as input to the next.
     """
-    def __init__(self, name: str | None = None, context_enabled: bool = False):
+    def __init__(self, name: str, context_enabled: bool = False):
         self._agents:list[Agent] = []
-        self._name = name or "ChainSequence"
+        self._name = name
         self._context_enabled = context_enabled
-        self._role_prompt = ""
+        self._role_prompt = "You are a chain-sequence agent. You sequentially invoke the following agents:\n"
         self._history = []
         self._llm_engine = None
     @property
     def agents(self) -> list[Agent]:
-        return self._agents
+        return self._agents.copy()
 
     @property
     def role_prompt(self):
-        desc = "You are a chain-sequence agent. You sequentially invoke the following agents:\n"
-        return desc + "\n".join(f"- {agent.name}" for agent in self._agents)
+        return self._role_prompt + "".join(f"\n- {agent.name}" for agent in self._agents)
 
     @property
     def llm_engine(self):
@@ -193,9 +192,12 @@ class ChainSequenceAgent(Agent):
         result = prompt
         if not self._agents:
             raise RuntimeError(f"Agents list is empty for ChainSequenceAgent '{self.name}'")
+        if self.context_enabled:
+            self._history.append({"role": "user", "content": "input: " + prompt})
         for agent in self._agents:
             result = agent.invoke(str(result))
-        if self._context_enabled:
-            self._history.append({"role": "user", "content": prompt})
-            self._history.append({"role": "assistant", "content": str(result)})
+            if self.context_enabled:
+                self._history.append({"role": "assistant", "content": agent.name + ": "+str(result)})
+        if self.context_enabled:
+            self._history.append({"role": "assistant", "content": self.name + ": " + str(result)})
         return result

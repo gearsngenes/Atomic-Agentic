@@ -50,7 +50,7 @@ reviewer = Agent("DraftReviewer", llm_engine, REVIEWER_PROMPT, context_enabled=T
 orch = AgenticPlannerAgent(name = "StoryPlanner", llm_engine=llm_engine)
 
 orch.register(tool = outliner,
-                    description = "Flesh out a full outline from a brief idea description.")
+                    description = "Fleshes out a full outline from a brief idea description.")
 orch.register(tool = reviewer,
                     description = "Reviews story drafts, provides revision notes back to the writer.")
 # writer & reviewer are exposed as ordinary tools (not agent-tools)
