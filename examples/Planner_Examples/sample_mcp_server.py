@@ -1,5 +1,5 @@
 # Run the below command once you've implemented the server:
-# mcpo --port 8000 -- python sample_server.py
+# mcpo --port 8000 -- python sample_mcp_server.py
 
 from mcp.server.fastmcp import FastMCP
 import math
