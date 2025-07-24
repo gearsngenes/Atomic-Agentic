@@ -7,8 +7,8 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 # ───────────────────────────  local imports  ────────────────────
-from modules.Agents import Agent, AgenticPlannerAgent
-from modules.Plugins import ConsolePlugin
+from modules.Agents import Agent
+from modules.PlannerAgents import AgenticPlannerAgent
 from modules.LLMEngines import *
 
 # define a global llm engine to give to each of our agents

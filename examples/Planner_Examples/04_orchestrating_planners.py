@@ -15,9 +15,9 @@ import time, logging
 logging.basicConfig(level=logging.INFO)
 
 # --- Atomic Agentic Imports ---
-from modules.Agents import Agent, PlannerAgent, AgenticPlannerAgent
+from modules.Agents import *
+from modules.PlannerAgents import PlannerAgent, AgenticPlannerAgent
 from modules.Plugins import MathPlugin
-from modules.LLMEngines import *
 
 # define a global llm engine to give to each of our agents
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")
@@ -48,7 +48,7 @@ haiku_agent = Agent(
 batch_haiku_planner = AgenticPlannerAgent(
     name    ="BatchHaikuPlanner",
     llm_engine = llm_engine,
-    is_async= False,
+    is_async= True,
     granular = True,
 )
 
