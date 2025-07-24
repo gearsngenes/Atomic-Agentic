@@ -49,11 +49,9 @@ class PlanExecutor(_ExecutorBase):
         super().__init__()
     def execute(self, plan: Dict[str, Any]) -> Any:
         steps: List[Dict] = plan["steps"]
-        tools: Dict[str, Dict] = plan["tools"]
-
+        tools: Dict[str, callable] = plan["tools"]
         for idx, step in enumerate(steps):
-            fn_meta = tools[step["function"]]
-            fn      = fn_meta["callable"]
+            fn = tools[step["function"]]
             if self._is_async_fn(fn):
                 raise RuntimeError(
                     f"Function '{step['function']}' is async; "
@@ -82,8 +80,8 @@ class AsyncPlanExecutor(_ExecutorBase):
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
     # ------------- public API -----------------------------------
     async def execute_async(self, plan: Dict[str, Any]) -> Any:
-        steps  = plan["steps"]
-        tools  = plan["tools"]
+        steps: list[dict]  = plan["steps"]
+        tools: dict[str, callable]  = plan["tools"]
 
         # Build dependency graph: step i ↦ set(indices it depends on)
         deps = {
@@ -95,8 +93,7 @@ class AsyncPlanExecutor(_ExecutorBase):
 
         async def _run_one(i: int):
             step   = steps[i]
-            fn_meta = tools[step["function"]]
-            fn     = fn_meta["callable"]
+            fn = tools[step["function"]]
             args   = self._resolve(step.get("args", {}))
             logging.info(f"[TOOL] {step["function"]}, args: {step["args"]}")
             if self._is_async_fn(fn):

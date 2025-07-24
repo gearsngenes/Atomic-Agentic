@@ -52,7 +52,7 @@ class MathPlugin(Plugin):
                 "description": "Takes in two numbers 'a' and 'b' and returns their quotient."
             },
             "power": {
-                "callable": lambda base, exp: base ** exp,
+                "callable": lambda a, b: a ** b,
                 "description": "Takes in two numbers 'a' and 'b' and returns 'a' raised to the power of 'b'."
             },
             "sqrt": {

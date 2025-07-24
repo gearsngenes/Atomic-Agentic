@@ -9,7 +9,7 @@ from modules.Agents  import PlannerAgent
 from modules.Plugins import ParserPlugin, MathPlugin, ConsolePlugin, PythonPlugin
 from modules.LLMEngines import *
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO) # Comment to hide the log info
 
 print("\n───────────────────────────────\n")
 print("Testing MathPlugin + ConsolePlugin …")
@@ -18,8 +18,8 @@ print("Testing MathPlugin + ConsolePlugin …")
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
 planner = PlannerAgent(name="math-console-tester", llm_engine=llm_engine)
-planner.register_plugin(MathPlugin())
-planner.register_plugin(ConsolePlugin())      # for `print`
+planner.register(MathPlugin())
+planner.register(ConsolePlugin())      # for `print`
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
@@ -47,9 +47,9 @@ print(f"\nReturned value → {result}\n")
 print("\n───────────────────────────────\n")
 print("Now testing ParserPlugin + MathPlugin …")
 planner = PlannerAgent(name="parser-math-tester", llm_engine=llm_engine)
-planner.register_plugin(ParserPlugin())
-planner.register_plugin(MathPlugin())
-planner.register_plugin(ConsolePlugin())
+planner.register(ParserPlugin())
+planner.register(MathPlugin())
+planner.register(ConsolePlugin())
 
 task_prompt = """
 TASK
@@ -68,8 +68,8 @@ print(f"\nMean returned → {mean_val}\n")
 print("\n───────────────────────────────\n")
 print("Now testing PythonPlugin + ConsolePlugin …")
 planner = PlannerAgent(name="python-type-tester", llm_engine=llm_engine)
-planner.register_plugin(PythonPlugin())
-planner.register_plugin(ConsolePlugin())
+planner.register(PythonPlugin())
+planner.register(ConsolePlugin())
 
 task_prompt = """
 TASK

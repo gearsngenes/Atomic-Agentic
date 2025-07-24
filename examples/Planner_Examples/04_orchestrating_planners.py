@@ -15,7 +15,7 @@ import time, logging
 logging.basicConfig(level=logging.INFO)
 
 # --- Atomic Agentic Imports ---
-from modules.Agents import PlannerAgent, Agent
+from modules.Agents import Agent, PlannerAgent, AgenticPlannerAgent
 from modules.Plugins import MathPlugin
 from modules.LLMEngines import *
 
@@ -45,20 +45,20 @@ haiku_agent = Agent(
 )
 
 # Define Batch Haiku Planner
-batch_haiku_planner = PlannerAgent(
+batch_haiku_planner = AgenticPlannerAgent(
     name    ="BatchHaikuPlanner",
     llm_engine = llm_engine,
-    is_async= True,
+    is_async= False,
+    granular = True,
 )
 
 # Register Haiku Writing Agent
-batch_haiku_planner.register_agent(haiku_agent, description="Writes a haiku for a given prompt.")
+batch_haiku_planner.register(haiku_agent, description="Writes a haiku for a given prompt.")
 
 # Define and Register Print Haiku Tool
 def print_haiku(haiku_topic, haiku):
     print(f"---\n**{haiku_topic}**\n{haiku}\n---")
-batch_haiku_planner.register_tool(
-    "print_haiku",
+batch_haiku_planner.register(
     print_haiku,
     "Prints a haiku formatted with topic as the title."
 )    
@@ -72,17 +72,16 @@ batch_haiku_planner.register_tool(
 batch_math_planner = PlannerAgent(
     name    = "BatchMathPlanner",
     llm_engine = llm_engine,
-    is_async= True,
+    is_async = False,
 )
 
 # Register Math Plugin and print method
-batch_math_planner.register_plugin(MathPlugin())
+batch_math_planner.register(MathPlugin())
 
 def print_math_solution(problem, solution):
     print(f"Question: {problem}\nAnswer: {solution}")
 
-batch_math_planner.register_tool(
-    "print_solution",
+batch_math_planner.register(
     print_math_solution,
     "Prints the formatted math problem its solution."
 )
@@ -93,15 +92,15 @@ batch_math_planner.register_tool(
 # --------------------------------------
 
 # Define Super Planner
-super_planner = PlannerAgent(
+super_planner = AgenticPlannerAgent(
     name    = "SuperPlanner",
     llm_engine = llm_engine,
-    is_async= False,
+    is_async= True,
 )
 
 # Register the two batch planners to the super planner
-super_planner.register_agent(batch_haiku_planner, description="Handles batch haiku writing tasks.")
-super_planner.register_agent(batch_math_planner, description="Handles batch math solving tasks.")
+super_planner.register(batch_haiku_planner, description="Handles batch haiku writing tasks.")
+super_planner.register(batch_math_planner, description="Handles batch math solving tasks.")
 
 
 # -----------------------------------

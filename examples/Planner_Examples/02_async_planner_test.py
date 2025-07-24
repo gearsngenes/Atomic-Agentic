@@ -1,10 +1,10 @@
-import sys, os, logging, time
+import sys, os, logging, time, json
 from pathlib import Path
 # Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 # ----------------- Atomic Agents ----------------
-from modules.Agents import Agent, PlannerAgent
+from modules.Agents import PrePostAgent, AgenticPlannerAgent
 from modules.LLMEngines import *
 
 # ----------------- Setup Logging ----------------
@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
 # Define a haiku-writing agent
-haiku_writer = Agent(
+haiku_writer = PrePostAgent(
     name        = "HaikuWriter",
     llm_engine     = llm_engine,
     role_prompt = (
@@ -27,32 +27,31 @@ haiku_writer = Agent(
         "With red streaks a-cross the sky,\n"
         "Crisp, bright, mor-ning light\n\n"
         "Be sure to follow the 5-7-5 syllable structure, and "
-        "hyphenate every multi-syllable word used."
+        "hyphenate every multi-syllable word used.\n"
+        "Once you have finished writing the haiku, place the haiku "
+        "and the topic into a valid JSON object in the format below, with "
+        "NO additional tags, quotation marks, or comments:\n"
+        """{"title":"<haiku topic here>", "haiku":"<haiku poem here>"}"""
     )
 )
 
+# Define and register a formatted print function for haikus + the json.loads method
+def print_haiku(haiku_json):
+    print(f"---\n**{haiku_json['title']}**\n{haiku_json['haiku']}\n---")
+haiku_writer.add_poststep(json.loads)
+haiku_writer.add_poststep(print_haiku)
+
 # Create a PlannerAgent that uses the haiku writer and print tool
-async_batch_writer = PlannerAgent(
-    name =      "AsyncBatchHaikuPlanner",
-    llm_engine =   llm_engine,
-    is_async =  True,   # Toggle between async and sync planning
+async_batch_writer = AgenticPlannerAgent(
+    name        = "AsyncBatchHaikuPlanner",
+    llm_engine  = llm_engine,
+    granular    = False,     # Toggle to enable adding individual tools & plugins
+    is_async    = True,   # Toggle between async and sync planning
 )
 
 # Register the haiku writer agent
-async_batch_writer.register_agent(
-    agent =         haiku_writer,
-    description =   "Writes a haiku about a given topic."
-)
 
-# Define and register a simple formatted print function for haikus
-def print_haiku(haiku_topic, haiku):
-    print(f"---\n**{haiku_topic}**\n{haiku}\n---")
-
-async_batch_writer.register_tool(
-    name =          "print_haiku",
-    func =          print_haiku,
-    description =   "Prints a haiku formatted with topic as the title."
-)
+async_batch_writer.register(tool=haiku_writer)
 
 if __name__ == "__main__":
     # List of haiku topics to write about
@@ -73,7 +72,6 @@ if __name__ == "__main__":
     prompt = (
         "Given the following list of topics, separately send each topic to the HaikuWriter. "
         "The HaikuWriter should be given only ONE HAIKU TOPIC at a time. "
-        "Use the haiku print method to print the formatted haikus after they are written."
         "Topics:\n"
         + "\n- Topic ".join(f'{i}: {t}' for i, t in enumerate(topics)) + "."
     )

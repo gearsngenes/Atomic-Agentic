@@ -7,7 +7,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 # ───────────────────────────  local imports  ────────────────────
-from modules.Agents import Agent, PlannerAgent
+from modules.Agents import Agent, AgenticPlannerAgent
 from modules.Plugins import ConsolePlugin
 from modules.LLMEngines import *
 
@@ -26,12 +26,13 @@ Output: **JSON only** with keys:
 
 WRITER_PROMPT = """
 You are the *Story Writer*.
-Required arg: outline_json (from Outliner).
-Optional args: prior_draft, revision_notes (may be empty strings).
+Required arg: outline_json (from Outliner, though only for the first draft).
+Afterwards, you may instead get revision notes from the reviewer, which
+you will use to apply changes to your last draft with.
 
 Return ONLY markdown for the story draft.
-Use scene titles as ## headings.
-Max 1 500 words.  Never include the outline or revision notes verbatim.
+Break the story up into sections, where logical, with ## headings.
+Max 1000 words. Never include the outline or revision notes verbatim.
 """.strip()
 
 REVIEWER_PROMPT = """
@@ -42,22 +43,19 @@ Output: bullet-point critique ONLY (max 8 bullets).  No rewriting.
 
 # ───────────────────────────  WORKER AGENTS  ────────────────────
 outliner = Agent("StoryOutliner", llm_engine, OUTLINER_PROMPT)
-writer   = Agent("StoryWriter",   llm_engine, WRITER_PROMPT)
-reviewer = Agent("DraftReviewer", llm_engine, REVIEWER_PROMPT)
+writer   = Agent("StoryWriter",   llm_engine, WRITER_PROMPT, context_enabled=True)
+reviewer = Agent("DraftReviewer", llm_engine, REVIEWER_PROMPT, context_enabled=True)
 
 # ───────────────────────────  ORCHESTRATOR  ─────────────────────
-orch = PlannerAgent(name = "StoryPlanner", llm_engine=llm_engine)
+orch = AgenticPlannerAgent(name = "StoryPlanner", llm_engine=llm_engine)
 
-orch.register_agent(agent       = outliner,
+orch.register(tool = outliner,
                     description = "Flesh out a full outline from a brief idea description.")
-orch.register_agent(agent       = reviewer,
+orch.register(tool = reviewer,
                     description = "Reviews story drafts, provides revision notes back to the writer.")
 # writer & reviewer are exposed as ordinary tools (not agent-tools)
-orch.register_agent(agent       = writer,
-                    description = "Writes a draft based on the story outline, plus any additional context (i.e. revision notes, prior drafts)")
-
-# register the print method from ConsolePlugin
-orch.register_plugin(ConsolePlugin())
+orch.register(tool = writer,
+                    description = "Writes a draft based on the story outline, plus any additional context (i.e. revision notes)")
 
 # ─────────────────────────────  MAIN  ───────────────────────────
 if __name__ == "__main__":
@@ -68,10 +66,9 @@ if __name__ == "__main__":
         f"Write a full story based on: “{idea}”.\n"
         f"Run {loops} write/review cycle(s).\n"
         f"For the write-review steps, after creating revision notes for the latest draft, "
-        f"send the original outline, the reviewer's latest revision notes, and the "
-        f"writer's latest draft as a single string formatted like so back to the writer to rewrite the story:\n\n"
-        f"Outline:\n<outline here>\n\nPrior Draft:\n<prior draft here>\n\nRevision Notes:\n<revision notes here>'\n\n"
-        f"Print and return the final draft once it's prepared."
+        f"send the latest revision notes back to the writer to rewrite the story:\n\n"
+        f"Revision Notes:\n<revision notes here>'\n\n"
+        f"Return the final draft once it's prepared."
     )
 
     # The orchestrator handles both planning *and* execution.
