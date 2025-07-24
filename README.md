@@ -156,8 +156,8 @@ from modules.Plugins import ConsolePlugin, MathPlugin
 planner = PlannerAgent(llm_engine=llm_engine, name="Workflow Orchestrator")
 
 # Register plugins/tools
-planner.register_plugin(ConsolePlugin()) # for methods related to logging, printing, etc.
-planner.register_plugin(MathPlugin()) # for basic math methods
+planner.register(ConsolePlugin()) # for methods related to logging, printing, etc.
+planner.register(MathPlugin()) # for basic math methods
 
 # Use the planner agent to generate and execute a plan
 planner_result = planner.invoke("Calculate the product of 42 and 58, then print the result.")
@@ -182,6 +182,8 @@ Plugins extend PlannerAgent capabilities, allowing agents to interact with their
 
 Plugins can be registered to any agent, including PlannerAgents and ChainSequences, making the system highly extensible and adaptable to new environments or requirements.
 
+### AgenticPlannerAgent
+This sublcass of PlannerAgent can register other agents, themselves, and as a result, it can perform more advanced tasks. Note, that in the constructor, there is also a `granular` parameter. This is set to `False` by default, but it effectively determines whether the user can register individual methods and plugins (as by default, it focuses only on accepting other agents).
 
 ## Getting Started
 
