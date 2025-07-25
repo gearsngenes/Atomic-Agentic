@@ -55,6 +55,9 @@ class Agent:
     def role_prompt(self, value: str):
         self._role_prompt = value
 
+    def clear_memory(self):
+        self._history = []
+    
     def invoke(self, prompt: str):
         messages = [{"role": "system", "content": self._role_prompt}]
         if self._context_enabled:
@@ -201,3 +204,25 @@ class ChainSequenceAgent(Agent):
         if self.context_enabled:
             self._history.append({"role": "assistant", "content": self.name + ": " + str(result)})
         return result
+
+
+from abc import abstractmethod
+# ────────────────────────────────────────────────────────────────
+# 4.  Abstract ToolAgent  (Uses Tools and Agents to execute tasks)
+# ────────────────────────────────────────────────────────────────
+class ToolAgent(Agent):
+    def __init__(self, name, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT):
+        super().__init__(name, llm_engine, role_prompt, context_enabled = False)
+        self._toolbox:dict[str, dict] = {}
+    @abstractmethod
+    def strategize(self, prompt:str)->dict:
+        pass
+    @abstractmethod
+    def execute(self, plan:dict)->Any:
+        pass
+    @abstractmethod
+    def register(self, tool: Any, description: str|None = None) -> None:
+        pass
+    @property # toolbox should not be editable from the outside
+    def toolbox(self):
+        return self._toolbox.copy()
