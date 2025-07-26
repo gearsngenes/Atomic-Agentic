@@ -11,16 +11,16 @@ class ToolOrchestratorAgent(ToolAgent):
         Initializes context and toolbox.
         """
         super().__init__(name, llm_engine)
-        self.role_prompt=Prompts.ORCHESTRATOR_PROMPT
-        def _return(val:Any):
+        self.role_prompt = Prompts.ORCHESTRATOR_PROMPT
+        def _return(val: Any):
             return val
         self._previous_steps = []
-        self.register(_return, "Use this method to return a specific value object or string if the user specifically requests it")
+        ToolOrchestratorAgent.register(self, _return, "Use this method to return a specific value object or string if the user specifically requests it")
 
     def register(self, tool: Any, description: str | None = None) -> None:
         """
         Register a tool (callable or Plugin) into self._toolbox.
-        """        
+        """
         if callable(tool):
             source = "__dev_tools__"
             if source not in self._toolbox:
@@ -64,11 +64,9 @@ class ToolOrchestratorAgent(ToolAgent):
             f"Return a single JSON-formatted object for the next step to be executed in the plan"
         )
 
-        # clean + parse response
         raw = Agent.invoke(self, user_prompt)
         raw = re.sub(r"^```[a-zA-Z]*|```$", "", raw.strip())
         step = json.loads(raw)
-        # print(json.dumps(step, indent = 2))
         return step
 
     def execute(self, step: dict) -> Any:
@@ -76,12 +74,10 @@ class ToolOrchestratorAgent(ToolAgent):
         Executes a tool call after resolving any stepN placeholders.
         """
         def _resolve(val: Any) -> Any:
-            # Full replacement: "{{stepN}}"
             if isinstance(val, str):
                 match = re.fullmatch(r"\{\{step(\d+)\}\}", val)
                 if match:
                     return self._previous_steps[int(match.group(1))]["Step_Result"]
-                # Partial substitution: e.g. "The answer is {{step0}}"
                 return re.sub(
                     r"\{\{step(\d+)\}\}",
                     lambda m: str(self._previous_steps[int(m.group(1))]["Step_Result"]),
@@ -97,23 +93,24 @@ class ToolOrchestratorAgent(ToolAgent):
         source = step["source"]
         func_key = step["function"]
         func = self._toolbox[source][func_key]["callable"]
+        logging.info(f"[TOOL] {func_key} with args:{"".join(f"\n{k}:{v}" for k,v in resolved_args.items())}")
         return func(**resolved_args)
 
     def step(self, user_input: str) -> tuple[dict, Any]:
-        """
-        Combines strategize + execute
-        """
         step_strategy = self.strategize(user_input)
         step_call, explanation, status = step_strategy["step_call"], step_strategy["explanation"], step_strategy["status"]
         step_result = self.execute(step_call)
         return explanation, step_result, status
 
     def invoke(self, prompt: str) -> Any:
+        logging.info(f"+---{'-'*len(self.name + ' Starting')}---+")
+        logging.info(f"|   {self.name} Starting   |")
+        logging.info(f"+---{'-'*len(self.name + ' Starting')}---+")
+
         self._previous_steps = []
         task_status = "INCOMPLETE"
         result = None
         while task_status != "COMPLETE":
-            # Reformat prompt to include history
             if self._previous_steps:
                 formatted_history = "\n".join(
                     [f"Step {i}: {step['Step_Purpose']} → {step['Step_Result']}" for i, step in enumerate(self._previous_steps)]
@@ -123,4 +120,37 @@ class ToolOrchestratorAgent(ToolAgent):
                 full_prompt = prompt
             explanation, result, task_status = self.step(full_prompt)
             self._previous_steps.append({"Step_Purpose": explanation, "Step_Result": result})
+
+        logging.info(f"+---{'-'*len(self.name + ' Finished')}---+")
+        logging.info(f"|   {self.name} Finished   |")
+        logging.info(f"+---{'-'*len(self.name + ' Finished')}---+\n")
         return result
+
+
+class AgenticOrchestratorAgent(ToolOrchestratorAgent):
+    """
+    Extends ToolOrchestratorAgent to support registration of other agents as callable tools.
+    Each registered agent gets its own namespace: '__agent_<name>__' with a single '.invoke' method.
+    """
+    def __init__(self, name: str, llm_engine: LLMEngine, granular: bool = False):
+        super().__init__(name, llm_engine)
+        self._granular = granular
+        self.role_prompt = Prompts.AGENTIC_ORCHESTRATOR_PROMPT
+
+    def register(self, tool: Any, description: str | None = None) -> None:
+        if isinstance(tool, Agent):
+            if not description:
+                raise ValueError(f"You must provide a description when registering agent '{tool.name}'")
+            source = f"__agent_{tool.name}__"
+            if source in self._toolbox:
+                raise RuntimeError(f"Agent '{tool.name}' is already registered.")
+            self._toolbox[source] = {}
+
+            key = f"{source}.invoke"
+            sig = ToolAgent._build_signature(key, tool.invoke)
+            desc = sig + f" — This method invokes the agent '{tool.name}'.\nAgent description: {description}"
+            self._toolbox[source][key] = {"callable": tool.invoke, "description": desc}
+        elif self._granular:
+            super().register(tool, description)
+        else:
+            raise RuntimeError(f"{self.name} is not configured for granular registration of Plugin's and individual methods")

@@ -156,3 +156,41 @@ RULES
 You will receive the task and any prior step history.
 """.strip()
 
+AGENTIC_ORCHESTRATOR_PROMPT = f"""
+{ORCHESTRATOR_PROMPT}
+────────────────────────────────────────────────────────────────
+ADDITIONAL ORCHESTRATION RULES
+• In addition to ordinary tools and plugin methods, you may also
+  invoke the `.invoke()` method of other registered agents.
+
+• These agents are listed in AVAILABLE METHODS under special
+  namespaces like "__agent_<AgentName>__.invoke".
+
+• When calling an agent, you must use:
+    {{
+      "function": "__agent_<AgentName>__.invoke",
+      "args": {{ "prompt": "<the input you want to give that agent>" }},
+      "source": "__agent_<AgentName>__"
+    }}
+
+• The result of the agent's `.invoke()` call will be treated as
+  the step’s result, just like a normal tool.
+
+EXAMPLE:
+--------
+{{
+  "step_call": {{
+    "function": "__agent_Summarizer__.invoke",
+    "args": {{ "prompt": "Summarize this paragraph: {{step0}}" }},
+    "source": "__agent_Summarizer__"
+  }},
+  "explanation": "Use the Summarizer agent to reduce the previous output to key ideas.",
+  "status": "INCOMPLETE"
+}}
+
+RULES SUMMARY:
+--------------
+- Each agent provides a single method called `.invoke`.
+- You must use the exact key "__agent_<AgentName>__.invoke" in both 'function' and 'source'.
+- Combine agent calls with other tools using {{stepN}} references.
+""".strip()
