@@ -41,18 +41,6 @@ class PlannerAgent(ToolAgent):
         self._is_async = val
         self._executor = AsyncPlanExecutor() if val else PlanExecutor()
 
-    @staticmethod
-    def _build_signature(key: str, func: callable) -> str:
-        sig = inspect.signature(func)
-        hints = get_type_hints(func)
-        params = [
-            f"{n}: {hints.get(n, Any).__name__}"
-            + (f" = {p.default!r}" if p.default is not inspect._empty else "")
-            for n, p in sig.parameters.items() if n != "self"
-        ]
-        rtype = hints.get('return', Any).__name__
-        return f"{key}({', '.join(params)}) → {rtype}"
-
     def register(self, tool: Any, description: str = None) -> None:
         """
         Register a callable or Plugin under the appropriate source namespace.
@@ -64,7 +52,7 @@ class PlannerAgent(ToolAgent):
             if name.startswith("<"):
                 raise ValueError("Tools must be named functions, not lambdas or internals")
             key = f"{source}.{name}"
-            sig = self._build_signature(key, tool)
+            sig = ToolAgent._build_signature(key, tool)
             desc = f"{sig}"
             if description:
                 desc += f" — {description}"
@@ -79,7 +67,7 @@ class PlannerAgent(ToolAgent):
             self._toolbox[source] = {}
             for method, meta in tool.method_map().items():
                 key = f"{source}.{method}"
-                sig = self._build_signature(key, meta['callable'])
+                sig = ToolAgent._build_signature(key, meta['callable'])
                 desc = f"{sig} — {meta['description']}"
                 self._toolbox[source][key] = {"callable": meta['callable'], "description": desc}
         else:
@@ -170,7 +158,7 @@ class AgenticPlannerAgent(PlannerAgent):
         self._toolbox[source] = {}
 
         key = f"{source}.invoke"
-        sig = self._build_signature(key, agent.invoke)
+        sig = ToolAgent._build_signature(key, agent.invoke)
         desc = sig + (f" — This method invokes the {agent.name}.\nAgent description: {description}")
         self._toolbox[source][key] = {"callable": agent.invoke, "description": desc}
 
@@ -239,7 +227,7 @@ class McpoPlannerAgent(AgenticPlannerAgent):
             # Register its single invoke tool
             source = wrapper.name
             key = f"{source}.mcpo_invoke"
-            sig = self._build_signature(key, wrapper.mcpo_invoke)
+            sig = ToolAgent._build_signature(key, wrapper.mcpo_invoke)
             desc = (
                 f"{sig} — Calls the '.mcpo_invoke' method for the {wrapper.name} server.\n"
                 "Use exactly one of these paths and payload schemas:\n"

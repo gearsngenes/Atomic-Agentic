@@ -214,6 +214,18 @@ class ToolAgent(Agent):
     def __init__(self, name, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT):
         super().__init__(name, llm_engine, role_prompt, context_enabled = False)
         self._toolbox:dict[str, dict] = {}
+    
+    @staticmethod
+    def _build_signature(key: str, func: callable) -> str:
+        sig = inspect.signature(func)
+        hints = get_type_hints(func)
+        params = [
+            f"{n}: {hints.get(n, Any).__name__}"
+            + (f" = {p.default!r}" if p.default is not inspect._empty else "")
+            for n, p in sig.parameters.items() if n != "self"
+        ]
+        rtype = hints.get('return', Any).__name__
+        return f"{key}({', '.join(params)}) → {rtype}"
     @abstractmethod
     def strategize(self, prompt:str)->dict:
         pass
