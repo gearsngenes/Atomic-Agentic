@@ -99,6 +99,7 @@ llm_engine = OpenAIEngine(api_key="your-api-key", model="your-model")
 
 my_agent = Agent(
    name = "Fact_Checker"
+   description="...",
    llm_engine=llm_engine,
    role_prompt = "You are a helpful fact-checking assistant. Whenever you see a mistake, start your response with 'WAIT.' before continuing. .",
    context_enabled = True # Mark as true to remember prior messages
@@ -151,6 +152,7 @@ engine = OpenAIEngine(api_key="...", model="gpt-4o")
 # Define PrePost agent
 translator = PrePostAgent(
     name="UppercaseTranslator",
+    description="...",
     llm_engine=engine,
     role_prompt="You are a translator that translates English text to French."
 )
@@ -179,12 +181,12 @@ Below is an abbreviated version of the ChainSequence Storybuilder example.
 from modules.LLMEngines import OpenAIEngine
 from modules.Agents import Agent, ChainSequence
 
-# Define two simple agents, assume 
-outliner = Agent(...)
-writer = Agent(...)
+# Define two simple agents, assume the rest of their features are already implemented
+outliner = Agent(name = "story-outliner", description="...", ...)
+writer = Agent(name = "story-writer", description="...", ...)
 
 #Create a chain in a ChainSequence
-story_chain = ChainSequenceAgent("Story-Builder-chain")
+story_chain = ChainSequenceAgent("Story-Builder-chain") # The description uses that of the agents you add
 story_chain.add(outliner)
 story_chain.add(writer)
 
@@ -208,7 +210,7 @@ from modules.Agents import PlannerAgent
 from modules.Plugins import ConsolePlugin, MathPlugin
 
 # Define a planner agent, assume pre-defined LLM_engine
-planner = PlannerAgent(llm_engine=llm_engine, name="Workflow Orchestrator")
+planner = PlannerAgent(name="Workflow Planner", description="...", llm_engine=llm_engine)
 
 # Register plugins/tools
 planner.register(ConsolePlugin()) # for methods related to logging, printing, etc.
@@ -236,6 +238,56 @@ Plugins extend PlannerAgent capabilities, allowing agents to interact with their
 
 
 Plugins can be registered to any agent, including PlannerAgents and ChainSequences, making the system highly extensible and adaptable to new environments or requirements.
+
+## 🧠 Agent Descriptions Now Handled Automatically
+
+A recent update simplifies how you register agents inside planner or orchestrator agents. Previously, when you registered an agent to another, you needed to manually provide a description:
+
+```python
+agentic.register(helper_agent, description="Summarizes a given passage.")
+```
+
+Now, **you don’t need to provide a description at all**. Agents expose a `.description` property that generates a Markdown-formatted string based on their type and declared description.
+
+This means:
+
+- `AgenticPlannerAgent`, `McpoPlannerAgent`, and `AgenticOrchestratorAgent` will automatically embed a subagent’s description when registering.
+- You no longer have to repeat information or worry about formatting descriptions manually.
+- This is especially useful when you're orchestrating many agents or dynamically building agent registries.
+
+**New Example:**
+
+```python
+from modules.PlannerAgents import AgenticPlannerAgent
+from modules.Agents import Agent
+from modules.LLMEngines import OpenAIEngine
+
+llm = OpenAIEngine(api_key="...", model="gpt-4o")
+
+meta = AgenticPlannerAgent("MetaPlanner", description="Handles subtasks by delegating to helpers.", llm_engine=llm)
+
+# Define a helper agent
+summarizer = Agent(description="...", 
+    name="Summarizer",
+    description="Summarizes English passages into concise bullets.",
+    llm_engine=llm,
+    role_prompt="Summarize input into bullet points."
+)
+
+# No need to pass `description=` explicitly anymore!
+meta.register(summarizer)
+
+result = meta.invoke("Summarize: The Eiffel Tower is in Paris and was built in 1889.")
+```
+
+Under the hood, this will register a function like:
+```
+__agent_Summarizer__.invoke(text: str) → str — Agent description: ~~Agent Summarizer~~
+A generic Agent for on Text-Text responses. Description: Summarizes English passages into concise bullets.
+```
+
+This makes your orchestration logic cleaner, avoids redundancy, and ensures descriptions stay consistent with the agents themselves.
+
 ## Planner Agents: Tool-Oriented Reasoners
 
 Planner Agents are one of the most powerful constructs in Atomic-Agentic. Unlike reactive agents (like `Agent` or `ChainSequenceAgent`), planners **autonomously generate execution plans**—dynamic chains of function calls based on the task prompt and available tools.
@@ -255,7 +307,7 @@ from modules.LLMEngines import OpenAIEngine
 from modules.Plugins import MathPlugin, ConsolePlugin
 
 llm = OpenAIEngine(api_key="...", model="gpt-4o")
-planner = PlannerAgent("SimplePlanner", llm_engine=llm)
+planner = PlannerAgent(name = "SimplePlanner", description="...",  llm_engine=llm)
 
 planner.register(MathPlugin())
 planner.register(ConsolePlugin())
@@ -279,9 +331,9 @@ from modules.Agents import Agent
 from modules.LLMEngines import OpenAIEngine
 
 llm = OpenAIEngine(api_key="...", model="gpt-4o")
-agentic = AgenticPlannerAgent("MetaPlanner", llm_engine=llm, granular=True)
+agentic = AgenticPlannerAgent("MetaPlanner", description="...", llm_engine=llm, granular=True)
 
-helper = Agent("SimpleHelper", llm_engine=llm, role_prompt="Summarize input text.")
+helper = Agent("SimpleHelper", description="...", llm_engine=llm, role_prompt="Summarize input text.")
 agentic.register(helper, description="Summarizes a given passage.")
 
 # This will delegate the summarization to the registered helper agent
@@ -311,7 +363,7 @@ from modules.PlannerAgents import McpoPlannerAgent
 from modules.LLMEngines import OpenAIEngine
 
 llm = OpenAIEngine(api_key="...", model="gpt-4o")
-mcpo = McpoPlannerAgent("CrossServerPlanner", llm_engine=llm)
+mcpo = McpoPlannerAgent("CrossServerPlanner", description="...", llm_engine=llm)
 
 # Register an MCP server
 mcpo.register("http://localhost:8000") # our sample server
