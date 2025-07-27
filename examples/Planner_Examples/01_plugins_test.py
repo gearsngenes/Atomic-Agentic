@@ -17,7 +17,7 @@ print("Testing MathPlugin + ConsolePlugin …")
 # define a global llm_engine to give to each of our agents
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
-planner = PlannerAgent(name="math-console-tester", llm_engine=llm_engine)
+planner = PlannerAgent(name="math-console-tester", description="Testing the Math and Console Plugins", llm_engine=llm_engine)
 planner.register(MathPlugin())
 planner.register(ConsolePlugin())      # for `print`
 
@@ -46,7 +46,7 @@ print(f"\nReturned value → {result}\n")
 # ────────────────────────  PARSER + MATH DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
 print("Now testing ParserPlugin + MathPlugin …")
-planner = PlannerAgent(name="parser-math-tester", llm_engine=llm_engine)
+planner = PlannerAgent(name="parser-math-tester", description="Testing the Math and Parser Plugins", llm_engine=llm_engine)
 planner.register(ParserPlugin())
 planner.register(MathPlugin())
 planner.register(ConsolePlugin())
@@ -67,7 +67,7 @@ print(f"\nMean returned → {mean_val}\n")
 # ────────────────────────  PYTHON + CONSOLE DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
 print("Now testing PythonPlugin + ConsolePlugin …")
-planner = PlannerAgent(name="python-type-tester", llm_engine=llm_engine)
+planner = PlannerAgent(name="python-type-tester", description="Testing the Python and Console Plugins Plugins", llm_engine=llm_engine)
 planner.register(PythonPlugin())
 planner.register(ConsolePlugin())
 

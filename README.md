@@ -43,12 +43,12 @@ Atomic-Agentic/
 │   │   ├── openai_agent_test.py    # Example: OpenAI agent usage
 │   │   └── slm_agent_test.py       # Example: SLM agent usage
 │   ├── Planner_Examples/
-│   │   ├── 01_plugins_test.py         # Generate plans with plugin methods
-│   │   ├── 02_async_planner_test.py   # Asynchronous plan execution
-│   │   ├── 03_agentic_story_builder.py   # Multi-agent story workflow
-│   │   ├── 04_orchestrating_planners.py  # Orchestrating planners
-│   │   ├── 05_mcpo_planner_test.py       # Running a test server
-|   |   └── sample_mcp_server.py       # Run this in a separate terminal
+│   │   ├── 01_plugins_test.py          # Generate plans with plugin methods
+│   │   ├── 02_async_planner_test.py    # Asynchronous plan execution
+│   │   ├── 03_agentic_story_builder.py # Multi-agent story workflow
+│   │   ├── 04_planner_delegator.py     # Delegating tasks to individual planners
+│   │   ├── 05_mcpo_planner_test.py     # Running a test server
+|   |   └── sample_mcp_server.py        # Run this in a separate terminal
 │   │   
 │   ├── PrePost_Examples
 │   │   └── 01_coder_build_and_run.py  # Generates & executes code

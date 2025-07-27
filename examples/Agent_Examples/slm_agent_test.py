@@ -17,6 +17,7 @@ Agent_Atom = Agent(
     name        = "SLM-Agent Atom",
     llm_engine     = llm_engine,
     role_prompt = "You are a helpful assistant named SLM-Agent Atom!",
+    description= "A generically helpful conversational AI assistant for basic Q&A",
     context_enabled=True
 )
 

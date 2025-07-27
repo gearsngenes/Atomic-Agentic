@@ -20,6 +20,7 @@ def testDelayPrint():
 # Create a PlannerAgent for testing our delay print tool
 async_tester = PlannerAgent(
     name        = "Async-Delay-Tester",
+    description = "Tests the ability to run methods asynchronously",
     llm_engine  = llm_engine,
     is_async    = True,   # Toggle between async and sync planning
 )

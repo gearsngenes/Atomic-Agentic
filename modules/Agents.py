@@ -12,16 +12,22 @@ from modules.LLMEngines import *
 # 1.  Agent  (LLM responds to prompts)
 # ────────────────────────────────────────────────────────────────
 class Agent:
-    def __init__(self, name, llm_engine:LLMEngine, role_prompt: str = Prompts.DEFAULT_PROMPT, context_enabled: bool = False):
+    def __init__(self, name, description: str, llm_engine:LLMEngine, role_prompt: str = Prompts.DEFAULT_PROMPT, context_enabled: bool = False):
         self._name = name
         self._llm_engine: LLMEngine = llm_engine
         self._role_prompt = role_prompt
         self._context_enabled = context_enabled
+        self._description = description
         self._history = []
 
     @property
     def name(self):
         return self._name
+    
+    @property
+    def description(self):
+        description = f"~~Agent {self.name}~~\nA generic Agent for on Text-Text responses. Description: {self._description}"
+        return description
 
     @property
     def role_prompt(self):
@@ -29,7 +35,7 @@ class Agent:
 
     @property
     def context_enabled(self):
-        return self.context_enabled
+        return self._context_enabled
 
     @property
     def llm_engine(self):
@@ -50,6 +56,10 @@ class Agent:
     @name.setter
     def name(self, value: str):
         self._name = value
+    
+    @description.setter
+    def description(self, value: str):
+        self._description = value
 
     @role_prompt.setter
     def role_prompt(self, value: str):
@@ -73,8 +83,8 @@ class Agent:
 # 2.  PrePostAgent  (calls methods to preprocess and postprocess an Agent's output
 # ───────────────────────────────────────────────────────────────────────────────
 class PrePostAgent(Agent):
-    def __init__(self, name, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT, context_enabled = False):
-        Agent.__init__(self, name, llm_engine, role_prompt, context_enabled)
+    def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT, context_enabled = False):
+        Agent.__init__(self, name, description, llm_engine, role_prompt, context_enabled)
         self._preprocessors: list[callable] = []
         self._postprocessors: list[callable] = []
     
@@ -138,7 +148,13 @@ class PrePostAgent(Agent):
                     postprocessed = func(postprocessed)
         # 4. return post-processed result
         return postprocessed
-
+    @property
+    def description(self):
+        desc = f"~~PrePost Agent {self.name}~~\nThis agent preprocesses inputs to the LLM before generating output, and then post-processes the output before returning it.\nDescription:{self._description}"
+        return desc
+    @description.setter
+    def description(self, value: str):
+        self._description = value
     @property
     def preprocessors(self):
         return self._preprocessors.copy()
@@ -165,7 +181,7 @@ class ChainSequenceAgent(Agent):
         self._agents:list[Agent] = []
         self._name = name
         self._context_enabled = context_enabled
-        self._role_prompt = "You are a chain-sequence agent. You sequentially invoke the following agents:\n"
+        self._role_prompt = f"~~ChainSequence Agent {self._name}~~\nThis agent sequentially invokes a list of agents."
         self._history = []
         self._llm_engine = None
     @property
@@ -174,11 +190,14 @@ class ChainSequenceAgent(Agent):
 
     @property
     def role_prompt(self):
-        return self._role_prompt + "".join(f"\n- {agent.name}" for agent in self._agents)
-
+        return self._role_prompt
+    @property
+    def description(self):
+        desc = f"{self._role_prompt}\nDescription: this agent calls the following agents in order below:\n~~~start~~~{"".join(f"\n{agent._description}" for agent in self._agents)}\n~~~end~~~"
+        return desc
     @property
     def llm_engine(self):
-        return self._agents[0].llm_engine if self._agents else None
+        return None
     
     def add(self, agent:Agent, idx:int|None = None):
         if idx != None:
@@ -211,8 +230,8 @@ from abc import abstractmethod
 # 4.  Abstract ToolAgent  (Uses Tools and Agents to execute tasks)
 # ────────────────────────────────────────────────────────────────
 class ToolAgent(Agent):
-    def __init__(self, name, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT):
-        super().__init__(name, llm_engine, role_prompt, context_enabled = False)
+    def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT):
+        super().__init__(name, description, llm_engine, role_prompt, context_enabled = False)
         self._toolbox:dict[str, dict] = {}
     
     @staticmethod

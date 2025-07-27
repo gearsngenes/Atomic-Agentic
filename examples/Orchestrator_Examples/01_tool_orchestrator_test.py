@@ -15,6 +15,7 @@ llm = OpenAIEngine(model="gpt-4o")  # or any OpenAI-compatible model
 # Step 2: Instantiate the orchestrator agent
 orchestrator = ToolOrchestratorAgent(
     name="MathOrchestrator",
+    description="Orchestrates calls to math methods to solve problems",
     llm_engine=llm,
 )
 

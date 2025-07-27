@@ -15,6 +15,7 @@ llm = OpenAIEngine(model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY"))
 # Define the helper agents
 builder = Agent(
     name="CodeBuilderAgent",
+    description="Generates code based on user requests",
     llm_engine=llm,
     role_prompt="""
 You are a senior software engineer who writes clean, working Python code for requested tasks.
@@ -24,6 +25,7 @@ You return ONLY the code, without explanations or output.
 
 optimizer = Agent(
     name="CodeOptimizerAgent",
+    description="Reviews and refines code to optimize it for simplicity and effectiveness",
     llm_engine=llm,
     role_prompt="""
 You are an expert Python performance analyst. When given a code snippet, you rewrite it for efficiency,
@@ -32,11 +34,11 @@ readability, and maintainability. You return only the revised code, without comm
 )
 
 # Set up the orchestrator
-orchestrator = AgenticOrchestratorAgent("AgenticOrchestrator", llm)
+orchestrator = AgenticOrchestratorAgent("AgenticOrchestrator", description="orchestrates calls between the code builder and code refiner", llm_engine= llm)
 
 # Register both agents
-orchestrator.register(builder, description="Generates Python code from plain-English task requests.")
-orchestrator.register(optimizer, description="Optimizes Python code for speed and clarity.")
+orchestrator.register(builder)
+orchestrator.register(optimizer)
 
 # Run a dynamic task
 task =  (

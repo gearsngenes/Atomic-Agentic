@@ -36,15 +36,19 @@ def exec_python(code: str) -> str:
         return f"Erroneous Code:\n{code}\n\nError: {e}"
 
 # Define and build our C++ to English translator
-cpp_2_eng = PrePostAgent(name= "C++_to_English",
-                llm_engine= llm_engine,
-                role_prompt = CPP_2_ENG)
+cpp_2_eng = PrePostAgent(
+    name        = "C++_to_English",
+    description = "Translates C++ code to an English representation",
+    llm_engine  = llm_engine,
+    role_prompt = CPP_2_ENG)
 cpp_2_eng.add_poststep(print_and_pass)
 
 # Define and build our English to Python executor
-eng_2_py = PrePostAgent(name= "English_to_Python",
-                    llm_engine= llm_engine,
-                    role_prompt= ENG_2_PY)
+eng_2_py = PrePostAgent(
+    name        = "English_to_Python",
+    description = "Translates English code outlines/descriptions into python code and executes the generated code",
+    llm_engine  = llm_engine,
+    role_prompt = ENG_2_PY)
 eng_2_py.add_poststep(print_and_pass)
 eng_2_py.add_poststep(exec_python)
 

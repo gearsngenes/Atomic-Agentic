@@ -26,9 +26,10 @@ variable it is saved in is called 'output'.
 
 # Define our seed agent
 _internal_coder = PrePostAgent(
-    name         = "Coder",
-    llm_engine      = llm_engine,
-    role_prompt  = CODE_WRITER_PROMPT)
+    name        = "Coder",
+    description = "A coding assistant that generates and executes code",
+    llm_engine  = llm_engine,
+    role_prompt = CODE_WRITER_PROMPT)
 
 # define an execution tool to run after our code-writer seed creates code string
 def _exec(code: str) -> Any:
@@ -47,7 +48,7 @@ def _exec(code: str) -> Any:
 _internal_coder.add_poststep(_exec)
 
 # Define our 1-unit polymer agent
-single_link_programmer = ChainSequenceAgent("Programmer")
+single_link_programmer = ChainSequenceAgent(name = "Programmer")
 single_link_programmer.add(_internal_coder)
 # Set up example
 math_function = "3x^3 + 2x + 1"

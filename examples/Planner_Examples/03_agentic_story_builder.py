@@ -42,20 +42,16 @@ Output: bullet-point critique ONLY (max 8 bullets).  No rewriting.
 """.strip()
 
 # ───────────────────────────  WORKER AGENTS  ────────────────────
-outliner = Agent("StoryOutliner", llm_engine, OUTLINER_PROMPT)
-writer   = Agent("StoryWriter",   llm_engine, WRITER_PROMPT, context_enabled=True)
-reviewer = Agent("DraftReviewer", llm_engine, REVIEWER_PROMPT, context_enabled=True)
+outliner = Agent("StoryOutliner", description = "Fleshes out a brief story idea into a full, structured outline.", llm_engine=llm_engine, role_prompt= OUTLINER_PROMPT)
+writer   = Agent("StoryWriter", description = "Writes a draft based on the story outline, plus any additional context (i.e. revision notes)", llm_engine= llm_engine, role_prompt=WRITER_PROMPT, context_enabled=True)
+reviewer = Agent("DraftReviewer", description = "Reviews story drafts, provides revision notes back to the writer.", llm_engine=llm_engine, role_prompt=REVIEWER_PROMPT, context_enabled=True)
 
 # ───────────────────────────  ORCHESTRATOR  ─────────────────────
-orch = AgenticPlannerAgent(name = "StoryPlanner", llm_engine=llm_engine)
+orch = AgenticPlannerAgent(name = "StoryPlanner", description="A stroy building planner that utilizes a story-outliner, writer, and reviewer to construct polished story drafts", llm_engine=llm_engine)
 
-orch.register(tool = outliner,
-                    description = "Fleshes out a full outline from a brief idea description.")
-orch.register(tool = reviewer,
-                    description = "Reviews story drafts, provides revision notes back to the writer.")
-# writer & reviewer are exposed as ordinary tools (not agent-tools)
-orch.register(tool = writer,
-                    description = "Writes a draft based on the story outline, plus any additional context (i.e. revision notes)")
+orch.register(outliner)
+orch.register(reviewer)
+orch.register(writer)
 
 # ─────────────────────────────  MAIN  ───────────────────────────
 if __name__ == "__main__":

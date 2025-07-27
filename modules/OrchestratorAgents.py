@@ -6,11 +6,11 @@ from modules.Plugins import Plugin
 from modules.LLMEngines import LLMEngine
 
 class ToolOrchestratorAgent(ToolAgent):
-    def __init__(self, name: str, llm_engine: LLMEngine):
+    def __init__(self, name: str, description: str, llm_engine: LLMEngine):
         """
         Initializes context and toolbox.
         """
-        super().__init__(name, llm_engine)
+        super().__init__(name, description=description, llm_engine=llm_engine)
         self.role_prompt = Prompts.ORCHESTRATOR_PROMPT
         def _return(val: Any):
             return val
@@ -132,15 +132,13 @@ class AgenticOrchestratorAgent(ToolOrchestratorAgent):
     Extends ToolOrchestratorAgent to support registration of other agents as callable tools.
     Each registered agent gets its own namespace: '__agent_<name>__' with a single '.invoke' method.
     """
-    def __init__(self, name: str, llm_engine: LLMEngine, granular: bool = False):
-        super().__init__(name, llm_engine)
+    def __init__(self, name: str, description:str, llm_engine: LLMEngine, granular: bool = False):
+        super().__init__(name, description=description, llm_engine=llm_engine)
         self._granular = granular
         self.role_prompt = Prompts.AGENTIC_ORCHESTRATOR_PROMPT
 
     def register(self, tool: Any, description: str | None = None) -> None:
         if isinstance(tool, Agent):
-            if not description:
-                raise ValueError(f"You must provide a description when registering agent '{tool.name}'")
             source = f"__agent_{tool.name}__"
             if source in self._toolbox:
                 raise RuntimeError(f"Agent '{tool.name}' is already registered.")
@@ -148,7 +146,7 @@ class AgenticOrchestratorAgent(ToolOrchestratorAgent):
 
             key = f"{source}.invoke"
             sig = ToolAgent._build_signature(key, tool.invoke)
-            desc = sig + f" — This method invokes the agent '{tool.name}'.\nAgent description: {description}"
+            desc = sig + f" — Agent description: {tool.description}"
             self._toolbox[source][key] = {"callable": tool.invoke, "description": desc}
         elif self._granular:
             super().register(tool, description)

@@ -14,8 +14,8 @@ class PlannerAgent(ToolAgent):
     Generates and runs an executable plan as a tool,
     with a consistent toolbox: source → {name → {callable, description}}
     """
-    def __init__(self, name: str, llm_engine: LLMEngine, is_async=False):
-        super().__init__(name, llm_engine, role_prompt=Prompts.PLANNER_PROMPT)
+    def __init__(self, name: str, description: str, llm_engine: LLMEngine, is_async=False):
+        super().__init__(name, description, llm_engine, role_prompt=Prompts.PLANNER_PROMPT)
 
         # initialize toolbox with dev_tools source
         self._toolbox = {"__dev_tools__": {}}
@@ -40,7 +40,15 @@ class PlannerAgent(ToolAgent):
     def is_async(self, val: bool):
         self._is_async = val
         self._executor = AsyncPlanExecutor() if val else PlanExecutor()
-
+    
+    @property
+    def description(self):
+        desc = f"~~Planner Agent {self.name}~~\nThis agent decomposes input task prompts into a sequential list of calls to tool methods.\nDescription: {self._description}"
+        return desc
+    @description.setter
+    def description(self, value: str):
+        self._description = value
+    
     def register(self, tool: Any, description: str = None) -> None:
         """
         Register a callable or Plugin under the appropriate source namespace.
@@ -129,12 +137,20 @@ class AgenticPlannerAgent(PlannerAgent):
     Extends PlannerAgent to allow registration of other agents' invoke methods
     as first-class tools under __agent_<AgentName>__ namespaces.
     """
-    def __init__(self, name: str, llm_engine: LLMEngine, granular: bool=False, is_async: bool=False):
-        super().__init__(name, llm_engine, is_async=is_async)
+    def __init__(self, name: str, description: str, llm_engine: LLMEngine, granular: bool=False, is_async: bool=False):
+        super().__init__(name, description, llm_engine, is_async=is_async)
         self._granular = granular
         # prepare agent namespace
         self._toolbox['__agent_invoke__'] = {}
         self._role_prompt = Prompts.AGENTIC_PLANNER_PROMPT
+
+    @property
+    def description(self):
+        desc = f"~~AgenticPlanner Agent {self.name}~~\nThis agent decomposes input task prompts into subtasks for other agents and/or calls to tool methods.\nDescription: {self._description}"
+        return desc
+    @description.setter
+    def description(self, value: str):
+        self._description = value
 
     @property
     def granular(self):
@@ -150,8 +166,6 @@ class AgenticPlannerAgent(PlannerAgent):
                 return super().register(tool, description)
             raise RuntimeError(f"Not configured for granular registration of methods and plugins")
         agent = tool
-        if not description:
-            return ValueError(f"Pleas provide {agent.name} a description for context.")
         source = f"__agent_{agent.name}__"
         if source in self._toolbox:
             raise RuntimeError(f"Agent '{agent.name}' already registered")
@@ -159,7 +173,7 @@ class AgenticPlannerAgent(PlannerAgent):
 
         key = f"{source}.invoke"
         sig = ToolAgent._build_signature(key, agent.invoke)
-        desc = sig + (f" — This method invokes the {agent.name}.\nAgent description: {description}")
+        desc = sig + (f" — Agent description: {agent.description}")
         self._toolbox[source][key] = {"callable": agent.invoke, "description": desc}
 
 # ────────────────────────────────────────────────────────────────
@@ -192,10 +206,11 @@ class McpoPlannerAgent(AgenticPlannerAgent):
     """
     def __init__(self,
                  name: str,
+                 description: str,
                  llm_engine: LLMEngine,
                  granular: bool = True,
                  is_async: bool = False):
-        super().__init__(name, llm_engine, granular=granular, is_async=is_async)
+        super().__init__(name, description, llm_engine, granular=granular, is_async=is_async)
 
         # Counter for naming each server wrapper
         self._mcpo_counter = 0
@@ -204,6 +219,14 @@ class McpoPlannerAgent(AgenticPlannerAgent):
 
         # Override to MCPO-specific prompt
         self._role_prompt = Prompts.MCPO_PLANNER_PROMPT
+
+    @property
+    def description(self):
+        desc = f"~~MCPO-Planner Agent {self.name}~~\nThis agent decomposes input task prompts into subtasks for other agents, calls to locally registered tool methods, and/or calls to MCPO Tool servers for remotely accessible tools.\nDescription: {self._description}"
+        return desc
+    @description.setter
+    def description(self, value: str):
+        self._description = value
 
     def register(self, tool: Any, description: str = None) -> None:
         # If given a URL string, treat it as a new MCP-O server

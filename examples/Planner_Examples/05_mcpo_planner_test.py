@@ -12,7 +12,7 @@ from modules.Plugins import *
 # define a global llm_engine to give to each of our agents
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
-planner = McpoPlannerAgent("MCPO Agent", llm_engine)
+planner = McpoPlannerAgent("MCPO Agent", description="Creates plans utilizing our sample MCPO server", llm_engine=llm_engine)
 planner.register("http://localhost:8000") # our MCP Calculus server
 planner.register(ConsolePlugin())
 

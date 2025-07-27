@@ -27,9 +27,9 @@ REWRITER_PROMPT = """
 You are a story rewriter. Given a story draft and a list of feedback points, revise the story to address the feedback. Respond ONLY with the revised story text.
 """
 # Define our agents
-outliner = Agent(name="Outliner", llm_engine=llm_engine, role_prompt=OUTLINER_PROMPT)
-writer = Agent(name="Writer", llm_engine=llm_engine, role_prompt=WRITER_PROMPT, context_enabled=True)
-reviewer = Agent(name="Reviewer", llm_engine=llm_engine, role_prompt=REVIEWER_PROMPT, context_enabled=True)
+outliner = Agent(name="Outliner", description="Takes in story ideas and turns them into structured story outlines", llm_engine=llm_engine, role_prompt=OUTLINER_PROMPT)
+writer = Agent(name="Writer", description="Takes in story outlines or old drafts+review notes to create fully written stories", llm_engine=llm_engine, role_prompt=WRITER_PROMPT, context_enabled=True)
+reviewer = Agent(name="Reviewer", description="Takes in story drafts and creates lists of revision notes to pass back to the story writer", llm_engine=llm_engine, role_prompt=REVIEWER_PROMPT, context_enabled=True)
 
 # helper save method
 def save_markdown(text, filename):

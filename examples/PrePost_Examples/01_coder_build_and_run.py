@@ -24,9 +24,10 @@ directly in the built-in exec() function.
 # script is 'output'.
 
 Coder = PrePostAgent(
-    name         = "Coder",
+    name        = "Coder",
+    description = "An assistant that generates code based on the user request & executes it once generated",
     llm_engine      = llm_engine,
-    role_prompt  = CODE_WRITER_PROMPT)
+    role_prompt = CODE_WRITER_PROMPT)
 
 # define an execution tool to run after our code-writer seed creates code string
 def _exec(code: str) -> Any:

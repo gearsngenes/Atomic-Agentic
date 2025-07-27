@@ -29,6 +29,7 @@ llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 # Define Haiku Writing Agent
 haiku_agent = Agent(
     name        = "HaikuWriter",
+    description = "Writes Haikus when given a topic/prompt for them",
     llm_engine     = llm_engine,
     role_prompt = (
         "You are a master of writing haiku. Given a topic, write a "
@@ -47,13 +48,14 @@ haiku_agent = Agent(
 # Define Batch Haiku Planner
 batch_haiku_planner = AgenticPlannerAgent(
     name    ="BatchHaikuPlanner",
+    description= "Orchestrates calls to the Haiku Writer Agent and displays its outputs",
     llm_engine = llm_engine,
     is_async= True,
     granular = True,
 )
 
 # Register Haiku Writing Agent
-batch_haiku_planner.register(haiku_agent, description="Writes a haiku for a given prompt.")
+batch_haiku_planner.register(haiku_agent)
 
 # Define and Register Print Haiku Tool
 def print_haiku(haiku_topic, haiku):
@@ -71,6 +73,7 @@ batch_haiku_planner.register(
 # Define Batch Math Planner
 batch_math_planner = PlannerAgent(
     name    = "BatchMathPlanner",
+    description="Handles tasks involving math problems and the like",
     llm_engine = llm_engine,
     is_async = False,
 )
@@ -94,13 +97,14 @@ batch_math_planner.register(
 # Define Super Planner
 super_planner = AgenticPlannerAgent(
     name    = "SuperPlanner",
+    description = "A planner that decomposes and delegates tasks to other planners",
     llm_engine = llm_engine,
     is_async= True,
 )
 
 # Register the two batch planners to the super planner
-super_planner.register(batch_haiku_planner, description="Handles batch haiku writing tasks.")
-super_planner.register(batch_math_planner, description="Handles batch math solving tasks.")
+super_planner.register(batch_haiku_planner)
+super_planner.register(batch_math_planner)
 
 
 # -----------------------------------
