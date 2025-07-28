@@ -23,8 +23,8 @@ You return ONLY the code, without explanations or output.
 """.strip()
 )
 
-Sidharta = HumanAgent(
-    "Sidharta",
+human = HumanAgent(
+    "Code-Reviewer",
     "A code reviewer that offers additional suggestions and feedback if there is substantial refactoring/design changes needed")
 
 optimizer = Agent(
@@ -43,7 +43,7 @@ orchestrator = AgenticOrchestratorAgent("AgenticOrchestrator", description="orch
 # Register both agents
 orchestrator.register(builder)
 orchestrator.register(optimizer)
-orchestrator.register(Sidharta)
+orchestrator.register(human)
 
 # Run a dynamic task
 task =  (
