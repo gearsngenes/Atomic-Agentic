@@ -224,10 +224,21 @@ class ChainSequenceAgent(Agent):
             self._history.append({"role": "assistant", "content": self.name + ": " + str(result)})
         return result
 
+# ────────────────────────────────────────────────────────────────
+# 4.  Human Agent  (Asks human for input, when provided a prompt)
+# ────────────────────────────────────────────────────────────────
+class HumanAgent(Agent):
+    def __init__(self, name, description, context_enabled = False):
+        self._context_enabled = context_enabled
+        self._name = name
+        self._description = description
+        self._llm_engine = None
+    def invoke(self, prompt:str):
+        return input(f"{prompt}\n{self.name}'s Response: ")
 
 from abc import abstractmethod
 # ────────────────────────────────────────────────────────────────
-# 4.  Abstract ToolAgent  (Uses Tools and Agents to execute tasks)
+# 5.  Abstract ToolAgent  (Uses Tools and Agents to execute tasks)
 # ────────────────────────────────────────────────────────────────
 class ToolAgent(Agent):
     def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT):
