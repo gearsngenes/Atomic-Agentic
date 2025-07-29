@@ -1,88 +1,63 @@
-import logging, requests, inspect, json, re
-from typing import Any, get_type_hints
-from modules.Agents import Agent, ToolAgent, ChainSequenceAgent
+import asyncio, inspect, logging, json, re, requests
+from typing import Any
+from modules.Agents import ToolAgent, Agent
 from modules.LLMEngines import LLMEngine
-import modules.Prompts as Prompts
-from modules.PlanExecutors import PlanExecutor, AsyncPlanExecutor
 from modules.Plugins import Plugin
+import modules.Prompts as Prompts
 
-# ────────────────────────────────────────────────────────────────
-# 1. PlannerAgent class
-# ────────────────────────────────────────────────────────────────
 class PlannerAgent(ToolAgent):
     """
     Generates and runs an executable plan as a tool,
-    with a consistent toolbox: source → {name → {callable, description}}
+    with a consistent toolbox: source → {name → {callable, description}}.
+    Executes plans step-by-step, storing prior step results in _previous_steps.
     """
     def __init__(self, name: str, description: str, llm_engine: LLMEngine, is_async=False):
         super().__init__(name, description, llm_engine, role_prompt=Prompts.PLANNER_PROMPT)
-
-        # initialize toolbox with dev_tools source
         self._toolbox = {"__dev_tools__": {}}
-
-        # register built-in _return under dev_tools
-        def _return(val: Any) -> Any:
-            return val
-        PlannerAgent.register(self, tool = _return, description="Returns the passed-in value, always use at end.")
-
-        # choose executor
-        self._executor = AsyncPlanExecutor() if is_async else PlanExecutor()
         self._is_async = is_async
+        self._previous_steps: list[dict] = []
+
+        def _return(val: Any): return val
+        PlannerAgent.register(self, _return, "Returns the passed-in value. Always use this at the end of a plan.")
 
     @property
-    def toolbox(self):
-        return {src: methods.copy() for src, methods in self._toolbox.items()}
-
-    @property
-    def is_async(self):
-        return self._is_async
+    def is_async(self): return self._is_async
     @is_async.setter
-    def is_async(self, val: bool):
-        self._is_async = val
-        self._executor = AsyncPlanExecutor() if val else PlanExecutor()
-    
+    def is_async(self, value: bool): self._is_async = value
+
     @property
     def description(self):
-        desc = f"~~Planner Agent {self.name}~~\nThis agent decomposes input task prompts into a sequential list of calls to tool methods.\nDescription: {self._description}"
-        return desc
+        return f"~~Planner Agent {self.name}~~\nThis agent decomposes tasks into a list of tool calls.\nDescription: {self._description}"
     @description.setter
-    def description(self, value: str):
-        self._description = value
-    
+    def description(self, val): self._description = val
+
     def register(self, tool: Any, description: str = None) -> None:
-        """
-        Register a callable or Plugin under the appropriate source namespace.
-        """
-        # Callable functions go under __dev_tools__
         if callable(tool):
             source = "__dev_tools__"
             name = tool.__name__
             if name.startswith("<"):
-                raise ValueError("Tools must be named functions, not lambdas or internals")
+                raise ValueError("Tool functions must be named.")
+            if not description:
+                raise ValueError("Tool functions must have description strings.")
             key = f"{source}.{name}"
             sig = ToolAgent._build_signature(key, tool)
-            desc = f"{sig}"
-            if description:
-                desc += f" — {description}"
-            self._toolbox[source][key] = {"callable": tool, "description": desc}
-
-        # Plugin instances each get their own namespace
+            self._toolbox[source][key] = {"callable": tool, "description": f"{sig} — {description}"}
         elif isinstance(tool, Plugin):
             plugin_name = tool.__class__.__name__
             source = f"__plugin_{plugin_name}__"
             if source in self._toolbox:
-                raise RuntimeError(f"Plugin '{plugin_name}' already registered in '{self.name}'")
-            self._toolbox[source] = {}
-            for method, meta in tool.method_map().items():
-                key = f"{source}.{method}"
-                sig = ToolAgent._build_signature(key, meta['callable'])
-                desc = f"{sig} — {meta['description']}"
-                self._toolbox[source][key] = {"callable": meta['callable'], "description": desc}
+                raise RuntimeError(f"Plugin '{plugin_name}' already registered.")
+            self._toolbox[source] = {
+                f"{source}.{name}": {
+                    "callable": meta["callable"],
+                    "description": ToolAgent._build_signature(f"{source}.{name}", meta["callable"]) + f" — {meta['description']}"
+                }
+                for name, meta in tool.method_map().items()
+            }
         else:
-            raise TypeError("Tool must be a callable or Plugin instance")
+            raise TypeError("Only functions or Plugin instances can be registered.")
 
     def strategize(self, prompt: str) -> dict:
-        # build methods block grouped by source
         lines = []
         for src, methods in self._toolbox.items():
             lines.append(f"SOURCE: {src}")
@@ -99,36 +74,105 @@ class PlannerAgent(ToolAgent):
         raw = re.sub(r'^```[a-zA-Z]*|```$', '', raw)
         steps = json.loads(raw)
 
-        # flatten tools dict for execution
-        tools = {key: meta['callable']
-                 for src in self._toolbox.values() for key, meta in src.items()}
-
-        # ensure final return
         if not steps or steps[-1]['function'] != '__dev_tools__._return':
-            steps.append({'function': '__dev_tools__._return', 'args': {'val': None}})
+            steps.append({"function": "__dev_tools__._return", "args": {"val": None}})
 
-        return {'steps': steps, 'tools': tools}
+        tools = {name: meta['callable'] for methods in self._toolbox.values() for name, meta in methods.items()}
+        return {"steps": steps, "tools": tools}
+
+    def _resolve(self, obj: Any) -> Any:
+        """
+        Recursively resolve {{stepN}} references using self._previous_steps.
+        Ensures the referenced step is completed before use.
+        """
+        if isinstance(obj, str):
+            match = re.fullmatch(r"\{\{step(\d+)\}\}", obj)
+            if match:
+                idx = int(match.group(1))
+                if idx >= len(self._previous_steps) or not self._previous_steps[idx]["completed"]:
+                    raise RuntimeError(f"Step {idx} has not been completed yet.")
+                return self._previous_steps[idx]["result"]
+
+            return re.sub(
+                r"\{\{step(\d+)\}\}",
+                lambda m: str(self._previous_steps[int(m.group(1))]["result"])
+                if self._previous_steps[int(m.group(1))]["completed"]
+                else RuntimeError(f"Step {m.group(1)} has not been completed yet."),
+                obj
+            )
+
+        if isinstance(obj, list):
+            return [self._resolve(x) for x in obj]
+        if isinstance(obj, dict):
+            return {k: self._resolve(v) for k, v in obj.items()}
+        return obj
 
     def execute(self, plan: dict) -> Any:
-        return self._executor.execute(plan)
+        return asyncio.run(self.execute_async(plan)) if self._is_async else self._execute_sync(plan)
+
+    def _execute_sync(self, plan: dict) -> Any:
+        steps, tools = plan["steps"], plan["tools"]
+        for i, step in enumerate(steps):
+            fn = tools[step["function"]]
+            if inspect.iscoroutinefunction(fn):
+                raise RuntimeError(f"Function '{step['function']}' is async — use is_async=True.")
+            logging.info(f"[TOOL] {step['function']} args: {step.get("args", {})}")
+            args = self._resolve(step.get("args", {}))
+            result = fn(**args)
+            self._previous_steps[i]["result"] = result
+            self._previous_steps[i]["completed"] = True
+        return self._previous_steps[-1]["result"]
+
+    async def execute_async(self, plan: dict) -> Any:
+        steps, tools = plan["steps"], plan["tools"]
+
+        def get_deps(i):
+            return {
+                int(n) for n in re.findall(r"step(\d+)", json.dumps(steps[i].get("args", {})))
+            }
+
+        async def run_step(i: int):
+            step = steps[i]
+            fn = tools[step["function"]]
+            logging.info(f"[TOOL] {step['function']} args: {step.get("args", {})}")
+            args = self._resolve(step.get("args", {}))
+            if inspect.iscoroutinefunction(fn):
+                return await fn(**args)
+            return await asyncio.get_running_loop().run_in_executor(None, lambda: fn(**args))
+
+        remaining = set(range(len(steps)))
+        completed = set()
+
+        while remaining:
+            ready = [i for i in remaining if get_deps(i) <= completed]
+            if not ready:
+                raise RuntimeError("Circular dependency in plan.")
+            results = await asyncio.gather(*(run_step(i) for i in ready))
+            for i, result in zip(ready, results):
+                self._previous_steps[i]["result"] = result
+                self._previous_steps[i]["completed"] = True
+                completed.add(i)
+                remaining.remove(i)
+
+        return self._previous_steps[-1]["result"]
 
     def invoke(self, prompt: str):
-        """
-        Plan, execute, and return the final result.
-        """
         logging.info(f"+---{'-'*len(self.name + ' Starting')}---+")
         logging.info(f"|   {self.name} Starting   |")
         logging.info(f"+---{'-'*len(self.name + ' Starting')}---+")
 
+        self._previous_steps = []  # reset step history
         plan = self.strategize(prompt)
-        logging.info(f"{self.name} created plan with {len(plan['steps'])} steps")
+        self._previous_steps = [{"result": None, "completed": False} for _ in plan["steps"]]
 
+        logging.info(f"{self.name} created plan with {len(plan['steps'])} steps")
         result = self.execute(plan)
 
         logging.info(f"+---{'-'*len(self.name + ' Finished')}---+")
         logging.info(f"|   {self.name} Finished   |")
         logging.info(f"+---{'-'*len(self.name + ' Finished')}---+\n")
         return result
+
 # ────────────────────────────────────────────────────────────────
 # 2. AgenticPlannerAgent class
 # ────────────────────────────────────────────────────────────────
@@ -140,8 +184,6 @@ class AgenticPlannerAgent(PlannerAgent):
     def __init__(self, name: str, description: str, llm_engine: LLMEngine, granular: bool=False, is_async: bool=False):
         super().__init__(name, description, llm_engine, is_async=is_async)
         self._granular = granular
-        # prepare agent namespace
-        self._toolbox['__agent_invoke__'] = {}
         self._role_prompt = Prompts.AGENTIC_PLANNER_PROMPT
 
     @property
@@ -238,7 +280,7 @@ class McpoPlannerAgent(AgenticPlannerAgent):
             # Fetch and parse OpenAPI
             try:
                 openapi = requests.get(f"{host}/openapi.json").json()
-            except Exception:
+            except ValueError:
                 raise ValueError(f"Invalid MCP-O server URL: {tool}")
 
             # Instantiate wrapper under a unique namespace
