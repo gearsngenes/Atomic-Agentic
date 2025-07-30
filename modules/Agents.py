@@ -236,15 +236,42 @@ class HumanAgent(Agent):
     def invoke(self, prompt:str):
         return input(f"{prompt}\n{self.name}'s Response: ")
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 # ────────────────────────────────────────────────────────────────
 # 5.  Abstract ToolAgent  (Uses Tools and Agents to execute tasks)
 # ────────────────────────────────────────────────────────────────
-class ToolAgent(Agent):
+class ToolAgent(Agent, ABC):
     def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT):
         super().__init__(name, description, llm_engine, role_prompt, context_enabled = False)
         self._toolbox:dict[str, dict] = {}
-    
+        self._previous_steps: list[dict] = []
+
+    def _resolve(self, obj: Any) -> Any:
+        """
+        Recursively resolve {{stepN}} references using self._previous_steps.
+        Ensures the referenced step is completed before use.
+        """
+        if isinstance(obj, str):
+            match = re.fullmatch(r"\{\{step(\d+)\}\}", obj)
+            if match:
+                idx = int(match.group(1))
+                if idx >= len(self._previous_steps) or not self._previous_steps[idx]["completed"]:
+                    raise RuntimeError(f"Step {idx} has not been completed yet.")
+                return self._previous_steps[idx]["result"]
+
+            return re.sub(
+                r"\{\{step(\d+)\}\}",
+                lambda m: str(self._previous_steps[int(m.group(1))]["result"])
+                if self._previous_steps[int(m.group(1))]["completed"]
+                else RuntimeError(f"Step {m.group(1)} has not been completed yet."),
+                obj
+            )
+
+        if isinstance(obj, list):
+            return [self._resolve(x) for x in obj]
+        if isinstance(obj, dict):
+            return {k: self._resolve(v) for k, v in obj.items()}
+        return obj
     @staticmethod
     def _build_signature(key: str, func: callable) -> str:
         sig = inspect.signature(func)

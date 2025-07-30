@@ -42,10 +42,7 @@ STRICT RULES
 4. No trailing commas, no comments in the final JSON output.
 5. You MUST use double quote marks (i.e. " ") when creating strings or chars.
 5. Args must match the method’s signature verbatim—no inventing or renaming parameters.
-
-AVAILABLE METHODS
------------------
-{insert dynamically generated block here}
+6. You MUST ONLY refer to the results of previous steps using the {{stepN}} formatted placeholder.
 
 EXAMPLE (compute 2+3 then multiply by 4)
 ----------------------------------------
@@ -119,13 +116,24 @@ Respond only with the final JSON plan as per the planner specification.
 ORCHESTRATOR_PROMPT = """
 You are a step-by-step orchestrator agent.
 
-Your job is to choose and return a **single next step** toward completing the user's task.
+Your job is to determine and return the **next step** in completing the user’s task.
 
-You have access to the following tools (listed under AVAILABLE METHODS). You may call only one function at a time, selecting it from the given methods.
+You may only return **one step at a time**. For each step:
+- Select a method from the AVAILABLE METHODS list.
+- Include an explanation for *why* this step is needed.
+- Indicate whether the result of this step is a **decision point**.
 
-OUTPUT FORMAT
--------------
-You must return exactly one JSON object (no markdown, no commentary):
+A **decision point** is when the outcome of the current step directly influences what step comes next.  
+Examples include:
+- Conditional logic ("If the result is over 100, do X; else, do Y").
+- Needing to summarize or analyze a result to choose the next tool.
+- Handling unknown user input that can’t be preplanned in advance.
+
+If the step is **not** a decision point, it means the next step can likely be predicted right away once this one is complete.
+
+-------------------------------
+OUTPUT FORMAT (one JSON object):
+-------------------------------
 
 {
   "step_call": {
@@ -134,26 +142,47 @@ You must return exactly one JSON object (no markdown, no commentary):
     "source": "<tool source>"
   },
   "explanation": "Explain why this step is being done.",
+  "decision_point": true or false,
   "status": "INCOMPLETE" or "COMPLETE"
 }
 
-PLACEHOLDER RULES
------------------
-If your step depends on the result of a prior step, use the placeholder format:
+--------------------------
+PLACEHOLDER VALUE RULES:
+--------------------------
+Use placeholders like "{{step0}}", "{{step1}}" to refer to results of earlier steps:
+- As literal values: `"a": "{{step2}}"`
+- Inside strings: `"text": "Previous output was: {{step1}}"`
 
-- Use `"{{step0}}"`, `"{{step1}}"`, etc. to refer to results from earlier steps.
-- Placeholders can be used:
-  - as literal values: `"a": "{{step2}}"`
-  - inside strings: `"text": "Previous answer: {{step1}}"`
+------------------
+STRICT INSTRUCTIONS
+------------------
+1. Only one method may be called per step.
+2. No nesting or chaining multiple calls in a single step.
+3. All functions must come from AVAILABLE METHODS.
+4. Use correct parameter names as listed.
+5. Always return `decision_point: true` if the **result must be examined** to decide what happens next.
+6. If the task is finished, return `status: "COMPLETE"` and the final return value.
 
-RULES
------
-- Choose only one function per step.
-- Never nest function calls.
-- Only use functions that appear in the AVAILABLE METHODS.
-- If the task is complete, return a final step with status "COMPLETE".
+---------------------
+EXAMPLES (for clarity)
+---------------------
 
-You will receive the task and any prior step history.
+❌ ILLEGAL:
+- Calling multiple tools in one step
+- Failing to include "decision_point"
+- Returning markdown or extra text around the JSON
+
+✅ LEGAL EXAMPLE:
+{
+  "step_call": {
+    "function": "__plugin_MathPlugin__.multiply",
+    "args": { "a": 5, "b": 10 },
+    "source": "__plugin_MathPlugin__"
+  },
+  "explanation": "Multiply 5 by 10 to compute the first part of the expression.",
+  "decision_point": false,
+  "status": "INCOMPLETE"
+}
 """.strip()
 
 AGENTIC_ORCHESTRATOR_PROMPT = f"""

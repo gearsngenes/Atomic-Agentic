@@ -1,4 +1,4 @@
-import sys
+import sys, logging
 from pathlib import Path
 from typing import Any
 # Setting the root
@@ -8,6 +8,8 @@ from modules.OrchestratorAgents import ToolOrchestratorAgent
 from modules.LLMEngines import OpenAIEngine
 from modules.Plugins import MathPlugin, ConsolePlugin
 import modules.Prompts as Prompts
+
+logging.basicConfig(level=logging.INFO)
 
 # Step 1: Set up the LLM engine
 llm = OpenAIEngine(model="gpt-4o")  # or any OpenAI-compatible model

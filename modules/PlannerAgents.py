@@ -80,33 +80,6 @@ class PlannerAgent(ToolAgent):
         tools = {name: meta['callable'] for methods in self._toolbox.values() for name, meta in methods.items()}
         return {"steps": steps, "tools": tools}
 
-    def _resolve(self, obj: Any) -> Any:
-        """
-        Recursively resolve {{stepN}} references using self._previous_steps.
-        Ensures the referenced step is completed before use.
-        """
-        if isinstance(obj, str):
-            match = re.fullmatch(r"\{\{step(\d+)\}\}", obj)
-            if match:
-                idx = int(match.group(1))
-                if idx >= len(self._previous_steps) or not self._previous_steps[idx]["completed"]:
-                    raise RuntimeError(f"Step {idx} has not been completed yet.")
-                return self._previous_steps[idx]["result"]
-
-            return re.sub(
-                r"\{\{step(\d+)\}\}",
-                lambda m: str(self._previous_steps[int(m.group(1))]["result"])
-                if self._previous_steps[int(m.group(1))]["completed"]
-                else RuntimeError(f"Step {m.group(1)} has not been completed yet."),
-                obj
-            )
-
-        if isinstance(obj, list):
-            return [self._resolve(x) for x in obj]
-        if isinstance(obj, dict):
-            return {k: self._resolve(v) for k, v in obj.items()}
-        return obj
-
     def execute(self, plan: dict) -> Any:
         return asyncio.run(self.execute_async(plan)) if self._is_async else self._execute_sync(plan)
 
