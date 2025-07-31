@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from modules.Agents import *
-from modules.PlannerAgents import McpoPlannerAgent
+from modules.PlannerAgents import PlannerAgent
 from modules.Plugins import *
 
 # logging.basicConfig(level=logging.INFO) # Uncomment to see the logging details.
@@ -12,7 +12,10 @@ from modules.Plugins import *
 # define a global llm_engine to give to each of our agents
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
-planner = McpoPlannerAgent("MCPO Agent", description="Creates plans utilizing our sample MCPO server", llm_engine=llm_engine)
+planner = PlannerAgent("MCPO Agent",
+                       description="Creates plans utilizing our sample MCPO server",
+                       llm_engine=llm_engine,
+                       allow_mcpo=True)
 planner.register("http://localhost:8000") # our MCP Calculus server
 planner.register(ConsolePlugin())
 

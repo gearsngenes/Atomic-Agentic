@@ -67,52 +67,6 @@ ILLEGAL PLAN (nested call or concatenation):
 Remember: output only the raw JSON array exactly as specified—nothing else.
 """.strip()
 
-AGENTIC_PLANNER_PROMPT = f"""
-{PLANNER_PROMPT}
-────────────────────────────────────────────────────────────────
-ADDITIONAL ORCHESTRATION RULES
-• You can also invoke registered methods, in order to dynamically
-  utilize their functionality in the plan. The agents themselves can
-  be identified in the AVAILABLE METHODS that you may be provided
-  by looking for method names that are formatted like: "<agent_name>.invoke",
-  where <agent_name> is the name of the registered agent. Invoking such a
-  method forwards the arguments to that agent’s own `invoke()`.
-
-• You may freely combine agent calls with ordinary tools, all linked
-  via {{stepN}} placeholders.
-"""
-
-MCPO_PLANNER_PROMPT = f"""
-{AGENTIC_PLANNER_PROMPT}
-────────────────────────────────────────────────────────────────
-MCPO SERVER INTEGRATION RULES
-• Each registered MCP-O server lives under its own namespace: __mcpo_server_<i>__.
-• To call any MCP-O tool, use the single entrypoint:
-    "__mcpo_server_<i>__.mcpo_invoke"
-
-• mcpo_invoke args:
-    • path    (str)  : one of the server’s available endpoints (exactly as shown below)
-    • payload (dict) : must match the JSON schema for that endpoint from the server’s OpenAPI spec
-
-EXAMPLE LEGAL USAGE:
----------------------
-{{
-  "function": "__mcpo_server_0__.mcpo_invoke",
-  "args": {{
-    "path": "/add",
-    "payload": {{ "a": 3, "b": 4 }}
-  }}
-}}
-
-STRICT RULES:
--------------
-1. **Only** call "__mcpo_server_<i>__.mcpo_invoke" for MCP-O operations.  
-2. Use **exact** path strings and **exact** payload keys/types from the OpenAPI spec.  
-3. You may interleave MCP calls with other tool/agent calls in one plan.  
-
-Respond only with the final JSON plan as per the planner specification.
-""".strip()
-
 ORCHESTRATOR_PROMPT = """
 You are a step-by-step orchestrator agent.
 
@@ -183,43 +137,4 @@ EXAMPLES (for clarity)
   "decision_point": false,
   "status": "INCOMPLETE"
 }
-""".strip()
-
-AGENTIC_ORCHESTRATOR_PROMPT = f"""
-{ORCHESTRATOR_PROMPT}
-────────────────────────────────────────────────────────────────
-ADDITIONAL ORCHESTRATION RULES
-• In addition to ordinary tools and plugin methods, you may also
-  invoke the `.invoke()` method of other registered agents.
-
-• These agents are listed in AVAILABLE METHODS under special
-  namespaces like "__agent_<AgentName>__.invoke".
-
-• When calling an agent, you must use:
-    {{
-      "function": "__agent_<AgentName>__.invoke",
-      "args": {{ "prompt": "<the input you want to give that agent>" }},
-      "source": "__agent_<AgentName>__"
-    }}
-
-• The result of the agent's `.invoke()` call will be treated as
-  the step’s result, just like a normal tool.
-
-EXAMPLE:
---------
-{{
-  "step_call": {{
-    "function": "__agent_Summarizer__.invoke",
-    "args": {{ "prompt": "Summarize this paragraph: {{step0}}" }},
-    "source": "__agent_Summarizer__"
-  }},
-  "explanation": "Use the Summarizer agent to reduce the previous output to key ideas.",
-  "status": "INCOMPLETE"
-}}
-
-RULES SUMMARY:
---------------
-- Each agent provides a single method called `.invoke`.
-- You must use the exact key "__agent_<AgentName>__.invoke" in both 'function' and 'source'.
-- Combine agent calls with other tools using {{stepN}} references.
 """.strip()

@@ -1,4 +1,4 @@
-import json, re, inspect, logging
+import json, re, inspect, logging, requests
 from dotenv import load_dotenv
 from typing import Any, get_type_hints
 load_dotenv()
@@ -228,8 +228,8 @@ class ChainSequenceAgent(Agent):
 # 4.  Human Agent  (Asks human for input, when provided a prompt)
 # ────────────────────────────────────────────────────────────────
 class HumanAgent(Agent):
-    def __init__(self, name, description, context_enabled = False):
-        self._context_enabled = context_enabled
+    def __init__(self, name, description):
+        self._context_enabled = False
         self._name = name
         self._description = description
         self._llm_engine = None
@@ -241,10 +241,17 @@ from abc import ABC, abstractmethod
 # 5.  Abstract ToolAgent  (Uses Tools and Agents to execute tasks)
 # ────────────────────────────────────────────────────────────────
 class ToolAgent(Agent, ABC):
-    def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT):
+    def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT, allow_agentic:bool = False, allow_mcpo:bool = False):
         super().__init__(name, description, llm_engine, role_prompt, context_enabled = False)
         self._toolbox:dict[str, dict] = {}
         self._previous_steps: list[dict] = []
+        # These flags let subclasses declare what they can register
+        self._allow_agent_registration = allow_agentic
+        self._allow_mcpo_registration = allow_mcpo
+        self._mcpo_servers = {}  # optional for MCP, added only if enabled
+        self._mcpo_counter = 0
+        def _return(val: Any): return val
+        self.register(_return, "Returns the passed-in value. Always use this at the end of a plan.")
 
     def _resolve(self, obj: Any) -> Any:
         """
@@ -289,9 +296,103 @@ class ToolAgent(Agent, ABC):
     @abstractmethod
     def execute(self, plan:dict)->Any:
         pass
-    @abstractmethod
-    def register(self, tool: Any, description: str|None = None) -> None:
-        pass
+    def register(self, tool: Any, description: str | None = None) -> None:
+        # ── Callable Tool ─────────────────────────────
+        if callable(tool):
+            source = "__dev_tools__"
+            name = tool.__name__
+            if name.startswith("<"):
+                raise ValueError("Callable tools must be named.")
+            if not description:
+                raise ValueError("Tool functions must include a description.")
+            key = f"{source}.{name}"
+            sig = self._build_signature(key, tool)
+            if source not in self._toolbox:
+                self._toolbox[source] = {}
+            self._toolbox[source][key] = {"callable": tool, "description": f"{sig} — {description}"}
+            return
+
+        # ── Plugin Tool ───────────────────────────────
+        if isinstance(tool, Plugin):
+            plugin_name = tool.__class__.__name__
+            source = f"__plugin_{plugin_name}__"
+            if source in self._toolbox:
+                raise RuntimeError(f"Plugin '{plugin_name}' already registered.")
+            self._toolbox[source] = {
+                f"{source}.{name}": {
+                    "callable": meta["callable"],
+                    "description": self._build_signature(f"{source}.{name}", meta["callable"]) + f" — {meta['description']}"
+                }
+                for name, meta in tool.method_map().items()
+            }
+            return
+
+        # ── Agent Tool ────────────────────────────────
+        if isinstance(tool, Agent):
+            if not self._allow_agent_registration:
+                raise RuntimeError("Agent registration is not enabled for this agent.")
+            source = f"__agent_{tool.name}__"
+            if source in self._toolbox:
+                raise RuntimeError(f"Agent '{tool.name}' already registered.")
+            key = f"{source}.invoke"
+            sig = self._build_signature(key, tool.invoke)
+            self._toolbox[source] = {
+                key: {
+                    "callable": tool.invoke,
+                    "description": f"{sig} — Agent description: {tool.description}"
+                }
+            }
+            return
+
+        # ── MCP Server Tool ───────────────────────────
+        if isinstance(tool, str):
+            if not self._allow_mcpo_registration:
+                raise RuntimeError("MCPO registration is not enabled for this agent.")
+            host = tool.rstrip('/')
+            if host in self._mcpo_servers:
+                return  # Already registered
+            try:
+                openapi = requests.get(f"{host}/openapi.json").json()
+            except Exception:
+                raise ValueError(f"Invalid MCP-O server URL or no OpenAPI response: {host}")
+
+            self._mcpo_counter += 1
+            name = f"__mcpo_server_{self._mcpo_counter}__"
+            paths = {
+                path: meta.get('post', {}).get('description', '')
+                for path, meta in openapi.get('paths', {}).items()
+            }
+
+            def mcpo_invoke(path: str, payload: dict, base_url=host):
+                import requests
+                return requests.post(f"{base_url}{path}", json=payload).json()
+
+            key = f"{name}.mcpo_invoke"
+            sig = self._build_signature(key, mcpo_invoke)
+            desc = (
+                f"{sig} — Calls the MCP server at {host} with path+payload.\n"
+                "Available paths:\n" + "\n".join(f"  - {p}: {d}" for p, d in paths.items())
+            )
+            self._toolbox[name] = {
+                key: {"callable": mcpo_invoke, "description": desc}
+            }
+            self._mcpo_servers[host] = (name, paths)
+            return
+
+        raise TypeError(f"Cannot register object of type: {type(tool)}")
+
     @property # toolbox should not be editable from the outside
     def toolbox(self):
         return self._toolbox.copy()
+    @property
+    def allow_agent_registration(self):
+        return self._allow_agent_registration
+    @allow_agent_registration.setter
+    def allow_agent_registration(self, val: bool):
+        self._allow_agent_registration = val
+    @property
+    def allow_mcpo_registration(self):
+        return self._allow_mcpo_registration
+    @allow_mcpo_registration.setter
+    def allow_mcpo_registration(self, val:bool):
+        self._allow_mcpo_registration = val

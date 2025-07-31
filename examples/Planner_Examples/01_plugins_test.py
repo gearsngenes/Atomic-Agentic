@@ -9,17 +9,19 @@ from modules.PlannerAgents import PlannerAgent
 from modules.Plugins import ParserPlugin, MathPlugin, ConsolePlugin, PythonPlugin
 from modules.LLMEngines import *
 
-logging.basicConfig(level=logging.INFO) # Comment to hide the log info
+# logging.basicConfig(level=logging.INFO) # Uncomment to show the log info
 
 print("\n───────────────────────────────\n")
-print("Testing MathPlugin + ConsolePlugin …")
+print("Testing Task Decomposition and Printing capabilities")
 # ──────────────────────────  SET-UP  ───────────────────────────
 # define a global llm_engine to give to each of our agents
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
-planner = PlannerAgent(name="math-console-tester", description="Testing the Math and Console Plugins", llm_engine=llm_engine)
+planner = PlannerAgent(name="Test-Planner", description="Testing the prebuilt plugins", llm_engine=llm_engine)
 planner.register(MathPlugin())
-planner.register(ConsolePlugin())      # for `print`
+planner.register(ConsolePlugin())
+planner.register(ParserPlugin())
+planner.register(PythonPlugin())
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
@@ -40,44 +42,32 @@ AFTERWARDS:
 """
 
 print("\n⇢ Executing math demo …")
-result = planner.invoke(task_prompt)
-print(f"\nReturned value → {result}\n")
+planner.invoke(task_prompt)
 
 # ────────────────────────  PARSER + MATH DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
-print("Now testing ParserPlugin + MathPlugin …")
-planner = PlannerAgent(name="parser-math-tester", description="Testing the Math and Parser Plugins", llm_engine=llm_engine)
-planner.register(ParserPlugin())
-planner.register(MathPlugin())
-planner.register(ConsolePlugin())
-
+print("Now testing math and parsing capabilities…")
 task_prompt = """
 TASK
-Given the string ae9w8r98[23.4, 25.1, 22.8]afdadfew
-1. Extract the JSON list of numbers from the string.
-2. Print the extracted json string
-3. Then parse it as a list.
-4. Then calculate the average temperature of the list.
-5. Print BOTH the extracted list's max value and its mean (each labeled as such).
+Given the string "[23.4, 25.1, 22.8]"
+1. Parse the JSON list of numbers from the string.
+2. Print the list
+3. Then calculate the average temperature of the list.
+4. Print BOTH the extracted list's max value and its mean (each labeled as such).
 """
 print("\n⇢ Executing parser+math demo …")
-mean_val = planner.invoke(task_prompt)
-print(f"\nMean returned → {mean_val}\n")
+planner.invoke(task_prompt)
 
 # ────────────────────────  PYTHON + CONSOLE DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
-print("Now testing PythonPlugin + ConsolePlugin …")
-planner = PlannerAgent(name="python-type-tester", description="Testing the Python and Console Plugins Plugins", llm_engine=llm_engine)
-planner.register(PythonPlugin())
-planner.register(ConsolePlugin())
+print("Now testing type-determining and return…")
 
 task_prompt = """
 TASK
-• Determine the type of the following object: {'a': [1, 2, 3], 'b': 4.5}
-  using PythonPlugin.get_type.
-• Print the resulting type name via ConsolePlugin.print.
-• Return the type name.
+• Return the type value of the following object: {'a': [1, 2, 3], 'b': 4.5}
+  using PythonPlugin.get_type, and format the returned result as:
+  "TYPE RESULT -- <result here>".
 """
 print("\n⇢ Executing python-type demo …")
 tname = planner.invoke(task_prompt)
-print(f"\nType returned → {tname}\n")
+print("RETURNED VALUE: ", tname)

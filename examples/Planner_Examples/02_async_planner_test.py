@@ -8,7 +8,7 @@ from modules.Agents import *
 from modules.PlannerAgents import PlannerAgent
 
 # ----------------- Setup Logging ----------------
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO) # Uncomment to see the logging info
 
 # define a global llm engine to give to each of our agents
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")

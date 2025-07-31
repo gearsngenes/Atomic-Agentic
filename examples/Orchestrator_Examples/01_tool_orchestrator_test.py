@@ -4,7 +4,7 @@ from typing import Any
 # Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
-from modules.OrchestratorAgents import ToolOrchestratorAgent
+from modules.OrchestratorAgents import OrchestratorAgent
 from modules.LLMEngines import OpenAIEngine
 from modules.Plugins import MathPlugin, ConsolePlugin
 import modules.Prompts as Prompts
@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 llm = OpenAIEngine(model="gpt-4o")  # or any OpenAI-compatible model
 
 # Step 2: Instantiate the orchestrator agent
-orchestrator = ToolOrchestratorAgent(
+orchestrator = OrchestratorAgent(
     name="MathOrchestrator",
     description="Orchestrates calls to math methods to solve problems",
     llm_engine=llm,

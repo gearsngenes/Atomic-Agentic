@@ -4,7 +4,7 @@ from typing import Any
 # Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from modules.LLMEngines import OpenAIEngine
-from modules.OrchestratorAgents import AgenticOrchestratorAgent
+from modules.OrchestratorAgents import OrchestratorAgent
 from modules.Agents import Agent, HumanAgent
 
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +38,10 @@ readability, and maintainability. You return only the revised code, without comm
 )
 
 # Set up the orchestrator
-orchestrator = AgenticOrchestratorAgent("AgenticOrchestrator", description="orchestrates calls between the code builder and code refiner", llm_engine= llm)
+orchestrator = OrchestratorAgent("AgenticOrchestrator",
+                                 description="orchestrates calls between the code builder and code refiner",
+                                 llm_engine= llm,
+                                 allow_agentic=True)
 
 # Register both agents
 orchestrator.register(builder)

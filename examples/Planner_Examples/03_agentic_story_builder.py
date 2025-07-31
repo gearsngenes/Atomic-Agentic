@@ -8,7 +8,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 # ───────────────────────────  local imports  ────────────────────
 from modules.Agents import Agent
-from modules.PlannerAgents import AgenticPlannerAgent
+from modules.PlannerAgents import PlannerAgent
 from modules.LLMEngines import *
 
 # define a global llm engine to give to each of our agents
@@ -42,12 +42,15 @@ Output: bullet-point critique ONLY (max 8 bullets).  No rewriting.
 """.strip()
 
 # ───────────────────────────  WORKER AGENTS  ────────────────────
-outliner = Agent("StoryOutliner", description = "Fleshes out a brief story idea into a full, structured outline.", llm_engine=llm_engine, role_prompt= OUTLINER_PROMPT)
+outliner = Agent("StoryOutliner", description = "Should be called when given a new story idea. Fleshes it out into a full, structured outline.", llm_engine=llm_engine, role_prompt= OUTLINER_PROMPT)
 writer   = Agent("StoryWriter", description = "Writes a draft based on the story outline, plus any additional context (i.e. revision notes)", llm_engine= llm_engine, role_prompt=WRITER_PROMPT, context_enabled=True)
 reviewer = Agent("DraftReviewer", description = "Reviews story drafts, provides revision notes back to the writer.", llm_engine=llm_engine, role_prompt=REVIEWER_PROMPT, context_enabled=True)
 
 # ───────────────────────────  ORCHESTRATOR  ─────────────────────
-orch = AgenticPlannerAgent(name = "StoryPlanner", description="A stroy building planner that utilizes a story-outliner, writer, and reviewer to construct polished story drafts", llm_engine=llm_engine)
+orch = PlannerAgent(name = "StoryPlanner",
+                    description = "A stroy building planner that utilizes a story-outliner, writer, and reviewer to construct polished story drafts",
+                    llm_engine = llm_engine,
+                    allow_agentic = True)
 
 orch.register(outliner)
 orch.register(reviewer)
@@ -59,10 +62,10 @@ if __name__ == "__main__":
     loops = int(input("How many review/revision cycles? "))
 
     task_prompt = (
-        f"Write a full story based on: “{idea}”.\n"
+        f"Outline and write a full story based on: “{idea}”.\n"
         f"Run {loops} write/review cycle(s).\n"
         f"For the write-review steps, after creating revision notes for the latest draft, "
-        f"send the latest revision notes back to the writer to rewrite the story:\n\n"
+        f"send the reviewer's latest revision notes back to the writer to rewrite the story:\n\n"
         f"Revision Notes:\n<revision notes here>'\n\n"
         f"Return the final draft once it's prepared."
     )

@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 
 # --- Atomic Agentic Imports ---
 from modules.Agents import *
-from modules.PlannerAgents import PlannerAgent, AgenticPlannerAgent
+from modules.PlannerAgents import PlannerAgent
 from modules.Plugins import MathPlugin
 
 # define a global llm engine to give to each of our agents
@@ -46,12 +46,12 @@ haiku_agent = Agent(
 )
 
 # Define Batch Haiku Planner
-batch_haiku_planner = AgenticPlannerAgent(
+batch_haiku_planner = PlannerAgent(
     name    ="BatchHaikuPlanner",
     description= "Orchestrates calls to the Haiku Writer Agent and displays its outputs",
     llm_engine = llm_engine,
     is_async= True,
-    granular = True,
+    allow_agentic= True,
 )
 
 # Register Haiku Writing Agent
@@ -95,11 +95,12 @@ batch_math_planner.register(
 # --------------------------------------
 
 # Define Super Planner
-super_planner = AgenticPlannerAgent(
+super_planner = PlannerAgent(
     name    = "SuperPlanner",
     description = "A planner that decomposes and delegates tasks to other planners",
     llm_engine = llm_engine,
     is_async= True,
+    allow_agentic=True,
 )
 
 # Register the two batch planners to the super planner
