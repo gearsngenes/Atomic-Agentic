@@ -1,5 +1,7 @@
 # Requirements for Agentic Explorations
 python-dotenv
+python-a2a
+uvicorn
 openai
 llama-cpp-python
 huggingface-hub
