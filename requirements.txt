@@ -3,6 +3,7 @@ python-dotenv
 openai
 llama-cpp-python
 huggingface-hub
+google-genai
 uv
 mcp
 mcpo
