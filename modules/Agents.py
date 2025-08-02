@@ -146,6 +146,9 @@ class PrePostAgent(Agent):
                     raise ValueError(f"Preprocessor tool {func.__name__} expects {len(params)} args but got {len(preprocessed)}")
                 else:
                     postprocessed = func(postprocessed)
+        if self._context_enabled:
+            self._history[-2] = {"role":"user", "content":prompt}
+            self._history[-1] = {"role":"assistant", "content":str(postprocessed)}
         # 4. return post-processed result
         return postprocessed
     @property
@@ -197,7 +200,7 @@ class ChainSequenceAgent(Agent):
         return desc
     @property
     def llm_engine(self):
-        return None
+        return {a.name:a.llm_engine for a in self._agents}
     
     def add(self, agent:Agent, idx:int|None = None):
         if idx != None:
@@ -215,26 +218,31 @@ class ChainSequenceAgent(Agent):
         if not self._agents:
             raise RuntimeError(f"Agents list is empty for ChainSequenceAgent '{self.name}'")
         if self.context_enabled:
-            self._history.append({"role": "user", "content": "input: " + prompt})
+            self._history.append({"role": "user", "content": "User-Input: " + prompt})
         for agent in self._agents:
             result = agent.invoke(str(result))
             if self.context_enabled:
-                self._history.append({"role": "assistant", "content": agent.name + ": "+str(result)})
+                self._history.append({"role": "assistant", "content": agent.name + " - Partial Result: "+str(result)})
         if self.context_enabled:
-            self._history.append({"role": "assistant", "content": self.name + ": " + str(result)})
+            self._history.append({"role": "assistant", "content": self.name + "- Final Result: " + str(result)})
         return result
 
 # ────────────────────────────────────────────────────────────────
 # 4.  Human Agent  (Asks human for input, when provided a prompt)
 # ────────────────────────────────────────────────────────────────
 class HumanAgent(Agent):
-    def __init__(self, name, description):
-        self._context_enabled = False
+    def __init__(self, name, description, context_enabled:bool = False):
+        self._context_enabled = context_enabled
         self._name = name
         self._description = description
         self._llm_engine = None
+        self._role_prompt = description
     def invoke(self, prompt:str):
-        return input(f"{prompt}\n{self.name}'s Response: ")
+        response = input(f"{prompt}\n{self.name}'s Response: ")
+        if self._context_enabled:
+            self._history.append({"role": "user", "content": prompt})
+            self._history.append({"role": "assistant", "content": response})
+        return response
 
 from abc import ABC, abstractmethod
 # ────────────────────────────────────────────────────────────────

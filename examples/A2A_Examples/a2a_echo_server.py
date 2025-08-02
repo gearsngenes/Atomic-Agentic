@@ -12,7 +12,6 @@ class EchoServer(A2AServer):
     def handle_task(self, task):
         # 1) Extract the incoming text from the 'content' field
         content = task.message.get("content", {}) or {}
-        print(f"CONTENT: {content}")
         text = content.get("text", "").upper()
 
         # 2) Echo it back in the artifact

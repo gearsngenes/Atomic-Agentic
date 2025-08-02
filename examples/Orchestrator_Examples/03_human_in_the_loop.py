@@ -54,7 +54,8 @@ task =  (
     "for agentic AI that also is platform agnostic (i.e. bedrock vs openai vs llama-cpp-python, etc.). "
     "Return the final draft once it's done. Prioritize OOP-design, simplified interfaces that are easy "
     "to expand on in subclasses and consistent to inherit. It should require minimal amounts of if-else "
-    "statements for configuration. Be sure to use helper classes, as well."
+    "statements for configuration. Be sure to use helper classes, as well. Whenever the Optimizer makes "
+    "revisions, it should ask the human code-reviewer for any feedback."
 )
 
 result = orchestrator.invoke(task)
