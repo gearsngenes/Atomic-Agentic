@@ -2,21 +2,21 @@ import json, re, logging
 from typing import Any
 from modules.Agents import Agent, ToolAgent
 import modules.Prompts as Prompts
-from modules.Plugins import Plugin
 from modules.LLMEngines import LLMEngine
 
 class OrchestratorAgent(ToolAgent):
-    def __init__(self, name: str, description: str, llm_engine: LLMEngine, allow_agentic = False, allow_mcpo = False):
+    def __init__(self, name: str, description: str, llm_engine: LLMEngine, allow_agentic: bool = False, allow_mcpo: bool = False):
         """
-        Initializes context and toolbox.
+        A step-by-step orchestrator that generates one JSON step at a time.
         """
         super().__init__(name, description=description, llm_engine=llm_engine, allow_agentic=allow_agentic, allow_mcpo=allow_mcpo)
+        # Enable built-in history/caching of prompts & responses
+        self.context_enabled = True
         self.role_prompt = Prompts.ORCHESTRATOR_PROMPT
-        self._context_enabled = True
-        self._previous_steps = []
+        self._previous_steps: list[dict] = []
 
     def strategize(self, prompt: str) -> dict:
-        # Build method descriptions
+        # 1) Build the AVAILABLE METHODS block
         method_lines = []
         for source, methods in self._toolbox.items():
             method_lines.append(f"SOURCE: {source}")
@@ -24,82 +24,94 @@ class OrchestratorAgent(ToolAgent):
                 method_lines.append(f"- {name}: {meta['description']}")
         available_methods = "\n".join(method_lines)
 
-        # LLM call
+        # 2) Always use this simple template
         user_prompt = (
             f"AVAILABLE METHODS:\n{available_methods}\n\n"
-            f"USER TASK:\n{prompt}\n\n"
+            f"{prompt}\n\n"
             f"Return a single JSON-formatted object for the next step to be executed in the plan."
         )
 
+        # 3) Delegate to Agent.invoke (which now includes entire history automatically)
         raw = Agent.invoke(self, user_prompt)
         raw = re.sub(r"^```[a-zA-Z]*|```$", "", raw.strip())
         step = json.loads(raw)
 
-        # Ensure required keys exist
-        assert "step_call" in step and "explanation" in step and "decision_point" in step and "status" in step, \
-            "Returned step is missing required fields."
+        # 4) Sanity check
+        assert all(k in step for k in ("step_call", "explanation", "decision_point", "status")), \
+            "Returned JSON must include step_call, explanation, decision_point, and status."
 
         return step
 
-
     def execute(self, step: dict) -> Any:
         """
-        Executes a tool call after resolving any stepN placeholders.
+        Runs the chosen tool, resolving any {{stepN}} placeholders.
         """
-        resolved_args = self._resolve(step["args"])
-        source = step["source"]
-        func_key = step["function"]
-        func = self._toolbox[source][func_key]["callable"]
-        return func(**resolved_args)
+        resolved_args = self._resolve(step["step_call"]["args"])
+        src = step["step_call"]["source"]
+        fn_key = step["step_call"]["function"]
+        fn = self._toolbox[src][fn_key]["callable"]
+        return fn(**resolved_args)
 
-    def step(self, user_input: str) -> tuple[str, Any, str, bool]:
-        step_strategy = self.strategize(user_input)
-        step_call = step_strategy["step_call"]
-        explanation = step_strategy["explanation"]
-        decision_point = step_strategy["decision_point"]
-        status = step_strategy["status"]
+    def step(self, prompt: str) -> tuple[str, Any, str, bool]:
+        strat = self.strategize(prompt)
+        call = strat["step_call"]
+        explanation = strat["explanation"]
+        is_decision = strat["decision_point"]
+        status = strat["status"]
 
-        logging.info(f"[TOOL] {step_call['function']} with args: " + "".join(f"\n{k}: {v}" for k, v in step_call["args"].items()) +f"\nDecision Point? {decision_point}")
-        step_result = self.execute(step_call)
-        return explanation, step_result, status, decision_point
-
+        logging.info(
+            f"[TOOL] {call['function']} args: {call['args']}\nDecision Point? {is_decision}"
+        )
+        result = self.execute(strat)
+        return explanation, result, status, is_decision
 
     def invoke(self, prompt: str) -> Any:
+        """
+        Loop, generating one step at a time, until status == "COMPLETE".
+        """
         logging.info(f"+---{'-'*len(self.name + ' Starting')}---+")
         logging.info(f"|   {self.name} Starting   |")
         logging.info(f"+---{'-'*len(self.name + ' Starting')}---+")
 
+        # Reset history & steps
+        self.clear_memory()
         self._previous_steps = []
-        task_status = "INCOMPLETE"
-        result = None
 
-        while task_status != "COMPLETE":
-            # Build context: include all step purposes
-            explanation_lines = [f"Step {i}: {s['Step_Purpose']}" for i, s in enumerate(self._previous_steps)]
-            context = "\n".join(explanation_lines)
+        status = "INCOMPLETE"
+        last_result = None
+        last_decision = False
+        iteration = 0
 
-            # Determine whether to include result from most recent step
-            if self._previous_steps and self._previous_steps[-1]["decision_point"]:
-                last = self._previous_steps[-1]
-                result_block = (
-                    f"\n\nDecision Point Triggered:\n"
-                    f"Result of Step {len(self._previous_steps)-1}:\n"
-                    f"{last['result']}"
-                )
+        while status != "COMPLETE":
+            if iteration == 0:
+                # very first call: feed the raw user task
+                sub_prompt = prompt
             else:
-                result_block = ""
+                if last_decision:
+                    sub_prompt = (
+                        f"The result of the previously executed step was: {{step{len(self._previous_steps)-1}}}: {last_result}\n\n"
+                        "Given any previously generated and executed steps, generate the next JSON-formatted step needed to complete the user task. Once you've decided what the next step is based on the result value itself, use the double curly-bracket placeholder when passing the result as an argument to the next method/tool. Do NOT pass the raw value itself, but the placeholder instead."
+                    )
+                else:
+                    sub_prompt = (
+                        "Given the previously generated and executed steps, generate the next JSON-formatted step needed to complete the user task."
+                    )
 
-            full_prompt = f"{prompt}\n\nPrevious Steps:\n{context}{result_block}" if context else prompt
+            explanation, result, status, is_decision = self.step(sub_prompt)
 
-            explanation, result, task_status, is_decision_point = self.step(full_prompt)
+            # Track for the next iteration
             self._previous_steps.append({
-                "Step_Purpose": explanation,
+                "explanation": explanation,
                 "result": result,
-                "decision_point": is_decision_point,
-                "completed": True
+                "decision_point": is_decision,
+                "completed":     True
             })
-
+            last_result = result
+            last_decision = is_decision
+            iteration += 1
+        self.clear_memory()
         logging.info(f"+---{'-'*len(self.name + ' Finished')}---+")
         logging.info(f"|   {self.name} Finished   |")
         logging.info(f"+---{'-'*len(self.name + ' Finished')}---+\n")
-        return result
+
+        return last_result
