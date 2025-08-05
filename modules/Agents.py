@@ -404,3 +404,32 @@ class ToolAgent(Agent, ABC):
     @allow_mcpo_registration.setter
     def allow_mcpo_registration(self, val:bool):
         self._allow_mcpo_registration = val
+
+# ────────────────────────────────────────────────────────────────
+# 6.  A2A ProxyAgent  (Invokes agents remotely via A2A protocol)
+# ────────────────────────────────────────────────────────────────
+from python_a2a import A2AClient
+class A2AProxyAgent(Agent):
+    def __init__(self, a2a_host: str, context_enabled = False):
+        self._client = A2AClient(a2a_host)
+        agent_card = self._client.get_agent_card()
+        self._name, self._description = agent_card.name, agent_card.description
+        self._context_enabled = context_enabled
+        self._llm_engine = None
+        self._history = []
+    def invoke(self, prompt:str):
+        response = self._client.ask(prompt)
+        if self.context_enabled:
+            self._history.append({"role":"user","content":prompt})
+            self._history.append({"role":"assistant","content":response})
+        return response
+    @property
+    def description(self):
+        agent_card = self._client.get_agent_card()
+        self._description = agent_card.description
+        return self._description
+    @property
+    def name(self):
+        agent_card = self._client.get_agent_card()
+        self._name = agent_card.name
+        return self._name
