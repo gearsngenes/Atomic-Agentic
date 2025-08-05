@@ -14,7 +14,7 @@ from modules.Agents import Agent
 
 llm = OpenAIEngine(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
 my_agent = Agent(
-    name="ShakespeareBot",
+    name="ShakespeareAgent",
     description="Responds in Shakespearean English.",
     llm_engine=llm,
     role_prompt="You are a helpful assistant that responds only in Shakespearean English.",

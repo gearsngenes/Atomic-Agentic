@@ -13,7 +13,6 @@ class PlannerAgent(ToolAgent):
     """
     def __init__(self, name: str, description: str, llm_engine: LLMEngine, is_async=False, allow_agentic = False, allow_mcpo = False):
         super().__init__(name, description, llm_engine, role_prompt=Prompts.PLANNER_PROMPT, allow_agentic=allow_agentic, allow_mcpo=allow_mcpo)
-        self._toolbox = {"__dev_tools__": {}}
         self._is_async = is_async
         self._previous_steps: list[dict] = []
 
@@ -43,7 +42,7 @@ class PlannerAgent(ToolAgent):
         )
         raw = Agent.invoke(self, user_prompt).strip()
         raw = re.sub(r'^```[a-zA-Z]*|```$', '', raw)
-        steps = json.loads(raw)
+        steps = list(json.loads(raw))
 
         if not steps or steps[-1]['function'] != '__dev_tools__._return':
             steps.append({"function": "__dev_tools__._return", "args": {"val": None}})

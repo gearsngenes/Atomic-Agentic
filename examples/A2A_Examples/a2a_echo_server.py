@@ -3,10 +3,10 @@ from python_a2a import A2AServer, agent, run_server, TaskStatus, TaskState
 
 @agent(
     name="EchoAgent",
-    description="A minimal A2A echo agent",
+    description="An A2A echo agent that echoes back the user response but capitalized",
     version="1.0.0",
     # Must be the address your clients will use!
-    url="http://localhost:5000"    
+    url="http://localhost:6000"    
 )
 class EchoServer(A2AServer):
     def handle_task(self, task):
@@ -28,4 +28,4 @@ class EchoServer(A2AServer):
 if __name__ == "__main__":
     # Bind to 0.0.0.0 so any interface (including localhost) is served,
     # but advertise localhost in the Agent Card so your test client can reach it.
-    run_server(EchoServer(), host="0.0.0.0", port=5000, debug=True)
+    run_server(EchoServer(), host="0.0.0.0", port=6000, debug=True)
