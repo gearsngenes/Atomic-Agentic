@@ -4,12 +4,13 @@ from dotenv import load_dotenv
 from abc import ABC, abstractmethod
 from openai import OpenAI
 from google import genai
-
+from mistralai import Mistral
 
 # CONSTANTS
 load_dotenv()
 DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DEFAULT_GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
+DEFAULT_MISTRAL_KEY = os.getenv("MISTRAL_API_KEY")
 
 class LLMEngine(ABC):
     @abstractmethod
@@ -93,6 +94,38 @@ class GeminiEngine(LLMEngine):
         response = self.client.models.generate_content(model=self.model, contents=contents, config=config)
         # Return the assistant's response text
         return response.text.strip()
+
+class MistralEngine(LLMEngine):
+    def __init__(self, model: str = "mistral-large-latest",
+                 api_key: str | None = None,
+                 temperature: float = 0.1):
+        self.client = Mistral(api_key=api_key if api_key else DEFAULT_MISTRAL_KEY)
+        if not self.client:
+            raise RuntimeError("Mistral client failed to initialize (missing API key?).")
+        self.model = model
+        self.temperature = temperature
+
+    def invoke(self, messages: list[dict[str, str]]) -> str:
+        """
+        Accepts OpenAI-style messages: [{"role":"system"|"user"|"assistant","content":"..."}]
+        Returns the assistant text content.
+        """
+        # Mistral’s SDK already uses the same role/content schema for chat completions.
+        # See official examples for identical shape and the "system" role note. 
+        # (System messages are supported & documented in their "Chat messages" section.)
+        # https://docs.mistral.ai/capabilities/completion/
+        resp = self.client.chat.complete(
+            model=self.model,
+            messages=messages,
+            temperature=self.temperature,
+        )
+        # First candidate message → content (string or list-of-chunks; coerce to string)
+        choice = resp.choices[0].message
+        content = choice.content
+        if isinstance(content, list):
+            # concatenate chunked content if returned as deltas/chunks
+            content = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in content])
+        return (content or "").strip()
 
 class AzureOpenAIEngine(LLMEngine):
     def __init__(self, api_key: str, endpoint: str, api_version: str, model: str):

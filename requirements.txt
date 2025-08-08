@@ -6,6 +6,7 @@ openai
 llama-cpp-python
 huggingface-hub
 google-genai
+mistralai
 uv
 mcp
 mcpo
