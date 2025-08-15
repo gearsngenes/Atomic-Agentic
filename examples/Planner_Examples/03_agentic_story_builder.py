@@ -5,7 +5,8 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 import logging
 
-logging.basicConfig(level=logging.INFO)
+logging.getLogger().setLevel(level=logging.INFO) # to enable us to see the agentic planning steps
+
 # ───────────────────────────  local imports  ────────────────────
 from modules.Agents import Agent
 from modules.PlannerAgents import PlannerAgent

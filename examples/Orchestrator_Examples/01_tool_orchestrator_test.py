@@ -7,9 +7,8 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from modules.OrchestratorAgents import OrchestratorAgent
 from modules.LLMEngines import OpenAIEngine
 from modules.Plugins import MathPlugin, ConsolePlugin
-import modules.Prompts as Prompts
 
-logging.basicConfig(level=logging.INFO)
+logging.getLogger().setLevel(level=logging.INFO)
 
 # Step 1: Set up the LLM engine
 llm = OpenAIEngine(model="gpt-4o")  # or any OpenAI-compatible model

@@ -7,7 +7,7 @@ from modules.LLMEngines import OpenAIEngine
 from modules.OrchestratorAgents import OrchestratorAgent
 from modules.Agents import Agent, HumanAgent
 
-logging.basicConfig(level=logging.INFO)
+logging.getLogger().setLevel(level=logging.INFO)
 
 # Set up the LLM engine
 llm = OpenAIEngine(model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY"))

@@ -174,7 +174,7 @@ from modules.PlannerAgents import PlannerAgent
 from modules.Plugins import MathPlugin, ConsolePlugin
 from modules.LLMEngines import OpenAIEngine
 
-planner = PlannerAgent("MathPlanner", "Does math", OpenAIEngine("gpt-4o", api_key="..."), allow_agentic=True, allow_mcpo=True)
+planner = PlannerAgent("MathPlanner", "Does math", OpenAIEngine("gpt-4o", api_key="..."), allow_agentic=True, allow_mcp=True)
 planner.register(MathPlugin())
 planner.register(ConsolePlugin())
 
@@ -192,7 +192,7 @@ from modules.OrchestratorAgents import OrchestratorAgent
 from modules.Plugins import MathPlugin
 from modules.LLMEngines import OpenAIEngine
 
-orch = OrchestratorAgent("MathStepper", "Step-by-step solver", OpenAIEngine("gpt-4o", api_key="..."), allow_mcpo=True)
+orch = OrchestratorAgent("MathStepper", "Step-by-step solver", OpenAIEngine("gpt-4o", api_key="..."), allow_mcp=True)
 orch.register(MathPlugin())
 
 result = orch.invoke("Multiply 5 by 10, then if the result is even, return 'EVEN', else return 'ODD'.")
@@ -207,7 +207,7 @@ All `ToolAgent` subclasses (like `PlannerAgent` and `OrchestratorAgent`) support
 - ✅ Individual Python functions
 - ✅ Plugin collections (e.g., `MathPlugin`)
 - ✅ Other agents (if `allow_agentic=True`)
-- ✅ External MCP servers (if `allow_mcpo=True`)
+- ✅ External MCP servers (if `allow_mcp=True`)
 
 When creating the agent, pass these options via the constructor:
 
@@ -223,7 +223,7 @@ planner = PlannerAgent(
     description="Plans using local tools, agents, and remote servers.",
     llm_engine=llm,
     allow_agentic=True,
-    allow_mcpo=True
+    allow_mcp=True
 )
 ```
 
@@ -298,5 +298,5 @@ The example below for a step asking for the product of 5 and 10.
 | `OrchestratorAgent` | Decides & executes next step         | ✅         | ✅         | ✅*          | ✅**         |
 
 *Requires `allow_agentic=True`\
-**Requires `allow_mcpo=True`
+**Requires `allow_mcp=True`
 

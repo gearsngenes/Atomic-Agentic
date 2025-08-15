@@ -1,8 +1,7 @@
-import asyncio, inspect, logging, json, re, requests
+import asyncio, inspect, logging, json, re
 from typing import Any
 from modules.Agents import ToolAgent, Agent
 from modules.LLMEngines import LLMEngine
-from modules.Plugins import Plugin
 import modules.Prompts as Prompts
 
 class PlannerAgent(ToolAgent):
@@ -11,8 +10,8 @@ class PlannerAgent(ToolAgent):
     with a consistent toolbox: source → {name → {callable, description}}.
     Executes plans step-by-step, storing prior step results in _previous_steps.
     """
-    def __init__(self, name: str, description: str, llm_engine: LLMEngine, is_async=False, allow_agentic = False, allow_mcpo = False):
-        super().__init__(name, description, llm_engine, role_prompt=Prompts.PLANNER_PROMPT, allow_agentic=allow_agentic, allow_mcpo=allow_mcpo)
+    def __init__(self, name: str, description: str, llm_engine: LLMEngine, is_async=False, allow_agentic = False, allow_mcp = False):
+        super().__init__(name, description, llm_engine, role_prompt=Prompts.PLANNER_PROMPT, allow_agentic=allow_agentic, allow_mcp=allow_mcp)
         self._is_async = is_async
         self._previous_steps: list[dict] = []
 

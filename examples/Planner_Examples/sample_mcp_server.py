@@ -24,4 +24,5 @@ def derivative(func: str, x: float) -> float:
     return (f(x + h) - f(x)) / h
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    MODE = "streamable-http" #"stdio" # Streamable HTTP for standard MCP servers, stdio for mcpo-style servers
+    mcp.run(transport=MODE)

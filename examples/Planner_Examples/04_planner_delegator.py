@@ -12,7 +12,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 # ───────────────────────────  imports  ───────────────────────────
 import time, logging
 
-logging.basicConfig(level=logging.INFO)
+logging.getLogger().setLevel(level=logging.INFO)
 
 # --- Atomic Agentic Imports ---
 from modules.Agents import *

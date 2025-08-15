@@ -1,6 +1,13 @@
-import json, re, inspect, logging, requests
+import re, inspect, requests
 from dotenv import load_dotenv
 from typing import Any, get_type_hints
+import asyncio
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+import logging
+
+logging.basicConfig(level=logging.WARNING)  # Default level; override in examples as needed
+
 load_dotenv()
 
 # internal imports
@@ -249,15 +256,16 @@ from abc import ABC, abstractmethod
 # 5.  Abstract ToolAgent  (Uses Tools and Agents to execute tasks)
 # ────────────────────────────────────────────────────────────────
 class ToolAgent(Agent, ABC):
-    def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT, allow_agentic:bool = False, allow_mcpo:bool = False):
+    def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT, allow_agentic:bool = False, allow_mcp:bool = False):
         super().__init__(name, description, llm_engine, role_prompt, context_enabled = False)
         self._toolbox:dict[str, dict] = {}
         self._previous_steps: list[dict] = []
         # These flags let subclasses declare what they can register
         self._allow_agent_registration = allow_agentic
-        self._allow_mcpo_registration = allow_mcpo
+        self._allow_mcp_registration = allow_mcp
         self._mcpo_servers = {}  # optional for MCP, added only if enabled
         self._mcpo_counter = 0
+        self._mcp_counter = 0
         def _return(val: Any): return val
         self.register(_return, "Returns the passed-in value. Always use this at the end of a plan.")
 
@@ -304,90 +312,321 @@ class ToolAgent(Agent, ABC):
     @abstractmethod
     def execute(self, plan:dict)->Any:
         pass
-    def register(self, tool: Any, description: str | None = None) -> None:
-        # ── Callable Tool ─────────────────────────────
-        if callable(tool):
-            source = "__dev_tools__"
-            name = tool.__name__
-            if name.startswith("<"):
-                raise ValueError("Callable tools must be named.")
-            if not description:
-                raise ValueError("Tool functions must include a description.")
-            key = f"{source}.{name}"
-            sig = self._build_signature(key, tool)
-            if source not in self._toolbox:
-                self._toolbox[source] = {}
-            self._toolbox[source][key] = {"callable": tool, "description": f"{sig} — {description}"}
-            return
+    def _register_callable(self, func: callable, description: str) -> str:
+        """
+        Register a plain Python function as a dev tool.
 
-        # ── Plugin Tool ───────────────────────────────
-        if isinstance(tool, Plugin):
-            plugin_name = tool.__class__.__name__
-            source = f"__plugin_{plugin_name}__"
-            if source in self._toolbox:
-                raise RuntimeError(f"Plugin '{plugin_name}' already registered.")
-            self._toolbox[source] = {
-                f"{source}.{name}": {
-                    "callable": meta["callable"],
-                    "description": self._build_signature(f"{source}.{name}", meta["callable"]) + f" — {meta['description']}"
-                }
-                for name, meta in tool.method_map().items()
+        - Source group: "__dev_tools__"
+        - Key format:   "__dev_tools__.<func_name>"
+        - Description:  "<signature> — <description>"
+
+        Returns:
+            str: The fully-qualified toolbox key.
+        """
+        if not callable(func):
+            raise TypeError("func must be callable")
+
+        if not description:
+            raise ValueError("Tool functions must include a description.")
+
+        name = getattr(func, "__name__", None) or ""
+        if not name or name.startswith("<"):
+            raise ValueError("Callable tools must have a valid (non-anonymous) __name__.")
+
+        source = "__dev_tools__"
+        key = f"{source}.{name}"
+        sig = self._build_signature(key, func)
+
+        if source not in self._toolbox:
+            self._toolbox[source] = {}
+
+        # Optional: guard against accidental overwrite; comment out if you prefer overwriting
+        if key in self._toolbox[source]:
+            raise RuntimeError(f"Tool '{key}' is already registered.")
+
+        self._toolbox[source][key] = {
+            "callable": func,
+            "description": f"{sig} — {description}",
+        }
+        return key
+
+    def _register_plugin(self,plugin: Plugin) -> str:
+        """
+        Registers a Plugin instance into the toolbox as its own SOURCE bucket.
+
+        Returns:
+            source (str): the SOURCE key that was created (e.g. "__plugin_MathPlugin__")
+        """
+        # 1) compute SOURCE name & guard against duplicates
+        plugin_name = plugin.__class__.__name__
+        source = f"__plugin_{plugin_name}__"
+        if source in self._toolbox:
+            raise RuntimeError(f"Plugin '{plugin_name}' already registered.")
+
+        # 2) get methods and filter by include/exclude if provided
+        methods = plugin.method_map()  # { method_name: {"callable": ..., "description": ...}, ... }
+
+        if not methods:
+            raise ValueError(f"No methods to register for plugin '{plugin_name}' after filtering.")
+
+        # 3) build the per-method entries (fully qualified function keys)
+        bucket: dict[str, dict] = {}
+        for method_name, meta in methods.items():
+            fq_name = f"{source}.{method_name}"
+            fn = meta["callable"]
+            desc = meta.get("description", "").strip()
+            sig = self._build_signature(fq_name, fn)
+            bucket[fq_name] = {
+                "callable": fn,
+                "description": f"{sig} — {desc}"
             }
-            return
 
-        # ── Agent Tool ────────────────────────────────
-        if isinstance(tool, Agent):
+        # 4) add to toolbox and return the source for convenience
+        self._toolbox[source] = bucket
+        return source
+
+    def _register_agent(self, agent: Agent) -> str:
+        """
+        Register an Agent instance as a tool source.
+
+        - Requires: self._allow_agent_registration == True
+        - Source group: "__agent_<AgentName>__"
+        - Exposed method: "<source>.invoke" (calls agent.invoke(prompt: str) -> Any)
+
+        Returns:
+            str: Fully-qualified toolbox key for the invoke method.
+        """
+        if not self._allow_agent_registration:
+            raise RuntimeError("Agent registration is not enabled for this agent.")
+
+        source = f"__agent_{agent.name}__"
+        if source in self._toolbox:
+            raise RuntimeError(f"Agent '{agent.name}' is already registered.")
+
+        key = f"{source}.invoke"
+        sig = self._build_signature(key, agent.invoke)
+        desc = f"{sig} — Agent description: {agent.description}"
+
+        self._toolbox[source] = {
+            key: {
+                "callable": agent.invoke,
+                "description": desc
+            }
+        }
+        return key
+
+    def _register_mcpo(self, base_url: str) -> str:
+        """
+        Register an MCP‑O (OpenAPI) proxy server as its own SOURCE bucket.
+        Returns the SOURCE name (e.g., "__mcpo_server_1__").
+        """
+        if not self._allow_mcp_registration:
+            raise RuntimeError("MCPO registration is not enabled for this agent.")
+
+        host = base_url.rstrip('/')
+        if host in self._mcpo_servers:
+            return self._mcpo_servers[host][0]  # already registered → return group
+
+        # Probe OpenAPI
+        try:
+            openapi = requests.get(f"{host}/openapi.json").json()
+        except Exception:
+            raise ValueError(f"Invalid MCP‑O server URL or no OpenAPI response: {host}")
+
+        if not isinstance(openapi, dict) or "paths" not in openapi:
+            raise ValueError(f"OpenAPI response missing 'paths' at {host}/openapi.json")
+
+        # Create group
+        self._mcpo_counter += 1
+        group = f"__mcpo_server_{self._mcpo_counter}__"
+        paths = {
+            path: meta.get('post', {}).get('description', '')
+            for path, meta in openapi.get('paths', {}).items()
+            if isinstance(meta, dict)
+        }
+
+        # Single generic invoker
+        def mcpo_invoke(path: str, payload: dict, base=host):
+            resp = requests.post(f"{base}{path}", json=payload)
+            try:
+                return resp.json()
+            except Exception:
+                return resp.text
+
+        key = f"{group}.mcpo_invoke"
+        sig = self._build_signature(key, mcpo_invoke)
+        desc = (
+            f"{sig} — Calls the MCP‑O server at {host} with path+payload.\n"
+            "Available paths:\n" + "\n".join(f"  - {p}: {d}" for p, d in paths.items())
+        )
+
+        self._toolbox[group] = {key: {"callable": mcpo_invoke, "description": desc}}
+        self._mcpo_servers[host] = (group, paths)
+        return group
+
+    # in ToolAgent
+    def _register_mcp(self, url_or_base: str) -> str:
+        """
+        Register a native MCP (Streamable HTTP) server as its own SOURCE bucket.
+        Returns the SOURCE name (e.g., "__mcp_server_2__").
+        """
+        if not self._allow_mcp_registration:
+            raise RuntimeError("MCP registration is not enabled for this agent.")
+
+        base = url_or_base.rstrip('/')
+        mcp_url = base if base.endswith("/mcp") else f"{base}/mcp"
+
+        # Avoid double-registration for the same base URL
+        if base in getattr(self, "_mcpo_servers", {}):
+            return self._mcpo_servers[base][0]
+
+        # --- 1) Probe the MCP server for its tool list ---------------------------
+        async def _list_tools(u: str):
+            async with streamablehttp_client(u) as (r, w, _sid):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    resp = await session.list_tools()
+                    # resp.tools items typically have: name, description, input_schema (JSON schema)
+                    tools = []
+                    for t in resp.tools:
+                        tools.append({
+                            "name": t.name,
+                            "description": getattr(t, "description", "") or t.name,
+                            "schema": getattr(t, "input_schema", None) or getattr(t, "inputSchema", None) or {}
+                        })
+                    return tools
+
+        try:
+            tool_specs = asyncio.run(_list_tools(mcp_url))
+        except Exception as e:
+            raise ValueError(f"Failed to list MCP tools at '{mcp_url}': {e}")
+
+        # --- 2) Create a SOURCE bucket for this MCP server -----------------------
+        self._mcpo_counter += 1
+        group = f"__mcp_server_{self._mcpo_counter}__"
+        self._toolbox[group] = {}
+
+        # Helper: pretty-print JSON schema into arg listing
+        def _schema_to_args(schema: dict) -> tuple[list[str], list[str]]:
+            props = []
+            required = []
+            if isinstance(schema, dict):
+                props = list((schema.get("properties") or {}).keys())
+                required = schema.get("required") or []
+            return props, required
+
+        # Optional: synthesize a "pretty signature" string from schema
+        def _pretty_signature_from_schema(key: str, props: list[str], required: list[str]) -> str:
+            # e.g., "__mcp_server_1__.mcp_derivative(func: Any [req], x: Any [req]) → Any"
+            params = []
+            for p in props:
+                tag = " [req]" if p in required else ""
+                params.append(f"{p}: Any{tag}")
+            return f"{key}({', '.join(params)}) → Any"
+
+        # --- 3) One wrapper per tool ---------------------------------------------
+        def _make_tool_fn(u: str, tool_name: str):
+            async def _acall(**payload):
+                # ====== IMPORTANT: unwrap nested {'kwargs': {...}} if present ======
+                # (This guards against planners that pass a single 'kwargs' arg.)
+                if "kwargs" in payload and isinstance(payload["kwargs"], dict) and len(payload) == 1:
+                    payload = payload["kwargs"]
+
+                async with streamablehttp_client(u) as (r, w, _sid):
+                    async with ClientSession(r, w) as session:
+                        await session.initialize()
+                        result = await session.call_tool(tool_name, arguments=payload)
+
+                        # Prefer a simple text return if present; else return structured payload
+                        if getattr(result, "content", None):
+                            texts = [getattr(c, "text", None) for c in result.content if getattr(c, "text", None)]
+                            if texts:
+                                return texts[0]
+                        try:
+                            return result.model_dump()
+                        except Exception:
+                            return result
+
+            def _sync(**payload):
+                return asyncio.run(_acall(**payload))
+
+            _sync.__name__ = f"mcp_{tool_name}"   # stable, readable name in toolbox keys
+            return _sync
+
+        # Register each tool with schema-aware description to guide planners
+        name_to_desc = {}
+        for spec in tool_specs:
+            tool_name = spec["name"]
+            tool_desc = spec["description"]
+            props, required = _schema_to_args(spec["schema"])
+
+            fn = _make_tool_fn(mcp_url, tool_name)
+            key = f"{group}.{fn.__name__}"
+
+            # Build a description that **exposes real arg names** (so planners avoid "kwargs")
+            arg_block = ""
+            if props:
+                arg_lines = [f"  - {p}" + (" (required)" if p in required else " (optional)") for p in props]
+                arg_block = "\nArgs:\n" + "\n".join(arg_lines)
+
+            # Prefer a schema-derived signature over the generic **kwargs signature
+            sig = _pretty_signature_from_schema(key, props, required) if props else self._build_signature(key, fn)
+
+            self._toolbox[group][key] = {
+                "callable": fn,
+                "description": f"{sig} — MCP tool '{tool_name}' from {mcp_url}. {tool_desc}{arg_block}"
+            }
+            name_to_desc[tool_name] = tool_desc
+
+        # --- 4) Track registration & return source name --------------------------
+        self._mcpo_servers[base] = (group, name_to_desc)
+        return group
+
+
+    def register(self, tool: Any, description: str | None = None) -> None:
+        """
+        Dispatch-only entrypoint. Routes to the correct helper based on 'tool' type:
+        - callables  -> self._register_callable(...)
+        - plugins    -> self._register_plugin(...)
+        - agents     -> self._register_agent(...)
+        - URLs (str) -> self._register_mcp(...) or self._register_mcpo(...)
+        """
+
+        # 1) Plain Python function (method)
+        if callable(tool):
+            return self._register_callable(tool, description)
+
+        # 2) Plugin instance
+        if isinstance(tool, Plugin):
+            return self._register_plugin(tool)
+
+        # 3) Agent instance
+        if issubclass(type(tool), Agent):
             if not self._allow_agent_registration:
                 raise RuntimeError("Agent registration is not enabled for this agent.")
-            source = f"__agent_{tool.name}__"
-            if source in self._toolbox:
-                raise RuntimeError(f"Agent '{tool.name}' already registered.")
-            key = f"{source}.invoke"
-            sig = self._build_signature(key, tool.invoke)
-            self._toolbox[source] = {
-                key: {
-                    "callable": tool.invoke,
-                    "description": f"{sig} — Agent description: {tool.description}"
-                }
-            }
-            return
+            return self._register_agent(tool)
 
-        # ── MCP Server Tool ───────────────────────────
+        # 4) Server URL string: MCP vs MCP‑O
         if isinstance(tool, str):
-            if not self._allow_mcpo_registration:
-                raise RuntimeError("MCPO registration is not enabled for this agent.")
-            host = tool.rstrip('/')
-            if host in self._mcpo_servers:
-                return  # Already registered
-            try:
-                openapi = requests.get(f"{host}/openapi.json").json()
-            except Exception:
-                raise ValueError(f"Invalid MCP-O server URL or no OpenAPI response: {host}")
+            if not self._allow_mcp_registration:
+                raise RuntimeError("MCP/MCP‑O registration is not enabled for this agent.")
 
-            self._mcpo_counter += 1
-            name = f"__mcpo_server_{self._mcpo_counter}__"
-            paths = {
-                path: meta.get('post', {}).get('description', '')
-                for path, meta in openapi.get('paths', {}).items()
-            }
+            url = tool.strip()
+            if not (url.startswith("http://") or url.startswith("https://")):
+                raise ValueError(f"Expected an HTTP(S) URL for MCP/MCP‑O registration, got: {tool!r}")
 
-            def mcpo_invoke(path: str, payload: dict, base_url=host):
-                import requests
-                return requests.post(f"{base_url}{path}", json=payload).json()
+            # Heuristic:
+            # - Native MCP (Streamable HTTP) usually exposes /mcp
+            # - MCP‑O (OpenAPI proxy) usually exposes /openapi.json at the base
+            u = url.rstrip("/")
+            if u.endswith("/mcp") or "/mcp" in u:
+                return self._register_mcp(url)     # expects to create one wrapper per MCP tool
+            else:
+                return self._register_mcpo(url)    # expects to create a generic mcpo_invoke(...)
 
-            key = f"{name}.mcpo_invoke"
-            sig = self._build_signature(key, mcpo_invoke)
-            desc = (
-                f"{sig} — Calls the MCP server at {host} with path+payload.\n"
-                "Available paths:\n" + "\n".join(f"  - {p}: {d}" for p, d in paths.items())
-            )
-            self._toolbox[name] = {
-                key: {"callable": mcpo_invoke, "description": desc}
-            }
-            self._mcpo_servers[host] = (name, paths)
-            return
-
+        # 5) Unknown
         raise TypeError(f"Cannot register object of type: {type(tool)}")
+
 
     @property # toolbox should not be editable from the outside
     def toolbox(self):
@@ -399,11 +638,11 @@ class ToolAgent(Agent, ABC):
     def allow_agent_registration(self, val: bool):
         self._allow_agent_registration = val
     @property
-    def allow_mcpo_registration(self):
-        return self._allow_mcpo_registration
-    @allow_mcpo_registration.setter
-    def allow_mcpo_registration(self, val:bool):
-        self._allow_mcpo_registration = val
+    def allow_mcp_registration(self):
+        return self._allow_mcp_registration
+    @allow_mcp_registration.setter
+    def allow_mcp_registration(self, val:bool):
+            self._allow_mcp_registration = val
 
 # ────────────────────────────────────────────────────────────────
 # 6.  A2A ProxyAgent  (Invokes agents remotely via A2A protocol)

@@ -5,11 +5,11 @@ import modules.Prompts as Prompts
 from modules.LLMEngines import LLMEngine
 
 class OrchestratorAgent(ToolAgent):
-    def __init__(self, name: str, description: str, llm_engine: LLMEngine, allow_agentic: bool = False, allow_mcpo: bool = False):
+    def __init__(self, name: str, description: str, llm_engine: LLMEngine, allow_agentic: bool = False, allow_mcp: bool = False):
         """
         A step-by-step orchestrator that generates one JSON step at a time.
         """
-        super().__init__(name, description=description, llm_engine=llm_engine, allow_agentic=allow_agentic, allow_mcpo=allow_mcpo)
+        super().__init__(name, description=description, llm_engine=llm_engine, allow_agentic=allow_agentic, allow_mcp=allow_mcp)
         # Enable built-in history/caching of prompts & responses
         self.context_enabled = True
         self.role_prompt = Prompts.ORCHESTRATOR_PROMPT
