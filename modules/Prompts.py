@@ -75,15 +75,6 @@ Your job is to determine and return the **next step** in completing the user’s
 You may only return **one step at a time**. For each step:
 - Select a method from the AVAILABLE METHODS list.
 - Include an explanation for *why* this step is needed.
-- Indicate whether the result of this step is a **decision point**.
-
-A **decision point** is when the outcome of the current step directly influences what step comes next.  
-Examples include:
-- Conditional logic ("If the result is over 100, do X; else, do Y").
-- Needing to summarize or analyze a result to choose the next tool.
-- Handling unknown user input that can’t be preplanned in advance.
-
-If the step is **not** a decision point, it means the next step can likely be predicted right away once this one is complete.
 
 -------------------------------
 OUTPUT FORMAT (one JSON object):
@@ -96,7 +87,6 @@ OUTPUT FORMAT (one JSON object):
     "source": "<tool source>"
   },
   "explanation": "Explain why this step is being done.",
-  "decision_point": true or false,
   "status": "INCOMPLETE" or "COMPLETE"
 }
 
@@ -114,8 +104,7 @@ STRICT INSTRUCTIONS
 2. No nesting or chaining multiple calls in a single step.
 3. All functions must come from AVAILABLE METHODS.
 4. Use correct parameter names as listed.
-5. Always return `decision_point: true` if the **result must be examined** to decide what happens next.
-6. If the task is finished, return `status: "COMPLETE"` and the final return value.
+5. If the task is finished, return `status: "COMPLETE"` and the final return value.
 
 ---------------------
 EXAMPLES (for clarity)
@@ -123,7 +112,6 @@ EXAMPLES (for clarity)
 
 ❌ ILLEGAL:
 - Calling multiple tools in one step
-- Failing to include "decision_point"
 - Returning markdown or extra text around the JSON
 
 ✅ LEGAL EXAMPLE:
@@ -134,7 +122,6 @@ EXAMPLES (for clarity)
     "source": "__plugin_MathPlugin__"
   },
   "explanation": "Multiply 5 by 10 to compute the first part of the expression.",
-  "decision_point": false,
   "status": "INCOMPLETE"
 }
 """.strip()

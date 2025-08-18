@@ -1,13 +1,16 @@
-# Requirements for Agentic Explorations
+# Environment & Jupyter requirements
+ipykernel
 python-dotenv
-python-a2a
-uvicorn
+# LLM providers
 openai
 llama-cpp-python
 huggingface-hub
 google-genai
 mistralai
-uv
+# A2A and MCP/O requirements
+python-a2a
 mcp
+uv
+uvicorn
 mcpo
 requests
