@@ -12,12 +12,12 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 # ───────────────────────────  imports  ───────────────────────────
 import time, logging
 
-logging.getLogger().setLevel(level=logging.INFO)
-
 # --- Atomic Agentic Imports ---
 from modules.Agents import *
 from modules.PlannerAgents import PlannerAgent
 from modules.Plugins import MathPlugin
+
+logging.getLogger().setLevel(level=logging.INFO)
 
 # define a global llm engine to give to each of our agents
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")

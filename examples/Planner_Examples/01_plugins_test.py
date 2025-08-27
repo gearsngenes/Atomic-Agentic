@@ -9,7 +9,7 @@ from modules.PlannerAgents import PlannerAgent
 from modules.Plugins import ParserPlugin, MathPlugin, ConsolePlugin, PythonPlugin
 from modules.LLMEngines import *
 
-# logging.getLogger().setLevel(level=logging.INFO) # Uncomment to show the log info
+logging.getLogger().setLevel(level=logging.INFO)
 
 print("\n───────────────────────────────\n")
 print("Testing Task Decomposition and Printing capabilities")

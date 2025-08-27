@@ -4,13 +4,12 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 import logging
-
-logging.getLogger().setLevel(level=logging.INFO) # to enable us to see the agentic planning steps
-
 # ───────────────────────────  local imports  ────────────────────
 from modules.Agents import Agent
 from modules.PlannerAgents import PlannerAgent
 from modules.LLMEngines import *
+
+logging.getLogger().setLevel(level=logging.INFO) # to enable us to see the agentic planning steps
 
 # define a global llm engine to give to each of our agents
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")
