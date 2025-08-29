@@ -99,9 +99,9 @@ class PlannerAgent(ToolAgent):
         return self._previous_steps[-1]["result"]
 
     def invoke(self, prompt: str):
-        logging.info(f"+---{'-'*len(self.name + ' Starting')}---+")
-        logging.info(f"|   {self.name} Starting   |")
-        logging.info(f"+---{'-'*len(self.name + ' Starting')}---+")
+        logging.info(f"\n+---{'-'*len(self.name + ' Starting')}---+"
+                     f"\n|   {self.name} Starting   |"
+                     f"\n+---{'-'*len(self.name + ' Starting')}---+")
 
         self._previous_steps = []  # reset step history
         plan = self.strategize(prompt)
@@ -110,7 +110,7 @@ class PlannerAgent(ToolAgent):
         logging.info(f"{self.name} created plan with {len(plan['steps'])} steps")
         result = self.execute(plan)
 
-        logging.info(f"+---{'-'*len(self.name + ' Finished')}---+")
-        logging.info(f"|   {self.name} Finished   |")
-        logging.info(f"+---{'-'*len(self.name + ' Finished')}---+\n")
+        logging.info(   f"\n+---{'-'*len(self.name + ' Finished')}---+"
+                        f"\n|   {self.name} Finished   |"
+                        f"\n+---{'-'*len(self.name + ' Finished')}---+\n")
         return result

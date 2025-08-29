@@ -27,7 +27,7 @@ agent = Agent(
 
 def main():
     # 1) Upload a local document once; agent stores provider handle in agent.files
-    file_path = "./examples/Agent_Examples/Dromaeosaurs.pdf"#"./test_code/sat_practice_test.pdf"  # <-- change to your local file path
+    file_path = "./examples/Agent_Examples/Dromaeosaurs.pdf"
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
     agent.attach(file_path)
@@ -40,16 +40,11 @@ def main():
         "Call out any key features, images, description, information, etc."
     )
     summary = agent.invoke(prompt)
+    # 3) Print the summary
     print("\n=== Summary ===\n")
     print(summary)
 
-    # # 5) (Optional) Ask a follow-up; the same file handle is reused automatically
-    # follow_up = agent.invoke("Now list the top risks and recommended mitigations.")
-    # print("\n=== Risks & Mitigations ===\n")
-    # print(follow_up)
-
-    # 6) (Optional) Clean up the remote file and remove from the agent's files map
-    #    You can keep it for the session and delete later; shown here for completeness.
+    # 4) detach the file if no longer needed
     agent.detach(file_path)
 
 if __name__ == "__main__":

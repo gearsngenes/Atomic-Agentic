@@ -91,9 +91,9 @@ class OrchestratorAgent(ToolAgent):
         Loop, generating one step at a time, until status == "COMPLETE".
         Always includes the prior step's (truncated) result in the next prompt.
         """
-        logging.info(f"+---{'-'*len(self.name + ' Starting')}---+")
-        logging.info(f"|   {self.name} Starting   |")
-        logging.info(f"+---{'-'*len(self.name + ' Starting')}---+")
+        logging.info(f"\n+---{'-'*len(self.name + ' Starting')}---+"
+                     f"\n|   {self.name} Starting   |"
+                     f"\n+---{'-'*len(self.name + ' Starting')}---+")
 
         # Reset history & steps
         self.clear_memory()
@@ -139,9 +139,9 @@ class OrchestratorAgent(ToolAgent):
             iteration += 1
 
         self.clear_memory()
-        logging.info(f"+---{'-'*len(self.name + ' Finished')}---+")
-        logging.info(f"|   {self.name} Finished   |")
-        logging.info(f"+---{'-'*len(self.name + ' Finished')}---+\n")
+        logging.info(   f"\n+---{'-'*len(self.name + ' Finished')}---+"
+                        f"\n|   {self.name} Finished   |"
+                        f"\n+---{'-'*len(self.name + ' Finished')}---+\n")
 
         # Return the final result (from the last completed step)
         return self._previous_steps[-1]["result"] if self._previous_steps else None

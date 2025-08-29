@@ -18,9 +18,6 @@ from modules.LLMEngines import *
 # ────────────────────────────────────────────────────────────────
 # 1.  Agent  (LLM responds to prompts)
 # ────────────────────────────────────────────────────────────────
-# ────────────────────────────────────────────────────────────────
-# 1.  Agent  (LLM responds to prompts)  — UPDATED
-# ────────────────────────────────────────────────────────────────
 class Agent:
     """
     Minimal, stateful Agent that:
@@ -153,156 +150,8 @@ class Agent:
 
         return response
 
-# ───────────────────────────────────────────────────────────────────────────────
-# 2.  PrePostAgent  (calls methods to preprocess and postprocess an Agent's output
-# ───────────────────────────────────────────────────────────────────────────────
-class PrePostAgent(Agent):
-    def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT, context_enabled = False):
-        Agent.__init__(self, name, description, llm_engine, role_prompt, context_enabled)
-        self._preprocessors: list[callable] = []
-        self._postprocessors: list[callable] = []
-    
-    # adds a new tool to the preprocessor chain
-    def add_prestep(self, func: callable, index: int = None):
-        # Only allow callables that do not return None
-        hints = get_type_hints(func)
-        rtype = hints.get('return', Any)
-        if rtype is type(None):
-            raise ValueError("Preprocessor tool cannot have return type None")
-        if index is not None:
-            self._preprocessors.insert(index, func)
-        else:
-            self._preprocessors.append(func)
-
-    # adds a new tool to the postprocessor chain
-    def add_poststep(self, func: callable, index: int = None):
-        # Only allow callables that do not return None
-        hints = get_type_hints(func)
-        rtype = hints.get('return', Any)
-        if rtype is type(None):
-            raise ValueError("Preprocessor tool cannot have return type None")
-        if index is not None:
-            self._postprocessors.insert(index, func)
-        else:
-            self._postprocessors.append(func)
-    def invoke(self, prompt: str):
-        # 1. Pass prompt through preprocessor chain
-        preprocessed = prompt
-        for func in self._preprocessors:
-            # Try to match argument count: if func takes >1 arg, pass result as first arg
-            sig = inspect.signature(func)
-            params = list(sig.parameters.values())
-            if len(params) == 1:
-                preprocessed = func(preprocessed)
-            else:
-                # If more than one arg, try to unpack if result is tuple/list
-                if isinstance(preprocessed, (tuple, list)) and len(preprocessed) == len(params):
-                    preprocessed = func(*preprocessed)
-                elif isinstance(preprocessed, (tuple, list)) and len(preprocessed) != len(params):
-                    raise ValueError(f"Preprocessor tool {func.__name__} expects {len(params)} args but got {len(preprocessed)}")
-                else:
-                    preprocessed = func(preprocessed)
-        # 2. pass preprocessed result through the LLM
-        processed = Agent.invoke(self, str(preprocessed))
-        # 3. pass the processed prompt through the postprocessors
-        postprocessed = processed
-        for func in self._postprocessors:
-            # Try to match argument count: if func takes >1 arg, pass result as first arg
-            sig = inspect.signature(func)
-            params = list(sig.parameters.values())
-            if len(params) == 1:
-                postprocessed = func(postprocessed)
-            else:
-                # If more than one arg, try to unpack if result is tuple/list
-                if isinstance(postprocessed, (tuple, list)) and len(postprocessed) == len(params):
-                    postprocessed = func(*postprocessed)
-                elif isinstance(postprocessed, (tuple, list)) and len(postprocessed) != len(params):
-                    raise ValueError(f"Preprocessor tool {func.__name__} expects {len(params)} args but got {len(preprocessed)}")
-                else:
-                    postprocessed = func(postprocessed)
-        if self._context_enabled:
-            self._history[-2] = {"role":"user", "content":prompt}
-            self._history[-1] = {"role":"assistant", "content":str(postprocessed)}
-        # 4. return post-processed result
-        return postprocessed
-    @property
-    def description(self):
-        desc = f"~~PrePost Agent {self.name}~~\nThis agent preprocesses inputs to the LLM before generating output, and then post-processes the output before returning it.\nDescription:{self._description}"
-        return desc
-    @description.setter
-    def description(self, value: str):
-        self._description = value
-    @property
-    def preprocessors(self):
-        return self._preprocessors.copy()
-    @preprocessors.setter # should be capable of being set in batches
-    def preprocessor(self, value: list[callable]):
-        self._preprocessors = value
-    @property
-    def postprocessors(self):
-        return self._postprocessors.copy()
-    @postprocessors.setter # should be capable of being set in batches
-    def postprocessors(self, value: list[callable]):
-        self._postprocessors = value
-
-
 # ────────────────────────────────────────────────────────────────
-# 3.  ChainSequenceAgent  (Invokes a chain of Agents)
-# ────────────────────────────────────────────────────────────────
-class ChainSequenceAgent(Agent):
-    """
-    A sequential Chain-of-Agents. Uses a flat internal list.
-    Each agent's output is passed as input to the next.
-    """
-    def __init__(self, name: str, context_enabled: bool = False):
-        self._agents:list[Agent] = []
-        self._name = name
-        self._context_enabled = context_enabled
-        self._role_prompt = f"~~ChainSequence Agent {self._name}~~\nThis agent sequentially invokes a list of agents."
-        self._history = []
-        self._llm_engine = None
-    @property
-    def agents(self) -> list[Agent]:
-        return self._agents.copy()
-
-    @property
-    def role_prompt(self):
-        return self._role_prompt
-    @property
-    def description(self):
-        desc = f"{self._role_prompt}\nDescription: this agent calls the following agents in order below:\n~~~start~~~{"".join(f"\n{agent._description}" for agent in self._agents)}\n~~~end~~~"
-        return desc
-    @property
-    def llm_engine(self):
-        return {a.name:a.llm_engine for a in self._agents}
-    
-    def add(self, agent:Agent, idx:int|None = None):
-        if idx != None:
-            self._agents.insert(idx, agent)
-        else:
-            self._agents.append(agent)
-    
-    def pop(self, idx:int|None = None) -> Agent:
-        if idx != None:
-            return self._agents.pop(idx)
-        return self._agents.pop()
-    
-    def invoke(self, prompt: str):
-        result = prompt
-        if not self._agents:
-            raise RuntimeError(f"Agents list is empty for ChainSequenceAgent '{self.name}'")
-        if self.context_enabled:
-            self._history.append({"role": "user", "content": "User-Input: " + prompt})
-        for agent in self._agents:
-            result = agent.invoke(str(result))
-            if self.context_enabled:
-                self._history.append({"role": "assistant", "content": agent.name + " - Partial Result: "+str(result)})
-        if self.context_enabled:
-            self._history.append({"role": "assistant", "content": self.name + "- Final Result: " + str(result)})
-        return result
-
-# ────────────────────────────────────────────────────────────────
-# 4.  Human Agent  (Asks human for input, when provided a prompt)
+# 2.  Human Agent  (Asks human for input, when provided a prompt)
 # ────────────────────────────────────────────────────────────────
 class HumanAgent(Agent):
     def __init__(self, name, description, context_enabled:bool = False):
@@ -311,6 +160,10 @@ class HumanAgent(Agent):
         self._description = description
         self._llm_engine = None
         self._role_prompt = description
+    def attach(self, file_path: str):
+        raise NotImplementedError("HumanAgent does not support file attachments.")
+    def detach(self, file_path: str):
+        raise NotImplementedError("HumanAgent does not support file attachments.")
     def invoke(self, prompt:str):
         response = input(f"{prompt}\n{self.name}'s Response: ")
         if self._context_enabled:
@@ -320,7 +173,7 @@ class HumanAgent(Agent):
 
 from abc import ABC, abstractmethod
 # ────────────────────────────────────────────────────────────────
-# 5.  Abstract ToolAgent  (Uses Tools and Agents to execute tasks)
+# 3.  Abstract ToolAgent  (Uses Tools and Agents to execute tasks)
 # ────────────────────────────────────────────────────────────────
 class ToolAgent(Agent, ABC):
     def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT, allow_agentic:bool = False, allow_mcp:bool = False):
@@ -694,6 +547,8 @@ class ToolAgent(Agent, ABC):
         # 5) Unknown
         raise TypeError(f"Cannot register object of type: {type(tool)}")
 
+    def invoke(self, prompt):
+        raise NotImplementedError("ToolAgent is abstract; use strategize() and execute() instead.")
 
     @property # toolbox should not be editable from the outside
     def toolbox(self):
@@ -710,25 +565,3 @@ class ToolAgent(Agent, ABC):
     @allow_mcp_registration.setter
     def allow_mcp_registration(self, val:bool):
             self._allow_mcp_registration = val
-
-# ────────────────────────────────────────────────────────────────
-# 6.  A2A ProxyAgent  (Invokes agents remotely via A2A protocol)
-# ────────────────────────────────────────────────────────────────
-from python_a2a import A2AClient
-class A2AProxyAgent(Agent):
-    def __init__(self, a2a_host: str):
-        self._client = A2AClient(a2a_host)
-        agent_card = self._client.get_agent_card()
-        self._name, self._description = agent_card.name, agent_card.description
-        self._context_enabled = False
-        self._llm_engine = None
-        self._history = []
-    def invoke(self, prompt:str):
-        response = self._client.ask(prompt)
-        return response
-    @property
-    def description(self):
-        return self._description
-    @property
-    def name(self):
-        return self._name
