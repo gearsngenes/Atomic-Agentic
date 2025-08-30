@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from modules.Agents import *
-from modules.PlannerAgents import PlannerAgent
+from modules.ToolAgents import PlannerAgent
 from modules.Plugins import *
 
 # logging.getLogger().setLevel(level=logging.INFO) # Uncomment to see the logging info

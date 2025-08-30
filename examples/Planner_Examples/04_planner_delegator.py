@@ -14,7 +14,7 @@ import time, logging
 
 # --- Atomic Agentic Imports ---
 from modules.Agents import *
-from modules.PlannerAgents import PlannerAgent
+from modules.ToolAgents import PlannerAgent
 from modules.Plugins import MathPlugin
 
 logging.getLogger().setLevel(level=logging.INFO)

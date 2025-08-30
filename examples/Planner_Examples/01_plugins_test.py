@@ -5,7 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 import logging
 # math_console_demo.py
-from modules.PlannerAgents import PlannerAgent
+from modules.ToolAgents import PlannerAgent
 from modules.Plugins import ParserPlugin, MathPlugin, ConsolePlugin, PythonPlugin
 from modules.LLMEngines import *
 

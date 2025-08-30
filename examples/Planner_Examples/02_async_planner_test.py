@@ -5,7 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 # ----------------- Atomic Agents ----------------
 from modules.Agents import *
-from modules.PlannerAgents import PlannerAgent
+from modules.ToolAgents import PlannerAgent
 
 # ----------------- Setup Logging ----------------
 # logging.getLogger().setLevel(level=logging.INFO)

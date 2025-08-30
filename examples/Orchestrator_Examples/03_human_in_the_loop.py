@@ -4,7 +4,7 @@ from typing import Any
 # Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from modules.LLMEngines import OpenAIEngine
-from modules.OrchestratorAgents import OrchestratorAgent
+from modules.ToolAgents import OrchestratorAgent
 from modules.Agents import Agent, HumanAgent
 
 logging.getLogger().setLevel(level=logging.INFO)
