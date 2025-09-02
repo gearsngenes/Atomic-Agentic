@@ -1,454 +1,510 @@
-# streamlit_app.py
-# Two-tab Streamlit UI (Chat / Config) for Atomic-Agentic base Agents
-# - Persists agent configs to ./agents.json
-# - Imports your classes directly from modules.Agents and modules.LLMEngines
-# - Whole responses (no streaming), markdown/code rendering
-# - Chat history comes from the Agent instance itself (and can be cleared)
-# - Config supports add/edit/duplicate/delete, unique names, import/export
-# - Secrets come from environment variables (as your engines expect)
+# atomic_ui.py — Simplest "global tool-calls tape" + in-place rebinding of tool callables
+# - One global TOOL_CALLS list (order-preserving).
+# - Tool bodies append {'name': ..., 'args': {...}} to TOOL_CALLS.
+# - Before invoke(): refresh toolbox entries so they point to THIS RUN’s function objects.
+# - After invoke(): stitch each tool-call into the assistant transcript, then append the final reply and clear TOOL_CALLS.
+# - Planner forced synchronous (is_async=False). No wrappers, no polling, no Streamlit calls from tools.
+
+from __future__ import annotations
 
 import json
-import os
-import sys
-import time
-from typing import Any, Dict, List, Optional
+import math
+from dataclasses import dataclass, asdict
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-# Ensure repo root is importable (so `modules` resolves)
-sys.path.append(os.path.abspath("."))
-
-# ---- Import your framework classes ----
-from modules.Agents import Agent  # base Agent
+# ---- Atomic-Agentic modules (your project must expose these on PYTHONPATH) ----
+from modules.Agents import Agent
+from modules.ToolAgents import PlannerAgent, OrchestratorAgent
 from modules.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine
 
-# ---- Constants ----
-AGENTS_DB_PATH = "agents.json"
-PROVIDER_CHOICES = ["openai", "gemini", "mistral"]
+# ============================== Global tool-calls tape ==============================
+# Tools append here at call time; UI drains after invoke().
+TOOL_CALLS: List[Dict[str, Any]] = []  # each: {"name": str, "args": dict}
 
-# Curated, safe defaults for Pro/Free tiers (+ Custom)
-OPENAI_MODELS = [
-    "gpt-4o",
-    "gpt-4o-mini",
-    "gpt-4.1-mini",
-    "Custom…",
-]
-GEMINI_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-pro",
-    "Custom…",
-]
-MISTRAL_MODELS = [
-    "open-mixtral-8x7b",
-    "open-mistral-7b",
-    "mistral-small-latest",
-    "Custom…",
-]
+def record_tool_call(name: str, **kwargs) -> None:
+    """Append a single tool invocation record in call order."""
+    TOOL_CALLS.append({"name": name, "args": dict(kwargs)})
 
-# ---- Persistence helpers ----
-def load_agent_configs() -> List[Dict[str, Any]]:
-    if not os.path.exists(AGENTS_DB_PATH):
-        return []
-    try:
-        with open(AGENTS_DB_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except Exception:
-        return []
+def drain_tool_calls() -> List[Dict[str, Any]]:
+    """Return and clear all recorded tool calls."""
+    global TOOL_CALLS
+    calls = TOOL_CALLS
+    TOOL_CALLS = []
+    return calls
 
-def save_agent_configs(configs: List[Dict[str, Any]]) -> None:
-    with open(AGENTS_DB_PATH, "w", encoding="utf-8") as f:
-        json.dump(configs, f, indent=2, ensure_ascii=False)
+# ============================== Transcript helpers ==============================
+def _ensure_transcript(name: str) -> None:
+    st.session_state.transcripts.setdefault(name, [])
 
-def name_exists(configs: List[Dict[str, Any]], name: str, exclude_name: Optional[str] = None) -> bool:
-    for c in configs:
-        if c.get("name") == name and name != exclude_name:
-            return True
-    return False
+def _append_chat_line(agent_name: str, role: str, content_md: str) -> None:
+    _ensure_transcript(agent_name)
+    st.session_state.transcripts[agent_name].append({"role": role, "content": content_md})
 
-# ---- Engine / Agent instantiation helpers ----
-def _construct_engine(cls, model: str, temperature: float):
-    tried = []
-    for kwargs in (
-        {"model": model, "temperature": temperature},
-        {"model_name": model, "temperature": temperature},
-        {"model": model},
-        {"model_name": model},
-        {"config": {"model": model, "temperature": temperature}},
-    ):
+def _clear_transcript(name: str) -> None:
+    st.session_state.transcripts[name] = []
+
+def _md_tool_block(name: str, args: Dict[str, Any]) -> str:
+    return f"Tool: {name}\n\nArgs:\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```"
+
+# ============================== Built-in tools (explicit, no Streamlit) ==============================
+def echo(prompt: str) -> str:
+    record_tool_call("__dev_tools__.echo", prompt=prompt)
+    return prompt
+
+def _return(val: Any) -> Any:
+    record_tool_call("__dev_tools__._return", val=val)
+    return val
+
+def add(a: float, b: float) -> float:
+    record_tool_call("__dev_tools__.add", a=a, b=b)
+    return a + b
+
+def sub(a: float, b: float) -> float:
+    record_tool_call("__dev_tools__.sub", a=a, b=b)
+    return a - b
+
+def mul(a: float, b: float) -> float:
+    record_tool_call("__dev_tools__.mul", a=a, b=b)
+    return a * b
+
+def div(a: float, b: float) -> float:
+    record_tool_call("__dev_tools__.div", a=a, b=b)
+    if b == 0:
+        raise ZeroDivisionError("Division by zero")
+    return a / b
+
+def pow_(a: float, b: float) -> float:
+    record_tool_call("__dev_tools__.pow", a=a, b=b)
+    return math.pow(a, b)
+
+def sqrt(x: float) -> float:
+    record_tool_call("__dev_tools__.sqrt", x=x)
+    if x < 0:
+        raise ValueError("sqrt domain error: x must be >= 0")
+    return math.sqrt(x)
+
+def sin(x: float) -> float:
+    record_tool_call("__dev_tools__.sin", x=x)
+    return math.sin(x)
+
+def cos(x: float) -> float:
+    record_tool_call("__dev_tools__.cos", x=x)
+    return math.cos(x)
+
+def tan(x: float) -> float:
+    record_tool_call("__dev_tools__.tan", x=x)
+    return math.tan(x)
+
+def radians_(deg: float) -> float:
+    record_tool_call("__dev_tools__.radians", deg=deg)
+    return math.radians(deg)
+
+def degrees_(rad: float) -> float:
+    record_tool_call("__dev_tools__.degrees", rad=rad)
+    return math.degrees(rad)
+
+# Match the keys ToolAgent uses: "__dev_tools__.pow/radians/degrees"
+pow_.__name__ = "pow"
+radians_.__name__ = "radians"
+degrees_.__name__ = "degrees"
+
+BUILTIN_TOOLS: Dict[str, Tuple[Callable[..., Any], str]] = {
+    "echo": (echo, "Echo back the prompt (identity)."),
+    "_return": (_return, "Return the supplied value (terminal step)."),
+    "add": (add, "add(a: float, b: float) -> float"),
+    "sub": (sub, "sub(a: float, b: float) -> float"),
+    "mul": (mul, "mul(a: float, b: float) -> float"),
+    "div": (div, "div(a: float, b: float) -> float; raises on b==0"),
+    "pow": (pow_, "pow(a: float, b: float) -> float"),
+    "sqrt": (sqrt, "sqrt(x: float) -> float; x>=0"),
+    "sin": (sin, "sin(x: float) -> float (radians)"),
+    "cos": (cos, "cos(x: float) -> float (radians)"),
+    "tan": (tan, "tan(x: float) -> float (radians)"),
+    "radians": (radians_, "radians(deg: float) -> float"),
+    "degrees": (degrees_, "degrees(rad: float) -> float"),
+}
+
+def register_builtin_tools(tool_agent: Any) -> None:
+    """Initial registration (first instantiation). Duplicate keys are ignored."""
+    for _, (fn, desc) in BUILTIN_TOOLS.items():
         try:
-            return cls(**kwargs)
-        except Exception as e:
-            tried.append((kwargs, str(e)))
-    try:
-        return cls()
-    except Exception as e:
-        tried.append(("{}", str(e)))
-        raise RuntimeError(
-            f"Could not construct {cls.__name__} with any known signature. Attempts:\n" +
-            "\n".join([f"- {kw}: {err}" for kw, err in tried])
+            tool_agent.register(fn, desc)
+        except Exception:
+            pass  # okay if already present
+
+def refresh_builtin_tools(tool_agent: Any) -> None:
+    """
+    Overwrite existing '__dev_tools__.*' entries so they point to THIS RUN's functions.
+    Fixes stale callables captured on previous Streamlit reruns.
+    Toolbox shape (from Agents.py):
+      self._toolbox: Dict[str, Dict[str, Dict{'callable','description'}]]
+      source bucket: '__dev_tools__'
+      key in bucket: '__dev_tools__.<func_name>'
+    """
+    tb = getattr(tool_agent, "_toolbox", None)
+    bucket = tb.get("__dev_tools__") if isinstance(tb, dict) else None
+
+    if not isinstance(bucket, dict):
+        # If no bucket yet, try to register everything.
+        register_builtin_tools(tool_agent)
+        tb = getattr(tool_agent, "_toolbox", None)
+        bucket = tb.get("__dev_tools__") if isinstance(tb, dict) else None
+
+    if not isinstance(bucket, dict):
+        return  # nothing else we can do
+
+    for name, (fn, desc) in BUILTIN_TOOLS.items():
+        key = f"__dev_tools__.{name}"
+        cell = bucket.get(key)
+        if isinstance(cell, dict) and "callable" in cell:
+            cell["callable"] = fn
+        elif cell is not None and callable(cell):
+            bucket[key] = fn
+        else:
+            # missing → register fresh
+            try:
+                tool_agent.register(fn, desc)
+            except Exception:
+                pass
+
+# ============================== Engines & Agents ==============================
+@dataclass
+class AgentCfg:
+    name: str
+    agent_type: str = "basic"      # "basic" | "planner" | "orchestrator"
+    provider: str = "openai"       # "openai" | "gemini" | "mistral"
+    model: str = "gpt-4o-mini"
+    temperature: float = 0.2
+    description: str = ""
+    # basic-only:
+    role_prompt: str = ""
+    context_enabled: bool = True
+
+SUPPORTED_PROVIDERS = ("openai", "gemini", "mistral")
+
+def engine_factory(provider: str, model: str, temperature: float):
+    p = (provider or "").lower()
+    if p == "openai":
+        return OpenAIEngine(model=model, temperature=temperature)
+    if p == "gemini":
+        return GeminiEngine(model=model, temperature=temperature)
+    if p == "mistral":
+        return MistralEngine(model=model, temperature=temperature)
+    raise ValueError(f"Unsupported provider: {provider!r} (expected one of {SUPPORTED_PROVIDERS}).")
+
+def agent_factory(cfg: AgentCfg) -> Any:
+    engine = engine_factory(cfg.provider, cfg.model, cfg.temperature)
+
+    if cfg.agent_type == "planner":
+        # Force synchronous execution so tool bodies run inline (simplifies everything).
+        inst = PlannerAgent(
+            name=cfg.name,
+            description=cfg.description,
+            llm_engine=engine,
+            is_async=False,
+            allow_agentic=True,
         )
+        register_builtin_tools(inst)
+        return inst
 
-def create_engine(provider: str, model: str, temperature: float):
-    provider = provider.lower()
-    if provider == "openai":
-        return _construct_engine(OpenAIEngine, model, temperature)
-    if provider == "gemini":
-        return _construct_engine(GeminiEngine, model, temperature)
-    if provider == "mistral":
-        return _construct_engine(MistralEngine, model, temperature)
-    raise ValueError(f"Unknown provider '{provider}'")
+    if cfg.agent_type == "orchestrator":
+        inst = OrchestratorAgent(
+            name=cfg.name,
+            description=cfg.description,
+            llm_engine=engine,
+            allow_agentic=True,
+        )
+        register_builtin_tools(inst)
+        return inst
 
-def create_agent_instance(cfg: Dict[str, Any]) -> Agent:
-    engine = create_engine(cfg["provider"], cfg["model"], float(cfg["temperature"]))
-    name = cfg["name"]
-    description = cfg.get("description", "")
-    role_prompt = cfg.get("role_prompt", "")
-    context_enabled = bool(cfg.get("context_enabled", False))
-
-    tried = []
-    for kwargs in (
-        dict(name=name, description=description, llm_engine=engine,
-             role_prompt=role_prompt, context_enabled=context_enabled),
-        dict(name=name, description=description, llm_engine=engine, role_prompt=role_prompt),
-        dict(name=name, description=description, llm_engine=engine, context_enabled=context_enabled),
-        dict(name=name, description=description, llm_engine=engine),
-        dict(name=name, description=description, engine=engine, role_prompt=role_prompt,
-             context_enabled=context_enabled),
-        dict(name=name, description=description, llm_engine=engine, system_prompt=role_prompt,
-             context_enabled=context_enabled),
-    ):
-        try:
-            return Agent(**kwargs)
-        except Exception as e:
-            tried.append((kwargs, str(e)))
-    raise RuntimeError(
-        "Could not construct Agent with the usual signatures. Attempts:\n" +
-        "\n".join([f"- {kw}: {err}" for kw, err in tried])
+    # basic
+    return Agent(
+        name=cfg.name,
+        description=cfg.description,
+        llm_engine=engine,
+        role_prompt=cfg.role_prompt,
+        context_enabled=cfg.context_enabled,
     )
 
-def reset_agent_history(agent: Agent) -> None:
+# ============================== Session bootstrap ==============================
+def _bootstrap_defaults():
+    if "configs" not in st.session_state:
+        st.session_state.configs: List[AgentCfg] = []
+    if "instances" not in st.session_state:
+        st.session_state.instances: Dict[str, Any] = {}
+    if "transcripts" not in st.session_state:
+        st.session_state.transcripts: Dict[str, List[Dict[str, str]]] = {}
+    if "selected" not in st.session_state:
+        st.session_state.selected: Optional[str] = None
+    if "last_error" not in st.session_state:
+        st.session_state.last_error: str = ""
+    if "input_nonce" not in st.session_state:
+        st.session_state.input_nonce = 0
+
+    if not st.session_state.configs:
+        default = AgentCfg(
+            name="default",
+            agent_type="basic",
+            provider="openai",
+            model="gpt-4o-mini",
+            temperature=0.2,
+            description="Default basic agent.",
+            role_prompt="",
+            context_enabled=True,
+        )
+        st.session_state.configs.append(default)
+        st.session_state.selected = default.name
+        _ensure_transcript(default.name)
+
+def _get_config_map() -> Dict[str, AgentCfg]:
+    return {c.name: c for c in st.session_state.configs}
+
+def _get_instance(name: str) -> Any:
+    if name in st.session_state.instances:
+        return st.session_state.instances[name]
+    cfg_map = _get_config_map()
+    if name not in cfg_map:
+        raise KeyError(f"No such agent config: {name!r}")
+    inst = agent_factory(cfg_map[name])
+    st.session_state.instances[name] = inst
+    _ensure_transcript(name)
+    return inst
+
+def _reset_agent_memory(agent: Any):
     try:
         if hasattr(agent, "clear_history") and callable(agent.clear_history):
-            agent.clear_history()
-            return
+            agent.clear_history(); return
     except Exception:
         pass
     try:
         if hasattr(agent, "reset") and callable(agent.reset):
-            agent.reset()
-            return
+            agent.reset(); return
     except Exception:
         pass
     for attr in ("history", "_history", "messages", "_messages", "_previous_steps"):
         if hasattr(agent, attr):
             try:
                 obj = getattr(agent, attr)
-                if isinstance(obj, list):
-                    obj.clear()
+                if isinstance(obj, list): obj.clear()
             except Exception:
                 pass
 
-def agent_respond(agent: Agent, user_text: str) -> str:
-    for m in ("generate_reply", "invoke", "step", "respond", "chat"):
+def _agent_send(agent: Any, text: str) -> str:
+    if hasattr(agent, "invoke") and callable(agent.invoke):
+        return str(agent.invoke(text))
+    for m in ("generate_reply", "step", "respond", "chat"):
         if hasattr(agent, m) and callable(getattr(agent, m)):
-            try:
-                return getattr(agent, m)(user_text)
-            except Exception as e:
-                raise RuntimeError(f"{agent.__class__.__name__}.{m} failed: {e}")
-    raise RuntimeError("No known response method found on Agent (tried: generate_reply/invoke/step/respond/chat).")
+            return str(getattr(agent, m)(text))
+    raise RuntimeError("Agent does not implement invoke/generate_reply/step/respond/chat.")
 
-def extract_history(agent: Agent) -> List[Dict[str, str]]:
-    candidates = []
-    for attr in ("history", "_history", "messages", "_messages"):
-        if hasattr(agent, attr):
-            try:
-                v = getattr(agent, attr)
-                if isinstance(v, list) and len(v) > 0:
-                    candidates.append(v)
-            except Exception:
-                pass
-    if not candidates:
-        return []
-    hist = max(candidates, key=len)
-    norm: List[Dict[str, str]] = []
-    for item in hist:
-        if isinstance(item, dict):
-            role = item.get("role") or item.get("speaker") or item.get("name")
-            content = item.get("content") or item.get("text") or item.get("message") or ""
-        elif isinstance(item, (tuple, list)) and len(item) >= 2:
-            role, content = str(item[0]).lower(), str(item[1])
-        else:
-            role, content = "assistant", str(item)
-        role = (role or "assistant").lower()
-        role = role if role in ("user", "assistant", "system") else "assistant"
-        norm.append({"role": role, "content": content})
-    return norm
-
-# ---- Session bootstrap ----
-if "agent_configs" not in st.session_state:
-    st.session_state.agent_configs = load_agent_configs()
-if "agent_instances" not in st.session_state:
-    st.session_state.agent_instances: Dict[str, Agent] = {}
-if "selected_agent" not in st.session_state:
-    st.session_state.selected_agent = None  # agent name
-
-# ---- UI: Title ----
-st.set_page_config(page_title="Atomic-Agentic Chat", page_icon="🤖", layout="wide")
-st.title("Atomic-Agentic — Agents & Chat")
+# ============================== UI ==============================
+st.set_page_config(page_title="Atomic-Agentic — Agents & Tools", page_icon="🧰", layout="wide")
+_bootstrap_defaults()
 
 tab_chat, tab_config = st.tabs(["💬 Chat", "⚙️ Config"])
 
-# =========================
-# Chat Tab
-# =========================
 with tab_chat:
-    configs = st.session_state.agent_configs
-    names = [c["name"] for c in configs]
+    left, right = st.columns([0.67, 0.33], gap="large")
 
-    left, right = st.columns([2, 1])
     with left:
         st.subheader("Chat")
+
+        names = [c.name for c in st.session_state.configs]
         if not names:
-            st.info("No agents yet. Create one in the **Config** tab.")
+            st.info("No agents yet. Create one in the Config tab.")
         else:
-            # Selection
-            current_index = 0
-            if st.session_state.selected_agent in names:
-                current_index = names.index(st.session_state.selected_agent)
-            current_name = st.selectbox("Choose agent", names, index=current_index, key="selected_agent")
+            current = st.session_state.selected or names[0]
+            try:
+                idx = names.index(current)
+            except ValueError:
+                idx = 0
+                st.session_state.selected = names[0]
 
-            # ---------- SAFER INSTANTIATION ----------
-            if current_name:
-                # find config safely (avoid StopIteration)
-                cfg = next((c for c in configs if c.get("name") == current_name), None)
-                if cfg:
-                    if current_name not in st.session_state.agent_instances:
-                        try:
-                            st.session_state.agent_instances[current_name] = create_agent_instance(cfg)
-                        except Exception as e:
-                            safe_name = current_name or "(unnamed)"
-                            st.toast(f"Could not instantiate agent '{safe_name}': {e}", icon="❌")
-                            # Do not stop the app; allow user to fix config and continue
-                else:
-                    # No matching config yet (transient after save); skip instantiation this frame
-                    pass
-            # ----------------------------------------
+            selected = st.selectbox("Select agent", names, index=idx, key="agent_select")
+            if selected != st.session_state.selected:
+                st.session_state.selected = selected
+                _ensure_transcript(selected)
+                st.session_state.input_nonce += 1
+                st.rerun()
 
-            agent = st.session_state.agent_instances.get(current_name)
-            st.markdown("###### Conversation")
+            agent = _get_instance(st.session_state.selected)
 
-            if agent:
-                history = extract_history(agent)
-                if not history:
-                    st.caption("No messages yet.")
-                # Right-align user, left-align assistant, with avatars at edges
-                for msg in history:
-                    role = msg.get("role", "assistant")
-                    content = msg.get("content", "")
-                    is_user = role == "user"
-                    if is_user:
-                        spacer, msgcol = st.columns([0.15, 0.85])
-                        with msgcol:
-                            with st.chat_message("user", avatar="🧑"):
-                                st.markdown(content)
-                    else:
-                        msgcol, spacer = st.columns([0.85, 0.15])
-                        with msgcol:
-                            with st.chat_message("assistant", avatar="🤖"):
-                                st.markdown(content)
-            else:
-                st.caption("Select a valid agent to start chatting.")
+            # Render transcript
+            for msg in st.session_state.transcripts.get(agent.name, []):
+                avatar = "🙂" if msg["role"] == "user" else "🤖"
+                with st.chat_message(msg["role"], avatar=avatar):
+                    st.markdown(msg["content"])
 
-            st.divider()
+            # Input row
+            with st.container(border=True):
+                ci_cols = st.columns([6, 1, 1])
+                input_key = f"chat_input__{agent.name}__{st.session_state.input_nonce}"
+                user_text = ci_cols[0].text_input("Message", key=input_key, label_visibility="collapsed")
+                send_clicked = ci_cols[1].button("Send", use_container_width=True, key=f"send__{agent.name}")
+                clear_clicked = ci_cols[2].button("Clear", type="secondary", use_container_width=True, key=f"clear__{agent.name}")
 
-            # --- Input row: message + Send / Clear (FORM; Option A) ---
-            input_key = f"user_text_{current_name or 'active'}"
-            with st.form(f"chat-send-{current_name or 'active'}", clear_on_submit=True):
-                user_text = st.text_area(
-                    "Your message",
-                    placeholder="Type a message…",
-                    height=100,
-                    key=input_key,
-                )
-                send_col, clear_col, _ = st.columns([0.15, 0.15, 0.7])
-                send_clicked = send_col.form_submit_button("Send", use_container_width=True)
-                clear_clicked = clear_col.form_submit_button("Clear chat", use_container_width=True)
-
-            if clear_clicked and agent:
+            if clear_clicked:
                 try:
-                    reset_agent_history(agent)
-                    st.session_state.pop(input_key, None)
-                    st.toast("Cleared chat (agent memory reset).", icon="🧹")
-                    time.sleep(0.2)
+                    _clear_transcript(agent.name)
+                    _reset_agent_memory(agent)
+                finally:
+                    st.session_state.input_nonce += 1
                     st.rerun()
-                except Exception as e:
-                    st.toast(f"Failed to clear: {e}", icon="❌")
 
-            if send_clicked and user_text and user_text.strip():
-                if not agent:
-                    st.toast("Please select a valid agent first.", icon="⚠️")
+            if send_clicked:
+                txt = (user_text or "").strip()
+                if not txt:
+                    st.toast("Please enter a message.", icon="⚠️")
                 else:
                     try:
-                        _ = agent_respond(agent, user_text.strip())
-                        st.rerun()
+                        _append_chat_line(agent.name, "user", txt)
+
+                        # New run: clear any stale tool-calls
+                        TOOL_CALLS.clear()
+
+                        # CRITICAL: ensure toolbox uses THIS RUN’s tool functions (avoid stale callables)
+                        if hasattr(agent, "_toolbox"):
+                            refresh_builtin_tools(agent)
+
+                        # Execute synchronously; tools append into TOOL_CALLS
+                        reply = _agent_send(agent, txt)
+
+                        # Stitch tool calls into chat (in order), then final reply
+                        for call in TOOL_CALLS:
+                            _append_chat_line(agent.name, "assistant", _md_tool_block(call["name"], call["args"]))
+                        _append_chat_line(agent.name, "assistant", reply)
+                        TOOL_CALLS.clear()
+
+                        st.session_state.last_error = ""
                     except Exception as e:
-                        st.toast(f"Message failed: {e}", icon="❌")
+                        _append_chat_line(agent.name, "assistant", f"❌ Error: {e}")
+                        st.session_state.last_error = str(e)
+                    finally:
+                        st.session_state.input_nonce += 1
+                        st.rerun()
 
     with right:
         st.subheader("Agent Info")
-        if names and st.session_state.selected_agent in st.session_state.agent_instances:
-            cfg = next((c for c in configs if c["name"] == st.session_state.selected_agent), None)
+        if st.session_state.selected:
+            cfg_map = _get_config_map()
+            cfg = cfg_map.get(st.session_state.selected)
             if cfg:
-                st.write("**Name:**", cfg["name"])
-                st.write("**Provider:**", cfg["provider"])
-                st.write("**Model:**", cfg["model"])
-                st.write("**Temperature:**", cfg["temperature"])
-                st.write("**Context Enabled:**", "Yes" if cfg.get("context_enabled") else "No")
-                st.write("**Description:**")
-                st.caption(cfg.get("description", ""))
+                st.write("**Name:**", cfg.name)
+                st.write("**Type:**", cfg.agent_type.title())
+                st.write("**Provider:**", cfg.provider)
+                st.write("**Model:**", cfg.model)
+                st.write("**Temperature:**", cfg.temperature)
+                st.write("**Description:**"); st.caption(cfg.description or "—")
+                if cfg.agent_type == "basic":
+                    st.write("**Context Enabled:**", "Yes" if cfg.context_enabled else "No")
+                    with st.expander("Role/System Prompt", expanded=False):
+                        st.code(cfg.role_prompt or "—", language="markdown")
 
-# =========================
-# Config Tab
-# =========================
+        st.markdown("---")
+        st.subheader("Diagnostics")
+        if st.session_state.last_error:
+            st.error(st.session_state.last_error)
+        else:
+            st.caption("No errors.")
+
 with tab_config:
     st.subheader("Manage Agents")
 
-    top_l, top_r = st.columns([0.7, 0.3])
-    with top_l:
-        existing_names = [c["name"] for c in st.session_state.agent_configs]
-        selected_to_edit = st.selectbox("Select existing agent to edit", ["(New)"] + existing_names, index=0)
+    existing = [c.name for c in st.session_state.configs]
+    choice = st.selectbox("Select", ["(New)"] + existing, index=0, key="cfg_picker")
+    creating_new = choice == "(New)"
 
-    with top_r:
-        # Export / Import
-        if st.button("Export JSON", use_container_width=True):
-            data = json.dumps(st.session_state.agent_configs, indent=2, ensure_ascii=False).encode("utf-8")
-            st.download_button(
-                "Download agents.json",
-                data,
-                file_name="agents.json",
-                mime="application/json",
-                use_container_width=True,
-            )
-        uploaded = st.file_uploader("Import JSON", type=["json"], label_visibility="collapsed")
-        if uploaded is not None:
-            try:
-                imported = json.loads(uploaded.read().decode("utf-8"))
-                assert isinstance(imported, list)
-                added, skipped = 0, 0
-                cur = st.session_state.agent_configs
-                for item in imported:
-                    if not isinstance(item, dict):
-                        continue
-                    required = ["name", "provider", "model", "temperature", "description", "role_prompt"]
-                    if not all(k in item for k in required):
-                        continue
-                    if name_exists(cur, item["name"]):
-                        skipped += 1
-                    else:
-                        item.setdefault("context_enabled", False)
-                        cur.append(item)
-                        added += 1
-                save_agent_configs(cur)
-                st.toast(f"Imported: {added} added, {skipped} skipped (duplicate names).", icon="📥")
-            except Exception as e:
-                st.toast(f"Import failed: {e}", icon="❌")
-
-    if selected_to_edit == "(New)":
-        working = {
-            "name": "",
-            "provider": PROVIDER_CHOICES[0],
-            "model": OPENAI_MODELS[0],
-            "temperature": 0.2,
-            "description": "",
-            "role_prompt": "",
-            "context_enabled": True,
-        }
-        is_new = True
+    if creating_new:
+        working = AgentCfg(name="")
     else:
-        working = next(c for c in st.session_state.agent_configs if c["name"] == selected_to_edit)
-        is_new = False
+        src = _get_config_map()[choice]
+        working = AgentCfg(**asdict(src))
 
-    with st.form("agent-form"):
-        name = st.text_input("Name", value=working["name"])
-        provider = st.selectbox(
-            "Provider",
-            PROVIDER_CHOICES,
-            index=PROVIDER_CHOICES.index(working["provider"]) if working["provider"] in PROVIDER_CHOICES else 0,
+    with st.form("cfg_form"):
+        agent_type = st.selectbox(
+            "Category",
+            options=["basic", "planner", "orchestrator"],
+            index={"basic": 0, "planner": 1, "orchestrator": 2}.get(working.agent_type, 0),
         )
-        model_choices = OPENAI_MODELS if provider == "openai" else GEMINI_MODELS if provider == "gemini" else MISTRAL_MODELS
-        model_sel = st.selectbox(
-            "Model",
-            model_choices,
-            index=(model_choices.index(working["model"]) if working["model"] in model_choices else len(model_choices) - 1),
-        )
-        if model_sel == "Custom…":
-            model = st.text_input("Custom model id", value=working["model"] if working["model"] not in model_choices else "")
+
+        name = st.text_input("Name (unique)", value=working.name)
+        provider = st.selectbox("Provider", list(SUPPORTED_PROVIDERS),
+                                index=(list(SUPPORTED_PROVIDERS).index(working.provider) if working.provider in SUPPORTED_PROVIDERS else 0))
+        model = st.text_input("Model", value=working.model)
+        temperature = st.slider("Temperature", 0.0, 1.0, float(working.temperature), step=0.05)
+        description = st.text_area("Description", value=working.description, height=80)
+
+        role_prompt = working.role_prompt
+        context_enabled = working.context_enabled
+
+        if agent_type == "basic":
+            role_prompt = st.text_area("Role/System Prompt", value=working.role_prompt, height=140)
+            context_enabled = st.checkbox("Enable context memory", value=working.context_enabled)
         else:
-            model = model_sel
+            st.caption("Planner/Orchestrator do not use role prompts nor context memory.")
 
-        temperature = st.slider("Temperature", 0.0, 1.0, float(working.get("temperature", 0.2)), step=0.05)
-        description = st.text_area("Agent description (metadata)", value=working.get("description", ""), height=80)
-        role_prompt = st.text_area("Agent role/system prompt", value=working.get("role_prompt", ""), height=140)
-        context_enabled = st.checkbox("Context enabled (remember conversation)", value=bool(working.get("context_enabled", True)))
+        c1, c2, c3 = st.columns([1, 1, 1])
+        save_clicked = c1.form_submit_button("Save")
+        delete_clicked = (False if creating_new else c2.form_submit_button("Delete"))
 
-        colA, colB, colC, colD = st.columns(4)
-        save_btn = colA.form_submit_button("Save", use_container_width=True)
-        dup_btn = (not is_new) and colB.form_submit_button("Duplicate", use_container_width=True)
-        del_btn = (not is_new) and colC.form_submit_button("Delete", use_container_width=True)
-
-    if save_btn:
-        if not name.strip():
-            st.toast("Name is required.", icon="⚠️")
-        elif not provider or not model:
-            st.toast("Provider and model are required.", icon="⚠️")
-        elif name_exists(st.session_state.agent_configs, name.strip(), exclude_name=None if is_new else working["name"]):
-            st.toast("Agent name must be unique.", icon="⚠️")
-        else:
-            new_cfg = {
-                "name": name.strip(),
-                "provider": provider,
-                "model": model.strip(),
-                "temperature": float(temperature),
-                "description": description,
-                "role_prompt": role_prompt,
-                "context_enabled": bool(context_enabled),
-            }
-            cfgs = st.session_state.agent_configs
-            if is_new:
-                cfgs.append(new_cfg)
+        if save_clicked:
+            nm = name.strip()
+            if not nm:
+                st.toast("Name is required.", icon="⚠️")
+            elif provider not in SUPPORTED_PROVIDERS:
+                st.toast(f"Unsupported provider: {provider}", icon="⚠️")
             else:
-                for i, c in enumerate(cfgs):
-                    if c["name"] == working["name"]:
-                        cfgs[i] = new_cfg
-                        st.session_state.agent_instances.pop(working["name"], None)
-                        break
-            save_agent_configs(cfgs)
-            st.toast("Saved.", icon="💾")
-            time.sleep(0.2)
+                names = [c.name for c in st.session_state.configs]
+                is_rename = (not creating_new) and (nm != working.name)
+                if (creating_new and nm in names) or (is_rename and nm in names):
+                    st.toast("Agent name must be unique.", icon="⚠️")
+                else:
+                    new_cfg = AgentCfg(
+                        name=nm,
+                        agent_type=agent_type,
+                        provider=provider,
+                        model=model.strip(),
+                        temperature=float(temperature),
+                        description=description.strip(),
+                        role_prompt=(role_prompt if agent_type == "basic" else ""),
+                        context_enabled=(bool(context_enabled) if agent_type == "basic" else False),
+                    )
+
+                    if creating_new:
+                        st.session_state.configs.append(new_cfg)
+                        _ensure_transcript(new_cfg.name)
+                        st.session_state.selected = new_cfg.name
+                    else:
+                        old = working.name
+                        for i, c in enumerate(st.session_state.configs):
+                            if c.name == old:
+                                st.session_state.configs[i] = new_cfg
+                                break
+                        if old in st.session_state.transcripts:
+                            st.session_state.transcripts[new_cfg.name] = st.session_state.transcripts.pop(old)
+                        else:
+                            _ensure_transcript(new_cfg.name)
+                        st.session_state.instances.pop(old, None)
+                        if st.session_state.selected == old:
+                            st.session_state.selected = new_cfg.name
+
+                    st.toast("Saved.", icon="💾")
+                    st.session_state.input_nonce += 1
+                    st.rerun()
+
+        if delete_clicked and not creating_new:
+            victim = working.name
+            st.session_state.configs = [c for c in st.session_state.configs if c.name != victim]
+            st.session_state.instances.pop(victim, None)
+            st.session_state.transcripts.pop(victim, None)
+            if st.session_state.configs:
+                st.session_state.selected = st.session_state.configs[0].name
+                _ensure_transcript(st.session_state.selected)
+            else:
+                st.session_state.clear()
+                _bootstrap_defaults()
+            st.toast(f"Deleted '{victim}'.", icon="🗑️")
+            st.session_state.input_nonce += 1
             st.rerun()
-
-    if dup_btn:
-        base = working["name"]
-        k = 2
-        new_name = f"{base} ({k})"
-        while name_exists(st.session_state.agent_configs, new_name):
-            k += 1
-            new_name = f"{base} ({k})"
-        copy_cfg = dict(working)
-        copy_cfg["name"] = new_name
-        st.session_state.agent_configs.append(copy_cfg)
-        save_agent_configs(st.session_state.agent_configs)
-        st.toast(f"Duplicated as '{new_name}'.", icon="🧬")
-        time.sleep(0.2)
-        st.rerun()
-
-    if del_btn:
-        cfgs = [c for c in st.session_state.agent_configs if c["name"] != working["name"]]
-        st.session_state.agent_configs = cfgs
-        save_agent_configs(cfgs)
-        st.session_state.agent_instances.pop(working["name"], None)
-        st.toast(f"Deleted '{working['name']}'.", icon="🗑️")
-        time.sleep(0.2)
-        st.rerun()

@@ -4,3 +4,4 @@ output_markdowns/
 modules/__pycache__/
 test_code/
 .env
+agents.json
