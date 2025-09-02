@@ -138,15 +138,11 @@ def radians_(deg: float) -> float:
 
 def degrees_(rad: float) -> float:
     record_tool_call("degrees", rad=rad); return math.degrees(rad)
-def _return(val: Any) -> Any:
-    record_tool_call("_return", val=val); return val
-# Match keys expected by ToolAgent: "__dev_tools__.pow/radians/degrees"
 pow_.__name__ = "pow"
 radians_.__name__ = "radians"
 degrees_.__name__ = "degrees"
 
 BUILTIN_TOOLS: Dict[str, Tuple[Callable[..., Any], str]] = {
-    "_return": (_return, "Return the supplied value (terminal step)."),
     "add": (add, "add(a: float, b: float) -> float"),
     "sub": (sub, "sub(a: float, b: float) -> float"),
     "mul": (mul, "mul(a: float, b: float) -> float"),
