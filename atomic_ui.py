@@ -1,11 +1,7 @@
-# atomic_ui.py — global TOOL_CALLS + toolbox rebinding + agents.json persistence
-# - One global TOOL_CALLS list (order-preserving).
-# - Tool bodies append {'name': ..., 'args': {...}} to TOOL_CALLS.
-# - Before invoke(): refresh toolbox entries to THIS RUN’s function objects.
-# - After invoke(): stitch tool-calls into assistant transcript, append final reply, clear TOOL_CALLS.
-# - Planner forced synchronous (is_async=False).
-# - Agent configs persist to agents.json across app reloads.
-
+# atomic_ui.py — TOOL_CALLS tape + toolbox sync/rebinding + agents.json persistence
+# FIXED:
+# - Agent-type switch uses radio with NO on_change rerun; form updates instantly and stays on Config tab.
+# - Planner/Orchestrator tool selection via CHECKBOXES. On Save: replace config in file, drop instance, recreate.
 from __future__ import annotations
 
 import json
@@ -16,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-# ---- Atomic-Agentic modules (your project must expose these on PYTHONPATH) ----
+# ---- Atomic-Agentic modules (ensure importable) ----
 from modules.Agents import Agent
 from modules.ToolAgents import PlannerAgent, OrchestratorAgent
 from modules.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine
@@ -35,13 +31,18 @@ class AgentCfg:
     # basic-only:
     role_prompt: str = ""
     context_enabled: bool = True
+    # planner/orchestrator:
+    allowed_tools: List[str] = None
 
 SUPPORTED_PROVIDERS = ("openai", "gemini", "mistral")
+ALWAYS_ON_TOOLS = {"_return"}  # always enabled (not shown)
 
 def _cfg_from_dict(d: Dict[str, Any]) -> AgentCfg:
-    # Defensive: ignore unknown keys; fill defaults for missing keys.
+    allowed = d.get("allowed_tools")
+    if not isinstance(allowed, list):
+        allowed = []
     return AgentCfg(
-        name=d.get("name", "").strip() or "unnamed",
+        name=(d.get("name") or "").strip() or "unnamed",
         agent_type=(d.get("agent_type") or "basic").lower(),
         provider=(d.get("provider") or "openai").lower(),
         model=d.get("model") or "gpt-4o-mini",
@@ -49,6 +50,7 @@ def _cfg_from_dict(d: Dict[str, Any]) -> AgentCfg:
         description=d.get("description") or "",
         role_prompt=d.get("role_prompt") or "",
         context_enabled=bool(d.get("context_enabled", True)),
+        allowed_tools=[str(x) for x in allowed],
     )
 
 def load_agent_configs_file() -> List[AgentCfg]:
@@ -72,19 +74,10 @@ def save_agent_configs_file(configs: List[AgentCfg]) -> None:
         st.toast(f"Failed to save agents.json: {e}", icon="❌")
 
 # ============================== Global tool-calls tape ==============================
-# Tools append here at call time; UI drains after invoke().
-TOOL_CALLS: List[Dict[str, Any]] = []  # each: {"name": str, "args": dict}
+TOOL_CALLS: List[Dict[str, Any]] = []  # {"name": str, "args": dict}
 
 def record_tool_call(name: str, **kwargs) -> None:
-    """Append a single tool invocation record in call order."""
     TOOL_CALLS.append({"name": name, "args": dict(kwargs)})
-
-def drain_tool_calls() -> List[Dict[str, Any]]:
-    """Return and clear all recorded tool calls."""
-    global TOOL_CALLS
-    calls = TOOL_CALLS
-    TOOL_CALLS = []
-    return calls
 
 # ============================== Transcript helpers ==============================
 def _ensure_transcript(name: str) -> None:
@@ -101,6 +94,8 @@ def _md_tool_block(name: str, args: Dict[str, Any]) -> str:
     return f"**Tool:** {name}\n\n**Args**:\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```"
 
 # ============================== Built-in tools (explicit, no Streamlit) ==============================
+def _return(val: Any) -> Any:
+    record_tool_call("_return", val=val); return val
 
 def add(a: float, b: float) -> float:
     record_tool_call("add", a=a, b=b); return a + b
@@ -138,11 +133,14 @@ def radians_(deg: float) -> float:
 
 def degrees_(rad: float) -> float:
     record_tool_call("degrees", rad=rad); return math.degrees(rad)
+
+# match toolbox names
 pow_.__name__ = "pow"
 radians_.__name__ = "radians"
 degrees_.__name__ = "degrees"
 
 BUILTIN_TOOLS: Dict[str, Tuple[Callable[..., Any], str]] = {
+    "_return": (_return, "Return the supplied value (terminal step)."),
     "add": (add, "add(a: float, b: float) -> float"),
     "sub": (sub, "sub(a: float, b: float) -> float"),
     "mul": (mul, "mul(a: float, b: float) -> float"),
@@ -156,44 +154,53 @@ BUILTIN_TOOLS: Dict[str, Tuple[Callable[..., Any], str]] = {
     "degrees": (degrees_, "degrees(rad: float) -> float"),
 }
 
-def register_builtin_tools(tool_agent: Any) -> None:
-    """Initial registration (first instantiation). Duplicate keys are ignored."""
-    for _, (fn, desc) in BUILTIN_TOOLS.items():
-        try:
-            tool_agent.register(fn, desc)
-        except Exception:
-            pass  # okay if already present
+# ============================== Toolbox sync (register/remove/rebind) ==============================
+def sync_toolbox_with_selection(tool_agent: Any, selected: List[str] | None, always_on: set[str] = ALWAYS_ON_TOOLS) -> None:
+    """
+    Bring tool_agent._toolbox['__dev_tools__'] to match selected ∪ always_on.
+    - Remove unselected.
+    - Add missing selected.
+    - Rebind 'callable' cells to THIS RUN's functions.
+    """
+    target = set(selected or [])
+    target |= set(always_on)
 
-def refresh_builtin_tools(tool_agent: Any) -> None:
-    """
-    Overwrite existing '__dev_tools__.*' entries so they point to THIS RUN's functions.
-    Fixes stale callables captured on previous Streamlit reruns.
-    """
+    want: Dict[str, Tuple[Callable[..., Any], str]] = {}
+    for name in target:
+        if name in BUILTIN_TOOLS:
+            want[f"__dev_tools__.{name}"] = BUILTIN_TOOLS[name]
+
     tb = getattr(tool_agent, "_toolbox", None)
-    bucket = tb.get("__dev_tools__") if isinstance(tb, dict) else None
+    if not isinstance(tb, dict):
+        for _, (fn, desc) in want.items():
+            try: tool_agent.register(fn, desc)
+            except Exception: pass
+        return
 
+    bucket = tb.get("__dev_tools__")
     if not isinstance(bucket, dict):
-        # No dev bucket yet → attempt full registration.
-        register_builtin_tools(tool_agent)
-        tb = getattr(tool_agent, "_toolbox", None)
-        bucket = tb.get("__dev_tools__") if isinstance(tb, dict) else None
+        for _, (fn, desc) in want.items():
+            try: tool_agent.register(fn, desc)
+            except Exception: pass
+        bucket = tb.get("__dev_tools__")
+        if not isinstance(bucket, dict):
+            return
 
-    if not isinstance(bucket, dict):
-        return  # nothing else we can do
+    # remove unselected
+    for key in list(bucket.keys()):
+        if key.startswith("__dev_tools__.") and key not in want:
+            bucket.pop(key, None)
 
-    for name, (fn, desc) in BUILTIN_TOOLS.items():
-        key = f"__dev_tools__.{name}"
+    # add or rebind selected
+    for key, (fn, desc) in want.items():
         cell = bucket.get(key)
         if isinstance(cell, dict) and "callable" in cell:
             cell["callable"] = fn
         elif cell is not None and callable(cell):
             bucket[key] = fn
         else:
-            # missing → register fresh
-            try:
-                tool_agent.register(fn, desc)
-            except Exception:
-                pass
+            try: tool_agent.register(fn, desc)
+            except Exception: pass
 
 # ============================== Engines & Agents ==============================
 def engine_factory(provider: str, model: str, temperature: float):
@@ -210,15 +217,14 @@ def agent_factory(cfg: AgentCfg) -> Any:
     engine = engine_factory(cfg.provider, cfg.model, cfg.temperature)
 
     if cfg.agent_type == "planner":
-        # Force synchronous execution so tool bodies run inline.
         inst = PlannerAgent(
             name=cfg.name,
             description=cfg.description,
             llm_engine=engine,
-            is_async=False,
+            is_async=False,     # force sync
             allow_agentic=True,
         )
-        register_builtin_tools(inst)
+        sync_toolbox_with_selection(inst, cfg.allowed_tools)
         return inst
 
     if cfg.agent_type == "orchestrator":
@@ -228,10 +234,9 @@ def agent_factory(cfg: AgentCfg) -> Any:
             llm_engine=engine,
             allow_agentic=True,
         )
-        register_builtin_tools(inst)
+        sync_toolbox_with_selection(inst, cfg.allowed_tools)
         return inst
 
-    # basic
     return Agent(
         name=cfg.name,
         description=cfg.description,
@@ -243,7 +248,6 @@ def agent_factory(cfg: AgentCfg) -> Any:
 # ============================== Session bootstrap ==============================
 def _bootstrap_defaults():
     if "configs" not in st.session_state:
-        # Load from agents.json if present; else create one default agent and save.
         loaded = load_agent_configs_file()
         if loaded:
             st.session_state.configs: List[AgentCfg] = loaded
@@ -258,6 +262,7 @@ def _bootstrap_defaults():
                     description="Default basic agent.",
                     role_prompt="",
                     context_enabled=True,
+                    allowed_tools=[],
                 )
             ]
             save_agent_configs_file(st.session_state.configs)
@@ -272,10 +277,19 @@ def _bootstrap_defaults():
         st.session_state.last_error: str = ""
     if "input_nonce" not in st.session_state:
         st.session_state.input_nonce = 0
+    if "cfg_choice" not in st.session_state:
+        st.session_state.cfg_choice = "(New)"
 
-    # Ensure transcripts exist for loaded configs
     for cfg in st.session_state.configs:
         _ensure_transcript(cfg.name)
+
+def _do_rerun():
+    # Streamlit API changed: st.rerun() is the supported call.
+    # Fall back to experimental_rerun() if running on an older build.
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
 
 def _get_config_map() -> Dict[str, AgentCfg]:
     return {c.name: c for c in st.session_state.configs}
@@ -329,7 +343,6 @@ with tab_chat:
 
     with left:
         st.subheader("Chat")
-
         names = [c.name for c in st.session_state.configs]
         if not names:
             st.info("No agents yet. Create one in the Config tab.")
@@ -350,13 +363,11 @@ with tab_chat:
 
             agent = _get_instance(st.session_state.selected)
 
-            # Render transcript
             for msg in st.session_state.transcripts.get(agent.name, []):
                 avatar = "🙂" if msg["role"] == "user" else "🤖"
                 with st.chat_message(msg["role"], avatar=avatar):
                     st.markdown(msg["content"])
 
-            # Input row
             with st.container(border=True):
                 ci_cols = st.columns([6, 1, 1])
                 input_key = f"chat_input__{agent.name}__{st.session_state.input_nonce}"
@@ -380,17 +391,16 @@ with tab_chat:
                     try:
                         _append_chat_line(agent.name, "user", txt)
 
-                        # New run: clear any stale tool-calls
+                        # clear tape
                         TOOL_CALLS.clear()
 
-                        # Ensure toolbox uses THIS RUN’s tool functions (avoid stale callables)
-                        if hasattr(agent, "_toolbox"):
-                            refresh_builtin_tools(agent)
+                        # Sync toolbox to selected tools (and rebind callables) before running
+                        cfg = _get_config_map().get(agent.name)
+                        if cfg and hasattr(agent, "_toolbox") and cfg.agent_type in ("planner", "orchestrator"):
+                            sync_toolbox_with_selection(agent, cfg.allowed_tools)
 
-                        # Execute synchronously; tools append into TOOL_CALLS
                         reply = _agent_send(agent, txt)
 
-                        # Stitch tool calls into chat (in order), then final reply
                         for call in TOOL_CALLS:
                             _append_chat_line(agent.name, "assistant", _md_tool_block(call["name"], call["args"]))
                         _append_chat_line(agent.name, "assistant", reply)
@@ -420,6 +430,8 @@ with tab_chat:
                     st.write("**Context Enabled:**", "Yes" if cfg.context_enabled else "No")
                     with st.expander("Role/System Prompt", expanded=False):
                         st.code(cfg.role_prompt or "—", language="markdown")
+                else:
+                    st.write("**Allowed Tools:**", ", ".join(cfg.allowed_tools or []) or "—")
 
         st.markdown("---")
         st.subheader("Diagnostics")
@@ -432,115 +444,148 @@ with tab_config:
     st.subheader("Manage Agents")
 
     existing = [c.name for c in st.session_state.configs]
-    choice = st.selectbox("Select", ["(New)"] + existing, index=0, key="cfg_picker")
+    choice = st.selectbox(
+        "Select",
+        ["(New)"] + existing,
+        index=0 if st.session_state.get("cfg_choice","(New)")=="(New)"
+              else (existing.index(st.session_state["cfg_choice"])+1 if st.session_state["cfg_choice"] in existing else 0),
+        key="cfg_picker"
+    )
+    if choice != st.session_state.get("cfg_choice","(New)"):
+        st.session_state.cfg_choice = choice
+        st.rerun()
+
     creating_new = choice == "(New)"
+    src_cfg = None if creating_new else _get_config_map()[choice]
 
-    if creating_new:
-        working = AgentCfg(name="")
+    # ---- Agent type: RADIO (no callbacks; Streamlit will auto-rerun) ----
+    agent_type = st.radio(
+        "Category",
+        options=["basic", "planner", "orchestrator"],
+        index=(0 if creating_new else {"basic":0, "planner":1, "orchestrator":2}[src_cfg.agent_type]),
+        key="edit_agent_type",
+        horizontal=True,
+    )
+
+    # Common fields
+    name = st.text_input("Name (unique)", value=("" if creating_new else src_cfg.name), key="edit_name")
+    provider = st.selectbox(
+        "Provider", list(SUPPORTED_PROVIDERS),
+        index=(0 if creating_new else list(SUPPORTED_PROVIDERS).index(src_cfg.provider)),
+        key="edit_provider"
+    )
+    model = st.text_input("Model", value=("gpt-4o-mini" if creating_new else src_cfg.model), key="edit_model")
+    temperature = st.slider("Temperature", 0.0, 1.0, float(0.2 if creating_new else src_cfg.temperature), step=0.05, key="edit_temperature")
+    description = st.text_area("Description", value=("" if creating_new else src_cfg.description), height=80, key="edit_description")
+
+    # Conditional sections update immediately when radio changes
+    selected_tools: List[str] = []
+    if agent_type == "basic":
+        role_prompt = st.text_area("Role/System Prompt", value=("" if creating_new else src_cfg.role_prompt), height=140, key="edit_role_prompt")
+        context_enabled = st.checkbox("Enable context memory", value=(True if creating_new else src_cfg.context_enabled), key="edit_context_enabled")
     else:
-        src = _get_config_map()[choice]
-        working = AgentCfg(**asdict(src))
+        st.caption("Planner/Orchestrator do not use role prompts nor context memory.")
+        # Use the currently typed name (or placeholder) to namespace checkbox keys so they don't collide
+        ns = (name or (src_cfg.name if src_cfg else "new")).strip() or "new"
+        default_tools = ([] if creating_new else (src_cfg.allowed_tools or []))
+        tool_names = [k for k in BUILTIN_TOOLS.keys() if k not in ALWAYS_ON_TOOLS]
 
-    with st.form("cfg_form"):
-        agent_type = st.selectbox(
-            "Category",
-            options=["basic", "planner", "orchestrator"],
-            index={"basic": 0, "planner": 1, "orchestrator": 2}.get(working.agent_type, 0),
-        )
+        cols = st.columns(3)
+        for i, tname in enumerate(tool_names):
+            with cols[i % len(cols)]:
+                checked = st.checkbox(
+                    tname,
+                    value=(tname in default_tools),
+                    key=f"toolchk__{ns}__{tname}"
+                )
+                if checked:
+                    selected_tools.append(tname)
 
-        name = st.text_input("Name (unique)", value=working.name)
-        provider = st.selectbox("Provider", list(SUPPORTED_PROVIDERS),
-                                index=(list(SUPPORTED_PROVIDERS).index(working.provider) if working.provider in SUPPORTED_PROVIDERS else 0))
-        model = st.text_input("Model", value=working.model)
-        temperature = st.slider("Temperature", 0.0, 1.0, float(working.temperature), step=0.05)
-        description = st.text_area("Description", value=working.description, height=80)
+    c1, c2, _ = st.columns([1, 1, 6])
+    save_clicked = c1.button("Save", key="edit_save")
+    delete_clicked = (False if creating_new else c2.button("Delete", key="edit_delete"))
 
-        role_prompt = working.role_prompt
-        context_enabled = working.context_enabled
+    if save_clicked:
+        nm = (name or "").strip()
+        agt_type = agent_type or "basic"
+        prov = provider or "openai"
+        mdl = (model or "gpt-4o-mini").strip()
+        temp = float(temperature or 0.2)
+        desc = (description or "").strip()
 
-        if agent_type == "basic":
-            role_prompt = st.text_area("Role/System Prompt", value=working.role_prompt, height=140)
-            context_enabled = st.checkbox("Enable context memory", value=working.context_enabled)
+        if not nm:
+            st.toast("Name is required.", icon="⚠️")
+        elif prov not in SUPPORTED_PROVIDERS:
+            st.toast(f"Unsupported provider: {prov}", icon="⚠️")
         else:
-            st.caption("Planner/Orchestrator do not use role prompts nor context memory.")
-
-        c1, c2, c3 = st.columns([1, 1, 1])
-        save_clicked = c1.form_submit_button("Save")
-        delete_clicked = (False if creating_new else c2.form_submit_button("Delete"))
-
-        if save_clicked:
-            nm = name.strip()
-            if not nm:
-                st.toast("Name is required.", icon="⚠️")
-            elif provider not in SUPPORTED_PROVIDERS:
-                st.toast(f"Unsupported provider: {provider}", icon="⚠️")
+            # Build new config from the current widgets
+            if agt_type == "basic":
+                rp = st.session_state.get("edit_role_prompt") or ""
+                ctx = bool(st.session_state.get("edit_context_enabled", True))
+                new_cfg = AgentCfg(
+                    name=nm, agent_type=agt_type, provider=prov, model=mdl,
+                    temperature=temp, description=desc,
+                    role_prompt=rp, context_enabled=ctx, allowed_tools=[]
+                )
             else:
-                names = [c.name for c in st.session_state.configs]
-                is_rename = (not creating_new) and (nm != working.name)
-                if (creating_new and nm in names) or (is_rename and nm in names):
-                    st.toast("Agent name must be unique.", icon="⚠️")
+                new_cfg = AgentCfg(
+                    name=nm, agent_type=agt_type, provider=prov, model=mdl,
+                    temperature=temp, description=desc,
+                    role_prompt="", context_enabled=False,
+                    allowed_tools=list(dict.fromkeys(selected_tools))
+                )
+
+            # Replace config entry and REINSTANTIATE (robust tool updates)
+            if not creating_new:
+                old = src_cfg.name
+                st.session_state.configs = [c for c in st.session_state.configs if c.name != old]
+                # migrate transcript if rename
+                if old in st.session_state.transcripts:
+                    if old != new_cfg.name:
+                        st.session_state.transcripts[new_cfg.name] = st.session_state.transcripts.pop(old)
                 else:
-                    new_cfg = AgentCfg(
-                        name=nm,
-                        agent_type=agent_type,
-                        provider=provider,
-                        model=model.strip(),
-                        temperature=float(temperature),
-                        description=description.strip(),
-                        role_prompt=(role_prompt if agent_type == "basic" else ""),
-                        context_enabled=(bool(context_enabled) if agent_type == "basic" else False),
-                    )
+                    _ensure_transcript(new_cfg.name)
+                st.session_state.instances.pop(old, None)
+                if st.session_state.selected == old:
+                    st.session_state.selected = new_cfg.name
 
-                    if creating_new:
-                        st.session_state.configs.append(new_cfg)
-                        _ensure_transcript(new_cfg.name)
-                        st.session_state.selected = new_cfg.name
-                    else:
-                        old = working.name
-                        for i, c in enumerate(st.session_state.configs):
-                            if c.name == old:
-                                st.session_state.configs[i] = new_cfg
-                                break
-                        if old in st.session_state.transcripts:
-                            st.session_state.transcripts[new_cfg.name] = st.session_state.transcripts.pop(old)
-                        else:
-                            _ensure_transcript(new_cfg.name)
-                        st.session_state.instances.pop(old, None)
-                        if st.session_state.selected == old:
-                            st.session_state.selected = new_cfg.name
-
-                    # Persist to agents.json
-                    save_agent_configs_file(st.session_state.configs)
-                    st.toast("Saved.", icon="💾")
-                    st.session_state.input_nonce += 1
-                    st.rerun()
-
-        if delete_clicked and not creating_new:
-            victim = working.name
-            st.session_state.configs = [c for c in st.session_state.configs if c.name != victim]
-            st.session_state.instances.pop(victim, None)
-            st.session_state.transcripts.pop(victim, None)
-            if st.session_state.configs:
-                st.session_state.selected = st.session_state.configs[0].name
-                _ensure_transcript(st.session_state.selected)
-            else:
-                # No agents left — create a default and save
-                st.session_state.configs = [
-                    AgentCfg(
-                        name="default",
-                        agent_type="basic",
-                        provider="openai",
-                        model="gpt-4o-mini",
-                        temperature=0.2,
-                        description="Default basic agent.",
-                        role_prompt="",
-                        context_enabled=True,
-                    )
-                ]
-                st.session_state.selected = st.session_state.configs[0].name
-                _ensure_transcript(st.session_state.selected)
-            # Persist after delete
+            st.session_state.configs.append(new_cfg)
             save_agent_configs_file(st.session_state.configs)
-            st.toast(f"Deleted '{victim}'.", icon="🗑️")
-            st.session_state.input_nonce += 1
-            st.rerun()
+
+            # Recreate the instance NOW with the new tool set
+            st.session_state.instances[new_cfg.name] = agent_factory(new_cfg)
+            _ensure_transcript(new_cfg.name)
+
+            st.session_state.cfg_choice = new_cfg.name
+            st.toast("Saved.", icon="💾")
+            _do_rerun()# st.experimental_rerun()  # plain rerun after a save is fine; tabs keep position
+
+    if delete_clicked and not creating_new:
+        victim = src_cfg.name
+        st.session_state.configs = [c for c in st.session_state.configs if c.name != victim]
+        st.session_state.instances.pop(victim, None)
+        st.session_state.transcripts.pop(victim, None)
+        if st.session_state.configs:
+            st.session_state.selected = st.session_state.configs[0].name
+            st.session_state.cfg_choice = st.session_state.selected
+            _ensure_transcript(st.session_state.selected)
+        else:
+            st.session_state.configs = [
+                AgentCfg(
+                    name="default",
+                    agent_type="basic",
+                    provider="openai",
+                    model="gpt-4o-mini",
+                    temperature=0.2,
+                    description="Default basic agent.",
+                    role_prompt="",
+                    context_enabled=True,
+                    allowed_tools=[],
+                )
+            ]
+            st.session_state.selected = st.session_state.configs[0].name
+            st.session_state.cfg_choice = st.session_state.selected
+            _ensure_transcript(st.session_state.selected)
+        save_agent_configs_file(st.session_state.configs)
+        st.toast(f"Deleted '{victim}'.", icon="🗑️")
+        _do_rerun()#st.experimental_rerun()
