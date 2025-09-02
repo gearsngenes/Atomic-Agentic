@@ -1,7 +1,4 @@
-# atomic_ui.py — TOOL_CALLS tape + toolbox sync/rebinding + agents.json persistence
-# FIXED:
-# - Agent-type switch uses radio with NO on_change rerun; form updates instantly and stays on Config tab.
-# - Planner/Orchestrator tool selection via CHECKBOXES. On Save: replace config in file, drop instance, recreate.
+# atomic_ui.py — Orchestrator supported, TOOL_CALLS tape, toolbox sync/rebinding, agents.json persistence
 from __future__ import annotations
 
 import json
@@ -12,7 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-# ---- Atomic-Agentic modules (ensure importable) ----
+# ---- Atomic-Agentic modules (ensure importable in your env) ----
 from modules.Agents import Agent
 from modules.ToolAgents import PlannerAgent, OrchestratorAgent
 from modules.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine
@@ -94,8 +91,8 @@ def _md_tool_block(name: str, args: Dict[str, Any]) -> str:
     return f"**Tool:** {name}\n\n**Args**:\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```"
 
 # ============================== Built-in tools (explicit, no Streamlit) ==============================
-def _return(val: Any) -> Any:
-    record_tool_call("_return", val=val); return val
+# def _return(val: Any) -> Any:
+#     record_tool_call("_return", val=val); return val
 
 def add(a: float, b: float) -> float:
     record_tool_call("add", a=a, b=b); return a + b
@@ -134,13 +131,13 @@ def radians_(deg: float) -> float:
 def degrees_(rad: float) -> float:
     record_tool_call("degrees", rad=rad); return math.degrees(rad)
 
-# match toolbox names
+# align toolbox names
 pow_.__name__ = "pow"
 radians_.__name__ = "radians"
 degrees_.__name__ = "degrees"
 
 BUILTIN_TOOLS: Dict[str, Tuple[Callable[..., Any], str]] = {
-    "_return": (_return, "Return the supplied value (terminal step)."),
+    # "_return": (_return, "Return the supplied value (terminal step)."),
     "add": (add, "add(a: float, b: float) -> float"),
     "sub": (sub, "sub(a: float, b: float) -> float"),
     "mul": (mul, "mul(a: float, b: float) -> float"),
@@ -245,6 +242,13 @@ def agent_factory(cfg: AgentCfg) -> Any:
         context_enabled=cfg.context_enabled,
     )
 
+# ============================== Rerun helper (works across Streamlit versions) ==============================
+def _do_rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+
 # ============================== Session bootstrap ==============================
 def _bootstrap_defaults():
     if "configs" not in st.session_state:
@@ -282,14 +286,6 @@ def _bootstrap_defaults():
 
     for cfg in st.session_state.configs:
         _ensure_transcript(cfg.name)
-
-def _do_rerun():
-    # Streamlit API changed: st.rerun() is the supported call.
-    # Fall back to experimental_rerun() if running on an older build.
-    if hasattr(st, "rerun"):
-        st.rerun()
-    elif hasattr(st, "experimental_rerun"):
-        st.experimental_rerun()
 
 def _get_config_map() -> Dict[str, AgentCfg]:
     return {c.name: c for c in st.session_state.configs}
@@ -359,15 +355,17 @@ with tab_chat:
                 st.session_state.selected = selected
                 _ensure_transcript(selected)
                 st.session_state.input_nonce += 1
-                st.rerun()
+                _do_rerun()
 
             agent = _get_instance(st.session_state.selected)
 
+            # render transcript
             for msg in st.session_state.transcripts.get(agent.name, []):
                 avatar = "🙂" if msg["role"] == "user" else "🤖"
                 with st.chat_message(msg["role"], avatar=avatar):
                     st.markdown(msg["content"])
 
+            # input row
             with st.container(border=True):
                 ci_cols = st.columns([6, 1, 1])
                 input_key = f"chat_input__{agent.name}__{st.session_state.input_nonce}"
@@ -381,7 +379,7 @@ with tab_chat:
                     _reset_agent_memory(agent)
                 finally:
                     st.session_state.input_nonce += 1
-                    st.rerun()
+                    _do_rerun()
 
             if send_clicked:
                 txt = (user_text or "").strip()
@@ -391,7 +389,7 @@ with tab_chat:
                     try:
                         _append_chat_line(agent.name, "user", txt)
 
-                        # clear tape
+                        # clear tape for this run
                         TOOL_CALLS.clear()
 
                         # Sync toolbox to selected tools (and rebind callables) before running
@@ -401,6 +399,7 @@ with tab_chat:
 
                         reply = _agent_send(agent, txt)
 
+                        # stitch tool-calls then final reply
                         for call in TOOL_CALLS:
                             _append_chat_line(agent.name, "assistant", _md_tool_block(call["name"], call["args"]))
                         _append_chat_line(agent.name, "assistant", reply)
@@ -412,7 +411,7 @@ with tab_chat:
                         st.session_state.last_error = str(e)
                     finally:
                         st.session_state.input_nonce += 1
-                        st.rerun()
+                        _do_rerun()
 
     with right:
         st.subheader("Agent Info")
@@ -453,12 +452,12 @@ with tab_config:
     )
     if choice != st.session_state.get("cfg_choice","(New)"):
         st.session_state.cfg_choice = choice
-        st.rerun()
+        _do_rerun()
 
     creating_new = choice == "(New)"
     src_cfg = None if creating_new else _get_config_map()[choice]
 
-    # ---- Agent type: RADIO (no callbacks; Streamlit will auto-rerun) ----
+    # Agent type: RADIO (no callbacks; Streamlit auto-reruns and stays on this tab)
     agent_type = st.radio(
         "Category",
         options=["basic", "planner", "orchestrator"],
@@ -485,7 +484,7 @@ with tab_config:
         context_enabled = st.checkbox("Enable context memory", value=(True if creating_new else src_cfg.context_enabled), key="edit_context_enabled")
     else:
         st.caption("Planner/Orchestrator do not use role prompts nor context memory.")
-        # Use the currently typed name (or placeholder) to namespace checkbox keys so they don't collide
+        # Namespaced keys so flipping entries doesn't collide
         ns = (name or (src_cfg.name if src_cfg else "new")).strip() or "new"
         default_tools = ([] if creating_new else (src_cfg.allowed_tools or []))
         tool_names = [k for k in BUILTIN_TOOLS.keys() if k not in ALWAYS_ON_TOOLS]
@@ -518,7 +517,7 @@ with tab_config:
         elif prov not in SUPPORTED_PROVIDERS:
             st.toast(f"Unsupported provider: {prov}", icon="⚠️")
         else:
-            # Build new config from the current widgets
+            # Build new config
             if agt_type == "basic":
                 rp = st.session_state.get("edit_role_prompt") or ""
                 ctx = bool(st.session_state.get("edit_context_enabled", True))
@@ -535,11 +534,11 @@ with tab_config:
                     allowed_tools=list(dict.fromkeys(selected_tools))
                 )
 
-            # Replace config entry and REINSTANTIATE (robust tool updates)
+            # Replace config entry and re-instantiate (planner/orchestrator supported)
             if not creating_new:
                 old = src_cfg.name
                 st.session_state.configs = [c for c in st.session_state.configs if c.name != old]
-                # migrate transcript if rename
+                # migrate transcript on rename
                 if old in st.session_state.transcripts:
                     if old != new_cfg.name:
                         st.session_state.transcripts[new_cfg.name] = st.session_state.transcripts.pop(old)
@@ -552,13 +551,13 @@ with tab_config:
             st.session_state.configs.append(new_cfg)
             save_agent_configs_file(st.session_state.configs)
 
-            # Recreate the instance NOW with the new tool set
+            # Recreate instance NOW with the selected tools (works for orchestrator too)
             st.session_state.instances[new_cfg.name] = agent_factory(new_cfg)
             _ensure_transcript(new_cfg.name)
 
             st.session_state.cfg_choice = new_cfg.name
             st.toast("Saved.", icon="💾")
-            _do_rerun()# st.experimental_rerun()  # plain rerun after a save is fine; tabs keep position
+            _do_rerun()
 
     if delete_clicked and not creating_new:
         victim = src_cfg.name
@@ -588,4 +587,4 @@ with tab_config:
             _ensure_transcript(st.session_state.selected)
         save_agent_configs_file(st.session_state.configs)
         st.toast(f"Deleted '{victim}'.", icon="🗑️")
-        _do_rerun()#st.experimental_rerun()
+        _do_rerun()
