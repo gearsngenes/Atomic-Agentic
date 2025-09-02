@@ -1,14 +1,16 @@
-# atomic_ui.py — Simplest "global tool-calls tape" + in-place rebinding of tool callables
+# atomic_ui.py — global TOOL_CALLS + toolbox rebinding + agents.json persistence
 # - One global TOOL_CALLS list (order-preserving).
 # - Tool bodies append {'name': ..., 'args': {...}} to TOOL_CALLS.
-# - Before invoke(): refresh toolbox entries so they point to THIS RUN’s function objects.
-# - After invoke(): stitch each tool-call into the assistant transcript, then append the final reply and clear TOOL_CALLS.
-# - Planner forced synchronous (is_async=False). No wrappers, no polling, no Streamlit calls from tools.
+# - Before invoke(): refresh toolbox entries to THIS RUN’s function objects.
+# - After invoke(): stitch tool-calls into assistant transcript, append final reply, clear TOOL_CALLS.
+# - Planner forced synchronous (is_async=False).
+# - Agent configs persist to agents.json across app reloads.
 
 from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, asdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -18,6 +20,56 @@ import streamlit as st
 from modules.Agents import Agent
 from modules.ToolAgents import PlannerAgent, OrchestratorAgent
 from modules.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine
+
+# ============================== Persistence ==============================
+CONFIG_PATH = "agents.json"
+
+@dataclass
+class AgentCfg:
+    name: str
+    agent_type: str = "basic"      # "basic" | "planner" | "orchestrator"
+    provider: str = "openai"       # "openai" | "gemini" | "mistral"
+    model: str = "gpt-4o-mini"
+    temperature: float = 0.2
+    description: str = ""
+    # basic-only:
+    role_prompt: str = ""
+    context_enabled: bool = True
+
+SUPPORTED_PROVIDERS = ("openai", "gemini", "mistral")
+
+def _cfg_from_dict(d: Dict[str, Any]) -> AgentCfg:
+    # Defensive: ignore unknown keys; fill defaults for missing keys.
+    return AgentCfg(
+        name=d.get("name", "").strip() or "unnamed",
+        agent_type=(d.get("agent_type") or "basic").lower(),
+        provider=(d.get("provider") or "openai").lower(),
+        model=d.get("model") or "gpt-4o-mini",
+        temperature=float(d.get("temperature", 0.2)),
+        description=d.get("description") or "",
+        role_prompt=d.get("role_prompt") or "",
+        context_enabled=bool(d.get("context_enabled", True)),
+    )
+
+def load_agent_configs_file() -> List[AgentCfg]:
+    if not os.path.exists(CONFIG_PATH):
+        return []
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        return [_cfg_from_dict(x) for x in data]
+    except Exception:
+        return []
+
+def save_agent_configs_file(configs: List[AgentCfg]) -> None:
+    try:
+        payload = [asdict(c) for c in configs]
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        st.toast(f"Failed to save agents.json: {e}", icon="❌")
 
 # ============================== Global tool-calls tape ==============================
 # Tools append here at call time; UI drains after invoke().
@@ -46,72 +98,54 @@ def _clear_transcript(name: str) -> None:
     st.session_state.transcripts[name] = []
 
 def _md_tool_block(name: str, args: Dict[str, Any]) -> str:
-    return f"Tool: {name}\n\nArgs:\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```"
+    return f"**Tool:** {name}\n\n**Args**:\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```"
 
 # ============================== Built-in tools (explicit, no Streamlit) ==============================
-def echo(prompt: str) -> str:
-    record_tool_call("__dev_tools__.echo", prompt=prompt)
-    return prompt
-
-def _return(val: Any) -> Any:
-    record_tool_call("__dev_tools__._return", val=val)
-    return val
 
 def add(a: float, b: float) -> float:
-    record_tool_call("__dev_tools__.add", a=a, b=b)
-    return a + b
+    record_tool_call("add", a=a, b=b); return a + b
 
 def sub(a: float, b: float) -> float:
-    record_tool_call("__dev_tools__.sub", a=a, b=b)
-    return a - b
+    record_tool_call("sub", a=a, b=b); return a - b
 
 def mul(a: float, b: float) -> float:
-    record_tool_call("__dev_tools__.mul", a=a, b=b)
-    return a * b
+    record_tool_call("mul", a=a, b=b); return a * b
 
 def div(a: float, b: float) -> float:
-    record_tool_call("__dev_tools__.div", a=a, b=b)
-    if b == 0:
-        raise ZeroDivisionError("Division by zero")
+    record_tool_call("div", a=a, b=b)
+    if b == 0: raise ZeroDivisionError("Division by zero")
     return a / b
 
 def pow_(a: float, b: float) -> float:
-    record_tool_call("__dev_tools__.pow", a=a, b=b)
-    return math.pow(a, b)
+    record_tool_call("pow", a=a, b=b); return math.pow(a, b)
 
 def sqrt(x: float) -> float:
-    record_tool_call("__dev_tools__.sqrt", x=x)
-    if x < 0:
-        raise ValueError("sqrt domain error: x must be >= 0")
+    record_tool_call("sqrt", x=x)
+    if x < 0: raise ValueError("sqrt domain error: x must be >= 0")
     return math.sqrt(x)
 
 def sin(x: float) -> float:
-    record_tool_call("__dev_tools__.sin", x=x)
-    return math.sin(x)
+    record_tool_call("sin", x=x); return math.sin(x)
 
 def cos(x: float) -> float:
-    record_tool_call("__dev_tools__.cos", x=x)
-    return math.cos(x)
+    record_tool_call("cos", x=x); return math.cos(x)
 
 def tan(x: float) -> float:
-    record_tool_call("__dev_tools__.tan", x=x)
-    return math.tan(x)
+    record_tool_call("tan", x=x); return math.tan(x)
 
 def radians_(deg: float) -> float:
-    record_tool_call("__dev_tools__.radians", deg=deg)
-    return math.radians(deg)
+    record_tool_call("radians", deg=deg); return math.radians(deg)
 
 def degrees_(rad: float) -> float:
-    record_tool_call("__dev_tools__.degrees", rad=rad)
-    return math.degrees(rad)
-
-# Match the keys ToolAgent uses: "__dev_tools__.pow/radians/degrees"
+    record_tool_call("degrees", rad=rad); return math.degrees(rad)
+def _return(val: Any) -> Any:
+    record_tool_call("_return", val=val); return val
+# Match keys expected by ToolAgent: "__dev_tools__.pow/radians/degrees"
 pow_.__name__ = "pow"
 radians_.__name__ = "radians"
 degrees_.__name__ = "degrees"
 
 BUILTIN_TOOLS: Dict[str, Tuple[Callable[..., Any], str]] = {
-    "echo": (echo, "Echo back the prompt (identity)."),
     "_return": (_return, "Return the supplied value (terminal step)."),
     "add": (add, "add(a: float, b: float) -> float"),
     "sub": (sub, "sub(a: float, b: float) -> float"),
@@ -138,16 +172,12 @@ def refresh_builtin_tools(tool_agent: Any) -> None:
     """
     Overwrite existing '__dev_tools__.*' entries so they point to THIS RUN's functions.
     Fixes stale callables captured on previous Streamlit reruns.
-    Toolbox shape (from Agents.py):
-      self._toolbox: Dict[str, Dict[str, Dict{'callable','description'}]]
-      source bucket: '__dev_tools__'
-      key in bucket: '__dev_tools__.<func_name>'
     """
     tb = getattr(tool_agent, "_toolbox", None)
     bucket = tb.get("__dev_tools__") if isinstance(tb, dict) else None
 
     if not isinstance(bucket, dict):
-        # If no bucket yet, try to register everything.
+        # No dev bucket yet → attempt full registration.
         register_builtin_tools(tool_agent)
         tb = getattr(tool_agent, "_toolbox", None)
         bucket = tb.get("__dev_tools__") if isinstance(tb, dict) else None
@@ -170,20 +200,6 @@ def refresh_builtin_tools(tool_agent: Any) -> None:
                 pass
 
 # ============================== Engines & Agents ==============================
-@dataclass
-class AgentCfg:
-    name: str
-    agent_type: str = "basic"      # "basic" | "planner" | "orchestrator"
-    provider: str = "openai"       # "openai" | "gemini" | "mistral"
-    model: str = "gpt-4o-mini"
-    temperature: float = 0.2
-    description: str = ""
-    # basic-only:
-    role_prompt: str = ""
-    context_enabled: bool = True
-
-SUPPORTED_PROVIDERS = ("openai", "gemini", "mistral")
-
 def engine_factory(provider: str, model: str, temperature: float):
     p = (provider or "").lower()
     if p == "openai":
@@ -198,7 +214,7 @@ def agent_factory(cfg: AgentCfg) -> Any:
     engine = engine_factory(cfg.provider, cfg.model, cfg.temperature)
 
     if cfg.agent_type == "planner":
-        # Force synchronous execution so tool bodies run inline (simplifies everything).
+        # Force synchronous execution so tool bodies run inline.
         inst = PlannerAgent(
             name=cfg.name,
             description=cfg.description,
@@ -231,32 +247,39 @@ def agent_factory(cfg: AgentCfg) -> Any:
 # ============================== Session bootstrap ==============================
 def _bootstrap_defaults():
     if "configs" not in st.session_state:
-        st.session_state.configs: List[AgentCfg] = []
+        # Load from agents.json if present; else create one default agent and save.
+        loaded = load_agent_configs_file()
+        if loaded:
+            st.session_state.configs: List[AgentCfg] = loaded
+        else:
+            st.session_state.configs = [
+                AgentCfg(
+                    name="default",
+                    agent_type="basic",
+                    provider="openai",
+                    model="gpt-4o-mini",
+                    temperature=0.2,
+                    description="Default basic agent.",
+                    role_prompt="",
+                    context_enabled=True,
+                )
+            ]
+            save_agent_configs_file(st.session_state.configs)
+
     if "instances" not in st.session_state:
         st.session_state.instances: Dict[str, Any] = {}
     if "transcripts" not in st.session_state:
         st.session_state.transcripts: Dict[str, List[Dict[str, str]]] = {}
     if "selected" not in st.session_state:
-        st.session_state.selected: Optional[str] = None
+        st.session_state.selected: Optional[str] = (st.session_state.configs[0].name if st.session_state.configs else None)
     if "last_error" not in st.session_state:
         st.session_state.last_error: str = ""
     if "input_nonce" not in st.session_state:
         st.session_state.input_nonce = 0
 
-    if not st.session_state.configs:
-        default = AgentCfg(
-            name="default",
-            agent_type="basic",
-            provider="openai",
-            model="gpt-4o-mini",
-            temperature=0.2,
-            description="Default basic agent.",
-            role_prompt="",
-            context_enabled=True,
-        )
-        st.session_state.configs.append(default)
-        st.session_state.selected = default.name
-        _ensure_transcript(default.name)
+    # Ensure transcripts exist for loaded configs
+    for cfg in st.session_state.configs:
+        _ensure_transcript(cfg.name)
 
 def _get_config_map() -> Dict[str, AgentCfg]:
     return {c.name: c for c in st.session_state.configs}
@@ -364,7 +387,7 @@ with tab_chat:
                         # New run: clear any stale tool-calls
                         TOOL_CALLS.clear()
 
-                        # CRITICAL: ensure toolbox uses THIS RUN’s tool functions (avoid stale callables)
+                        # Ensure toolbox uses THIS RUN’s tool functions (avoid stale callables)
                         if hasattr(agent, "_toolbox"):
                             refresh_builtin_tools(agent)
 
@@ -490,6 +513,8 @@ with tab_config:
                         if st.session_state.selected == old:
                             st.session_state.selected = new_cfg.name
 
+                    # Persist to agents.json
+                    save_agent_configs_file(st.session_state.configs)
                     st.toast("Saved.", icon="💾")
                     st.session_state.input_nonce += 1
                     st.rerun()
@@ -503,8 +528,23 @@ with tab_config:
                 st.session_state.selected = st.session_state.configs[0].name
                 _ensure_transcript(st.session_state.selected)
             else:
-                st.session_state.clear()
-                _bootstrap_defaults()
+                # No agents left — create a default and save
+                st.session_state.configs = [
+                    AgentCfg(
+                        name="default",
+                        agent_type="basic",
+                        provider="openai",
+                        model="gpt-4o-mini",
+                        temperature=0.2,
+                        description="Default basic agent.",
+                        role_prompt="",
+                        context_enabled=True,
+                    )
+                ]
+                st.session_state.selected = st.session_state.configs[0].name
+                _ensure_transcript(st.session_state.selected)
+            # Persist after delete
+            save_agent_configs_file(st.session_state.configs)
             st.toast(f"Deleted '{victim}'.", icon="🗑️")
             st.session_state.input_nonce += 1
             st.rerun()
