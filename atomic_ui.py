@@ -1,9 +1,10 @@
-# atomic_ui.py — Orchestrator supported, TOOL_CALLS tape, toolbox sync/rebinding, agents.json persistence
+# atomic_ui.py — TOOL_CALLS tape + toolbox sync/rebinding + agent-wrapper tools + agents.json persistence
 from __future__ import annotations
 
 import json
 import math
 import os
+import re
 from dataclasses import dataclass, asdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -30,14 +31,18 @@ class AgentCfg:
     context_enabled: bool = True
     # planner/orchestrator:
     allowed_tools: List[str] = None
+    allowed_agents: List[str] = None   # NEW: sub-agents this agent can call
 
 SUPPORTED_PROVIDERS = ("openai", "gemini", "mistral")
 ALWAYS_ON_TOOLS = {"_return"}  # always enabled (not shown)
 
 def _cfg_from_dict(d: Dict[str, Any]) -> AgentCfg:
-    allowed = d.get("allowed_tools")
-    if not isinstance(allowed, list):
-        allowed = []
+    allowed_tools = d.get("allowed_tools")
+    if not isinstance(allowed_tools, list):
+        allowed_tools = []
+    allowed_agents = d.get("allowed_agents")
+    if not isinstance(allowed_agents, list):
+        allowed_agents = []
     return AgentCfg(
         name=(d.get("name") or "").strip() or "unnamed",
         agent_type=(d.get("agent_type") or "basic").lower(),
@@ -47,7 +52,8 @@ def _cfg_from_dict(d: Dict[str, Any]) -> AgentCfg:
         description=d.get("description") or "",
         role_prompt=d.get("role_prompt") or "",
         context_enabled=bool(d.get("context_enabled", True)),
-        allowed_tools=[str(x) for x in allowed],
+        allowed_tools=[str(x) for x in allowed_tools],
+        allowed_agents=[str(x) for x in allowed_agents],
     )
 
 def load_agent_configs_file() -> List[AgentCfg]:
@@ -77,6 +83,96 @@ def record_tool_call(name: str, **kwargs) -> None:
     TOOL_CALLS.append({"name": name, "args": dict(kwargs)})
 
 # ============================== Transcript helpers ==============================
+def _slugify_agent(name: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_").lower()
+    return s or "agent"
+
+def _make_agent_wrapper(sub_agent_name: str):
+    """
+    Wrapper callable that:
+      - logs to TOOL_CALLS: name="Agent: <sub_agent_name>", args={"prompt": prompt}
+      - preflight-syncs the sub-agent's toolbox/wrappers
+      - calls sub-agent and returns its result as str
+    """
+    def wrapper(prompt: str):
+        record_tool_call(f"Agent: {sub_agent_name}", prompt=prompt)
+        sub = _get_instance(sub_agent_name)
+        _preflight_sync_for(sub_agent_name, sub)
+        return _agent_send(sub, prompt)
+    wrapper.__name__ = f"agent_{_slugify_agent(sub_agent_name)}_invoke"
+    return wrapper
+
+def sync_agent_wrappers(tool_agent, allowed_agents, cfg_map):
+    """
+    Ensure __dev_tools__.agent_<slug>_invoke entries match 'allowed_agents'
+    (present in cfg_map and not self).
+    - Add/register missing wrappers with sub-agent description.
+    - Rebind callables for existing wrappers (fresh closure).
+    - Remove wrappers for agents no longer allowed/present.
+    """
+    if not hasattr(tool_agent, "name"):
+        return
+    self_name = getattr(tool_agent, "name", "")
+    present = [a for a in (allowed_agents or []) if a in cfg_map and a != self_name]
+
+    wanted = {}
+    for a in present:
+        fn = _make_agent_wrapper(a)
+        desc = cfg_map[a].description or f"Call sub-agent '{a}' (invoke)."
+        key = f"__dev_tools__.{fn.__name__}"  # __dev_tools__.agent_<slug>_invoke
+        wanted[key] = (fn, desc)
+
+    tb = getattr(tool_agent, "_toolbox", None)
+    if not isinstance(tb, dict):
+        for _, (fn, desc) in wanted.items():
+            try:
+                tool_agent.register(fn, desc)
+            except Exception:
+                pass
+        return
+
+    bucket = tb.get("__dev_tools__")
+    if not isinstance(bucket, dict):
+        for _, (fn, desc) in wanted.items():
+            try:
+                tool_agent.register(fn, desc)
+            except Exception:
+                pass
+        bucket = tb.get("__dev_tools__")
+        if not isinstance(bucket, dict):
+            return
+
+    # remove wrappers not wanted anymore
+    for key in list(bucket.keys()):
+        if key.startswith("__dev_tools__.agent_") and key.endswith("_invoke"):
+            if key not in wanted:
+                bucket.pop(key, None)
+
+    # add or rebind wrappers
+    for key, (fn, desc) in wanted.items():
+        cell = bucket.get(key)
+        if isinstance(cell, dict) and "callable" in cell:
+            cell["callable"] = fn
+        elif cell is not None and callable(cell):
+            bucket[key] = fn
+        else:
+            try:
+                tool_agent.register(fn, desc)
+            except Exception:
+                pass
+
+def _preflight_sync_for(name: str, inst):
+    """If a sub-agent is Planner/Orchestrator, sync its tools and agent-wrappers to the saved config."""
+    cfg_map = _get_config_map()
+    cfg = cfg_map.get(name)
+    if not cfg:
+        return
+    if cfg.agent_type in ("planner", "orchestrator") and hasattr(inst, "_toolbox"):
+        sync_toolbox_with_selection(inst, cfg.allowed_tools)
+        sync_agent_wrappers(inst, cfg.allowed_agents, cfg_map)
+
+
+
 def _ensure_transcript(name: str) -> None:
     st.session_state.transcripts.setdefault(name, [])
 
@@ -88,11 +184,14 @@ def _clear_transcript(name: str) -> None:
     st.session_state.transcripts[name] = []
 
 def _md_tool_block(name: str, args: Dict[str, Any]) -> str:
+    if name.startswith("Agent: "):
+        _name = name[7:].strip()
+        return f"**Agent:** {_name}\n\n**Prompt:**\n```\n{args.get('prompt','')}\n```"
     return f"**Tool:** {name}\n\n**Args**:\n```json\n{json.dumps(args, indent=2, ensure_ascii=False)}\n```"
 
 # ============================== Built-in tools (explicit, no Streamlit) ==============================
-# def _return(val: Any) -> Any:
-#     record_tool_call("_return", val=val); return val
+def _return(val: Any) -> Any:
+    record_tool_call("_return", val=val); return val
 
 def add(a: float, b: float) -> float:
     record_tool_call("add", a=a, b=b); return a + b
@@ -131,13 +230,13 @@ def radians_(deg: float) -> float:
 def degrees_(rad: float) -> float:
     record_tool_call("degrees", rad=rad); return math.degrees(rad)
 
-# align toolbox names
+# match toolbox names
 pow_.__name__ = "pow"
 radians_.__name__ = "radians"
 degrees_.__name__ = "degrees"
 
 BUILTIN_TOOLS: Dict[str, Tuple[Callable[..., Any], str]] = {
-    # "_return": (_return, "Return the supplied value (terminal step)."),
+    "_return": (_return, "Return the supplied value (terminal step)."),
     "add": (add, "add(a: float, b: float) -> float"),
     "sub": (sub, "sub(a: float, b: float) -> float"),
     "mul": (mul, "mul(a: float, b: float) -> float"),
@@ -151,13 +250,17 @@ BUILTIN_TOOLS: Dict[str, Tuple[Callable[..., Any], str]] = {
     "degrees": (degrees_, "degrees(rad: float) -> float"),
 }
 
-# ============================== Toolbox sync (register/remove/rebind) ==============================
+# ============================== Agent wrappers ==============================
+def _slugify_agent(name: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_").lower()
+    return s or "agent"
+
+
+# ============================== Toolbox sync (register/remove/rebind for BUILTIN TOOLS only) ==============================
 def sync_toolbox_with_selection(tool_agent: Any, selected: List[str] | None, always_on: set[str] = ALWAYS_ON_TOOLS) -> None:
     """
-    Bring tool_agent._toolbox['__dev_tools__'] to match selected ∪ always_on.
-    - Remove unselected.
-    - Add missing selected.
-    - Rebind 'callable' cells to THIS RUN's functions.
+    Bring tool_agent._toolbox['__dev_tools__'] to match selected ∪ always_on for BUILTIN_TOOLS.
+    Important: DOES NOT remove keys for agent wrappers (__dev_tools__.agent_*_invoke).
     """
     target = set(selected or [])
     target |= set(always_on)
@@ -183,12 +286,15 @@ def sync_toolbox_with_selection(tool_agent: Any, selected: List[str] | None, alw
         if not isinstance(bucket, dict):
             return
 
-    # remove unselected
+    # Remove only unselected BUILTIN tool keys; DO NOT touch agent wrappers
     for key in list(bucket.keys()):
-        if key.startswith("__dev_tools__.") and key not in want:
-            bucket.pop(key, None)
+        if key.startswith("__dev_tools__.agent_") and key.endswith("_invoke"):
+            continue  # leave wrappers alone
+        if key.startswith("__dev_tools__."):
+            if key not in want:
+                bucket.pop(key, None)
 
-    # add or rebind selected
+    # Add or rebind selected builtin tools
     for key, (fn, desc) in want.items():
         cell = bucket.get(key)
         if isinstance(cell, dict) and "callable" in cell:
@@ -221,6 +327,7 @@ def agent_factory(cfg: AgentCfg) -> Any:
             is_async=False,     # force sync
             allow_agentic=True,
         )
+        # tools only here; wrappers added by caller after instantiation (requires cfg_map)
         sync_toolbox_with_selection(inst, cfg.allowed_tools)
         return inst
 
@@ -242,7 +349,7 @@ def agent_factory(cfg: AgentCfg) -> Any:
         context_enabled=cfg.context_enabled,
     )
 
-# ============================== Rerun helper (works across Streamlit versions) ==============================
+# ============================== Rerun helper ==============================
 def _do_rerun():
     if hasattr(st, "rerun"):
         st.rerun()
@@ -267,6 +374,7 @@ def _bootstrap_defaults():
                     role_prompt="",
                     context_enabled=True,
                     allowed_tools=[],
+                    allowed_agents=[],
                 )
             ]
             save_agent_configs_file(st.session_state.configs)
@@ -392,14 +500,16 @@ with tab_chat:
                         # clear tape for this run
                         TOOL_CALLS.clear()
 
-                        # Sync toolbox to selected tools (and rebind callables) before running
-                        cfg = _get_config_map().get(agent.name)
-                        if cfg and hasattr(agent, "_toolbox") and cfg.agent_type in ("planner", "orchestrator"):
+                        # Sync toolbox + wrappers to selected config before running
+                        cfg_map = _get_config_map()
+                        cfg = cfg_map.get(agent.name)
+                        if cfg and cfg.agent_type in ("planner", "orchestrator") and hasattr(agent, "_toolbox"):
                             sync_toolbox_with_selection(agent, cfg.allowed_tools)
+                            sync_agent_wrappers(agent, cfg.allowed_agents, cfg_map)
 
                         reply = _agent_send(agent, txt)
 
-                        # stitch tool-calls then final reply
+                        # stitch tool/agent call logs then final reply
                         for call in TOOL_CALLS:
                             _append_chat_line(agent.name, "assistant", _md_tool_block(call["name"], call["args"]))
                         _append_chat_line(agent.name, "assistant", reply)
@@ -431,6 +541,7 @@ with tab_chat:
                         st.code(cfg.role_prompt or "—", language="markdown")
                 else:
                     st.write("**Allowed Tools:**", ", ".join(cfg.allowed_tools or []) or "—")
+                    st.write("**Allowed Sub-agents:**", ", ".join(cfg.allowed_agents or []) or "—")
 
         st.markdown("---")
         st.subheader("Diagnostics")
@@ -479,26 +590,37 @@ with tab_config:
 
     # Conditional sections update immediately when radio changes
     selected_tools: List[str] = []
+    selected_agents: List[str] = []
+
     if agent_type == "basic":
         role_prompt = st.text_area("Role/System Prompt", value=("" if creating_new else src_cfg.role_prompt), height=140, key="edit_role_prompt")
         context_enabled = st.checkbox("Enable context memory", value=(True if creating_new else src_cfg.context_enabled), key="edit_context_enabled")
     else:
         st.caption("Planner/Orchestrator do not use role prompts nor context memory.")
+
         # Namespaced keys so flipping entries doesn't collide
         ns = (name or (src_cfg.name if src_cfg else "new")).strip() or "new"
+
+        # Tools (checkboxes)
         default_tools = ([] if creating_new else (src_cfg.allowed_tools or []))
         tool_names = [k for k in BUILTIN_TOOLS.keys() if k not in ALWAYS_ON_TOOLS]
-
-        cols = st.columns(3)
+        tcols = st.columns(3)
         for i, tname in enumerate(tool_names):
-            with cols[i % len(cols)]:
-                checked = st.checkbox(
-                    tname,
-                    value=(tname in default_tools),
-                    key=f"toolchk__{ns}__{tname}"
-                )
-                if checked:
+            with tcols[i % len(tcols)]:
+                if st.checkbox(tname, value=(tname in default_tools), key=f"toolchk__{ns}__{tname}"):
                     selected_tools.append(tname)
+
+        st.markdown("---")
+
+        # Sub-agents (checkboxes) — exclude self
+        all_agent_names = [c.name for c in st.session_state.configs]
+        default_agents = ([] if creating_new else (src_cfg.allowed_agents or []))
+        selectable_agents = [a for a in all_agent_names if a != (src_cfg.name if src_cfg else name)]
+        acols = st.columns(3)
+        for i, aname in enumerate(selectable_agents):
+            with acols[i % len(acols)]:
+                if st.checkbox(aname, value=(aname in default_agents), key=f"agentchk__{ns}__{aname}"):
+                    selected_agents.append(aname)
 
     c1, c2, _ = st.columns([1, 1, 6])
     save_clicked = c1.button("Save", key="edit_save")
@@ -524,17 +646,19 @@ with tab_config:
                 new_cfg = AgentCfg(
                     name=nm, agent_type=agt_type, provider=prov, model=mdl,
                     temperature=temp, description=desc,
-                    role_prompt=rp, context_enabled=ctx, allowed_tools=[]
+                    role_prompt=rp, context_enabled=ctx,
+                    allowed_tools=[], allowed_agents=[]
                 )
             else:
                 new_cfg = AgentCfg(
                     name=nm, agent_type=agt_type, provider=prov, model=mdl,
                     temperature=temp, description=desc,
                     role_prompt="", context_enabled=False,
-                    allowed_tools=list(dict.fromkeys(selected_tools))
+                    allowed_tools=list(dict.fromkeys(selected_tools)),
+                    allowed_agents=list(dict.fromkeys(selected_agents)),
                 )
 
-            # Replace config entry and re-instantiate (planner/orchestrator supported)
+            # Replace config entry and re-instantiate (robust updates)
             if not creating_new:
                 old = src_cfg.name
                 st.session_state.configs = [c for c in st.session_state.configs if c.name != old]
@@ -544,6 +668,7 @@ with tab_config:
                         st.session_state.transcripts[new_cfg.name] = st.session_state.transcripts.pop(old)
                 else:
                     _ensure_transcript(new_cfg.name)
+                # drop old instance
                 st.session_state.instances.pop(old, None)
                 if st.session_state.selected == old:
                     st.session_state.selected = new_cfg.name
@@ -551,8 +676,14 @@ with tab_config:
             st.session_state.configs.append(new_cfg)
             save_agent_configs_file(st.session_state.configs)
 
-            # Recreate instance NOW with the selected tools (works for orchestrator too)
-            st.session_state.instances[new_cfg.name] = agent_factory(new_cfg)
+            # Recreate instance NOW with tools + agent-wrappers
+            inst = agent_factory(new_cfg)
+            # Add wrappers now that we have cfg_map
+            cfg_map = _get_config_map()
+            if new_cfg.agent_type in ("planner", "orchestrator"):
+                sync_toolbox_with_selection(inst, new_cfg.allowed_tools)
+                sync_agent_wrappers(inst, new_cfg.allowed_agents, cfg_map)
+            st.session_state.instances[new_cfg.name] = inst
             _ensure_transcript(new_cfg.name)
 
             st.session_state.cfg_choice = new_cfg.name
@@ -580,6 +711,7 @@ with tab_config:
                     role_prompt="",
                     context_enabled=True,
                     allowed_tools=[],
+                    allowed_agents=[],
                 )
             ]
             st.session_state.selected = st.session_state.configs[0].name
