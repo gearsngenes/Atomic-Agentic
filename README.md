@@ -2,6 +2,7 @@
 <div align="center">
 <img src="./images/AtomicAgentic.png" width = 400 alt = "Atomic-Agentic Logo">
 </div>
+
 **Atomic-Agentic** is an agentic AI framework for professional developers and curious hobbyists who want to learn, prototype, and ship agent systems grounded in **SOLID** and **POSA (Pattern-Oriented Software Architecture)** principles—without vendor lock-in or framework magic.
 
 At its core, Atomic-Agentic is **provider-agnostic**. Agents keep the **same input/output behavior** no matter which LLM you plug in—OpenAI, Gemini, Mistral, llama.cpp, and beyond. Engines are swappable; agent code stays the same. This separation of concerns lets you evaluate models, costs, and latency **without rewriting** your agent logic.
