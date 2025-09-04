@@ -1,4 +1,4 @@
-# atomic_ui.py — TOOL_CALLS tape + toolbox sync/rebinding + agent-wrapper tools + agents.json persistence
+# atomic_ui.py
 from __future__ import annotations
 
 import json
