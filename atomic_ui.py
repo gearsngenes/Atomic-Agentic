@@ -7,9 +7,9 @@ import os
 import re
 from dataclasses import dataclass, asdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
-
+from dotenv import load_dotenv
 import streamlit as st
-
+load_dotenv()  # take environment variables from .env.
 # ---- Atomic-Agentic modules (ensure importable in your env) ----
 from modules.Agents import Agent
 from modules.ToolAgents import PlannerAgent, OrchestratorAgent
@@ -230,6 +230,18 @@ def radians_(deg: float) -> float:
 def degrees_(rad: float) -> float:
     record_tool_call("degrees", rad=rad); return math.degrees(rad)
 
+from langchain_tavily import TavilySearch, TavilyExtract
+searcher = TavilySearch(max_results=3)
+extractor = TavilyExtract()
+def web_search(query: str) -> str:
+    record_tool_call("web_search", query=query)
+    try:
+        URLs = [result["url"] for result in searcher.run(query)["results"]]
+        content = [result["raw_content"] for result in extractor.invoke({"urls":URLs})["results"]]
+        final_content = "\n\n".join(content)
+        return f"Web search results for query: {query}\n\n{final_content}"
+    except Exception as e:
+        return f"Web search failed: {e}"
 # match toolbox names
 pow_.__name__ = "pow"
 radians_.__name__ = "radians"
@@ -248,6 +260,7 @@ BUILTIN_TOOLS: Dict[str, Tuple[Callable[..., Any], str]] = {
     "tan": (tan, "tan(x: float) -> float (radians)"),
     "radians": (radians_, "radians(deg: float) -> float"),
     "degrees": (degrees_, "degrees(rad: float) -> float"),
+    "web_search": (web_search, "web_search(query: str) -> str; performs a web search and returns the amalgamated research content."),
 }
 
 # ============================== Agent wrappers ==============================
