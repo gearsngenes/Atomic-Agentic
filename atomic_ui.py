@@ -77,10 +77,14 @@ def save_agent_configs_file(configs: List[AgentCfg]) -> None:
         st.toast(f"Failed to save agents.json: {e}", icon="❌")
 
 # ============================== Global tool-calls tape ==============================
-TOOL_CALLS: List[Dict[str, Any]] = []  # {"name": str, "args": dict}
-
+import time
 def record_tool_call(name: str, **kwargs) -> None:
-    TOOL_CALLS.append({"name": name, "args": dict(kwargs)})
+    avatar = "🤖"
+    content = _md_tool_block(name, dict(kwargs))
+    with st.chat_message("assistant", avatar=avatar):
+        st.markdown(content)
+    time.sleep(0.2)
+    _append_chat_line(agent.name, "assistant", content)
 
 # ============================== Transcript helpers ==============================
 def _slugify_agent(name: str) -> str:
@@ -184,6 +188,9 @@ def _clear_transcript(name: str) -> None:
     st.session_state.transcripts[name] = []
 
 def _md_tool_block(name: str, args: Dict[str, Any]) -> str:
+    for arg in args:
+        if isinstance(args[arg], str) and len(args[arg]) > 1000:
+            args[arg] = args[arg][:300] + "...[argument truncated for brevity]"
     if name.startswith("Agent: "):
         _name = name[7:].strip()
         return f"**Agent:** {_name}\n\n**Prompt:**\n```\n{args.get('prompt','')}\n```"
@@ -510,9 +517,6 @@ with tab_chat:
                     try:
                         _append_chat_line(agent.name, "user", txt)
 
-                        # clear tape for this run
-                        TOOL_CALLS.clear()
-
                         # Sync toolbox + wrappers to selected config before running
                         cfg_map = _get_config_map()
                         cfg = cfg_map.get(agent.name)
@@ -523,10 +527,7 @@ with tab_chat:
                         reply = _agent_send(agent, txt)
 
                         # stitch tool/agent call logs then final reply
-                        for call in TOOL_CALLS:
-                            _append_chat_line(agent.name, "assistant", _md_tool_block(call["name"], call["args"]))
                         _append_chat_line(agent.name, "assistant", reply)
-                        TOOL_CALLS.clear()
 
                         st.session_state.last_error = ""
                     except Exception as e:
