@@ -50,6 +50,7 @@ class PlannerAgent(ToolAgent):
         return {"steps": steps, "tools": tools}
 
     def execute(self, plan: dict) -> Any:
+        self._previous_steps = [{"result": None, "completed": False} for _ in plan["steps"]]
         return asyncio.run(self.execute_async(plan)) if self._is_async else self._execute_sync(plan)
 
     def _execute_sync(self, plan: dict) -> Any:
@@ -105,8 +106,6 @@ class PlannerAgent(ToolAgent):
 
         self._previous_steps = []  # reset step history
         plan = self.strategize(prompt)
-        self._previous_steps = [{"result": None, "completed": False} for _ in plan["steps"]]
-
         logging.info(f"{self.name} created plan with {len(plan['steps'])} steps")
         result = self.execute(plan)
 
