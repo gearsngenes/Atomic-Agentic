@@ -31,7 +31,7 @@ After executing all tools, return the final result from tool_3.
 
 print("Generating plan...")
 plan = planner.strategize(task_prompt)
-print(f"Plan: {json.dumps(plan["steps"], indent=2)}")
+print(f"Plan: {json.dumps(plan, indent=2)}")
 print("\nExecuting plan...")
 result = planner.execute(plan)
 print(f"\nFinal Result: {result}")

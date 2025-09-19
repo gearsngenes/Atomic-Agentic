@@ -21,8 +21,8 @@ orchestrator = OrchestratorAgent(
 )
 
 # Step 3: Register plugins
-orchestrator.register(MathPlugin())
-orchestrator.register(ConsolePlugin())
+orchestrator.register(MathPlugin)
+orchestrator.register(ConsolePlugin)
 
 # Step 4: Give the orchestrator a task
 task =  ("Calculate the sum of 42 and 58, multiply it by three, and divide it by four, "

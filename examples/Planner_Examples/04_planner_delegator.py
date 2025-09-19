@@ -79,7 +79,7 @@ batch_math_planner = PlannerAgent(
 )
 
 # Register Math Plugin and print method
-batch_math_planner.register(MathPlugin())
+batch_math_planner.register(MathPlugin)
 
 def print_math_solution(problem, solution):
     print(f"Question: {problem}\nAnswer: {solution}")

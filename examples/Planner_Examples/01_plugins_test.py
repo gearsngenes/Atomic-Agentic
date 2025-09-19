@@ -6,7 +6,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 import logging
 # math_console_demo.py
 from modules.ToolAgents import PlannerAgent
-from modules.Plugins import ParserPlugin, MathPlugin, ConsolePlugin, PythonPlugin
+from modules.Plugins import ParserPlugin, MathPlugin, ConsolePlugin
 from modules.LLMEngines import *
 
 logging.getLogger().setLevel(level=logging.INFO)
@@ -18,10 +18,9 @@ print("Testing Task Decomposition and Printing capabilities")
 llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
 planner = PlannerAgent(name="Test-Planner", description="Testing the prebuilt plugins", llm_engine=llm_engine)
-planner.register(MathPlugin())
-planner.register(ConsolePlugin())
-planner.register(ParserPlugin())
-planner.register(PythonPlugin())
+planner.register(MathPlugin)
+planner.register(ConsolePlugin)
+planner.register(ParserPlugin)
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
@@ -59,15 +58,15 @@ print("\n⇢ Executing parser+math demo …")
 planner.invoke(task_prompt)
 
 # ────────────────────────  PYTHON + CONSOLE DEMO  ─────────────────────
-print("\n───────────────────────────────\n")
-print("Now testing type-determining and return…")
+# print("\n───────────────────────────────\n")
+# print("Now testing type-determining and return…")
 
-task_prompt = """
-TASK
-• Return the type value of the following object: {'a': [1, 2, 3], 'b': 4.5}
-  using PythonPlugin.get_type, and format the returned result as:
-  "TYPE RESULT -- <result here>".
-"""
-print("\n⇢ Executing python-type demo …")
-tname = planner.invoke(task_prompt)
-print("RETURNED VALUE: ", tname)
+# task_prompt = """
+# TASK
+# • Return the type value of the following object: {'a': [1, 2, 3], 'b': 4.5}
+#   using PythonPlugin.get_type, and format the returned result as:
+#   "TYPE RESULT -- <result here>".
+# """
+# print("\n⇢ Executing python-type demo …")
+# tname = planner.invoke(task_prompt)
+# print("RETURNED VALUE: ", tname)
