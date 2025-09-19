@@ -121,8 +121,9 @@ class ToolAgent(Agent, ABC):
             self._allow_mcp_registration = val
 
 class PlannerAgent(ToolAgent):
-    def __init__(self, name: str, description: str, llm_engine: LLMEngine, is_async=False, allow_agentic = False, allow_mcp = False):
-        super().__init__(name, description, llm_engine, role_prompt=Prompts.PLANNER_PROMPT, allow_agentic=allow_agentic, allow_mcp=allow_mcp)
+    def __init__(self, name: str, description: str, llm_engine: LLMEngine, context_enabled = False, is_async=False, allow_agentic = False, allow_mcp = False):
+        super().__init__(name = name, description=description, llm_engine=llm_engine, role_prompt=Prompts.PLANNER_PROMPT, allow_agentic=allow_agentic, allow_mcp=allow_mcp)
+        self.context_enabled = context_enabled
         self._is_async = is_async
         self._previous_steps: list[dict] = []
 
@@ -142,16 +143,21 @@ class PlannerAgent(ToolAgent):
         block = self.get_actions_context()
 
         user_prompt = (
-            f"AVAILABLE METHODS (use the exact key names below):\n{block}\n\n"
             f"TASK:\n{prompt}\n\n"
             "When JSON-encoding your plan, every 'function' field must exactly match one of the keys above."
         )
 
         # 2) Ask the LLM for a full plan (array of steps)
-        raw = Agent.invoke(self, user_prompt).strip()
+        messages = [
+            {"role": "system", "content": f"{self.role_prompt}\n\nBelow are the available tools you can decompose a user's task into:\n{block}"},
+        ]
+        if self.context_enabled:
+            messages += self._history
+        messages.append({"role": "user", "content": user_prompt})
+        raw = self._llm_engine.invoke(messages = messages, file_paths = self._file_paths)
         raw = re.sub(r'^```[a-zA-Z]*|```$', '', raw)
+        self._history.append({"role": "assistant", "content": raw})
         steps = list(json.loads(raw))
-
         # 3) Ensure last step is the canonical return tool
         if not steps or steps[-1].get('function') != 'function.default._return':
             steps.append({"function": "function.default._return", "args": {"val": None}})
@@ -216,9 +222,14 @@ class PlannerAgent(ToolAgent):
 
         self._previous_steps = []  # reset step history
         plan = self.strategize(prompt)
+        plan_raw = self._history[-1]["content"] if self._history else ""
+        self._history = self._history[:-1]
         logging.info(f"{self.name} created plan with {len(plan)} steps")
         result = self.execute(plan)
-
+        if self.context_enabled:
+            self._history.append({"role": "user", "content": prompt})
+            self._history.append({"role": "assistant", "content": f"Generated plan:\n{plan_raw}\nExecuted Result: {str(result)}"})
+        self._previous_steps = []
         logging.info(   f"\n+---{'-'*len(self.name + ' Finished')}---+"
                         f"\n|   {self.name} Finished   |"
                         f"\n+---{'-'*len(self.name + ' Finished')}---+\n")

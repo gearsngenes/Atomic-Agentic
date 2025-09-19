@@ -24,9 +24,10 @@ class Agent:
       - detach(path): remove a file path from this agent's list
       - invoke(prompt): build messages (system + history + user),
                         and call engine.invoke(messages, file_paths=[...])
+      - clear_memory(): clears conversation history (not file paths)
     """
 
-    def __init__(self, name, description, llm_engine,
+    def __init__(self, name, description, llm_engine: LLMEngine,
                  role_prompt: str = Prompts.DEFAULT_PROMPT, context_enabled: bool = False):
         self._name = name
         self._description = description
