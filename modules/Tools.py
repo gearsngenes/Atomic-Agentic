@@ -46,7 +46,7 @@ class ToolFactory:
     def toolify_function(func: callable, type= "function", source = "default", description: str = "") -> list[Tool]:
         if func.__name__ == "<lambda>":
             raise ValueError("Lambda functions must be given proper names.")
-        return [Tool(name=func.__name__, func=func, type=type, source="default", description = description)]
+        return [Tool(name=func.__name__, func=func, type=type, source=source, description = description)]
     @staticmethod
     def toolify_agent(agent: Agent) -> list[Tool]:
         invoke_tool = ToolFactory.toolify_function(
@@ -59,13 +59,13 @@ class ToolFactory:
             func=agent.attach,
             type="agent",
             source=agent.name,
-            description=f"Attaches an input file path to {agent.name}'s internal knowledge base."
+            description=f"Attaches the specified input file path to {agent.name}'s internal knowledge base. Do NOT use unless there is an explicitly mentioned file path needed to be attached"
         )
         detach_tool = ToolFactory.toolify_function(
             func=agent.detach,
             type="agent",
             source=agent.name,
-            description=f"Detaches an input file path {agent.name}'s internal knowledge base."
+            description=f"Detaches the specified input file path from {agent.name}'s internal knowledge base. Do NOT use unless there is an explicitly mentioned file path needed to be detached"
         )
         clear_tool = ToolFactory.toolify_function(
             func=agent.clear_memory,

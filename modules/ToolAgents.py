@@ -236,11 +236,9 @@ class PlannerAgent(ToolAgent):
         return result
 
 class OrchestratorAgent(ToolAgent):
-    def __init__(self, name: str, description: str, llm_engine: LLMEngine, allow_agentic: bool = False, allow_mcp: bool = False, max_context_chars: int = 100_000):
-        """
-        A step-by-step orchestrator that generates one JSON step at a time.
-        It always includes the previous step's (truncated) result in the next strategize prompt.
-        """
+    def __init__(self, name: str, description: str, llm_engine: LLMEngine,
+                 context_enabled=False, allow_agentic: bool = False, allow_mcp: bool = False,
+                 max_context_chars: int = 100_000):
         super().__init__(
             name,
             description=description,
@@ -248,11 +246,11 @@ class OrchestratorAgent(ToolAgent):
             allow_agentic=allow_agentic,
             allow_mcp=allow_mcp,
         )
-        # Enable built-in history/caching of prompts & responses
-        self.context_enabled = True
+        self.context_enabled = context_enabled
         self.role_prompt = Prompts.ORCHESTRATOR_PROMPT
         self._previous_steps: list[dict] = []
-        self.max_context_chars = max_context_chars  # limit for last-result text included in context
+        self._running_plan: list[dict] = []  # list of prior step JSONs (compact)
+        self.max_context_chars = max_context_chars
 
     # --- helpers ---
     def _stringify(self, value: Any) -> str:
@@ -266,108 +264,99 @@ class OrchestratorAgent(ToolAgent):
     def _truncate(self, s: str | None) -> str | None:
         if s is None:
             return None
-        if len(s) <= self.max_context_chars:
-            return s
-        return s[: self.max_context_chars]
+        return s if len(s) <= self.max_context_chars else s[: self.max_context_chars]
 
-    def strategize(self, prompt: str) -> dict:
-        # 1) Build the AVAILABLE METHODS block
-        available_methods = self.get_actions_context()
+    def strategize(self, prompt: str) -> list[dict]:
+        """
+        Ask for exactly ONE next-step JSON object using the unified key format.
+        """
+        available = self.get_actions_context()
+        last_result = self._truncate(self._stringify(self._previous_steps[-1]["result"])) if self._previous_steps else None
 
-        # 2) Always use this simple template
-        user_prompt = (
-            f"AVAILABLE METHODS:\n{available_methods}\n\n"
-            f"{prompt}\n\n"
-            f"Return a single JSON-formatted object for the next step to be executed in the plan."
-        )
+        sys = {
+            "role": "system",
+            "content": f"{self.role_prompt}\n\nAVAILABLE METHODS (exact keys):\n{available}"
+        }
+        msgs = [sys]
+        if self.context_enabled:
+            msgs += self._history
+        user = {
+            "role": "user",
+            "content": (
+                "Generate the next single JSON object needed to complete the user's task.\n"
+                f"TASK: {prompt}\n"
+                f"RUNNING PLAN SO FAR: {json.dumps(self._running_plan, ensure_ascii=False)}\n"
+                + (f"LAST RESULT (truncated): {last_result}\n" if last_result is not None else "")
+            )
+        }
+        msgs.append(user)
 
-        # 3) Call LLM via Agent.invoke (includes message history when context_enabled)
-        raw = Agent.invoke(self, user_prompt)
-        raw = re.sub(r"^```[a-zA-Z]*|```$", "", raw.strip())
+        raw = self._llm_engine.invoke(messages=msgs, file_paths=self._file_paths).strip()
+        raw = re.sub(r"^```[a-zA-Z]*|```$", "", raw)
         step = json.loads(raw)
 
-        # 4) Sanity check (decision_point removed)
+        # Validate
         assert all(k in step for k in ("step_call", "explanation", "status")), \
             "Returned JSON must include step_call, explanation, and status."
+        assert "function" in step["step_call"] and "args" in step["step_call"], \
+            "step_call must include function and args."
 
+        # Memoize compact plan
+        compact = {
+            "function": step["step_call"]["function"],
+            "args": step["step_call"]["args"],
+            "status": step["status"]
+        }
+        self._running_plan.append(compact)
         return [step]
 
-    def execute(self, step: list[dict]) -> Any:
+    def execute(self, step_list: list[dict]) -> Any:
         """
-        Runs the chosen tool, resolving any {{stepN}} placeholders.
+        Executes the single chosen tool call, resolving any {{stepN}} placeholders.
         """
-        step = step[0]  # single step
-        resolved_args = self._resolve(step["step_call"]["args"])
+        step = step_list[0]
         fn_key = step["step_call"]["function"]
-        fn = self.list_tools()[fn_key]
-        return fn(**resolved_args)
+        tools = self.list_tools()
+        fn = tools.get(fn_key)
+        if fn is None:
+            available = ", ".join(sorted(tools.keys()))
+            raise KeyError(f"Unknown tool key '{fn_key}'. Available keys: {available}")
+
+        logging.info(f"[TOOL] {fn_key} args: {step['step_call'].get('args', {})}")
+        args = self._resolve(step["step_call"].get("args", {}))
+        if inspect.iscoroutinefunction(fn):
+            # orchestrator executes synchronously; disallow accidental async
+            raise RuntimeError(f"Function '{fn_key}' is async — switch to an async orchestrator if needed.")
+        return fn(**args)
 
     def step(self, prompt: str) -> tuple[str, Any, str]:
         strat = self.strategize(prompt)[0]
-        call = strat["step_call"]
         explanation = strat["explanation"]
         status = strat["status"]
-
-        logging.info(f"[TOOL] {call['function']} args: {call['args']}")
         result = self.execute([strat])
         return explanation, result, status
 
     def invoke(self, prompt: str) -> Any:
         """
-        Loop, generating one step at a time, until status == "COMPLETE".
-        Always includes the prior step's (truncated) result in the next prompt.
+        Generate/execute one step at a time until status == 'COMPLETE'.
         """
         logging.info(f"\n+---{'-'*len(self.name + ' Starting')}---+"
                      f"\n|   {self.name} Starting   |"
                      f"\n+---{'-'*len(self.name + ' Starting')}---+")
-
-        # Reset history & steps
-        self.clear_memory()
-        self._previous_steps = []
+        if not self.context_enabled:
+            self.clear_memory()
+        self._previous_steps.clear()
+        self._running_plan.clear()
 
         status = "INCOMPLETE"
-        last_result_text = None
-        iteration = 0
-
         while status != "COMPLETE":
-            if iteration == 0:
-                # very first call: feed the raw user task
-                sub_prompt = (
-                    "TASK:\n"
-                    f"{prompt}\n\n"
-                    "Generate the next JSON-formatted step needed to complete the user task."
-                )
-            else:
-                # Always include a preview of the last step's result (truncated)
-                last_idx = len(self._previous_steps) - 1
-                preview = self._truncate(last_result_text) if last_result_text is not None else ""
-                sub_prompt = (
-                    f"TASK:\n{prompt}\n\n"
-                    f"Previously executed step index: {last_idx}\n"
-                    f"Placeholder for its value: {{step{last_idx}}}\n"
-                    f"LAST RESULT PREVIEW (truncated to {self.max_context_chars} chars):\n"
-                    f"{preview}\n\n"
-                    "Using any previously generated and executed steps, generate the next JSON-formatted step "
-                    "needed to complete the user task. If you need to pass a previous result as an argument, "
-                    "use the {{stepN}} placeholder rather than inlining the preview text."
-                )
+            explanation, result, status = self.step(prompt)
+            self._previous_steps.append({"explanation": explanation, "result": result, "completed": True})
 
-            explanation, result, status = self.step(sub_prompt)
+        if not self.context_enabled:
+            self.clear_memory()
 
-            # Track for the next iteration
-            self._previous_steps.append({
-                "explanation": explanation,
-                "result": result,
-                "completed": True
-            })
-
-            last_result_text = self._stringify(result)
-            iteration += 1
-
-        self.clear_memory()
-        logging.info(   f"\n+---{'-'*len(self.name + ' Finished')}---+"
-                        f"\n|   {self.name} Finished   |"
-                        f"\n+---{'-'*len(self.name + ' Finished')}---+\n")
-
-        # Return the final result (from the last completed step)
+        logging.info(f"\n+---{'-'*len(self.name + ' Finished')}---+"
+                     f"\n|   {self.name} Finished   |"
+                     f"\n+---{'-'*len(self.name + ' Finished')}---+\n")
         return self._previous_steps[-1]["result"] if self._previous_steps else None

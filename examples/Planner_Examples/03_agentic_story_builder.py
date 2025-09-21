@@ -62,12 +62,12 @@ if __name__ == "__main__":
     loops = int(input("How many review/revision cycles? "))
 
     task_prompt = (
-        f"Outline and write a full story based on: “{idea}”.\n"
-        f"Run {loops} write/review cycle(s).\n"
-        f"For the write-review steps, after creating revision notes for the latest draft, "
-        f"send the reviewer's latest revision notes back to the writer to rewrite the story:\n\n"
-        f"Revision Notes:\n<revision notes here>'\n\n"
-        f"Return the final draft once it's prepared."
+        f"1) Outline a full story based on: “{idea}”.\n"
+        f"2) Then write the first draft using the outline\n"
+        f"3) Send the story draft to a reviewer\n"
+        f"4) Send ONLY the reviewer's revision notes back to the writer to rewrite the draft.\n"
+        f"5) Write {loops} total draft(s) using this process.\n"
+        f"6) Return the final draft once it's prepared."
     )
 
     # The orchestrator handles both planning *and* execution.
