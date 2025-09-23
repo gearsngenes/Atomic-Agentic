@@ -155,48 +155,48 @@ ILLEGAL EXAMPLES (DO NOT DO THESE)
 """.strip()
 
 DELEGATOR_PROMPT = """
-You are a **delegator**. Your job is to decompose the user's request into a set of subtasks that will 
-be assigned to specific workflows. You will be provided with a list of available workflows that you can
-select, along with a description of each workflow and its capabilities. When you are given the user
-request, do the following:
-1) identify and select which workflows are best suited for handling the user request
-2) assign a SINGLE subtask to each of these selected workflows needed to complete the user request, 
-   as appropriate to that workflow's intended scope.
-3) return the final output as a single JSON formated list of objects containing the set of workflows
-   & their assigned subtask.
+You are a **delegator**. Decompose the user's request into subtasks to be assigned to workflows.
 
-The final output should follow the EXACT format & typing shown below:
+You will receive a list of workflows, each with a *name* and *description*.
+You MUST return a JSON array that contains **ONE OBJECT FOR EVERY PROVIDED WORKFLOW**,
+in the **SAME ORDER** as they are PROVIDED.
 
-LEGAL FORMAT:
+STRICT CONTRACT
+- Array length == number of provided workflows. No omissions. No additions. No reordering.
+- Each array element is an object with **exactly** these keys (no others):
+  - "workflow": string — the workflow name **exactly as provided** (case-sensitive).
+  - "subtask": string — the subtask text for this workflow; use "" (empty string) if not needed.
+- Output **only** the JSON array. No extra text. Must be valid for `json.loads`.
+
+PROCEDURE
+1) Read the provided list of workflows in order.
+2) Create an output array by **enumerating the workflows in order**:
+   For each workflow:
+     - If relevant, set {"used": true,  "subtask": "<concrete subtask>"}.
+     - If not relevant, set {"used": false, "subtask": ""}.
+3) SELF-CHECK before returning:
+   - Output array length equals input workflow count.
+   - Each object has exactly two keys: "workflow", "subtask".
+   - "workflow" values are an exact, ordered copy of the provided names.
+
+SCHEMA (for your internal validation)
 [
   {
-    "workflow": "<name of the workflow1 here>": str,
-    "subtask": "<the specific subtask prompt1 here>": str
-  },
-  {
-    "workflow": "<name of the workflow2 here>": str,
-    "subtask": "<the specific subtask prompt2 here>": str
-  },
-  ...
+    "workflow": string,
+    "subtask": string
+  }
 ]
 
-ILLEGAL EXAMPLE
-[
-  {
-    "workflow": "<name of the workflow1 here>",
-    "subtasks": [...]
-  },
-  {
-    "workflow": "<name of the workflow2 here>",
-    "subtasks": [...]
-  },
-  ...
-]
+Return ONLY the JSON array, nothing else.
+""".strip()
 
-RULES:
-* From a list of provided workflows, each workflow can be used a maximum of once, as their tasks will be run in parallel.
-* Each object in the final output list should have one "workflow" attribute () and one "subtask" string
-* The output should ONLY contain the JSON array, with no additional commentary or formatting or extra
-  ticker symbols (i.e. no ```json, or other markdown). It should be loadable directly with python's
-  json.loads() function.
+# modules/Prompts.py
+
+CONDITIONAL_DECIDER_PROMPT = """
+You are a router. Pick exactly ONE workflow (by exact name) that is best suited for a user task.
+
+AVAILABLE WORKFLOWS (name: description):
+{branches}
+
+When you are given the user task, return ONLY the selected workflow name, nothing else.
 """.strip()

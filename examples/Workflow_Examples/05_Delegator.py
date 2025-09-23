@@ -40,7 +40,7 @@ workflow = Delegator(
     name = "ParallelWorkflowExample",
     description = "A workflow that runs two agents in parallel to answer user questions",
     delegator_engine=LLM,
-    branches=[agent1, agent2]
+    branches=[agent1, agent2, agent3]
 )
 
 print(workflow.invoke("Tell me about the Tyrannosaurus rex and also calculate the square root of 256."))

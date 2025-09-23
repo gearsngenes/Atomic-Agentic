@@ -30,18 +30,10 @@ agent2 = PlannerAgent(
 )
 agent2.register(MathPlugin)
 
-decider = Agent(
-    name = "Decider",
-    description = "Decides which agent is best suited to answer the user's question",
-    role_prompt = "You are a selector agent. Based on the user's questions, determine which workflow is best suited for handling the task.",
-    llm_engine = LLM,
-    context_enabled=True
-)
-
 workflow = ConditionalWorkflow(
     name = "ConditionalWorkflowExample",
     description = "A workflow that routes user questions to the appropriate agent based on the topic",
-    decider=decider,
+    decider_llm=LLM,
     branches=[agent1, agent2]
 )
 
