@@ -121,7 +121,7 @@ class ConditionalWorkflow(Workflow):
             llm_engine = decider_llm,
             role_prompt=Prompts.CONDITIONAL_DECIDER_PROMPT,
         )
-        self.branches: list[Workflow] = [SingleAgent(branch) if isinstance(branch, Agent) else branch for branch in branches]
+        self.branches: list[Workflow] = [SingleAgent(branch) if isinstance(branch, Agent) else (ToolWorkflow(branch) if isinstance(branch, Tool) else branch) for branch in branches]
     def add_branch(self, branch: Agent|Workflow):
         self.branches.append(branch if isinstance(branch, Workflow) else SingleAgent(branch))
     def remove_branch(self, branch_name: str):
@@ -154,20 +154,23 @@ class ConditionalWorkflow(Workflow):
         raise ValueError(f"Decider chose an unknown branch: {decision}")
 
 class Delegator(Workflow):
-    def __init__(self, name: str, description: str, delegator_engine: LLMEngine, branches: list[Agent|Workflow]):
+    def __init__(self, name: str, description: str, delegator_engine: LLMEngine, branches: list[Agent|Workflow|Tool], context_enabled = False):
         super().__init__(name, description)
         self.delegator = Agent(
             name = f"{name}_Delegator",
             description = Prompts.DELEGATOR_PROMPT,
             llm_engine = delegator_engine,
-            context_enabled=False
+            context_enabled=context_enabled
         )
-        self.branches: dict[str, Workflow] = {branch._name : (SingleAgent(branch) if isinstance(branch, Agent) else branch) for branch in branches}
-    def add_branch(self, branch: Agent|Workflow):
-        self.branches[branch._name] = branch if isinstance(branch, Workflow) else SingleAgent(branch)
+        self.branches: dict[str, Workflow] = {
+            branch._name : (
+                    SingleAgent(branch) if isinstance(branch, Agent) else (
+                    ToolWorkflow(branch) if isinstance(branch, Tool) else branch)
+                ) for branch in branches}
+    def add_branch(self, branch: Agent|Workflow|Tool):
+        self.branches[branch._name] = SingleAgent(branch) if isinstance(branch, Agent) else (ToolWorkflow(branch) if isinstance(branch, Tool) else branch)
     def remove_branch(self, branch_name: str):
-        removed_branch = self.branches[branch_name]
-        self.branches = {name:branch for name, branch in self.branches if branch_name != name}
+        removed_branch = self.branches.pop(branch_name)
         return removed_branch
     async def _invoke_branch(self, branch: Workflow, prompt: str):
         loop = asyncio.get_event_loop()
@@ -176,7 +179,7 @@ class Delegator(Workflow):
     def clear_memory(self):
         for branch in self.branches.values():
             branch.clear_memory()
-    def invoke(self, prompt: str):
+    def invoke(self, prompt: Any):
         logging.info(f"\n+---{'-'*len(self._name + ' Starting')}---+"
                      f"\n|   {self._name} Starting   |"
                      f"\n+---{'-'*len(self._name + ' Starting')}---+")
@@ -207,3 +210,57 @@ class Delegator(Workflow):
                         f"\n|   {self._name} Finished   |"
                         f"\n+---{'-'*len(self._name + ' Finished')}---+\n")
         return results
+
+class ToolWorkflow(Workflow):
+    def __init__(self, tool: Tool):
+        super().__init__(tool.name, tool.description)
+        self.tool = tool
+    def clear_memory(self):
+        pass
+    def invoke(self, *prompt: Any):
+        default = self.tool.get_param_defaults(deep=True)
+        sig = inspect.signature(self.tool.func)
+        params = list(sig.parameters.values())
+        has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+        # CASE 1: Single parameter input
+        if len(list(default.keys())) == 1:
+            logging.info(f"[WORKFLOW] Single Parameter for {self.name}")
+            # single-parameter function: pass the single value, not the whole tuple
+            if len(prompt) != 1:
+                raise TypeError(f"{self.__class__.__name__}.invoke expected exactly 1 argument for a single-parameter tool")
+            return self.tool.func(prompt[0])
+        # CASE 2: Dictionary input
+        elif len(prompt) == 1 and isinstance(prompt[0], dict):
+            logging.info(f"[WORKFLOW] Dictionary Parsing of inputs for {self.name}")
+            provided = dict(prompt[0])
+            # Start from defaults and override with provided keys
+            call_kwargs = self.tool.get_param_defaults(deep=True)
+            # Remove any var-kw placeholder that your Tool might have inserted
+            for p in params:
+                if p.kind == inspect.Parameter.VAR_KEYWORD and p.name in call_kwargs:
+                    call_kwargs.pop(p.name, None)
+            # Apply known keys
+            for k, v in list(provided.items()):
+                if k in call_kwargs:
+                    call_kwargs[k] = v
+                    provided.pop(k)
+            # If there are unknown keys, only allow if function has **kwargs
+            if provided and not has_varkw:
+                unknown = ", ".join(provided.keys())
+                raise TypeError(f"{self.tool.func.__name__}() got unexpected keyword argument(s): {unknown}")
+            # If has **kwargs, merge the leftover keys
+            if provided and has_varkw:
+                call_kwargs.update(provided)
+            return self.tool.func(**call_kwargs)
+        # CASE 3: Exact positional parameter match
+        elif len(prompt) == len(list(default.keys())):
+            logging.info(f"[WORKFLOW] Exact positional matching of parameters for {self.name}")
+            return self.tool.func(*prompt)
+        # CASE 4: Fallback
+        else:
+            logging.info(f"[WORKFLOW] Fallback method for {self.name}")
+            param_keys = list(default.keys())[:len(prompt)]
+            for i, param in enumerate(prompt):
+                default[param_keys[i]] = param
+            # pass by keywords, not as positional expansion of dict keys
+            return self.tool.func(**default)

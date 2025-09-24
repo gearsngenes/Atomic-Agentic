@@ -16,14 +16,14 @@ LLM = OpenAIEngine(model="gpt-4o")
 
 agent1 = Agent(
     name = "Agent1",
-    description = "An expert in paleontology",
+    description = "An paleontologist who excels in answering paleontological questions",
     role_prompt = "You are a paleontology expert. Answer the user's questions about dinosaurs with detailed and accurate information.",
     llm_engine = LLM,
     context_enabled=True
 )
 agent2 = PlannerAgent(
     name = "Agent2",
-    description = "A mathematician who excels in calculations",
+    description = "A mathematician who excels in solving math problems and performing calculations",
     llm_engine = LLM,
     context_enabled=True,
     is_async=True

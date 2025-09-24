@@ -30,7 +30,7 @@ agent2 = PlannerAgent(
 agent2.register(MathPlugin)
 agent3 = Agent(
     name = "Agent3",
-    description = "Tells jokes",
+    description = "Tells jokes and acts as a general assistant with a quasi-rebellious streak",
     role_prompt="You are a jokester who talks in a comedic, non-serious manner. You never take what the user says seriously and always respond with a witty comeback, dodging questions and the like.",
     llm_engine=LLM,
 )
@@ -43,4 +43,7 @@ workflow = Delegator(
     branches=[agent1, agent2, agent3]
 )
 
-print(workflow.invoke("Tell me about the Tyrannosaurus rex and also calculate the square root of 256."))
+print(workflow.invoke("""Do the following:
+                      * Tell me about the Tyrannosaurus rex
+                      * Calculate the square root of 256
+                      * What is a good vacation spot for the winter?""")) # add or edit these three lines to test behavior

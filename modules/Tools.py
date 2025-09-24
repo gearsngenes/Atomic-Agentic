@@ -5,6 +5,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from modules.Agents import Agent
 from modules.Plugins import *
+import copy
 
 class Tool:
     def __init__(self, name, func, type = "function", source = "default", description=""):
@@ -14,6 +15,7 @@ class Tool:
         self._func = func
         self._description = description
         self.signature = Tool._build_signature(self.name, func)
+        self._param_defaults = Tool._build_param_defaults(func)
     @property
     def type(self):
         return self._type
@@ -30,6 +32,22 @@ class Tool:
     def func(self):
         return self._func
     @staticmethod
+    def _build_param_defaults(func: callable) -> dict[str, Any]:
+        """
+        Return a dict of param names to their default values.
+        If a parameter has no default, value is None.
+        Includes positional-only, positional-or-keyword, keyword-only,
+        and also includes *args/**kwargs names (set to None).
+        Excludes 'self'.
+        """
+        sig = inspect.signature(func)
+        out: dict[str, Any] = {}
+        for name, p in sig.parameters.items():
+            if name == "self":
+                continue
+            out[name] = (None if p.default is inspect._empty else p.default)
+        return out
+    @staticmethod
     def _build_signature(key: str, func: callable) -> str:
         sig = inspect.signature(func)
         hints = get_type_hints(func)
@@ -40,6 +58,8 @@ class Tool:
         ]
         rtype = hints.get('return', Any).__name__
         return f"{key}({', '.join(params)}) → {rtype}"
+    def get_param_defaults(self, *, deep: bool = False) -> dict[str, Any]:
+        return copy.deepcopy(self._param_defaults) if deep else dict(self._param_defaults)
 
 class ToolFactory:
     @staticmethod
