@@ -36,4 +36,4 @@ workflow = ChainOfThought(
     description="A chain of thought workflow with three agents.",
     steps=[agent1, agent2, agent3]
 )
-print(workflow.invoke("So first, there are five sheep, and 23 ox and 0.5 chicken eggs."))
+print(workflow.invoke("So first, there are five sheep, and twenty-three ox and zero point five chicken eggs."))
