@@ -39,7 +39,7 @@ agent3 = Agent(
 workflow = Delegator(
     name = "ParallelWorkflowExample",
     description = "A workflow that runs two agents in parallel to answer user questions",
-    delegator_engine=LLM,
+    delegator_component=LLM,
     branches=[agent1, agent2, agent3]
 )
 

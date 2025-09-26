@@ -8,7 +8,7 @@ from modules.Plugins import *
 import copy
 
 class Tool:
-    def __init__(self, name, func, type = "function", source = "default", description=""):
+    def __init__(self, name:str, func:callable, type = "function", source = "default", description="", clear_mem_func: callable = None):
         self._type = type
         self._source = source
         self._name = name
@@ -16,6 +16,7 @@ class Tool:
         self._description = description
         self.signature = Tool._build_signature(self.name, func)
         self._param_defaults = Tool._build_param_defaults(func)
+        self._clear_mem = clear_mem_func
     @property
     def type(self):
         return self._type
@@ -31,6 +32,10 @@ class Tool:
     @property
     def func(self):
         return self._func
+    def clear_memory(self):
+        if self._clear_mem:
+            self._clear_mem()
+        pass
     @staticmethod
     def _build_param_defaults(func: callable) -> dict[str, Any]:
         """

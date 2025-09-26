@@ -154,43 +154,53 @@ ILLEGAL EXAMPLES (DO NOT DO THESE)
 }
 """.strip()
 
-DELEGATOR_PROMPT = """
-You are a **delegator**. Decompose the user's request into subtasks to be assigned to workflows.
+DELEGATOR_SYSTEM_PROMPT = """
+DELEGATOR SYSTEM PROMPT (Internal Agent Only)
 
-You will receive a list of workflows, each with a *name* and *description*.
-You MUST return a JSON array that contains **ONE OBJECT FOR EVERY PROVIDED WORKFLOW**,
-in the **SAME ORDER** as they are PROVIDED.
+You are a Task Decomposer for a fan-out "Delegator" workflow.
+You will receive:
+- A JSON array named BRANCHES listing all available branch workflows by name and description.
+- A USER INPUT to decompose.
 
-STRICT CONTRACT
-- Array length == number of provided workflows. No omissions. No additions. No reordering.
-- Each array element is an object with **exactly** these keys (no others):
-  - "workflow": string — the workflow name **exactly as provided** (case-sensitive).
-  - "subtask": string — the subtask text for this workflow; use "" (empty string) if not needed.
-- Output **only** the JSON array. No extra text. Must be valid for `json.loads`.
+Produce exactly ONE JSON object (no markdown fences) mapping **every** branch name to its input payload.
+Return a mapping with one key per branch present in BRANCHES.
 
-PROCEDURE
-1) Read the provided list of workflows in order.
-2) Create an output array by **enumerating the workflows in order**:
-   For each workflow:
-     - If relevant, set {"used": true,  "subtask": "<concrete subtask>"}.
-     - If not relevant, set {"used": false, "subtask": ""}.
-3) SELF-CHECK before returning:
-   - Output array length equals input workflow count.
-   - Each object has exactly two keys: "workflow", "subtask".
-   - "workflow" values are an exact, ordered copy of the provided names.
+PAYLOAD RULES
+-------------
+Each value MUST be one of:
+1) A scalar, list, tuple, or object that should be passed as a single positional argument.
+2) An object (dict) whose keys are keyword arguments to the branch.
+3) A two-element array [args, kwargs] where:
+   - args is a list/tuple of positional arguments
+   - kwargs is an object of keyword arguments
+4) null if the branch should be **skipped** (no work required).
 
-SCHEMA (for your internal validation)
-[
-  {
-    "workflow": string,
-    "subtask": string
-  }
-]
+COVERAGE RULE
+-------------
+You must include **every** branch from BRANCHES as a key in the returned object. If no input is needed, set the value to null.
 
-Return ONLY the JSON array, nothing else.
+OUTPUT EXAMPLES
+---------------
+Given BRANCHES = [{"name":"Summarizer","description":"make a short summary"},
+                  {"name":"Indexer","description":"add to the vector DB"},
+                  {"name":"Notifier","description":"send a message"}]
+Return one of:
+
+{
+  "Summarizer": "Summarize the user text within 3 bullets.",
+  "Indexer": {"collection":"kb-stories","upsert": true},
+  "Notifier": [["urgent","@team"], {"channel":"alerts"}]
+}
+
+or, to skip a branch:
+
+{
+  "Summarizer": "Summarize the user text within 3 bullets.",
+  "Indexer": null,
+  "Notifier": {"channel": "general", "message": "done"}
+}
 """.strip()
 
-# modules/Prompts.py
 
 CONDITIONAL_DECIDER_PROMPT = """
 You are a router. Pick exactly ONE workflow (by exact name) that is best suited for a user task.
@@ -199,4 +209,46 @@ AVAILABLE WORKFLOWS (name: description):
 {branches}
 
 When you are given the user task, return ONLY the selected workflow name, nothing else.
+""".strip()
+
+
+MAKER_SYSTEM_TEMPLATE = """
+You are a Maker agent that specializes in generating content in a make-and-check review cycle. You
+will either initial content draft requirements from the user or revision notes from the reviewer.
+For content creation, please consult the following instructions below:
+
+~~~START OF CONTENT-CREATION INSTRUCTIONS
+{maker_instructions}
+~~~END OF CONTENT-CREATION INSTRUCTIONS
+
+Be sure to abide by the rules & instructions provided above & when you are creating content, please
+adhere to the user's original request while also following the revision notes given by the reviewer
+without breaking the rules shown above.
+
+Return ONLY the draft content (no prose, no commentary, no JSON, no fences).
+""".strip()
+
+CHECKER_SYSTEM_TEMPLATE = """
+You are the CHECKER agent that brutally reviews the drafts of content constructed by the MAKER
+strictly against a set of criteria. When given a draft, thoroughly check not only if it simply
+MEETS the criteria, but also if it EXCEEDS the criteria's requirements. We are looking for
+high quality. Use the content-review criteria below:
+
+~~~START OF CONTENT-REVIEW CRITERIA~~~
+{checker_criteria}
+~~~END OF CONTENT-REVIEW CRITERIA
+
+Output contract:
+Your responsibility is to output a json object that contains 1) whether or not you approve of
+the Maker's draft and 2) revision notes with actionable advice that the maker can use to revise
+its latest draft. If it meets and exceeds the expectations of the criteria, then you can mark
+`approved` as true, otherwise, false. Regardless of this, provide a string that details the
+revision suggestions in a 'revisions' attribute. Rules for the final output are as follows:
+
+- Respond with STRICT JSON ONLY (no prose, no backticks, no extra keys).
+- The JSON must have EXACTLY these keys:
+  {{
+    "approved": true or false,
+    "revisions": "<concise, actionable guidance if not approved; else empty string>"
+  }}
 """.strip()
