@@ -426,31 +426,27 @@ class Delegator(Workflow):
             for b in branches
         ]
 
-        # Wrap decider component polymorphically
+        # Build the task master once; keep only a boolean to know if it's our internal agent
+        self._is_internal_agent: bool = False
+
         if isinstance(delegator_component, LLMEngine):
             # Internal agent we OWN; update its role-prompt whenever branches change
-            self._internal_agent = Agent(
+            internal_agent = Agent(
                 name=f"{name}.delegator",
                 description="Delegator decider (internal)",
                 llm_engine=delegator_component,
                 role_prompt=Prompts.DELEGATOR_SYSTEM_PROMPT,
                 context_enabled=context_enabled,
             )
-            self.task_manager: Workflow = SingleAgent(self._internal_agent)
-            self._owns_prompt = True
+            self.task_master: Workflow = SingleAgent(internal_agent)
+            self._is_internal_agent = True
             self._refresh_internal_prompt()
         elif isinstance(delegator_component, Agent):
-            self.task_manager = SingleAgent(delegator_component)
-            self._internal_agent = None
-            self._owns_prompt = False
+            self.task_master: Workflow = SingleAgent(delegator_component)
         elif isinstance(delegator_component, Tool):
-            self.task_manager = ToolFlow(delegator_component)
-            self._internal_agent = None
-            self._owns_prompt = False
+            self.task_master: Workflow = ToolFlow(delegator_component)
         elif isinstance(delegator_component, Workflow):
-            self.task_manager = delegator_component
-            self._internal_agent = None
-            self._owns_prompt = False
+            self.task_master: Workflow = delegator_component
         else:
             raise TypeError("delegator_component must be LLMEngine | Agent | Tool | Workflow")
 
@@ -460,7 +456,7 @@ class Delegator(Workflow):
         wf = (SingleAgent(branch) if isinstance(branch, Agent)
               else (ToolFlow(branch) if isinstance(branch, Tool) else branch))
         self.branches.append(wf)
-        if getattr(self, "_owns_prompt", False):
+        if self._is_internal_agent:
             self._refresh_internal_prompt()
 
     def remove_branch(self, branch_name: str):
@@ -468,14 +464,14 @@ class Delegator(Workflow):
         removed = None
         if idx is not None:
             removed = self.branches.pop(idx)
-            if getattr(self, "_owns_prompt", False):
+            if self._is_internal_agent:
                 self._refresh_internal_prompt()
         return removed
 
     def clear_memory(self):
-        # Clear internal agent memory if we own it
-        if getattr(self, "_internal_agent", None) and self._internal_agent.context_enabled:
-            self._internal_agent.clear_memory()
+        # Clear task_master memory if supported
+        self.task_master.clear_memory()
+        # Clear branches
         for b in self.branches:
             b.clear_memory()
 
@@ -483,27 +479,13 @@ class Delegator(Workflow):
 
     def _refresh_internal_prompt(self):
         """Update the internal decider's role-prompt to include branch list & rules."""
-        if not getattr(self, "_internal_agent", None):
-            return
-        branch_list = [
-            {"name": b._name, "description": getattr(b, "_description", "")}
-            for b in self.branches
-        ]
+        branch_list = [{"name": b.name, "description": b.description} for b in self.branches]
         dynamic = (
             f"{Prompts.DELEGATOR_SYSTEM_PROMPT}\n\n"
             f"BRANCHES:\n{json.dumps(branch_list, ensure_ascii=False)}\n"
-            f"(Remember: include every branch; use null to skip.)"
+            f"(Remember: include every branch; use null to indicate skipping.)"
         )
-        self._internal_agent.role_prompt = dynamic
-
-    @staticmethod
-    def _is_callspec(val) -> bool:
-        return (
-            isinstance(val, (list, tuple))
-            and len(val) == 2
-            and isinstance(val[0], (list, tuple))
-            and isinstance(val[1], dict)
-        )
+        if isinstance(self.task_master, SingleAgent): self.task_master.agent.role_prompt = dynamic
 
     async def _invoke_branch_async(self, branch: Workflow, payload):
         """
@@ -521,7 +503,7 @@ class Delegator(Workflow):
         def _call():
             if isinstance(branch, ToolFlow):
                 # Tool binding follows the ToolFlow's own normalization
-                if Delegator._is_callspec(payload):
+                if _is_callspec(payload):
                     args, kwargs = payload
                     return branch.invoke(*args, **kwargs)
                 if isinstance(payload, dict):
@@ -531,7 +513,7 @@ class Delegator(Workflow):
                 return branch.invoke(payload)
             else:
                 # SingleAgent / other Workflows
-                if Delegator._is_callspec(payload):
+                if _is_callspec(payload):
                     args, kwargs = payload
                     return branch.invoke(*args, **kwargs)
                 return branch.invoke(payload)
@@ -551,53 +533,24 @@ class Delegator(Workflow):
         if not self.branches:
             raise ValueError("Delegator has no branches to execute.")
 
-        # Prepare decider output (mapping branch_name -> payload)
-        if getattr(self, "_owns_prompt", False):
-            # Internal decider: give it a compact rendering of user input
-            if args and kwargs:
-                user_input = {"args": args, "kwargs": kwargs}
-            elif kwargs:
-                user_input = {"kwargs": kwargs}
-            elif len(args) == 1:
-                user_input = args[0]
-            else:
-                user_input = list(args)
+        # Build decider call exactly once through the unified task_master
+        raw = self.task_master.invoke(*args, **kwargs)
 
-            user_str = (
-                json.dumps(user_input, ensure_ascii=False)
-                if not isinstance(user_input, str) else user_input
-            )
-            prompt = (
-                "USER INPUT:\n"
-                + user_str
-                + "\n\nReturn ONLY a JSON object mapping each branch name to its input payload."
-            )
-
-            raw = self.task_manager.invoke(prompt)
-            cleaned = re.sub(r"```json(.*?)```", r"\1", str(raw), flags=re.DOTALL).strip()
+        # Normalize decider output to dict
+        if isinstance(raw, dict):
+            decider_output = raw
+        elif isinstance(raw, str):
+            cleaned = re.sub(r"```json(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
             try:
                 decider_output = json.loads(cleaned)
-            except json.JSONDecodeError as e:
+            except Exception as e:
                 raise ValueError(
-                    f"Delegator decider returned non-JSON or malformed output: {e}\nOutput was:\n{cleaned}"
+                    f"Delegator decider returned a string that is not valid JSON dict: {e}\nOutput was:\n{raw}"
                 )
         else:
-            # External decider: pass through original *args/**kwargs
-            raw = self.task_manager.invoke(*args, **kwargs)
-            if isinstance(raw, dict):
-                decider_output = raw
-            elif isinstance(raw, str):
-                cleaned = re.sub(r"```json(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
-                try:
-                    decider_output = json.loads(cleaned)
-                except Exception as e:
-                    raise ValueError(
-                        f"External delegator returned a string that is not valid JSON dict: {e}\nOutput was:\n{raw}"
-                    )
-            else:
-                raise TypeError(
-                    "Decider must return a dict (branch_name -> payload) or a JSON-string of that dict."
-                )
+            raise TypeError(
+                "Decider must return a dict (branch_name -> payload) or a JSON-string of that dict."
+            )
 
         # Validate/complete mapping to cover ALL branches
         name_to_index = {b._name: i for i, b in enumerate(self.branches)}

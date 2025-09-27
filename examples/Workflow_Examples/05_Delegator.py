@@ -8,6 +8,7 @@ from modules.Agents import Agent
 from modules.LLMEngines import OpenAIEngine
 from modules.ToolAgents import PlannerAgent
 from modules.Workflows import Delegator
+from modules.Tools import Tool
 from modules.Plugins import MathPlugin
 
 logging.getLogger().setLevel(logging.INFO)
@@ -36,14 +37,26 @@ agent3 = Agent(
 )
 
 
+def manual_delegate(task1, task2, task3):
+    return {
+        "Agent1":task1,
+        "Agent2":task2,
+        "Agent3":task3,
+    }
+manual_delegator = Tool("ManualDelegate", manual_delegate)
+
+delegator_component = LLM#manual_delegator#
+
+
 workflow = Delegator(
     name = "ParallelWorkflowExample",
     description = "A workflow that runs two agents in parallel to answer user questions",
-    delegator_component=LLM,
+    delegator_component=delegator_component,
     branches=[agent1, agent2, agent3]
 )
 
-print(workflow.invoke("""Do the following:
-                      * Tell me about the Tyrannosaurus rex
-                      * Calculate the square root of 256
-                      * What is a good vacation spot for the winter?""")) # add or edit these three lines to test behavior
+agentic_input = """Can you tell me about T-Rex, calculate 256, and tell me a good vacation spot"""
+
+manual_input = "Tell me about the Tyrannosaurus rex","Calculate the square root of 256","What is a good vacation spot for the winter?"
+
+print(workflow.invoke(agentic_input)) # add or edit these three lines to test behavior
