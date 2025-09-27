@@ -290,7 +290,7 @@ class MakerChecker(Workflow):
 
 class Selector(Workflow):
     def __init__(
-        self, name: str, description: str, branches: List[Agent|Tool|Workflow], decider: LLMEngine|Agent|Workflow|Tool, context_enabled: bool = True):
+        self, name: str, description: str, branches: List[Agent|Tool|Workflow], decider: LLMEngine|Agent|Workflow|Tool):
         super().__init__(name, description)
 
         # Wrap branches as SingleAgent for uniform .invoke(*args, **kwargs)
@@ -306,7 +306,6 @@ class Selector(Workflow):
                 description="Branch selection agent",
                 role_prompt=self._build_decider_system_prompt(),
                 llm_engine=decider,
-                context_enabled=context_enabled,
             ))
         elif self.custom_agent:
             self.decider = SingleAgent(decider)
@@ -415,7 +414,6 @@ class Delegator(Workflow):
         name: str, description: str,
         delegator_component: LLMEngine | Agent | Tool | Workflow,
         branches: list[Agent | Workflow | Tool],
-        context_enabled: bool = False,
     ):
         super().__init__(name, description)
 
@@ -436,7 +434,6 @@ class Delegator(Workflow):
                 description="Delegator decider (internal)",
                 llm_engine=delegator_component,
                 role_prompt=Prompts.DELEGATOR_SYSTEM_PROMPT,
-                context_enabled=context_enabled,
             )
             self.task_master: Workflow = SingleAgent(internal_agent)
             self._is_internal_agent = True
