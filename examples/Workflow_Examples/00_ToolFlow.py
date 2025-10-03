@@ -72,3 +72,21 @@ def string_any(a, b = 2, c = "hello", f = "john"):
 tool6 = Tool("string-any", string_any)
 wf = ToolFlow(tool6)
 print(wf.invoke("al"))
+
+# ===========================================================
+print("\n===Output-Schemas for Workflows===")
+def string_to_list(string: str):
+    return string.split(",")[:3]
+tool7 = Tool("string-2-list", string_to_list)
+wf = ToolFlow(tool7)
+
+out = wf.invoke("John,37,New Jersey")
+_type = type(out)
+print("Without Output Schema: ", out, _type)
+
+wf = ToolFlow(tool7, result_schema=["name", "age", "state"])
+out = wf.invoke("John,37,New Jersey")
+_type = type(out)
+print("With Output Schema: ", out, _type)
+print("This enables us to potentially pass this output to a new method that "
+      "accepts a name, age, and state parameter as **kwargs")

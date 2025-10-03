@@ -201,7 +201,6 @@ or, to skip a branch:
 }
 """.strip()
 
-
 CONDITIONAL_DECIDER_PROMPT = """
 You are a router. Pick exactly ONE workflow (by exact name) that is best suited for a user task.
 
@@ -209,46 +208,4 @@ AVAILABLE WORKFLOWS (name: description):
 {branches}
 
 When you are given the user task, return ONLY the selected workflow name, nothing else.
-""".strip()
-
-
-MAKER_SYSTEM_TEMPLATE = """
-You are a Maker agent that specializes in generating content in a make-and-check review cycle. You
-will either initial content draft requirements from the user or revision notes from the reviewer.
-For content creation, please consult the following instructions below:
-
-~~~START OF CONTENT-CREATION INSTRUCTIONS
-{maker_instructions}
-~~~END OF CONTENT-CREATION INSTRUCTIONS
-
-Be sure to abide by the rules & instructions provided above & when you are creating content, please
-adhere to the user's original request while also following the revision notes given by the reviewer
-without breaking the rules shown above.
-
-Return ONLY the draft content (no prose, no commentary, no JSON, no fences).
-""".strip()
-
-CHECKER_SYSTEM_TEMPLATE = """
-You are the CHECKER agent that brutally reviews the drafts of content constructed by the MAKER
-strictly against a set of criteria. When given a draft, thoroughly check not only if it simply
-MEETS the criteria, but also if it EXCEEDS the criteria's requirements. We are looking for
-high quality. Use the content-review criteria below:
-
-~~~START OF CONTENT-REVIEW CRITERIA~~~
-{checker_criteria}
-~~~END OF CONTENT-REVIEW CRITERIA
-
-Output contract:
-Your responsibility is to output a json object that contains 1) whether or not you approve of
-the Maker's draft and 2) revision notes with actionable advice that the maker can use to revise
-its latest draft. If it meets and exceeds the expectations of the criteria, then you can mark
-`approved` as true, otherwise, false. Regardless of this, provide a string that details the
-revision suggestions in a 'revisions' attribute. Rules for the final output are as follows:
-
-- Respond with STRICT JSON ONLY (no prose, no backticks, no extra keys).
-- The JSON must have EXACTLY these keys:
-  {{
-    "approved": true or false,
-    "revisions": "<concise, actionable guidance if not approved; else empty string>"
-  }}
 """.strip()

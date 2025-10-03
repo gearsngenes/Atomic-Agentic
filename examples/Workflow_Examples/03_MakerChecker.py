@@ -80,9 +80,9 @@ feedback on how to improve the story. The below are your criteria that you evalu
     instead of just ones that require reader projection/self-insertion (evaluate as appropriate
     based on the style of story).
     
-After you've finished your analysis and provided any potential revisions, if you determine the
-story meets at least 95 percent of the critera above, end your revisions notes with a single
-"<<APPROVED>>" appended at the end of your response. 
+After you've finished your analysis and provided any potential revisions, if this isn't
+the first draft AND you determine the story meets at least 95 percent of the critera above,
+end your revisions notes with a single "<<APPROVED>>" appended at the end of your response.
 """.strip()
 
 writer_agent = Agent(
@@ -108,14 +108,15 @@ workflow = MakerChecker(
     description = "Creates and refines a short story based on user input",
     maker = AgentFlow(writer_agent),
     checker = AgentFlow(editor_agent),
-    early_stop = None, #approver,
-    max_revisions = 3
+    early_stop = approver, # Change to None if you want to force it to go through all three revision roundss
+    max_revisions = 3,
+    result_schema=["edits_history", "final_draft"]
 )
 
 user_prompt = input("Enter a prompt for the story: ")
 
-drafts, final_draft = workflow.invoke(user_prompt)
+result = workflow.invoke(user_prompt)
 
 print("---PREVIOUS DRAFTS & REVISIONS---\n"
-      f"{json.dumps(drafts, indent=1)}"
-      f"\n\n---FINAL DRAFT---\n{final_draft}")
+      f"{json.dumps(result["edits_history"], indent=1)}"
+      f"\n\n---FINAL DRAFT---\n{result["final_draft"]}")

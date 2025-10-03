@@ -57,7 +57,8 @@ workflow = Selector(
     name = "ConditionalWorkflowExample",
     description = "A workflow that routes user questions to the appropriate agent based on the topic",
     decider=decider,
-    branches=[agent1, agent2, format_tool]
+    branches=[agent1, agent2, format_tool],
+    result_schema=["selected_output"]
 )
 
 #~~~Define our tasks that we'd want specific agents to handle~~~

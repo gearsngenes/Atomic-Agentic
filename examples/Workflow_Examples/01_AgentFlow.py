@@ -1,6 +1,5 @@
 import sys
 from pathlib import Path
-from typing import Any
 # Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
@@ -25,3 +24,11 @@ print("2)", workflow.invoke(prompt = "What percent of the earth's mass is carbon
 print("===")
 # using dicts as keywords
 print("3)", workflow.invoke(**{"prompt" : "Can you tell me how far the moon is?"}))
+print("===")
+# using lists as positionals
+print("4)", workflow.invoke(*["What is a the meaning of life as a number?"]))
+print("===")
+# with result schema
+print("Now we have a result schema of { 'answer' : ...}")
+workflow = AgentFlow(agent=my_agent, result_schema=["answer"])
+print("5)", workflow.invoke("How many parameters does model gpt-4o have?"))

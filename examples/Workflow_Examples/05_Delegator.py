@@ -69,4 +69,4 @@ task = manual_input
 if isinstance(task, tuple):
     print(json.dumps(workflow.invoke(*task), indent = 2))
 else:
-    print(json.dumps(workflow.invoke(task), indent = 2)) # add or edit these three lines to test behavior
+    print(json.dumps(workflow.invoke(task), indent = 2))

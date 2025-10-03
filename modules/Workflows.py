@@ -12,11 +12,10 @@ from typing import Any
 
 
 class Workflow(ABC):
-    def __init__(self, name: str, description: str, result_schema: list[str], return_raw = False):
+    def __init__(self, name: str, description: str, result_schema: list[str]):
         self._name = name
         self._description = description
         self._result_schema = result_schema or []
-        self.return_raw = return_raw or not self._result_schema
         for s in self._result_schema:
             if not s:
                 raise ValueError("Empty strings are not permissible output schema parameter names")
@@ -35,7 +34,7 @@ class Workflow(ABC):
 
     def package_results(self, results: Any):
         # If no schema provided, return results unchanged (caller asked for raw results)
-        if not self._result_schema or self.return_raw:
+        if not self._result_schema:
             return results
 
         # If results is a dict/list/tuple, check lengths and map by order when equal
@@ -61,12 +60,10 @@ class Workflow(ABC):
 
 class AgentFlow(Workflow):
     def __init__(self, agent: Agent,
-                 result_schema: list[str] = [],
-                 return_raw: bool = False):
+                 result_schema: list[str] = []):
         super().__init__(name = agent.name,
                          description = agent.description,
-                         result_schema = result_schema,
-                         return_raw=return_raw)
+                         result_schema = result_schema)
         self.agent: Agent = agent
     def clear_memory(self):
         self.agent.clear_memory()
@@ -82,8 +79,8 @@ class AgentFlow(Workflow):
         return result
 
 class ToolFlow(Workflow):
-    def __init__(self, tool: Tool, result_schema: list[str] = [], return_raw = False):
-        super().__init__(tool.name, tool.description, result_schema, return_raw=return_raw)
+    def __init__(self, tool: Tool, result_schema: list[str] = []):
+        super().__init__(tool.name, tool.description, result_schema)
         self.tool = tool
 
     def clear_memory(self):
@@ -114,7 +111,8 @@ class ChainOfThought(Workflow):
 
     def insert_step(self, step: Agent|Workflow|Tool, schema: list[str] = [], position: int | None = None):
         if isinstance(step, Agent): step = AgentFlow(step, schema)
-        if isinstance(step, Tool):  step = ToolFlow(step, schema)
+        elif isinstance(step, Tool):  step = ToolFlow(step, schema)
+        elif isinstance(step, Workflow): step._result_schema = schema
         if position is None: self._steps.append(step, schema)
         else: self._steps.insert(position, step)
 
@@ -163,9 +161,8 @@ class MakerChecker(Workflow):
                  checker: Workflow,
                  early_stop: Agent|Tool|Workflow = None,
                  max_revisions: int = 1,
-                 result_schema: list[str] = [],
-                 return_raw: bool = False):
-        super().__init__(name, description, result_schema, return_raw)
+                 result_schema: list[str] = []):
+        super().__init__(name, description, result_schema)
         if max_revisions < 0:
             raise ValueError("max_revisions must be >= 0")
         self.max_revisions = max_revisions
@@ -183,6 +180,8 @@ class MakerChecker(Workflow):
     def clear_memory(self):
         self.maker.clear_memory()
         self.checker.clear_memory()
+        if self.early_stop:
+            self.early_stop.clear_memory()
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
         logging.info(
@@ -201,6 +200,7 @@ class MakerChecker(Workflow):
         for i in range(1, self.max_revisions + 1):
             logging.info(f"{self.name} Reviewing draft {i}")
             # Build revions from current draft
+            approved = False
             if isinstance(draft, dict):
                 revisions = self.checker.invoke(**draft)
             elif isinstance(draft, (tuple, list)):
@@ -213,13 +213,14 @@ class MakerChecker(Workflow):
                 approved = self.early_stop and self.early_stop.invoke(*revisions)
             else:
                 approved = self.early_stop and self.early_stop.invoke(revisions)
-            approved = approved or i == self.max_revisions
+            approved = approved
             rounds.append({
                 "approved": approved,
                 "revisions": revisions,
                 "draft": draft,
             })
             if approved:
+                logging.info(f"[WORKFLOW] {self.name} Approved draft {i}")
                 break
             # Make a new revised draft
             logging.info(f"{self.name} Making draft {i+1}")
@@ -240,15 +241,14 @@ class MakerChecker(Workflow):
 class FanFlow(Workflow):
     def __init__(self, name: str, description: str,
                  branches: list[Agent|Tool|Workflow] = [], 
-                 result_schema: list[str] = [],
-                 return_raw: bool = False):
-        super().__init__(name, description, result_schema, return_raw)
-        self.branches: List[Workflow] = []
+                 result_schema: list[str] = []):
+        super().__init__(name, description, result_schema)
+        self.branches: list[Workflow] = []
         for branch in branches:
             if isinstance(branch, Agent):
-                self.branches.append(AgentFlow(branch, [], True))
+                self.branches.append(AgentFlow(branch, []))
             elif isinstance(branch, Tool):
-                self.branches.append(ToolFlow(branch, [], True))
+                self.branches.append(ToolFlow(branch, []))
             else:
                 self.branches.append(branch)
     async def _invoke_branch_async(self, branch: Workflow, payload):
@@ -263,7 +263,12 @@ class FanFlow(Workflow):
         if payload is None:
             return None
         def _call():
-            return branch.invoke(payload)
+            if isinstance(payload, dict):
+                return branch.invoke(**payload)
+            elif isinstance(payload, (list, tuple)):
+                return branch.invoke(*payload)
+            else:
+                return branch.invoke(payload)
         logging.info(f"[WORKFLOW] Invoking branch: {branch._name}")
         return await loop.run_in_executor(None, _call)
     async def _fanout(self, payloads:list[Any]):
@@ -279,14 +284,10 @@ class FanFlow(Workflow):
         for branch in self.branches:
             branch.clear_memory()
     def add_branch(self, branch: Agent|Tool|Workflow, schema: list[str] = [], position: int = -1) -> bool:
-        if isinstance(branch, Agent):
-            new_branch = AgentFlow(branch, schema)
-        elif isinstance(branch, Tool):
-            new_branch = ToolFlow(branch, schema)
-        else:
-            new_branch = branch
-            if schema:
-                new_branch.result_schema = schema
+        if isinstance(branch, Agent): new_branch = AgentFlow(branch)
+        elif isinstance(branch, Tool): new_branch = ToolFlow(branch)
+        else: new_branch = branch
+        new_branch._result_schema = schema
         self.branches.insert(position, new_branch)
         return True
     def remove_branch(self, position: int = -1) -> Workflow:
@@ -297,11 +298,10 @@ class FanFlow(Workflow):
 
 class Selector(FanFlow):
     def __init__(
-        self, name: str, description: str, branches: List[Workflow],
+        self, name: str, description: str, branches: list[Workflow],
         decider: LLMEngine|Agent|Workflow|Tool,
-        result_schema: list[str] = [],
-        return_raw: bool = False):
-        super().__init__(name, description, branches)
+        result_schema: list[str] = [],):
+        super().__init__(name, description, branches, result_schema)
 
         # Build decider Agent with SYSTEM role-prompt that lists branches
         self.is_internal_agent = isinstance(decider, LLMEngine)
@@ -312,20 +312,12 @@ class Selector(FanFlow):
                     description="Branch selection agent",
                     role_prompt=self._build_decider_system_prompt(),
                     llm_engine=decider,
-                ),
-                result_schema=[],
-                return_raw=True
+                )
             )
-        elif isinstance(decider, Agent):
-            self.decider = AgentFlow(decider,
-                                     result_schema=[],
-                                     return_raw = True)
-        elif isinstance(decider, Tool):
-            self.decider = ToolFlow(decider, result_schema=[], return_raw=True)
-        else:
-            self.decider = decider
-            self.decider._result_schema = []
-            self.return_raw = True
+        elif isinstance(decider, Agent): self.decider = AgentFlow(decider)
+        elif isinstance(decider, Tool): self.decider = ToolFlow(decider)
+        else: self.decider = decider
+        self.decider._result_schema = []
 
     # ---- internal helpers ----
 
@@ -370,6 +362,9 @@ class Selector(FanFlow):
 
         # 1) Prefer the original shape (most flexible callers expect this).
         decision_name = self.decider.invoke(*args, **kwargs)
+        if not isinstance(decision_name, str):
+            return TypeError(f"{decision_name} is not an instance of type 'str'. "
+                             f"Check {self.decider.name}'s return type")
         logging.info(f"[WORKFLOW] Decider chose: {decision_name}")
 
         # route to the chosen branch with the ORIGINAL payload
@@ -381,8 +376,7 @@ class Selector(FanFlow):
         if not selected:
             raise ValueError(f"Decider chose an unknown branch: {decision_name}")
         result = selected.invoke(*args, **kwargs)
-        if not self.return_raw:
-            result = self.package_results(result)
+        result = self.package_results(result)
         logging.info(
             f"\n+---{'-'*len(self._name + ' Finished')}---+"
             f"\n|   {self._name} Finished   |"
@@ -392,11 +386,8 @@ class Selector(FanFlow):
 
 class Delegator(FanFlow):
     def __init__(self, name: str, description: str, branches: list[Agent | Workflow | Tool],
-        task_master: LLMEngine | Agent | Tool | Workflow,
-        result_schema:list[str] = [],
-        return_raw:bool = False
-    ):
-        super().__init__(name, description, branches, result_schema, return_raw)
+        task_master: LLMEngine | Agent | Tool | Workflow, result_schema:list[str] = []):
+        super().__init__(name, description, branches, result_schema)
 
         # Build the task master once; keep only a boolean to know if it's our internal agent
         self._is_internal_agent: bool = isinstance(task_master, LLMEngine)
@@ -409,19 +400,12 @@ class Delegator(FanFlow):
                 llm_engine=task_master,
                 role_prompt=Prompts.DELEGATOR_SYSTEM_PROMPT,
             )
-            self.task_master: Workflow = AgentFlow(internal_agent, [])
+            self.task_master: Workflow = AgentFlow(internal_agent)
             self._refresh_internal_prompt()
-        elif isinstance(task_master, Agent):
-            self.task_master: Workflow = AgentFlow(task_master, [], True)
-        elif isinstance(task_master, Tool):
-            self.task_master: Workflow = ToolFlow(task_master, default_schema)
-        elif isinstance(task_master, Workflow):
-            self.task_master: Workflow = task_master
-            self.task_master.return_raw = False
-            self.task_master._result_schema = default_schema
-        else:
-            raise TypeError("delegator_component must be LLMEngine | Agent | Tool | Workflow")
-
+        elif isinstance(task_master, Agent): self.task_master: Workflow = AgentFlow(task_master)
+        elif isinstance(task_master, Tool): self.task_master: Workflow = ToolFlow(task_master)
+        else: self.task_master: Workflow = task_master
+        self.task_master._result_schema = default_schema
     # ---------------- Branch management ----------------
 
     def add_branch(self, branch: Agent | Workflow | Tool, position: int = -1):
@@ -451,7 +435,7 @@ class Delegator(FanFlow):
             f"BRANCHES:\n{json.dumps(branch_list, ensure_ascii=False)}\n"
             f"(Remember: include every branch; use null to indicate skipping.)"
         )
-        if isinstance(self.task_master, AgentFlow): self.task_master.agent.role_prompt = dynamic
+        if isinstance(self.task_master, AgentFlow) and self._is_internal_agent: self.task_master.agent.role_prompt = dynamic
 
     # ---------------- Public API ----------------
 
@@ -468,20 +452,20 @@ class Delegator(FanFlow):
         raw = self.task_master.invoke(*args, **kwargs)
         logging.info(f"[WORKFLOW] {self.name} has created task assignments")
         # Normalize decider output to dict
-        if isinstance(raw, dict):
-            decider_output = raw
-        elif isinstance(raw, str):
+        if self._is_internal_agent:
             cleaned = re.sub(r"```json(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
             try:
-                decider_output = json.loads(cleaned)
+                decider_output:dict = json.loads(cleaned)
             except Exception as e:
                 raise ValueError(f"Delegator decider returned a string that is not valid JSON dict: {e}\nOutput was:\n{raw}")
-        else:
+        elif not isinstance(raw, dict):
             raise TypeError(
-                "Decider must return a dict (branch_name -> payload) or a JSON-string of that dict. "
-                f"Instead, Decider recieved {raw} of type {type(raw)}"
+                "Decider must return a dict (branch_name -> payload), "
+                "or a JSON-string of that dict. Instead, Decider recieved:\n"
+                f"{raw} of type {type(raw)}"
             )
-
+        else:
+            decider_output = raw
         # Validate/complete mapping to cover ALL branches
         payloads = [None] * len(self.branches)  # default None (skip)
         
@@ -504,10 +488,10 @@ class Delegator(FanFlow):
             # Fallback: if event loop policy prevents new loops, try asyncio.run
             results = asyncio.run(self._fanout(payloads))
         
-        if not self.return_raw:
-            results = self.package_results(results)
-        elif not self.result_schema:
+        if not self.result_schema:
             results = {b.name:result for b, result in zip(self.branches, results)}
+        else:
+            results = self.package_results(results)
         logging.info(
             f"\n+---{'-' * (len(self._name) + 9)}---+"
             f"\n|   {self._name} Finished   |"
