@@ -452,22 +452,23 @@ class Delegator(FanFlow):
         raw = self.task_master.invoke(*args, **kwargs)
         logging.info(f"[WORKFLOW] {self.name} has created task assignments")
         # Normalize decider output to dict
-        if self._is_internal_agent:
-            cleaned = re.sub(r"```json(.*?)```", r"\1", raw, flags=re.DOTALL).strip()
-            try:
-                decider_output:dict = json.loads(cleaned)
-            except Exception as e:
-                raise ValueError(f"Delegator decider returned a string that is not valid JSON dict: {e}\nOutput was:\n{raw}")
-        elif not isinstance(raw, dict):
+        if not isinstance(raw, dict):
             raise TypeError(
                 "Decider must return a dict (branch_name -> payload), "
                 "or a JSON-string of that dict. Instead, Decider recieved:\n"
                 f"{raw} of type {type(raw)}"
             )
+        elif self._is_internal_agent:
+            str_out = list(raw.values())[0]
+            cleaned = re.sub(r"```json(.*?)```", r"\1", str_out, flags=re.DOTALL).strip()
+            try:
+                decider_output:dict = json.loads(cleaned)
+            except Exception as e:
+                raise ValueError(f"Delegator decider returned a string that is not valid JSON dict: {e}\nOutput was:\n{raw}")
         else:
             decider_output = raw
-        # Validate/complete mapping to cover ALL branches
-        payloads = [None] * len(self.branches)  # default None (skip)
+
+        payloads = [None] * len(self.branches)
         
         logging.info(f"[WORKFLOW] Handing out assignments")
         for i, b in enumerate(self.branches):

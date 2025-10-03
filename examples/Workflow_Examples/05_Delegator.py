@@ -36,37 +36,58 @@ agent3 = Agent(
     llm_engine=LLM,
 )
 
+def compare_lengths(str1, str2):
+    if len(str1) == len(str2):
+        return f"Lengths of '{str1}' and '{str2}' are equal"
+    longer = len(str1) > len(str2)
+    if longer:
+        return f"'{str1}' is longer than '{str2}'"
+    return f"'{str2}' is longer than '{str1}'"
+tool1 = Tool("compare_lengths",
+             compare_lengths,
+             description="Compares the lengths of two strings and returns an analysis of which is longer")
 
-def manual_delegate(task1, task2, task3):
+def manual_delegate(task1, task2, task3, task4):
     return {
         "Paleontologist":task1,
         "Mathematician":task2,
         "Jokester":task3,
+        "compare_lengths":task4
     }
+
 manual_delegator = Tool("ManualDelegate", manual_delegate)
 
-delegator_component = manual_delegator#LLM#
+agentic = False
 
+delegator_component = LLM if agentic else manual_delegator#
 
 workflow = Delegator(
     name = "ParallelWorkflowExample",
     description = "A workflow that runs two agents in parallel to answer user questions",
     task_master=delegator_component,
-    branches=[agent1, agent2, agent3]
+    branches=[agent1, agent2, agent3, tool1]
 )
 
 agentic_input = """
 Can you tell me about T-Rex,
 calculate 256 to the power of one half,
-and tell me a good vacation spot"""
+and tell me a good vacation spot.
 
-manual_input = ("Tell me about the Tyrannosaurus rex",
-                "Calculate the square root of 256",
-                "What is a dog's favorite snack?")
+Also, which string is longer? "dogs"? or "dolphin"?
+"""
 
-task = manual_input
+manual_input = ("Tell me about the Velociraptor",
+                "Calculate the eigth root of 256",
+                "What is a dog's favorite snack?",
+                ("rats", "dog"))
+
+task = agentic_input if agentic else manual_input
 
 if isinstance(task, tuple):
-    print(json.dumps(workflow.invoke(*task), indent = 2))
+    results = workflow.invoke(*task)
 else:
-    print(json.dumps(workflow.invoke(task), indent = 2))
+    results = workflow.invoke(*task)
+
+for source, result in results.items():
+    print(f"{source}: {result}")
+    print("===")
