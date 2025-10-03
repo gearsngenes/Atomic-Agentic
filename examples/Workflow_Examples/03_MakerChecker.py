@@ -6,11 +6,11 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from modules.Agents import Agent
 from modules.LLMEngines import OpenAIEngine
-from modules.Workflows import MakerChecker
-
+from modules.Workflows import MakerChecker, AgentFlow
+from modules.Tools import Tool
 logging.getLogger().setLevel(logging.INFO)
 
-LLM = OpenAIEngine(model="gpt-4o", temperature=0.4)
+LLM = OpenAIEngine(model="gpt-4o", temperature=0.7)
 
 WRITER = """
 You are a creative story writer. You take story ideas & outlines and create full-blown story drafts.
@@ -79,15 +79,36 @@ feedback on how to improve the story. The below are your criteria that you evalu
     characters' individuality, because stories only work with interesting or complete characters
     instead of just ones that require reader projection/self-insertion (evaluate as appropriate
     based on the style of story).
+    
+After you've finished your analysis and provided any potential revisions, if you determine the
+story meets at least 95 percent of the critera above, end your revisions notes with a single
+"<<APPROVED>>" appended at the end of your response. 
 """.strip()
+
+writer_agent = Agent(
+  name = "Writer",
+  description="Writes stories based on user input & revision notes",
+  llm_engine=LLM,
+  role_prompt= WRITER,
+  context_enabled=True
+)
+editor_agent = Agent(
+  name="Editor",
+  description="Provides feedback on story drafts",
+  llm_engine=LLM,
+  role_prompt=CRITIC,
+  context_enabled=True
+)
+def is_approved(revisions: str)->bool:
+  return "<<APPROVED>>" in revisions
+approver = Tool("approver", is_approved)
 
 workflow = MakerChecker(
     name = "Story-Generator",
     description = "Creates and refines a short story based on user input",
-    maker_instructions=WRITER,
-    maker_llm=LLM,
-    checker_criteria=CRITIC,
-    checker_llm=LLM,
+    maker = AgentFlow(writer_agent),
+    checker = AgentFlow(editor_agent),
+    early_stop = None, #approver,
     max_revisions = 3
 )
 

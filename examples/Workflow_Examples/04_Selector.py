@@ -9,7 +9,7 @@ from modules.Agents import Agent
 from modules.Tools import Tool
 from modules.LLMEngines import OpenAIEngine
 from modules.ToolAgents import PlannerAgent
-from modules.Workflows import Selector
+from modules.Workflows import Selector, ToolFlow
 from modules.Plugins import MathPlugin
 
 logging.getLogger().setLevel(logging.INFO)
@@ -35,20 +35,20 @@ agent2.register(MathPlugin)
 
 def format_addr(bld, str, twn, st, zip):
     return f"Address: {bld} {str}, {twn}, {st} {zip}"
-branch_tool = Tool("AddressFormatter",
+format_tool = Tool("AddressFormatter",
                    format_addr,
-                   description="formats the input into a valid address")
+                   description="formats the building number,  into a valid address")
 
 #~~~Define our potential deciders~~~
-def check_for_numbers(task):
-    select_two = False
+def fill_args(a,b = None,c = None, d = None, e = None):
+    if b:
+        return format_tool.name
     for i in range(10):
-        select_two = select_two or (str(i) in task)
-    select_one = False
-    if "dinosaur" in task or "fossil" in task or "tyranosaur" in task or "paleo" in task:
-        select_one = True
-    return agent1.name if select_one else (agent2.name if select_two else branch_tool.name)
-filter_tool = Tool("number-filter", check_for_numbers)
+        if str(i) in a:
+            return agent2.name
+    return agent1.name
+    
+filter_tool = Tool("arg-filler", fill_args)
 
 decider = filter_tool# LLM #
 
@@ -57,15 +57,18 @@ workflow = Selector(
     name = "ConditionalWorkflowExample",
     description = "A workflow that routes user questions to the appropriate agent based on the topic",
     decider=decider,
-    branches=[agent1, agent2, branch_tool]
+    branches=[agent1, agent2, format_tool]
 )
 
 #~~~Define our tasks that we'd want specific agents to handle~~~
-agent1_input = "Difference between tyranosaurs and dromaeosaurs?"
-agent2_input = "what is twenty minus three, all to the power of 3.14159?"
-agent3_input = "123", "Fort Hamilton", "New York", "NY", 10364
+input1 = "Difference between tyranosaurs and dromaeosaurs?"
+input2 = "what is twenty minus three, all to the power of 3.14159?"
+input3 = "123", "Fort Hamilton", "New York", "NY", 10364
 #~~~Select the task~~~
-task = agent3_input
+task = input2
 
 #~~~print result~~~
-print(workflow.invoke(task))
+if isinstance(task, tuple):
+    print(workflow.invoke(*task))
+else:
+    print(workflow.invoke(task))

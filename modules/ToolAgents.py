@@ -71,7 +71,7 @@ class ToolAgent(Agent, ABC):
         for by_source in self._toolbox.values():
             for tool_list in by_source.values():
                 for tool in tool_list:
-                    tools[tool.name] = tool.func
+                    tools[tool.full_name] = tool.func
         return tools
     
     def register(self, tool: Any, name: str|None = None, description: str | None = None) -> None:
@@ -79,7 +79,7 @@ class ToolAgent(Agent, ABC):
             _type = tool.type
             _source = tool.source
             self._toolbox[_type][_source].append(tool)
-            return tool.name
+            return tool.full_name
         elif callable(tool):
             _type = "function"
         elif isinstance(tool, dict) and "method_map" in tool and "name" in tool:
@@ -91,7 +91,7 @@ class ToolAgent(Agent, ABC):
         else:
             raise ValueError("Tool must be a callable, Plugin, Agent, or MCP server URL string (if MCP registration is allowed).")
         tools: list[Tool] = ToolFactory.toolify(object=tool, name = name, description=description)
-        _name = tools[0].name if tools else "unknown"
+        _name = tools[0].full_name if tools else "unknown"
         # _type = tools[0].type if tools else "unknown"
         _source = tools[0].source if tools else "unknown"
         if _type != "function":

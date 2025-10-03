@@ -14,7 +14,7 @@ class Tool:
         self._name = name
         self._func = func
         self._description = description
-        self.signature = Tool._build_signature(self.name, func)
+        self.signature = Tool._build_signature(self.full_name, func)
         self._param_defaults = Tool._build_param_defaults(func)
         self._clear_mem = clear_mem_func
     @property
@@ -25,6 +25,9 @@ class Tool:
         return self._source
     @property
     def name(self):
+        return self._name
+    @property
+    def full_name(self):
         return f"{self._type}.{self._source}.{self._name}"
     @property
     def description(self):
