@@ -45,22 +45,14 @@ def format_out(a, b):
     return f"The value of 'A' is {a}, and the value of 'B' is {b}"
 tool3 = Tool("formatter", format_out)
 
-agentic_chain = False # change to switch from the agent chain to the tool chain
-steps = [
-    AgentFlow(agent1, ["prompt"]),
-    AgentFlow(agent2, ["prompt"]),
-    AgentFlow(agent3, [])
-] if agentic_chain else [
-    ToolFlow(tool1, ["output"]),
-    ToolFlow(tool2, ["a", "b"]),
-    ToolFlow(tool3, [])
-]
+agentic_chain = True # change to switch from the agent chain to the tool chain
+steps = [agent1, agent2, agent3] if agentic_chain else [tool1,tool2,tool3]
 
 workflow = ChainOfThought(
-    name="ChainOfThoughtExample",
-    description="A chain of thought workflow with three agents.",
-    steps=steps,
-    result_schema= ["final_string"] # change/remove string to alter output format (empty list = raw string)
+    name = "ChainOfThoughtExample",
+    description ="A chain of thought workflow with three agents.",
+    steps = steps,
+    result_schema = ["final_string"]
 )
 
 task = "There are 5 sheep, and twenty-three ox and zero point five chicken eggs." if agentic_chain else '{"a":-1.74,"b":7,"c":4}'

@@ -10,12 +10,44 @@ from modules.Tools import Tool
 import json, logging
 from typing import Any
 
+import inspect
+from typing import Callable
+
+def callable_is_single_param(fn: Callable) -> bool:
+    """
+    Return True iff `fn` takes exactly one logical input parameter,
+    excluding 'self' and excluding varargs/kwargs.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (ValueError, TypeError):
+        # fallback: unknown signature
+        return False
+
+    params = []
+    for p in sig.parameters.values():
+        # ignore bound-instance 'self' if present
+        if p.name == "self":
+            continue
+        # if function uses *args or **kwargs, treat as not single-param
+        if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            return False
+        # count positional-only, positional-or-keyword, keyword-only
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                      inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                      inspect.Parameter.KEYWORD_ONLY):
+            params.append(p)
+
+    return len(params) == 1
+
+WF_RESULT = "__wf_result__"
 
 class Workflow(ABC):
-    def __init__(self, name: str, description: str, result_schema: list[str]):
+    def __init__(self, name: str, description: str, result_schema: list[str] = [WF_RESULT]):
         self._name = name
         self._description = description
-        self._result_schema = result_schema or []
+        self._result_schema = result_schema
+        self._is_single_param = False
         for s in self._result_schema:
             if not s:
                 raise ValueError("Empty strings are not permissible output schema parameter names")
@@ -30,13 +62,11 @@ class Workflow(ABC):
     def result_schema(self) -> list[str]: return self._result_schema
     @result_schema.setter
     def result_schema(self, val: list[str]):
+        if val == None or not len(val):
+            raise ValueError("Result schema must be set to a non-empty list of strings")
         self._result_schema = val
 
-    def package_results(self, results: Any):
-        # If no schema provided, return results unchanged (caller asked for raw results)
-        if not self._result_schema:
-            return results
-
+    def package_results(self, results: Any)->dict:
         # If results is a dict/list/tuple, check lengths and map by order when equal
         if isinstance(results, dict):
             if len(results) != len(self._result_schema):
@@ -48,10 +78,14 @@ class Workflow(ABC):
                 return {self._result_schema[0]: results}
             return {self._result_schema[i] : results[i] for i in range(len(self._result_schema))}
         # If result is not a collection
-        return {self._result_schema[0] : results}
+        final = {}
+        for i, k in enumerate(self._result_schema):
+            if i == 0: final[k] = results;continue
+            final[k] = None
+        return final
     
     @abstractmethod
-    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+    def invoke(self, *args: Any, **kwargs: Any) -> dict:
         pass
 
     @abstractmethod
@@ -59,19 +93,23 @@ class Workflow(ABC):
         pass
 
 class AgentFlow(Workflow):
-    def __init__(self, agent: Agent,
-                 result_schema: list[str] = []):
+    def __init__(self, agent: Agent, result_schema: list[str] = [WF_RESULT]):
         super().__init__(name = agent.name,
                          description = agent.description,
                          result_schema = result_schema)
         self.agent: Agent = agent
+        self._is_single_param = True
     def clear_memory(self):
         self.agent.clear_memory()
-    def invoke(self, *args, **kwargs):
+    def invoke(self, *args: Any, **kwargs: Any)->dict:
         logging.info(f"\n+---{'-'*len(self._name + ' Starting')}---+"
                      f"\n|   {self._name} Starting   |"
                      f"\n+---{'-'*len(self._name + ' Starting')}---+")
-        result = self.agent.invoke(*args, **kwargs)
+        try:
+            result = self.agent.invoke(*args, **kwargs)
+        except TypeError as e:
+            logging.info(f"Failed to pass in arguments as is, giving '{e}'. Stringifying...")
+            result = self.agent.invoke(f"*args:{args}\n**kwargs:{kwargs}")
         result = self.package_results(result)
         logging.info(   f"\n+---{'-'*len(self._name + ' Finished')}---+"
                         f"\n|   {self._name} Finished   |"
@@ -79,24 +117,18 @@ class AgentFlow(Workflow):
         return result
 
 class ToolFlow(Workflow):
-    def __init__(self, tool: Tool, result_schema: list[str] = []):
+    def __init__(self, tool: Tool, result_schema: list[str] = [WF_RESULT]):
         super().__init__(tool.name, tool.description, result_schema)
         self.tool = tool
+        self._is_single_param = callable_is_single_param(tool.func)
 
     def clear_memory(self):
         self.tool.clear_memory()
 
-    def invoke(self, *args, **kwargs):
+    def invoke(self, *args: Any, **kwargs: Any)->dict:
         """
         Invoke the underlying function and bind its return into a dict matching
         the keys of `result_schema`.
-
-        Rules (per your request):
-        - `result_schema` must be a flat dict of keys, e.g. {"k1": {}, "k2": {}}.
-        - If the returned `results` is a dict, list, or tuple:
-            - If number of items == number of schema keys: map items in order to keys and return the dict.
-            - Otherwise: return {first_key: results} (put the whole result under the first schema key).
-        - If `results` is any other type: return {first_key: results}.
         """
         # Raw results
         results = self.tool.func(*args, **kwargs)
@@ -105,20 +137,32 @@ class ToolFlow(Workflow):
         return results
 
 class ChainOfThought(Workflow):
-    def __init__(self, name: str, description: str, steps: list[Workflow] = [], result_schema: list[str] = []):
+    def __init__(self, name: str, description: str,
+                 steps: list[Tool|Agent|Workflow] = [], unpack_midsteps:bool = True,
+                 result_schema: list[str] = [WF_RESULT]):
         super().__init__(name, description, result_schema)
-        self._steps: list[Workflow] = steps
+        self._steps: list[Workflow] = []
+        self._unpack_midsteps = unpack_midsteps
+        for step in steps:
+            if isinstance(step, Tool): new_step = ToolFlow(step)
+            elif isinstance(step, Agent): new_step = AgentFlow(step)
+            else: new_step = step
+            self._steps.append(new_step)
+        self._is_single_param = self._steps[0]._is_single_param
 
-    def insert_step(self, step: Agent|Workflow|Tool, schema: list[str] = [], position: int | None = None):
+    def insert_step(self, step: Agent|Workflow|Tool, schema: list[str] = [WF_RESULT], position: int | None = None):
         if isinstance(step, Agent): step = AgentFlow(step, schema)
         elif isinstance(step, Tool):  step = ToolFlow(step, schema)
         elif isinstance(step, Workflow): step._result_schema = schema
         if position is None: self._steps.append(step, schema)
         else: self._steps.insert(position, step)
+        self._is_single_param = self._steps[0]._is_single_param
 
     def pop(self, position: int = -1) -> Workflow:
         if not self._steps: raise ValueError("No steps to remove.")
-        return self._steps.pop(position)
+        popped = self._steps.pop(position)
+        self._is_single_param = self._steps[0]._is_single_param
+        return popped
 
     def clear_memory(self):
         for step in self._steps: step.clear_memory()
@@ -138,13 +182,14 @@ class ChainOfThought(Workflow):
             if step == self._steps[0]:
                 current = step.invoke(*args, **kwargs)
                 continue
-            # MUST output key-word representations if they aren't the last step
-            if not isinstance(current, dict):
-                raise RuntimeError(
-                    "The output of the previous step must provide a keyword-representation "
-                    f"of the arguments for the current step, but instead got:\n{current}\n"
-                    f"Please check {step.name}'s input schema")
-            # If current is a dict, pass it as keyword arguments to the next step.
+            # If current uses the default result key, handle it as seen below
+            if WF_RESULT in current:
+                mid_result = current[WF_RESULT]
+                if step._is_single_param: current = step.invoke(mid_result)
+                elif isinstance(mid_result,(list,tuple)): current = step.invoke(*mid_result)
+                elif isinstance(mid_result, dict): current = step.invoke(**mid_result)
+                continue
+            # Otherwise, treat it as key-word arguments
             current = step.invoke(**current)
         result = self.package_results(current)
         logging.info(f"\n+---{'-'*len(self._name + ' Finished')}---+"
@@ -157,25 +202,24 @@ class MakerChecker(Workflow):
     Maker-Checker pattern (agents only), *args/**kwargs compatible.
     """
     def __init__(self, name: str, description: str,
-                 maker: Workflow,
-                 checker: Workflow,
-                 early_stop: Agent|Tool|Workflow = None,
+                 maker: Workflow, checker: Workflow, early_stop: Agent|Tool|Workflow = None,
                  max_revisions: int = 1,
-                 result_schema: list[str] = []):
+                 result_schema: list[str] = [WF_RESULT]):
         super().__init__(name, description, result_schema)
         if max_revisions < 0:
             raise ValueError("max_revisions must be >= 0")
+        self._is_single_param = maker._is_single_param
         self.max_revisions = max_revisions
         self.maker: Workflow = maker
         self.checker: Workflow = checker
-        if early_stop and isinstance(early_stop, Agent):
-            self.early_stop = AgentFlow(early_stop, [])
-        elif early_stop and isinstance(early_stop, Tool):
-            self.early_stop = ToolFlow(early_stop, [])
-        elif early_stop:
-            self.early_stop = early_stop
-        else:
-            self.early_stop = None
+        if not early_stop: self.early_stop = None
+        elif isinstance(early_stop, Agent): self.early_stop = AgentFlow(early_stop)
+        elif isinstance(early_stop, Tool): self.early_stop = ToolFlow(early_stop)
+        else: self.early_stop = early_stop
+        if self.early_stop and len(self.early_stop.result_schema) > 1:
+            raise ValueError("The Early stop workflow component should only have a single key "
+                             "to track whether or the current revision notes warrant approving "
+                             "the current draft or not. A single key for a single boolean.")
 
     def clear_memory(self):
         self.maker.clear_memory()
@@ -190,8 +234,6 @@ class MakerChecker(Workflow):
             f"\n+---{'-'*len(self._name + ' Starting')}---+"
         )
         rounds: list[dict] = []
-        draft = None
-        approved = False
 
         # Prepare first maker user message (no revisions yet)
         logging.info(f"{self.name} Making the first draft")
@@ -201,19 +243,19 @@ class MakerChecker(Workflow):
             logging.info(f"{self.name} Reviewing draft {i}")
             # Build revions from current draft
             approved = False
-            if isinstance(draft, dict):
-                revisions = self.checker.invoke(**draft)
-            elif isinstance(draft, (tuple, list)):
-                revisions = self.checker.invoke(*draft)
-            else:
-                revisions = self.checker.invoke(draft)
-            if isinstance(revisions, dict):
-                approved = self.early_stop and self.early_stop.invoke(**revisions)
-            elif isinstance(revisions, (tuple, list)):
-                approved = self.early_stop and self.early_stop.invoke(*revisions)
-            else:
-                approved = self.early_stop and self.early_stop.invoke(revisions)
-            approved = approved
+            if WF_RESULT in draft:
+                draft = draft[WF_RESULT]
+            if self.checker._is_single_param: revisions = self.checker.invoke(draft)
+            elif isinstance(draft, dict): revisions = self.checker.invoke(**draft)
+            elif isinstance(draft, (tuple, list)): revisions = self.checker.invoke(*draft)
+            if WF_RESULT in revisions:
+                revisions = revisions[WF_RESULT]
+            if self.early_stop:
+                logging.info(f"[WORKFLOW] {self.early_stop.name} is marking checking if revisions warrant early approval")
+                if self.early_stop and self.early_stop._is_single_param: approver_res = self.early_stop.invoke(revisions)
+                elif isinstance(revisions, dict): approver_res = self.early_stop.invoke(**revisions)
+                elif isinstance(revisions, (tuple, list)): approver_res = self.early_stop.invoke(*revisions)
+            approved = self.early_stop != None and approver_res[list(approver_res.keys())[0]]
             rounds.append({
                 "approved": approved,
                 "revisions": revisions,
@@ -224,12 +266,9 @@ class MakerChecker(Workflow):
                 break
             # Make a new revised draft
             logging.info(f"{self.name} Making draft {i+1}")
-            if isinstance(revisions, dict):
-                draft = self.maker.invoke(**revisions)
-            elif isinstance(revisions, (tuple, list)):
-                draft = self.maker.invoke(*revisions)
-            else:
-                draft = self.maker.invoke(revisions)
+            if self.maker._is_single_param: draft = self.maker.invoke(revisions)
+            elif isinstance(revisions, dict): draft = self.maker.invoke(**revisions)
+            elif isinstance(revisions, (tuple, list)): draft = self.maker.invoke(*revisions)
         result = self.package_results((rounds, draft))
         logging.info(
             f"\n+---{'-'*len(self._name + ' Finished')}---+"
@@ -238,115 +277,67 @@ class MakerChecker(Workflow):
         )
         return result
 
-class FanFlow(Workflow):
-    def __init__(self, name: str, description: str,
-                 branches: list[Agent|Tool|Workflow] = [], 
-                 result_schema: list[str] = []):
+class Selector(Workflow):
+    def __init__(
+        self, name: str, description: str,
+        branches: list[Workflow], decider: LLMEngine|Agent|Workflow|Tool,
+        result_schema: list[str] = [WF_RESULT]):
         super().__init__(name, description, result_schema)
+        # Initialize the choice agents
         self.branches: list[Workflow] = []
         for branch in branches:
-            if isinstance(branch, Agent):
-                self.branches.append(AgentFlow(branch, []))
-            elif isinstance(branch, Tool):
-                self.branches.append(ToolFlow(branch, []))
-            else:
-                self.branches.append(branch)
-    async def _invoke_branch_async(self, branch: Workflow, payload):
-        """
-        Invoke a branch workflow with normalized payload conventions.
-        For ToolFlow: bind using signature-aware logic (as in ToolFlow.invoke).
-        For other Workflows/Agents: pass through payload as a single argument,
-        unless payload is an explicit callspec [args, kwargs].
-        """
-        loop = asyncio.get_running_loop()
-        # Skip sentinel
-        if payload is None:
-            return None
-        def _call():
-            if isinstance(payload, dict):
-                return branch.invoke(**payload)
-            elif isinstance(payload, (list, tuple)):
-                return branch.invoke(*payload)
-            else:
-                return branch.invoke(payload)
-        logging.info(f"[WORKFLOW] Invoking branch: {branch._name}")
-        return await loop.run_in_executor(None, _call)
-    async def _fanout(self, payloads:list[Any]):
-        if len(payloads) != len(self.branches):
-            raise ArithmeticError("The number of payloads do not match the number of branches."
-                                  f" {self.name} expected {len(self.branches)}, but got {len(payloads)}")
-        tasks = [
-            self._invoke_branch_async(self.branches[i], payloads[i])
-            for i in range(len(self.branches))
-        ]
-        return await asyncio.gather(*tasks, return_exceptions=False)
-    def clear_memory(self):
-        for branch in self.branches:
-            branch.clear_memory()
-    def add_branch(self, branch: Agent|Tool|Workflow, schema: list[str] = [], position: int = -1) -> bool:
+            if isinstance(branch, Agent): self.branches.append(AgentFlow(branch))
+            elif isinstance(branch, Tool): self.branches.append(ToolFlow(branch))
+            else: self.branches.append(branch)
+        # Build decider Agent with SYSTEM role-prompt that lists branches
+        self._is_internal_agent = isinstance(decider, LLMEngine)
+        if self._is_internal_agent:
+            self.decider = AgentFlow(
+                Agent(
+                    name=f"{name}.Selector",
+                    description="Branch selection agent",
+                    role_prompt="",
+                    llm_engine=decider,
+                )
+            )
+            self._update_decider_prompt()
+        elif isinstance(decider, Agent): self.decider = AgentFlow(decider)
+        elif isinstance(decider, Tool): self.decider = ToolFlow(decider)
+        else: self.decider = decider
+        if len(self.decider._result_schema) > 1:
+            raise ValueError("The decider workflow must have a result schema of length 1, as we only "
+                             "expect a single string corresponding to the name of one of the branches.")
+        self._is_single_param = self.decider._is_single_param
+
+    # ---- internal helpers ----
+    def _update_decider_prompt(self) -> None:
+        # refresh the decider's SYSTEM prompt when branch set changes
+        branch_lines = ",\n".join(
+            f"{b.name}: {b.description}" for b in self.branches
+        )
+        new_system_prompt = Prompts.CONDITIONAL_DECIDER_PROMPT.format(branches=branch_lines)
+        self.decider.agent.role_prompt = new_system_prompt
+
+    # ---- public API ----
+    def add_branch(self, branch: Agent|Tool|Workflow, schema: list[str] = [WF_RESULT], position: int|None = None) -> None:
         if isinstance(branch, Agent): new_branch = AgentFlow(branch)
         elif isinstance(branch, Tool): new_branch = ToolFlow(branch)
         else: new_branch = branch
         new_branch._result_schema = schema
-        self.branches.insert(position, new_branch)
-        return True
-    def remove_branch(self, position: int = -1) -> Workflow:
-        return self.branches.pop(position)
-    @abstractmethod
-    def invoke(*args, **kwargs):
-        pass
-
-class Selector(FanFlow):
-    def __init__(
-        self, name: str, description: str, branches: list[Workflow],
-        decider: LLMEngine|Agent|Workflow|Tool,
-        result_schema: list[str] = [],):
-        super().__init__(name, description, branches, result_schema)
-
-        # Build decider Agent with SYSTEM role-prompt that lists branches
-        self.is_internal_agent = isinstance(decider, LLMEngine)
-        if self.is_internal_agent:
-            self.decider = AgentFlow(
-                Agent(
-                    name=f"{name}::Selector",
-                    description="Branch selection agent",
-                    role_prompt=self._build_decider_system_prompt(),
-                    llm_engine=decider,
-                )
-            )
-        elif isinstance(decider, Agent): self.decider = AgentFlow(decider)
-        elif isinstance(decider, Tool): self.decider = ToolFlow(decider)
-        else: self.decider = decider
-        self.decider._result_schema = []
-
-    # ---- internal helpers ----
-
-    def _build_decider_system_prompt(self) -> str:
-        # name: description lines, one per branch (stable, readable)
-        branch_lines = ",\n".join(
-            f"{b.name}: {b.description}" for b in self.branches
-        )
-        return Prompts.CONDITIONAL_DECIDER_PROMPT.format(branches=branch_lines)
-
-    def _update_decider_prompt(self) -> None:
-        # refresh the decider's SYSTEM prompt when branch set changes
-        self.decider.agent.role_prompt = self._build_decider_system_prompt()
-
-    # ---- public API ----
-    def add_branch(self, branch: Agent|Tool|Workflow, position: int = -1) -> None:
-        FanFlow.add_branch(self, branch, position)
-        if self.is_internal_agent:
+        if not position: self.branches.append(new_branch)
+        else: self.branches.insert(position, new_branch)
+        if self._is_internal_agent:
             self._update_decider_prompt()
 
     def remove_branch(self, position: int = -1):
-        removed = FanFlow.remove_branch(self, position)
-        if self.is_internal_agent:
+        removed = self.branches.pop(position)
+        if self._is_internal_agent:
             self._update_decider_prompt()
         return removed
 
     def clear_memory(self):
         self.decider.clear_memory()
-        FanFlow.clear_memory(self)
+        for branch in self.branches: branch.clear_memory(self)
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
         logging.info(
@@ -360,8 +351,12 @@ class Selector(FanFlow):
 
         logging.info(f"[WORKFLOW] Selecting branch via decider on {self._name}")
 
-        # 1) Prefer the original shape (most flexible callers expect this).
-        decision_name = self.decider.invoke(*args, **kwargs)
+        # if not self._is_internal_agent:
+        decision_obj = self.decider.invoke(*args, **kwargs)
+        # else:
+        #     decision_obj = self.decider.invoke(f"*args:{args}\n**kwargs:{kwargs}")
+        decision_name = decision_obj[list(decision_obj.keys())[0]]
+
         if not isinstance(decision_name, str):
             return TypeError(f"{decision_name} is not an instance of type 'str'. "
                              f"Check {self.decider.name}'s return type")
@@ -384,119 +379,100 @@ class Selector(FanFlow):
         )
         return result
 
-class Delegator(FanFlow):
-    def __init__(self, name: str, description: str, branches: list[Agent | Workflow | Tool],
-        task_master: LLMEngine | Agent | Tool | Workflow, result_schema:list[str] = []):
-        super().__init__(name, description, branches, result_schema)
+class BatchFlow(Workflow):
+    """
+    Simple parallel workflow: runs provided branches in parallel.
 
-        # Build the task master once; keep only a boolean to know if it's our internal agent
-        self._is_internal_agent: bool = isinstance(task_master, LLMEngine)
-        default_schema = [b.name for b in self.branches]
-        if self._is_internal_agent:
-            # Internal agent we OWN; update its role-prompt whenever branches change
-            internal_agent = Agent(
-                name=f"{name}.delegator",
-                description="Delegator decider (internal)",
-                llm_engine=task_master,
-                role_prompt=Prompts.DELEGATOR_SYSTEM_PROMPT,
-            )
-            self.task_master: Workflow = AgentFlow(internal_agent)
-            self._refresh_internal_prompt()
-        elif isinstance(task_master, Agent): self.task_master: Workflow = AgentFlow(task_master)
-        elif isinstance(task_master, Tool): self.task_master: Workflow = ToolFlow(task_master)
-        else: self.task_master: Workflow = task_master
-        self.task_master._result_schema = default_schema
-    # ---------------- Branch management ----------------
+    Invocation semantics:
+    - Positional arguments to `invoke` are assigned to branches by position (0 -> branches[0], etc.).
+    - Keyword arguments must use branch names to target a specific branch and override positional inputs for that branch.
+    - Each branch may be an Agent/Tool/Workflow and will be wrapped as an appropriate Workflow (AgentFlow/ToolFlow) on construction.
 
-    def add_branch(self, branch: Agent | Workflow | Tool, position: int = -1):
-        FanFlow.add_branch(self, branch, position)
-        if self._is_internal_agent:
-            self._refresh_internal_prompt()
+    Result schema rules:
+    - `result_schema` must either have length 1 or length == number of branches.
+      - If length == 1: the list of branch results is returned under that single key.
+      - If length == number_of_branches: each branch result is mapped positionally to the schema keys.
+    - If `result_schema` is empty, the return value is a dict mapping branch.name -> branch_result.
+    """
+    def __init__(self, name: str, description: str, branches: list[Agent|Tool|Workflow], result_schema: list[str] = []):
+        super().__init__(name=name, description=description, result_schema=result_schema)
+        self.branches: list[Workflow] = []
+        for b in branches:
+            if isinstance(b, Agent): self.branches.append(AgentFlow(b))
+            elif isinstance(b, Tool): self.branches.append(ToolFlow(b))
+            else: self.branches.append(b)
 
-    def remove_branch(self, position: int = -1):
-        removed = FanFlow.remove_branch(self, position)
-        if self._is_internal_agent:
-            self._refresh_internal_prompt()
-        return removed
+        # Validate schema length now that branches are known
+        if len(self._result_schema) not in (0, 1, len(self.branches)):
+            raise ValueError("result_schema must be empty, length 1, or match number of branches")
 
     def clear_memory(self):
-        # Clear task_master memory if supported
-        self.task_master.clear_memory()
-        # Clear branches
-        FanFlow.clear_memory(self)
+        for b in self.branches:
+            b.clear_memory()
 
-    # ---------------- Internal helpers ----------------
+    def invoke(self, *args: Any, **kwargs: Any) -> dict:
+        logging.info(f"[PARALLEL] {self._name} Starting")
 
-    def _refresh_internal_prompt(self):
-        """Update the internal decider's role-prompt to include branch list & rules."""
-        branch_list = [{"name": b.name, "description": b.description} for b in self.branches]
-        dynamic = (
-            f"{Prompts.DELEGATOR_SYSTEM_PROMPT}\n\n"
-            f"BRANCHES:\n{json.dumps(branch_list, ensure_ascii=False)}\n"
-            f"(Remember: include every branch; use null to indicate skipping.)"
-        )
-        if isinstance(self.task_master, AgentFlow) and self._is_internal_agent: self.task_master.agent.role_prompt = dynamic
-
-    # ---------------- Public API ----------------
-
-    def invoke(self, *args, **kwargs):
-        logging.info(
-            f"\n+---{'-' * (len(self._name) + 9)}---+"
-            f"\n|   {self._name} Starting   |"
-            f"\n+---{'-' * (len(self._name) + 9)}---+"
-        )
-
-        if not self.branches:
-            raise ValueError("Delegator has no branches to execute.")
-
-        raw = self.task_master.invoke(*args, **kwargs)
-        logging.info(f"[WORKFLOW] {self.name} has created task assignments")
-        # Normalize decider output to dict
-        if not isinstance(raw, dict):
-            raise TypeError(
-                "Decider must return a dict (branch_name -> payload), "
-                "or a JSON-string of that dict. Instead, Decider recieved:\n"
-                f"{raw} of type {type(raw)}"
-            )
-        elif self._is_internal_agent:
-            str_out = list(raw.values())[0]
-            cleaned = re.sub(r"```json(.*?)```", r"\1", str_out, flags=re.DOTALL).strip()
-            try:
-                decider_output:dict = json.loads(cleaned)
-            except Exception as e:
-                raise ValueError(f"Delegator decider returned a string that is not valid JSON dict: {e}\nOutput was:\n{raw}")
-        else:
-            decider_output = raw
-
+        # Build payloads per-branch from positionals and keyword overrides
         payloads = [None] * len(self.branches)
-        
-        logging.info(f"[WORKFLOW] Handing out assignments")
+        for i in range(len(self.branches)):
+            # positional if provided
+            if i < len(args):
+                payloads[i] = args[i]
+            else:
+                payloads[i] = None
+        # keyword overrides by branch name
         for i, b in enumerate(self.branches):
-            if b.name not in decider_output:
-                continue
-            payloads[i] = decider_output[b.name]
-        logging.info(f"[WORKFLOW] Executing tasks")
+            if b.name in kwargs:
+                payloads[i] = kwargs[b.name]
+
+        async def _fanout(payloads:list[Any]):
+            loop = asyncio.get_running_loop()
+            tasks = []
+            for i, branch in enumerate(self.branches):
+                payload = payloads[i]
+                def _call(branch=branch, payload=payload):
+                    # Normalize payload invocation similar to other workflows
+                    if payload is None:
+                        return branch.invoke()
+                    if branch._is_single_param:
+                        return branch.invoke(payload)
+                    if isinstance(payload, (list, tuple)):
+                        return branch.invoke(*payload)
+                    if isinstance(payload, dict):
+                        return branch.invoke(**payload)
+                    return branch.invoke(payload)
+                tasks.append(loop.run_in_executor(None, _call))
+            results = await asyncio.gather(*tasks, return_exceptions=False)
+            return results
+
         try:
-            # Use a fresh loop to avoid conflicts with any outer loops
             loop = asyncio.new_event_loop()
             try:
                 asyncio.set_event_loop(loop)
-                results = loop.run_until_complete(self._fanout(payloads))
+                results = loop.run_until_complete(_fanout(payloads))
             finally:
                 asyncio.set_event_loop(None)
                 loop.close()
         except RuntimeError:
-            # Fallback: if event loop policy prevents new loops, try asyncio.run
-            results = asyncio.run(self._fanout(payloads))
-        
-        if not self.result_schema:
-            results = {b.name:result for b, result in zip(self.branches, results)}
-        else:
-            results = self.package_results(results)
-        logging.info(
-            f"\n+---{'-' * (len(self._name) + 9)}---+"
-            f"\n|   {self._name} Finished   |"
-            f"\n+---{'-' * (len(self._name) + 9)}---+\n"
-        )
-        # Tuple aligned to branch order (includes None for skipped)
-        return results
+            # fallback for environments that disallow new event loops
+            results = asyncio.run(_fanout(payloads))
+
+        # Normalize results: if a branch returned a single-key dict with WF_RESULT,
+        # unwrap it so callers don't get nested {branch: {WF_RESULT: ...}}
+        normalized = []
+        for r in results:
+            if isinstance(r, dict) and WF_RESULT in r:
+                normalized.append(r[WF_RESULT])
+            else: normalized.append(r)
+
+        # If no explicit schema, return mapping branch.name -> result
+        if not self._result_schema:
+            out = {b.name: r for b, r in zip(self.branches, normalized)}
+            logging.info(f"[PARALLEL] {self._name} Finished")
+            return out
+
+        # Otherwise schema must be length 1 or length num branches (validated in ctor)
+        out = self.package_results(normalized)
+        logging.info(f"[PARALLEL] {self._name} Finished")
+        return out

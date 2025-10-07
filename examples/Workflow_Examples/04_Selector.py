@@ -40,17 +40,17 @@ format_tool = Tool("AddressFormatter",
                    description="formats the building number,  into a valid address")
 
 #~~~Define our potential deciders~~~
-def fill_args(a,b = None,c = None, d = None, e = None):
+def fill_args(a, b = None, c = None, d = None, e = None):
     if b:
         return format_tool.name
     for i in range(10):
         if str(i) in a:
             return agent2.name
     return agent1.name
-    
+
 filter_tool = Tool("arg-filler", fill_args)
 
-decider = filter_tool# LLM #
+decider = filter_tool# LLM#
 
 #~~~~Build our selector workflow~~~
 workflow = Selector(
@@ -66,10 +66,8 @@ input1 = "Difference between tyranosaurs and dromaeosaurs?"
 input2 = "what is twenty minus three, all to the power of 3.14159?"
 input3 = "123", "Fort Hamilton", "New York", "NY", 10364
 #~~~Select the task~~~
-task = input2
+task = input3
 
 #~~~print result~~~
-if isinstance(task, tuple):
-    print(workflow.invoke(*task))
-else:
-    print(workflow.invoke(task))
+if isinstance(task, tuple): print(workflow.invoke(*task))
+else: print(workflow.invoke(task))

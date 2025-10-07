@@ -31,7 +31,7 @@ try:
 except Exception as e:
     print("ERROR: failed to pass in raw [5,10] as input, since it is "
           f"viewed as a single parameter, resulting in the given error:\n```{e}```")
-print("\n**Correct way to pass list/tuple in as an *args**:\n(.invoke(*[5,10])): ", wf.invoke(*[5, 10]))
+print("\n**Correct way to pass list/tuple in as an *args:**:\n(.invoke(*[5,10])): ", wf.invoke(*[5, 10]))
 
 
 # ===========================================================
@@ -46,7 +46,7 @@ try:
 except Exception as e:
     print(f"ERROR: failed to pass in raw {{'a':1, 'b':3, 'c':-0.5}} as input, since it is "
           f"viewed as a single parameter, resulting in the given error:\n```{e}```")
-    print("\n**Correct invoke(**{...})**:\n",wf.invoke(**{"a":1, "b":3, "c":-0.5}))
+    print("\n**Correct way to pass dict in as an **kwargs:**\n(.invoke(**{'a':1, 'b':3, 'c':-0.5})):",wf.invoke(**{"a":1, "b":3, "c":-0.5}))
 
 # ===========================================================
 def format_menu(menu: dict):
@@ -68,7 +68,7 @@ print(wf.invoke(3.1, b={"x":1, "y":0, "z":-1}))
 # ===========================================================
 print("\n===Default-Value Examples===")
 def string_any(a, b = 2, c = "hello", f = "john"):
-    return f"a: {a}, b: {b}, c: {c}, f: {f}"
+    return f"Single string -- a: {a}, b: {b}, c: {c}, f: {f}"
 tool6 = Tool("string-any", string_any)
 wf = ToolFlow(tool6)
 print(wf.invoke("al"))
