@@ -6,7 +6,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from modules.Agents import Agent
 from modules.LLMEngines import OpenAIEngine
-from modules.Workflows import ChainOfThought, ToolFlow, AgentFlow
+from modules.Workflows import ChainFlow
 from modules.Tools import Tool
 
 logging.getLogger().setLevel(logging.INFO)
@@ -48,8 +48,8 @@ tool3 = Tool("formatter", format_out)
 agentic_chain = True # change to switch from the agent chain to the tool chain
 steps = [agent1, agent2, agent3] if agentic_chain else [tool1,tool2,tool3]
 
-workflow = ChainOfThought(
-    name = "ChainOfThoughtExample",
+workflow = ChainFlow(
+    name = "ChainFlow_Example",
     description ="A chain of thought workflow with three agents.",
     steps = steps,
     result_schema = ["final_string"]

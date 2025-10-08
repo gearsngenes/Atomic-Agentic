@@ -15,8 +15,7 @@ class Tool:
         self._func = func
         self._description = description
         self.signature = Tool._build_signature(self.full_name, func)
-        self._param_defaults = Tool._build_param_defaults(func)
-        self._clear_mem = clear_mem_func
+        self._clear_mem:callable = clear_mem_func
     @property
     def type(self):
         return self._type
@@ -36,25 +35,7 @@ class Tool:
     def func(self):
         return self._func
     def clear_memory(self):
-        if self._clear_mem:
-            self._clear_mem()
-        pass
-    @staticmethod
-    def _build_param_defaults(func: callable) -> dict[str, Any]:
-        """
-        Return a dict of param names to their default values.
-        If a parameter has no default, value is None.
-        Includes positional-only, positional-or-keyword, keyword-only,
-        and also includes *args/**kwargs names (set to None).
-        Excludes 'self'.
-        """
-        sig = inspect.signature(func)
-        out: dict[str, Any] = {}
-        for name, p in sig.parameters.items():
-            if name == "self":
-                continue
-            out[name] = (None if p.default is inspect._empty else p.default)
-        return out
+        if self._clear_mem != None: self._clear_mem()
     @staticmethod
     def _build_signature(key: str, func: callable) -> str:
         sig = inspect.signature(func)
@@ -66,8 +47,8 @@ class Tool:
         ]
         rtype = hints.get('return', Any).__name__
         return f"{key}({', '.join(params)}) → {rtype}"
-    def get_param_defaults(self, *, deep: bool = False) -> dict[str, Any]:
-        return copy.deepcopy(self._param_defaults) if deep else dict(self._param_defaults)
+    def invoke(self, *args, **kwargs)->Any:
+        return self._func(*args, **kwargs)
 
 class ToolFactory:
     @staticmethod

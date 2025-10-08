@@ -131,12 +131,12 @@ class ToolFlow(Workflow):
         the keys of `result_schema`.
         """
         # Raw results
-        results = self.tool.func(*args, **kwargs)
+        results = self.tool.invoke(*args, **kwargs)
         # Package into the declared result schema
         results = self.package_results(results)
         return results
 
-class ChainOfThought(Workflow):
+class ChainFlow(Workflow):
     def __init__(self, name: str, description: str,
                  steps: list[Tool|Agent|Workflow] = [], unpack_midsteps:bool = True,
                  result_schema: list[str] = [WF_RESULT]):
