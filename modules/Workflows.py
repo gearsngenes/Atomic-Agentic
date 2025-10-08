@@ -280,7 +280,7 @@ class MakerChecker(Workflow):
 class Selector(Workflow):
     def __init__(
         self, name: str, description: str,
-        branches: list[Workflow], decider: LLMEngine|Agent|Workflow|Tool,
+        branches: list[Workflow], decider: Agent|Workflow|Tool,
         result_schema: list[str] = [WF_RESULT]):
         super().__init__(name, description, result_schema)
         # Initialize the choice agents
@@ -289,19 +289,7 @@ class Selector(Workflow):
             if isinstance(branch, Agent): self.branches.append(AgentFlow(branch))
             elif isinstance(branch, Tool): self.branches.append(ToolFlow(branch))
             else: self.branches.append(branch)
-        # Build decider Agent with SYSTEM role-prompt that lists branches
-        self._is_internal_agent = isinstance(decider, LLMEngine)
-        if self._is_internal_agent:
-            self.decider = AgentFlow(
-                Agent(
-                    name=f"{name}.Selector",
-                    description="Branch selection agent",
-                    role_prompt="",
-                    llm_engine=decider,
-                )
-            )
-            self._update_decider_prompt()
-        elif isinstance(decider, Agent): self.decider = AgentFlow(decider)
+        if isinstance(decider, Agent): self.decider = AgentFlow(decider)
         elif isinstance(decider, Tool): self.decider = ToolFlow(decider)
         else: self.decider = decider
         if len(self.decider._result_schema) > 1:
@@ -309,16 +297,6 @@ class Selector(Workflow):
                              "expect a single string corresponding to the name of one of the branches.")
         self._is_single_param = self.decider._is_single_param
 
-    # ---- internal helpers ----
-    def _update_decider_prompt(self) -> None:
-        # refresh the decider's SYSTEM prompt when branch set changes
-        branch_lines = ",\n".join(
-            f"{b.name}: {b.description}" for b in self.branches
-        )
-        new_system_prompt = Prompts.CONDITIONAL_DECIDER_PROMPT.format(branches=branch_lines)
-        self.decider.agent.role_prompt = new_system_prompt
-
-    # ---- public API ----
     def add_branch(self, branch: Agent|Tool|Workflow, schema: list[str] = [WF_RESULT], position: int|None = None) -> None:
         if isinstance(branch, Agent): new_branch = AgentFlow(branch)
         elif isinstance(branch, Tool): new_branch = ToolFlow(branch)
@@ -326,14 +304,9 @@ class Selector(Workflow):
         new_branch._result_schema = schema
         if not position: self.branches.append(new_branch)
         else: self.branches.insert(position, new_branch)
-        if self._is_internal_agent:
-            self._update_decider_prompt()
 
     def remove_branch(self, position: int = -1):
-        removed = self.branches.pop(position)
-        if self._is_internal_agent:
-            self._update_decider_prompt()
-        return removed
+        return self.branches.pop(position)
 
     def clear_memory(self):
         self.decider.clear_memory()
@@ -351,10 +324,7 @@ class Selector(Workflow):
 
         logging.info(f"[WORKFLOW] Selecting branch via decider on {self._name}")
 
-        # if not self._is_internal_agent:
         decision_obj = self.decider.invoke(*args, **kwargs)
-        # else:
-        #     decision_obj = self.decider.invoke(f"*args:{args}\n**kwargs:{kwargs}")
         decision_name = decision_obj[list(decision_obj.keys())[0]]
 
         if not isinstance(decision_name, str):
@@ -394,7 +364,7 @@ class BatchFlow(Workflow):
       - If length == number_of_branches: each branch result is mapped positionally to the schema keys.
     - If `result_schema` is empty, the return value is a dict mapping branch.name -> branch_result.
     """
-    def __init__(self, name: str, description: str, branches: list[Agent|Tool|Workflow], result_schema: list[str] = []):
+    def __init__(self, name: str, description: str, branches: list[Agent|Tool|Workflow], result_schema: list[str] = [WF_RESULT]):
         super().__init__(name=name, description=description, result_schema=result_schema)
         self.branches: list[Workflow] = []
         for b in branches:

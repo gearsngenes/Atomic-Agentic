@@ -6,6 +6,7 @@ import random
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from modules.Agents import Agent
+import modules.Prompts as Prompts 
 from modules.Tools import Tool
 from modules.LLMEngines import OpenAIEngine
 from modules.ToolAgents import PlannerAgent
@@ -50,7 +51,18 @@ def fill_args(a, b = None, c = None, d = None, e = None):
 
 filter_tool = Tool("arg-filler", fill_args)
 
-decider = filter_tool# LLM#
+decide_agentically = False
+
+branch_content = "\n".join([f"{b.name}: {b.description}" for b in [agent1, agent2, format_tool]])
+
+decider_agent = Agent(
+    name = "decider",
+    description="decides what workflow to run provided the input",
+    llm_engine=LLM,
+    role_prompt=Prompts.CONDITIONAL_DECIDER_PROMPT.format(branches = branch_content)
+)
+
+decider = decider_agent if decide_agentically else filter_tool
 
 #~~~~Build our selector workflow~~~
 workflow = Selector(
@@ -66,7 +78,7 @@ input1 = "Difference between tyranosaurs and dromaeosaurs?"
 input2 = "what is twenty minus three, all to the power of 3.14159?"
 input3 = "123", "Fort Hamilton", "New York", "NY", 10364
 #~~~Select the task~~~
-task = input3
+task = input1
 
 #~~~print result~~~
 if isinstance(task, tuple): print(workflow.invoke(*task))
