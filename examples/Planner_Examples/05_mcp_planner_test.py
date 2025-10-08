@@ -14,8 +14,7 @@ llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
 planner = PlannerAgent("MCP Agent",
                        description="Creates plans utilizing our sample MCPO server",
-                       llm_engine=llm_engine,
-                       allow_mcp=True)
+                       llm_engine=llm_engine)
 planner.register("http://localhost:8000/mcp", "CalculusServer")
 result = planner.invoke(
     "Give me the derivative of the function: 'x**5 + 1' at the point x = 2."

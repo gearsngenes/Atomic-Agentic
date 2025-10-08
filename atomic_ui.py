@@ -344,8 +344,7 @@ def agent_factory(cfg: AgentCfg) -> Any:
             name=cfg.name,
             description=cfg.description,
             llm_engine=engine,
-            is_async=False,     # force sync
-            allow_agentic=True,
+            is_async=False
         )
         # tools only here; wrappers added by caller after instantiation (requires cfg_map)
         sync_toolbox_with_selection(inst, cfg.allowed_tools)
@@ -355,8 +354,7 @@ def agent_factory(cfg: AgentCfg) -> Any:
         inst = OrchestratorAgent(
             name=cfg.name,
             description=cfg.description,
-            llm_engine=engine,
-            allow_agentic=True,
+            llm_engine=engine
         )
         sync_toolbox_with_selection(inst, cfg.allowed_tools)
         return inst

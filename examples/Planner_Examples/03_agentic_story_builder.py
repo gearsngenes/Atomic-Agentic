@@ -49,8 +49,7 @@ reviewer = Agent("DraftReviewer", description = "Reviews story drafts, provides 
 # ───────────────────────────  ORCHESTRATOR  ─────────────────────
 orch = PlannerAgent(name = "StoryPlanner",
                     description = "A stroy building planner that utilizes a story-outliner, writer, and reviewer to construct polished story drafts",
-                    llm_engine = llm_engine,
-                    allow_agentic = True)
+                    llm_engine = llm_engine)
 
 orch.register(outliner)
 orch.register(reviewer)

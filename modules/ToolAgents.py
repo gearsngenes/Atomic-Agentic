@@ -7,13 +7,12 @@ from abc import ABC, abstractmethod
 from modules.Tools import Tool, ToolFactory
 
 class ToolAgent(Agent, ABC):
-    def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT, allow_agentic:bool = False, allow_mcp:bool = False):
+    def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT):
         super().__init__(name, description, llm_engine, role_prompt, context_enabled = False)
-        self._toolbox:dict[str, dict[str, list[Tool]]] = {"function": {"default": []}, "agent": {}, "plugin": {}, "mcp": {}}
+        # Flattened toolbox: ordered list of Tool objects. Grouping by type/source
+        # is computed on-demand by toolbox_by_type().
+        self._toolbox: list[Tool] = []
         self._previous_steps: list[dict] = []
-        # These flags let subclasses declare what they can register
-        self._allow_agent_registration = allow_agentic
-        self._allow_mcp_registration = allow_mcp
         self._mcpo_servers = {}  # optional for MCP, added only if enabled
         self._mcpo_counter = 0
         self._mcp_counter = 0
@@ -53,10 +52,20 @@ class ToolAgent(Agent, ABC):
     def execute(self, plan:list[dict])->Any:
         pass
     
-    def get_actions_context(self) -> list[Tool]:
-        """Return a flat list of all registered tools."""
+    def get_actions_context(self) -> str:
+        """Return a textual description of available tools formatted for prompts.
+
+        This preserves the old layout used by the planner/orchestrator prompts by
+        grouping tools by type then source.
+        """
+        # Group tools by type -> source -> [tools] keeping insertion order
+        grouped: dict[str, dict[str, list[Tool]]] = {}
+        for tool in self._toolbox:
+            grouped.setdefault(tool.type, {})
+            grouped[tool.type].setdefault(tool.source, []).append(tool)
+
         context = ""
-        for action_type, type_dict in self._toolbox.items():
+        for action_type, type_dict in grouped.items():
             context += f"ACTION TYPE: {action_type}s\n"
             for source, tool_list in type_dict.items():
                 context += f"- SOURCE: {source}\n"
@@ -65,64 +74,70 @@ class ToolAgent(Agent, ABC):
             context += "\n"
         return context
     
-    def list_tools(self) -> list[str]:
-        """Return a flat list of all registered tool names."""
+    def list_tools(self) -> dict:
+        """Return a mapping of full tool key -> callable.
+
+        Later-registered tools override earlier ones when keys collide.
+        """
         tools: dict[str, Any] = {}
-        for by_source in self._toolbox.values():
-            for tool_list in by_source.values():
-                for tool in tool_list:
-                    tools[tool.full_name] = tool.func
+        for tool in self._toolbox:
+            tools[tool.full_name] = tool.func
         return tools
     
     def register(self, tool: Any, name: str|None = None, description: str | None = None) -> None:
+        # Accept a ready-made Tool instance
         if isinstance(tool, Tool):
-            _type = tool.type
-            _source = tool.source
-            self._toolbox[_type][_source].append(tool)
+            self._toolbox.append(tool)
             return tool.full_name
-        elif callable(tool):
+
+        # Determine allowed non-Tool types (we keep same external API inputs)
+        if callable(tool):
             _type = "function"
         elif isinstance(tool, dict) and "method_map" in tool and "name" in tool:
             _type = "plugin"
         elif isinstance(tool, Agent):
             _type = "agent"
-        elif isinstance(tool, str) and tool.endswith("/mcp") and self._allow_mcp_registration:
+        elif isinstance(tool, str) and tool.endswith("/mcp"):
             _type = "mcp"
         else:
             raise ValueError("Tool must be a callable, Plugin, Agent, or MCP server URL string (if MCP registration is allowed).")
-        tools: list[Tool] = ToolFactory.toolify(object=tool, name = name, description=description)
-        _name = tools[0].full_name if tools else "unknown"
-        # _type = tools[0].type if tools else "unknown"
-        _source = tools[0].source if tools else "unknown"
-        if _type != "function":
-            self._toolbox[_type][_source] = tools
-            return f"{_type}.{_source}"
+
+        tools: list[Tool] = ToolFactory.toolify(object=tool, name=name, description=description)
+        if not tools:
+            return None
+
+        # Append all produced Tool objects. We intentionally allow multiple
+        # registrations for the same source; lookup will resolve last-wins.
+        self._toolbox.extend(tools)
+
+        # Return a helpful reference string similar to prior behavior.
+        if _type == "function":
+            # return like: function.default.<method_name>
+            return f"function.default.{tools[0].name}"
         else:
-            self._toolbox[_type]["default"].extend(tools)
-            return f"function.default.{_name}"
+            # return like: plugin.<source> or agent.<source> or mcp.<source>
+            return f"{tools[0].type}.{tools[0].source}"
 
     def invoke(self, prompt):
         raise NotImplementedError("ToolAgent is abstract; use strategize() and execute() instead.")
 
     @property # toolbox should not be editable from the outside
     def toolbox(self):
-        return self._toolbox.copy()
-    @property
-    def allow_agent_registration(self):
-        return self._allow_agent_registration
-    @allow_agent_registration.setter
-    def allow_agent_registration(self, val: bool):
-        self._allow_agent_registration = val
-    @property
-    def allow_mcp_registration(self):
-        return self._allow_mcp_registration
-    @allow_mcp_registration.setter
-    def allow_mcp_registration(self, val:bool):
-            self._allow_mcp_registration = val
+        # Return a shallow copy of the internal Tool list
+        return list(self._toolbox)
+    def toolbox_by_type(self) -> dict:
+        """Compatibility helper: produce the legacy nested dict view
+        { type: { source: [Tool, ...], ... }, ... }
+        """
+        grouped: dict[str, dict[str, list[Tool]]] = {}
+        for tool in self._toolbox:
+            grouped.setdefault(tool.type, {})
+            grouped[tool.type].setdefault(tool.source, []).append(tool)
+        return grouped
 
 class PlannerAgent(ToolAgent):
-    def __init__(self, name: str, description: str, llm_engine: LLMEngine, context_enabled = False, is_async=False, allow_agentic = False, allow_mcp = False):
-        super().__init__(name = name, description=description, llm_engine=llm_engine, role_prompt=Prompts.PLANNER_PROMPT, allow_agentic=allow_agentic, allow_mcp=allow_mcp)
+    def __init__(self, name: str, description: str, llm_engine: LLMEngine, context_enabled = False, is_async=False):
+        super().__init__(name = name, description=description, llm_engine=llm_engine, role_prompt=Prompts.PLANNER_PROMPT)
         self.context_enabled = context_enabled
         self._is_async = is_async
         self._previous_steps: list[dict] = []
@@ -237,15 +252,8 @@ class PlannerAgent(ToolAgent):
 
 class OrchestratorAgent(ToolAgent):
     def __init__(self, name: str, description: str, llm_engine: LLMEngine,
-                 context_enabled=False, allow_agentic: bool = False, allow_mcp: bool = False,
-                 max_context_chars: int = 100_000):
-        super().__init__(
-            name,
-            description=description,
-            llm_engine=llm_engine,
-            allow_agentic=allow_agentic,
-            allow_mcp=allow_mcp,
-        )
+                 context_enabled=False, max_context_chars: int = 100_000):
+        super().__init__(name, description=description, llm_engine=llm_engine)
         self.context_enabled = context_enabled
         self.role_prompt = Prompts.ORCHESTRATOR_PROMPT
         self._previous_steps: list[dict] = []

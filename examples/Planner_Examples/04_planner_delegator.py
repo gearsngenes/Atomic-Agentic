@@ -50,8 +50,7 @@ batch_haiku_planner = PlannerAgent(
     name    ="BatchHaikuPlanner",
     description= "Orchestrates calls to the Haiku Writer Agent and displays its outputs",
     llm_engine = llm_engine,
-    is_async= True,
-    allow_agentic= True,
+    is_async= True
 )
 
 # Register Haiku Writing Agent
@@ -99,8 +98,7 @@ super_planner = PlannerAgent(
     name    = "SuperPlanner",
     description = "A planner that decomposes and delegates tasks to other planners",
     llm_engine = llm_engine,
-    is_async= True,
-    allow_agentic=True,
+    is_async= True
 )
 
 # Register the two batch planners to the super planner
