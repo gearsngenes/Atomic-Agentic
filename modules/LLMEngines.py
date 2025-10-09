@@ -26,44 +26,42 @@ DEFAULT_MISTRAL_KEY    = os.getenv("MISTRAL_API_KEY")
 # ── ABSTRACT ENGINE ───────────────────────────────────────────────────────────
 class LLMEngine:
     """
-    Stateless provider interface.
+    Abstract, **stateless** interface for LLM provider adapters.
 
     Contract
     --------
-    invoke(messages, file_paths=None) -> str
-      • `messages`: list of {"role": str, "content": str} (system/user/assistant).
-      • `file_paths`: list[str] of local file paths (the Agent is the only stateful owner).
-      • Engines MUST:
-          1) Validate each path and raise TypeError on illegal/unsupported types.
-          2) Decide, per provider, how to handle supported files:
-             - PDFs/images: upload/attach as the provider expects; delete after the call.
-             - Text/code: either upload if natively supported or inline text (subject to cutoff).
-          3) Stay stateless: any uploads created inside `invoke` must be cleaned up (best-effort).
-          4) Keep the model call surface consistent for the provider (e.g., always Responses for OpenAI).
-      • Return the final assistant text.
+    - `invoke(messages, file_paths=None) -> str` must be implemented by subclasses.
+      * `messages`: a list of `{"role": str, "content": str}` dicts in chat order
+        (roles typically: "system", "user", "assistant").
+      * `file_paths`: optional list of local file paths the *Agent* wants to include.
+        The *Agent* is the only stateful owner of these paths; engines decide how to
+        upload/inline/ignore per provider.
 
-    Design Notes
-    ------------
-    - Engines may expose instance knobs (set in their own __init__), e.g.:
-        inline_cutoff_chars: int  # max total chars to inline from text/code files
-        reject_exts: set[str]     # extra extensions to reject up-front
-        vision_required: bool     # enforce a vision-capable model when images/PDFs present
-    - Engines should implement small internal helpers for:
-        _classify_path(path)  -> {"kind": "pdf"|"image"|"text"|"illegal", "ext": ".pdf", ...}
-        _upload(path)         -> provider handle (if needed)
-        _attach(...), _inline(...), _cleanup(...)
-      but these helpers are implementation details and NOT part of this abstract interface.
+    Expectations for concrete engines
+    ---------------------------------
+    1) Validate each file path and raise `TypeError` for unsupported/illegal types.
+    2) Decide how to incorporate files per provider:
+       - PDFs/images: upload and attach in the provider's format; delete after the call.
+       - Text/code: either upload when supported or inline with a sensible size cutoff.
+    3) Remain stateless: temporary uploads created inside `invoke` should be cleaned up
+       best-effort in a `finally:` block.
+    4) Return a plain `str` containing the assistant's text response (trimmed).
 
-    Illegal Types (guideline)
+    Hints for implementations
     -------------------------
-    Treat these as illegal by default; raise TypeError on sight:
-      • MIME prefixes: "audio/", "video/"
-      • Common opaque/binary/exec/archive/db/model extensions:
-        .zip, .tar, .gz, .tgz, .rar, .7z,
-        .exe, .dll, .so, .bin, .o,
-        .db, .sqlite,
-        .h5, .pt, .pth, .onnx
-    Concrete engines may widen/narrow this set.
+    Engines often keep small knobs on `__init__`, e.g.:
+      - `inline_cutoff_chars`: max characters of text to inline.
+      - `reject_exts`: extra extensions to reject early.
+      - `vision_required`: whether images/PDFs imply a vision model.
+    Helper methods like `_classify_path`, `_upload`, `_cleanup` are recommended but
+    not enforced here.
+
+    Baseline “illegal” examples (guidance, not binding)
+    ---------------------------------------------------
+    Consider rejecting:
+      - MIME prefixes: `"audio/"`, `"video/"`
+      - Common opaque/exec/archive/db/weights:
+        `.zip .tar .gz .tgz .rar .7z .exe .dll .so .bin .o .db .sqlite .h5 .pt .pth .onnx`
     """
 
     # Optional shared guidelines (concrete engines may override in __init__)
@@ -78,15 +76,13 @@ class LLMEngine:
 
     def invoke(self, messages: list[dict], file_paths: list[str] | None = None) -> str:
         """
-        Execute a single model call with the given messages and optional local file paths.
+        Run a single request against the backing provider.
 
-        Responsibilities of concrete implementations:
-          - Validate `file_paths` against provider support; raise TypeError for illegal types.
-          - Upload + attach PDFs/images as required by the provider; inline text/code if applicable.
-          - Ensure any temporary uploads are best-effort deleted after the call (statelessness).
-          - Return the assistant's text response (stripped).
-
-        MUST be overridden by concrete engines.
+        Subclasses **must**:
+        - Validate `file_paths`.
+        - Upload/inline/attach as required by the provider.
+        - Best-effort delete temporary resources.
+        - Return the assistant's message text.
         """
         raise NotImplementedError("LLMEngine.invoke must be implemented by subclasses")
 
@@ -100,22 +96,21 @@ DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 class OpenAIEngine(LLMEngine):
     """
-    OpenAI engine (stateless) using the Responses API for ALL calls.
+    OpenAI adapter using the **Responses API**.
 
-    Supported file handling (per-call):
-      • PDFs   → upload to Files API; attach as {"type":"input_file","file_id":...}
-      • Images → upload to Files API; attach as {"type":"input_image","file_id":...}
-      • Text/code (e.g., .txt/.md/.py/.json/.html/.js/.java, etc.)
-               → read() and inline as {"type":"input_text","text":...} with a global cutoff.
-      • Illegal/unsupported types (audio/video/archives/executables/db/models) → TypeError
+    File policy (per call)
+    ----------------------
+    - **PDFs** → upload to Files API; attach `{ "type": "input_file", "file_id": ... }`
+    - **Images** → upload to Files API; attach `{ "type": "input_image", "file_id": ... }`
+    - **Text/Code** (e.g., `.txt/.md/.py/.json/.html/.js/.java/...`) → read and inline as
+      `{ "type": "input_text", "text": ... }` subject to a global inline cutoff.
+    - Unsupported (audio/video/archives/executables/db/weights) → `TypeError`.
 
-    Statelessness:
-      • Any uploads created inside `invoke` are best-effort deleted in a finally block.
-
-    Notes:
-      • Use a vision-capable model (e.g., gpt-4o / gpt-4o-mini) when providing PDFs or images.
-      • System prompts are set via top-level `instructions`.
-      • Assistant history is encoded as 'output_text'; other turns as 'input_text'.
+    Other notes
+    -----------
+    - System prompts are provided via top-level `instructions`.
+    - Assistant history is encoded as `output_text`; user/other turns as `input_text`.
+    - Any files uploaded inside `invoke` are best-effort deleted in a `finally:` block.
     """
 
     # Default config/knobs (override in __init__ if desired)
@@ -208,7 +203,7 @@ class OpenAIEngine(LLMEngine):
 
     # ── Helpers: classification / validation / IO / uploads ─────
     def _classify_or_raise(self, path: str) -> tuple[str, str]:
-        """Return (path, kind) where kind ∈ {'pdf','image','text'}; raise on illegal/unknown."""
+        """Classify `path` into ('pdf'|'image'|'text'); raise on illegal/unknown file types."""
         if not os.path.exists(path):
             raise FileNotFoundError(f"OpenAIEngine: file not found: {path}")
 
@@ -232,12 +227,18 @@ class OpenAIEngine(LLMEngine):
         return (path, "text")
 
     def _collect_instructions(self, messages: list[dict]) -> str | None:
+        """Concatenate all `system` message contents into a single instructions string (or None)."""
         parts = [m["content"] for m in messages
                  if (m.get("role") or "").lower() == "system" and m.get("content")]
         return "\n\n".join(parts) or None
 
     def _build_role_blocks(self, messages: list[dict]) -> list[dict]:
-        """assistant→output_text; others (non-system)→input_text."""
+        """
+        Convert chat messages to Responses API blocks:
+        - `assistant` turns become `output_text`.
+        - All other non-system turns become `input_text`.
+        - `system` content is not a block; it is carried via `instructions`.
+        """
         blocks: list[dict] = []
         for m in messages:
             role = (m.get("role") or "user").lower()
@@ -252,6 +253,7 @@ class OpenAIEngine(LLMEngine):
         return blocks
 
     def _ensure_user_block(self, blocks: list[dict]) -> int:
+        """Return index of a `user` block; create an empty one at the end if none exists."""
         idx = next((i for i in range(len(blocks) - 1, -1, -1) if blocks[i]["role"] == "user"), None)
         if idx is None:
             blocks.append({"role": "user", "content": []})
@@ -259,6 +261,7 @@ class OpenAIEngine(LLMEngine):
         return idx
 
     def _read_text_file(self, path: str) -> str:
+        """Read a local file as UTF-8 (with replacement). Return error text if reading fails."""
         try:
             with open(path, "rb") as f:
                 raw = f.read()
@@ -267,13 +270,19 @@ class OpenAIEngine(LLMEngine):
             return f"[Error reading file '{os.path.basename(path)}': {e}]"
 
     def _upload_file(self, path: str) -> str:
+        """Upload a local file to OpenAI Files; return `file_id`."""
         with open(path, "rb") as fp:
             f = self.llm.files.create(file=fp, purpose="assistants")
         return f.id
 
     # ── Helpers ─────────────────────────────────────────────────
     def _attach_local_path(self, user_parts: List[Dict[str, Any]], path: str) -> None:
-        """Decide PDF/image/other from local path; upload as needed or inline as text."""
+        """
+        Attach a local path to a User parts list:
+        - PDFs → `input_file`
+        - Images → `input_image`
+        - Everything else → inline text (UTF-8 with replacement), truncated if needed.
+        """
         mime, _ = mimetypes.guess_type(path)
         mime = mime or ""
         is_pdf   = mime == "application/pdf" or path.lower().endswith(".pdf")
@@ -306,9 +315,11 @@ class OpenAIEngine(LLMEngine):
 
     def _attach_uploaded_handle(self, user_parts: List[Dict[str, Any]], file_id: str) -> None:
         """
-        Decide PDF/image/other from uploaded file metadata.
-        If not PDF/image, try to download content and inline; if the SDK
-        doesn't support .files.content, raise a clear error.
+        Attach an **existing** uploaded file by inspecting its metadata:
+        - If PDF → `input_file`
+        - If image → `input_image`
+        - Otherwise, try to fetch bytes and inline as text (if `.files.content` exists).
+          If content retrieval isn't supported by the SDK, raise a clear error.
         """
         # Try to detect from metadata
         filename, mime = "", ""
@@ -363,7 +374,7 @@ class OpenAIEngine(LLMEngine):
 
     @staticmethod
     def _as_openai_file_id(handle: Any) -> str:
-        """Accept string id, dict with 'id'/'file_id', or SDK File object; return id string."""
+        """Normalize a Files handle (string ID / dict with `id` or `file_id` / SDK object) to a string ID."""
         if isinstance(handle, str):
             return handle
         if isinstance(handle, dict):
@@ -376,8 +387,18 @@ class OpenAIEngine(LLMEngine):
                 return fid
         raise TypeError(f"Unsupported OpenAI file handle type: {type(handle)}")
 
+
 # ── LLAMA.CPP (local; no remote file store) ────────────────────────────────────
 class LlamaCppEngine(LLMEngine):
+    """
+    Local llama.cpp adapter.
+
+    Behavior
+    --------
+    - Loads a local GGUF (via `model_path`) or a pre-trained artifact (`repo_id` + `filename`).
+    - Ignores `files` (no remote file store).
+    - Uses llama.cpp `create_chat_completion` with the given messages as is.
+    """
     def __init__(
         self,
         model_path: Optional[str] = None,
@@ -395,12 +416,15 @@ class LlamaCppEngine(LLMEngine):
             raise ValueError("Must provide either model_path or both repo_id and filename.")
 
     def upload(self, path: str) -> Any:
+        """Not supported for local inference."""
         raise NotImplementedError("LlamaCppEngine has no remote file storage.")
 
     def delete(self, handle: Any) -> bool:
+        """Not supported for local inference."""
         raise NotImplementedError("LlamaCppEngine has no remote file storage.")
 
     def invoke(self, messages: List[Dict[str, str]], files: Optional[List[Any]] = None) -> str:
+        """Run a local chat completion; `files` are ignored."""
         if not self.llm:
             raise RuntimeError("Llama model not loaded.")
         # local models ignore 'files'; messages are standard chat format
@@ -411,22 +435,17 @@ class LlamaCppEngine(LLMEngine):
 # ── GEMINI (flat contents: file handle objects + strings) ──────────────────────
 class GeminiEngine(LLMEngine):
     """
-    Google Gemini engine (stateless) using the Files API + flat `contents`.
+    Google Gemini adapter (Files API + **flat** `contents` call style).
 
-    Strategy per call:
-      • Validate each provided path; reject audio/video/archives/executables/etc.
-      • Upload ALL supported files (PDFs, images, text/code, Office docs, CSV/XLSX, etc.)
-        via `client.files.upload(...)` and pass the returned File objects directly
-        in `contents` (no manual inlining needed).
-      • Flatten non-system chat turns into plain strings (order preserved).
-      • Put system prompts into `system_instruction`.
-      • Best-effort delete every uploaded file in a `finally:` block to stay stateless.
-
-    Notes:
-      • This mirrors Google's recommended “flat contents” pattern:
-          contents = [ <File>, <File>, ..., "user text", "assistant text", ... ]
-      • If you later want to cache uploads across turns, do that in the Agent (stateful)
-        and skip deletion; this engine intentionally cleans up to remain stateless.
+    Strategy per call
+    -----------------
+    1) Validate each local path; reject audio/video/archives/executables/etc.
+    2) Upload **all** supported files (PDF/image/text/code/Office/csv/xlsx/…)
+       using `client.files.upload(...)`; pass returned File objects directly in
+       `contents` (no manual inlining required).
+    3) Flatten all non-system chat turns to plain strings and append to `contents`.
+       Provide system prompts via `system_instruction`.
+    4) Best-effort delete uploaded files created during the call in a `finally:` block.
     """
 
     _ILLEGAL_EXTS = {
@@ -447,6 +466,13 @@ class GeminiEngine(LLMEngine):
 
     # ── Public API ───────────────────────────────────────────────
     def invoke(self, messages: list[dict], file_paths: list[str] | None = None) -> str:
+        """
+        Generate content with Gemini:
+        - Uploads all validated files and includes the resulting File objects in `contents`.
+        - Appends user/assistant strings (non-system) after the files.
+        - Supplies system text via `system_instruction`.
+        - Deletes uploaded files created by this call (best-effort).
+        """
         file_paths = list(dict.fromkeys(file_paths or []))  # de-dupe, preserve order
 
         # 1) Validate paths (raise early on illegal types)
@@ -492,6 +518,7 @@ class GeminiEngine(LLMEngine):
 
     # ── Helpers: validation / preparation / uploads ─────────────
     def _validate_paths_or_raise(self, paths: list[str]) -> None:
+        """Raise if any path does not exist or matches disallowed MIME/ext patterns."""
         for p in paths:
             if not os.path.exists(p):
                 raise FileNotFoundError(f"GeminiEngine: file not found: {p}")
@@ -505,11 +532,13 @@ class GeminiEngine(LLMEngine):
             # Everything else is acceptable for Gemini upload (PDF, image, text/code, Office, csv/xlsx, etc.)
 
     def _collect_system(self, messages: list[dict]) -> str | None:
+        """Join system message contents into a single string (or None)."""
         parts = [m["content"] for m in messages
                  if (m.get("role") or "").lower() == "system" and m.get("content")]
         return "\n\n".join(parts) or None
 
     def _collect_non_system_texts(self, messages: list[dict]) -> list[str]:
+        """Return a list of non-system message contents, preserving order."""
         out = []
         for m in messages:
             role = (m.get("role") or "").lower()
@@ -521,27 +550,30 @@ class GeminiEngine(LLMEngine):
         return out
 
     def _upload_path(self, path: str):
+        """Upload a local path via Gemini Files API and return the resulting File object."""
         # Upload local path and return the File object.
         # genai SDK will infer MIME and handle supported types.
         abs_path = os.path.abspath(path)
         return self.client.files.upload(file=abs_path)
 
+
 # ── MISTRAL (Document QnA: upload -> sign -> document_url) ─────────────────────
 class MistralEngine(LLMEngine):
     """
-    Mistral engine (stateless) using file upload → signed URL → chat parts.
+    Mistral adapter using: **upload → (eventual) sign → attach URL parts**.
 
-    Per-call strategy:
-      • Validate each provided path; raise TypeError on illegal/unsupported types.
-      • PDFs  → upload, sign, attach as {"type":"document_url","document_url": ...}
-      • Images→ upload, sign, attach as {"type":"image_url","image_url": ...}
-      • Text/code → read() and inline as {"type":"text","text": ...} (with cutoff)
-      • Best-effort delete every uploaded file in a finally block (statelessness)
+    Flow per call
+    -------------
+    1) Validate & classify each local path.
+       - PDFs → upload + sign → add `{ "type": "document_url", "document_url": ... }`
+       - Images → upload + sign → add `{ "type": "image_url", "image_url": ... }`
+       - Text/code → read + inline `{ "type": "text", "text": ... }` (respect cutoff)
+    2) Convert the last user message to a parts array if needed, then append file parts.
+    3) Call `chat.complete`.
+    4) Best-effort delete uploaded files created by this call.
 
-    Notes:
-      • Signing can be briefly eventual-consistent after upload; we retry on 404.
-      • We preserve incoming messages; only convert the last user turn to a parts array
-        so we can append text/doc/image parts cleanly.
+    Note: signing can be briefly eventual-consistent after upload; a small retry loop
+    with backoff is used when signing returns 404.
     """
 
     _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic")
@@ -571,6 +603,10 @@ class MistralEngine(LLMEngine):
 
     # ── Public API ───────────────────────────────────────────────
     def invoke(self, messages: list[dict], file_paths: list[str] | None = None) -> str:
+        """
+        Complete a Mistral chat turn, attaching inlined text and signed file URLs as parts.
+        Any temporary uploads created in this call are deleted best-effort.
+        """
         file_paths = list(dict.fromkeys(file_paths or []))  # de-dupe, preserve order
 
         # 1) Validate & classify
@@ -642,7 +678,7 @@ class MistralEngine(LLMEngine):
 
     # ── Helpers: validation / classification / IO / uploads ─────
     def _classify_or_raise(self, path: str) -> tuple[str, str]:
-        """Return (path, kind) where kind ∈ {'pdf','image','text'}; raise on illegal."""
+        """Classify `path` into ('pdf'|'image'|'text'); raise on illegal types or missing files."""
         if not os.path.exists(path):
             raise FileNotFoundError(f"MistralEngine: file not found: {path}")
 
@@ -663,9 +699,9 @@ class MistralEngine(LLMEngine):
 
     def _ensure_user_parts(self, native: list[dict]) -> int:
         """
-        Ensure there is a user message with content as a parts list.
-        - If none exists, append an empty user turn.
-        - If content is a string, convert to [{"type":"text","text":...}] (preserving original).
+        Ensure there is a user message with `content` as a parts list.
+        - If none exists: append an empty user turn.
+        - If it's a string: convert to `[{"type": "text", "text": ...}]` (preserving content).
         """
         idx = next((i for i in range(len(native) - 1, -1, -1) if (native[i].get("role") or "").lower() == "user"), None)
         if idx is None:
@@ -684,6 +720,7 @@ class MistralEngine(LLMEngine):
         return idx
 
     def _read_text_file(self, path: str) -> str:
+        """Read a local file as UTF-8 (with replacement). Return error text on failure."""
         try:
             with open(path, "rb") as f:
                 raw = f.read()
@@ -692,6 +729,7 @@ class MistralEngine(LLMEngine):
             return f"[Error reading file '{os.path.basename(path)}': {e}]"
 
     def _upload_file(self, path: str) -> str:
+        """Upload to Mistral Files for OCR/doc understanding; return file handle ID."""
         with open(path, "rb") as f:
             up = self.client.files.upload(
                 file={"file_name": os.path.basename(path), "content": f},
@@ -701,7 +739,9 @@ class MistralEngine(LLMEngine):
 
     def _sign_with_retry(self, file_id: str, max_retries: int, base_delay: float) -> str:
         """
-        Mint a signed URL; retry on brief 404 propagation windows after upload.
+        Obtain a signed URL for a previously uploaded file, retrying on transient 404s.
+
+        Strategy: exponential backoff with small jitter until success or `max_retries` exhausted.
         """
         for attempt in range(max_retries):
             try:
@@ -723,6 +763,12 @@ class MistralEngine(LLMEngine):
 
 # ── PLACEHOLDERS (keep the same abstract contract) ─────────────────────────────
 class AzureOpenAIEngine(LLMEngine):
+    """
+    Placeholder for an Azure OpenAI adapter.
+
+    This class documents the intended constructor/contract but provides **no**
+    implementation: `upload`, `delete`, and `invoke` are intentionally unimplemented.
+    """
     def __init__(self, api_key: str, endpoint: str, api_version: str, model: str):
         self.api_key = api_key
         self.endpoint = endpoint
@@ -740,6 +786,12 @@ class AzureOpenAIEngine(LLMEngine):
 
 
 class BedrockEngine(LLMEngine):
+    """
+    Placeholder for an AWS Bedrock adapter.
+
+    This class documents the intended constructor/contract but provides **no**
+    implementation: `upload`, `delete`, and `invoke` are intentionally unimplemented.
+    """
     def __init__(self, access_key: str, secret_key: str, region: str, model: str):
         self.access_key = access_key
         self.secret_key = secret_key

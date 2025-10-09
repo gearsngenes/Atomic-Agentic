@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from modules.A2Agents import A2AProxyAgent, A2AServerAgent
-from modules.PlannerAgents import PlannerAgent
+from modules.ToolAgents import PlannerAgent
 from modules.LLMEngines import OpenAIEngine
 
 echo = A2AProxyAgent("http://localhost:6000")

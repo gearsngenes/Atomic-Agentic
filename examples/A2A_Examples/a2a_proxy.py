@@ -6,7 +6,7 @@ from modules.A2Agents import A2AProxyAgent
 def main():
     # Address and ports of agents to test
     agents = {
-        "echo": {"port": 6000, "task": "Hello, World!"},
+        "trivia": {"port": 6000, "task": "Hello, World!"},
         "shakespeare": {"port": 5000, "task": "Who are you, and what are capable of?"},
         "planner": {"port": 7000, "task": """
                     Perform the following tasks:
@@ -14,7 +14,7 @@ def main():
                     2)  Write a sonnet about bluebirds
                     3)  Return both results in the format:
                         Trivia Result: 
-                        <echo result here>
+                        <trivia result here>
 
                         Sonnet Result: 
                         <sonnet result here>"""}
