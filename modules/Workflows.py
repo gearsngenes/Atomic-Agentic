@@ -9,6 +9,7 @@ import json, re
 from modules.Tools import Tool
 import json, logging
 from typing import Any
+from datetime import datetime
 
 import inspect
 from typing import Callable
@@ -48,6 +49,7 @@ class Workflow(ABC):
         self._description = description
         self._result_schema = result_schema
         self._is_single_param = False
+        self._checkpoints: list = []
         for s in self._result_schema:
             if not s:
                 raise ValueError("Empty strings are not permissible output schema parameter names")
@@ -55,6 +57,12 @@ class Workflow(ABC):
     @property
     def name(self) -> str: return self._name
     
+    @property
+    def checkpoints(self) -> list: return list(self._checkpoints)
+    @checkpoints.setter
+    def checkpoints(self, val: list) -> None: self._checkpoints = val
+    @property
+    def latest_result(self) -> dict: return self._checkpoints[-1]["result"] if self._checkpoints else {k:None for k in self._result_schema}
     @property
     def description(self) -> str: return self._description
     
@@ -84,12 +92,11 @@ class Workflow(ABC):
             final[k] = None
         return final
     
+    def clear_memory(self) -> None:
+        self._checkpoints = []
+    
     @abstractmethod
     def invoke(self, *args: Any, **kwargs: Any) -> dict:
-        pass
-
-    @abstractmethod
-    def clear_memory(self) -> None:
         pass
 
 class AgentFlow(Workflow):
@@ -100,6 +107,7 @@ class AgentFlow(Workflow):
         self.agent: Agent = agent
         self._is_single_param = True
     def clear_memory(self):
+        Workflow.clear_memory(self)
         self.agent.clear_memory()
     def invoke(self, *args: Any, **kwargs: Any)->dict:
         logging.info(f"\n+---{'-'*len(self._name + ' Starting')}---+"
@@ -111,6 +119,12 @@ class AgentFlow(Workflow):
             logging.info(f"Failed to pass in arguments as is, giving '{e}'. Stringifying...")
             result = self.agent.invoke(f"*args:{args}\n**kwargs:{kwargs}")
         result = self.package_results(result)
+        self._checkpoints.append({
+            "args":args,
+            "kwargs":kwargs,
+            "timestamp":str(datetime.now()),
+            "result": result if WF_RESULT not in result else result[WF_RESULT]
+        })
         logging.info(   f"\n+---{'-'*len(self._name + ' Finished')}---+"
                         f"\n|   {self._name} Finished   |"
                         f"\n+---{'-'*len(self._name + ' Finished')}---+\n")
@@ -123,6 +137,7 @@ class ToolFlow(Workflow):
         self._is_single_param = callable_is_single_param(tool.func)
 
     def clear_memory(self):
+        Workflow.clear_memory(self)
         self.tool.clear_memory()
 
     def invoke(self, *args: Any, **kwargs: Any)->dict:
@@ -131,10 +146,16 @@ class ToolFlow(Workflow):
         the keys of `result_schema`.
         """
         # Raw results
-        results = self.tool.invoke(*args, **kwargs)
+        result = self.tool.invoke(*args, **kwargs)
         # Package into the declared result schema
-        results = self.package_results(results)
-        return results
+        result = self.package_results(result)
+        self._checkpoints.append({
+            "args":args,
+            "kwargs":kwargs,
+            "timestamp":str(datetime.now()),
+            "result": result if WF_RESULT not in result else result[WF_RESULT]
+        })
+        return result
 
 class ChainFlow(Workflow):
     def __init__(self, name: str, description: str,
@@ -149,7 +170,11 @@ class ChainFlow(Workflow):
             else: new_step = step
             self._steps.append(new_step)
         self._is_single_param = self._steps[0]._is_single_param
-
+    @property
+    def steps(self): return self._steps
+    @steps.setter
+    def steps(self, val: list[Workflow]): self._steps = val
+    
     def insert_step(self, step: Agent|Workflow|Tool, schema: list[str] = [WF_RESULT], position: int | None = None):
         if isinstance(step, Agent): step = AgentFlow(step, schema)
         elif isinstance(step, Tool):  step = ToolFlow(step, schema)
@@ -165,6 +190,7 @@ class ChainFlow(Workflow):
         return popped
 
     def clear_memory(self):
+        Workflow.clear_memory(self)
         for step in self._steps: step.clear_memory()
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
@@ -192,6 +218,12 @@ class ChainFlow(Workflow):
             # Otherwise, treat it as key-word arguments
             current = step.invoke(**current)
         result = self.package_results(current)
+        self._checkpoints.append({
+            "args":args,
+            "kwargs":kwargs,
+            "timestamp":str(datetime.now()),
+            "result": result if WF_RESULT not in result else result[WF_RESULT]
+        })
         logging.info(f"\n+---{'-'*len(self._name + ' Finished')}---+"
                      f"\n|   {self._name} Finished   |"
                      f"\n+---{'-'*len(self._name + ' Finished')}---+\n")
@@ -222,6 +254,7 @@ class MakerChecker(Workflow):
                              "the current draft or not. A single key for a single boolean.")
 
     def clear_memory(self):
+        Workflow.clear_memory(self)
         self.maker.clear_memory()
         self.checker.clear_memory()
         if self.early_stop:
@@ -270,6 +303,12 @@ class MakerChecker(Workflow):
             elif isinstance(revisions, dict): draft = self.maker.invoke(**revisions)
             elif isinstance(revisions, (tuple, list)): draft = self.maker.invoke(*revisions)
         result = self.package_results((rounds, draft))
+        self._checkpoints.append({
+            "args":args,
+            "kwargs":kwargs,
+            "timestamp":str(datetime.now()),
+            "result": result if WF_RESULT not in result else result[WF_RESULT]
+        })
         logging.info(
             f"\n+---{'-'*len(self._name + ' Finished')}---+"
             f"\n|   {self._name} Finished   |"
@@ -309,6 +348,7 @@ class Selector(Workflow):
         return self.branches.pop(position)
 
     def clear_memory(self):
+        Workflow.clear_memory(self)
         self.decider.clear_memory()
         for branch in self.branches: branch.clear_memory(self)
 
@@ -342,6 +382,12 @@ class Selector(Workflow):
             raise ValueError(f"Decider chose an unknown branch: {decision_name}")
         result = selected.invoke(*args, **kwargs)
         result = self.package_results(result)
+        self._checkpoints.append({
+            "args":args,
+            "kwargs":kwargs,
+            "timestamp":str(datetime.now()),
+            "result": result if WF_RESULT not in result else result[WF_RESULT]
+        })
         logging.info(
             f"\n+---{'-'*len(self._name + ' Finished')}---+"
             f"\n|   {self._name} Finished   |"
@@ -377,6 +423,7 @@ class BatchFlow(Workflow):
             raise ValueError("result_schema must be empty, length 1, or match number of branches")
 
     def clear_memory(self):
+        Workflow.clear_memory(self)
         for b in self.branches:
             b.clear_memory()
 
@@ -436,13 +483,13 @@ class BatchFlow(Workflow):
                 normalized.append(r[WF_RESULT])
             else: normalized.append(r)
 
-        # If no explicit schema, return mapping branch.name -> result
-        if not self._result_schema:
-            out = {b.name: r for b, r in zip(self.branches, normalized)}
-            logging.info(f"[PARALLEL] {self._name} Finished")
-            return out
-
         # Otherwise schema must be length 1 or length num branches (validated in ctor)
-        out = self.package_results(normalized)
+        result = self.package_results(normalized)
+        self._checkpoints.append({
+            "args":args,
+            "kwargs":kwargs,
+            "timestamp":str(datetime.now()),
+            "result": result if WF_RESULT not in result else result[WF_RESULT]
+        })
         logging.info(f"[PARALLEL] {self._name} Finished")
-        return out
+        return result

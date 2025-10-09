@@ -36,8 +36,7 @@ readability, and maintainability. You return only the revised code, without comm
 # Set up the orchestrator
 orchestrator = OrchestratorAgent("AgenticOrchestrator",
                                  description="orchestrates calls between the code builder and code refiner",
-                                 llm_engine= llm,
-                                 allow_agentic=True)
+                                 llm_engine= llm)
 
 # Register both agents
 orchestrator.register(builder)
