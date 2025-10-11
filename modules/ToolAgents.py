@@ -73,7 +73,7 @@ class ToolAgent(Agent, ABC):
             If a referenced step index has not completed yet.
         """
         if isinstance(obj, str):
-            match = re.fullmatch(r"\{\{step(\d+)\}\}", obj)
+            match = re.fullmatch(r"\{step(\d+)\}", obj)
             if match:
                 idx = int(match.group(1))
                 if idx >= len(self._previous_steps) or not self._previous_steps[idx]["completed"]:
@@ -81,7 +81,7 @@ class ToolAgent(Agent, ABC):
                 return self._previous_steps[idx]["result"]
 
             return re.sub(
-                r"\{\{step(\d+)\}\}",
+                r"\{step(\d+)\}",
                 lambda m: str(self._previous_steps[int(m.group(1))]["result"])
                 if self._previous_steps[int(m.group(1))]["completed"]
                 else RuntimeError(f"Step {m.group(1)} has not been completed yet."),
@@ -254,13 +254,12 @@ class PlannerAgent(ToolAgent):
         block = self.get_actions_context()
 
         user_prompt = (
-            f"TASK:\n{prompt}\n\n"
-            "When JSON-encoding your plan, every 'function' field must exactly match one of the keys above."
+            f"Decompose the following task into a JSON plan:\n{prompt}\n\n"
         )
 
         # 2) Ask the LLM for a full plan (array of steps)
         messages = [
-            {"role": "system", "content": f"{self.role_prompt}\n\nBelow are the available tools you can decompose a user's task into:\n{block}"},
+            {"role": "system", "content": Prompts.PLANNER_PROMPT.format(TOOLS = block)},
         ]
         if self.context_enabled:
             messages += self._history
@@ -416,7 +415,7 @@ class OrchestratorAgent(ToolAgent):
 
         sys = {
             "role": "system",
-            "content": f"{self.role_prompt}\n\nAVAILABLE METHODS (exact keys):\n{available}"
+            "content": Prompts.ORCHESTRATOR_PROMPT.format(TOOLS = available)
         }
         msgs = [sys]
         if self.context_enabled:
@@ -427,7 +426,7 @@ class OrchestratorAgent(ToolAgent):
                 "Generate the next single JSON object needed to complete the user's task.\n"
                 f"TASK: {prompt}\n"
                 f"RUNNING PLAN SO FAR: {json.dumps(self._running_plan, ensure_ascii=False)}\n"
-                + (f"LAST RESULT (truncated): {last_result}\n" if last_result is not None else "")
+                + (f"STEP{len(self._running_plan)-1} RESULT (truncated): {last_result}\n" if last_result is not None else "")
             )
         }
         msgs.append(user)

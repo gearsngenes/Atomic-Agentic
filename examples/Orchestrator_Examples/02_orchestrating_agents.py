@@ -15,22 +15,25 @@ llm = OpenAIEngine(model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY"))
 # Define the helper agents
 builder = Agent(
     name="CodeBuilderAgent",
-    description="Generates code based on user requests",
+    description="Handles tasks related to generating code based on user requests and revisions",
     llm_engine=llm,
     role_prompt="""
-You are a senior software engineer who writes clean, working Python code for requested tasks.
-You return ONLY the code, without explanations or output.
-""".strip()
+    You are a senior software engineer who writes Python code for requested tasks.
+    You return ONLY the code, without explanations or output.
+    """.strip(),
+    context_enabled=True
 )
 
 optimizer = Agent(
-    name="CodeOptimizerAgent",
-    description="Reviews and refines code to optimize it for simplicity and effectiveness",
+    name="CodeReviewer",
+    description="Handles tasks related to reviewing code from the code-builder and provides revision notes",
     llm_engine=llm,
     role_prompt="""
-You are an expert Python performance analyst. When given a code snippet, you rewrite it for efficiency,
-readability, and maintainability. You return only the revised code, without comments or extra explanation.
-""".strip()
+    You are an expert Python performance analyst. When given a code snippet, thoroughly, and brutally evaluate its quality 
+    in terms of accuracy, readability, and design, checking whether it follows SOLID principles. Once you've evaluated
+    the code, return ONLY your revision SUGGESTIONS for the code builder to work on, otherwise return only "Approved".
+    """.strip(),
+    context_enabled=True
 )
 
 # Set up the orchestrator
@@ -46,9 +49,8 @@ orchestrator.register(optimizer)
 task =  (
     "Write a Python-based class that can help construct a design-pattern/oop oriented design "
     "for agentic AI that also is platform agnostic (i.e. bedrock vs openai vs llama-cpp-python, etc.). "
-    "Return the final draft once it's done. Prioritize OOP-design, simplified interfaces that are easy "
-    "to expand on in subclasses and consistent to inherit. It should require minimal amounts of if-else "
-    "statements for configuration. Be sure to use helper classes, as well."
+    "Be sure that once the code is generated, its reviewed first, and then re-built with any improvements "
+    "suggested by the code reviewer. Then, once the code-reviewer approves, return the latest code draft."
 )
 
 result = orchestrator.invoke(task)

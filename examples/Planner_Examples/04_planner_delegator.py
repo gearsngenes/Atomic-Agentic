@@ -85,7 +85,7 @@ def print_math_solution(problem, solution):
 
 batch_math_planner.register(
     print_math_solution,
-    "Prints the formatted math problem its solution."
+    "Prints the math problem its solution once the result is calculated."
 )
 
 
@@ -136,8 +136,7 @@ haiku_task = (
 )
 
 # --- 2. Batch Math Planner task ---
-math_task = f"For each math problem in the provided list seen here:\n{math_problems}\n"
-"Solve and PRINT(using print_solution) each math problem and its solution."
+math_task = f"Print each math problem and its solution. The problems are here:\n{math_problems}"
 
 
 # --- 3. Super Planner Demo ---

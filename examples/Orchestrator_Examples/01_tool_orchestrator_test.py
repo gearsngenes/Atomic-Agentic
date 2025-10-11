@@ -26,7 +26,7 @@ orchestrator.register(ConsolePlugin)
 
 # Step 4: Give the orchestrator a task
 task =  ("Calculate the sum of 42 and 58, multiply it by three, and divide it by four, "
-        "and return the final result.")
+        "then print the result as 'INTERNAL RESULT: <result here>' and return three times the result.")
 
 # Step 5: Let it orchestrate step-by-step
 final_result = orchestrator.invoke(task)
