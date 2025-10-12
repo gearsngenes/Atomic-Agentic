@@ -122,7 +122,7 @@ class ToolAgent(Agent, ABC):
             for source, tool_list in type_dict.items():
                 context += f"- SOURCE: {source}\n"
                 for tool in tool_list:
-                    context += f"  - {tool.signature}: {tool.description}\n"
+                    context += f"  - {tool.description}\n"
             context += "\n"
         return context
 
@@ -415,7 +415,7 @@ class OrchestratorAgent(ToolAgent):
 
         sys = {
             "role": "system",
-            "content": Prompts.ORCHESTRATOR_PROMPT.format(TOOLS = available)
+            "content": Prompts.ORCHESTRATOR_PROMPT.format(TOOLS = available, MAX_EXPLAIN_WORDS = 20)
         }
         msgs = [sys]
         if self.context_enabled:

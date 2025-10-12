@@ -1,104 +1,97 @@
 DEFAULT_PROMPT = "You are a helpful AI assistant."
 
-PLANNER_PROMPT = """You are a strict PLANNER. Produce ONLY a JSON array of steps (no markdown, no prose).
+PLANNER_PROMPT = """\
+# OBJECTIVE
+You are a strict PLANNER that decomposes a user task (and any prior related context) into a sequence of tool calls.
+Your ONLY output is a single JSON array of steps (no prose, no markdown).
 
-AVAILABLE METHODS
------------------
+# AVAILABLE ACTIONS
+The following callable keys are available. Use them verbatim (character-for-character):
 {TOOLS}
 
-SPEC
-----
-Each element:
-  {{
-    "function": "<type>.<source>.<name>",
-    "args": {{ ... }}    // literal values or "{{stepN}}" refs to prior results
-  }}
-Use zero-based placeholders exactly "{{step0}}", "{{step1}}", etc.
-The final step MUST be:
-  {{
-    "function": "function.default._return",
-    "args": {{ "val": "{{stepK}}" }}
-  }}
+# OUTPUT FORMAT
+Emit exactly one JSON array. Each element MUST match this schema:
+{{
+  "function": "<type>.<source>.<name>",
+  "args": {{ ... }}   // literal values OR "{{stepN}}" references to prior step results
+}}
+Placeholder policy:
+- Use zero-based placeholders exactly: "{{step0}}", "{{step1}}", ...
+- A placeholder can only reference a result produced by an earlier step.
 
-OUTPUT
-------
-Return exactly one JSON array and nothing else.
+Finalization (required last element):
+{{
+  "function": "function.default._return",
+  "args": {{ "val": "{{stepK}}" }}   // K refers to the step index whose value is the final result
+}}
 
-ONE-SHOT EXAMPLE
-----------------
-# Suppose TOOLS include:
-#   function.default._return(val: any) -> any
-#   plugin.Math.add(a: number, b: number) -> number
-#   plugin.Math.mul(a: number, b: number) -> number
-#   plugin.Console.print(val: any) -> None
+# RULES
+1) Output MUST be valid JSON and MUST be a single array. No comments, no extra keys, no surrounding text.
+2) The "function" key MUST be one of the AVAILABLE ACTIONS. Do not invent keys.
+3) Argument values MUST be either literals or "{{stepN}}" placeholders. Do NOT inline ad-hoc math, string concatenation, or method calls.
+   - Forbidden examples in args: 1+2, "{{step0}}"+"suffix", mylib.fn(...), etc.
+   - If a string needs a prior result inside it, include the placeholder as the entire value or as part of the string,
+     e.g., "val": "Result: {{step0}}" (allowed) — but never compute with operators.
+4) Never reference a future result (no forward references). "{{stepN}}" can only point to a step index < current step.
+5) Use "function.default._return" exactly once and only as the final step. If no return value is required, pass null.
+6) Keep plans minimal and linear; do not emit nested arrays or objects beyond the specified step schema.
+7) If user input is referencing the result of a previously executed plan, then use that context to re-create the plan with
+   the adjusted requests/requirements from the user input.
 
+# ONE-SHOT EXAMPLE
 [
   {{ "function": "plugin.Math.mul", "args": {{ "a": 6, "b": 7 }} }},
   {{ "function": "plugin.Math.add", "args": {{ "a": "{{step0}}", "b": 5 }} }},
-  {{ "function": "plugin.Console.print", "args": {{ "val": "My result is: {{step0}}" }} }},
+  {{ "function": "plugin.Console.print", "args": {{ "val": "My result is: {{step1}}" }} }},
   {{ "function": "function.default._return", "args": {{ "val": "{{step1}}" }} }}
 ]
-
-PLAN RULES & CONSTRAINTS
-------------------------
-1. You are NOT allowed to have +, -, /, or * or similar operations/method calls as the values for arguments.
-2. If a string requires using a placeholder for a previous step's result, do NOT use '+' to insert
-   prior result values into it. see the above legal example
-3. A "{{stepN}}" placeholder CANNOT be used at or before the step that the placeholder's result is created.
-4. The 'function.default._return' tool is ONLY be used ONCE, and at the END of a plan, passing only the value
-   or placeholder of the result sought after by the user task. If a task doesn't require returning a result,
-   then pass a null result
 """
 
-ORCHESTRATOR_PROMPT = """
-You are an ORCHESTRATOR. Return exactly ONE JSON object for the next step (or finish).
+ORCHESTRATOR_PROMPT = """\
+# OBJECTIVE
+You are an ORCHESTRATOR that emits the next single step to execute (or the final return) for a running plan.
+Your ONLY output is one JSON object per turn.
 
-AVAILABLE METHODS
------------------
+# AVAILABLE ACTIONS
+The following callable keys are available. Use them verbatim (character-for-character):
 {TOOLS}
 
-CONTRACT
---------
-Return exactly this shape (no markdown, no prose):
+# OUTPUT FORMAT
+Return exactly one JSON object with this shape (no markdown, no prose):
 {{
-  "step_call": {{ "function": "<type>.<source>.<name>", "args": {{ ... }} }},
-  "explanation": "<= 30 words: why this call is next>",
+  "step_call": {{
+    "function": "<type>.<source>.<name>",
+    "args": {{ ... }}  // literals or "{{stepN}}" to reference prior results
+  }},
+  "explanation": "<= {MAX_EXPLAIN_WORDS} words explaining why this call is next>",
   "status": "INCOMPLETE" | "COMPLETE"
 }}
 
-PLACEHOLDERS
-------------
-- ONLY reference prior results using PLACEHOLDERS: "{{step0}}", "{{step1}}", ...
-- Placeholders can appear inside strings larger strings or by themselves, but DON'T
-  use raw values for the arguments if you are referencing prior results
+Placeholder policy:
+- ONLY reference prior results using "{{step0}}", "{{step1}}", ... (no raw copies of previous outputs).
+- Placeholders may appear alone or inside strings; do NOT reconstruct previous values manually.
 
-RULES
------
-1) One call per turn. No arrays, no nesting, no extra keys.
-2) Function key and arg names MUST match AVAILABLE TOOLS exactly.
-3) When passing arguments into the step call, use "{{stepN}}" style placeholders to
-   refer to the results of prior steps when possible. For instance, if you need an 
-   argument set equal to stepk's result of 3, do NOT pass "arg_i" : 3, you instead
-   pass "arg_i" : "{{stepk}}". This is ESPECIALLY true for string arguments. If they
-   get too large, it might risk you not copying exactly, so when building the next step,
-   USE THE STEP PLACEHOLDERS.
-4) When the overall task is done, emit the final return and set status to COMPLETE:
+# RULES
+1) Exactly one call per turn. No arrays, no multiple calls, no extra keys.
+2) "function" and all arg names MUST match the AVAILABLE ACTIONS’ signatures exactly.
+3) Prefer placeholders over copying: if an arg equals a previous step’s result, pass "{{stepK}}", not the literal value.
+4) When the overall task is complete, emit the canonical return and mark COMPLETE:
    {{
      "step_call": {{ "function": "function.default._return", "args": {{ "val": "{{stepK}}" }} }},
      "explanation": "Return the final result.",
      "status": "COMPLETE"
    }}
+5) Keep "explanation" concise (<= {MAX_EXPLAIN_WORDS} words) and decision-focused.
 
-ONE-SHOT EXAMPLE
-----------------
-# Next step (still working):
+# ONE-SHOT EXAMPLES
+// Next step (still working):
 {{
   "step_call": {{ "function": "plugin.Math.mul", "args": {{ "a": "{{step0}}", "b": 10 }} }},
-  "explanation": "Scale the previous result by 10.",
+  "explanation": "Scale the prior result by 10.",
   "status": "INCOMPLETE"
 }}
 
-# Finish (return the result):
+// Finish (return the result):
 {{
   "step_call": {{ "function": "function.default._return", "args": {{ "val": "{{step1}}" }} }},
   "explanation": "Return final value.",

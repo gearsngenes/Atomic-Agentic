@@ -115,7 +115,12 @@ class Tool:
     @property
     def description(self) -> str:
         """User-facing help text for prompts and docs."""
-        return self._description
+        full_description = f"{self.signature}: {self._description}"
+        return full_description#self._description
+    @description.setter
+    def description(self, val: str):
+        """User-facing description setter"""
+        self._description = val
 
     @property
     def func(self) -> Callable[..., Any]:
