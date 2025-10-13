@@ -27,13 +27,13 @@ Finalization (required last element):
 
 # RULES
 1) Output MUST be valid JSON and MUST be a single array. No comments, no extra keys, no surrounding text.
-2) The "function" key MUST be one of the AVAILABLE ACTIONS. Do not invent keys.
+2) The "function" and "args" keys MUST reference ACTUAL action names & parameter names from AVAILABLE ACTIONS. Do NOT add or invent keys.
 3) Argument values MUST be either literals or "{{stepN}}" placeholders. Do NOT inline ad-hoc math, string concatenation, or method calls.
    - Forbidden examples in args: 1+2, "{{step0}}"+"suffix", mylib.fn(...), etc.
    - If a string needs a prior result inside it, include the placeholder as the entire value or as part of the string,
      e.g., "val": "Result: {{step0}}" (allowed) — but never compute with operators.
-4) Never reference a future result (no forward references). "{{stepN}}" can only point to a step index < current step.
-5) Use "function.default._return" exactly once and only as the final step. If no return value is required, pass null.
+4) NEVER reference a result from a step that HASN'T been completed yet (no forward references). "{{stepN}}" can only point to a step index N < current step index.
+5) ONLY use "function.default._return" once as the FINAL step of the JSON array. If no return value is required, then pass null.
 6) Keep plans minimal and linear; do not emit nested arrays or objects beyond the specified step schema.
 7) If user input is referencing the result of a previously executed plan, then use that context to re-create the plan with
    the adjusted requests/requirements from the user input.

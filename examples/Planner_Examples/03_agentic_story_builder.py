@@ -43,7 +43,7 @@ Output: bullet-point critique ONLY (max 8 bullets).  No rewriting.
 
 # ───────────────────────────  WORKER AGENTS  ────────────────────
 outliner = Agent("StoryOutliner", description = "Should be called when given a new story idea. Fleshes it out into a full, structured outline.", llm_engine=llm_engine, role_prompt= OUTLINER_PROMPT)
-writer   = Agent("StoryWriter", description = "Writes a draft based on the story outline, plus any additional context (i.e. revision notes)", llm_engine= llm_engine, role_prompt=WRITER_PROMPT, context_enabled=True)
+writer   = Agent("StoryWriter", description = "Writes a draft based on the story outline or revision notes from a reviewer", llm_engine= llm_engine, role_prompt=WRITER_PROMPT, context_enabled=True)
 reviewer = Agent("DraftReviewer", description = "Reviews story drafts, provides revision notes back to the writer.", llm_engine=llm_engine, role_prompt=REVIEWER_PROMPT, context_enabled=True)
 
 # ───────────────────────────  ORCHESTRATOR  ─────────────────────
@@ -61,12 +61,13 @@ if __name__ == "__main__":
     loops = int(input("How many review/revision cycles? "))
 
     task_prompt = (
-        f"1) Outline a full story based on: “{idea}”.\n"
-        f"2) Then write the first draft using the outline\n"
-        f"3) Send the story draft to a reviewer\n"
-        f"4) Send ONLY the reviewer's revision notes back to the writer to rewrite the draft.\n"
-        f"5) Write {loops} total draft(s) using this process.\n"
-        f"6) Return the final draft once it's prepared."
+        "Follow the below instructions to create a story:\n"
+        f"Create an outline for a full story based on the following user idea: “{idea}”.\n"
+        f"Then write the first draft using the generated outline.\n"
+        f"Send the writer's draft to a reviewer for revision.\n"
+        f"Send the reviewer's revision notes back to the writer.\n"
+        f"Repeat the review & rewrite process to update the draft {loops} times.\n"
+        f"Return the final draft once it's prepared."
     )
 
     # The orchestrator handles both planning *and* execution.
