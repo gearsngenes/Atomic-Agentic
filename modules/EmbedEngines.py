@@ -1,12 +1,11 @@
 from __future__ import annotations
-import math
+import math, time, os, random
 from abc import ABC, abstractmethod
 from openai import OpenAI
 from google import genai
 from google.genai import types as genai_types
 from mistralai import Mistral, SDKError
 from llama_cpp import Llama  # local inference
-import os, random
 from typing import List, Optional, Sequence, Any
 from dotenv import load_dotenv
 
@@ -76,7 +75,6 @@ class EmbedEngine(ABC):
         norm = math.sqrt(sum((x * x) for x in vec)) or 1.0
         return [x / norm for x in vec]
 
-
 class OpenAIEmbedEngine(EmbedEngine):
     """
     OpenAI implementation of the EmbedEngine interface.
@@ -107,14 +105,14 @@ class OpenAIEmbedEngine(EmbedEngine):
     def __init__(
         self,
         model: str = "text-embedding-3-small",
-        api_key: Optional[str] = None,
+        api_key: str = DEFAULT_OPENAI_API_KEY,
         dimension: int = 1536,
         normalize: bool = False,
     ):
         if not isinstance(dimension, int) or dimension <= 0:
             raise ValueError("`dimension` must be a positive integer and is now mandatory.")
         super().__init__(dimension=dimension, normalize=normalize)
-        self.client = OpenAI(api_key=api_key or DEFAULT_OPENAI_API_KEY)
+        self.client = OpenAI(api_key=api_key)
         self.model = model
 
     def vectorize(self, text: str) -> List[float]:
@@ -159,7 +157,7 @@ class GeminiEmbedEngine(EmbedEngine):
     def __init__(
         self,
         model: str = "text-embedding-004",
-        api_key: Optional[str] = None,
+        api_key: str = DEFAULT_GEMINI_API_KEY,
         dimension: int = 1536,
         *,
         task_type: Optional[str] = None,
@@ -168,7 +166,7 @@ class GeminiEmbedEngine(EmbedEngine):
         if not isinstance(dimension, int) or dimension <= 0:
             raise ValueError("`dimension` must be a positive integer and is mandatory.")
         super().__init__(dimension=dimension, normalize=normalize)
-        self.client = genai.Client(api_key=api_key or DEFAULT_GEMINI_API_KEY)
+        self.client = genai.Client(api_key=api_key)
         self.model = model
         self.task_type = task_type
 
@@ -213,7 +211,6 @@ class GeminiEmbedEngine(EmbedEngine):
             )
         return out
 
-import time
 class MistralEmbedEngine(EmbedEngine):
     """
     Mistral implementation of EmbedEngine with retry/backoff.
@@ -226,7 +223,7 @@ class MistralEmbedEngine(EmbedEngine):
     def __init__(
         self,
         model: str = "mistral-embed",
-        api_key: Optional[str] = None,
+        api_key: str = DEFAULT_MISTRAL_API_KEY,
         dimension: int = 1024,
         normalize: bool = False,
         *,
@@ -239,7 +236,7 @@ class MistralEmbedEngine(EmbedEngine):
         if not isinstance(dimension, int) or dimension <= 0:
             raise ValueError("`dimension` must be a positive integer and is mandatory.")
         super().__init__(dimension=dimension, normalize=normalize)
-        self.client = Mistral(api_key=api_key or DEFAULT_MISTRAL_API_KEY)
+        self.client = Mistral(api_key=api_key)
         self.model = model
 
         self.max_retries = int(max_retries)
@@ -297,106 +294,6 @@ class MistralEmbedEngine(EmbedEngine):
                 jitter = sleep_s * (self.jitter * (2 * random.random() - 1.0))
                 time.sleep(max(0.0, sleep_s + jitter))
                 attempt += 1
-
-
-
-class LlamaCppEmbedEngine(EmbedEngine):
-    """
-    Local embedding engine using llama-cpp-python (GGUF models).
-
-    Notes
-    -----
-    - Works entirely offline with a local GGUF embedding model (e.g.,
-      *nomic-embed-text-v1.5.f16.gguf*, *bge-small-en-v1.5.gguf*, etc.).
-    - `dimension` is **mandatory** and must match the model’s embedding size
-      (e.g., 768 for Nomic v1.5, 384 for bge-small-en, 1024 for bge-large, etc.).
-    - Returns plain `list[float]`.
-
-    Parameters
-    ----------
-    model_path : str
-        Filesystem path to the GGUF model.
-    dimension : int
-        Required. Embedding size expected from the model; enforced every call.
-    normalize : bool
-        If True, L2-normalize the returned vector.
-    n_ctx : int
-        Context window for the model (token limit); impacts internal chunking only.
-    n_threads : Optional[int]
-        Thread count for llama-cpp; defaults to library heuristic if None.
-    llama_kwargs : dict
-        Extra kwargs forwarded to `llama_cpp.Llama` (e.g., n_gpu_layers, seed, tensor_split).
-
-    Usage
-    -----
-    engine = LlamaCppEmbedEngine(
-        model_path="/models/nomic-embed-text-v1.5.f16.gguf",
-        dimension=768,
-        normalize=True,
-        n_threads=8
-    )
-    vec = engine.vectorize("Atomic-Agentic is an agentic AI framework.")
-    """
-
-    def __init__(
-        self,
-        model_path: str,
-        dimension: int,
-        normalize: bool = False,
-        *,
-        verbose: bool = False,
-        n_ctx: int = 2048,
-        n_threads: Optional[int] = None,
-        **llama_kwargs: Any,
-    ):
-        if not isinstance(model_path, str) or not os.path.exists(model_path):
-            raise ValueError("`model_path` must point to an existing GGUF file.")
-        if not isinstance(dimension, int) or dimension <= 0:
-            raise ValueError("`dimension` must be a positive integer and is mandatory.")
-
-        super().__init__(dimension=dimension, normalize=normalize)
-
-        # Important: embedding=True enables embedding-only fast path
-        self.llm = Llama(
-            model_path=model_path,
-            embedding=True,
-            n_ctx=n_ctx,
-            n_threads=n_threads or 0,  # 0 = library decides
-            verbose=verbose,
-            **llama_kwargs,
-        )
-
-    def vectorize(self, text: str) -> List[float]:
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Input text must be a non-empty string.")
-        text = text.strip()
-
-        # llama-cpp-python has two common shapes; support both:
-        # 1) `create_embedding(input=...)` → {"data":[{"embedding":[...]}], ...}
-        # 2) `embed(texts=[...])` → [[...]]   (newer helpers)
-        vec: List[float]
-
-        # Try OpenAI-like shape first
-        try:
-            out = self.llm.create_embedding(input=text)  # type: ignore[arg-type]
-            vec = list(out["data"][0]["embedding"])
-        except Exception:
-            # Fallback to the helper that returns a plain list-of-lists
-            out2 = self.llm.embed(texts=[text])
-            if isinstance(out2, dict) and "data" in out2:
-                vec = list(out2["data"][0]["embedding"])
-            elif isinstance(out2, list) and out2 and isinstance(out2[0], (list, tuple)):
-                vec = [float(x) for x in out2[0]]
-            else:
-                raise RuntimeError("llama-cpp returned an unexpected embedding response.")
-
-        out_vec = self._to_list_float(vec)
-
-        if len(out_vec) != self.dimension:
-            raise ValueError(
-                f"Embedding dimension mismatch: expected {self.dimension}, got {len(out_vec)}"
-            )
-        return out_vec
 
 class LlamaCppEmbedEngine(EmbedEngine):
     """
