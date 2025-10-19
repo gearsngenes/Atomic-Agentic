@@ -18,6 +18,6 @@ planner = PlannerAgent("MCP Agent",
 planner.register("http://localhost:8000/mcp", "CalculusServer")
 result = planner.invoke(
     "Give me the derivative of the function: 'x**5 + 1' at the point x = 2."
-    "Once you've calculated the derivative, return the formatted string: MCPO RESULT -- <result here>"
+    "Then, multiply by 10, and return the output."
 )
-print(result)
+print(result, type(result))

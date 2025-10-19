@@ -385,16 +385,21 @@ class ToolFactory:
                     async with ClientSession(r, w) as session:
                         await session.initialize()
                         result = await session.call_tool(tool_name, arguments=payload)
-
                         # Prefer plain text when available
-                        if getattr(result, "content", None):
-                            texts = [getattr(c, "text", None) for c in result.content if getattr(c, "text", None)]
-                            if texts:
-                                return texts[0]
 
                         # Fallback to dict-like form
                         try:
-                            return result.model_dump()
+                            result_dict = result.model_dump()
+                            if "structuredContent" in result_dict and result_dict["structuredContent"] is not None:
+                                struct_cont = result_dict["structuredContent"]
+                                if isinstance(struct_cont, dict) and "result" in struct_cont:
+                                    return struct_cont.get("result")
+                                else:
+                                    return struct_cont
+                            if getattr(result, "content", None):
+                                texts = [getattr(c, "text", None) for c in result.content if getattr(c, "text", None)]
+                                if texts:
+                                    return texts[0]
                         except Exception:
                             return result
 
