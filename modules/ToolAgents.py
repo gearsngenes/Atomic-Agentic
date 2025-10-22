@@ -57,7 +57,7 @@ class ToolAgent(Agent, ABC):
         self._mcpo_counter = 0
         self._mcp_counter = 0
         def _return(val: Any): return val
-        self.register(_return, "Returns the passed-in value. This method should ONLY OCCUR ONCE as the FINAL STEP of any plan.")
+        self.register(tool = _return, name = "_return", description = "Returns the passed-in value. This method should ONLY OCCUR ONCE as the FINAL STEP of any plan.")
 
     def _resolve(self, obj: Any) -> Any:
         """Recursively resolve placeholders inside args payloads.

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Any, Callable, Dict, List, Optional, Tuple, get_type_hints, TypedDict
+from typing import Any, Callable, Dict, List, Optional, Tuple, get_type_hints, get_origin, get_args, TypedDict
+from collections import OrderedDict
 
 # External integrations (MCP) + local modules
 from mcp import ClientSession
@@ -21,58 +22,34 @@ __all__ = ["Tool", "ToolFactory"]
 # ───────────────────────────────────────────────────────────────────────────────
 # Tool
 # ───────────────────────────────────────────────────────────────────────────────
+import inspect
+from collections import OrderedDict
+from typing import Any, Callable, Optional, get_args, get_origin, get_type_hints
+
 
 class Tool:
     """
-    A thin, immutable wrapper around a Python callable (or an agent/plugin/MCP façade),
-    exposing a stable, fully-qualified name and a user-facing signature string.
+    Wrapper around a callable providing:
+      • Stable identity (type, source, name → full_name)
+      • Human-readable signature string (for prompts/UI)
+      • Optional memory clear hook
+      • Simple invoke() dispatcher
 
-    Fully-qualified naming convention (stable key for planners/orchestrators):
-        <type>.<source>.<name>
+    Internal detail (compat preserved):
+      • Structured signature is stored as:
+          _sig_types: OrderedDict[str, type]
+          _return_type: type
+        .signature (str) is rendered from these.
 
-    Examples:
-        function.default.add
-        plugin.MathPlugin.multiply
-        agent.Researcher.invoke
-        mcp.fastmcp_server.mcp_summarize
-
-    Parameters
-    ----------
-    name : str
-        The short method name (right-most segment of the key).
-        Must be stable and human-readable for docs/prompts.
-
-    func : Callable[..., Any]
-        The underlying Python callable to execute. May be a sync function only
-        for ToolAgent/Planner/Orchestrator usage; async callables should be
-        wrapped upstream where appropriate.
-
-    type : str, default "function"
-        Logical category: "function" | "plugin" | "agent" | "mcp".
-        Drives the <type> segment in `full_name` and grouping in prompts.
-
-    source : str, default "default"
-        Namespace for the tool (e.g., plugin name, agent name, MCP server name).
-
-    description : str, default ""
-        Short, task-oriented doc used in AVAILABLE METHODS prompts. Keep
-        parameter details short; Tool.signature already includes arg names.
-
-    clear_mem_func : Optional[Callable[[], None]]
-        Optional callback invoked by `clear_memory()` to reset any internal
-        state the wrapped callable keeps (e.g., caches). No-op if None.
-
-    Attributes
-    ----------
-    signature : str
-        Human-readable signature: "<full_key>(a: int, b: int = 0) → str".
-        Built lazily from Python type hints if present; falls back to `Any`.
-
-    Notes
-    -----
-    - This class does NOT validate or coerce arguments. Callers (e.g., ToolAgent)
-      should resolve placeholders and pass kwargs positionally/nominally as needed.
+    Conventions:
+      • Full name IS type-prefixed: '{type}.{source}.{name}'
+      • Drop conventional receiver params ('self'/'cls') from signatures
+      • Render *args/**kwargs as '*args: Any' / '**kwargs: Any'
     """
+
+    # ----------------------------
+    # Construction & Introspection
+    # ----------------------------
 
     def __init__(
         self,
@@ -88,95 +65,155 @@ class Tool:
         self._name: str = name
         self._func: Callable[..., Any] = func
         self._description: str = description
-        self.signature: str = Tool._build_signature(self.full_name, func)
         self._clear_mem: Optional[Callable[[], None]] = clear_mem_func
 
-    # ── Read-only properties (stable surface used in planners/orchestrators) ──
+        # Structured signature storage (authoritative)
+        self._sig_types: "OrderedDict[str, Any]" = OrderedDict()
+        self._return_type: Any = Any
+        self._build_signature_map(func)
+
+    # ----------------------------
+    # Identity & Metadata
+    # ----------------------------
+
     @property
     def type(self) -> str:
-        """Logical category: 'function' | 'plugin' | 'agent' | 'mcp'."""
+        """Logical tool category (e.g., 'function', 'plugin', 'api')."""
         return self._type
 
     @property
     def source(self) -> str:
-        """Namespace for the method (plugin name, agent name, or MCP server key)."""
+        """Namespace/owner; contributes to fully-qualified name."""
         return self._source
 
     @property
     def name(self) -> str:
-        """Short method name (right-most segment)."""
+        """Unqualified tool name."""
         return self._name
 
     @property
     def full_name(self) -> str:
-        """Fully-qualified tool key: '<type>.<source>.<name>'."""
+        """Fully-qualified, type-prefixed name: '{type}.{source}.{name}'."""
         return f"{self._type}.{self._source}.{self._name}"
+
+    # ----------------------------
+    # Description & Signature
+    # ----------------------------
 
     @property
     def description(self) -> str:
-        """User-facing help text for prompts and docs."""
-        full_description = f"{self.signature}: {self._description}"
-        return full_description#self._description
+        """
+        Human-readable description prefixed with the formatted signature.
+        Example:
+            "function.plugin_math.add(a: int, b: int) → int: Add two integers."
+        """
+        return f"{self.signature}: {self._description}" if self._description else self.signature
+
     @description.setter
-    def description(self, val: str):
-        """User-facing description setter"""
+    def description(self, val: str) -> None:
         self._description = val
 
     @property
+    def signature(self) -> str:
+        """
+        Legacy, human-readable signature string synthesized from the structured
+        _sig_types/_return_type. Kept for prompt/tooling compatibility.
+        """
+        return self._format_signature(self.full_name, self._sig_types, self._return_type)
+
+    # Optional: expose structured signature read-only (useful for tooling).
+    @property
+    def signature_map(self) -> OrderedDict[str, Any]:
+        """Ordered mapping of parameter names to their (annotation) types."""
+        return OrderedDict(self._sig_types)
+
+    @property
+    def return_type(self) -> Any:
+        """Return annotation/type if present, else `typing.Any`."""
+        return self._return_type
+
+    # ----------------------------
+    # Execution
+    # ----------------------------
+
+    @property
     def func(self) -> Callable[..., Any]:
-        """The underlying callable to execute."""
+        """Underlying callable."""
         return self._func
 
-    # ── Control ────────────────────────────────────────────────────────────────
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        """Call the underlying function."""
+        return self._func(*args, **kwargs)
+
     def clear_memory(self) -> None:
-        """
-        Invoke the optional 'clear_mem_func' to reset any internal state/caches.
-        No-op if no callback was provided.
-        """
+        """Invoke the optional clear-memory hook, if provided."""
         if self._clear_mem is not None:
             self._clear_mem()
 
-    def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        """
-        Execute the underlying callable.
+    # ----------------------------
+    # Dunder
+    # ----------------------------
 
-        Notes
-        -----
-        - Planner/Orchestrator infrastructure already resolves placeholders into
-          concrete Python objects before calling this.
-        - If the callable is async, it should be awaited by an async-aware runner;
-          the default Planner/Orchestrator paths assume sync callables.
-        """
-        return self._func(*args, **kwargs)
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return f"Tool<{self.signature}>"
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
-    @staticmethod
-    def _build_signature(key: str, func: Callable[..., Any]) -> str:
-        """
-        Build a human-readable, single-line signature using Python type hints.
+    # ----------------------------
+    # Internal helpers
+    # ----------------------------
 
-        Example:
-            "plugin.MathPlugin.add(a: int, b: int) → int"
+    def _build_signature_map(self, func: Callable[..., Any]) -> None:
+        """
+        Populate `_sig_types` (param -> annotation) and `_return_type` from the
+        callable's signature and type hints. Drops conventional receiver params.
         """
         sig = inspect.signature(func)
         hints = get_type_hints(func)
 
-        params: List[str] = []
-        for n, p in sig.parameters.items():
-            if n == "self":
+        params = list(sig.parameters.items())
+        for idx, (name, p) in enumerate(params):
+            # Drop conventional receiver ('self'/'cls') if present as first positional
+            if (
+                idx == 0
+                and p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                and name in {"self", "cls"}
+            ):
                 continue
-            annotated = hints.get(n, Any)
-            ann_name = getattr(annotated, "__name__", str(annotated))
-            default_str = f" = {p.default!r}" if p.default is not inspect._empty else ""
-            params.append(f"{n}: {ann_name}{default_str}")
 
-        rtype = hints.get("return", Any)
-        rtype_name = getattr(rtype, "__name__", str(rtype))
-        return f"{key}({', '.join(params)}) → {rtype_name}"
+            if p.kind == inspect.Parameter.VAR_POSITIONAL:
+                self._sig_types["*args"] = Any
+            elif p.kind == inspect.Parameter.VAR_KEYWORD:
+                self._sig_types["**kwargs"] = Any
+            else:
+                self._sig_types[name] = hints.get(name, Any)
 
-    # ── Debugging niceties ─────────────────────────────────────────────────────
-    def __repr__(self) -> str:
-        return f"Tool<{self.full_name}>"
+        self._return_type = hints.get("return", Any)
+
+    @staticmethod
+    def _format_signature(
+        key: str,
+        sig_types: "OrderedDict[str, Any]",
+        rtype: Any,
+    ) -> str:
+        """
+        Render the structured signature to a concise, readable single line:
+            "{key}(a: int, b: list[str]) → bool"
+        """
+
+        def _ann_name(t: Any) -> str:
+            origin = get_origin(t)
+            if origin is None:
+                # Builtins/typing.Any/ForwardRef fallback
+                return getattr(t, "__name__", str(t))
+            args = get_args(t)
+            base = getattr(origin, "__name__", str(origin))
+            if args:
+                inner = ", ".join(_ann_name(a) for a in args)
+                return f"{base}[{inner}]"
+            return base
+
+        params_str = ", ".join(f"{n}: {_ann_name(ann)}" for n, ann in sig_types.items())
+        rtype_str = _ann_name(rtype)
+        return f"{key}({params_str}) \u2192 {rtype_str}"  # Unicode arrow
 
 
 # ───────────────────────────────────────────────────────────────────────────────
