@@ -68,7 +68,7 @@ decider = decider_agent if decide_agentically else filter_tool
 workflow = Selector(
     name = "ConditionalWorkflowExample",
     description = "A workflow that routes user questions to the appropriate agent based on the topic",
-    decider=decider,
+    judge=decider,
     branches=[agent1, agent2, format_tool],
     result_schema=["selected_output"]
 )

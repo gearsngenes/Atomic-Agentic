@@ -514,7 +514,7 @@ class MakerChecker(Workflow):
         description: str,
         maker: Workflow,
         checker: Workflow,
-        early_stop: Agent | Tool | Workflow = None,
+        judge: Agent | Tool | Workflow = None,
         max_revisions: int = 1,
         result_schema: list[str] = [WF_RESULT],
     ):
@@ -525,16 +525,16 @@ class MakerChecker(Workflow):
         self.max_revisions = max_revisions
         self.maker: Workflow = maker
         self.checker: Workflow = checker
-        if not early_stop:
-            self.early_stop = None
-        elif isinstance(early_stop, Agent):
-            self.early_stop = AgentFlow(early_stop)
-        elif isinstance(early_stop, Tool):
-            self.early_stop = ToolFlow(early_stop)
+        if not judge:
+            self.judge = None
+        elif isinstance(judge, Agent):
+            self.judge = AgentFlow(judge)
+        elif isinstance(judge, Tool):
+            self.judge = ToolFlow(judge)
         else:
-            self.early_stop = early_stop
+            self.judge = judge
 
-        if self.early_stop and len(self.early_stop.result_schema) > 1:
+        if self.judge and len(self.judge.result_schema) > 1:
             raise ValueError(
                 "The Early stop workflow component should only have a single key "
                 "to track whether or the current revision notes warrant approving "
@@ -546,8 +546,8 @@ class MakerChecker(Workflow):
         Workflow.clear_memory(self)
         self.maker.clear_memory()
         self.checker.clear_memory()
-        if self.early_stop:
-            self.early_stop.clear_memory()
+        if self.judge:
+            self.judge.clear_memory()
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
         """
@@ -580,12 +580,12 @@ class MakerChecker(Workflow):
                 revisions = revisions[WF_RESULT]
 
             # Optional early approval
-            if self.early_stop:
-                logging.info(f"[WORKFLOW] {self.early_stop.name} is marking checking if revisions warrant early approval")
-                if self.early_stop and self.early_stop._is_single_param: approver_res = self.early_stop.invoke(revisions)
-                elif isinstance(revisions, dict): approver_res = self.early_stop.invoke(**revisions)
-                elif isinstance(revisions, (tuple, list)): approver_res = self.early_stop.invoke(*revisions)
-            approved = self.early_stop != None and approver_res[list(approver_res.keys())[0]]
+            if self.judge:
+                logging.info(f"[WORKFLOW] {self.judge.name} is marking checking if revisions warrant early approval")
+                if self.judge and self.judge._is_single_param: approver_res = self.judge.invoke(revisions)
+                elif isinstance(revisions, dict): approver_res = self.judge.invoke(**revisions)
+                elif isinstance(revisions, (tuple, list)): approver_res = self.judge.invoke(*revisions)
+            approved = self.judge != None and approver_res[list(approver_res.keys())[0]]
 
             rounds.append({"approved": approved, "revisions": revisions, "draft": draft})
 
@@ -641,7 +641,7 @@ class Selector(Workflow):
         name: str,
         description: str,
         branches: list[Workflow],
-        decider: Agent | Workflow | Tool,
+        judge: Agent | Workflow | Tool,
         result_schema: list[str] = [WF_RESULT],
     ):
         super().__init__(name, description, result_schema)
@@ -651,15 +651,15 @@ class Selector(Workflow):
             if isinstance(branch, Agent): self.branches.append(AgentFlow(branch))
             elif isinstance(branch, Tool): self.branches.append(ToolFlow(branch))
             else: self.branches.append(branch)
-        if isinstance(decider, Agent):self.decider = AgentFlow(decider)
-        elif isinstance(decider, Tool): self.decider = ToolFlow(decider)
-        else: self.decider = decider
-        if len(self.decider._result_schema) > 1:
+        if isinstance(judge, Agent):self.judge = AgentFlow(judge)
+        elif isinstance(judge, Tool): self.judge = ToolFlow(judge)
+        else: self.judge = judge
+        if len(self.judge._result_schema) > 1:
             raise ValueError(
                 "The decider workflow must have a result schema of length 1, as we only "
                 "expect a single string corresponding to the name of one of the branches."
             )
-        self._is_single_param = self.decider._is_single_param
+        self._is_single_param = self.judge._is_single_param
 
     def add_branch(self, branch: Agent | Tool | Workflow, schema: list[str] = [WF_RESULT], position: int | None = None) -> None:
         """
@@ -688,7 +688,7 @@ class Selector(Workflow):
     def clear_memory(self):
         """Clear checkpoints, decider memory, and each branch's memory."""
         Workflow.clear_memory(self)
-        self.decider.clear_memory()
+        self.judge.clear_memory()
         for branch in self.branches: branch.clear_memory(self)
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
@@ -701,18 +701,18 @@ class Selector(Workflow):
             f"\n+---{'-'*len(self._name + ' Starting')}---+"
         )
 
-        if not self.decider or not self.branches:
+        if not self.judge or not self.branches:
             raise ValueError("Decider and branches must be set.")
 
         logging.info(f"[WORKFLOW] Selecting branch via decider on {self._name}")
 
-        decision_obj = self.decider.invoke(*args, **kwargs)
+        decision_obj = self.judge.invoke(*args, **kwargs)
         decision_name = decision_obj[list(decision_obj.keys())[0]]
 
         if not isinstance(decision_name, str):
             raise TypeError(
                 f"{decision_name} is not an instance of type 'str'. "
-                f"Check {self.decider.name}'s return type"
+                f"Check {self.judge.name}'s return type"
             )
         logging.info(f"[WORKFLOW] Decider chose: {decision_name}")
 
@@ -868,3 +868,222 @@ class BatchFlow(Workflow):
         )
         logging.info(f"[PARALLEL] {self._name} Finished")
         return result
+
+from typing import Any, Callable, Dict, List, Optional
+
+from langgraph.graph import StateGraph
+
+class LangGraphFlow(Workflow):
+    """
+    LangGraph-backed Workflow (builder-owned, compile-on-invoke).
+
+    Key properties:
+      - Single-parameter consumer: expects exactly one state dictionary.
+      - Explicit result_schema (required, non-empty). Every node's workflow must use the SAME schema.
+      - add_node(obj) accepts Tool | Agent | Workflow; wraps Tools/Agents into ToolFlow/AgentFlow and
+        sets their result_schema to match this flow's. Workflows must already match the schema.
+      - Node registration uses the wrapped workflow's .name and .invoke directly.
+      - add_edge/add_conditional_edges validate node names against the internal list of workflows.
+      - No removals. set_entry_point/set_finish_point provided.
+      - invoke() compiles if dirty, runs the graph, packages the final state (no output_key).
+      - Checkpoints: only the final packaged outputs (and timestamp), no input echo.
+
+    Invariants:
+      - All node workflows are single-parameter only. If a workflow is not single-param, add_node raises.
+      - All node workflows share the same result_schema (identical to this flow's).
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        *,
+        result_schema: List[str],
+        graph: Optional[Any] = None,
+    ):
+        if not isinstance(result_schema, list) or not result_schema:
+            raise ValueError("LangGraphFlow requires a non-empty list for result_schema.")
+
+        super().__init__(name, description, result_schema=result_schema)
+
+        if graph is None and StateGraph is None:
+            raise RuntimeError(
+                "langgraph is not installed; cannot create a builder. "
+                "Provide an existing builder via graph=... or install langgraph."
+            )
+
+        # Live, mutable builder
+        self._graph = graph if graph is not None else StateGraph(dict)
+
+        # Compilation cache + dirty flag
+        self._app = None
+        self._dirty = True
+
+        # Registry of node workflows (list of Workflow). Names validated from this list.
+        self._nodes: List[Workflow] = []
+
+        # This Workflow consumes a SINGLE dict payload
+        self._is_single_param = True
+
+    # -------------------- Helpers --------------------
+
+    def _wrap_tool_or_agent(self, obj: Any) -> Workflow:
+        """
+        Wrap Tool → ToolFlow or Agent → AgentFlow with this flow's result_schema.
+        If obj is already a Workflow, enforce schema equality and return it unchanged.
+        """
+        # Already a Workflow
+        if isinstance(obj, Workflow):
+            if obj.result_schema != self.result_schema:
+                raise ValueError(
+                    f"Workflow '{getattr(obj, 'name', '<unnamed>')}' "
+                    f"result_schema {obj.result_schema} != LangGraphFlow.result_schema {self.result_schema}"
+                )
+            return obj
+
+        # Tool (duck-typing: has .func and .full_name)
+        if hasattr(obj, "func") and hasattr(obj, "full_name"):
+            wf = ToolFlow(obj, result_schema=self.result_schema)
+            return wf
+
+        # Agent (duck-typing: has .invoke and .name; not already a Workflow)
+        if hasattr(obj, "invoke") and hasattr(obj, "name"):
+            wf = AgentFlow(obj, result_schema=self.result_schema)
+            return wf
+
+        raise TypeError("add_node expects a Tool, Agent, or Workflow instance.")
+
+    def _node_names(self) -> List[str]:
+        return [wf.name for wf in self._nodes]
+
+    # -------------------- Builder mutation API --------------------
+
+    def add_node(self, obj: Any):
+        """
+        Add a node from a Tool | Agent | Workflow.
+        - Wrap Tools/Agents into ToolFlow/AgentFlow with this flow's result_schema.
+        - For Workflows, require identical result_schema (no coercion).
+        - Require node workflow to be SINGLE-PARAM only (_is_single_param == True).
+        - Register the node under workflow.name and function = workflow.invoke.
+        """
+        wf: Workflow = None
+        if isinstance(obj, Agent): wf = AgentFlow(obj)
+        elif isinstance(obj, Tool): wf = ToolFlow(obj)
+        else: wf = obj
+
+        # Single-parameter enforcement
+        if not wf._is_single_param:
+            raise ValueError(
+                f"Workflow '{wf.name}' is not single-parameter; "
+                f"all LangGraphFlow nodes must accept a single state dict."
+            )
+
+        node_name = wf.name
+        if not node_name or not isinstance(node_name, str):
+            raise ValueError("Wrapped workflow must have a non-empty string 'name'.")
+
+        if node_name in self._node_names():
+            raise ValueError(f"Node '{node_name}' already exists.")
+
+        # Register workflow first (for name validation by edges)
+        self._nodes.append(wf)
+
+        # Register node directly with its invoke function
+        # Contract: node fn signature is (state: dict) -> dict
+        self._graph.add_node(node_name, wf.invoke)
+
+        self._dirty = True
+
+    def add_edge(self, src: str, dst: str):
+        """
+        Add a directed edge src -> dst. Validates both names are known node names.
+        """
+        names = set(self._node_names())
+        if src not in names:
+            raise ValueError(f"Unknown node '{src}'. Add it first via add_node().")
+        if dst not in names:
+            raise ValueError(f"Unknown node '{dst}'. Add it first via add_node().")
+
+        self._graph.add_edge(src, dst)
+        self._dirty = True
+
+    def add_conditional_edges(
+        self,
+        src: str,
+        router_fn: Callable[[Dict[str, Any]], Any],
+        routes: Dict[Any, str],
+    ):
+        """
+        Add conditional edges from 'src' → routes[outcome].
+        Validates that 'src' and all destinations are registered node names.
+        """
+        names = set(self._node_names())
+        if src not in names:
+            raise ValueError(f"Unknown node '{src}'. Add it first via add_node().")
+        for outcome, dst in routes.items():
+            if dst not in names:
+                raise ValueError(
+                    f"Unknown destination node '{dst}' for outcome '{outcome}'. "
+                    f"Add it first via add_node()."
+                )
+
+        self._graph.add_conditional_edges(src, router_fn, routes)
+        self._dirty = True
+
+    def set_entry_point(self, name: str):
+        if name not in set(self._node_names()):
+            raise ValueError(f"Unknown entry node '{name}'. Add it first via add_node().")
+        self._graph.set_entry_point(name)
+        self._dirty = True
+
+    def set_finish_point(self, name: str):
+        if name not in set(self._node_names()):
+            raise ValueError(f"Unknown finish node '{name}'. Add it first via add_node().")
+        self._graph.set_finish_point(name)
+        self._dirty = True
+
+    # -------------------- Execution --------------------
+
+    def invoke(self, *args: Any, **kwargs: Any) -> dict:
+        """
+        Compile (if dirty) and run the graph.
+
+        Input normalization:
+          - kwargs present → state = dict(kwargs)
+          - else exactly one positional arg of type dict → state = that dict
+          - else TypeError
+
+        Returns:
+          - packaged(final_state)  # no output-key extraction; always full state
+        """
+        # Normalize to single state dict
+        if kwargs:
+            state = dict(kwargs)
+        elif len(args) == 1 and isinstance(args[0], dict):
+            state = args[0]
+        else:
+            raise TypeError(
+                f"{self.__class__.__name__} requires a single state dict input; "
+                f"got args={len(args)} kwargs={len(kwargs)}"
+            )
+        for k in self.result_schema:
+            if state.get(k, None) == None:
+                state[k] = None
+        # Compile on dirty
+        if self._dirty or self._app is None:
+            self._app = self._graph.compile()
+            self._dirty = False
+        # Run
+        final_state = self._app.invoke(state)
+
+        final_state = {k: final_state.get(k) for k in self.result_schema}
+
+
+        # Checkpoint: ONLY final outputs (and timestamp) per your directive
+        self._checkpoints.append({
+            "timestamp": str(datetime.now()),
+            "result": final_state,
+        })
+        return final_state
+
+

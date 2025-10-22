@@ -15,4 +15,7 @@ uvicorn
 mcpo
 requests
 # langchain and tools
+langgraph
+graphviz
+pydantic
 langchain-tavily

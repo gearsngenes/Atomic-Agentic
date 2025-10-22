@@ -108,7 +108,7 @@ workflow = MakerChecker(
     description = "Creates and refines a short story based on user input",
     maker = AgentFlow(writer_agent),
     checker = AgentFlow(editor_agent),
-    early_stop = approver, # Change to None if you want to force it to go through all three revision roundss
+    judge = approver, # Change to None if you want to force it to go through all three revision roundss
     max_revisions = 3,
     result_schema=["edits_history", "final_draft"]
 )
