@@ -68,7 +68,8 @@ class Tool:
         self._clear_mem: Optional[Callable[[], None]] = clear_mem_func
 
         # Structured signature storage (authoritative)
-        self._sig_types: "OrderedDict[str, Any]" = OrderedDict()
+        self._sig_types: OrderedDict[str, Any] = OrderedDict()
+        self._sig_defaults: OrderedDict[str, Any] = OrderedDict()
         self._return_type: Any = Any
         self._build_signature_map(func)
 
@@ -115,11 +116,8 @@ class Tool:
 
     @property
     def signature(self) -> str:
-        """
-        Legacy, human-readable signature string synthesized from the structured
-        _sig_types/_return_type. Kept for prompt/tooling compatibility.
-        """
-        return self._format_signature(self.full_name, self._sig_types, self._return_type)
+        """Human-readable signature string for prompts/UI."""
+        return self._format_signature(self.full_name, self._sig_types, self._return_type, self._sig_defaults)
 
     # Optional: expose structured signature read-only (useful for tooling).
     @property
@@ -131,6 +129,11 @@ class Tool:
     def return_type(self) -> Any:
         """Return annotation/type if present, else `typing.Any`."""
         return self._return_type
+
+    @property
+    def default_map(self) -> "OrderedDict[str, Any]":
+        """Ordered mapping of parameter names to their default values (if any)."""
+        return OrderedDict(self._sig_defaults)
 
     # ----------------------------
     # Execution
@@ -163,8 +166,8 @@ class Tool:
 
     def _build_signature_map(self, func: Callable[..., Any]) -> None:
         """
-        Populate `_sig_types` (param -> annotation) and `_return_type` from the
-        callable's signature and type hints. Drops conventional receiver params.
+        Populate `_sig_types` (param -> annotation), `_sig_defaults` (param -> default),
+        and `_return_type`. Drops conventional receiver params.
         """
         sig = inspect.signature(func)
         hints = get_type_hints(func)
@@ -181,22 +184,27 @@ class Tool:
 
             if p.kind == inspect.Parameter.VAR_POSITIONAL:
                 self._sig_types["*args"] = Any
+                # no default for var-positional
             elif p.kind == inspect.Parameter.VAR_KEYWORD:
                 self._sig_types["**kwargs"] = Any
+                # no default for var-keyword
             else:
                 self._sig_types[name] = hints.get(name, Any)
+                if p.default is not inspect._empty:
+                    self._sig_defaults[name] = p.default  # record default
 
         self._return_type = hints.get("return", Any)
 
     @staticmethod
     def _format_signature(
         key: str,
-        sig_types: "OrderedDict[str, Any]",
+        sig_types: OrderedDict[str, Any],
         rtype: Any,
+        sig_defaults: OrderedDict[str, Any] | None = None,   # <-- NEW param
     ) -> str:
         """
-        Render the structured signature to a concise, readable single line:
-            "{key}(a: int, b: list[str]) → bool"
+        Render the structured signature to a concise single line:
+            "{key}(a: int = 3, b: list[str] = None) → bool"
         """
 
         def _ann_name(t: Any) -> str:
@@ -211,9 +219,27 @@ class Tool:
                 return f"{base}[{inner}]"
             return base
 
-        params_str = ", ".join(f"{n}: {_ann_name(ann)}" for n, ann in sig_types.items())
+        def _default_repr(v: Any) -> str:
+            # readable, bounded-length repr for prompts
+            if isinstance(v, str):
+                s = v if len(v) <= 40 else (v[:37] + "…")
+                return repr(s)
+            if v is None or isinstance(v, (int, float, bool)):
+                return repr(v)
+            r = repr(v)
+            return r if len(r) <= 40 else (r[:37] + "…")
+
+        sig_defaults = sig_defaults or OrderedDict()
+        parts = []
+        for n, ann in sig_types.items():
+            piece = f"{n}: {_ann_name(ann)}"
+            if n in sig_defaults:
+                piece += f" = {_default_repr(sig_defaults[n])}"
+            parts.append(piece)
+
+        params_str = ", ".join(parts)
         rtype_str = _ann_name(rtype)
-        return f"{key}({params_str}) \u2192 {rtype_str}"  # Unicode arrow
+        return f"{key}({params_str}) \u2192 {rtype_str}"
 
 
 # ───────────────────────────────────────────────────────────────────────────────
