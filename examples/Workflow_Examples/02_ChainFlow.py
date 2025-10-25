@@ -1,7 +1,8 @@
-import sys, logging,json
+# 02_ChainFlow.py — minimal, direct ChainFlow examples (dict-in → dict-out)
+import sys, logging, json
 from pathlib import Path
-from typing import Any
-# Setting the root
+
+# Repo root on path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from modules.Agents import Agent
@@ -45,15 +46,15 @@ def format_out(a, b):
     return f"The value of 'A' is {a}, and the value of 'B' is {b}"
 tool3 = Tool("formatter", format_out)
 
-agentic_chain = True # change to switch from the agent chain to the tool chain
+agentic_chain = False # change to switch from the agent chain to the tool chain
 steps = [agent1, agent2, agent3] if agentic_chain else [tool1,tool2,tool3]
 
 workflow = ChainFlow(
     name = "ChainFlow_Example",
     description ="A chain of thought workflow with three agents.",
     steps = steps,
-    result_schema = ["final_string"]
+    output_schema= ["final_string"]
 )
 
-task = "There are 5 sheep, and twenty-three ox and zero point five chicken eggs." if agentic_chain else '{"a":-1.74,"b":7,"c":4}'
+task = {"prompt":"There are 5 sheep, and twenty-three ox and zero point five chicken eggs."} if agentic_chain else {"string":'{"a":-1.74,"b":7,"c":4}'}
 print(workflow.invoke(task))

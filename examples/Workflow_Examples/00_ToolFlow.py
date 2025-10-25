@@ -1,92 +1,115 @@
 import sys, logging, json
 from pathlib import Path
 from typing import Any
-# Setting the root
+
+# Setting the repo root on path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+
 from modules.Workflows import ToolFlow
 from modules.Tools import Tool
 
 
+logging.basicConfig(level=logging.INFO)
+print("=== ToolFlow examples (NEW uniform `invoke(inputs: dict)` contract) ===")
+
 # ===========================================================
-def double_json_keys(num, string, map):
-    return num * 2, json.loads(string), map.keys()
+# Example 1: multiple inputs → tuple result mapped by output_schema
+def double_json_keys(num, string, map_):
+    return num * 2, json.loads(string), list(map_.keys())
+
 tool1 = Tool("double_and_json", double_json_keys)
-wf = ToolFlow(tool1)
-print("===Scalar inputs only===")
-print(wf.invoke(5, '{"a":5, "b": [1,3,5, -1]}', {"a":1, "!":-4, "007": 4}))
+wf1 = ToolFlow(tool=tool1, output_schema=["doubled", "json", "keys"])
 
-print("\n\n===Keyword inputs only===")
-print(wf.invoke(num = 13, string = '{"a":"cats & dogs", "b": [1,3,5, -1]}', map = {"3":1, "hello":-4, "#$": 4}))
+print("\n[1] Mixed inputs (all via single dict):")
+out1 = wf1.invoke({
+    "num": 5,
+    "string": '{"a":5, "b":[1,3,5,-1]}',
+    "map_": {"a":1, "!":-4, "007":4},
+})
+print(out1)
 
 
 # ===========================================================
-def multiply(a,b):
-    return a*b
+# Example 2: simple numeric op → scalar under first output field
+def multiply(a, b):
+    return a * b
+
 tool2 = Tool("multiply", multiply)
+wf2 = ToolFlow(tool=tool2, output_schema=["product"])
 
-print("\n\n===Lists/tuples as positional inputs===")
-wf = ToolFlow(tool2)
-try:
-    print("(.invoke([5,10])): ",wf.invoke([5,10]))
-except Exception as e:
-    print("ERROR: failed to pass in raw [5,10] as input, since it is "
-          f"viewed as a single parameter, resulting in the given error:\n```{e}```")
-print("\n**Correct way to pass list/tuple in as an *args:**:\n(.invoke(*[5,10])): ", wf.invoke(*[5, 10]))
+print("\n[2] Multiply (dict inputs only):")
+out2 = wf2.invoke({"a": 13, "b": 7})
+print(out2)
 
 
 # ===========================================================
+# Example 3: three-arg join → single string
 def join(a, b, c):
-    return "Joined result: " + ", ".join([str(a),str(b),str(c)])
+    return "Joined result: " + ", ".join([str(a), str(b), str(c)])
+
 tool3 = Tool("join", join)
+wf3 = ToolFlow(tool=tool3, output_schema=["text"])
 
-print("\n\n===Dictionary as keywords-only inputs===")
-wf = ToolFlow(tool3)
-try:
-    print(wf.invoke({"a":1, "b":3, "c":-0.5}))
-except Exception as e:
-    print(f"ERROR: failed to pass in raw {{'a':1, 'b':3, 'c':-0.5}} as input, since it is "
-          f"viewed as a single parameter, resulting in the given error:\n```{e}```")
-    print("\n**Correct way to pass dict in as an **kwargs:**\n(.invoke(**{'a':1, 'b':3, 'c':-0.5})):",wf.invoke(**{"a":1, "b":3, "c":-0.5}))
+print("\n[3] Join three fields (dict inputs only):")
+out3 = wf3.invoke({"a": 1, "b": 3, "c": -0.5})
+print(out3)
+
 
 # ===========================================================
+# Example 4: tool that expects a single dict param
 def format_menu(menu: dict):
-    return "MENU:\n"+"\n".join([f"- {k}: {v}" for k,v in menu.items()])
+    return "MENU:\n" + "\n".join([f"- {k}: {v}" for k, v in menu.items()])
+
 tool4 = Tool("format_menu", format_menu)
-print("\n\n===Passing in argument dictionary===")
-wf = ToolFlow(tool4)
-print(wf.invoke({"biscuit":"A dry cookie", "salmon":"baked with pepper & salt seasoning"}))
-print("\n**Correct Keyword way: .invoke(menu = {...})**:\n", wf.invoke(menu = {"biscuit":"A dry cookie", "salmon":"baked with pepper & salt seasoning"}))
+wf4 = ToolFlow(tool=tool4, output_schema=["text"])
+
+print("\n[4] Single-dict param (still passed via `inputs`):")
+out4 = wf4.invoke({
+    "menu": {
+        "biscuit": "A dry cookie",
+        "salmon": "baked with pepper & salt seasoning",
+    }
+})
+print(out4)
+
 
 # ===========================================================
-print("\n===Mix-and-match positional & keyword example===")
-def formatter(a:Any, b:dict):
+# Example 5: mix types — Any + dict
+def formatter(a: Any, b: dict):
     return f"The value of 'A' is {a}, and the sum of the values of 'B' is {sum(list(b.values()))}"
-tool5 = Tool("Printer", formatter)
-wf = ToolFlow(tool5)
-print(wf.invoke(3.1, b={"x":1, "y":0, "z":-1}))
+
+tool5 = Tool("printer", formatter)
+wf5 = ToolFlow(tool=tool5, output_schema=["text"])
+
+print("\n[5] Mixed types via dict:")
+out5 = wf5.invoke({"a": 3.1, "b": {"x": 1, "y": 0, "z": -1}})
+print(out5)
+
 
 # ===========================================================
-print("\n===Default-Value Examples===")
-def string_any(a, b = 2, c = "hello", f = "john"):
+# Example 6: defaulted parameters — only need to provide non-defaults
+def string_any(a, b=2, c="hello", f="john"):
     return f"Single string -- a: {a}, b: {b}, c: {c}, f: {f}"
-tool6 = Tool("string-any", string_any)
-wf = ToolFlow(tool6)
-print(wf.invoke("al"))
+
+tool6 = Tool("string_any", string_any)
+wf6 = ToolFlow(tool=tool6, output_schema=["text"])
+
+print("\n[6] Defaults respected (only required key provided):")
+out6 = wf6.invoke({"a": "al"})
+print(out6)
+
 
 # ===========================================================
-print("\n===Output-Schemas for Workflows===")
+# Example 7: output schema used to fan out list return into named fields
 def string_to_list(string: str):
+    # Return 3 fields; output_schema will positionally map them by order
     return string.split(",")[:3]
-tool7 = Tool("string-2-list", string_to_list)
-wf = ToolFlow(tool7)
 
-out = wf.invoke("John,37,New Jersey")
-_type = type(out)
-print("Without Output Schema: ", out, _type)
+tool7 = Tool("string_to_list", string_to_list)
+wf7 = ToolFlow(tool=tool7, output_schema=["name", "age", "state"])
 
-wf = ToolFlow(tool7, result_schema=["name", "age", "state"])
-out = wf.invoke("John,37,New Jersey")
-_type = type(out)
-print("With Output Schema: ", out, _type)
-print("This enables us to potentially pass this output to a new method that "
-      "accepts a name, age, and state parameter as **kwargs")
+print("\n[7] Output schema mapping:")
+out7 = wf7.invoke({"string": "John,37,New Jersey"})
+print(out7)
+print("This enables downstream workflows/agents/tools to accept named inputs "
+      "matching ['name','age','state'] without manual unpacking.")

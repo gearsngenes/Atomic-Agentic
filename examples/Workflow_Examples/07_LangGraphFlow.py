@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from typing_extensions import Annotated
+from typing import Optional
 from datetime import datetime, timezone, timedelta
 
 from langgraph.graph import StateGraph
@@ -22,54 +23,81 @@ def latest_non_null(old: dict, new: dict) -> dict:
 SCHEMA = ["name", "email", "phone", "address", "last_seen", "score"]
 
 # ───────────────────────── Tools (all single-param; always return full schema) ─────────
-def seed_local_profile(state: dict) -> dict:
+def seed_local_profile(
+    name: str = "Alex Doe",
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    address: Optional[str] = None,
+    last_seen: Optional[str] = None,
+    score: Optional[int] = None,
+) -> dict:
     """Seed a sparse local record; fill missing schema keys safely."""
-    name      = state.get("name", "Alex Doe")
-    email     = state.get("email")                 # could be None
-    phone     = state.get("phone")                 # could be None
-    address   = state.get("address")               # could be None
-    last_seen = state.get("last_seen") or datetime.now(timezone.utc).isoformat()
-    score     = state.get("score")                 # computed later
+    last_seen = last_seen or datetime.now(timezone.utc).isoformat()
     return {
-        "name": name, "email": email, "phone": phone,
-        "address": address, "last_seen": last_seen, "score": score
+        "name": name,
+        "email": email,
+        "phone": phone,
+        "address": address,
+        "last_seen": last_seen,
+        "score": score,
     }
 
-def crm_enrich(state: dict) -> dict:
+def crm_enrich(
+    name: str,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    address: Optional[str] = None,
+    last_seen: Optional[str] = None,
+    score: Optional[int] = None,
+) -> dict:
     """Simulate CRM update: maybe a fresher phone, email unknown (None)."""
     newer_phone = "+1-555-0107"     # use None to simulate 'no update'
     newer_email = None
     return {
-        "name": state.get("name"),
-        "email": newer_email if newer_email is not None else state.get("email"),
-        "phone": newer_phone if newer_phone is not None else state.get("phone"),
-        "address": state.get("address"),
-        "last_seen": state.get("last_seen"),
-        "score": state.get("score"),
+        "name": name,
+        "email": newer_email if newer_email is not None else email,
+        "phone": newer_phone if newer_phone is not None else phone,
+        "address": address,
+        "last_seen": last_seen,
+        "score": score,
     }
 
-def geocode_enrich(state: dict) -> dict:
+def geocode_enrich(
+    name: str,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    address: Optional[str] = None,
+    last_seen: Optional[str] = None,
+    score: Optional[int] = None,
+) -> dict:
     """Simulate geocoder update: maybe normalized address; preserve others."""
     normalized_address = "123 Maple St, Springfield, IL 62704"  # or None for 'no update'
     return {
-        "name": state.get("name"),
-        "email": state.get("email"),
-        "phone": state.get("phone"),
-        "address": normalized_address if normalized_address is not None else state.get("address"),
-        "last_seen": state.get("last_seen"),
-        "score": state.get("score"),
+        "name": name,
+        "email": email,
+        "phone": phone,
+        "address": normalized_address if normalized_address is not None else address,
+        "last_seen": last_seen,
+        "score": score,
     }
 
-def finalize_profile(state: dict) -> dict:
+def finalize_profile(
+    name: str,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    address: Optional[str] = None,
+    last_seen: Optional[str] = None,
+    score: Optional[int] = None,
+) -> dict:
     """Finalize: refresh last_seen, compute naive completeness score."""
     now = datetime.now(timezone.utc).isoformat()
-    completeness = int(bool(state.get("email"))) + int(bool(state.get("phone"))) + int(bool(state.get("address")))
+    completeness = int(bool(email)) + int(bool(phone)) + int(bool(address))
     new_score = completeness * 10
     return {
-        "name": state.get("name"),
-        "email": state.get("email"),
-        "phone": state.get("phone"),
-        "address": state.get("address"),
+        "name": name,
+        "email": email,
+        "phone": phone,
+        "address": address,
         "last_seen": now,
         "score": new_score,
     }
@@ -89,7 +117,7 @@ def main():
     flow = LangGraphFlow(
         name="profile_enrichment",
         description="seed → (crm_enrich | geocode_enrich) → finalize_profile",
-        result_schema=SCHEMA,
+        schema=SCHEMA,
         graph=builder,
     )
 
@@ -107,11 +135,15 @@ def main():
     flow.add_edge(geo_tool.name, final_tool.name)
     flow.set_finish_point(final_tool.name)
 
-    # Sparse initial record (note: 'email', 'phone', 'address' can be missing/None safely)
+    # Initial record — LangGraphFlow requires all schema keys present, so
+    # set optional fields to None when absent.
     initial = {
         "name": "Alex Doe",
+        "email": None,
+        "phone": None,
+        "address": None,
         "last_seen": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(),
-        # intentionally leaving 'email', 'phone', 'address' absent
+        "score": None,
     }
 
     result = flow.invoke(initial)
