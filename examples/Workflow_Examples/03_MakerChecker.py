@@ -55,41 +55,27 @@ editor_agent = Agent(
 )
 
 # ---- Judge (Tool) ----
-def is_approved(text: str) -> bool:
-    return "<<APPROVED>>" in text
+def is_approved(prompt: str) -> bool:
+    return "<<APPROVED>>" in prompt
 
 approver_tool = Tool("approver", is_approved)
-
-# ---- Wrap as Workflows with aligned schemas ----
-# Use a single logical field name across the pipeline: "text"
-maker_flow   = AgentFlow(writer_agent,  input_schema=["text"], output_schema=["text"])
-checker_flow = AgentFlow(editor_agent,  input_schema=["text"], output_schema=["text"])
-judge_flow   = ToolFlow(approver_tool,  output_schema=["approved"])  # input_schema inferred from function: ["text"]; output len==1
 
 # ---- MakerChecker pipeline ----
 workflow = MakerChecker(
     name="Story-Generator",
     description="Creates and refines a short story based on user input",
-    maker=maker_flow,
-    checker=checker_flow,
+    maker=writer_agent,
+    checker=editor_agent,
     max_revisions=3,
-    judge=judge_flow,  # set to None to disable early approval
+    judge=approver_tool,
 )
 
 # ---- Run ----
 user_prompt = input("Enter a prompt for the story: ")
-result = workflow.invoke({"text": user_prompt})  # dict-only input
+result = workflow.invoke({"prompt": user_prompt})  # dict-only input
 
-# final result conforms to workflow.output_schema (["text"])
-final_draft = result["text"]
-
-# optional: fetch draft history from the last checkpoint (not part of result)
-history = []
-if workflow.checkpoints:
-    history = workflow.checkpoints[-1].get("draft_history", [])
-
-print("\n---REVISION HISTORY (checkpoint-only)---")
-print(json.dumps(history, indent=2))
+# final result conforms to workflow.output_schema
+final_draft = result["prompt"]
 
 print("\n---FINAL DRAFT---\n")
 print(final_draft)

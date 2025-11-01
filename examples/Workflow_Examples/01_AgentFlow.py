@@ -1,4 +1,4 @@
-import sys
+import sys, json
 from pathlib import Path
 
 # Setting the repo root on path
@@ -33,9 +33,9 @@ print("1) ", res1)
 res2 = workflow.invoke({"prompt": "Give a one-sentence definition of Bayes' theorem."})
 print("2) ", res2)
 
-# 3) Show latest checkpoint shape (inputs/result)
+# Show latest checkpoint shape (inputs/result)
 print("=== Latest checkpoint (AgentFlow w/ 'prompt') ===")
-print(workflow.checkpoints[-1])
+print(json.dumps(workflow.checkpoints[-1], indent = 2))
 
 
 # ===================================================================
@@ -46,29 +46,33 @@ print(workflow.checkpoints[-1])
 # AgentFlow in the library defaults to input_schema ["prompt"], but we
 # can format the input using a specific key.
 
-# Use a different key name: "question"
-workflow_q = AgentFlow(agent=my_agent, input_schema=["question"], output_schema=["answer"],)
+# when multiple keys are provided or needed
+workflow_q = AgentFlow(agent=my_agent,
+                       input_schema=["user", "session_id", "question", "temperature"],
+                       output_schema=["answer"],)
 
-# 4) Invoke with many keys; only "question" is consumed
-res4 = workflow_q.invoke({
+# 3) Invoke with many keys; only "question" is consumed
+res3 = workflow_q.invoke({
     "user": "alice",
     "session_id": "abc123",
     "question": "State the central limit theorem in one sentence.",
     "temperature": 0.0,
 })
-print("4) ", res4)
+print("3) ", res3)
 print("=== Latest checkpoint (AgentFlow w/ input key 'question') ===")
-print(workflow_q.checkpoints[-1])
+print(json.dumps(workflow_q.checkpoints[-1], indent = 2))
 
 
-# 6) Another custom key: "query"
-workflow_query = AgentFlow(agent=my_agent,  input_schema=["query"], output_schema=["answer"])
-res5 = workflow_query.invoke({
-    "query": "What does O(n log n) usually refer to?",
-    "foo": "bar",   # ignored
-    "meta": {"source": "unit-test"}  # ignored
+# 4) Another custom key set
+workflow_query = AgentFlow(agent=my_agent,
+                           input_schema=["query", "foo", "meta"],
+                           output_schema=["answer"])
+# Missing key values won't cause issues, provided it isn't empty, or if
+# the agent is needing them to perform the task
+res4 = workflow_query.invoke({
+    "query": "What does O(n log n) usually refer to?"
 })
-print("5) ", res5)
+print("4) ", res4)
 
 print("=== Latest checkpoint (AgentFlow w/ input key 'query') ===")
-print(workflow_query.checkpoints[-1])
+print(json.dumps(workflow_query.checkpoints[-1], indent = 2))

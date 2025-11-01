@@ -42,19 +42,21 @@ def separate(output: dict):
     return output.keys(), sum(list(output.values()))
 tool2 = Tool("separator", separate)
 
-def format_out(a, b):
-    return f"The value of 'A' is {a}, and the value of 'B' is {b}"
+def format_out(_keys, _sum):
+    return f"The keys of our dicitonary are {_keys}, and the sum of their values is is {_sum}"
 tool3 = Tool("formatter", format_out)
 
-agentic_chain = False # change to switch from the agent chain to the tool chain
-steps = [agent1, agent2, agent3] if agentic_chain else [tool1,tool2,tool3]
+agentic_chain = False # change to switch between the agent and the tool steps
 
 workflow = ChainFlow(
     name = "ChainFlow_Example",
-    description ="A chain of thought workflow with three agents.",
-    steps = steps,
-    output_schema= ["final_string"]
+    description ="A chain of thought workflow with three {obj_type}.".format(
+        obj_type = "agents" if agentic_chain else "tools"),
+    steps = [agent1, agent2, agent3] if agentic_chain else [tool1,tool2,tool3],
+    output_schema=["chain_result"]
 )
 
-task = {"prompt":"There are 5 sheep, and twenty-three ox and zero point five chicken eggs."} if agentic_chain else {"string":'{"a":-1.74,"b":7,"c":4}'}
+task = {
+    "prompt":"There are 5 sheep, and twenty-three ox and zero point five chicken eggs."
+    } if agentic_chain else {"string":'{"a":-1.74,"b":7,"c":4}'}
 print(workflow.invoke(task))

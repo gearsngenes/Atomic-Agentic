@@ -2,920 +2,1077 @@
 Workflows
 =========
 
-A small suite of **stateful** workflow primitives that wrap Agents, Tools, or
-other Workflows to compose larger behaviors. These classes focus on **plumbing**
-(data-shape adaptation, result packaging, and light bookkeeping) and deliberately
-avoid any provider-specific logic.
+This module defines the Workflow system — a collection of deterministic, schema-based
+coordinators that connect and orchestrate Agents, Tools, and other Workflows into
+reliable pipelines of logic. Each workflow operates under a uniform call signature
+(`invoke(inputs: dict) -> dict`) and uses ordered `input_schema` and `output_schema`
+definitions to enforce consistent data flow between components. The goal is to provide
+a predictable, provider-agnostic backbone for building structured, multi-step reasoning
+and execution chains across any combination of agentic or deterministic logic units.
 
-Key concepts
-------------
-- All workflows expose a uniform `invoke(*args, **kwargs) -> dict` contract whose
-  return object always conforms to `result_schema` (list of string keys).
-- Each workflow keeps an internal `checkpoints` list with call metadata and a
-  normalized snapshot of the last result. The latest normalized result is reachable
-  by `latest_result`.
-- The constant `WF_RESULT` ("__wf_result__") is the *default* single-key schema
-  name used when the result is a single logical value.
+Workflows are built on the principle of schema determinism: every step declares its
+expected inputs and outputs, ensuring that data passed between nodes is validated and
+normalized at runtime. This design yields reproducible, debuggable behavior, making it
+possible to trace and verify complex orchestration sequences with confidence.
 
-Classes
--------
-Workflow (abstract)
-    Base class that defines schema management, result packaging, and checkpointing.
-AgentFlow
-    Wraps an `Agent` as a one-step workflow, forwarding `invoke`.
-ToolFlow
-    Wraps a `Tool` as a one-step workflow, forwarding `invoke`.
-ChainFlow
-    Linear composition of steps (each a Workflow/Agent/Tool) with shape-adapting
-    handoff between steps.
-MakerChecker
-    Maker–Checker pattern (optionally with early approval) over two Workflows.
-Selector
-    Branching workflow that delegates to one of several branches based on a decider.
-BatchFlow
-    Simple parallel fan-out/fan-in that runs branches concurrently and aggregates results.
+The module supports a range of coordination patterns commonly used in agentic
+architectures, including:\n
+    - ToolFlow and AgentFlow — wrapping tools or agents in schema-aware workflow nodes.
+    - ChainFlow — linear or chain-of-thought pipelines that pass results step-to-step.
+    - BatchFlow — parallel fan-out of multiple branches with aggregated results.
+    - MakerChecker — iterative maker-reviewer cycles with optional automated judgment.
+    - Selector — strategy-style conditional routing between alternative branches.
+    - LangGraphFlow — graph-based orchestration using uniform schema propagation.
 
-Notes
------
-- This file only improves documentation clarity. No functional changes were made.
+All workflows share a consistent checkpointing system that records timestamps, input
+snapshots, and normalized outputs after every invocation, enabling full traceability
+and validation of runs. They can be freely composed or subclassed to introduce new
+coordination patterns, provided the schema-based invocation contract and deterministic
+checkpoint behavior are maintained.
 """
 
-from __future__ import annotations
-from modules.Agents import Agent
-import modules.Prompts as Prompts
-from modules.LLMEngines import LLMEngine
-from abc import ABC, abstractmethod
-import asyncio
-import logging
-import json, re
-from modules.Tools import Tool
-import json, logging
-from typing import Any
-from datetime import datetime
-
-import inspect
-from typing import Callable
-from typing import Any, Dict, List, Optional, Sequence, Union
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# ============================================================
+# Standard Library Imports
+# ============================================================
+from __future__ import annotations  # Enables forward type hints for class references
+from abc import ABC, abstractmethod  # Abstract base classes
+from datetime import date, datetime, time                    # For timestamping checkpoints
+from typing import Any, Dict, List, Optional, Set, Union, Tuple, TypedDict  # Type hinting
+from concurrent.futures import ThreadPoolExecutor, as_completed  # For parallel execution
+import logging                 # Logging support
+from copy import deepcopy
+import json
+from decimal import Decimal
+from uuid import UUID
+from pathlib import Path
 
 
-from typing import Any, Callable, Dict, List, Optional
+# ============================================================
+# Atomic-Agentic Modules
+# ============================================================
+from .Tools import Tool             # Used by ToolFlow for wrapping Tools as Workflows
+from .Agents import Agent           # Used by AgentFlow for wrapping Agents as Workflows
 
-from langgraph.graph import StateGraph
+# ============================================================
+# Third-Party Dependencies
+# ============================================================
+from langgraph.graph import StateGraph, END
 
-from typing import Any, Callable, Dict, List, Optional
-from langgraph.graph import StateGraph
+# ============================================================
+# Constants
+# ============================================================
+WF_RESULT = "__wf_result__"         # Default single-output field for packaging results
+JUDGE_RESULT = "__judge_result__"   # Standard field for boolean judge outputs
 
-# def callable_is_single_param(fn: Callable) -> bool:
-#     """
-#     Return True iff `fn` accepts **exactly one** logical parameter.
-
-#     Rules
-#     -----
-#     - Ignores a bound instance parameter named `self`.
-#     - Rejects functions that use *args or **kwargs (treated as multi-parameter).
-#     - Counts POSITIONAL_ONLY, POSITIONAL_OR_KEYWORD, and KEYWORD_ONLY as logical params.
-
-#     Parameters
-#     ----------
-#     fn : Callable
-#         The function whose signature is inspected.
-
-#     Returns
-#     -------
-#     bool
-#         True if there is exactly one logical parameter; False otherwise.
-#     """
-#     try:
-#         sig = inspect.signature(fn)
-#     except (ValueError, TypeError):
-#         # Fallback: unknown signature → treat as not single-parameter
-#         return False
-
-#     params = []
-#     for p in sig.parameters.values():
-#         if p.name == "self":
-#             continue
-#         if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-#             return False
-#         if p.kind in (
-#             inspect.Parameter.POSITIONAL_ONLY,
-#             inspect.Parameter.POSITIONAL_OR_KEYWORD,
-#             inspect.Parameter.KEYWORD_ONLY,
-#         ):
-#             params.append(p)
-
-#     return len(params) == 1
-
-
-# Default single-key result label used when callers don't provide a custom schema.
-WF_RESULT = "__wf_result__"
-JUDGE_RESULT = "__judge_result__"
 
 class Workflow(ABC):
     """
-    Abstract workflow base class (new uniform contract).
+    Abstract base for deterministic, schema-driven orchestration.
+
+    Mission
+    -------
+    A Workflow coordinates a single synchronous "step" that wraps a callable
+    unit (e.g., a Python method, Tool, Agent, or another Workflow) behind a
+    uniform interface. It enforces input/output schemas, performs strict input
+    validation, delegates execution to `_process_inputs(inputs)`, and then
+    packages the raw result into a dict conforming to `output_schema`.
 
     Contract
     --------
-    - Each workflow declares two ordered schemas:
-        * input_schema:  list[str]  — required input field names
-        * output_schema: list[str]  — required output/result field names
-      These are **ordered lists of strings** only (no types, no validators).
+    - Entry point: `invoke(inputs: dict) -> dict`
+      - Validates `inputs` against `input_schema`.
+      - Delegates to `_process_inputs(inputs)` for the actual execution.
+      - Packages the raw result via `package_results(result)` to match
+        `output_schema`, honoring bundling/unwrap options.
+      - Records a timestamped checkpoint of the final packaged output.
 
-    - Invocation is uniform: `invoke(input:s dict) -> dict`
-      * The single argument MUST be a dictionary named `input`.
-      * Implementations must return a dictionary whose keys match `output_schema`
-        exactly (ordering is not enforced by Python dicts but is assumed by callers).
-
-    Checkpointing
-    -------------
-    - Subclasses may record per-call checkpoints; this base class only provides
-      the storage and convenience accessors. The expected shape is a list of
-      dicts, where each entry at least contains:
-        {
-          "timestamp": <iso str>,
-          "inputs": <dict>,
-          "result": <dict conforming to output_schema>
-        }
-
-    Packaging helper
+    Input Validation
     ----------------
-    - `package_results(results)` is provided as a convenience for subclasses to
-      coerce arbitrary return shapes into an `output_schema`-conforming dict:
-        * dict of any shape:
-            - if its length == len(output_schema): map **by value order** onto
-              output_schema (positional mapping of values).
-            - else: place the whole dict under output_schema[0].
-        * list/tuple:
-            - if its length == len(output_schema): map positionally.
-            - else: place the whole sequence under output_schema[0].
-        * scalar:
-            - place under output_schema[0], and set remaining fields to None.
+    - Keys in `inputs` must be a subset of `input_schema`. Any unexpected key
+      raises `ValueError`.
+    - Missing keys allowed; unexpected keys raise.
+    - Inputs are treated as immutable; internal logic operates on deep copies.
 
-      Note: This helper does **not** perform any validation beyond shape coercion,
-      and it intentionally does not support *args/**kwargs or mutable mapping
-      adapters beyond this packaging step.
+    Output Packaging
+    ----------------
+    - Regardless of the internal processes, the final output will always be
+      a dictionary with keys matching an `output_schema`.
+    - Depending on initialization settings, if the output_schema is a single
+      key, then the raw output will then be bundled under that single key,
+      regardless of type.
+    - Packaging raw outputs to match the output schema is handled by a method
+      `package_results`
+    
+    Determinism & Checkpointing
+    ---------------------------
+    - All transformations are pure with respect to `inputs`.
+    - Every successful `invoke` stores a deep-copied, timestamped checkpoint of
+      the final packaged output for inspection/reset.
+    - `clear_memory()` resets internal checkpoints/state without affecting
+      wrapped callables (unless a subclass explicitly cascades clearing).
+
+    Extensibility
+    -------------
+    - Subclasses implement `_process_inputs(inputs: dict) -> Any`.
+    - Subclasses SHOULD NOT bypass `invoke`; always call `invoke` to get
+      consistent validation, packaging, and checkpointing.
     """
 
-    # -------------------- Lifecycle --------------------
 
     def __init__(
         self,
         name: str,
         description: str,
-        input_schema: list[str],
-        output_schema: list[str] = [WF_RESULT],
-    ):
-        if not isinstance(name, str) or not name:
-            raise ValueError("`name` must be a non-empty string.")
-        if not isinstance(description, str):
-            raise ValueError("`description` must be a string.")
-        if input_schema is None or not isinstance(input_schema, list) or not input_schema:
-            raise ValueError("`input_schema` must be a non-empty list of strings.")
-        if output_schema is None or not isinstance(output_schema, list) or not output_schema:
-            raise ValueError("`output_schema` must be a non-empty list of strings.")
-
+        input_schema: List[str],
+        output_schema: List[str] = [WF_RESULT],
+        bundle_all: bool = True,
+    ) -> None:
         self._name = name
         self._description = description
-        self._input_schema = input_schema
-        self._output_schema = output_schema
-        self._checkpoints: list[dict] = []
+        self._input_schema: List[str] = input_schema or []
+        self._output_schema: List[str] = output_schema
+        self._bundle_all = (bool(bundle_all) and len(self._output_schema) == 1) or self._output_schema == [WF_RESULT]
+        self._checkpoints: List[Dict[str, Any]] = []
 
-    # -------------------- Introspection --------------------
+        # Basic validation
+        if self._input_schema is None:
+            raise ValueError(f"{self.name}: input_schema must be a non-empty list of field names")
+        if not self._output_schema:
+            raise ValueError(f"{self.name}: output_schema must be a non-empty list of field names")
+        if any(not isinstance(k, str) or not k for k in self._input_schema):
+            raise ValueError(f"{self.name}: input_schema must contain non-empty strings")
+        if any(not isinstance(k, str) or not k for k in self._output_schema):
+            raise ValueError(f"{self.name}: output_schema must contain non-empty strings")
+        if self._bundle_all and len(self._output_schema) != 1:
+            raise ValueError(
+                f"{self.name}: bundle_all=True requires single-key output_schema, got {self._output_schema}"
+            )
 
+    # -----------------------------
+    # Read-only configuration
+    # -----------------------------
+    @property
+    def input_schema(self) -> List[str]:
+        return list(self._input_schema)
+
+    @property
+    def output_schema(self) -> List[str]:
+        """Get the current output schema (copy)."""
+        return list(self._output_schema)
+    
+    @property
+    def bundle_all(self) -> bool:
+        return self._bundle_all
+    
+    @property
+    def description(self):
+        return self._description
+    
     @property
     def name(self) -> str:
-        """str: Workflow display name."""
+        """Distinguished workflow name based on the tool/agent/workflow it wraps."""
         return self._name
-
-    @property
-    def description(self) -> str:
-        """str: Short description of the workflow."""
-        return self._description
-
-    @property
-    def input_schema(self) -> list[str]:
-        """list[str]: Ordered input field names required by this workflow."""
-        return self._input_schema
-
-    @input_schema.setter
-    def input_schema(self, val: list[str]):
-        """
-        Set the input schema.
-        """
-        self._input_schema = val
-
-    @property
-    def output_schema(self) -> list[str]:
-        """list[str]: Ordered output/result field names produced by this workflow."""
-        return self._output_schema
-
+    
+    # -----------------------------
+    # Mutatable attributes
+    # -----------------------------
     @output_schema.setter
-    def output_schema(self, val: list[str]):
-        """
-        Set the output schema.
-        """
-        self._output_schema = val
+    def output_schema(self, schema: List[str]) -> None:
+        """Set a new output schema; must be non-empty strings. If bundle_all=True, schema must be length 1."""
+        if not schema:
+            raise ValueError("Output Schema must be set to a non-empty list of strings.")
+        if any((not isinstance(key, str) or not key.strip()) for key in schema):
+            raise ValueError("Output schema must be a list of strings.")
+        # unbundle if more than 1 key
+        if len(schema) > 1: self._bundle_all = False
+        # bundle if using default result
+        if schema == [WF_RESULT]: self._bundle_all = True
+        self._output_schema = list(schema)
+    
+    @bundle_all.setter
+    def bundle_all(self, flag: bool) -> None:
+        """Enable/disable bundle-all mode; when enabling, output_schema must be length 1."""
+        # don't enable if schema is longer than 1
+        if flag and (len(self._output_schema) != 1):
+            raise ValueError(
+                f"{self.name}: enabling bundle_all requires single-key output_schema; got {self._output_schema}"
+            )
+        # always allow us to disable bundling
+        self._bundle_all = flag
+
+    # -----------------------------
+    # Checkpointing API
+    # -----------------------------
+    @property
+    def checkpoints(self) -> List[Dict[str, Any]]:
+        """A deep copy of the checkpoints history (append-only audit log)."""
+        # requires: from copy import deepcopy
+        return deepcopy(self._checkpoints)
 
     @property
-    def checkpoints(self) -> list[dict]:
-        """list[dict]: A shallow copy of recorded checkpoints (implementation-defined entries)."""
-        return list(self._checkpoints)
-
-    @checkpoints.setter
-    def checkpoints(self, val: list[dict]) -> None:
-        """Replace the stored checkpoints with `val`."""
-        self._checkpoints = val
-
-    @property
-    def latest_result(self) -> dict:
-        """
-        dict: The most recent result, normalized to `output_schema`.
-
-        If no checkpoints exist, returns a dict containing all schema keys
-        mapped to `None`.
-        """
-        if not self._checkpoints:
-            return None
-        return self._checkpoints[-1].get("result", None)
-
-    # -------------------- Utilities --------------------
-
-    def package_results(self, results: Any) -> dict:
-        """
-        Normalize an arbitrary return value into a dict conforming to `output_schema`.
-
-        Shape rules:
-          - dict: if len(dict) == len(output_schema) → map values by order onto schema;
-                  else → {output_schema[0]: dict}
-          - list/tuple: if len(seq) == len(output_schema) → positional map;
-                        else → {output_schema[0]: seq}
-          - scalar: {output_schema[0]: scalar} plus remaining keys set to None
-        """
-        schema = self._output_schema
-
-        # unwrap until no WF_RESULT is present
-        while isinstance(results, dict) and WF_RESULT in results and len(results) == 1:
-            results = results[WF_RESULT]
-        
-        # if singular scalar result
-        if not isinstance(results, (dict, list, tuple)):
-            if len(schema) == 1: return {schema[0]: results}
-            else: raise ValueError("When packaging a scalar, output_schema length must be exactly 1.")
-
-        # if dict
-        if isinstance(results, dict):
-            if len(results) != len(schema):
-                # e.g. single-key schema
-                if len(schema) == 1: return {schema[0]: results}
-                raise ValueError("When packaging a dict/list/tuple, its length must match the output_schema length if the length of schema is not equal to 1.")
-            # keys match → return as-is
-            if set(results.keys()) == set(schema): return results
-            # lengths match → map by value order
-            vals = list(results.values())
-            return {k: v for k, v in zip(schema, vals)}
-
-        # if list/tuple
-        if isinstance(results, (list, tuple)):
-            if len(results) != len(schema):
-                # e.g. single-key schema
-                if len(schema) == 1: return {schema[0]: results}
-                raise ValueError("When packaging a dict/list/tuple, its length must match the output_schema length if the length of schema is not equal to 1.")
-            # lengths match → inferred positional map
-            return {schema[i]: results[i] for i in range(len(schema))}
+    def latest_result(self) -> Optional[Dict[str, Any]]:
+        """The most recent packaged result, or None if no invocations yet."""
+        if not self._checkpoints: return None
+        return deepcopy(self._checkpoints[-1].get("result"))
 
     def clear_memory(self) -> None:
-        """Clear all recorded checkpoints for this workflow instance."""
+        """Clear workflow checkpoints."""
         self._checkpoints = []
 
-    # -------------------- Execution --------------------
+    # -----------------------------
+    # Packaging
+    # -----------------------------
+    def package_results(self, results: Any) -> Dict[str, Any]:
+        """
+        Normalize `results` into a dict matching `output_schema`.
 
+        Packaging Rules (strict, deterministic):
+          1) Unwrap while results == {WF_RESULT: x} (single key) → results = x.
+          2) If results is scalar (not dict/list/tuple):
+               - If single-key schema: {schema[0]: results}
+               - Else: raise.
+          3) If results is a sequence (list/tuple):
+               - If bundle_all: {schema[0]: results}
+               - Else:
+                   * if len(seq) > len(schema): raise (too many results)
+                   * pad with None to len(schema), map positionally to schema keys
+          4) If results is a dict:
+               - If keys match: results
+               - If bundle_all: {schema[0]: results}
+               - Else if results.keys() ⊆ schema_keys:
+                   * return {k: results.get(k, None)} for k in schema (pad missing with None)
+                 Else:
+                   * if len(results) > len(schema): raise (too many results)
+                   * positional map by insertion-order of values() to schema keys
+                     and pad with None if fewer
+
+        Raises
+        ------
+        ValueError
+            If `results` cannot be deterministically packaged into `output_schema`.
+        """
+        schema = self._output_schema
+        if not schema:
+            raise ValueError(f"{self.name}: output_schema must be non-empty")
+
+        # (1) Unwrap nested {WF_RESULT: x} until its no longer the sole key
+        while isinstance(results, dict) and len(results) == 1 and WF_RESULT in results:
+            results = results[WF_RESULT]
+
+        # (2) Scalar path
+        if not isinstance(results, (dict, list, tuple)):
+            if len(schema) == 1: return {schema[0]: results}
+            raise ValueError(
+                f"{self.name}: scalar result cannot be packaged into multi-key schema {schema}"
+            )
+
+        # Sequence path (3)
+        if isinstance(results, (list, tuple)):
+            # if bundle, do so regardless of # of entries
+            if self.bundle_all: return {schema[0]: results}
+            # mapping values to schema 1-1
+            elif len(results) == len(schema):
+                return {k:v for k,v in zip(schema, results)}
+            # pad out missing positional values
+            elif len(results) < len(schema):
+                padded = list(results) + [None] * (len(schema) - len(results))
+                return {k: v for k, v in zip(schema, padded)}
+            # if length is greater than schema
+            raise ValueError(
+                f"{self.name}: We received a result length {len(results)}, "
+                f"which exceeds the schema length {len(schema)}."
+            )
+        # Dict path (4)
+        assert isinstance(results, dict)
+        # No duplicate key wrapping, even if bundle_all
+        if set(list(results.keys())) == set(schema): return results
+        # else if bundling outputs, do so regardless of # of keys
+        if self.bundle_all: return {schema[0] : results}
+        # else if keys a subset of schema
+        if set(list(results.keys())).issubset(set(schema)): return {k: results.get(k, None) for k in schema}
+        # else if not a subset of schema keys and not bundling, raise an error
+        if len(results.keys()) != len(schema):
+            # else if there are unrecognizeable keys or result is longer/shorter than schema
+            raise ValueError(
+                f"{self.name}: We accept a dict that is a subset of {schema} "
+                "or a dict with a number of keys matching the expected schema length. "
+                f"Instead, we got a dictionary with {len(results)} keys that isn't a "
+                "subset of our desired schema."
+            )
+        # if key sets are different and not bundle all, positionally pad values
+        key_map = {s:r for s,r in zip(schema, list(results.keys()))}
+        return {s:results[key_map[s]] for s in schema}
+    
+    # -----------------------------
+    # Template method contract
+    # -----------------------------
     @abstractmethod
-    def invoke(self, inputs: dict) -> dict:  # noqa: A002  (shadowing built-in is intentional by contract)
+    def _process_inputs(self, inputs: dict) -> Any:
         """
-        Execute the workflow with a single `input` dictionary.
+        Subclass-specific processing for a single invocation.
 
-        Implementations MUST:
-          - Accept exactly one argument named `input` (a dict).
-          - Return a dict conforming to `output_schema` (use `package_results` as needed).
-          - (Optional) Append a checkpoint with at least {"timestamp", "input", "result"}.
+        Implementations should:
+          - Assume `inputs` may omit some fields from `input_schema` (missing keys are allowed).
+          - Forbid relying on extra/unexpected keys; `invoke` already validates and rejects them.
+          - Return any Python object (scalar, sequence, or dict). The base class will package it.
+
+        Parameters
+        ----------
+        inputs : dict
+            A dictionary of inputs keyed by `input_schema`. Missing keys are allowed and should
+            be handled by the subclass (e.g., via defaults).
+
+        Returns
+        -------
+        Any
+            The raw result to be normalized by `package_results`.
         """
-        raise NotImplementedError
+        pass
+
+    def invoke(self, inputs: dict) -> dict:
+        """
+        Execute the workflow using the template method pattern:
+
+          1) Validate inputs against `input_schema` (unexpected keys → error).
+          2) Delegate to subclass `_process_inputs(inputs)`.
+          3) Normalize the raw result using `package_results`.
+          4) Append a checkpoint and return the normalized dict.
+
+        Parameters
+        ----------
+        inputs : dict
+            Input data; keys must be a subset of `input_schema` (unexpected keys raise).
+
+        Returns
+        -------
+        dict
+            Normalized output matching `output_schema`.
+        """
+        # Forbid unexpected input keys; allow missing keys
+        for key in inputs.keys():
+            if key not in self._input_schema:
+                raise ValueError(f"{self.name}: Received unexpected input key '{key}', not in input_schema {self._input_schema}")
+
+        # Process and package
+        raw = self._process_inputs(inputs)
+        result = self.package_results(raw)
+
+        # Checkpoint (deep copies to protect audit history)
+        self._checkpoints.append({
+            "timestamp": datetime.now().isoformat(),
+            "inputs": deepcopy(Workflow._sanitize_for_json(inputs)),
+            "raw": deepcopy(Workflow._sanitize_for_json(raw)),
+            "result": deepcopy(Workflow._sanitize_for_json(result)),
+        })
+
+        return result
+
+    @staticmethod
+    def _sanitize_for_json(value):
+        """
+        Recursively transform `value` into a JSON-serializable form that preserves
+        readability. Non-serializable leaves are wrapped with a marker.
+
+        Returns a structure safe for `json.dumps(...)`.
+        """
+        PRIMITIVES = (str, int, float, bool, type(None))
+        if isinstance(value, PRIMITIVES):
+            return value
+
+        # Common quasi-primitives → stringified with type marker
+        if isinstance(value, (datetime, date, time)): return value.isoformat()
+        if isinstance(value, Path): return str(value)
+        if isinstance(value, Decimal): return float(value)
+        if isinstance(value, UUID): return str(value)
+        if isinstance(value, Exception): return str(value)
+
+        # dict: ensure string keys; recurse on values
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                key_str = k if isinstance(k, str) else str(k)
+                out[key_str] = Workflow._sanitize_for_json(v)
+            return out
+
+        # list/tuple: recurse to list
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [Workflow._sanitize_for_json(v) for v in list(value)]
+
+        # Fallback for arbitrary objects
+        try:
+            # if it has a reasonable __json__ hook or similar in the future, could be extended
+            return {
+                "__type__": type(value).__name__,
+                "value": str(value),
+            }
+        except Exception:
+            return {
+                "__type__": type(value).__name__,
+                "value": repr(value),
+            }
 
 
 class AgentFlow(Workflow):
     """
-    Workflow that wraps a single `Agent` and expects exactly one input field: "prompt".
+    Wraps an Agent into a schema-aware Workflow node.
 
-    Construction
+    Input/Output
     ------------
-    - `agent` : modules.Agents.Agent
-        Supplies:
-          • name        → used as workflow name
-          • description → used as workflow description
-        The input schema is **fixed** to ["prompt"] for all AgentFlow instances.
-    - `output_schema` : list[str]
-        Must be provided explicitly (ordered list of result field names).
+    - input_schema: defaults to ["prompt"], but can be any non-empty string list
+    - output_schema: defaults to [WF_RESULT] unless overridden.
 
     Invocation
     ----------
-    invoke(inputs: dict) -> dict
-      • Validates that `inputs` contains the key "prompt".
-      • Calls the underlying agent with `agent.invoke(prompt)`.
-      • Normalizes the return via `package_results` to match `output_schema`.
-      • Records a checkpoint with timestamp, original inputs, and normalized result.
+    - The 'prompt' value is sanitized for JSON readability:
+        * JSON-native primitives (str, int, float, bool, None) pass through unchanged.
+        * dict/list/tuple recurse with the same rule.
+        * sets are converted to {"__type__": "set", "values": [...]}
+        * non-serializable leaves (e.g., datetime, Path, custom objects) are
+          converted to {"__stringified__": true, "__type__": "<TypeName>", "value": "<str()>"}
+      This ensures `json.dumps(...)` never fails while remaining human-readable.
+    - If 'prompt' is already a string, it is passed as-is.
+      Otherwise the sanitized structure is JSON-encoded (UTF-8, no ASCII escaping).
 
     Notes
     -----
-    - No *args/**kwargs interfaces—uniform dict `inputs` only.
-    - Extra keys in `inputs` are ignored.
+    - Payload values that are not strings or collections of strings are coerced to strings during dict sanitation.
     """
 
-    def __init__(self, agent: Agent,
+    def __init__(self,
+                 agent: Agent,
                  input_schema: list[str] = ["prompt"],
-                 output_schema: list[str] = [WF_RESULT]) -> None:
+                 output_schema: List[str] = [WF_RESULT],
+                 bundle_all: bool = True,
+    ):
+        if input_schema == []:
+            raise TypeError("AgentFlow: Cannot initialize agent-flows with empty input schemas")
         super().__init__(
             name = agent.name,
             description = agent.description,
             input_schema = input_schema,
             output_schema = output_schema,
+            bundle_all=bundle_all
         )
         self._agent = agent
 
     # -------------------- Introspection --------------------
-
     @property
     def agent(self) -> Agent:
         """The wrapped Agent object."""
         return self._agent
+    @agent.setter
+    def agent(self, val: Agent) -> None:
+        """Replaces agent"""
+        self._agent = val
 
     # -------------------- Execution --------------------
-
     def clear_memory(self):
         """Clear workflow checkpoints and the wrapped agent's memory."""
         Workflow.clear_memory(self)
         self.agent.clear_memory()
 
-    def invoke(self, inputs: dict) -> dict:
+    def _process_inputs(self, inputs: dict) -> str:
         """
-        Execute the wrapped agent with a single `inputs` dict containing "prompt".
+        Execute the wrapped agent using JSON-readable prompt normalization.
 
-        Steps:
-          1) Validate `inputs` is a dict and contains "prompt".
-          2) Call the agent as `agent.invoke(prompt)`.
-          3) Normalize raw return via `package_results` to conform to `output_schema`.
-          4) Record a checkpoint with ISO-8601 timestamp (local time).
+        Behavior:
+        - Return the agent.invoke(stringified inputs (or value at key 'prompt'))
         """
-        raw = self._agent.invoke(str(inputs))
-        result = self.package_results(raw)
-
-        self._checkpoints.append(
-            {
-                "timestamp": str(datetime.now()),
-                "inputs": inputs,
-                "result": result,
-            }
-        )
-        return result
+        # Reject empty inputs
+        if not len(inputs):
+            raise TypeError(f"{self.name}: Cannot provide empty inputs to an agent flow.")
+        # reject
+        if list(inputs.keys()) == ["prompt"]:
+            return self.agent.invoke(str(inputs["prompt"]))
+        sanitized = Workflow._sanitize_for_json(inputs)
+        stringified_inputs = json.dumps(sanitized, ensure_ascii=False)
+        return self.agent.invoke(stringified_inputs)
 
 
 class ToolFlow(Workflow):
     """
-    Workflow that wraps a single `Tool`.
+    Workflow wrapper for a single `Tool`.
 
-    Construction
-    ------------
-    - `tool` : modules.Tools.Tool
-        Provides name, description, and an ordered parameter map (signature_map).
-        These are used to infer:
-          • name            → tool.full_name
-          • description     → tool.description
-          • input_schema    → list(tool.signature_map.keys()) excluding '*args'/'**kwargs'
-    - `output_schema` : list[str]
-        Must be provided explicitly.
+    This flow enforces a dict-based invocation contract over a Tool’s callable,
+    preserves the Tool’s input signature as an immutable `input_schema`, and
+    allows controlled customization of the output channel via `output_schema`
+    and `bundle_all`.
 
-    Invocation
-    ----------
-    invoke(inputs: dict) -> dict
-      • Validates that all keys in `input_schema` are present in `inputs`.
-      • Calls the underlying tool as `tool.invoke(**filtered_input)`, where
-        `filtered_input` includes only keys declared by `input_schema`.
-      • Normalizes the return via `package_results` to match `output_schema`.
-      • Records a checkpoint with timestamp, original input, and normalized result.
-
-    Notes
-    -----
-    - No *args/**kwargs workflow interfaces are provided—uniform dict input only.
-    - Extra keys in `input` (not in `input_schema`) are ignored when calling the tool.
+    Design
+    ------
+    - Identity:
+        * `name` is exposed as "workflow.<tool.name>" to distinguish it from the Tool.
+        * `description` is derived from the Tool and is immutable in ToolFlow.
+    - Schemas:
+        * `input_schema` is derived from the Tool’s signature (ordered) and is read-only.
+        * `output_schema` is configurable post-init via a validated setter.
+        * `bundle_all` is configurable; when True, `output_schema` must have length 1.
+    - Execution:
+        * Do not override `invoke`; base `Workflow.invoke` handles validation,
+          packaging, and checkpointing. ToolFlow implements `_process_inputs`
+          and calls the underlying Tool with the provided `inputs` as **kwargs**.
     """
 
-    def __init__(self, tool: Tool, output_schema: list[str] = [WF_RESULT]) -> None:
-        if not isinstance(tool, Tool):
-            raise TypeError("`tool` must be an instance of modules.Tools.Tool.")
-        # Derive input schema from the tool's structured signature
-        sig_keys = [k for k in tool.signature_map.keys() if k not in ("*args", "**kwargs")]
+    def __init__(
+        self,
+        tool: Tool,
+        output_schema: List[str] = [WF_RESULT],
+        bundle_all: bool = True,
+    ) -> None:
+        # Filter out varargs/kwargs conventional placeholders if present
+        input_schema: List[str] = [p for p in list(tool.signature_map.keys()) if p not in ("*args", "**kwargs")]
+
+        # If base currently forbids empty, this will raise during super().__init__.
         super().__init__(
-            # Use the short tool name for branch/input lookup so user-provided
-            # inputs can refer to the tool by its simple name (e.g. "Compare_Lengths").
-            # The underlying Tool object still carries its full_name for runtime
-            # lookup when planners/orchestrators produce fully-qualified keys.
-            name=tool.name,
-            description=tool.description,
-            input_schema=sig_keys,
+            name=tool.name,                         # base will store; we expose a property wrapper
+            description=tool._description,           # immutable, derived below
+            input_schema=input_schema,
+            bundle_all=bundle_all,
             output_schema=output_schema,
         )
-        self._tool = tool
+        # Store the tool reference
+        self._tool: Tool = tool
 
-    # -------------------- Introspection --------------------
-
+    # ---------------------------------------------------------------------
+    # Identity & metadata (read-only)
+    # ---------------------------------------------------------------------
     @property
     def tool(self) -> Tool:
-        """The wrapped Tool object."""
+        """The wrapped tool (read-only)."""
         return self._tool
-    
-    # input schema is immutable and derived from the tool
+
     @property
-    def input_schema(self) -> list[str]:
-        """list[str]: Ordered input field names required by this workflow."""
-        return self._input_schema
-
-    # -------------------- Public API --------------------
-    def clear_memory(self):
-        """Clear workflow checkpoints and forward memory clear to the wrapped tool."""
-        Workflow.clear_memory(self)
-        self.tool.clear_memory()
-
-    def invoke(self, inputs: dict) -> dict:  # noqa: A002 (intentional)
+    def description(self):
+        template = """
+        Wraps the tool `{tool_name}` in a workflow. It expects a key-word dictionary
+        representation for the inputs to be passed into the tool for the following keys:
+        {keys}
+        
+        Wrapped Tool description: {description}
         """
-        Execute the wrapped tool with filtered `input` and normalize the result.
-        """
-        inputs = {k: v for k,v in inputs.items() if k in self._input_schema}
-        raw = self._tool.invoke(**inputs)
-        result = self.package_results(raw)
+        keys = "".join([f"\n- {key}" for key in self.input_schema]) if self.input_schema else "\n(no parameters)"
+        tool_desc = self.tool._description
+        return template.format(tool_name=self.tool.name, keys=keys, description=tool_desc.strip())
 
-        self._checkpoints.append(
-            {
-                "timestamp": datetime.now().isoformat(),
-                "inputs": inputs,
-                "raw_result": raw,
-                "result": result,
-            }
-        )
-        return result
+
+    # ---------------------------------------------------------------------
+    # Execution (template method hook)
+    # ---------------------------------------------------------------------
+    def _process_inputs(self, inputs: dict) -> Any:
+        """
+        Delegate to the underlying Tool using dict → **kwargs calling convention.
+        Missing keys are allowed (Tool defaults apply). Unexpected keys are
+        already rejected by the base `invoke`.
+        """
+        return self._tool.invoke(**inputs)
+
+    # ---------------------------------------------------------------------
+    # Memory
+    # ---------------------------------------------------------------------
+    def clear_memory(self) -> None:
+        """
+        Clear checkpoints and cascade to the Tool if it exposes a clear_memory hook.
+        """
+        super().clear_memory()
+        self._tool.clear_memory()
+
+# wraps all incoming objects into workflow classes and adjusts their input/output schemas based on optional parameters
+def _to_workflow(obj: Agent | Tool | Workflow, in_sch:list[str]|None = None, out_sch:list[str]|None = None) -> Workflow:
+        if isinstance(obj, Workflow):
+            obj.output_schema = out_sch or obj.output_schema
+            return obj
+        if isinstance(obj, Agent): return AgentFlow(obj, input_schema=in_sch or ["prompt"], output_schema=out_sch or [WF_RESULT])
+        if isinstance(obj, Tool): return ToolFlow(obj, output_schema=out_sch or [WF_RESULT])
+        raise TypeError(f"Object must be Agent, Tool, or Workflow. Got unexpected '{type(obj).__name__}'.")
 
 
 class ChainFlow(Workflow):
     """
-    Linear composition of steps with shape-aware handoff.
+    ChainFlow
+    ---------
+    Linear pipeline of steps (each a Workflow/ToolFlow/AgentFlow) with strict internal
+    reconciliation and a ChainFlow-level output contract (overlay) that shapes the final
+    result without mutating the last child.
 
-    Handoff semantics
-    -----------------
-    - The first step receives the original `*args, **kwargs`.
-    - If a step's result is a dict containing only `WF_RESULT`, its value is treated as
-      the *logical* output for routing to the next step.
-    - For subsequent steps:
-        * If the receiving step expects a single param (`_is_single_param=True`), pass
-          the logical output as a single argument.
-        * If the logical output is a `list`/`tuple`, expand positionally.
-        * If the logical output is a `dict` (non `WF_RESULT`-wrapped), expand as **kwargs.
-        * Otherwise pass as a single positional argument.
+    STATES
+    ======
+    • Empty (len(steps) == 0)
+      - input_schema/output_schema: freely set; they mirror each other.
+      - bundle_all: ALWAYS False (setter rejects enabling).
+      - _process_inputs: identity (returns inputs unchanged).
 
-    Parameters
-    ----------
-    steps : list[Tool | Agent | Workflow]
-        Items are wrapped to Workflows (ToolFlow/AgentFlow) unless already a Workflow.
-    unpack_midsteps : bool
-        Preserved legacy flag (handoff behavior is as described above).
+    • Non-empty (len(steps) >= 1)
+      - input_schema: derived from first step; setter rejected.
+      - output_schema: ChainFlow-level overlay ONLY (no child mutation):
+          * If len(schema) > 1  -> force bundle_all = False automatically.
+          * If len(schema) == 1 -> do NOT auto-enable bundle_all; caller decides.
+          * If effective bundle_all == False -> require len(schema) >= len(last.output_schema).
+      - bundle_all: ChainFlow-level overlay ONLY:
+          * Enabling True requires len(output_schema) == 1.
+          * Disabling False always allowed.
+
+    INTERNAL HANDOFFS
+    =================
+    For each adjacent (A -> B):
+      - If A.bundle_all: A.out := B.in (length may differ); assert persisted equality.
+      - Else: require len(A.out) == len(B.in); then A.out := B.in.
     """
 
-    def __init__(self, name: str, description: str, steps: list[Agent|Tool|Workflow] = [], output_schema: list[str] = [WF_RESULT]) -> None:
-        wrapped_steps: list[Workflow] = []
-        # convert steps to Workflows as needed
-        for i in range(len(steps)):
-            if isinstance(steps[i], Agent): wrapped_steps.append(AgentFlow(steps[i]))
-            elif isinstance(steps[i], Tool): wrapped_steps.append(ToolFlow(steps[i]))
-            else: wrapped_steps.append(steps[i])
-        # infer output_schema handoffs
-        for i in range(len(wrapped_steps)-1): wrapped_steps[i]._output_schema = wrapped_steps[i+1].input_schema
-        # initialize base Workflow
-        super().__init__(name = name,
-                         description = description,
-                         input_schema = wrapped_steps[0].input_schema if wrapped_steps else [],
-                         output_schema = output_schema)
-        self._steps: list[Workflow] = wrapped_steps
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        steps: List[Agent | Tool | Workflow] | None = None,
+        output_schema: List[str] | None = None,
+        *,
+        zero_step_schema: list[str] = [WF_RESULT],
+    ):
+        # validate zero_step_schema
+        if zero_step_schema == []:
+            raise TypeError("ChainFlow: While a chain-flow lacks any intermediate steps, the default identity schema cannot be an empty list")
+        if any(not isinstance(key, str) for key in zero_step_schema):
+            raise TypeError("ChainFlow: The default schema assigned must be a list of strings, only")
+        # build steps
+        self._steps: list[Workflow] = []
+        if steps:
+            self._steps = [_to_workflow(s) for s in steps]
+        super().__init__(
+            name=name,
+            description=description,
+            input_schema=zero_step_schema,
+            output_schema=zero_step_schema,
+            bundle_all= zero_step_schema == [WF_RESULT] or (self._steps and self._steps[-1].bundle_all),
+        )
+        # Reserve for when no steps are present
+        self._default_schema = zero_step_schema
+        self._reconcile_all()
+        self._mirror_endpoints_from_children()
+        # if a custom output schema is provided, set it to that.
+        if output_schema != None:
+            self.output_schema = output_schema
 
-    # input schema is derived from first step, and is immutable
+    # -------------------- Steps management --------------------
+
     @property
-    def input_schema(self) -> list[str]:
-        """list[str]: Ordered input field names required by this workflow."""
-        if self._steps:
-            return self._input_schema
-        return []
-    
-    @property
-    def steps(self):
-        """list[Workflow]: The concrete sequence of step workflows."""
-        return self._steps
+    def steps(self) -> list[Workflow]:
+        return list(self._steps)
 
     @steps.setter
-    def steps(self, val: list[Agent|Tool|Workflow]):
-        wrapped_steps: list[Workflow] = []
-        # convert steps to Workflows as needed
-        for i in range(len(val)):
-            if isinstance(val[i], Agent): wrapped_steps.append(AgentFlow(val[i]))
-            elif isinstance(val[i], Tool): wrapped_steps.append(ToolFlow(val[i]))
-            else: wrapped_steps.append(val[i])
-        # infer output_schema handoffs
-        for i in range(len(wrapped_steps)-1): wrapped_steps[i]._output_schema = wrapped_steps[i+1].input_schema
-        self._input_schema = wrapped_steps[0].input_schema if wrapped_steps else []
-        self._steps = wrapped_steps
-
-    def add_step(self, step: Agent | Workflow | Tool, position: int | None = None):
-        """
-        Insert a new step at `position`. If `step` is Agent/Tool, it is wrapped.
-
-        Notes
-        -----
-        - When inserting a `Workflow`, its current `output_schema` is overwritten
-          to match the next step's `input_schema` (if any).
-        - If `position` is None, the step is appended to the end."""
-        # normalize to Workflow
-        if isinstance(step, Agent): step = AgentFlow(step)
-        elif isinstance(step, Tool): step = ToolFlow(step)
-        # append or insert new workflow step
-        if position is None: self._steps.append(step)
-        else: self._steps.insert(position, step)
-        # recompute intermediate output schemas
-        for i, step in enumerate(self._steps[:-1]): step._output_schema = self._steps[i+1].input_schema
-        self._input_schema = self._steps[0].input_schema
-
-    def pop(self, position: int = -1) -> Workflow:
-        """Remove and return the step at `position` (default: last)."""
+    def steps(self, value: list[Agent | Tool | Workflow] | None):
+        value = value or []
+        self._steps = [_to_workflow(s) for s in value]
         if not self._steps:
-            raise ValueError("No steps to remove.")
-        popped = self._steps.pop(position)
-        if not self._steps:
-            self._input_schema = []
-            self._output_schema = []
+            # Return to empty state invariants
+            self._bundle_all = False
+            # Keep user-configurable input/output overlays; they remain mirrored by setters.
+            return
+        self._reconcile_all()
+        self._mirror_endpoints_from_children()
+
+    def add_step(self, step: Agent | Tool | Workflow, position: int | None = None) -> None:
+        wrapped = _to_workflow(step)
+        if position is None:
+            self._steps.append(wrapped)
         else:
-            self._input_schema = self._steps[0].input_schema
-            self._output_schema = self._steps[-1].output_schema
-        for i, step in enumerate(self._steps[:-1]): step._output_schema = self._steps[i+1].input_schema
-        return popped
+            if position < 0 or position > len(self._steps):
+                raise IndexError(f"{self.name}: add_step position out of range")
+            self._steps.insert(position, wrapped)
+        self._reconcile_all()
+        self._mirror_endpoints_from_children()
 
-    def clear_memory(self):
-        """Clear workflow checkpoints and each step's memory."""
-        Workflow.clear_memory(self)
-        for step in self._steps:
-            step.clear_memory()
-
-    def invoke(self, inputs: dict) -> Any:
-        """
-        Execute steps in order, adapting intermediate shapes as described in
-        *Handoff semantics*. The final normalized dict is checkpointed and returned.
-        """
-        logging.info(
-            f"\n+---{'-'*len(self._name + ' Starting')}---+"
-            f"\n|   {self._name} Starting   |"
-            f"\n+---{'-'*len(self._name + ' Starting')}---+"
-        )
+    def pop(self, index: int = -1) -> Workflow:
+        removed = self._steps.pop(index)
         if not self._steps:
-            raise ValueError("No steps registered in this workflow.")
-        # Initial input
+            self._bundle_all = False  # empty state invariant
+            return removed
+        self._reconcile_all()
+        self._mirror_endpoints_from_children()
+        return removed
+
+    # -------------------- Execution --------------------
+    def _process_inputs(self, inputs: dict) -> dict:
+        if not self._steps:
+            return inputs  # identity
         current = inputs
-        # Iterate schema pipeline
         for step in self._steps:
-            logging.info(f"[WORKFLOW] Invoking: {step.name}")
-            current = step.invoke(current)
-        # Final packaging
-        result = self.package_results(current)
-        # Record checkpoint
-        self._checkpoints.append(
-            {
-                "timestamp": str(datetime.now()),
-                "inputs": inputs,
-                "result": result,
-            }
-        )
-        logging.info(
-            f"\n+---{'-'*len(self._name + ' Finished')}---+"
-            f"\n|   {self._name} Finished   |"
-            f"\n+---{'-'*len(self._name + ' Finished')}---+\n"
-        )
-        return result
+            current = step.invoke(current)  # each child returns a dict
+        return current  # ChainFlow overlay packaging happens in base invoke()
+
+    # -------------------- Internals --------------------
+    def _reconcile_all(self) -> None:
+        if not self._steps:
+            return
+        for A, B in zip(self._steps, self._steps[1:]):
+            a_out = list(A.output_schema)
+            b_in  = list(B.input_schema)
+            # Skip if they match already
+            if a_out == b_in:
+                continue
+            '''
+            Mutate A's output schema if one of the following is true:
+            1) A is bundled (theoretically unbundled A out could align with B in)
+            2) A out length = B out length (positional mapping of keys 1-1)
+            3) A out is a subset of B in (pad out missing keys)
+            '''
+            if (A.bundle_all) or (len(a_out) == len(b_in)) or (set(a_out).issubset(set(b_in))):
+                A.output_schema = b_in
+                continue
+            # If none of the above are valid, then raise an error
+            raise ValueError(
+                    f"{self.name}: length mismatch {A.name} → {B.name}: "
+                    f"len(out)={len(a_out)} != len(in)={len(b_in)} (adapter required)"
+                )
+
+    def _mirror_endpoints_from_children(self) -> None:
+        # if no steps are present, then chainflow becomes an identity flow
+        if not self._steps:
+            self._input_schema = self._default_schema
+            self.output_schema = self._default_schema
+        first = self._steps[0]
+        last  = self._steps[-1]
+        self._input_schema  = list(first.input_schema)
+        self._output_schema = list(last.output_schema)
+        self._bundle_all    = bool(last.bundle_all)
 
 
 class MakerChecker(Workflow):
     """
-    Maker–Checker workflow (dict-only).
+    Maker-Checker composite workflow.
 
-    Invariants:
-      - input_schema == maker.input_schema
-      - output_schema == maker.output_schema
+    Contracts:
       - maker.output_schema == checker.input_schema
       - checker.output_schema == maker.input_schema
-      - If judge is provided:
-          judge.input_schema == checker.output_schema
-          len(judge.output_schema) == 1  (single boolean key)
-    """
+      - judge (optional):
+            input_schema == maker.input_schema
+            output_schema == [__judge_result__]
+            bundle_all == False
 
+    Composability (ChainFlow-style overlays on THIS composite only):
+      - On __init__ and on maker/checker replacement, this composite mirrors `maker`
+        for its external endpoints (input_schema, output_schema, bundle_all).
+      - Callers (e.g., ChainFlow) may set THIS composite's output_schema / bundle_all to relabel outputs.
+        Overlay rules (using maker as reference):
+          * If len(schema) > 1  -> force bundle_all=False.
+          * If len(schema) == len(maker.output_schema) -> accept (positional relabel allowed).
+          * If len(schema) > len(maker.output_schema)  -> require superset of maker.output_schema; else raise.
+          * If len(schema) < len(maker.output_schema)  -> raise.
+          * bundle_all=True requires single-key output_schema.
+
+    Judge volatility policy:
+      - If maker.input_schema changes (directly or via checker parity), judge is auto-dropped (None).
+      - At invoke time, judge compatibility is rechecked and auto-dropped if stale.
+    """
+    # --------------------------
+    # Init
+    # --------------------------
     def __init__(
         self,
         name: str,
         description: str,
-        maker: Agent|Tool|Workflow,
-        checker: Agent|Tool|Workflow,
-        max_revisions: int = 1,
-        judge: Optional[Agent|Tool|Workflow] = None,
+        maker: Agent | Tool | Workflow,
+        checker: Agent | Tool | Workflow,
+        judge: Optional[Agent | Tool | Workflow] = None,
+        max_revisions: int = 0,
     ) -> None:
+        # Normalize participants
+        maker_wf   = _to_workflow(maker)
+        checker_wf = _to_workflow(checker)
         if max_revisions < 0:
-            raise ValueError(f"{name}: max_revisions must be >= 0")
-        # Wrap maker/checker as Workflows if needed
-        if isinstance(maker, Agent): maker = AgentFlow(maker)
-        elif isinstance(maker, Tool): maker = ToolFlow(maker)
-        if isinstance(checker, Agent): checker = AgentFlow(checker)
-        elif isinstance(checker, Tool): checker = ToolFlow(checker)
-        maker.output_schema = checker.input_schema
-        checker.output_schema = maker.input_schema
-
-        # Judge constraints (no coercion—fail fast)
-        self._judge = None
-        if judge is not None:
-            if isinstance(judge, Agent): judge = AgentFlow(judge)
-            elif isinstance(judge, Tool): judge = ToolFlow(judge)
-            if judge.input_schema != maker.input_schema:
-                raise ValueError(
-                    f"{name}: judge.input_schema {judge.input_schema} "
-                    f"!= checker.output_schema or maker.input_schema {checker.output_schema}"
-                )
-            if len(judge.output_schema) != 1:
-                raise ValueError(
-                    f"{name}: judge.output_schema must have length 1; got {judge.output_schema}"
-                )
-            judge._output_schema = [JUDGE_RESULT]
-
-        # Our schemas: identical to maker’s
+            raise ValueError(f"{self.name}: max_revisions must be >= 0; got {max_revisions}")
+        # Initialize base mirroring the *maker* endpoints
         super().__init__(
             name=name,
             description=description,
-            input_schema=maker.input_schema,
-            output_schema=checker.input_schema,
+            input_schema=list(maker_wf.input_schema),
+            output_schema=list(checker_wf.input_schema),
+            bundle_all=maker_wf.bundle_all,
         )
 
-        self._maker: Workflow = maker
-        self._checker: Workflow = checker
-        self._judge: Workflow = judge
-        self._max_revisions: int = max_revisions
-    @property
-    def max_revisions(self) -> int:
-        """Maximum number of maker/checker revision rounds."""
-        return self._max_revisions
-    @max_revisions.setter
-    def max_revisions(self, val: int) -> None:
-        """Set the maximum number of maker/checker revision rounds."""
-        if val < 0:
-            raise ValueError(f"{self.name}: max_revisions must be >= 0")
-        self._max_revisions = val
+        self._maker: Workflow = maker_wf
+        self._checker: Workflow = checker_wf
+        self.max_revisions: int = int(max_revisions)
+        self._judge: Optional[Workflow] = None
+        self._to_judge_adapter: dict = {}
+
+        # Enforce maker <-> checker parity before initial mirror.
+        self._reconcile_pair()
+        
+        # Judge initial sanity (if provided)
+        if judge is not None:
+            # build judge
+            j_wf = _to_workflow(judge)
+            j_wf.output_schema = [JUDGE_RESULT]
+            j_wf.bundle_all = False
+            # if lengths don't match
+            if len(j_wf.input_schema) != len(self._maker.input_schema):
+                raise ValueError(
+                    f"{self.name}: Expected {len(self._maker.input_schema)} but only got {len(j_wf.input_schema)}."
+                )
+            # initialize mapping of maker input keys to judge input keys
+            if set(j_wf.input_schema) == set(self._maker.input_schema):
+                self._to_judge_adapter = {key:key for key in self._maker.input_schema}
+            else:
+                self._to_judge_adapter = {
+                    m_key : j_key for m_key, j_key in zip(self._maker.input_schema, j_wf.input_schema)
+                }
+            self._judge = j_wf
+        # Mirror maker endpoints externally (again, after reconcile)
+        self._refresh_endpoints()
+
+
+    # --------------------------
+    # Utilities
+    # --------------------------
+    def _reconcile_pair(self) -> None:
+        """
+        Enforce maker-checker symmetry
+        """
+        self._maker.output_schema = self._checker.input_schema
+        self._checker.output_schema = self._maker.input_schema
+        if self._judge is not None and len(self._judge.input_schema) != self._maker.input_schema:
+            self._judge = None
+            self._to_judge_adapter = {}
+        if self._judge:
+            self._to_judge_adapter = {m_key : j_key for m_key, j_key in zip(self._maker.input_schema, self._judge.input_schema)}
+
+    def _refresh_endpoints(self) -> None:
+        """
+        Mirror maker endpoints; used on initialization and when replacing maker/checker.
+        Do NOT call this at invoke-time so that explicit composite-level overlays set
+        by callers are not clobbered between invocations.
+        """
+        # must use private for input_schema
+        self._input_schema = list(self._maker.input_schema)
+        # must use output setter
+        self.output_schema = list(self._maker.output_schema)
+        # must use bundle all setter
+        self.bundle_all = self._maker.bundle_all
+        # set judge to None if judge.input_schema length no longer matches
+        if len(self._maker.input_schema) != len(self._judge.input_schema):
+            self._judge = None
+            self._to_judge_adapter = {}
+        # update adapter
+        self._to_judge_adapter = {
+            m:j for m,j in zip(self._maker.input_schema, self._judge.input_schema)
+        }
+
+    # --------------------------
+    # Participant accessors
+    # --------------------------
     @property
     def maker(self) -> Workflow:
-        """The maker workflow."""
         return self._maker
+
     @maker.setter
-    def maker(self, val: Workflow) -> None:
-        """Set the maker workflow."""
-        self._maker = val
-        self._input_schema = val.input_schema
-        # Update maker/checker symmetry
-        self._maker.output_schema = self._checker.input_schema
-        self._checker.output_schema = self._maker.input_schema
+    def maker(self, value: Agent | Tool | Workflow) -> None:
+        self._maker = _to_workflow(value)
+        # Maintain parity before commit
+        self._reconcile_pair()   # M.out -> C.in
+        # Mirror endpoints to maker for this composite (input/output/bundle)
+        self._refresh_endpoints()
+
     @property
     def checker(self) -> Workflow:
-        """The checker workflow."""
         return self._checker
+
     @checker.setter
-    def checker(self, val: Workflow) -> None:
-        """Set the checker workflow."""
-        self._checker = val
-        self._output_schema = val.input_schema
-        # Update maker/checker symmetry
-        self._maker.output_schema = self._checker.input_schema
-        self._checker.output_schema = self._maker.input_schema
+    def checker(self, value: Agent | Tool | Workflow) -> None:
+        self._checker = _to_workflow(value)
+        # Maintain parity before commit
+        self._reconcile_pair()     # C.out  -> M.in
+        # Mirror endpoints to maker for this composite (input/output/bundle)
+        self._refresh_endpoints()
+
     @property
     def judge(self) -> Optional[Workflow]:
-        """The optional judge workflow."""
         return self._judge
+
     @judge.setter
-    def judge(self, val: Optional[Agent|Tool|Workflow]) -> None:
-        """Update the judge workflow."""
-        # if clearing judge
-        if val is None: self._judge = None; return
-        # normalize to Workflow, and ensure single-key output schema
-        if isinstance(val, Agent):
-            val = AgentFlow(val, self._checker.output_schema, [JUDGE_RESULT])
-        elif isinstance(val, Tool):
-            val = ToolFlow(val, [JUDGE_RESULT])
-        elif len(val.output_schema) > 1:
+    def judge(self, value: Optional[Agent | Tool | Workflow]) -> None:
+        j_wf = _to_workflow(value) if value is not None else None
+        if j_wf is None: self._judge = None; return
+        # Judge must consume maker.input; produce a boolean at JUDGE_RESULT
+        if len(j_wf) != len(self._maker.input_schema):
             raise ValueError(
-                f"{self.name}: judge.output_schema must have length 1; got {val.output_schema}"
+                f"{self.name}: Expected {len(self._maker.input_schema)} but only got {len(j_wf.input_schema)}."
             )
-        else: val._output_schema = [JUDGE_RESULT]
-        # validate input schema
-        if val.input_schema != self._checker.output_schema:
-            raise ValueError(
-                f"{self.name}: judge.input_schema {val.input_schema} "
-                f"!= checker.output_schema or maker.input_schema {self._checker.output_schema}"
-            )
-        # enforce single-key output schema
-        self._judge = val
+        else:
+            self._to_judge_adapter = {m:j for m,j in zip(self._maker.input_schema, j_wf.input_schema)}
+        self._judge = j_wf
+        self._judge.output_schema = [JUDGE_RESULT]
+        self._judge.bundle_all = False
 
-    def clear_memory(self) -> None:
-        """Clear workflow checkpoints and each component's memory."""
-        Workflow.clear_memory(self)
-        self._maker.clear_memory()
-        self._checker.clear_memory()
-        if self._judge is not None:
-            self._judge.clear_memory()
-    
-    def invoke(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        # Create initial draft
+    # --------------------------
+    # Runtime
+    # --------------------------
+    def _process_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Deterministic loop:
+          1) maker(draft_0) -> draft_1
+          2) checker(draft_1) -> revisions_1
+          3) if judge: ok = judge(revisions_1)[__judge_result__] (bool)
+             - if ok: break and return draft_1
+             - else: draft_2 = maker(revisions_1), repeat
+          4) stop after max_revisions or when judge approves.
+
+        Returns the latest maker draft (dict keyed by maker.output_schema).
+        """
+        # Initial draft from maker (keys == maker.output_schema)
         draft = self._maker.invoke(inputs)
-        
-        draft_history: List[Dict[str, Any]] = []
-        approved = False
 
-        for i in range(1, self._max_revisions + 1):
-            # Checker consumes the draft directly
-            revisions = self._checker.invoke(draft)  # matches checker.output_schema == maker.input_schema
+        if self.max_revisions == 0:
+            return draft
 
-            # Optional judge consumes the revisions directly
+        for _ in range(self.max_revisions):
+            # Checker consumes maker.input_schema and emits a revision bundle (== maker.input_schema)
+            revisions = self._checker.invoke(draft)
+
             if self._judge is not None:
-                decision = self._judge.invoke(revisions)
-                approved: bool = decision[JUDGE_RESULT]
-                if not isinstance(approved, bool):
+                decision = self._judge.invoke(revisions)  # expects maker.input_schema
+                ok = decision.get(JUDGE_RESULT)
+                if not isinstance(ok, bool):
                     raise ValueError(
-                        f"{self.name}: judge must return a boolean, but instead got a decision of type {type(approved)}"
+                        f"{self.name}: judge must return a single boolean at key '{JUDGE_RESULT}'; got {decision!r}"
                     )
-            else: approved = False
-            # Record round in checkpoint-only history
-            draft_history.append({
-                "timestamp": str(datetime.now()),
-                "draft_index": i,
-                "draft": draft,
-                "revisions": revisions,
-                "approved": approved,
-            })
-            # If approved, break early
-            if approved: break
-            # Next draft uses revisions directly (schema symmetry guarantees compatibility)
+                if ok: break
+
+            # Feedback: maker uses revisions to produce a new draft
             draft = self._maker.invoke(revisions)
-        # Package final draft to our output_schema (identical to maker.output_schema)
-        final_result = self.package_results(draft)
-        # Checkpoint with history (not returned)
-        self._checkpoints.append({
-            "timestamp": str(datetime.now()),
-            "inputs": inputs,
-            "draft_history": draft_history,
-            "result": final_result,
-        })
-        return final_result
+
+        return draft
 
 
 class Selector(Workflow):
     """
-    Selector workflow (dict-only).
+    Conditional router that delegates to one of several branches based on a judge workflow.
 
-    Rules:
-      - input_schema is inferred from the judge (judge.input_schema)
-      - judge MUST be a Workflow; branches MUST be Workflows
-      - judge.output_schema MUST have exactly 1 key; the runtime value must be a string
-      - all branches MUST have:
-          branch.input_schema == judge.input_schema
-          branch.output_schema == self.output_schema
-      - invoke(inputs) does NOT validate input keys (caller responsibility)
-      - result is always self.package_results(raw_branch_result)
-      - checkpoints include {"timestamp", "inputs", "selection", "result"}
+    Conventions
+    -----------
+    - Judge is any (Workflow|Agent|Tool). If Agent/Tool is supplied, it is wrapped into an
+      AgentFlow/ToolFlow owned by this Selector.
+    - The judge's *output_schema* is forcibly `[JUDGE_RESULT]`. At runtime, the judge must
+      return a dict like `{JUDGE_RESULT: "<branch_name>"}`.
+    - The Selector's *input_schema* strictly mirrors the judge's input schema. Because the
+      base class exposes `input_schema` as read-only, we update via private `_input_schema`.
+    - Each branch is any (Workflow|Agent|Tool). If Agent/Tool, it is wrapped into a Flow.
+      Branch **input_schema** must set-equal the Selector's input schema. Branch outputs are
+      independent from the Selector's advertised `output_schema`/`bundle_all`.
+    - Packaging/checkpointing occur in `Workflow.invoke()`. `_process_inputs()` only chooses
+      a branch and returns that branch's *raw* result.
     """
 
     def __init__(
         self,
         name: str,
         description: str,
-        branches: List[Tool|Agent|Workflow],
+        branches: List[Agent|Tool|Workflow],
         judge: Agent|Tool|Workflow,
-        output_schema: List[str],
+        output_schema: List[str] = [WF_RESULT],
+        bundle_all: bool = True,
     ) -> None:
+        # ---- Wrap & normalize judge
+        wrapped_judge: Workflow = _to_workflow(judge, out_sch = [JUDGE_RESULT])
+        wrapped_judge.bundle_all = False
 
-        # Wrap judge as Workflow if needed
-        if isinstance(judge, Agent): judge = AgentFlow(judge, ["prompt"], [JUDGE_RESULT])
-        elif isinstance(judge, Tool): judge = ToolFlow(judge, [JUDGE_RESULT])
-        # Validate judge output schema
-        elif len(judge.output_schema) != 1:
-            raise ValueError(
-                f"{name}: judge.output_schema must have length 1; got {judge.output_schema}"
-            )
-        else: judge._output_schema = [JUDGE_RESULT]
-        # Initialize base
+        # Initialize base with judge input schema mirrored into selector
         super().__init__(
             name=name,
             description=description,
-            input_schema=judge.input_schema,
+            input_schema=list(wrapped_judge.input_schema),
             output_schema=output_schema,
+            bundle_all=bundle_all,
         )
 
-        # Store judge via private slot (we already adopted its input schema);
-        self._judge: Workflow = judge
+        # Mirror via private slot to match project conventions
+        self._judge: Workflow = wrapped_judge
+        self._input_schema = list(self._judge.input_schema)
 
-        # Validate branches against inferred input schema & declared output schema
-        if set([b.name for b in branches]) != set([b.name for b in branches]):
-            raise ValueError(f"{self.name}: duplicate branch names detected")
-        wrapped_branches = []
-        for b in branches:
-            # Wrap branch as Workflow if needed
-            if isinstance(b, Agent): b = AgentFlow(b, judge.input_schema, output_schema)
-            elif isinstance(b, Tool): b = ToolFlow(b, output_schema)
-            if b.input_schema != judge.input_schema:
-                raise ValueError(
-                    f"{self.name}: branch '{b.name}' input_schema {b.input_schema} "
-                    f"!= selector/judge input_schema {self.input_schema}"
-                )
-            b._output_schema = output_schema
-            # Add to list
-            wrapped_branches.append(b)
-        # Store branches
+        # ---- Ingest branches
+        wrapped_branches: List[Workflow] = [_to_workflow(b, list(self._input_schema), output_schema) for b in branches]
+        if len(set([b.name for b in branches])) < len(branches):
+            raise ValueError(
+                f"{self.name}: duplicate branch names detected. Names given are {[b.name for b in branches]}."
+            )
+        if any(set(b.input_schema) != set(self._input_schema) for b in wrapped_branches):
+            raise ValueError(
+                f"{self.name}: unexpected input schema not matching judge's input schema: {self._input_schema}"
+            )
         self._branches: List[Workflow] = wrapped_branches
 
-    # ---- judge property/setter ----
-    @property
-    def input_schema(self) -> List[str]:
-        return self._judge.input_schema
-    @property
-    def branches(self) -> List[Workflow]:
-        return self._branches
-    @branches.setter
-    def branches(self, val: List[Agent|Tool|Workflow]) -> None:
-        wrapped_branches = []
-        for b in val:
-            # Wrap branch as Workflow if needed
-            if isinstance(b, Agent): b = AgentFlow(b, self.input_schema, self.output_schema)
-            elif isinstance(b, Tool):
-                b = ToolFlow(b, self.output_schema)
-                if b.input_schema != self._judge.input_schema:
-                    raise ValueError(
-                        f"{self.name}: branch '{b.name}' input_schema {b.input_schema} "
-                        f"!= selector/judge input_schema {self.input_schema}"
-                    )
-            else: b._output_schema = self.output_schema
-            # Add to list
-            wrapped_branches.append(b)
-        self._branches = wrapped_branches
-
+    # -------------------- Properties --------------------
     @property
     def judge(self) -> Workflow:
         return self._judge
 
     @judge.setter
     def judge(self, val: Agent|Tool|Workflow) -> None:
-        # Wrap judge as Workflow if needed
-        if isinstance(val, Agent): val = AgentFlow(val, self.input_schema, [JUDGE_RESULT])
-        elif isinstance(val, Tool): val = ToolFlow(val, [JUDGE_RESULT])
-        # Must keep the same input schema as the current selector's (inferred from original judge)
-        if val.input_schema != self.input_schema:
-            raise ValueError(
-                f"{self.name}: new judge.input_schema {val.input_schema} "
-                f"!= current selector.input_schema {self.input_schema}"
-            )
-        if len(val.output_schema) != 1:
-            raise ValueError(
-                f"{self.name}: judge.output_schema must have exactly 1 key; got {val.output_schema}"
-            )
-        val._output_schema = [JUDGE_RESULT]
-        self._judge = val
+        # Wrap provided value
+        new_judge = _to_workflow(val)
+        new_judge.output_schema = [JUDGE_RESULT]
+        new_judge.bundle_all = False
+        # Mirror input schema via private slot
+        self._judge = new_judge
+        self._input_schema = list(self._judge.input_schema)
 
-    # ---- branch management ----
+        # Filter branches to only those that match by set-equivalence
+        survivors: List[Workflow] = []
+        for b in self._branches:
+            try:
+                if set(b.input_schema) == set(self._input_schema):
+                    survivors.append(b)
+            except Exception:
+                # Extremely defensive: drop anything malformed
+                logging.warning(f"{self.name}: branch {b.name} did not match the new judge's input schema. it is being dropped.")
+                continue
+        self._branches = survivors
+
+    @property
+    def branches(self) -> List[Workflow]:
+        return list(self._branches)
+
+    @branches.setter
+    def branches(self, vals: List[Agent|Tool|Workflow]) -> None:
+        # Re-ingest + validate (same as constructor)
+        seen_names: set[str] = set()
+        wrapped: List[Workflow] = []
+        for b in vals:
+            wb = _to_workflow(b, in_sch=self._input_schema, out_sch=self._output_schema)
+            if set(wb.input_schema) != set(self._input_schema):
+                raise ValueError(
+                    f"{self.name}: branch '{wb.name}' input_schema {wb.input_schema} "
+                    f"!= selector/judge input_schema {list(self._input_schema)} (set mismatch)"
+                )
+            if wb.name in seen_names:
+                raise ValueError(f"{self.name}: duplicate branch name '{wb.name}'")
+            seen_names.add(wb.name)
+            wrapped.append(wb)
+        self._branches = wrapped
+
+    # -------------------- Public API --------------------
     def add_branch(self, branch: Agent|Tool|Workflow) -> None:
-        if branch.name in [b.name for b in self._branches]:
-            raise ValueError(f"{self.name}: duplicate branch name '{branch.name}'")
-        # Wrap branch as Workflow if needed
-        if isinstance(branch, Agent): branch = AgentFlow(branch, self.input_schema, self.output_schema)
-        elif isinstance(branch, Tool): branch = ToolFlow(branch, self.output_schema)
-        if branch.input_schema != self.input_schema:
+        # Wrap
+        wb = _to_workflow(branch, self.input_schema, self.output_schema)
+        # Validate input schema set-equivalence
+        if set(wb.input_schema) != set(self.input_schema):
             raise ValueError(
-                f"{self.name}: branch '{branch.name}' input_schema {branch.input_schema} "
-                f"!= selector/judge input_schema {self.input_schema}"
+                f"{self.name}: branch '{wb.name}' input_schema {wb.input_schema} "
+                f"!= selector/judge input_schema {list(self._input_schema)} (set mismatch)"
             )
-        if branch.output_schema != self.output_schema: branch._output_schema = self.output_schema
-        self._branches.append(branch)
+        # Unique name
+        if any(b.name == wb.name for b in self._branches):
+            raise ValueError(f"{self.name}: duplicate branch name '{wb.name}'")
 
-    def remove_branch(self, branch: str|None = None, *, position = -1) -> Workflow:
+        self._branches.append(wb)
+
+    def remove_branch(self, name: str|None = None, *, position: int = -1) -> Workflow:
         if not self._branches:
             raise IndexError(f"{self.name}: no branches to remove")
-        if branch is None: removed = self._branches.pop(position)
-        else:
-            idx = next((i for i,b in enumerate(self._branches) if b.name == branch), None)
-            if idx is None: raise ValueError(f"{self.name}: no branch named '{branch}' to remove")
-            removed = self._branches.pop(idx)
-        return removed
+        if name is None:
+            return self._branches.pop(position)
+        idx = next((i for i,b in enumerate(self._branches) if b.name == name), None)
+        if idx is None:
+            raise ValueError(f"{self.name}: no branch named '{name}' to remove")
+        return self._branches.pop(idx)
 
     def clear_memory(self) -> None:
         Workflow.clear_memory(self)
@@ -923,428 +1080,473 @@ class Selector(Workflow):
         for b in self._branches:
             b.clear_memory()
 
-    # ---- main execution ----
-    def invoke(self, inputs: Dict) -> Dict:
-        # Decide
-        decision = self._judge.invoke(inputs)
-        selection = decision.get(JUDGE_RESULT)
-        if not isinstance(selection, str):
-            raise ValueError(
-                f"{self.name}: judge must output a string under '{self._sel_key}', got {selection!r}"
-            )
-
-        # Dispatch
-        if selection not in [b.name for b in self._branches]:
-            raise ValueError(
-                f"{self.name}: unknown selection '{selection}'. "
-                f"Valid: {[b.name for b in self._branches]}"
-            )
-        idx = next(i for i,b in enumerate(self._branches) if b.name == selection)
-        raw = self._branches[idx].invoke(inputs)
-
-        # Package & checkpoint
-        result = self.package_results(raw)
-        self._checkpoints.append({
-            "timestamp": str(datetime.now()),
-            "inputs": inputs,
-            "selection": selection,
-            "result": result,
-        })
-        return result
+    # -------------------- Execution --------------------
+    def _process_inputs(self, inputs: Dict[str, Any]) -> Any:
+        """
+        Decide a branch using the judge and return the *raw* result from that branch's invoke().
+        Base Workflow.invoke() will package this result according to the Selector's own
+        output_schema/bundle_all configuration.
+        """
+        # fail fast if no branches
+        if not self._branches:
+            raise ValueError(f"{self.name}: There are no branches to choose from, thus failure.")
+        # have judge select branch to invoke
+        selection_raw = self._judge.invoke(inputs)
+        # fail if selection isn't formatted correctly or returning a string
+        if not isinstance(selection_raw, dict) or JUDGE_RESULT not in selection_raw:
+            raise ValueError(f"{self.name}: judge must return a dict with key '{JUDGE_RESULT}'; got {selection_raw!r}")
+        selection = selection_raw[JUDGE_RESULT]
+        if not isinstance(selection, str) or not selection.strip():
+            raise ValueError(f"{self.name}: judge must output a non-empty string under '{JUDGE_RESULT}', got {selection!r}")
+        # Find and run branch with selection name (either the ._name or .name)
+        selected_branch = next((b for b in self._branches if b._name == selection or b.name == selection), None)
+        if selected_branch is None:
+            raise RuntimeError(f"{self.name}: No branches matching the name for selection '{selection}'.")
+        return selected_branch.invoke(inputs)
 
 
-class BatchFlow(Workflow):
+class MapFlow(Workflow):
     """
-    BatchFlow (dict-only, label-map based).
+    MapFlow (tailored fan-out).
 
-    Rules:
-      1) input_schema = ordered list of branch names (derived from self.branches).
-      2) output_schema depends on unwrap_outputs:
-         - if True: output_schema length == number of branches; labels come from an internal
-           label map {branch.name -> label}. If labels were not provided, defaults to branch names.
-         - if False: output_schema = [output_key] (defaults to WF_RESULT) and the aggregate result is
-           wrapped under that single key as { output_key: { branch_name: branch_result, ... } }.
-      3) invoke runs all branches in parallel. Each branch receives inputs.get(branch.name, {}).
-      4) add/remove branch updates input_schema and, when unwrap_outputs=True, output_schema and label map.
-      5) invoke raises if there are no branches.
+    Run multiple branches in parallel where each branch receives its own payload from
+    `inputs[branch.name]`. The input schema is dynamic and always equals the ordered list
+    of current branch names. Missing branch names in `inputs` do not error:
+      - flatten=False  -> result for that branch is None
+      - flatten=True   -> branch is ignored (not invoked)
+
+    Packaging/bundling/checkpointing are handled by Workflow.invoke(); this subclass only
+    implements _process_inputs().
+
+    Execution
+    ---------
+    - Enqueue only branches that have a present payload and that payload is a dict.
+      (If a present payload is not a dict, raise ValueError naming the branch.)
+    - Run concurrently (ThreadPool), collect results in declared branch order (deterministic).
+    - Each executed branch must return a dict, else TypeError naming the branch.
+    - When flatten=False (default): return { branch.name: dict|None, ... } (all branches present).
+    - When flatten=True: merge keys from executed branch dicts into a single dict.
+        * If a branch result is exactly {WF_RESULT: ...} or {JUDGE_RESULT: ...}, do not flatten;
+          instead insert as {branch.name: <raw_result_dict>} (prevents special keys at top-level).
+        * Key collisions raise ValueError with the offending key and branch identity.
+
+    Notes
+    -----
+    - Branches are wrapped via _to_workflow(obj, in_sch=None, out_sch=None). MapFlow does not
+      mutate child schemas; overlays are applied only at the MapFlow boundary by base invoke().
     """
 
     def __init__(
         self,
         name: str,
         description: str,
-        branches: Sequence[Union[Workflow, Any]],
-        *,
-        unwrap_outputs: bool = True,
-        labels: Optional[List[str]] = None,     # only used when unwrap_outputs=True
-        output_key: str = WF_RESULT,            # only used when unwrap_outputs=False
+        branches: List[Union[Workflow, Agent, Tool]] = [],
+        output_schema: List[str] = [WF_RESULT],
+        bundle_all: bool = True,
+        flatten: bool = False,
     ) -> None:
-        if not branches:
-            raise ValueError(f"{name}: at least one branch is required")
-
-        # Normalize branches to Workflows (Agent/Tool -> AgentFlow/ToolFlow).
-        wf_branches: List[Workflow] = []
-        for obj in branches:
-            if isinstance(obj, Workflow):
-                wf_branches.append(obj)
-            else:
-                # Try ToolFlow first (callable tools), then AgentFlow fallback.
-                try:
-                    wf_branches.append(ToolFlow(obj))
-                except Exception:
-                    wf_branches.append(AgentFlow(obj))
-
-        # Enforce unique branch names
-        names = [b.name for b in wf_branches]
-        if len(names) != len(set(names)):
-            raise ValueError(f"{name}: duplicate branch names are not allowed: {names}")
-
-        self.unwrap_outputs: bool = bool(unwrap_outputs)
-
-        # Label map: branch.name -> output label (used only when unwrap_outputs=True)
-        self._label_map: Dict[str, str] = {}
-        if self.unwrap_outputs:
-            if labels is not None:
-                if len(labels) != len(wf_branches):
-                    raise ValueError(
-                        f"{name}: labels length {len(labels)} must equal number of branches {len(wf_branches)}"
-                    )
-                if not all(isinstance(lbl, str) and lbl for lbl in labels):
-                    raise ValueError(f"{name}: all labels must be non-empty strings")
-                if len(set(labels)) != len(labels):
-                    raise ValueError(f"{name}: labels must be unique: {labels}")
-                self._label_map = {wf_branches[i].name: labels[i] for i in range(len(wf_branches))}
-            else:
-                # default to branch names
-                self._label_map = {b.name: b.name for b in wf_branches}
-            output_schema_list = [self._label_map[b.name] for b in wf_branches]
-        else:
-            if not isinstance(output_key, str) or not output_key:
-                raise ValueError(f"{name}: output_key must be a non-empty string")
-            self._label_map = {}  # unused in wrapped mode
-            output_schema_list = [output_key]
-            self.output_key: str = output_schema_list[0]
-
-        # Initialize base Workflow with derived schemas
+        # Initialize base with placeholder input_schema; we will set the private field afterwards
         super().__init__(
             name=name,
             description=description,
-            input_schema=list(names),
-            output_schema=output_schema_list,
+            input_schema=[],  # will be rebuilt from branch names
+            output_schema=output_schema,
+            bundle_all=bundle_all,
         )
 
-        self._branches: List[Workflow] = wf_branches
+        self._flatten: bool = bool(flatten)
+        self._branches: List[Workflow] = []
+
+        # Ingest/wrap branches; enforce unique names
+        seen: set[str] = set()
+        for obj in branches or []:
+            wf = _to_workflow(obj, in_sch=None, out_sch=None)
+            if wf.name in seen:
+                raise ValueError(f"{self.name}: duplicate branch name '{wf.name}'")
+            seen.add(wf.name)
+            self._branches.append(wf)
+
+        # Input schema mirrors current branch names (ordered)
+        self._rebuild_input_schema_from_branch_names()
+
+    # -------------------- Properties --------------------
 
     @property
     def branches(self) -> List[Workflow]:
-        """The list of branch workflows."""
-        return self._branches
-    @branches.setter
-    def branches(self, val: List[Workflow]) -> None:
-        """Set the list of branch workflows (rebuilds schemas)."""
-        # Enforce unique branch names
-        names = [b.name for b in val]
-        if len(names) != len(set(names)):
-            raise ValueError(f"{self.name}: duplicate branch names are not allowed: {names}")
-        self._branches = val
-        # Rebuild schemas
-        self._rebuild_schemas_after_change()
-    
-    @property
-    def output_key(self) -> str:
-        """The output key when unwrap_outputs=False."""
-        if self.unwrap_outputs:
-            raise RuntimeError(f"{self.name}: output_key is only meaningful when unwrap_outputs=False")
-        return self._output_schema[0]
-    @output_key.setter
-    def output_key(self, val: str) -> None:
-        """Set the output key when unwrap_outputs=False (rebuilds output_schema)."""
-        if self.unwrap_outputs:
-            raise RuntimeError(f"{self.name}: output_key is only meaningful when unwrap_outputs=False")
-        self._output_schema = [val]
-    @property
-    def input_schema(self) -> List[str]:
-        """The current input schema."""
-        return self._input_schema
-    # ---------------------------
-    # Branch management
-    # ---------------------------
-    def add_branch(
-        self,
-        branch: Union[Workflow, Any],
-        position: Optional[int] = None,
-        *,
-        label: Optional[str] = None,  # only used when unwrap_outputs=True
-    ) -> None:
-        # Normalize to Workflow
-        if isinstance(branch, Tool):
-            branch = ToolFlow(branch)
-        elif isinstance(branch, Agent):
-            branch = AgentFlow(branch)
-        
-        if any(b.name == branch.name for b in self._branches):
-            raise ValueError(f"{self.name}: duplicate branch name '{branch.name}'")
+        """Read-only view of branches (shallow copy)."""
+        return list(self._branches)
 
-        # Insert/append
-        if position is None:
-            self._branches.append(branch)
-        else:
-            if position < 0 or position > len(self._branches):
-                raise IndexError(f"{self.name}: add_branch position out of range")
-            self._branches.insert(position, branch)
+    # -------------------- Branch Management --------------------
 
-        # Maintain label map & schemas
-        if self.unwrap_outputs:
-            lbl = label or branch.name
-            if lbl in self._label_map.values() or branch.name in self._label_map.keys():
-                raise ValueError(f"{self.name}: duplicate branch name {branch.name} or output label '{lbl}'")
-            self._label_map[branch.name] = lbl
+    def add_branch(self, obj: Union[Workflow, Agent, Tool]) -> None:
+        """
+        Add a branch. Name must be unique. Input schema is rebuilt from branch names.
+        """
+        wf = self._to_workflow(obj, in_sch=None, out_sch=None)
+        if any(b.name == wf.name for b in self._branches):
+            raise ValueError(f"{self.name}: duplicate branch name '{wf.name}'")
+        self._branches.append(wf)
+        self._rebuild_input_schema_from_branch_names()
 
-        self._rebuild_schemas_after_change()
-
-    def remove_branch(self, position: int = -1) -> Workflow:
+    def remove_branch(self, name: Optional[str] = None, *, position: int = -1) -> Workflow:
+        """
+        Remove a branch by exact name or by position (default: last). Returns the removed workflow.
+        Input schema is rebuilt from branch names.
+        """
         if not self._branches:
             raise IndexError(f"{self.name}: no branches to remove")
 
+        if name is not None:
+            for i, b in enumerate(self._branches):
+                if b.name == name:
+                    removed = self._branches.pop(i)
+                    self._rebuild_input_schema_from_branch_names()
+                    return removed
+            raise ValueError(f"{self.name}: no branch named '{name}' to remove")
+
         removed = self._branches.pop(position)
-
-        if self.unwrap_outputs:
-            self._label_map.pop(removed.name, None)
-
-        self._rebuild_schemas_after_change()
+        self._rebuild_input_schema_from_branch_names()
         return removed
 
-    def _rebuild_schemas_after_change(self) -> None:
-        # input_schema = ordered list of branch names
-        names = [b.name for b in self._branches]
-        self._input_schema = list(names)
+    # -------------------- Memory --------------------
 
-        # output_schema
-        if self.unwrap_outputs:
-            # Ensure every branch has a label; default to its own name if missing (shouldn't happen in normal flow)
-            for b in self._branches:
-                if b.name not in self._label_map:
-                    self._label_map[b.name] = b.name
-            # Rebuild output schema from label map in branch order
-            self._output_schema = [self._label_map[b.name] for b in self._branches]
-        else:
-            # Keep the single output key stable
-            self._output_schema = [self.output_key]
-
-    # ---------------------------
-    # Execution
-    # ---------------------------
-    def invoke(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        if not self._branches:
-            raise RuntimeError(f"{self.name}: cannot invoke with zero branches")
-
-        # Prepare per-branch payloads (dict-only); missing -> {}
-        payloads: Dict[str, Dict[str, Any]] = {}
+    def clear_memory(self) -> None:
+        Workflow.clear_memory(self)
         for b in self._branches:
-            val = inputs.get(b.name, {})
-            if not isinstance(val, dict):
-                raise ValueError(
-                    f"{self.name}: payload for branch '{b.name}' must be a dict; got {type(val).__name__}"
-                )
-            payloads[b.name] = val
+            try:
+                b.clear_memory()
+            except Exception:
+                pass
 
-        # Run in parallel
-        results: Dict[str, Dict[str, Any]] = {}
+    # -------------------- Execution --------------------
 
-        def _run(wf: Workflow) -> Dict[str, Any]:
-            return wf.invoke(payloads[wf.name])
-
-        with ThreadPoolExecutor(max_workers=max(1, len(self._branches))) as pool:
-            future_map = {pool.submit(_run, b): b.name for b in self._branches}
-            for fut in as_completed(future_map):
-                bname = future_map[fut]
-                results[bname] = fut.result()
-
-        # Aggregate
-        if self.unwrap_outputs:
-            aggregated: Dict[str, Any] = {}
-            for b in self._branches:
-                key = self._label_map[b.name]
-                branch_result = results[b.name]
-                while isinstance(branch_result, dict) and len(branch_result) == 1 and WF_RESULT in branch_result:
-                    branch_result = branch_result[WF_RESULT]
-                aggregated[key] = branch_result
-            packaged = self.package_results(aggregated)
-        else:
-            wrapped = {self.output_schema[0]: {b.name: results[b.name] for b in self._branches}}
-            packaged = self.package_results(wrapped)
-
-        # Checkpoint (keep lean as requested)
-        self._checkpoints.append({
-            "timestamp": str(datetime.now()),
-            "inputs": inputs,
-            "result": packaged,
-        })
-        return packaged
-
-    # ---------------------------
-    # Optional label utilities
-    # ---------------------------
-    def get_label(self, branch_name: str) -> Optional[str]:
-        """Return the output label for a given branch name (unwrap mode only)."""
-        return self._label_map.get(branch_name) if self.unwrap_outputs else None
-
-    def set_label(self, branch_name: str, new_label: str) -> None:
+    def _process_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Update the output label for a given branch (unwrap mode only).
-        Ensures uniqueness and rebuilds output_schema.
+        Tailored fan-out:
+        
+        - For each branch:
+            * If inputs contains branch.name:
+                - require inputs[branch.name] to be a dict; otherwise raise ValueError
+                - schedule branch.invoke(inputs[branch.name])
+            * If inputs does not contain branch.name:
+                - flatten=False: result for branch.name := None (not invoked)
+                - flatten=True: branch is ignored (not invoked)
+
+        Returns:
+            - flatten=False: { branch.name: dict | None, ... } (all branches)
+            - flatten=True:  flattened dict merged from executed branches with collision checks;
+                             special single-key envelopes {WF_RESULT: ...}/{JUDGE_RESULT: ...}
+                             are inserted as {branch.name: <raw>} instead of flattened.
         """
-        if not self.unwrap_outputs:
-            raise RuntimeError(f"{self.name}: labels are only meaningful when unwrap_outputs=True")
-        if branch_name not in (b.name for b in self._branches):
-            raise ValueError(f"{self.name}: unknown branch '{branch_name}'")
-        if not isinstance(new_label, str) or not new_label:
-            raise ValueError(f"{self.name}: new_label must be a non-empty string")
-        if new_label in self._label_map.values():
-            raise ValueError(f"{self.name}: duplicate output label '{new_label}'")
+        if not self._branches:
+            raise RuntimeError(f"{self.name}: No branches available")
 
-        self._label_map[branch_name] = new_label
-        # Rebuild output schema to reflect new label order
-        self._output_schema = [self._label_map[b.name] for b in self._branches]
+        # Partition branches: which have payloads, which don't
+        to_run: List[tuple[str, Workflow, Dict[str, Any]]] = []
+        missing_names: List[str] = []
 
-    # ---------------------------
-    # Memory management
-    # ---------------------------
+        for b in self._branches:
+            if b.name in inputs:
+                payload = inputs[b.name]
+                if not isinstance(payload, dict):
+                    raise ValueError(
+                        f"{self.name}: payload for branch '{b.name}' must be a dict; "
+                        f"got {type(payload).__name__}"
+                    )
+                to_run.append((b.name, b, payload))
+            else:
+                missing_names.append(b.name)
+
+        # Concurrency: execute only those with payloads
+        from concurrent.futures import ThreadPoolExecutor
+
+        results_by_branch: Dict[str, Optional[Dict[str, Any]]] = {}
+
+        # Initialize defaults for missing branches (flatten=False only)
+        if not self._flatten:
+            for name in missing_names:
+                results_by_branch[name] = None
+
+        first_exc: Optional[BaseException] = None
+        failing_branch: Optional[str] = None
+
+        if to_run:
+            max_workers = min(len(to_run), 16)
+            futures: List[tuple[str, Any]] = []
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                for name, wf, payload in to_run:
+                    futures.append((name, pool.submit(wf.invoke, payload)))
+
+                # Collect in declared branch order for determinism
+                for branch_name, fut in futures:
+                    if first_exc is not None:
+                        if not fut.done():
+                            fut.cancel()
+                        continue
+                    try:
+                        res = fut.result()
+                        if not isinstance(res, dict):
+                            raise TypeError(
+                                f"{self.name}:{branch_name} returned non-dict result "
+                                f"({type(res).__name__}); expected dict"
+                            )
+                        results_by_branch[branch_name] = res
+                    except BaseException as e:
+                        first_exc = e
+                        failing_branch = branch_name
+                        # Attempt to cancel remaining
+                        for _, f in futures:
+                            if not f.done():
+                                f.cancel()
+
+        if first_exc is not None:
+            raise RuntimeError(f"{self.name}:{failing_branch} failed") from first_exc
+
+        if not self._flatten:
+            # Ensure all branches are present in the output (ordered by declaration)
+            # (Executed branches already filled; missing branches are None)
+            return {b.name: results_by_branch.get(b.name, None) for b in self._branches}
+
+        # Flattening path: merge only executed branch dicts
+        flat: Dict[str, Any] = {}
+        special_keys = {WF_RESULT, JUDGE_RESULT}
+
+        for b in self._branches:
+            if b.name not in results_by_branch:
+                # either missing input or (in theory) not executed; skip entirely
+                continue
+            payload = results_by_branch[b.name]
+            if payload is None:
+                # shouldn't occur here because we don't insert None for flatten=True
+                continue
+
+            # Special-envelope rule: exact single-key {WF_RESULT: ...} or {JUDGE_RESULT: ...}
+            if len(payload) == 1:
+                only_key = next(iter(payload))
+                if only_key in special_keys:
+                    if b.name in flat and not isinstance(payload[only_key], dict):
+                        raise ValueError(
+                            f"{self.name}: flatten collision for branch name '{b.name}'"
+                        )
+                    if isinstance(payload[only_key], dict) and not any(not isinstance(k, str) for k in payload[only_key].keys()):
+                        payload = payload[only_key]
+                    else:
+                        flat[b.name] = payload
+                        continue
+            else: pass
+
+            # Normal flatten: merge keys with collision check
+            for k, v in payload.items():
+                if k in flat:
+                    raise ValueError(
+                        f"{self.name}: flatten key collision for '{k}' "
+                        f"(originating branch '{b.name}')"
+                    )
+                flat[k] = v
+        return flat
+
+    # -------------------- Helpers --------------------
+
+    def _rebuild_input_schema_from_branch_names(self) -> None:
+        """Mirror current branch names into the private input schema (ordered)."""
+        self._input_schema = [b.name for b in self._branches]
+
+
+class ScatterFlow(Workflow):
+    """
+    ScatterFlow (broadcast fan-out).
+
+    Broadcast a single validated input dict to multiple child workflows in parallel and
+    aggregate results. Packaging/bundling/checkpointing are handled by Workflow.invoke();
+    this subclass only implements _process_inputs().
+
+    Input schema
+    ------------
+    - Fixed at construction time and immutable thereafter.
+    - Every branch must accept the same input schema (set-equivalent).
+    - Branches are wrapped via _to_workflow(obj, in_sch=<broadcast schema>, out_sch=None).
+    - At construction, non-conforming branches are pruned.
+    - On add, non-conforming branches raise ValueError.
+
+    Execution
+    ---------
+    - _process_inputs runs branches concurrently (ThreadPool), collects results in the
+      declared branch order, and returns either:
+        * { branch.name: dict_result, ... } when flatten=False (default), or
+        * a single flattened dict when flatten=True, merging keys from each branch result.
+
+    Result rules
+    ------------
+    - Each branch's invoke() MUST return a dict; non-dict results raise TypeError.
+    - When flatten=True:
+        * If a branch result dict has exactly one key and that key is WF_RESULT or JUDGE_RESULT,
+          the flattened output receives { branch.name: <raw_result_dict> } (do not flatten this
+          envelope) to avoid redundant/special keys polluting the top level.
+        * Otherwise, merge the branch result's items into the flattened dict.
+          Key collisions raise ValueError with the offending key and branch identities.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        input_schema: List[str],
+        branches: List[Union[Workflow, Agent, Tool]] = [],
+        output_schema: List[str] = [WF_RESULT],
+        bundle_all: bool = True,
+        flatten: bool = False,
+    ) -> None:
+        # Initialize base with the broadcast schema
+        super().__init__(
+            name=name,
+            description=description,
+            input_schema=list(input_schema),
+            output_schema=list(output_schema),
+            bundle_all=bundle_all,
+        )
+
+        self._flatten: bool = bool(flatten)
+        self._branches: List[Workflow] = []
+
+        # Ingest/wrap branches; enforce unique names; prune non-conforming schemas
+        wrapped: List[Workflow] = []
+        seen: set[str] = set()
+        for obj in branches or []:
+            wf = _to_workflow(obj, in_sch=self._input_schema)
+            if wf.name in seen:
+                raise ValueError(f"{self.name}: duplicate branch name '{wf.name}'")
+            seen.add(wf.name)
+            # Prune if schema not set-equivalent
+            if set(wf.input_schema) == set(self._input_schema):
+                wrapped.append(wf)
+        self._branches = wrapped
+
+    # -------------------- Properties --------------------
+
+    @property
+    def branches(self) -> List[Workflow]:
+        """Read-only view of branches (shallow copy)."""
+        return list(self._branches)
+
+    # -------------------- Branch Management --------------------
+
+    def add_branch(self, obj: Union[Workflow, Agent, Tool]) -> None:
+        """
+        Add a branch. Name must be unique. The branch's input_schema must be
+        set-equivalent to the fixed broadcast schema or this raises ValueError.
+        """
+        wf = _to_workflow(obj, in_sch=self._input_schema)
+        if any(b.name == wf.name for b in self._branches):
+            raise ValueError(f"{self.name}: duplicate branch name '{wf.name}'")
+        if set(wf.input_schema) != set(self._input_schema):
+            raise ValueError(
+                f"{self.name}: branch '{wf.name}' input_schema {wf.input_schema} "
+                f"!= broadcast input_schema {list(self._input_schema)} (set mismatch)"
+            )
+        self._branches.append(wf)
+
+    def remove_branch(self, name: Optional[str] = None, *, position: int = -1) -> Workflow:
+        """
+        Remove a branch by exact name or by position (default: last). Returns the removed workflow.
+        """
+        if not self._branches:
+            raise IndexError(f"{self.name}: no branches to remove")
+        if name is not None:
+            for i, b in enumerate(self._branches):
+                if b.name == name:
+                    return self._branches.pop(i)
+            raise ValueError(f"{self.name}: no branch named '{name}' to remove")
+        # by position
+        return self._branches.pop(position)
+
+    # -------------------- Memory --------------------
+
     def clear_memory(self) -> None:
         Workflow.clear_memory(self)
         for b in self._branches:
             b.clear_memory()
 
-
-class LangGraphFlow(Workflow):
-    """
-    LangGraph-backed Workflow (dict-only adapter).
-
-    Rules:
-      - A single global `schema` is used for BOTH input and output schemas for the flow and for ALL nodes.
-      - Nodes are **Tools only**. Each added Tool is wrapped as a ToolFlow:
-          * ToolFlow.input_schema MUST equal the global schema.
-          * ToolFlow.output_schema is FORCED to the global schema.
-        The ToolFlow's `.invoke` is registered directly into the StateGraph under the node's name.
-      - Edges (plain or conditional) use string node names exactly as in langgraph.
-      - invoke(inputs: dict) compiles if dirty, runs the graph, and returns only keys in the global schema.
-      - Checkpoints store timestamp and the final packaged outputs only.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        *,
-        schema: List[str],
-        graph: Optional[Any] = None,
-    ):
-        # Single global schema used for both input and output
-        super().__init__(name=name, description=description, input_schema=schema, output_schema=schema)
-
-        if graph is None and StateGraph is None:
-            raise RuntimeError(
-                "langgraph is not installed; cannot create a builder. "
-                "Provide an existing builder via graph=... or install langgraph."
-            )
-
-        self._graph: StateGraph = graph if graph is not None else StateGraph(dict)
-        self._app = None
-        self._dirty = True
-
-        # Keep the wrapped ToolFlows here for metadata/checkpoints lookup
-        self._nodes: List[ToolFlow] = []
-        self._routers: list[Tool] = []
-
-    # -------------------- Introspection --------------------
-
-    def _node_names(self) -> List[str]:
-        return [wf.name for wf in self._nodes]
-
-    # -------------------- Builder API --------------------
-
-    def add_node(self, node: Tool|Agent|Workflow, name: Optional[str] = None) -> None:
-        """
-        Add a Tool node:
-          - Wrap as ToolFlow(tool, output_schema=self.output_schema)
-          - Enforce ToolFlow.input_schema == self.input_schema
-          - Register node_name + toolflow.invoke into the underlying StateGraph
-        """
-        if isinstance(node, Agent): node = AgentFlow(node, self.input_schema, self.output_schema)
-        elif isinstance(node, Tool): node = ToolFlow(node, output_schema=self.output_schema)
-        if not (node.input_schema == self.input_schema and node.output_schema == node.input_schema):
-            raise ValueError(
-                f"{self.name}: node must be a Workflow with input_schema = output_schema "
-                f"to be added to LangGraphFlow. Got input_schema={node.input_schema}, "
-                f"output_schema={node.output_schema}."
-            )
-        
-        if node.name in self._node_names():
-            raise ValueError(f"{self.name}: node '{node.name}' already exists")
-        self._nodes.append(node)
-
-        # Register the node directly with its invoke
-        self._graph.add_node(node.name, node.invoke)
-        self._dirty = True
-
-    def add_edge(self, src: str, dst: str) -> None:
-        names = set(self._node_names())
-        if src not in names:
-            raise ValueError(f"{self.name}: unknown node '{src}'. Add it first.")
-        if dst not in names:
-            raise ValueError(f"{self.name}: unknown node '{dst}'. Add it first.")
-        self._graph.add_edge(src, dst)
-        self._dirty = True
-
-    def add_conditional_edges(
-        self,
-        src: str,
-        router: Tool,
-        routes: Dict[str, str],
-    ) -> None:
-        """
-        router(state) -> route_key; routes: {route_key: node_name}
-        """
-        names = set(self._node_names())
-        if src not in names:
-            raise ValueError(f"{self.name}: unknown node '{src}'. Add it first.")
-        for _, dst in routes.items():
-            if dst not in names:
-                raise ValueError(f"{self.name}: unknown destination node '{dst}'. Add it first.")
-        if router.name not in [t.name for t in self._routers]:
-            self._routers.append(router)
-        self._graph.add_conditional_edges(src, router.func, routes)
-        self._dirty = True
-
-    def set_entry_point(self, name: str) -> None:
-        if name not in set(self._node_names()):
-            raise ValueError(f"{self.name}: unknown entry node '{name}'")
-        self._graph.set_entry_point(name)
-        self._dirty = True
-
-    def set_finish_point(self, name: str) -> None:
-        if name not in set(self._node_names()):
-            raise ValueError(f"{self.name}: unknown finish node '{name}'")
-        self._graph.set_finish_point(name)
-        self._dirty = True
-
     # -------------------- Execution --------------------
 
-    def invoke(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _process_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Run the compiled graph with a single state dict and return only the global schema keys.
-        """
-        
-        # Strict ingress: require all declared keys present. (If you prefer permissive, default missing to None.)
-        if self._dirty or self._app is None:
-            self._app = self._graph.compile()
-            self._dirty = False
+        Fan out across branches concurrently and return:
+            - { branch.name: dict_result, ... } when self._flatten is False
+            - a single flattened dict when self._flatten is True
 
-        final_state = self._app.invoke(inputs)
-        # Ensure all output_schema keys are present
-        for key in self.output_schema:
-            if final_state.get(key, None) is None: final_state[key] = None
-        print(len(final_state.keys()), len(self.output_schema))
-        result = self.package_results(final_state)
-        self._checkpoints.append({"timestamp": str(datetime.now()), "inputs":inputs, "result": result})
-        return result
+        Every branch receives the same validated `inputs` dict. Each result must be a dict.
+        """
+        if not self._branches:
+            raise RuntimeError(f"{self.name}: No branches available")
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        max_workers = min(len(self._branches), 16) if self._branches else 1
+        futures: List[tuple[str, Any]] = []
+        results_by_branch: Dict[str, Dict[str, Any]] = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for b in self._branches:
+                futures.append((b.name, pool.submit(b.invoke, inputs)))
+
+            first_exc: Optional[BaseException] = None
+            failing_branch: Optional[str] = None
+
+            # Collect in declared branch order for determinism
+            for branch_name, fut in futures:
+                if first_exc is not None:
+                    if not fut.done():
+                        fut.cancel()
+                    continue
+                try:
+                    res = fut.result()
+                    if not isinstance(res, dict):
+                        raise TypeError(
+                            f"{self.name}:{branch_name} returned non-dict result "
+                            f"({type(res).__name__}); expected dict"
+                        )
+                    results_by_branch[branch_name] = res
+                except BaseException as e:
+                    first_exc = e
+                    failing_branch = branch_name
+                    # Attempt to cancel remaining futures
+                    for _, f in futures:
+                        if not f.done():
+                            f.cancel()
+
+            if first_exc is not None:
+                raise RuntimeError(f"{self.name}:{failing_branch} failed") from first_exc
+
+        if not self._flatten:
+            return results_by_branch
+
+        # Flattening path
+        flat: Dict[str, Any] = {}
+        special_keys = {WF_RESULT, JUDGE_RESULT}
+
+        for bname, payload in results_by_branch.items():
+            # Special-envelope rule: if payload is exactly {WF_RESULT: ...} or {JUDGE_RESULT: ...},
+            # DO NOT flatten; map under branch name instead to avoid special keys at top-level.
+            if len(payload) == 1:
+                only_key = next(iter(payload))
+                if only_key in special_keys:
+                    if bname in flat and not isinstance(payload[only_key], dict):
+                        raise ValueError(
+                            f"{self.name}: flatten collision for branch name '{bname}'"
+                        )
+                    if isinstance(payload[only_key], dict) and not any(not isinstance(key, str) for key in payload[only_key].keys()):
+                        payload = payload[only_key]
+                    else:
+                        flat[bname] = payload[only_key]
+                        continue
+                else: pass
+            # Normal flatten: merge keys, enforcing no collisions
+            for k, v in payload.items():
+                if k in flat:
+                    raise ValueError(
+                        f"{self.name}: flatten key collision for '{k}' "
+                        f"(originating branch '{bname}')"
+                    )
+                flat[k] = v
+
+        return flat

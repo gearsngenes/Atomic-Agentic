@@ -65,7 +65,7 @@ class Tool:
         self._name: str = name
         self._func: Callable[..., Any] = func
         self._description: str = description
-        self._clear_mem: Optional[Callable[[], None]] = clear_mem_func
+        self._clear_mem: Callable[[], None] = clear_mem_func
 
         # Structured signature storage (authoritative)
         self._sig_types: OrderedDict[str, Any] = OrderedDict()
