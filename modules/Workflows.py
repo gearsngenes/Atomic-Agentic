@@ -37,14 +37,16 @@ checkpoint behavior are maintained.
 from __future__ import annotations  # Enables forward type hints for class references
 from abc import ABC, abstractmethod  # Abstract base classes
 from datetime import date, datetime, time                    # For timestamping checkpoints
-from typing import Any, Dict, List, Optional, Set, Union, Tuple, TypedDict  # Type hinting
-from concurrent.futures import ThreadPoolExecutor, as_completed  # For parallel execution
+from typing import Any, Dict, List, Optional, Union
+from concurrent.futures import ThreadPoolExecutor
 import logging                 # Logging support
 from copy import deepcopy
 import json
 from decimal import Decimal
 from uuid import UUID
 from pathlib import Path
+from collections.abc import Mapping, Iterable, Sequence, Set
+from dataclasses import is_dataclass, asdict
 
 
 # ============================================================
@@ -52,17 +54,50 @@ from pathlib import Path
 # ============================================================
 from .Tools import Tool             # Used by ToolFlow for wrapping Tools as Workflows
 from .Agents import Agent           # Used by AgentFlow for wrapping Agents as Workflows
-
-# ============================================================
-# Third-Party Dependencies
-# ============================================================
-from langgraph.graph import StateGraph, END
-
 # ============================================================
 # Constants
 # ============================================================
 WF_RESULT = "__wf_result__"         # Default single-output field for packaging results
 JUDGE_RESULT = "__judge_result__"   # Standard field for boolean judge outputs
+
+# Module logger for targeted observability
+logger = logging.getLogger(__name__)
+
+
+# Domain-specific exceptions
+class WorkflowError(Exception):
+    """Base class for workflow-related errors."""
+
+
+class ValidationError(WorkflowError, ValueError):
+    """Raised for input/output validation failures."""
+
+
+class SchemaError(ValidationError):
+    """Raised when schema definitions are malformed or incompatible."""
+
+
+class PackagingError(ValidationError):
+    """Raised when a raw result cannot be deterministically packaged into the
+    configured output schema."""
+
+
+class ExecutionError(WorkflowError, RuntimeError):
+    """Raised when runtime processing (i.e., _process_inputs) fails."""
+
+
+def _is_namedtuple(x) -> bool:
+    return isinstance(x, tuple) and hasattr(x, "_fields")
+
+def _namedtuple_as_mapping(x) -> dict:
+    return {f: getattr(x, f) for f in x._fields}
+
+# Primary, tweakable groupings
+MAPPABLE_KINDS  = (Mapping,)     # dict, defaultdict, ChainMap, etc.
+ITERABLE_KINDS  = (Iterable,)    # list/tuple/deque/set/range/generator/... (strings excluded below)
+
+# Small utility tuples for exclusions/special cases
+STRINGISH       = (str, bytes, bytearray)
 
 
 class Workflow(ABC):
@@ -118,7 +153,6 @@ class Workflow(ABC):
       consistent validation, packaging, and checkpointing.
     """
 
-
     def __init__(
         self,
         name: str,
@@ -127,27 +161,29 @@ class Workflow(ABC):
         output_schema: List[str] = [WF_RESULT],
         bundle_all: bool = True,
     ) -> None:
-        self._name = name
-        self._description = description
-        self._input_schema: List[str] = input_schema or []
-        self._output_schema: List[str] = output_schema
-        self._bundle_all = (bool(bundle_all) and len(self._output_schema) == 1) or self._output_schema == [WF_RESULT]
-        self._checkpoints: List[Dict[str, Any]] = []
-
-        # Basic validation
-        if self._input_schema is None:
-            raise ValueError(f"{self.name}: input_schema must be a non-empty list of field names")
-        if not self._output_schema:
-            raise ValueError(f"{self.name}: output_schema must be a non-empty list of field names")
-        if any(not isinstance(k, str) or not k for k in self._input_schema):
-            raise ValueError(f"{self.name}: input_schema must contain non-empty strings")
-        if any(not isinstance(k, str) or not k for k in self._output_schema):
-            raise ValueError(f"{self.name}: output_schema must contain non-empty strings")
-        if self._bundle_all and len(self._output_schema) != 1:
-            raise ValueError(
-                f"{self.name}: bundle_all=True requires single-key output_schema, got {self._output_schema}"
+        # In/Out schema validation
+        if input_schema is None:
+            raise SchemaError("Workflow: input_schema must be a non-empty list of field names")
+        if output_schema is None or output_schema == []:
+            raise SchemaError(f"Workflow: output_schema must be a non-empty list of field names")
+        if any(not isinstance(k, str) or not k for k in input_schema):
+            raise SchemaError(f"Workflow: input_schema must contain non-empty strings")
+        if any(not isinstance(k, str) or not k for k in output_schema):
+            raise SchemaError(f"Workflow: output_schema must contain non-empty strings")
+        if bundle_all and len(output_schema) != 1:
+            raise SchemaError(
+                f"Workflow: bundle_all=True requires single-key output_schema, got {output_schema}"
             )
 
+        self._name = name
+        self._description = description
+        self._input_schema: List[str] = list(input_schema)
+        self._output_schema: List[str] = list(output_schema)
+        self._bundle_all = bundle_all
+        self._checkpoints: List[Dict[str, Any]] = []
+
+        # Observability: record how this Workflow was configured
+        logger.debug("%s: initialized with input_schema=%s output_schema=%s bundle_all=%s", self._name, self._input_schema, self._output_schema, self._bundle_all)
     # -----------------------------
     # Read-only configuration
     # -----------------------------
@@ -179,15 +215,16 @@ class Workflow(ABC):
     @output_schema.setter
     def output_schema(self, schema: List[str]) -> None:
         """Set a new output schema; must be non-empty strings. If bundle_all=True, schema must be length 1."""
-        if not schema:
-            raise ValueError("Output Schema must be set to a non-empty list of strings.")
+        if schema is None:
+            raise TypeError("Workflow: expected a list of strings, but got a 'NoneType'")
+        if schema == []:
+            raise SchemaError("Workflow: Output Schema must be set to a non-empty list of strings.")
         if any((not isinstance(key, str) or not key.strip()) for key in schema):
-            raise ValueError("Output schema must be a list of strings.")
+            raise TypeError("Workflow: Output schema must be a list of strings. Mismatched type found in schema.")
         # unbundle if more than 1 key
         if len(schema) > 1: self._bundle_all = False
-        # bundle if using default result
-        if schema == [WF_RESULT]: self._bundle_all = True
         self._output_schema = list(schema)
+        logger.debug("%s: output_schema set to %s (bundle_all=%s)", self._name, self._output_schema, self._bundle_all)
     
     @bundle_all.setter
     def bundle_all(self, flag: bool) -> None:
@@ -222,86 +259,146 @@ class Workflow(ABC):
     # -----------------------------
     # Packaging
     # -----------------------------
-    def package_results(self, results: Any) -> Dict[str, Any]:
-        """
-        Normalize `results` into a dict matching `output_schema`.
-
-        Packaging Rules (strict, deterministic):
-          1) Unwrap while results == {WF_RESULT: x} (single key) → results = x.
-          2) If results is scalar (not dict/list/tuple):
-               - If single-key schema: {schema[0]: results}
-               - Else: raise.
-          3) If results is a sequence (list/tuple):
-               - If bundle_all: {schema[0]: results}
-               - Else:
-                   * if len(seq) > len(schema): raise (too many results)
-                   * pad with None to len(schema), map positionally to schema keys
-          4) If results is a dict:
-               - If keys match: results
-               - If bundle_all: {schema[0]: results}
-               - Else if results.keys() ⊆ schema_keys:
-                   * return {k: results.get(k, None)} for k in schema (pad missing with None)
-                 Else:
-                   * if len(results) > len(schema): raise (too many results)
-                   * positional map by insertion-order of values() to schema keys
-                     and pad with None if fewer
-
-        Raises
-        ------
-        ValueError
-            If `results` cannot be deterministically packaged into `output_schema`.
-        """
-        schema = self._output_schema
+    def package_results(self, results: object) -> dict:
+        schema = self.output_schema
         if not schema:
-            raise ValueError(f"{self.name}: output_schema must be non-empty")
+            raise SchemaError(f"{self.name}: output_schema is empty")
 
-        # (1) Unwrap nested {WF_RESULT: x} until its no longer the sole key
-        while isinstance(results, dict) and len(results) == 1 and WF_RESULT in results:
+        # 1) Named "record" types → treat as mapping
+        if _is_namedtuple(results):
+            results = _namedtuple_as_mapping(results)
+        elif is_dataclass(results):
+            results = asdict(results)
+
+        # 2) Keep unwrapping WF_RESULT until it's not a 1-key mapping with WF_RESULT
+        while isinstance(results, MAPPABLE_KINDS) and len(results) == 1 and WF_RESULT in results:
             results = results[WF_RESULT]
 
-        # (2) Scalar path
-        if not isinstance(results, (dict, list, tuple)):
-            if len(schema) == 1: return {schema[0]: results}
-            raise ValueError(
-                f"{self.name}: scalar result cannot be packaged into multi-key schema {schema}"
+        # 3) Mapping path (hybrid mapping enabled)
+        if isinstance(results, MAPPABLE_KINDS):
+            # preserve declared order for schema, and insertion order for results
+            schema_list = list(schema)
+            schema_set  = set(schema)
+
+            res_keys_list = list(results.keys())
+            res_keys_set  = set(res_keys_list)
+
+            # Fast paths
+            if res_keys_set == schema_set:
+                # exact name match → reorder to schema order
+                return {k: results[k] for k in schema_list}
+
+            if res_keys_set.issubset(schema_set):
+                # results missing some schema keys → pad with None
+                return {k: results.get(k, None) for k in schema_list}
+
+            if schema_set.issubset(res_keys_set):
+                # results have extras; keep only schema keys, preserve schema order
+                return {k: results.get(k, None) for k in schema_list}
+
+            # Hybrid path:
+            #  - common keys map by name
+            #  - missing on each side must be of equal cardinality
+            common_keys = res_keys_set.intersection(schema_set)
+
+            # preserve insertion order for "only in results"
+            only_in_results = [k for k in res_keys_list if k not in schema_set]
+            # preserve declared order for "only in schema"
+            only_in_schema  = [k for k in schema_list if k not in res_keys_set]
+
+            if len(only_in_results) == len(only_in_schema):
+                # Build output starting with named matches
+                out = {k: results[k] for k in schema_list if k in common_keys}
+                # Pair remaining by position: results' insertion order → schema order
+                for src_key, dst_key in zip(only_in_results, only_in_schema):
+                    out[dst_key] = results.get(src_key)
+                # Ensure all schema keys exist (defensive; should be complete)
+                for k in schema_list:
+                    out.setdefault(k, None)
+                # Optional: log that hybrid mapping occurred (helps debugging)
+                logger.debug(f"{self.name}: hybrid dict mapping used: "
+                            f"matched={sorted(common_keys)}, "
+                            f"positional={list(zip(only_in_results, only_in_schema))}")
+                return out
+
+            # Mismatch and cannot hybrid-map: try bundling; else fail fast
+            if self.bundle_all:
+                if len(schema_list) != 1:
+                    raise PackagingError(f"{self.name}: bundle_all requires single-key schema")
+                return {schema_list[0]: dict(results)}
+
+            raise PackagingError(
+                f"{self.name}: mapping keys cannot be aligned: "
+                f"only_in_results={only_in_results}, only_in_schema={only_in_schema}. "
+                f"Provide an adapter, adjust schema, or enable bundle_all."
             )
 
-        # Sequence path (3)
-        if isinstance(results, (list, tuple)):
-            # if bundle, do so regardless of # of entries
-            if self.bundle_all: return {schema[0]: results}
-            # mapping values to schema 1-1
-            elif len(results) == len(schema):
-                return {k:v for k,v in zip(schema, results)}
-            # pad out missing positional values
-            elif len(results) < len(schema):
-                padded = list(results) + [None] * (len(schema) - len(results))
-                return {k: v for k, v in zip(schema, padded)}
-            # if length is greater than schema
-            raise ValueError(
-                f"{self.name}: We received a result length {len(results)}, "
-                f"which exceeds the schema length {len(schema)}."
+
+        # 4) Scalars (including strings/bytes)
+        if isinstance(results, STRINGISH) or not isinstance(results, ITERABLE_KINDS):
+            if len(schema) == 1:
+                return {schema[0]: results}
+            raise PackagingError(
+                f"{self.name}: scalar result cannot fit multi-key schema {schema}"
             )
-        # Dict path (4)
-        assert isinstance(results, dict)
-        # No duplicate key wrapping, even if bundle_all
-        if set(list(results.keys())) == set(schema): return results
-        # else if bundling outputs, do so regardless of # of keys
-        if self.bundle_all: return {schema[0] : results}
-        # else if keys a subset of schema
-        if set(list(results.keys())).issubset(set(schema)): return {k: results.get(k, None) for k in schema}
-        # else if not a subset of schema keys and not bundling, raise an error
-        if len(results.keys()) != len(schema):
-            # else if there are unrecognizeable keys or result is longer/shorter than schema
-            raise ValueError(
-                f"{self.name}: We accept a dict that is a subset of {schema} "
-                "or a dict with a number of keys matching the expected schema length. "
-                f"Instead, we got a dictionary with {len(results)} keys that isn't a "
-                "subset of our desired schema."
+
+        # 5) Set-like (unordered) — disallow positional use unless bundled
+        if isinstance(results, Set):
+            if self.bundle_all:
+                if len(schema) != 1:
+                    raise PackagingError(f"{self.name}: bundle_all requires single-key schema")
+                # document: order not guaranteed; if you need order, pre-sort upstream
+                return {schema[0]: list(results)}
+            raise PackagingError(
+                f"{self.name}: set-like results are unordered; bundle_all or pre-coerce to a sequence"
             )
-        # if key sets are different and not bundle all, positionally pad values
-        key_map = {s:r for s,r in zip(schema, list(results.keys()))}
-        return {s:results[key_map[s]] for s in schema}
+
+        # 6) Sequence (ordered) — safe for positional mapping
+        if isinstance(results, Sequence) and not isinstance(results, STRINGISH):
+            seq = list(results)
+            if self.bundle_all:
+                if len(schema) != 1:
+                    raise PackagingError(f"{self.name}: bundle_all requires single-key schema")
+                return {schema[0]: seq}
+            if len(seq) > len(schema):
+                raise PackagingError(
+                    f"{self.name}: too many positional items ({len(seq)}) for schema of length {len(schema)}"
+                )
+            padded = seq + [None] * (len(schema) - len(seq))
+            return {k: v for k, v in zip(schema, padded)}
+
+        # 7) Iterable fallback (e.g., generators) — consume deterministically
+        #    Only safe for positional mapping; cap to schema length, then assert exhaustion.
+        if isinstance(results, ITERABLE_KINDS):
+            if self.bundle_all:
+                if len(schema) != 1:
+                    raise PackagingError(f"{self.name}: bundle_all requires single-key schema")
+                return {schema[0]: list(results)}
+            it = iter(results)
+            collected = []
+            for _ in range(len(schema)):
+                try:
+                    collected.append(next(it))
+                except StopIteration:
+                    break
+            # ensure no overflow beyond schema
+            try:
+                next(it)
+                raise PackagingError(
+                    f"{self.name}: iterable produced more items than schema length {len(schema)}"
+                )
+            except StopIteration:
+                pass
+            collected += [None] * (len(schema) - len(collected))
+            return {k: v for k, v in zip(schema, collected)}
+
+        # 8) Final fallback
+        if len(schema) == 1:
+            return {schema[0]: results}
+        raise PackagingError(
+            f"{self.name}: cannot package type {type(results).__name__} into multi-key schema"
+        )
+
     
     # -----------------------------
     # Template method contract
@@ -348,14 +445,26 @@ class Workflow(ABC):
         dict
             Normalized output matching `output_schema`.
         """
-        # Forbid unexpected input keys; allow missing keys
-        for key in inputs.keys():
-            if key not in self._input_schema:
-                raise ValueError(f"{self.name}: Received unexpected input key '{key}', not in input_schema {self._input_schema}")
+        # Observability: log invocation start (debug-level payload)
+        logger.debug("%s: invoke called with inputs=%s", self.name, Workflow._sanitize_for_json(inputs))
 
-        # Process and package
-        raw = self._process_inputs(inputs)
+        # Forbid unexpected input keys; allow missing keys
+        unexpected = set(inputs.keys()) - set(self._input_schema)
+        if unexpected:
+            logger.error("%s: unexpected input keys %s (allowed: %s)", self.name, unexpected, self._input_schema)
+            raise ValidationError(f"{self.name}: Received unexpected input keys {unexpected}, not in input_schema {self._input_schema}")
+
+        # Process and package (catch runtime errors to add context)
+        start_ts = datetime.now()
+        try:
+            raw = self._process_inputs(inputs)
+        except Exception as e:
+            logger.exception("%s: _process_inputs raised an exception", self.name)
+            raise ExecutionError(f"{self.name}: execution failed") from e
         result = self.package_results(raw)
+        end_ts = datetime.now()
+        duration_ms = (end_ts - start_ts).total_seconds() * 1000.0
+        logger.info("%s: invoke completed in %.1fms", self.name, duration_ms)
 
         # Checkpoint (deep copies to protect audit history)
         self._checkpoints.append({
@@ -382,9 +491,17 @@ class Workflow(ABC):
         # Common quasi-primitives → stringified with type marker
         if isinstance(value, (datetime, date, time)): return value.isoformat()
         if isinstance(value, Path): return str(value)
-        if isinstance(value, Decimal): return float(value)
+        # Preserve Decimal precision by converting to string rather than float
+        if isinstance(value, Decimal):
+            logger.debug("%s: sanitizing Decimal value to string to avoid precision loss", type(value).__name__)
+            return str(value)
         if isinstance(value, UUID): return str(value)
-        if isinstance(value, Exception): return str(value)
+        # Represent exceptions in a structured, descriptive form
+        if isinstance(value, Exception):
+            return {
+                "__exception__": type(value).__name__,
+                "message": str(value),
+            }
 
         # dict: ensure string keys; recurse on values
         if isinstance(value, dict):
@@ -440,20 +557,23 @@ class AgentFlow(Workflow):
 
     def __init__(self,
                  agent: Agent,
+                 name: str = None,
                  input_schema: list[str] = ["prompt"],
                  output_schema: List[str] = [WF_RESULT],
                  bundle_all: bool = True,
     ):
         if input_schema == []:
-            raise TypeError("AgentFlow: Cannot initialize agent-flows with empty input schemas")
+            raise SchemaError("AgentFlow: Cannot initialize agent-flows with empty input schemas")
         super().__init__(
-            name = agent.name,
+            name = name or agent.name,
             description = agent.description,
             input_schema = input_schema,
             output_schema = output_schema,
             bundle_all=bundle_all
         )
         self._agent = agent
+        logger.debug("%s: AgentFlow initialized wrapping agent=%s input_schema=%s output_schema=%s bundle_all=%s",
+                     self.name, getattr(agent, "name", None), self.input_schema, self.output_schema, self.bundle_all)
 
     # -------------------- Introspection --------------------
     @property
@@ -469,7 +589,10 @@ class AgentFlow(Workflow):
     def clear_memory(self):
         """Clear workflow checkpoints and the wrapped agent's memory."""
         Workflow.clear_memory(self)
-        self.agent.clear_memory()
+        try:
+            self.agent.clear_memory()
+        except Exception:
+            logger.warning("%s: agent.clear_memory() raised an exception", self.name, exc_info=True)
 
     def _process_inputs(self, inputs: dict) -> str:
         """
@@ -479,14 +602,27 @@ class AgentFlow(Workflow):
         - Return the agent.invoke(stringified inputs (or value at key 'prompt'))
         """
         # Reject empty inputs
-        if not len(inputs):
-            raise TypeError(f"{self.name}: Cannot provide empty inputs to an agent flow.")
+        if not inputs:
+            logger.error("%s: empty inputs provided to AgentFlow", self.name)
+            raise ValidationError(f"{self.name}: AgentFlow requires a non-empty inputs dict (e.g., a 'prompt' key)")
         # reject
         if list(inputs.keys()) == ["prompt"]:
             return self.agent.invoke(str(inputs["prompt"]))
         sanitized = Workflow._sanitize_for_json(inputs)
-        stringified_inputs = json.dumps(sanitized, ensure_ascii=False)
-        return self.agent.invoke(stringified_inputs)
+        # stringify the sanitized prompt payload for agents that expect a string
+        try:
+            stringified_inputs = json.dumps(sanitized, ensure_ascii=False)
+        except Exception as e:
+            logger.exception("%s: failed to JSON-encode sanitized inputs for agent invocation", self.name)
+            raise PackagingError(f"{self.name}: failed to JSON-encode inputs for agent invocation") from e
+
+        logger.debug("%s: invoking agent %s with stringified inputs (len=%d)", self.name, getattr(self.agent, "name", None), len(stringified_inputs))
+        try:
+            return self.agent.invoke(stringified_inputs)
+        except Exception as e:
+            logger.exception("%s: agent.invoke raised an exception", self.name)
+            # Wrap runtime errors to give callers a clear, domain-specific exception
+            raise ExecutionError(f"{self.name}: agent invocation failed") from e
 
 
 class ToolFlow(Workflow):
@@ -501,7 +637,7 @@ class ToolFlow(Workflow):
     Design
     ------
     - Identity:
-        * `name` is exposed as "workflow.<tool.name>" to distinguish it from the Tool.
+        * `name` is exposed as "<tool.name>" if no custom name is provided to distinguish it from the Tool.
         * `description` is derived from the Tool and is immutable in ToolFlow.
     - Schemas:
         * `input_schema` is derived from the Tool’s signature (ordered) and is read-only.
@@ -516,6 +652,7 @@ class ToolFlow(Workflow):
     def __init__(
         self,
         tool: Tool,
+        name = None,
         output_schema: List[str] = [WF_RESULT],
         bundle_all: bool = True,
     ) -> None:
@@ -524,14 +661,16 @@ class ToolFlow(Workflow):
 
         # If base currently forbids empty, this will raise during super().__init__.
         super().__init__(
-            name=tool.name,                         # base will store; we expose a property wrapper
+            name=name or tool.name,                         # base will store; we expose a property wrapper
             description=tool._description,           # immutable, derived below
             input_schema=input_schema,
             bundle_all=bundle_all,
             output_schema=output_schema,
         )
-        # Store the tool reference
+        # Store the tool reference                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
         self._tool: Tool = tool
+        logger.debug("%s: ToolFlow initialized wrapping tool=%s input_schema=%s output_schema=%s bundle_all=%s",
+                     self.name, tool.name, self.input_schema, self.output_schema, self.bundle_all)
 
     # ---------------------------------------------------------------------
     # Identity & metadata (read-only)
@@ -550,9 +689,9 @@ class ToolFlow(Workflow):
         
         Wrapped Tool description: {description}
         """
-        keys = "".join([f"\n- {key}" for key in self.input_schema]) if self.input_schema else "\n(no parameters)"
+        keys = "\n".join([f"- {key}" for key in self.input_schema]) if self.input_schema else "\n(no parameters)"
         tool_desc = self.tool._description
-        return template.format(tool_name=self.tool.name, keys=keys, description=tool_desc.strip())
+        return template.format(tool_name=self.tool.name, keys=keys, description=tool_desc.strip()).strip()
 
 
     # ---------------------------------------------------------------------
@@ -564,7 +703,13 @@ class ToolFlow(Workflow):
         Missing keys are allowed (Tool defaults apply). Unexpected keys are
         already rejected by the base `invoke`.
         """
-        return self._tool.invoke(**inputs)
+        logger.debug("%s: invoking tool %s", self.name, self.tool.name)
+        try:
+            return self._tool.invoke(**inputs)
+        except Exception as e:
+            logger.exception("%s: tool.invoke raised an exception", self.name)
+            # Wrap runtime errors for callers
+            raise ExecutionError(f"{self.name}: tool invocation failed") from e
 
     # ---------------------------------------------------------------------
     # Memory
@@ -574,7 +719,11 @@ class ToolFlow(Workflow):
         Clear checkpoints and cascade to the Tool if it exposes a clear_memory hook.
         """
         super().clear_memory()
-        self._tool.clear_memory()
+        try:
+            self._tool.clear_memory()
+        except Exception:
+            # Clearing memory is best-effort; log and continue
+            logger.warning("%s: tool.clear_memory() raised an exception during clear_memory", self.name, exc_info=True)
 
 # wraps all incoming objects into workflow classes and adjusts their input/output schemas based on optional parameters
 def _to_workflow(obj: Agent | Tool | Workflow, in_sch:list[str]|None = None, out_sch:list[str]|None = None) -> Workflow:
@@ -583,7 +732,7 @@ def _to_workflow(obj: Agent | Tool | Workflow, in_sch:list[str]|None = None, out
             return obj
         if isinstance(obj, Agent): return AgentFlow(obj, input_schema=in_sch or ["prompt"], output_schema=out_sch or [WF_RESULT])
         if isinstance(obj, Tool): return ToolFlow(obj, output_schema=out_sch or [WF_RESULT])
-        raise TypeError(f"Object must be Agent, Tool, or Workflow. Got unexpected '{type(obj).__name__}'.")
+        raise ValidationError(f"Object must be Agent, Tool, or Workflow. Got unexpected '{type(obj).__name__}'.")
 
 
 class ChainFlow(Workflow):
@@ -623,33 +772,24 @@ class ChainFlow(Workflow):
         name: str,
         description: str,
         steps: List[Agent | Tool | Workflow] | None = None,
-        output_schema: List[str] | None = None,
-        *,
-        zero_step_schema: list[str] = [WF_RESULT],
+        output_schema: List[str]  = [WF_RESULT],
+        bundle_all = True
     ):
-        # validate zero_step_schema
-        if zero_step_schema == []:
-            raise TypeError("ChainFlow: While a chain-flow lacks any intermediate steps, the default identity schema cannot be an empty list")
-        if any(not isinstance(key, str) for key in zero_step_schema):
-            raise TypeError("ChainFlow: The default schema assigned must be a list of strings, only")
         # build steps
         self._steps: list[Workflow] = []
         if steps:
             self._steps = [_to_workflow(s) for s in steps]
+        logger.debug("%s: ChainFlow initialized with %d step(s): %s", name, len(self._steps), [s.name for s in self._steps])
         super().__init__(
             name=name,
             description=description,
-            input_schema=zero_step_schema,
-            output_schema=zero_step_schema,
-            bundle_all= zero_step_schema == [WF_RESULT] or (self._steps and self._steps[-1].bundle_all),
+            input_schema=output_schema,
+            output_schema=output_schema,
+            bundle_all= bundle_all,
         )
         # Reserve for when no steps are present
-        self._default_schema = zero_step_schema
         self._reconcile_all()
         self._mirror_endpoints_from_children()
-        # if a custom output schema is provided, set it to that.
-        if output_schema != None:
-            self.output_schema = output_schema
 
     # -------------------- Steps management --------------------
 
@@ -662,10 +802,8 @@ class ChainFlow(Workflow):
         value = value or []
         self._steps = [_to_workflow(s) for s in value]
         if not self._steps:
-            # Return to empty state invariants
-            self._bundle_all = False
             # Keep user-configurable input/output overlays; they remain mirrored by setters.
-            return
+            logger.debug("%s: steps set to empty; ChainFlow reverting to default input schema=%s", self.name, self._output_schema)
         self._reconcile_all()
         self._mirror_endpoints_from_children()
 
@@ -675,8 +813,9 @@ class ChainFlow(Workflow):
             self._steps.append(wrapped)
         else:
             if position < 0 or position > len(self._steps):
-                raise IndexError(f"{self.name}: add_step position out of range")
+                raise IndexError(f"{self.name}: add_step position {position} out of range")
             self._steps.insert(position, wrapped)
+        logger.debug("%s: added step '%s' at position=%s", self.name, wrapped.name, str(position))
         self._reconcile_all()
         self._mirror_endpoints_from_children()
 
@@ -687,6 +826,7 @@ class ChainFlow(Workflow):
             return removed
         self._reconcile_all()
         self._mirror_endpoints_from_children()
+        logger.debug("%s: popped step '%s' (index=%d); %d steps remain", self.name, removed.name, index, len(self._steps))
         return removed
 
     # -------------------- Execution --------------------
@@ -717,8 +857,9 @@ class ChainFlow(Workflow):
             if (A.bundle_all) or (len(a_out) == len(b_in)) or (set(a_out).issubset(set(b_in))):
                 A.output_schema = b_in
                 continue
-            # If none of the above are valid, then raise an error
-            raise ValueError(
+            # If none of the above are valid, then raise a domain-specific validation error
+            logger.error("%s: reconcilation failed between %s and %s: out=%s in=%s", self.name, A.name, B.name, a_out, b_in)
+            raise ValidationError(
                     f"{self.name}: length mismatch {A.name} → {B.name}: "
                     f"len(out)={len(a_out)} != len(in)={len(b_in)} (adapter required)"
                 )
@@ -726,13 +867,12 @@ class ChainFlow(Workflow):
     def _mirror_endpoints_from_children(self) -> None:
         # if no steps are present, then chainflow becomes an identity flow
         if not self._steps:
-            self._input_schema = self._default_schema
-            self.output_schema = self._default_schema
+            self._input_schema = self.output_schema
+            logger.debug("%s: mirrored endpoints to default input schema=%s (no steps)", self.name, self._output_schema)
+            return
         first = self._steps[0]
-        last  = self._steps[-1]
         self._input_schema  = list(first.input_schema)
-        self._output_schema = list(last.output_schema)
-        self._bundle_all    = bool(last.bundle_all)
+        logger.debug("%s: mirrored endpoints from children: input_schema=%s output_schema=%s bundle_all=%s", self.name, self._input_schema, self._output_schema, self._bundle_all)
 
 
 class MakerChecker(Workflow):
@@ -773,49 +913,50 @@ class MakerChecker(Workflow):
         checker: Agent | Tool | Workflow,
         judge: Optional[Agent | Tool | Workflow] = None,
         max_revisions: int = 0,
+        output_schema: List[str] = [WF_RESULT],
+        bundle_all: bool = True
     ) -> None:
         # Normalize participants
-        maker_wf   = _to_workflow(maker)
+        maker_wf = _to_workflow(maker)
         checker_wf = _to_workflow(checker)
+
+        # Validate max_revisions early using provided name for clear messaging
         if max_revisions < 0:
-            raise ValueError(f"{self.name}: max_revisions must be >= 0; got {max_revisions}")
-        # Initialize base mirroring the *maker* endpoints
+            raise ValidationError(f"{name or '<MakerChecker>'}: max_revisions must be >= 0; got {max_revisions}")
+
+        # Initialize base mirroring the *maker* input schema
         super().__init__(
             name=name,
             description=description,
             input_schema=list(maker_wf.input_schema),
-            output_schema=list(checker_wf.input_schema),
-            bundle_all=maker_wf.bundle_all,
+            output_schema=list(output_schema),
+            bundle_all = bundle_all,
         )
 
+        # Instance state
         self._maker: Workflow = maker_wf
         self._checker: Workflow = checker_wf
         self.max_revisions: int = int(max_revisions)
         self._judge: Optional[Workflow] = None
-        self._to_judge_adapter: dict = {}
+
+        logger.debug("%s: MakerChecker init maker=%s checker=%s max_revisions=%d", self.name, maker_wf.name, checker_wf.name, max_revisions)
 
         # Enforce maker <-> checker parity before initial mirror.
         self._reconcile_pair()
-        
+
         # Judge initial sanity (if provided)
         if judge is not None:
             # build judge
             j_wf = _to_workflow(judge)
             j_wf.output_schema = [JUDGE_RESULT]
             j_wf.bundle_all = False
-            # if lengths don't match
-            if len(j_wf.input_schema) != len(self._maker.input_schema):
-                raise ValueError(
-                    f"{self.name}: Expected {len(self._maker.input_schema)} but only got {len(j_wf.input_schema)}."
+            # if maker and judge inputs don't match, this judge is not compatible
+            if set(j_wf.input_schema) != set(j_wf.input_schema):
+                raise SchemaError(
+                    f"{self.name}: judge.input_schema {j_wf.input_schema} != maker.input_schema {self._maker.input_schema}"
                 )
-            # initialize mapping of maker input keys to judge input keys
-            if set(j_wf.input_schema) == set(self._maker.input_schema):
-                self._to_judge_adapter = {key:key for key in self._maker.input_schema}
-            else:
-                self._to_judge_adapter = {
-                    m_key : j_key for m_key, j_key in zip(self._maker.input_schema, j_wf.input_schema)
-                }
             self._judge = j_wf
+
         # Mirror maker endpoints externally (again, after reconcile)
         self._refresh_endpoints()
 
@@ -829,11 +970,10 @@ class MakerChecker(Workflow):
         """
         self._maker.output_schema = self._checker.input_schema
         self._checker.output_schema = self._maker.input_schema
-        if self._judge is not None and len(self._judge.input_schema) != self._maker.input_schema:
+        # If judge's input schema length no longer matches maker, drop judge and adapter
+        if self._judge is not None and set(self._judge.input_schema) != set(self._maker.input_schema):
+            logger.info("%s: dropping judge due to input_schema mismatch (judge=%s maker=%s)", self.name, self._judge.input_schema, self._maker.input_schema)
             self._judge = None
-            self._to_judge_adapter = {}
-        if self._judge:
-            self._to_judge_adapter = {m_key : j_key for m_key, j_key in zip(self._maker.input_schema, self._judge.input_schema)}
 
     def _refresh_endpoints(self) -> None:
         """
@@ -843,18 +983,12 @@ class MakerChecker(Workflow):
         """
         # must use private for input_schema
         self._input_schema = list(self._maker.input_schema)
-        # must use output setter
-        self.output_schema = list(self._maker.output_schema)
-        # must use bundle all setter
-        self.bundle_all = self._maker.bundle_all
         # set judge to None if judge.input_schema length no longer matches
-        if len(self._maker.input_schema) != len(self._judge.input_schema):
+        if self._judge is not None and len(self._maker.input_schema) != len(self._judge.input_schema):
+            logger.info("%s: judge input_schema no longer matches maker; dropping judge", self.name)
             self._judge = None
-            self._to_judge_adapter = {}
-        # update adapter
-        self._to_judge_adapter = {
-            m:j for m,j in zip(self._maker.input_schema, self._judge.input_schema)
-        }
+        # update adapter if judge present
+        logger.debug("%s: refreshed endpoints -> input_schema=%s", self.name, self._input_schema)
 
     # --------------------------
     # Participant accessors
@@ -892,12 +1026,10 @@ class MakerChecker(Workflow):
         j_wf = _to_workflow(value) if value is not None else None
         if j_wf is None: self._judge = None; return
         # Judge must consume maker.input; produce a boolean at JUDGE_RESULT
-        if len(j_wf) != len(self._maker.input_schema):
-            raise ValueError(
-                f"{self.name}: Expected {len(self._maker.input_schema)} but only got {len(j_wf.input_schema)}."
+        if set(j_wf.input_schema) != set(self._maker.input_schema):
+            raise SchemaError(
+                f"{self.name}: judge.input_schema {j_wf.input_schema} != maker.input_schema length {self._maker.input_schema}"
             )
-        else:
-            self._to_judge_adapter = {m:j for m,j in zip(self._maker.input_schema, j_wf.input_schema)}
         self._judge = j_wf
         self._judge.output_schema = [JUDGE_RESULT]
         self._judge.bundle_all = False
@@ -931,7 +1063,8 @@ class MakerChecker(Workflow):
                 decision = self._judge.invoke(revisions)  # expects maker.input_schema
                 ok = decision.get(JUDGE_RESULT)
                 if not isinstance(ok, bool):
-                    raise ValueError(
+                    logger.error("%s: judge returned invalid decision %r", self.name, decision)
+                    raise ValidationError(
                         f"{self.name}: judge must return a single boolean at key '{JUDGE_RESULT}'; got {decision!r}"
                     )
                 if ok: break
@@ -990,11 +1123,11 @@ class Selector(Workflow):
         # ---- Ingest branches
         wrapped_branches: List[Workflow] = [_to_workflow(b, list(self._input_schema), output_schema) for b in branches]
         if len(set([b.name for b in branches])) < len(branches):
-            raise ValueError(
+            raise ValidationError(
                 f"{self.name}: duplicate branch names detected. Names given are {[b.name for b in branches]}."
             )
         if any(set(b.input_schema) != set(self._input_schema) for b in wrapped_branches):
-            raise ValueError(
+            raise ValidationError(
                 f"{self.name}: unexpected input schema not matching judge's input schema: {self._input_schema}"
             )
         self._branches: List[Workflow] = wrapped_branches
@@ -1038,12 +1171,12 @@ class Selector(Workflow):
         for b in vals:
             wb = _to_workflow(b, in_sch=self._input_schema, out_sch=self._output_schema)
             if set(wb.input_schema) != set(self._input_schema):
-                raise ValueError(
+                raise ValidationError(
                     f"{self.name}: branch '{wb.name}' input_schema {wb.input_schema} "
                     f"!= selector/judge input_schema {list(self._input_schema)} (set mismatch)"
                 )
             if wb.name in seen_names:
-                raise ValueError(f"{self.name}: duplicate branch name '{wb.name}'")
+                raise ValidationError(f"{self.name}: duplicate branch name '{wb.name}'")
             seen_names.add(wb.name)
             wrapped.append(wb)
         self._branches = wrapped
@@ -1054,13 +1187,13 @@ class Selector(Workflow):
         wb = _to_workflow(branch, self.input_schema, self.output_schema)
         # Validate input schema set-equivalence
         if set(wb.input_schema) != set(self.input_schema):
-            raise ValueError(
+            raise ValidationError(
                 f"{self.name}: branch '{wb.name}' input_schema {wb.input_schema} "
                 f"!= selector/judge input_schema {list(self._input_schema)} (set mismatch)"
             )
         # Unique name
         if any(b.name == wb.name for b in self._branches):
-            raise ValueError(f"{self.name}: duplicate branch name '{wb.name}'")
+            raise ValidationError(f"{self.name}: duplicate branch name '{wb.name}'")
 
         self._branches.append(wb)
 
@@ -1089,19 +1222,24 @@ class Selector(Workflow):
         """
         # fail fast if no branches
         if not self._branches:
-            raise ValueError(f"{self.name}: There are no branches to choose from, thus failure.")
+            logger.error("%s: no branches available for selection", self.name)
+            raise ValidationError(f"{self.name}: There are no branches to choose from")
         # have judge select branch to invoke
         selection_raw = self._judge.invoke(inputs)
         # fail if selection isn't formatted correctly or returning a string
         if not isinstance(selection_raw, dict) or JUDGE_RESULT not in selection_raw:
-            raise ValueError(f"{self.name}: judge must return a dict with key '{JUDGE_RESULT}'; got {selection_raw!r}")
+            logger.error("%s: judge returned malformed selection %r", self.name, selection_raw)
+            raise ValidationError(f"{self.name}: judge must return a dict with key '{JUDGE_RESULT}'; got {selection_raw!r}")
         selection = selection_raw[JUDGE_RESULT]
         if not isinstance(selection, str) or not selection.strip():
-            raise ValueError(f"{self.name}: judge must output a non-empty string under '{JUDGE_RESULT}', got {selection!r}")
+            logger.error("%s: judge produced empty or non-string selection %r", self.name, selection)
+            raise ValidationError(f"{self.name}: judge must output a non-empty string under '{JUDGE_RESULT}', got {selection!r}")
         # Find and run branch with selection name (either the ._name or .name)
         selected_branch = next((b for b in self._branches if b._name == selection or b.name == selection), None)
         if selected_branch is None:
-            raise RuntimeError(f"{self.name}: No branches matching the name for selection '{selection}'.")
+            logger.error("%s: no branch matched selection '%s'", self.name, selection)
+            raise ValidationError(f"{self.name}: No branches matching the name for selection '{selection}'.")
+        logger.debug("%s: selector chose branch '%s'", self.name, selected_branch.name)
         return selected_branch.invoke(inputs)
 
 
@@ -1144,6 +1282,8 @@ class MapFlow(Workflow):
         output_schema: List[str] = [WF_RESULT],
         bundle_all: bool = True,
         flatten: bool = False,
+        *,
+        max_workers: int = 16
     ) -> None:
         # Initialize base with placeholder input_schema; we will set the private field afterwards
         super().__init__(
@@ -1156,6 +1296,7 @@ class MapFlow(Workflow):
 
         self._flatten: bool = bool(flatten)
         self._branches: List[Workflow] = []
+        self._max_workers = max_workers
 
         # Ingest/wrap branches; enforce unique names
         seen: set[str] = set()
@@ -1182,9 +1323,9 @@ class MapFlow(Workflow):
         """
         Add a branch. Name must be unique. Input schema is rebuilt from branch names.
         """
-        wf = self._to_workflow(obj, in_sch=None, out_sch=None)
+        wf = _to_workflow(obj, in_sch=None, out_sch=None)
         if any(b.name == wf.name for b in self._branches):
-            raise ValueError(f"{self.name}: duplicate branch name '{wf.name}'")
+            raise ValidationError(f"{self.name}: duplicate branch name '{wf.name}'")
         self._branches.append(wf)
         self._rebuild_input_schema_from_branch_names()
 
@@ -1216,7 +1357,7 @@ class MapFlow(Workflow):
             try:
                 b.clear_memory()
             except Exception:
-                pass
+                logger.warning("%s: branch.clear_memory raised during clear_memory", self.name, exc_info=True)
 
     # -------------------- Execution --------------------
 
@@ -1239,7 +1380,8 @@ class MapFlow(Workflow):
                              are inserted as {branch.name: <raw>} instead of flattened.
         """
         if not self._branches:
-            raise RuntimeError(f"{self.name}: No branches available")
+            logger.error("%s: no branches available", self.name)
+            raise ValidationError(f"{self.name}: No branches available")
 
         # Partition branches: which have payloads, which don't
         to_run: List[tuple[str, Workflow, Dict[str, Any]]] = []
@@ -1249,16 +1391,13 @@ class MapFlow(Workflow):
             if b.name in inputs:
                 payload = inputs[b.name]
                 if not isinstance(payload, dict):
-                    raise ValueError(
+                    raise ValidationError(
                         f"{self.name}: payload for branch '{b.name}' must be a dict; "
                         f"got {type(payload).__name__}"
                     )
                 to_run.append((b.name, b, payload))
             else:
                 missing_names.append(b.name)
-
-        # Concurrency: execute only those with payloads
-        from concurrent.futures import ThreadPoolExecutor
 
         results_by_branch: Dict[str, Optional[Dict[str, Any]]] = {}
 
@@ -1271,7 +1410,7 @@ class MapFlow(Workflow):
         failing_branch: Optional[str] = None
 
         if to_run:
-            max_workers = min(len(to_run), 16)
+            max_workers = min(len(to_run), self._max_workers)
             futures: List[tuple[str, Any]] = []
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 for name, wf, payload in to_run:
@@ -1286,7 +1425,7 @@ class MapFlow(Workflow):
                     try:
                         res = fut.result()
                         if not isinstance(res, dict):
-                            raise TypeError(
+                            raise ValidationError(
                                 f"{self.name}:{branch_name} returned non-dict result "
                                 f"({type(res).__name__}); expected dict"
                             )
@@ -1300,7 +1439,8 @@ class MapFlow(Workflow):
                                 f.cancel()
 
         if first_exc is not None:
-            raise RuntimeError(f"{self.name}:{failing_branch} failed") from first_exc
+            logger.exception("%s: branch %s failed during MapFlow execution", self.name, failing_branch)
+            raise ExecutionError(f"{self.name}:{failing_branch} failed") from first_exc
 
         if not self._flatten:
             # Ensure all branches are present in the output (ordered by declaration)
@@ -1320,25 +1460,19 @@ class MapFlow(Workflow):
                 # shouldn't occur here because we don't insert None for flatten=True
                 continue
 
-            # Special-envelope rule: exact single-key {WF_RESULT: ...} or {JUDGE_RESULT: ...}
-            if len(payload) == 1:
-                only_key = next(iter(payload))
-                if only_key in special_keys:
-                    if b.name in flat and not isinstance(payload[only_key], dict):
-                        raise ValueError(
-                            f"{self.name}: flatten collision for branch name '{b.name}'"
-                        )
-                    if isinstance(payload[only_key], dict) and not any(not isinstance(k, str) for k in payload[only_key].keys()):
-                        payload = payload[only_key]
-                    else:
-                        flat[b.name] = payload
-                        continue
-            else: pass
+            # unwrap any special keys if using special keys
+            if _is_namedtuple(payload):
+                payload = _namedtuple_as_mapping(payload)
+            while isinstance(payload, MAPPABLE_KINDS) and len(payload.keys()) == 1 and list(payload.keys())[0] in special_keys:
+                payload = payload[list(payload.keys())[0]]
+            if not isinstance(payload, dict):
+                flat[b.name] = payload
+                continue
 
             # Normal flatten: merge keys with collision check
             for k, v in payload.items():
                 if k in flat:
-                    raise ValueError(
+                    raise ValidationError(
                         f"{self.name}: flatten key collision for '{k}' "
                         f"(originating branch '{b.name}')"
                     )
@@ -1395,6 +1529,8 @@ class ScatterFlow(Workflow):
         output_schema: List[str] = [WF_RESULT],
         bundle_all: bool = True,
         flatten: bool = False,
+        *,
+        max_workers: int = 16
     ) -> None:
         # Initialize base with the broadcast schema
         super().__init__(
@@ -1407,6 +1543,7 @@ class ScatterFlow(Workflow):
 
         self._flatten: bool = bool(flatten)
         self._branches: List[Workflow] = []
+        self._max_workers = max_workers
 
         # Ingest/wrap branches; enforce unique names; prune non-conforming schemas
         wrapped: List[Workflow] = []
@@ -1464,7 +1601,10 @@ class ScatterFlow(Workflow):
     def clear_memory(self) -> None:
         Workflow.clear_memory(self)
         for b in self._branches:
-            b.clear_memory()
+            try:
+                b.clear_memory()
+            except Exception:
+                logger.warning("%s: branch.clear_memory raised during clear_memory", self.name, exc_info=True)
 
     # -------------------- Execution --------------------
 
@@ -1477,11 +1617,10 @@ class ScatterFlow(Workflow):
         Every branch receives the same validated `inputs` dict. Each result must be a dict.
         """
         if not self._branches:
-            raise RuntimeError(f"{self.name}: No branches available")
+            logger.error("%s: no branches available", self.name)
+            raise ValidationError(f"{self.name}: No branches available")
 
-        from concurrent.futures import ThreadPoolExecutor
-
-        max_workers = min(len(self._branches), 16) if self._branches else 1
+        max_workers = min(len(self._branches), self._max_workers) if self._branches else 1
         futures: List[tuple[str, Any]] = []
         results_by_branch: Dict[str, Dict[str, Any]] = {}
 
@@ -1501,7 +1640,7 @@ class ScatterFlow(Workflow):
                 try:
                     res = fut.result()
                     if not isinstance(res, dict):
-                        raise TypeError(
+                        raise ValidationError(
                             f"{self.name}:{branch_name} returned non-dict result "
                             f"({type(res).__name__}); expected dict"
                         )
@@ -1515,7 +1654,8 @@ class ScatterFlow(Workflow):
                             f.cancel()
 
             if first_exc is not None:
-                raise RuntimeError(f"{self.name}:{failing_branch} failed") from first_exc
+                logger.exception("%s: branch %s failed during ScatterFlow execution", self.name, failing_branch)
+                raise ExecutionError(f"{self.name}:{failing_branch} failed") from first_exc
 
         if not self._flatten:
             return results_by_branch
@@ -1524,29 +1664,30 @@ class ScatterFlow(Workflow):
         flat: Dict[str, Any] = {}
         special_keys = {WF_RESULT, JUDGE_RESULT}
 
-        for bname, payload in results_by_branch.items():
-            # Special-envelope rule: if payload is exactly {WF_RESULT: ...} or {JUDGE_RESULT: ...},
-            # DO NOT flatten; map under branch name instead to avoid special keys at top-level.
-            if len(payload) == 1:
-                only_key = next(iter(payload))
-                if only_key in special_keys:
-                    if bname in flat and not isinstance(payload[only_key], dict):
-                        raise ValueError(
-                            f"{self.name}: flatten collision for branch name '{bname}'"
-                        )
-                    if isinstance(payload[only_key], dict) and not any(not isinstance(key, str) for key in payload[only_key].keys()):
-                        payload = payload[only_key]
-                    else:
-                        flat[bname] = payload[only_key]
-                        continue
-                else: pass
-            # Normal flatten: merge keys, enforcing no collisions
+        for b in self._branches:
+            if b.name not in results_by_branch:
+                # either missing input or (in theory) not executed; skip entirely
+                continue
+            payload = results_by_branch[b.name]
+            if payload is None:
+                # shouldn't occur here because we don't insert None for flatten=True
+                continue
+
+            # unwrap any special keys if using special keys
+            if _is_namedtuple(payload):
+                payload = _namedtuple_as_mapping(payload)
+            while isinstance(payload, MAPPABLE_KINDS) and len(payload.keys()) == 1 and list(payload.keys())[0] in special_keys:
+                payload = payload[list(payload.keys())[0]]
+            if not isinstance(payload, dict):
+                flat[b.name] = payload
+                continue
+
+            # Normal flatten: merge keys with collision check
             for k, v in payload.items():
                 if k in flat:
-                    raise ValueError(
+                    raise ValidationError(
                         f"{self.name}: flatten key collision for '{k}' "
-                        f"(originating branch '{bname}')"
+                        f"(originating branch '{b.name}')"
                     )
                 flat[k] = v
-
         return flat

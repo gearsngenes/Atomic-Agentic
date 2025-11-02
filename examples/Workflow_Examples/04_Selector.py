@@ -12,7 +12,7 @@ from modules.LLMEngines import OpenAIEngine
 from modules.Workflows import Selector, AgentFlow, ToolFlow
 from modules.Tools import Tool
 
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
 
 LLM = OpenAIEngine(model="gpt-4o-mini")
 

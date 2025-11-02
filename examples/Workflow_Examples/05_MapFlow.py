@@ -8,7 +8,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from modules.Tools import Tool
 from modules.Workflows import MapFlow
 
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
 
 # -------------------------
 # Branch tools (each returns a dict)

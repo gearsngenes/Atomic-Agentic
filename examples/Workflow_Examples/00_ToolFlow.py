@@ -1,15 +1,14 @@
 import sys, logging, json
 from pathlib import Path
-from typing import Any
-
 # Setting the repo root on path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
+from typing import Any
 from modules.Workflows import ToolFlow
 from modules.Tools import Tool
 
 
-logging.basicConfig(level=logging.INFO)
+logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
+
 print("=== ToolFlow examples (NEW uniform `invoke(inputs: dict)` contract) ===")
 
 # ===========================================================
@@ -18,7 +17,7 @@ def double_json_keys(num, string, map_):
     return num * 2, json.loads(string), list(map_.keys())
 
 tool1 = Tool("double_and_json", double_json_keys)
-wf1 = ToolFlow(tool=tool1, output_schema=["doubled", "json", "keys"])
+wf1 = ToolFlow(tool=tool1, output_schema=["doubled", "json", "keys"], bundle_all=False)
 
 print("\n[1] Mixed inputs (all via single dict):")
 out1 = wf1.invoke({
@@ -106,7 +105,7 @@ def string_to_list(string: str):
     return string.split(",")[:3]
 
 tool7 = Tool("string_to_list", string_to_list)
-wf7 = ToolFlow(tool=tool7, output_schema=["name", "age", "state"])
+wf7 = ToolFlow(tool=tool7, output_schema=["name", "age", "state"], bundle_all=False)
 
 print("\n[7] Output schema mapping:")
 out7 = wf7.invoke({"string": "John,37,New Jersey"})

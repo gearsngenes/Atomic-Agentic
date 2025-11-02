@@ -1,4 +1,4 @@
-import sys, json
+import sys, json, logging
 from pathlib import Path
 
 # Setting the repo root on path
@@ -8,6 +8,7 @@ from modules.Agents import Agent
 from modules.LLMEngines import OpenAIEngine
 from modules.Workflows import AgentFlow
 
+logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
 
 print("=== AgentFlow examples (NEW uniform `invoke(inputs: dict)` contract) ===")
 
@@ -33,10 +34,6 @@ print("1) ", res1)
 res2 = workflow.invoke({"prompt": "Give a one-sentence definition of Bayes' theorem."})
 print("2) ", res2)
 
-# Show latest checkpoint shape (inputs/result)
-print("=== Latest checkpoint (AgentFlow w/ 'prompt') ===")
-print(json.dumps(workflow.checkpoints[-1], indent = 2))
-
 
 # ===================================================================
 # OPTIONAL DEMO: Custom key variant
@@ -59,8 +56,6 @@ res3 = workflow_q.invoke({
     "temperature": 0.0,
 })
 print("3) ", res3)
-print("=== Latest checkpoint (AgentFlow w/ input key 'question') ===")
-print(json.dumps(workflow_q.checkpoints[-1], indent = 2))
 
 
 # 4) Another custom key set
@@ -73,6 +68,3 @@ res4 = workflow_query.invoke({
     "query": "What does O(n log n) usually refer to?"
 })
 print("4) ", res4)
-
-print("=== Latest checkpoint (AgentFlow w/ input key 'query') ===")
-print(json.dumps(workflow_query.checkpoints[-1], indent = 2))

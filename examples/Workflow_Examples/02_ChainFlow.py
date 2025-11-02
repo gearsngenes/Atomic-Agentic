@@ -10,7 +10,7 @@ from modules.LLMEngines import OpenAIEngine
 from modules.Workflows import ChainFlow
 from modules.Tools import Tool
 
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
 
 agent1 = Agent(
     name="Agent1",
@@ -56,7 +56,8 @@ workflow = ChainFlow(
     output_schema=["chain_result"]
 )
 
-task = {
-    "prompt":"There are 5 sheep, and twenty-three ox and zero point five chicken eggs."
-    } if agentic_chain else {"string":'{"a":-1.74,"b":7,"c":4}'}
+agentic_task = {"prompt":"There are 5 sheep, and twenty-three ox and zero point five chicken eggs."}
+tool_task = {"string":'{"a":-1.74,"b":7,"c":4}'}
+
+task = agentic_task if agentic_chain else tool_task
 print(workflow.invoke(task))

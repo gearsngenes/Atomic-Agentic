@@ -11,7 +11,7 @@ from modules.LLMEngines import OpenAIEngine
 from modules.Workflows import MakerChecker, AgentFlow, ToolFlow
 from modules.Tools import Tool
 
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
 
 # ---- LLM ----
 LLM = OpenAIEngine(model="gpt-4o", temperature=0.7)
@@ -68,6 +68,8 @@ workflow = MakerChecker(
     checker=editor_agent,
     max_revisions=3,
     judge=approver_tool,
+    output_schema=["final_draft"],
+    bundle_all=False
 )
 
 # ---- Run ----
@@ -75,7 +77,7 @@ user_prompt = input("Enter a prompt for the story: ")
 result = workflow.invoke({"prompt": user_prompt})  # dict-only input
 
 # final result conforms to workflow.output_schema
-final_draft = result["prompt"]
+final_draft = result["final_draft"]
 
 print("\n---FINAL DRAFT---\n")
 print(final_draft)

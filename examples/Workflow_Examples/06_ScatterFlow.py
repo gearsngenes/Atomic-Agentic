@@ -10,7 +10,7 @@ from modules.LLMEngines import OpenAIEngine
 from modules.Tools import Tool
 from modules.Workflows import ScatterFlow
 
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
 
 # -------------------------
 # Define simple tools that accept the *same* broadcast schema: {"prompt": ...}
