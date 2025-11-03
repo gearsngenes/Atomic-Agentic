@@ -2,33 +2,98 @@
 Workflows
 =========
 
-This module defines the Workflow system — a collection of deterministic, schema-based
-coordinators that connect and orchestrate Agents, Tools, and other Workflows into
-reliable pipelines of logic. Each workflow operates under a uniform call signature
-(`invoke(inputs: dict) -> dict`) and uses ordered `input_schema` and `output_schema`
-definitions to enforce consistent data flow between components. The goal is to provide
-a predictable, provider-agnostic backbone for building structured, multi-step reasoning
-and execution chains across any combination of agentic or deterministic logic units.
+Overview
+--------
+Workflows are **instantiated, stateful pipeline objects** that accept and return **single-dict payloads**.
+They provide **deterministic orchestration** of heterogeneous components (Tools, Agents, and other Workflows)
+through explicit **input/output schemas** and **normalized packaging**. This yields predictable composition,
+clear contracts, and auditability across complex, multi-step tasks.
 
-Workflows are built on the principle of schema determinism: every step declares its
-expected inputs and outputs, ensuring that data passed between nodes is validated and
-normalized at runtime. This design yields reproducible, debuggable behavior, making it
-possible to trace and verify complex orchestration sequences with confidence.
+Why Use Workflows
+-----------------
+• **Determinism & Contracts**: Inputs are validated against declared schemas; outputs are packaged to a declared shape.  
+• **Composability**: Mix Tools, Agents, and Workflows without bespoke glue code.  
+• **Traceability**: Timestamped checkpoints capture inputs, raw results, and packaged outputs.  
+• **Provider-Agnostic**: Decouple orchestration from LLM/tool vendors and SDKs.  
+• **Safety & Guardrails**: Schema checks, packaging rules, and boundary overlays prevent silent drift.
 
-The module supports a range of coordination patterns commonly used in agentic
-architectures, including:\n
-    - ToolFlow and AgentFlow — wrapping tools or agents in schema-aware workflow nodes.
-    - ChainFlow — linear or chain-of-thought pipelines that pass results step-to-step.
-    - BatchFlow — parallel fan-out of multiple branches with aggregated results.
-    - MakerChecker — iterative maker-reviewer cycles with optional automated judgment.
-    - Selector — strategy-style conditional routing between alternative branches.
-    - LangGraphFlow — graph-based orchestration using uniform schema propagation.
+Core Guarantees (Module-Level Contract)
+---------------------------------------
+• **Single call shape**: `invoke(inputs: dict) -> dict` for every Workflow.  
+• **Schema determinism**: `input_schema` and `output_schema` define accepted keys and returned keys.  
+• **Packaging normalization**: Scalars, sequences, mappings, and records are normalized to exactly `output_schema`.
+  Optional `bundle_all` allows single-key envelopes when appropriate.  
+• **Error taxonomy**:  
+  – `ValidationError`: inputs violate schema/structure.  
+  – `SchemaError`: incompatible or illegal schema configurations.  
+  – `PackagingError`: result cannot be normalized to the declared outputs.  
+  – `ExecutionError`: underlying step raised.
 
-All workflows share a consistent checkpointing system that records timestamps, input
-snapshots, and normalized outputs after every invocation, enabling full traceability
-and validation of runs. They can be freely composed or subclassed to introduce new
-coordination patterns, provided the schema-based invocation contract and deterministic
-checkpoint behavior are maintained.
+Key Concepts
+------------
+• **Boundary Overlays**: Composite patterns (e.g., Chain/Selector/MakerChecker/Map/Scatter) can expose an external
+  `output_schema`/`bundle_all` **at the boundary** without mutating children.  
+• **Hybrid Mapping (dicts)**: Partial overlaps map by key and pad/strict as configured; envelopes can be used
+  when arbitrary mappings must be preserved deterministically.  
+• **State & Memory**: Checkpoints for observability; optional clearing/reset between runs.
+
+Workflow Patterns (What they enable)
+------------------------------------
+• **ToolFlow** — *Capability Adaptation*  
+  Enable any callable “tool” to participate in schema-checked orchestration. It binds dict inputs to the tool’s
+  parameters and normalizes the tool’s return for downstream steps. Use when you want **typed, reusable operations**
+  (parsers, converters, retrievers) to plug into pipelines.
+
+• **AgentFlow** — *LLM/Agent Integration*  
+  Bridge dict-shaped inputs to an Agent’s prompting/inference interface and bring the Agent’s output back into
+  schema-checked form. Use when you need **reasoning or generation** but still want **deterministic I/O** and packaging.
+
+• **ChainFlow** — *Linear Transformation*  
+  Compose steps **sequentially** so each step’s packaged outputs become the next step’s inputs. Use when you need
+  **progressive transformation** (extract → analyze → summarize) with **clear handoff contracts**.
+
+• **MakerChecker** — *Quality Loop & Governance*  
+  Run an iterative **produce → review (→ optional judge)** cycle until approved or capped. Use when you need
+  **policy enforcement, drafting/revision**, and explicit acceptance criteria separating *creation* from *evaluation*.
+
+• **Selector** — *Policy Routing*  
+  Use a judge to select **one** branch to run from many. Use when choice depends on **inputs, policy, or heuristics**
+  (e.g., route to a specialist agent/tool). Keeps **decision logic** separate from **execution paths**.
+
+• **MapFlow** — *Heterogeneous Fan-Out by Name*  
+  Dispatch **different payloads** to **different branches** in parallel (payloads keyed by branch name), then aggregate.
+  Use when each branch performs **distinct work** on **distinct inputs** and you want **structured aggregation** or
+  optional flattening.
+
+• **ScatterFlow** — *Broadcast Fan-Out / Ensembling*  
+  Broadcast the **same inputs** to multiple branches in parallel (enforce schema alignment), then aggregate.
+  Use for **ensembles, consensus, redundancy**, or when comparing multiple approaches on the same data.
+
+Concurrency & Ordering
+----------------------
+Fan-out patterns parallelize branches while preserving **deterministic aggregation order**. Boundaries ensure that
+non-deterministic underlying steps still yield **deterministic packaged outputs**.
+
+Best Practices
+--------------
+• Treat schemas as **public contracts**; prefer adapters when step keys differ.  
+• Use `bundle_all` **only** with single-key envelopes and only when you truly need to preserve an arbitrary mapping.  
+• Keep overlays at **composite boundaries**; avoid mutating child schemas for local convenience.  
+• Rely on checkpoints for **debugging, audits, and reproducibility**.  
+• Fail **fast and loud** on schema mismatches rather than silently coercing ambiguous shapes.
+
+Out of Scope (What this docstring avoids)
+-----------------------------------------
+• Vendor specifics (LLM/provider APIs), HTTP plumbing, or SDK nuances.  
+• Private helper semantics or logging internals.  
+• Lengthy examples; see examples/tests for concrete usage patterns.
+
+Glossary
+--------
+**Schema**: Ordered list of keys defining accepted inputs or produced outputs.  
+**Packaging**: Normalization process that maps any step’s return into `output_schema`.  
+**Overlay**: External output schema/bundling applied at a composite boundary without mutating children.  
+**Envelope**: Single-key dict used to preserve arbitrary mappings or consolidate results predictably.
 """
 
 # ============================================================
@@ -102,55 +167,54 @@ STRINGISH       = (str, bytes, bytearray)
 
 class Workflow(ABC):
     """
-    Abstract base for deterministic, schema-driven orchestration.
+    One-line
+    --------
+    Abstract base for deterministic, schema-driven orchestration with single-dict I/O.
 
-    Mission
+    Purpose
     -------
-    A Workflow coordinates a single synchronous "step" that wraps a callable
-    unit (e.g., a Python method, Tool, Agent, or another Workflow) behind a
-    uniform interface. It enforces input/output schemas, performs strict input
-    validation, delegates execution to `_process_inputs(inputs)`, and then
-    packages the raw result into a dict conforming to `output_schema`.
+    An abstract class that orchestrates “steps” (Tools, Agents, or other Workflows) behind a uniform 
+    `invoke(inputs: dict) -> dict`. Validates inputs against `input_schema`, delegates to 
+    `_process_inputs`, and deterministically packages results to fit an `output_schema`. Maintains 
+    timestamped checkpoints of inputs & results (pre-packaged and packaged) for future reference.
 
     Contract
     --------
-    - Entry point: `invoke(inputs: dict) -> dict`
-      - Validates `inputs` against `input_schema`.
-      - Delegates to `_process_inputs(inputs)` for the actual execution.
-      - Packages the raw result via `package_results(result)` to match
-        `output_schema`, honoring bundling/unwrap options.
-      - Records a timestamped checkpoint of the final packaged output.
+    • Entry: `invoke(inputs: dict) -> dict` (do not override).
+    • Subclasses MUST implement `_process_inputs(inputs: dict) -> Any`.
+    • Inputs: keys MUST be a subset of `input_schema`; unexpected keys raise `ValidationError`.
+      Missing keys are allowed; subclass/tool/agent may apply defaults.
+    • Packaging: `package_results(result) -> dict` enforces `output_schema` with:
+      – Namedtuple/dataclass → mapping.
+      – Dict: exact/subset/superset → reordered/ padded/ filtered; hybrid mapping pairs extra
+        result keys to remaining schema keys by position; otherwise, if `bundle_all=True` and
+        `len(output_schema)==1`, nest under that key; else `PackagingError`.
+      – Set-like → require `bundle_all` (single-key) or error.
+      – Sequence/Iterable → positional mapping (padded or capped + exhaustion check); optional bundling.
+      – 1-key fallback: any value ⇒ `{schema[0]: value}`.
+    • Mutability: `output_schema` setter updates schema (and disables bundling if length > 1).
+      `bundle_all` setter requires single-key `output_schema` when enabling.
 
-    Input Validation
-    ----------------
-    - Keys in `inputs` must be a subset of `input_schema`. Any unexpected key
-      raises `ValueError`.
-    - Missing keys allowed; unexpected keys raise.
-    - Inputs are treated as immutable; internal logic operates on deep copies.
+    Key Parameters
+    --------------
+    • name: str; description: str.
+    • input_schema: list[str] (read-only via property).
+    • output_schema: list[str] (setter validates; may disable bundling).
+    • bundle_all: bool (setter validates single-key when True).
 
-    Output Packaging
-    ----------------
-    - Regardless of the internal processes, the final output will always be
-      a dictionary with keys matching an `output_schema`.
-    - Depending on initialization settings, if the output_schema is a single
-      key, then the raw output will then be bundled under that single key,
-      regardless of type.
-    - Packaging raw outputs to match the output schema is handled by a method
-      `package_results`
-    
-    Determinism & Checkpointing
-    ---------------------------
-    - All transformations are pure with respect to `inputs`.
-    - Every successful `invoke` stores a deep-copied, timestamped checkpoint of
-      the final packaged output for inspection/reset.
-    - `clear_memory()` resets internal checkpoints/state without affecting
-      wrapped callables (unless a subclass explicitly cascades clearing).
-
-    Extensibility
+    Checkpointing
     -------------
-    - Subclasses implement `_process_inputs(inputs: dict) -> Any`.
-    - Subclasses SHOULD NOT bypass `invoke`; always call `invoke` to get
-      consistent validation, packaging, and checkpointing.
+    • Appends deep-copied `{timestamp, inputs, raw, result}` per successful invoke.
+    • Access via `checkpoints`; reset with `clear_memory()`.
+
+    Errors
+    ------
+    `ValidationError`, `SchemaError`, `PackagingError`, `ExecutionError`.
+
+    Example
+    -------
+    >>> out = wf.invoke({"prompt": "hello"})
+    >>> out  # keys exactly match wf.output_schema
     """
 
     def __init__(
@@ -531,28 +595,43 @@ class Workflow(ABC):
 
 class AgentFlow(Workflow):
     """
-    Wraps an Agent into a schema-aware Workflow node.
+    One-line
+    --------
+    Workflow wrapper for an `Agent` that converts dict inputs into a single prompt string.
 
-    Input/Output
-    ------------
-    - input_schema: defaults to ["prompt"], but can be any non-empty string list
-    - output_schema: defaults to [WF_RESULT] unless overridden.
+    Purpose
+    -------
+    Normalizes agent calls for composition: validates inputs, converts them to a prompt string,
+    calls `agent.invoke(prompt: str)`, then packages the raw agent result to `output_schema`.
 
-    Invocation
-    ----------
-    - The 'prompt' value is sanitized for JSON readability:
-        * JSON-native primitives (str, int, float, bool, None) pass through unchanged.
-        * dict/list/tuple recurse with the same rule.
-        * sets are converted to {"__type__": "set", "values": [...]}
-        * non-serializable leaves (e.g., datetime, Path, custom objects) are
-          converted to {"__stringified__": true, "__type__": "<TypeName>", "value": "<str()>"}
-      This ensures `json.dumps(...)` never fails while remaining human-readable.
-    - If 'prompt' is already a string, it is passed as-is.
-      Otherwise the sanitized structure is JSON-encoded (UTF-8, no ASCII escaping).
+    Contract
+    --------
+    • Default schemas: `input_schema=["prompt"]` (configurable, non-empty), `output_schema=[WF_RESULT]`.
+    • Inputs: subset of `input_schema`; unexpected keys → `ValidationError`.
+    • Prompt formation:
+      – If inputs contain exactly one key `["prompt"]`, pass `str(inputs["prompt"])` directly.
+      – Otherwise, sanitize the entire `inputs` via `Workflow._sanitize_for_json`, then `json.dumps(...)`
+        (UTF-8, no ASCII escaping) and pass that string to `agent.invoke(...)`.
+    • Single agent call per `invoke`. Result is packaged by base `package_results`.
+    • Checkpointing via base class.
 
-    Notes
-    -----
-    - Payload values that are not strings or collections of strings are coerced to strings during dict sanitation.
+    Key Parameters
+    --------------
+    • agent: `Agent` (stateful; provides `invoke(prompt: str) -> str`).
+    • name: optional override; description derived from `agent.description`.
+    • output_schema, bundle_all: standard Workflow setters/validation apply.
+
+    Errors
+    ------
+    • `SchemaError` for empty `input_schema`.
+    • `ValidationError` for unexpected input keys or empty inputs.
+    • `PackagingError` if stringification/sanitization fails to serialize.
+    • `ExecutionError` if `agent.invoke` raises.
+
+    Example
+    -------
+    >>> af = AgentFlow(agent=my_agent)  # input_schema defaults to ["prompt"], name defaults to my_agent.name
+    >>> af.invoke({"prompt": "Summarize this."})[WF_RESULT]
     """
 
     def __init__(self,
@@ -584,6 +663,7 @@ class AgentFlow(Workflow):
     def agent(self, val: Agent) -> None:
         """Replaces agent"""
         self._agent = val
+        self._description = self._agent.description
 
     # -------------------- Execution --------------------
     def clear_memory(self):
@@ -627,28 +707,41 @@ class AgentFlow(Workflow):
 
 class ToolFlow(Workflow):
     """
-    Workflow wrapper for a single `Tool`.
+    One-line
+    --------
+    Workflow wrapper for a single `Tool` with kwargs binding and schema-aware packaging.
 
-    This flow enforces a dict-based invocation contract over a Tool’s callable,
-    preserves the Tool’s input signature as an immutable `input_schema`, and
-    allows controlled customization of the output channel via `output_schema`
-    and `bundle_all`.
+    Purpose
+    -------
+    Adapts a Tool’s callable to the Workflow contract: validates `inputs`, calls the Tool once
+    using dict→`**kwargs`, and packages the raw return to `output_schema`.
 
-    Design
+    Contract
+    --------
+    • `input_schema` is derived from `tool.signature_map` (ordered) excluding “*args”/“**kwargs”; read-only.
+    • `output_schema` defaults to `[WF_RESULT]` (override allowed). `bundle_all` optional.
+    • Inputs: keys MUST be a subset of `input_schema`; unexpected keys → `ValidationError`.
+      Missing keys are allowed—Tool-level defaults apply.
+    • Execution: `self._tool.invoke(**inputs)` exactly once per call.
+    • Packaging obeys base rules (scalars/tuple/dict/hybrid/sequence/set/iterable handling).
+    • Checkpointing via base class.
+
+    Key Parameters
+    --------------
+    • tool: `Tool` (exposes `.invoke`, `.signature_map`, `.name`, `.description`).
+    • name: optional override (defaults to tool.name).
+    • output_schema, bundle_all: standard Workflow setters/validation apply.
+
+    Errors
     ------
-    - Identity:
-        * `name` is exposed as "<tool.name>" if no custom name is provided to distinguish it from the Tool.
-        * `description` is derived from the Tool and is immutable in ToolFlow.
-    - Schemas:
-        * `input_schema` is derived from the Tool’s signature (ordered) and is read-only.
-        * `output_schema` is configurable post-init via a validated setter.
-        * `bundle_all` is configurable; when True, `output_schema` must have length 1.
-    - Execution:
-        * Do not override `invoke`; base `Workflow.invoke` handles validation,
-          packaging, and checkpointing. ToolFlow implements `_process_inputs`
-          and calls the underlying Tool with the provided `inputs` as **kwargs**.
-    """
+    • `ValidationError` for unexpected keys; arity/shape mismatches raise `PackagingError`.
+    • `ExecutionError` if the Tool raises.
 
+    Example
+    -------
+    >>> tf = ToolFlow(tool=my_tool)  # input_schema derived from signature_map
+    >>> tf.invoke({"text": "hello"})[WF_RESULT]
+    """
     def __init__(
         self,
         tool: Tool,
@@ -737,35 +830,58 @@ def _to_workflow(obj: Agent | Tool | Workflow, in_sch:list[str]|None = None, out
 
 class ChainFlow(Workflow):
     """
-    ChainFlow
-    ---------
-    Linear pipeline of steps (each a Workflow/ToolFlow/AgentFlow) with strict internal
-    reconciliation and a ChainFlow-level output contract (overlay) that shapes the final
-    result without mutating the last child.
+    One-line
+    --------
+    Linear, schema-checked pipeline that invokes steps in order and hands each step’s packaged output to the next.
 
-    STATES
-    ======
-    • Empty (len(steps) == 0)
-      - input_schema/output_schema: freely set; they mirror each other.
-      - bundle_all: ALWAYS False (setter rejects enabling).
-      - _process_inputs: identity (returns inputs unchanged).
+    Purpose
+    -------
+    Compose heterogeneous steps (Workflow/ToolFlow/AgentFlow) into a deterministic chain. The chain exposes its own
+    `output_schema` as an overlay for the chain boundary without mutating the final child’s internal schema.
 
-    • Non-empty (len(steps) >= 1)
-      - input_schema: derived from first step; setter rejected.
-      - output_schema: ChainFlow-level overlay ONLY (no child mutation):
-          * If len(schema) > 1  -> force bundle_all = False automatically.
-          * If len(schema) == 1 -> do NOT auto-enable bundle_all; caller decides.
-          * If effective bundle_all == False -> require len(schema) >= len(last.output_schema).
-      - bundle_all: ChainFlow-level overlay ONLY:
-          * Enabling True requires len(output_schema) == 1.
-          * Disabling False always allowed.
+    Contract
+    --------
+    • Steps are invoked sequentially; step N+1 receives the PACKAGED dict returned by step N’s `invoke()`.
+    • When empty, ChainFlow acts as an identity flow: `input_schema` mirrors `output_schema`.
+    • When non-empty, `input_schema` mirrors the first child; do not set it directly.
+    • Chain-level `output_schema` is an overlay applied to the final child’s raw result by base `package_results`.
+    • If ChainFlow `output_schema` has length > 1, `bundle_all` is forced False for the chain overlay.
+    • Upstream→downstream handoff:
+      – If upstream `bundle_all=True`: downstream must accept the single-key envelope.
+      – If upstream `bundle_all=False`: len(upstream.output) MUST equal len(downstream.input_schema), or raise.
+      – No implicit hybrid key remapping between children; insert explicit adapters if keys differ.
 
-    INTERNAL HANDOFFS
-    =================
-    For each adjacent (A -> B):
-      - If A.bundle_all: A.out := B.in (length may differ); assert persisted equality.
-      - Else: require len(A.out) == len(B.in); then A.out := B.in.
+    Key Parameters
+    --------------
+    • steps: list[Workflow|Tool|Agent]; wrapped to Workflows; set via `steps`, `add_step`, `pop`.
+    • output_schema / bundle_all: overlay for the chain boundary; reconciled independently of children.
+
+    Inputs & Outputs
+    ----------------
+    • Inputs: must match first child’s `input_schema`.
+    • Outputs: the chain’s final return is the base-packaged dict using the chain overlay (`output_schema`, `bundle_all`)
+      applied to the final child’s raw result.
+
+    Error Conditions
+    ----------------
+    • `SchemaError`/`ValidationError`: step adjacency mismatch during reconciliation; invalid overlays.
+    • `ExecutionError`: child failure; original exception chained.
+
+    Performance/Concurrency
+    -----------------------
+    Sequential by design; ordering is stable and deterministic.
+
+    Example
+    -------
+    >>> cf = ChainFlow(name="C").add_step(t1).add_step(t2)
+    >>> cf.output_schema = ["answer"]
+    >>> cf.invoke({"text": "hello"})["answer"]
+
+    See Also
+    --------
+    Workflow, ToolFlow, AgentFlow
     """
+
 
     def __init__(
         self,
@@ -832,6 +948,7 @@ class ChainFlow(Workflow):
     # -------------------- Execution --------------------
     def _process_inputs(self, inputs: dict) -> dict:
         if not self._steps:
+            self._mirror_endpoints_from_children()
             return inputs  # identity
         current = inputs
         for step in self._steps:
@@ -877,30 +994,59 @@ class ChainFlow(Workflow):
 
 class MakerChecker(Workflow):
     """
-    Maker-Checker composite workflow.
+    One-line
+    --------
+    Iterative maker→checker composite that loops drafts through review (and optional judge) until approved or capped.
 
-    Contracts:
-      - maker.output_schema == checker.input_schema
-      - checker.output_schema == maker.input_schema
-      - judge (optional):
-            input_schema == maker.input_schema
-            output_schema == [__judge_result__]
-            bundle_all == False
+    Purpose
+    -------
+    Encapsulate a write–review loop with strict schema parity between participants. Exposes composite-level overlays
+    for external callers while preserving internal participant schemas.
 
-    Composability (ChainFlow-style overlays on THIS composite only):
-      - On __init__ and on maker/checker replacement, this composite mirrors `maker`
-        for its external endpoints (input_schema, output_schema, bundle_all).
-      - Callers (e.g., ChainFlow) may set THIS composite's output_schema / bundle_all to relabel outputs.
-        Overlay rules (using maker as reference):
-          * If len(schema) > 1  -> force bundle_all=False.
-          * If len(schema) == len(maker.output_schema) -> accept (positional relabel allowed).
-          * If len(schema) > len(maker.output_schema)  -> require superset of maker.output_schema; else raise.
-          * If len(schema) < len(maker.output_schema)  -> raise.
-          * bundle_all=True requires single-key output_schema.
+    Contract
+    --------
+    • Parity: `maker.output_schema == checker.input_schema` and `checker.output_schema == maker.input_schema`.
+    • Judge (optional): `input_schema == maker.input_schema`, `output_schema == [JUDGE_RESULT]`, `bundle_all=False`,
+      returns `{JUDGE_RESULT: bool}`.
+    • On init or when replacing maker/checker, the composite mirrors MAKER externally:
+      `self._input_schema = maker.input_schema`; composite `output_schema` defaults to `maker.output_schema`.
+    • Callers MAY set composite `output_schema`/`bundle_all` as an overlay; internal participant schemas are unchanged.
+    • Loop:
+      1) `draft = maker.invoke(inputs)`
+      2) `revisions = checker.invoke(draft)`
+      3) If judge: `ok = judge.invoke(revisions)[JUDGE_RESULT]` (bool). If ok → stop; else `draft = maker.invoke(revisions)` and repeat.
+      4) Stop at `max_revisions` if not approved.
+    • Composite returns the latest MAKER draft; base `package_results` applies the composite overlay at the boundary.
 
-    Judge volatility policy:
-      - If maker.input_schema changes (directly or via checker parity), judge is auto-dropped (None).
-      - At invoke time, judge compatibility is rechecked and auto-dropped if stale.
+    Key Parameters
+    --------------
+    • maker, checker: Workflow|Tool|Agent (wrapped); must satisfy parity; set via properties (reconciles pair).
+    • judge: optional Workflow|Tool|Agent (wrapped and normalized as above).
+    • max_revisions: positive int safety cap.
+
+    Inputs & Outputs
+    ----------------
+    • Inputs: must match `maker.input_schema` (composite mirrors maker).
+    • Outputs: packaged draft per composite overlay (does not mutate maker/checker schemas).
+
+    Error Conditions
+    ----------------
+    • `SchemaError`/`ValidationError`: parity violations; incompatible judge; bad overlays.
+    • `ValidationError`: judge must return a single boolean under `JUDGE_RESULT`.
+    • `ExecutionError`: participant failure.
+
+    Performance/Concurrency
+    -----------------------
+    Deterministic loop; one participant call per step per iteration.
+
+    Example
+    -------
+    >>> mc = MakerChecker(maker=mk, checker=ck, max_revisions=3)
+    >>> mc.invoke(seed_inputs)  # returns packaged maker draft
+
+    See Also
+    --------
+    Workflow, ToolFlow, AgentFlow
     """
     # --------------------------
     # Init
@@ -1077,23 +1223,56 @@ class MakerChecker(Workflow):
 
 class Selector(Workflow):
     """
-    Conditional router that delegates to one of several branches based on a judge workflow.
+    One-line
+    --------
+    Conditional router that uses a judge to choose a single branch and return that branch’s result.
 
-    Conventions
-    -----------
-    - Judge is any (Workflow|Agent|Tool). If Agent/Tool is supplied, it is wrapped into an
-      AgentFlow/ToolFlow owned by this Selector.
-    - The judge's *output_schema* is forcibly `[JUDGE_RESULT]`. At runtime, the judge must
-      return a dict like `{JUDGE_RESULT: "<branch_name>"}`.
-    - The Selector's *input_schema* strictly mirrors the judge's input schema. Because the
-      base class exposes `input_schema` as read-only, we update via private `_input_schema`.
-    - Each branch is any (Workflow|Agent|Tool). If Agent/Tool, it is wrapped into a Flow.
-      Branch **input_schema** must set-equal the Selector's input schema. Branch outputs are
-      independent from the Selector's advertised `output_schema`/`bundle_all`.
-    - Packaging/checkpointing occur in `Workflow.invoke()`. `_process_inputs()` only chooses
-      a branch and returns that branch's *raw* result.
+    Purpose
+    -------
+    Separate decision logic (judge) from execution (branches). Normalizes judge output and applies a selector-level
+    overlay at the boundary, leaving branch internals untouched.
+
+    Contract
+    --------
+    • Judge: Workflow|Tool|Agent (wrapped); `output_schema = [JUDGE_RESULT]`, `bundle_all=False`.
+      At runtime it MUST return `{JUDGE_RESULT: <branch_name:str>}`.
+    • Selector `input_schema` mirrors the judge’s `input_schema` (private mirroring; read-only externally).
+    • Branches: each Workflow|Tool|Agent (wrapped). Every branch’s `input_schema` must be set-equal to the judge’s.
+      Branch `output_schema` is independent of the selector overlay.
+    • Execution: `_process_inputs` calls judge → picks matching branch by name → returns that branch’s RAW result.
+      Base `package_results` then applies the selector’s `output_schema`/`bundle_all` overlay for the caller.
+
+    Key Parameters
+    --------------
+    • judge: decision workflow (normalized on set).
+    • branches: list of candidate workflows; non-matching branches are dropped on judge change.
+    • output_schema / bundle_all: overlay for the selector boundary only.
+
+    Inputs & Outputs
+    ----------------
+    • Inputs: must match judge/branch schemas (set-equal with ordering normalized per branch).
+    • Outputs: branch result packaged by the selector overlay at the boundary.
+
+    Error Conditions
+    ----------------
+    • `ValidationError`: no branches; malformed judge output; missing branch for selected name.
+    • `SchemaError`: invalid judge/branch schemas.
+    • `ExecutionError`: judge or selected branch failure.
+
+    Performance/Concurrency
+    -----------------------
+    Single-branch execution per call; deterministic selection given the judge’s result.
+
+    Example
+    -------
+    >>> sel = Selector(judge=decider, branches=[foo_flow, bar_flow])
+    >>> sel.output_schema = ["result"]  # overlay
+    >>> sel.invoke(inputs)["result"]
+
+    See Also
+    --------
+    Workflow, AgentFlow, ToolFlow
     """
-
     def __init__(
         self,
         name: str,
@@ -1245,34 +1424,60 @@ class Selector(Workflow):
 
 class MapFlow(Workflow):
     """
-    MapFlow (tailored fan-out).
+    One-line
+    --------
+    Tailored fan-out that routes per-branch payloads from `inputs[branch.name]` to parallel branches and aggregates.
 
-    Run multiple branches in parallel where each branch receives its own payload from
-    `inputs[branch.name]`. The input schema is dynamic and always equals the ordered list
-    of current branch names. Missing branch names in `inputs` do not error:
-      - flatten=False  -> result for that branch is None
-      - flatten=True   -> branch is ignored (not invoked)
+    Purpose
+    -------
+    Executes a heterogeneous set of child workflows concurrently where each branch gets its own dict payload keyed by
+    the branch’s name. `input_schema` auto-mirrors the ordered list of branch names; packaging/bundling remain a
+    boundary concern handled by the base Workflow.
 
-    Packaging/bundling/checkpointing are handled by Workflow.invoke(); this subclass only
-    implements _process_inputs().
+    Contract
+    --------
+    • `input_schema` is dynamic and equals `[b.name for b in branches]` (ordered); it is rebuilt on add/remove.
+    • Only branches with a present payload are invoked; the payload MUST be a dict or a `ValidationError` is raised.
+    • Each executed branch MUST return a dict or a `ValidationError` is raised.
+    • When `flatten=False` (default): return `{branch.name: dict | None, ...}`; missing payload ⇒ `None`.
+    • When `flatten=True`: merge executed branch dicts; collisions raise `ValidationError`.
+      – Single-key envelopes `{WF_RESULT: …}` / `{JUDGE_RESULT: …}` are unwrapped first; if the inner value is a dict
+        it is merged; otherwise it is placed under `flat[branch.name]`.
+    • Child schemas are not mutated; selector/chain-level overlays apply only at the MapFlow boundary.
 
-    Execution
-    ---------
-    - Enqueue only branches that have a present payload and that payload is a dict.
-      (If a present payload is not a dict, raise ValueError naming the branch.)
-    - Run concurrently (ThreadPool), collect results in declared branch order (deterministic).
-    - Each executed branch must return a dict, else TypeError naming the branch.
-    - When flatten=False (default): return { branch.name: dict|None, ... } (all branches present).
-    - When flatten=True: merge keys from executed branch dicts into a single dict.
-        * If a branch result is exactly {WF_RESULT: ...} or {JUDGE_RESULT: ...}, do not flatten;
-          instead insert as {branch.name: <raw_result_dict>} (prevents special keys at top-level).
-        * Key collisions raise ValueError with the offending key and branch identity.
+    Key Parameters
+    --------------
+    • branches: list[Workflow|Agent|Tool]; wrapped via `_to_workflow(..., in_sch=None, out_sch=None)`. Names must be unique.
+    • flatten: bool (default False) to merge or keep per-branch results.
+    • output_schema: list[str] (default `[WF_RESULT]`) — overlay for the MapFlow boundary.
+    • bundle_all: bool (default True) — obeys base rules.
+    • max_workers: int (cap for ThreadPool).
 
-    Notes
-    -----
-    - Branches are wrapped via _to_workflow(obj, in_sch=None, out_sch=None). MapFlow does not
-      mutate child schemas; overlays are applied only at the MapFlow boundary by base invoke().
+    Inputs & Outputs
+    ----------------
+    • Inputs: keys must be a subset of current branch names. Unknown keys → `ValidationError`. Missing keys allowed.
+    • Outputs: either per-branch dict or a single flattened dict, then packaged by base with the MapFlow overlay.
+
+    Error Conditions
+    ----------------
+    • `ValidationError`: duplicate branch name; non-dict payload; non-dict branch result; key collision on flatten; unknown input key.
+    • `ExecutionError`: any branch raises; original exception is chained.
+    • `IndexError`/`ValueError`: remove with no branches / remove unknown name.
+
+    Performance/Concurrency
+    -----------------------
+    Parallel via `ThreadPoolExecutor` (up to `max_workers`). Result aggregation keeps declared branch order.
+
+    Example
+    -------
+    >>> mf = MapFlow(name="mf", description="per-branch", branches=[foo, bar], flatten=True)
+    >>> mf.invoke({"foo": {"x": 1}, "bar": {"y": 2}})  # {"x": 1, "y": 2}
+
+    See Also
+    --------
+    Workflow, AgentFlow, ToolFlow, ScatterFlow
     """
+
 
     def __init__(
         self,
@@ -1463,6 +1668,8 @@ class MapFlow(Workflow):
             # unwrap any special keys if using special keys
             if _is_namedtuple(payload):
                 payload = _namedtuple_as_mapping(payload)
+            elif is_dataclass(payload):
+                payload = asdict(payload)
             while isinstance(payload, MAPPABLE_KINDS) and len(payload.keys()) == 1 and list(payload.keys())[0] in special_keys:
                 payload = payload[list(payload.keys())[0]]
             if not isinstance(payload, dict):
@@ -1488,38 +1695,63 @@ class MapFlow(Workflow):
 
 class ScatterFlow(Workflow):
     """
-    ScatterFlow (broadcast fan-out).
+    One-line
+    --------
+    Broadcast fan-out that sends the same validated input dict to all branches in parallel and aggregates.
 
-    Broadcast a single validated input dict to multiple child workflows in parallel and
-    aggregate results. Packaging/bundling/checkpointing are handled by Workflow.invoke();
-    this subclass only implements _process_inputs().
+    Purpose
+    -------
+    Executes multiple child workflows concurrently against a fixed, shared input schema. Enforces set-equality of
+    branch input schemas (broadcast contract). Aggregation is either per-branch or flattened; packaging/bundling are
+    applied at the ScatterFlow boundary by the base Workflow.
 
-    Input schema
-    ------------
-    - Fixed at construction time and immutable thereafter.
-    - Every branch must accept the same input schema (set-equivalent).
-    - Branches are wrapped via _to_workflow(obj, in_sch=<broadcast schema>, out_sch=None).
-    - At construction, non-conforming branches are pruned.
-    - On add, non-conforming branches raise ValueError.
+    Contract
+    --------
+    • `input_schema` is fixed at construction and immutable thereafter.
+    • Every branch MUST accept an input schema set-equal to the broadcast schema.
+      – At construction, non-conforming branches are pruned.
+      – On `add_branch`, non-conforming branches raise `ValueError`.
+    • Each branch is invoked exactly once per call with the same `inputs` dict and MUST return a dict; otherwise `ValidationError`.
+    • When `flatten=False` (default): return `{branch.name: dict_result, ...}`.
+    • When `flatten=True`: merge branch results; collisions raise `ValidationError`.
+      – Single-key envelopes `{WF_RESULT: …}` / `{JUDGE_RESULT: …}` are unwrapped first; if the inner value is a dict it
+        is merged, otherwise it is stored under `flat[branch.name]`.
+    • Child schemas are not mutated; selector/chain-level overlays apply only at the ScatterFlow boundary.
 
-    Execution
-    ---------
-    - _process_inputs runs branches concurrently (ThreadPool), collects results in the
-      declared branch order, and returns either:
-        * { branch.name: dict_result, ... } when flatten=False (default), or
-        * a single flattened dict when flatten=True, merging keys from each branch result.
+    Key Parameters
+    --------------
+    • input_schema: list[str] (fixed broadcast contract).
+    • branches: list[Workflow|Agent|Tool]; wrapped via `_to_workflow(..., in_sch=input_schema, out_sch=None)`. Names must be unique.
+    • flatten: bool (default False) to merge or keep per-branch results.
+    • output_schema: list[str] (default `[WF_RESULT]`) — overlay for the ScatterFlow boundary.
+    • bundle_all: bool (default True) — obeys base rules.
+    • max_workers: int (cap for ThreadPool).
 
-    Result rules
-    ------------
-    - Each branch's invoke() MUST return a dict; non-dict results raise TypeError.
-    - When flatten=True:
-        * If a branch result dict has exactly one key and that key is WF_RESULT or JUDGE_RESULT,
-          the flattened output receives { branch.name: <raw_result_dict> } (do not flatten this
-          envelope) to avoid redundant/special keys polluting the top level.
-        * Otherwise, merge the branch result's items into the flattened dict.
-          Key collisions raise ValueError with the offending key and branch identities.
+    Inputs & Outputs
+    ----------------
+    • Inputs: keys must be a subset of `input_schema`; unknown keys → `ValidationError`. Missing keys allowed (branch defaults may apply).
+    • Outputs: per-branch map or flattened dict, then packaged by base with the ScatterFlow overlay.
+
+    Error Conditions
+    ----------------
+    • `ValidationError`: no branches; non-dict branch result; key collision on flatten; unknown input key.
+    • `ValueError`: duplicate branch name; add of non-conforming branch.
+    • `ExecutionError`: any branch raises; original exception is chained.
+    • `IndexError`/`ValueError`: remove with no branches / remove unknown name.
+
+    Performance/Concurrency
+    -----------------------
+    Parallel via `ThreadPoolExecutor` (up to `max_workers`). Aggregation preserves declared branch order for determinism.
+
+    Example
+    -------
+    >>> sf = ScatterFlow(name="sf", description="broadcast", input_schema=["text"], branches=[a, b], flatten=True)
+    >>> sf.invoke({"text": "hello"})  # merged keys from a & b
+
+    See Also
+    --------
+    Workflow, AgentFlow, ToolFlow, MapFlow
     """
-
     def __init__(
         self,
         name: str,
@@ -1676,6 +1908,8 @@ class ScatterFlow(Workflow):
             # unwrap any special keys if using special keys
             if _is_namedtuple(payload):
                 payload = _namedtuple_as_mapping(payload)
+            elif is_dataclass(payload):
+                payload = asdict(payload)
             while isinstance(payload, MAPPABLE_KINDS) and len(payload.keys()) == 1 and list(payload.keys())[0] in special_keys:
                 payload = payload[list(payload.keys())[0]]
             if not isinstance(payload, dict):
