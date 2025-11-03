@@ -34,12 +34,13 @@ def main():
     print(f"Uploaded and tracked file: {file_path}")
     time.sleep(2)  # wait a moment for upload to complete if needed
     
-    # 2) Ask for a summary (the Agent will pass files -> engine.invoke(..., files=[...]))
+    # 2) Ask for a summary (the Agent will pass files -> engine.invoke(...))
     prompt = (
         "Analyze and summarize the content of the file thoroughly. "
         "Call out any key features, images, description, information, etc."
     )
-    summary = agent.invoke(prompt)
+    summary = agent.invoke({"prompt": prompt})  # <-- UPDATED: dict-first invoke
+
     # 3) Print the summary
     print("\n=== Summary ===\n")
     print(summary)

@@ -10,7 +10,7 @@ from collections import OrderedDict
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from modules.Agents import Agent
+# from modules.Agents import Agent
 from modules.Plugins import *  # Provides Plugin-shaped dicts (see TypedDict below)
 
 
@@ -22,224 +22,397 @@ __all__ = ["Tool", "ToolFactory"]
 # ───────────────────────────────────────────────────────────────────────────────
 # Tool
 # ───────────────────────────────────────────────────────────────────────────────
-import inspect
+from typing import Any, Mapping, Callable, OrderedDict as OrderedDictType, Dict, List, Optional, Tuple
 from collections import OrderedDict
-from typing import Any, Callable, Optional, get_args, get_origin, get_type_hints
+import inspect
+
+
+class ToolError(Exception):
+    """Base exception for Tool-related errors."""
+
+
+class ToolDefinitionError(ToolError):
+    """Raised when a callable is incompatible at Tool construction time."""
+
+
+class ToolInvocationError(ToolError):
+    """Raised when inputs are invalid for invocation or binding fails."""
+
+
+# Sentinel to mark "no default" for parameters
+NO_DEFAULT = object()
 
 
 class Tool:
     """
-    Wrapper around a callable providing:
-      • Stable identity (type, source, name → full_name)
-      • Human-readable signature string (for prompts/UI)
-      • Optional memory clear hook
-      • Simple invoke() dispatcher
+    Tool
+    ----
+    Stateless wrapper around a Python callable with a dict-first invocation API.
+    At construction, Tool builds an **arguments map** describing each named
+    parameter (annotation, kind, default, and declaration position). During
+    `invoke()`, Tool splits the provided mapping into a positional-only list
+    (`args`) and a keyword dict (`kwargs`) according to that map, then calls
+    `func(*args, **kwargs)`.
 
-    Internal detail (compat preserved):
-      • Structured signature is stored as:
-          _sig_types: OrderedDict[str, type]
-          _return_type: type
-        .signature (str) is rendered from these.
+    Primary API
+    -----------
+    __init__(func: Callable, name: str, description: str = "",
+             tool_type: str = "python", source: str = "local")
 
-    Conventions:
-      • Full name IS type-prefixed: '{type}.{source}.{name}'
-      • Drop conventional receiver params ('self'/'cls') from signatures
-      • Render *args/**kwargs as '*args: Any' / '**kwargs: Any'
+    invoke(inputs: Mapping[str, Any]) -> Any
+        Deterministic binding by parameter **names**:
+          • Positional-only params → collected into *args by **declaration order**,
+            enforcing a contiguous prefix (no gaps).
+          • Positional-or-keyword & keyword-only params → placed in **kwargs** by name.
+          • If the function declares *args, extra positionals must be provided via
+            '_args': list|tuple.
+          • If the function declares **kwargs, extra keyword pairs must be provided
+            via '_kwargs': Mapping.
+
+    Metadata (tags)
+    ---------------
+    • type: str      # classification tag (e.g., "python", "agent", "workflow")
+    • source: str    # provenance tag (e.g., "local", "remote:mcp", "plugin:my_pkg")
+
+    Arguments Map (constructor-built, cached)
+    -----------------------------------------
+    arguments_map: OrderedDict[str, ArgSpec]
+      Each entry captures:
+        - index: int                         # declaration index (0-based)
+        - kind: inspect._ParameterKind       # EXACT enum (not a string)
+        - ann:  type | Any                   # from annotations; Any if absent
+        - has_default: bool
+        - default: value | NO_DEFAULT
+
+    Call Plan (cached)
+    ------------------
+    • posonly_order: List[str]               # positional-only names in declaration order
+    • p_or_kw_names: List[str]               # positional-or-keyword names
+    • kw_only_names: List[str]               # keyword-only names
+    • required_names: set[str]               # required among p_or_kw + kw_only (no defaults)
+    • has_varargs: bool                      # whether *args exists
+    • has_varkw: bool                        # whether **kwargs exists
+    • varargs_name: Optional[str]
+    • varkw_name: Optional[str]
+
+    Strictness
+    ----------
+    - Unknown top-level keys are **errors** (even if the function has **kwargs);
+      callers must place extras explicitly under '_kwargs'.
+    - Duplicate provision (top-level and '_kwargs' for the same name) is an error.
+    - Reserved keys must match required container types:
+        '_args' -> list|tuple, '_kwargs' -> Mapping.
+
+    Notes
+    -----
+    - Tool is **stateless**; it exposes no memory APIs.
+    - Descriptions must document the function's purpose and the arguments
+      (names/types/defaults) and return shape. Do **not** mention dict transport
+      or reserved keys in descriptions.
     """
 
-    # ----------------------------
-    # Construction & Introspection
-    # ----------------------------
-
+    # -------------------------
+    # Construction & metadata
+    # -------------------------
     def __init__(
         self,
+        func: Callable,
         name: str,
-        func: Callable[..., Any],
-        type: str = "function",
-        source: str = "default",
         description: str = "",
-        clear_mem_func: Optional[Callable[[], None]] = None,
+        tool_type: str = "python",
+        source: str = "local",
     ) -> None:
-        self._type: str = type
-        self._source: str = source
+        self._func: Callable = func
         self._name: str = name
-        self._func: Callable[..., Any] = func
         self._description: str = description
-        self._clear_mem: Callable[[], None] = clear_mem_func
+        self._type: str = tool_type
+        self._source: str = source
 
-        # Structured signature storage (authoritative)
-        self._sig_types: OrderedDict[str, Any] = OrderedDict()
-        self._sig_defaults: OrderedDict[str, Any] = OrderedDict()
-        self._return_type: Any = Any
-        self._build_signature_map(func)
+        # Build signature and call plan once (deterministic & fast at runtime)
+        try:
+            self._sig: inspect.Signature = inspect.signature(inspect.unwrap(func))
+        except Exception as e:
+            raise ToolDefinitionError(f"{name}: cannot introspect callable signature: {e}") from e
 
-    # ----------------------------
-    # Identity & Metadata
-    # ----------------------------
+        (
+            self.arguments_map,
+            self.posonly_order,
+            self.p_or_kw_names,
+            self.kw_only_names,
+            self.required_names,
+            self.has_varargs,
+            self.varargs_name,
+            self.has_varkw,
+            self.varkw_name,
+        ) = self._build_arguments_map_and_plan(self._sig)
+
+    # Read-only tags and doc
+    @property
+    def name(self) -> str:
+        """Tool name (read-only)."""
+        return self._name
+
+    @property
+    def description(self) -> str:
+        """Function-centric description (read-only)."""
+        return self._description
 
     @property
     def type(self) -> str:
-        """Logical tool category (e.g., 'function', 'plugin', 'api')."""
+        """Classification tag (read-only). E.g., 'python', 'agent', 'workflow'."""
         return self._type
 
     @property
     def source(self) -> str:
-        """Namespace/owner; contributes to fully-qualified name."""
+        """Provenance tag (read-only). E.g., 'local', 'remote:mcp', 'plugin:my_pkg'."""
         return self._source
 
-    @property
-    def name(self) -> str:
-        """Unqualified tool name."""
-        return self._name
-
-    @property
-    def full_name(self) -> str:
-        """Fully-qualified, type-prefixed name: '{type}.{source}.{name}'."""
-        return f"{self._type}.{self._source}.{self._name}"
-
-    # ----------------------------
-    # Description & Signature
-    # ----------------------------
-
-    @property
-    def description(self) -> str:
+    # -------------------------
+    # Core invocation
+    # -------------------------
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
         """
-        Human-readable description prefixed with the formatted signature.
-        Example:
-            "function.plugin_math.add(a: int, b: int) → int: Add two integers."
+        Invoke the wrapped callable by splitting `inputs` into:
+          - args:  positional-only values (contiguous prefix by declaration order),
+                   plus optional extras from '_args' if *args exists.
+          - kwargs: all positional-or-keyword and keyword-only parameters by name,
+                    plus optional extras from '_kwargs' if **kwargs exists.
+
+        Strict validation:
+          - Unknown top-level keys are errors (use '_kwargs' explicitly if **kwargs exists).
+          - Reserved keys '_args' and '_kwargs' require correct container types.
+          - Duplicate provision across top-level and '_kwargs' is an error.
+
+        Returns:
+            Any: result of `self._func(*args, **kwargs)`
+
+        Raises:
+            ToolInvocationError: on invalid inputs or binding mistakes.
         """
-        return f"{self.signature}: {self._description}" if self._description else self.signature
+        if not isinstance(inputs, Mapping):
+            raise ToolInvocationError(f"{self._name}: inputs must be a mapping")
 
-    @description.setter
-    def description(self, val: str) -> None:
-        self._description = val
+        ARGS_KEY = "_args"
+        KWARGS_KEY = "_kwargs"
 
-    @property
-    def signature(self) -> str:
-        """Human-readable signature string for prompts/UI."""
-        return self._format_signature(self.full_name, self._sig_types, self._return_type, self._sig_defaults)
+        # Validate reserved keys early
+        if ARGS_KEY in inputs:
+            if not self.has_varargs:
+                raise ToolInvocationError(f"{self._name}: '{ARGS_KEY}' provided but function declares no *args")
+            extra_args = inputs[ARGS_KEY]
+            if not isinstance(extra_args, (list, tuple)):
+                raise ToolInvocationError(f"{self._name}: '{ARGS_KEY}' must be list or tuple")
+        else:
+            extra_args = ()
 
-    # Optional: expose structured signature read-only (useful for tooling).
-    @property
-    def signature_map(self) -> OrderedDict[str, Any]:
-        """Ordered mapping of parameter names to their (annotation) types."""
-        return OrderedDict(self._sig_types)
+        if KWARGS_KEY in inputs:
+            if not self.has_varkw:
+                raise ToolInvocationError(f"{self._name}: '{KWARGS_KEY}' provided but function declares no **kwargs")
+            extra_kwargs = inputs[KWARGS_KEY]
+            if not isinstance(extra_kwargs, Mapping):
+                raise ToolInvocationError(f"{self._name}: '{KWARGS_KEY}' must be a mapping")
+        else:
+            extra_kwargs = {}
 
-    @property
-    def return_type(self) -> Any:
-        """Return annotation/type if present, else `typing.Any`."""
-        return self._return_type
+        provided_names = set(inputs.keys()) - {ARGS_KEY, KWARGS_KEY}
+        known_names = set(self.arguments_map.keys())
+        unknown = sorted(provided_names - known_names)
 
-    @property
-    def default_map(self) -> "OrderedDict[str, Any]":
-        """Ordered mapping of parameter names to their default values (if any)."""
-        return OrderedDict(self._sig_defaults)
+        # Strict: unknown top-level keys are not allowed even if **kwargs exists
+        if unknown:
+            if not self.has_varkw:
+                raise ToolInvocationError(f"{self._name}: unexpected keys: {unknown}")
+            raise ToolInvocationError(
+                f"{self._name}: unexpected keys {unknown}; place extras under '{KWARGS_KEY}' because function accepts **kwargs"
+            )
 
-    # ----------------------------
-    # Execution
-    # ----------------------------
+        # Required named parameters must be present (pos-only handled separately)
+        missing = sorted(self.required_names - provided_names)
+        if missing:
+            raise ToolInvocationError(f"{self._name}: missing required keys: {missing}")
 
-    @property
-    def func(self) -> Callable[..., Any]:
-        """Underlying callable."""
-        return self._func
+        # -------------------------
+        # Build args (positional-only), gap-safe
+        # -------------------------
+        args: List[Any] = []
+        seen_gap = False
+        for pname in self.posonly_order:
+            present = pname in inputs
+            if not present:
+                seen_gap = True
+                continue
+            if seen_gap:
+                # e.g., 'a' missing but 'b' present (both positional-only) — illegal
+                raise ToolInvocationError(
+                    f"{self._name}: positional-only gap: '{pname}' supplied after an earlier positional-only was missing"
+                )
+            args.append(inputs[pname])
 
-    def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        """Call the underlying function."""
-        return self._func(*args, **kwargs)
+        # After computing: extra_args, provided_names, and before building args/kwargs
+        if extra_args:
+            # How many pos-or-kw will be consumed by extra_args?
+            consume = min(len(extra_args), len(self.p_or_kw_names))
+            if consume:
+                conflicting = [self.p_or_kw_names[i] for i in range(consume) if self.p_or_kw_names[i] in provided_names]
+                if conflicting:
+                    raise ToolInvocationError(
+                        f"{self._name}: '_args' will bind positionally to {conflicting} "
+                        "but those are also provided by name; use either '_args' or named keys, not both."
+                    )
 
-    def clear_memory(self) -> None:
-        """Invoke the optional clear-memory hook, if provided."""
-        if self._clear_mem is not None:
-            self._clear_mem()
 
-    # ----------------------------
-    # Dunder
-    # ----------------------------
+        # -------------------------
+        # Build kwargs (pos_or_kw + kw_only)
+        # -------------------------
+        kwargs: Dict[str, Any] = {}
+        for pname in self.p_or_kw_names + self.kw_only_names:
+            if pname in inputs:
+                kwargs[pname] = inputs[pname]
+            # else: omit; Python applies default if available
 
-    def __repr__(self) -> str:  # pragma: no cover - debug helper
-        return f"Tool<{self.signature}>"
+        # Merge explicit var-keyword extras if any
+        if extra_kwargs:
+            # Check duplication between named kwargs and provided _kwargs
+            dupes = sorted(set(kwargs.keys()) & set(extra_kwargs.keys()))
+            if dupes:
+                raise ToolInvocationError(
+                    f"{self._name}: duplicate keys supplied both as named inputs and in '{KWARGS_KEY}': {dupes}"
+                )
+            kwargs.update(extra_kwargs)  # type: ignore[arg-type]
 
-    # ----------------------------
-    # Internal helpers
-    # ----------------------------
+        # Finally call the function
+        try:
+            return self._func(*args, **kwargs)
+        except TypeError as e:
+            # Surface actionable context for signature mismatches
+            raise ToolInvocationError(f"{self._name}: invocation failed: {e}") from e
 
-    def _build_signature_map(self, func: Callable[..., Any]) -> None:
+    # -------------------------
+    # Introspection & serialization
+    # -------------------------
+    def to_dict(self) -> Dict[str, Any]:
         """
-        Populate `_sig_types` (param -> annotation), `_sig_defaults` (param -> default),
-        and `_return_type`. Drops conventional receiver params.
+        Serialize Tool metadata and signature plan for registries and UIs.
+        Notes:
+          - 'default' uses sentinel string '<NO_DEFAULT>' when absent.
+          - 'ann' stores the annotation's repr for readability.
+          - 'kind' is emitted as the enum name (e.g., 'POSITIONAL_ONLY').
         """
-        sig = inspect.signature(func)
-        hints = get_type_hints(func)
+        def ann_repr(t: Any) -> str:
+            if t is inspect._empty:
+                return "Any"
+            try:
+                return getattr(t, "__name__", repr(t))
+            except Exception:
+                return repr(t)
 
-        params = list(sig.parameters.items())
-        for idx, (name, p) in enumerate(params):
-            # Drop conventional receiver ('self'/'cls') if present as first positional
-            if (
-                idx == 0
-                and p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-                and name in {"self", "cls"}
-            ):
+        argmap_serialized = OrderedDict()
+        for name, spec in self.arguments_map.items():
+            kind_enum: inspect._ParameterKind = spec["kind"]
+            argmap_serialized[name] = {
+                "index": spec["index"],
+                "kind": kind_enum.name,
+                "ann": ann_repr(spec["ann"]),
+                "has_default": spec["has_default"],
+                "default": "<NO_DEFAULT>" if spec["default"] is NO_DEFAULT else repr(spec["default"]),
+            }
+
+        return {
+            "name": self._name,
+            "description": self._description,
+            "type": self._type,
+            "source": self._source,
+            "signature": str(self._sig),
+            "arguments_map": argmap_serialized,
+            "posonly_order": list(self.posonly_order),
+            "p_or_kw_names": list(self.p_or_kw_names),
+            "kw_only_names": list(self.kw_only_names),
+            "required_names": sorted(self.required_names),
+            "has_varargs": self.has_varargs,
+            "varargs_name": self.varargs_name,
+            "has_varkw": self.has_varkw,
+            "varkw_name": self.varkw_name,
+        }
+
+    # -------------------------
+    # Internal: build arg map + call plan (ENUM kinds)
+    # -------------------------
+    def _build_arguments_map_and_plan(
+        self, sig: inspect.Signature
+    ) -> Tuple[
+        OrderedDictType[str, Dict[str, Any]],  # arguments_map
+        List[str],                             # posonly_order
+        List[str],                             # p_or_kw_names
+        List[str],                             # kw_only_names
+        set,                                   # required_names
+        bool, Optional[str],                   # has_varargs, varargs_name
+        bool, Optional[str],                   # has_varkw,   varkw_name
+    ]:
+        """
+        Partition parameters by kind (ENUM), capture annotations/defaults,
+        and precompute call-time ordering and requirements.
+        """
+        arguments_map: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        posonly_order: List[str] = []
+        p_or_kw_names: List[str] = []
+        kw_only_names: List[str] = []
+        required_names: set = set()
+
+        has_varargs = False
+        varargs_name: Optional[str] = None
+        has_varkw = False
+        varkw_name: Optional[str] = None
+
+        index = 0
+        for pname, p in sig.parameters.items():
+            if p.kind is p.VAR_POSITIONAL:
+                has_varargs = True
+                varargs_name = pname
+                continue
+            if p.kind is p.VAR_KEYWORD:
+                has_varkw = True
+                varkw_name = pname
                 continue
 
-            if p.kind == inspect.Parameter.VAR_POSITIONAL:
-                self._sig_types["*args"] = Any
-                # no default for var-positional
-            elif p.kind == inspect.Parameter.VAR_KEYWORD:
-                self._sig_types["**kwargs"] = Any
-                # no default for var-keyword
+            ann = p.annotation if p.annotation is not inspect._empty else Any
+            default = p.default if p.default is not inspect._empty else NO_DEFAULT
+            kind_enum = p.kind  # store the EXACT enum
+
+            if kind_enum is p.POSITIONAL_ONLY:
+                posonly_order.append(pname)
+            elif kind_enum is p.POSITIONAL_OR_KEYWORD:
+                p_or_kw_names.append(pname)
+            elif kind_enum is p.KEYWORD_ONLY:
+                kw_only_names.append(pname)
             else:
-                self._sig_types[name] = hints.get(name, Any)
-                if p.default is not inspect._empty:
-                    self._sig_defaults[name] = p.default  # record default
+                # Should be unreachable (varargs/varkw handled above)
+                raise ToolDefinitionError(f"Unexpected parameter kind for {pname}: {kind_enum!r}")
 
-        self._return_type = hints.get("return", Any)
+            arguments_map[pname] = {
+                "index": index,
+                "kind": kind_enum,   # enum stored here
+                "ann": ann,
+                "has_default": default is not NO_DEFAULT,
+                "default": default,
+            }
+            index += 1
 
-    @staticmethod
-    def _format_signature(
-        key: str,
-        sig_types: OrderedDict[str, Any],
-        rtype: Any,
-        sig_defaults: OrderedDict[str, Any] | None = None,   # <-- NEW param
-    ) -> str:
-        """
-        Render the structured signature to a concise single line:
-            "{key}(a: int = 3, b: list[str] = None) → bool"
-        """
+        # Required named = those without defaults among pos_or_kw + kw_only
+        for pname in p_or_kw_names + kw_only_names:
+            if arguments_map[pname]["default"] is NO_DEFAULT:
+                required_names.add(pname)
 
-        def _ann_name(t: Any) -> str:
-            origin = get_origin(t)
-            if origin is None:
-                # Builtins/typing.Any/ForwardRef fallback
-                return getattr(t, "__name__", str(t))
-            args = get_args(t)
-            base = getattr(origin, "__name__", str(origin))
-            if args:
-                inner = ", ".join(_ann_name(a) for a in args)
-                return f"{base}[{inner}]"
-            return base
-
-        def _default_repr(v: Any) -> str:
-            # readable, bounded-length repr for prompts
-            if isinstance(v, str):
-                s = v if len(v) <= 40 else (v[:37] + "…")
-                return repr(s)
-            if v is None or isinstance(v, (int, float, bool)):
-                return repr(v)
-            r = repr(v)
-            return r if len(r) <= 40 else (r[:37] + "…")
-
-        sig_defaults = sig_defaults or OrderedDict()
-        parts = []
-        for n, ann in sig_types.items():
-            piece = f"{n}: {_ann_name(ann)}"
-            if n in sig_defaults:
-                piece += f" = {_default_repr(sig_defaults[n])}"
-            parts.append(piece)
-
-        params_str = ", ".join(parts)
-        rtype_str = _ann_name(rtype)
-        return f"{key}({params_str}) \u2192 {rtype_str}"
+        return (
+            arguments_map,
+            posonly_order,
+            p_or_kw_names,
+            kw_only_names,
+            required_names,
+            has_varargs,
+            varargs_name,
+            has_varkw,
+            varkw_name,
+        )
 
 
 # ───────────────────────────────────────────────────────────────────────────────
