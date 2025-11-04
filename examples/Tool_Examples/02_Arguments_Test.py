@@ -49,18 +49,18 @@ class Accumulator:
 
 # ---------- Wrap them as Tools ----------
 
-t_mix = Tool(mix_sig, name="mix_sig", description="Mixed kinds", tool_type="python", source="local")
-t_kwargs = Tool(kwargs_only, name="kwargs_only", description="KW-only", tool_type="python", source="local")
-t_var = Tool(with_varargs, name="with_varargs", description="Varargs + Varkw", tool_type="python", source="local")
-t_defs = Tool(defaults_only, name="defaults_only", description="Defaults only", tool_type="python", source="local")
+t_mix = Tool(mix_sig, name="mix_sig", description="Mixed kinds", type="python", source="local")
+t_kwargs = Tool(kwargs_only, name="kwargs_only", description="KW-only", type="python", source="local")
+t_var = Tool(with_varargs, name="with_varargs", description="Varargs + Varkw", type="python", source="local")
+t_defs = Tool(defaults_only, name="defaults_only", description="Defaults only", type="python", source="local")
 
 acc = Accumulator()
-t_add = Tool(acc.add, name="acc.add", description="Bound method add", tool_type="python", source="local")
+t_add = Tool(acc.add, name="acc.add", description="Bound method add", type="python", source="local")
 
 
 # ---------- Helpers ----------
 
-def run_case(label, tool, inputs):
+def run_case(label, tool: Tool, inputs:dict):
     print(f"\n=== {label} ===")
     try:
         out = tool.invoke(inputs)

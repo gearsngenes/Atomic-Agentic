@@ -33,7 +33,7 @@ t_add = Tool(
     add,
     name="add",
     description="Add two integers. Args: a:int (required), b:int=0. Returns: int.",
-    tool_type="python",
+    type="python",
     source="local",
 )
 
@@ -41,7 +41,7 @@ t_greet = Tool(
     greet,
     name="greet",
     description="Greet a person. Args: name:str (required), excited:bool=False (keyword-only). Returns: str.",
-    tool_type="python",
+    type="python",
     source="local",
 )
 
@@ -49,7 +49,7 @@ t_sum = Tool(
     summarize,
     name="summarize",
     description="Summarize text. Args: text:str (required), max_chars:int (required). Returns: str.",
-    tool_type="python",
+    type="python",
     source="local",
 )
 
