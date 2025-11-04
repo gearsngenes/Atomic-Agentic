@@ -1,32 +1,20 @@
 # Tools.py
 from __future__ import annotations
 
-import asyncio
 import inspect
-from typing import Any, Callable, Dict, List, Optional, Tuple, get_type_hints, get_origin, get_args, TypedDict
+from typing import Any, Mapping, Callable, OrderedDict as Dict, List, Optional, Tuple
 from collections import OrderedDict
-
-# External integrations (MCP) + local modules
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
-
-# from modules.Agents import Agent
 from modules.Plugins import *  # Provides Plugin-shaped dicts (see TypedDict below)
 
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Public API
 # ───────────────────────────────────────────────────────────────────────────────
-__all__ = ["Tool", "ToolFactory"]
+__all__ = ["Tool"]
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Tool
 # ───────────────────────────────────────────────────────────────────────────────
-from typing import Any, Mapping, Callable, OrderedDict as OrderedDictType, Dict, List, Optional, Tuple
-from collections import OrderedDict
-import inspect
-
-
 class ToolError(Exception):
     """Base exception for Tool-related errors."""
 
