@@ -19,7 +19,7 @@ from modules.Agents import Agent
 # ───────────────────────────────────────────────────────────────────────────────
 # Public API
 # ───────────────────────────────────────────────────────────────────────────────
-__all__ = ["AgentTool", "MCPProxyTool"]
+__all__ = ["AgentTool", "MCPProxyTool", "toolify"]
 
 
 # =========================
@@ -393,3 +393,132 @@ class MCPProxyTool(Tool):
                 required_names.add(n)
 
         return arguments_map, p_or_kw_names, required_names
+
+
+# ---------- URL helpers ----------
+def _is_http_url(s: str) -> bool:
+    try:
+        p = urlparse(s)
+        return p.scheme in ("http", "https") and bool(p.netloc)
+    except Exception:
+        return False
+
+def _normalize_url(u: str) -> str:
+    p = urlparse(u)
+    if not p.path or p.path == "/":
+        p = p._replace(path="/mcp")
+    return urlunparse(p)
+
+
+# ---------- MCP discovery (list tool names) ----------
+async def _async_discover_mcp_tool_names(url: str, headers: Optional[dict]) -> List[str]:
+    try:
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+    except Exception as e:
+        raise ToolDefinitionError(
+            "ToolFactory: MCP client libraries not available. Install the MCP client or remove the MCP URL input."
+        ) from e
+
+    async with streamablehttp_client(url=url, headers=headers or None) as transport:
+        # robustly extract (read, write) for both transport-object and tuple forms
+        read = getattr(transport, "read", None)
+        write = getattr(transport, "write", None)
+        if read is None or write is None:
+            read, write = transport[0], transport[1]
+
+        async with ClientSession(read, write) as session:
+            # REQUIRED handshake
+            await session.initialize()
+            tools_resp = await session.list_tools()
+            tool_objs = getattr(tools_resp, "tools", tools_resp)
+            return [t.name for t in tool_objs]
+
+def _discover_mcp_tool_names(url: str, headers: Optional[dict]) -> List[str]:
+    return _run_sync(_async_discover_mcp_tool_names(url, headers))
+
+
+# ---------- filter helpers ----------
+def _filter_names(names: List[str],
+                  include: Optional[List[str]],
+                  exclude: Optional[List[str]]) -> List[str]:
+    s = list(names)
+    if include:
+        inc = set(include)
+        s = [n for n in s if n in inc]
+    if exclude:
+        exc = set(exclude)
+        s = [n for n in s if n not in exc]
+    return s
+
+
+# ---------- Public API ----------
+
+def toolify(
+    obj: Any,
+    *,
+    # callable-specific
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    tool_type: str = "python",
+    source: Optional[str] = None,
+
+    # MCP-specific (obj is an MCP URL)
+    server_name: Optional[str] = None,
+    headers: Optional[dict] = None,
+    include: Optional[List[str]] = None,
+    exclude: Optional[List[str]] = None,
+    fail_if_empty: bool = True,
+) -> List[Tool]:
+    """
+    Create packaged Tools from one of: Tool | Agent | callable | MCP URL (str).
+
+    Returns:
+        list[Tool]
+
+    Raises:
+        ToolDefinitionError for invalid inputs or unmet requirements.
+    """
+
+    # 1) Passthrough if already a Tool
+    if isinstance(obj, Tool):
+        return [obj]
+
+    # 2) Agent -> AgentTool
+    if isinstance(obj, Agent):
+        return [AgentTool(obj)]
+
+    # 3) MCP URL -> list of MCPProxyTool
+    if isinstance(obj, str) and _is_http_url(obj):
+        if not server_name:
+            raise ToolDefinitionError("ToolFactory: 'server_name' is required when toolifying an MCP URL.")
+        url = _normalize_url(obj)
+        names = _discover_mcp_tool_names(url, headers)
+        names = _filter_names(names, include, exclude)
+        if not names and fail_if_empty:
+            raise ToolDefinitionError("ToolFactory: no MCP tools found after applying filters.")
+        return [
+            MCPProxyTool(tool_name=n, server_name=server_name, server_url=url, headers=headers)
+            for n in names
+        ]
+
+    # 4) callable -> Tool
+    if callable(obj):
+        if not name or not isinstance(name, str):
+            raise ToolDefinitionError("ToolFactory: 'name' (str) is required for callables.")
+        if not description or not isinstance(description, str):
+            raise ToolDefinitionError("ToolFactory: 'description' (str) is required for callables.")
+        return [
+            Tool(
+                func=obj,
+                name=name,
+                description=description,
+                type=tool_type,
+                source=source or "local",
+            )
+        ]
+
+    # 5) Unsupported
+    raise ToolDefinitionError(
+        "ToolFactory: unsupported input. Expected Tool | Agent | callable | MCP URL string."
+    )
