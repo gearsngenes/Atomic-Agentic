@@ -66,7 +66,7 @@ def _invoke(proxy: MCPProxyTool, inputs: Mapping[str, Any]) -> None:
     print("inputs:", inputs)
     try:
         result = proxy.invoke(dict(inputs))
-        print("result:", result)
+        print("result:", result, type(result))
     except ToolInvocationError as e:
         print("invoke error:", e)
 

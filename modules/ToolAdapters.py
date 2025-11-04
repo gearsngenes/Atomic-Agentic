@@ -265,17 +265,30 @@ class MCPProxyTool(Tool):
         # 3) Build the wrapper that will call the remote tool synchronously
         def _mcp_wrapper(**inputs: Any) -> Any:
             result = _run_sync(self._call_remote(self._server_url, tool_name, inputs, self._headers))
-            # Prefer text content if present (typical MCP result shape)
-            try:
-                content = getattr(result, "content", None)
-                if isinstance(content, list) and content:
-                    texts = [getattr(c, "text", "") for c in content if hasattr(c, "text")]
-                    joined = "".join(texts).strip()
-                    if joined:
-                        return joined
-            except Exception:
-                pass
-            return result
+            result = result.model_dump()
+            import json
+            if "structuredContent" in result:
+                if "result" in result["structuredContent"]: return result["structuredContent"]["result"]
+                else: return result["structuredContent"]
+            else:
+                try:
+                    content = result["content"]
+                    texts = [c["text"] for c in content]
+                    return "".join(texts)
+                except:
+                    pass
+                return result
+            # # Prefer text content if present (typical MCP result shape)
+            # try:
+            #     content = getattr(result, "content", None)
+            #     if isinstance(content, list) and content:
+            #         texts = [getattr(c, "text", "") for c in content if hasattr(c, "text")]
+            #         joined = "".join(texts).strip()
+            #         if joined:
+            #             return joined
+            # except Exception:
+            #     pass
+            # return result
 
         # 4) Initialize base Tool, then override the call plan
         super().__init__(

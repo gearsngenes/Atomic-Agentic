@@ -7,21 +7,25 @@ import math
 mcp = FastMCP(name="Demo Mathematics Server")
 
 @mcp.tool()
-def mul(a: float, b: float) -> float:
-    """Multiply two numbers a, b, and return the product."""
-    return a * b
+def mul(a: float, b: float) -> list[int]:
+    """Multiply two numbers a, b, and return the product in a single-item list."""
+    return [a * b]
 
 @mcp.tool()
 def power(base: float, exponent: float) -> float:
     """Raise 'base' to the power of 'exponent'."""
     return base ** exponent
 
+from typing import TypedDict
+class FactorialOut(TypedDict):
+    n: int
+    value: int
+
 @mcp.tool()
-def factorial(n: int) -> int:
-    """Calculate the factorial of a non-negative integer 'n'."""
-    if n < 0:
-        raise ValueError("Factorial is not defined for negative numbers.")
-    return math.factorial(n)
+def factorial(n: int) -> FactorialOut:
+    import math
+    return {"n": n, "value": math.factorial(n)}
+
 
 @mcp.tool()
 def derivative(func: str, x: float) -> float:
