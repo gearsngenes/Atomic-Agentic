@@ -1,59 +1,71 @@
 import os, sys, logging
 from pathlib import Path
-from typing import Any
-# Setting the root
+
+# Setting the repo root on sys.path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+
 from modules.LLMEngines import OpenAIEngine
 from modules.ToolAgents import OrchestratorAgent
 from modules.Agents import Agent
 
-logging.getLogger().setLevel(level=logging.INFO)
+logging.getLogger().setLevel(logging.INFO)
 
-# Set up the LLM engine
-llm = OpenAIEngine(model="gpt-4o", api_key=os.getenv("OPENAI_API_KEY"))
+# 1) LLM engine
+llm = OpenAIEngine(
+    model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+    api_key=os.getenv("OPENAI_API_KEY"),
+)
 
-# Define the helper agents
+# 2) Helper agents (schema-first; default pre-invoke expects {"prompt": str})
 builder = Agent(
     name="CodeBuilderAgent",
-    description="Handles tasks related to generating code based on user requests and revisions",
+    description="Generates Python code per request/revision.",
     llm_engine=llm,
-    role_prompt="""
-    You are a senior software engineer who writes Python code for requested tasks.
-    You return ONLY the code, without explanations or output.
-    """.strip(),
-    context_enabled=True
+    role_prompt=(
+        "You are a senior software engineer who writes Python code for requested tasks.\n"
+        "Return ONLY the code, with no explanations."
+    ),
+    context_enabled=True,
+    history_window=10,
 )
 
-optimizer = Agent(
+reviewer = Agent(
     name="CodeReviewer",
-    description="Handles tasks related to reviewing code from the code-builder and provides revision notes",
+    description="Reviews code from the builder and returns revision suggestions or 'Approved'.",
     llm_engine=llm,
-    role_prompt="""
-    You are an expert Python performance analyst. When given a code snippet, thoroughly, and brutally evaluate its quality 
-    in terms of accuracy, readability, and design, checking whether it follows SOLID principles. Once you've evaluated
-    the code, return ONLY your revision SUGGESTIONS for the code builder to work on, otherwise return only "Approved".
-    """.strip(),
-    context_enabled=True
+    role_prompt=(
+        "You are an expert Python performance analyst. Thoroughly and brutally evaluate the code for "
+        "accuracy, readability, and SOLID design. Return ONLY revision suggestions. If no changes are "
+        "needed, return 'Approved'."
+    ),
+    context_enabled=True,
+    history_window=10,
 )
 
-# Set up the orchestrator
-orchestrator = OrchestratorAgent("AgenticOrchestrator",
-                                 description="orchestrates calls between the code builder and code refiner",
-                                 llm_engine= llm)
+# 3) Orchestrator (sequential single-step loop)
+orchestrator = OrchestratorAgent(
+    name="AgenticOrchestrator",
+    description="Orchestrates calls between the code builder and the code reviewer.",
+    llm_engine=llm,
+    history_window=10,
+    max_steps=20,
+    max_failures=5,
+)
 
-# Register both agents
+# 4) Register both agents as tools
 orchestrator.register(builder)
-orchestrator.register(optimizer)
+orchestrator.register(reviewer)
 
-# Run a dynamic task
-task =  (
-    "Write a Python-based class that can help construct a design-pattern/oop oriented design "
-    "for agentic AI that also is platform agnostic (i.e. bedrock vs openai vs llama-cpp-python, etc.). "
-    "Be sure that once the code is generated, its reviewed first, and then re-built with any improvements "
-    "suggested by the code reviewer. Then, once the code-reviewer approves, return the latest code draft."
+# 5) Dynamic task (schema-first: mapping with 'prompt')
+task = (
+    "Write a Python class that scaffolds an agentic AI design with clean OOP and provider-agnostic "
+    "LLM backends (e.g., Bedrock, OpenAI, llama-cpp-python). First, have the CodeBuilderAgent draft "
+    "the implementation; then have CodeReviewer review and propose improvements; apply the improvements "
+    "by calling the builder again; repeat until the reviewer returns 'Approved'; finally, return the "
+    "latest approved code."
 )
 
-result = orchestrator.invoke(task)
+result = orchestrator.invoke({"prompt": task})
 
 print("\n=== Final Result ===\n")
 print(result)

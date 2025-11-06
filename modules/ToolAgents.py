@@ -555,7 +555,7 @@ class PlannerAgent(ToolAgent):
             {"role": "system", "content": Prompts.PLANNER_PROMPT.format(TOOLS=self.actions_context())},
         ]
         if self.context_enabled and self._history:
-            messages += self._history
+            messages += self._history[-2*self._history_window:]
         messages.append({"role": "user", "content": user_prompt})
 
         # Use positional signature to match base Agent consistency
@@ -689,3 +689,356 @@ class PlannerAgent(ToolAgent):
         # Clear step tracker and return
         self._previous_steps = []
         return result
+
+
+class OrchestratorAgent(ToolAgent):
+    """
+    Iterative, schema-driven tool orchestrator.
+
+    Behavior
+    --------
+    • System persona: `Prompts.ORCHESTRATOR_PROMPT` with `{TOOLS}` filled by `actions_context()`.
+    • Each iteration, the LLM must return exactly ONE JSON object:
+        {
+          "step_call": { "function": "<type>.<source>.<name>", "args": {...} },
+          "explanation": "why this step",
+          "status": "CONTINUE" | "COMPLETE"
+        }
+      No prose, no markdown fences.
+    • Placeholders:
+        - Full-string "{stepN}" returns the referenced result with its original type.
+        - Inline "{stepN}" inside a larger string stringifies the referenced result.
+    • Execution:
+        - Tool lookup is schema-first via canonical `Tool.full_name`.
+        - Arg shape checks are delegated to `Tool.invoke` (intentional).
+        - Unknown tool / placeholder resolution errors are recorded and allow repair,
+          bounded by `max_failures`.
+        - If the model returns "COMPLETE" for a non-`_return` step, a soft
+          `"function.default._return"` is appended with the latest result.
+    • Guards:
+        - `max_steps` hard-stops after N executed steps.
+        - `max_failures` hard-stops after M failed iterations.
+    • History policy:
+        - During iteration, a compact "Previous Steps" section is injected into the
+          current user message; it is **not** persisted as separate turns.
+        - On finish (success or failure), if `context_enabled=True`, exactly two stored
+          turns are appended:
+            1) user: the original prompt,
+            2) assistant: a formatted summary of executed steps and the final result.
+        - Stored history is never trimmed; `history_window` only limits what is sent.
+
+    Parameters
+    ----------
+    name, description, llm_engine, role_prompt, context_enabled, pre_invoke, history_window
+        See `Agent` / `ToolAgent`. `role_prompt` defaults to `Prompts.ORCHESTRATOR_PROMPT`.
+    max_steps : int, default 25
+        Max executed steps before aborting with failure summary.
+    max_failures : int, default 5
+        Max failed iterations (parse/lookup/resolve/tool failures) before abort.
+    context_budget_chars : int, default 4000
+        Approximate character budget for the inline "Previous Steps" section per turn.
+
+    Returns
+    -------
+    Any
+        Final value from the canonical `_return` tool, or the latest result on failure.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        llm_engine: LLMEngine,
+        role_prompt: Optional[str] = None,
+        context_enabled: bool = True,
+        *,
+        pre_invoke: Optional[Tool] = None,
+        history_window: int = 50,
+        max_steps: int = 25,
+        max_failures: int = 5,
+        context_budget_chars: int = 4000,
+    ) -> None:
+        super().__init__(
+            name=name,
+            description=description,
+            llm_engine=llm_engine,
+            role_prompt=role_prompt or Prompts.ORCHESTRATOR_PROMPT,
+            context_enabled=context_enabled,
+            pre_invoke=pre_invoke,
+            history_window=history_window,
+        )
+        self._max_steps = int(max_steps)
+        self._max_failures = int(max_failures)
+        self._context_budget_chars = int(context_budget_chars)
+
+    # ------------------------------ public API --------------------------------
+
+    def strategize_next(self, prompt: str) -> str:
+        """
+        Ask the LLM for the NEXT single step JSON object (as a raw string).
+
+        The system message embeds available tools; the user message includes:
+        - the current task,
+        - a compact "Previous Steps" block,
+        - and a final reminder to emit one JSON object using single-brace `{stepN}` placeholders.
+        """
+        messages = [
+            {"role": "system", "content": Prompts.ORCHESTRATOR_PROMPT.format(TOOLS=self.actions_context(), MAX_EXPLAIN_WORDS = 30)},
+        ]
+
+        # Windowed prior history (if any)
+        if self.context_enabled and self._history:
+            if self._history_window > 0:
+                prior = self._history[-(self._history_window * 2):]
+            else:
+                prior = []
+            messages += prior
+
+        # Compose the current user prompt with compact previous steps
+        prev_block = self._format_previous_steps(self._previous_steps, self._context_budget_chars)
+        user_prompt = (
+            f"USER TASK:\n{prompt}\n\n"
+            f"Previous Steps (compact):\n{prev_block}\n\n"
+            "Emit exactly ONE JSON object for the next step. "
+            "Use single-brace placeholders like {step0} if needed."
+        )
+        messages.append({"role": "user", "content": user_prompt})
+
+        # Engine call (attachments supported)
+        raw = self._llm_engine.invoke(messages, self._attachments)
+
+        # Strip common markdown fences (if any)
+        raw = re.sub(r"^```[a-zA-Z]*|```$", "", raw).strip()
+        return raw
+
+    def _invoke(self, prompt: str) -> Any:
+        """
+        Iteratively request and execute one step at a time until COMPLETE or guards trip.
+        Returns the final value (or latest successful result on failure).
+        """
+        steps_executed = 0
+        failures = 0
+        final_result: Any = None
+
+        # Ensure a clean step tracker for this run
+        self._previous_steps = []
+
+        tools = self.list_tools()
+        RETURN_KEY = "function.default._return"
+
+        while True:
+            if steps_executed >= self._max_steps:
+                logger.warning("Orchestrator: max_steps (%d) reached; aborting.", self._max_steps)
+                break
+            if failures >= self._max_failures:
+                logger.warning("Orchestrator: max_failures (%d) reached; aborting.", self._max_failures)
+                break
+
+            # Ask for the next step
+            try:
+                raw = self.strategize_next(prompt)
+                obj:dict = json.loads(raw)
+            except Exception as e:
+                # Parsing failure -> counted as iteration failure
+                self._previous_steps.append({
+                    "function": "<parse-error>",
+                    "args": {},
+                    "explanation": "Failed to parse single-step JSON.",
+                    "result": f"ERROR: {e}",
+                    "ok": False,
+                    "completed": True,
+                })
+                failures += 1
+                continue
+
+            # Validate minimal shape (step_call/explanation/status)
+            step_call = obj.get("step_call")
+            explanation = obj.get("explanation", "")
+            status = str(obj.get("status", "CONTINUE")).upper()
+
+            if not isinstance(step_call, dict):
+                self._previous_steps.append({
+                    "function": "<shape-error>",
+                    "args": {},
+                    "explanation": "Missing or invalid 'step_call' object.",
+                    "result": "ERROR: invalid schema",
+                    "ok": False,
+                    "completed": True,
+                })
+                failures += 1
+                continue
+
+            function = step_call.get("function")
+            args = step_call.get("args", {})
+
+            # Prepare a step slot early (so placeholder resolution can target it)
+            step_index = len(self._previous_steps)
+            self._previous_steps.append({
+                "function": function if isinstance(function, str) else "<invalid>",
+                "args": args if isinstance(args, (dict, list, str, int, float, bool, type(None))) else {},
+                "explanation": explanation if isinstance(explanation, str) else "",
+                "result": None,
+                "ok": False,
+                "completed": False,
+            })
+
+            # Lookup tool
+            if not isinstance(function, str) or function not in tools:
+                self._previous_steps[step_index].update({
+                    "result": f"ERROR: unknown tool {function!r}",
+                    "ok": False,
+                    "completed": True,
+                })
+                failures += 1
+                continue
+
+            tool = tools[function]
+
+            # Resolve placeholders (single-brace policy)
+            try:
+                resolved_args = self._resolve(args)
+            except Exception as e:
+                self._previous_steps[step_index].update({
+                    "result": f"ERROR: placeholder resolution failed: {e}",
+                    "ok": False,
+                    "completed": True,
+                })
+                failures += 1
+                continue
+
+            # Execute the tool (arg validation is handled by the Tool itself)
+            try:
+                result = tool.invoke(inputs=resolved_args)
+            except Exception as e:
+                self._previous_steps[step_index].update({
+                    "result": f"ERROR: tool invocation failed: {e}",
+                    "ok": False,
+                    "completed": True,
+                })
+                failures += 1
+                continue
+
+            # Success
+            self._previous_steps[step_index].update({
+                "result": result,
+                "ok": True,
+                "completed": True,
+            })
+            final_result = result
+            steps_executed += 1
+
+            # Termination handling
+            if status == "COMPLETE":
+                if function != RETURN_KEY:
+                    # Soft-append a final return step for parity with Planner
+                    try:
+                        ret = tools[RETURN_KEY].invoke(inputs={"val": final_result})
+                    except Exception as e:
+                        # This should not realistically fail, but capture if it does
+                        self._previous_steps.append({
+                            "function": RETURN_KEY,
+                            "args": {"val": "<unavailable>"},
+                            "explanation": "Soft finalization via _return",
+                            "result": f"ERROR: return failed: {e}",
+                            "ok": False,
+                            "completed": True,
+                        })
+                        break
+
+                    self._previous_steps.append({
+                        "function": RETURN_KEY,
+                        "args": {"val": final_result},
+                        "explanation": "Soft finalization via _return",
+                        "result": ret,
+                        "ok": True,
+                        "completed": True,
+                    })
+                    final_result = ret
+                break  # Completed
+
+        # Persist final turns if context is enabled
+        if self.context_enabled:
+            self._history.append({"role": "user", "content": prompt})
+            self._history.append({
+                "role": "assistant",
+                "content": self._format_final_summary(self._previous_steps, final_result),
+            })
+
+        # Reset internal step tracker for next call
+        self._previous_steps = []
+        return final_result
+
+    # ------------------------------ helpers ----------------------------------
+
+    @staticmethod
+    def _truncate(s: str, max_len: int) -> str:
+        if len(s) <= max_len:
+            return s
+        if max_len <= 3:
+            return s[:max_len]
+        return s[: max_len - 3] + "..."
+
+    def _format_previous_steps(self, steps: List[dict], budget: int) -> str:
+        """
+        Compact single-line summaries per step, truncated to a character budget.
+        Example line:
+          0) plugin.Math.mul(args={a:2,b:3}) → 6
+          1) function.default._return(args={val:{step0}}) → 6
+        Failed steps show: → ERROR: <message>
+        """
+        if not steps:
+            return "(none)"
+        parts: List[str] = []
+        used = 0
+        for i, st in enumerate(steps):
+            fn = str(st.get("function", "<?>"))
+            args = st.get("args", {})
+            res = st.get("result", None)
+            ok = bool(st.get("ok", False))
+
+            # Compact arg/result stringifications
+            try:
+                args_s = json.dumps(args, ensure_ascii=False)
+            except Exception:
+                args_s = str(args)
+            args_s = self._truncate(args_s, 256)
+
+            if ok:
+                try:
+                    res_s = json.dumps(res, ensure_ascii=False)
+                except Exception:
+                    res_s = str(res)
+            else:
+                res_s = str(res)
+            res_s = self._truncate(res_s, 256)
+
+            line = f"{i}) {fn}(args={args_s}) → {'OK ' if ok else ''}{res_s if res_s is not None else 'null'}"
+            if used + len(line) + 1 > budget:
+                parts.append("… (truncated)")
+                break
+            parts.append(line)
+            used += len(line) + 1
+
+        return "\n".join(parts)
+
+    def _format_final_summary(self, steps: List[dict], final_result: Any) -> str:
+        header = "Executed Steps:"
+        lines = [header]
+        for i, st in enumerate(steps):
+            fn = str(st.get("function", "<?>"))
+            try:
+                args_s = json.dumps(st.get("args", {}), ensure_ascii=False)
+            except Exception:
+                args_s = str(st.get("args", {}))
+            ok = bool(st.get("ok", False))
+            try:
+                res_s = json.dumps(st.get("result"), ensure_ascii=False)
+            except Exception:
+                res_s = str(st.get("result"))
+            lines.append(f"{i}) {fn}(args={args_s}) → {'OK ' if ok else ''}{res_s}")
+        try:
+            final_s = json.dumps(final_result, ensure_ascii=False)
+        except Exception:
+            final_s = str(final_result)
+        lines.append(f"\nFinal Result: {final_s}")
+        return "\n".join(lines)

@@ -86,7 +86,7 @@ Placeholder policy:
 # ONE-SHOT EXAMPLES
 // Next step (still working):
 {{
-  "step_call": {{ "function": "plugin.Math.mul", "args": {{ "a": "{{step0}}", "b": 10 }} }},
+  "step_call": {{ "function": "function.default.mul", "args": {{ "a": "{{step0}}", "b": 10 }} }},
   "explanation": "Scale the prior result by 10.",
   "status": "INCOMPLETE"
 }}
