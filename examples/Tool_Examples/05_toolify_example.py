@@ -22,20 +22,7 @@ from urllib.parse import urlparse, urlunparse
 from modules.ToolAdapters import toolify
 from modules.Tools import Tool, ToolInvocationError
 from modules.Agents import Agent
-from modules.LLMEngines import LLMEngine
-
-
-# ---------- Local, offline LLM engine for the Agent path ----------
-
-class EchoEngine(LLMEngine):
-    """Echo the last user message (offline demo engine)."""
-    def __init__(self, label: str = "ECHO"):
-        self.label = label
-
-    def invoke(self, messages, file_paths=None) -> str:
-        # Pick last user message content
-        last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        return f"[{self.label}] {last_user}"
+from modules.LLMEngines import OpenAIEngine
 
 
 # ---------- A callable we'll wrap via toolify(callable, ...) ----------
@@ -78,7 +65,7 @@ pre_invoke_tool = Tool(
 agent = Agent(
     name="Writer",
     description="Concise writing assistant.",
-    llm_engine=EchoEngine(label="WRITER"),
+    llm_engine=OpenAIEngine("gpt-4o-mini"),
     role_prompt="You are a concise writing assistant.",
     pre_invoke=pre_invoke_tool,
 )
@@ -169,7 +156,7 @@ def main() -> None:
             "multiply":   {"a": 3, "b": 4},
             "power":      {"base": 2, "exponent": 8},
             "factorial":  {"n": 5},
-            "derivative": {"func": "x**2 + 2*x + 1", "x": 3.0},
+            "derivative": {"func": "2.71828**x + 2*x + 1", "x": 3.0},
         }
         for t in mcp_tools:
             show_plan(t)

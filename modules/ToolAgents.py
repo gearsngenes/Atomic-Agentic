@@ -1,211 +1,475 @@
-import asyncio, inspect, logging, json, re
-from typing import Any, get_type_hints
-from modules.Agents import Agent
-import modules.Prompts as Prompts
-from modules.LLMEngines import LLMEngine
+# modules/ToolAgents.py
+from __future__ import annotations
+
+import logging
+import re
+import threading
 from abc import ABC, abstractmethod
-from modules.Tools import Tool, ToolFactory
+from collections import OrderedDict
+from typing import Any, Iterable, List, Mapping, Optional, Union, Callable
 
-"""
-ToolAgents
-==========
+from .Agents import Agent
+from .LLMEngines import LLMEngine
+from .Tools import Tool, ToolDefinitionError
+from .ToolAdapters import toolify
 
-Stateful, tool-using agents that **plan** and/or **orchestrate** calls to registered
-tools (functions, plugins, agents, MCP tools). This file preserves existing logic and
-adds clearer documentation only—no behavioral changes.
+__all__ = [
+    "ToolAgent",
+    "ToolAgentError",
+    "ToolRegistrationError",
+]
 
-Classes
--------
-ToolAgent (abstract)
-    Base class that manages a flattened registry of Tool objects and provides common
-    utilities for formatting tool context, resolving {{stepN}} placeholders, and
-    listing/registration.
+logger = logging.getLogger(__name__)
 
-PlannerAgent
-    One-shot planner/executor. Requests a full JSON plan (array of steps) from the LLM
-    using `Prompts.PLANNER_PROMPT`, appends a final return step if missing, then executes
-    the plan synchronously or asynchronously.
 
-OrchestratorAgent
-    Step-by-step orchestrator. Iteratively asks for exactly one next step, executes it,
-    and loops until status == "COMPLETE". Maintains a compact running-plan log.
-"""
+# ───────────────────────────────────────────────────────────────────────────────
+# Errors
+# ───────────────────────────────────────────────────────────────────────────────
 
+class ToolAgentError(RuntimeError):
+    """Base exception for ToolAgent-related errors."""
+
+
+class ToolRegistrationError(ToolAgentError):
+    """Raised when registering tools fails due to collisions or bad inputs."""
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# ToolAgent (abstract)
+# ───────────────────────────────────────────────────────────────────────────────
+
+def _return(val: Any): return val
+
+return_tool = Tool(
+    func= _return,
+    name= "_return",
+    description= "Returns the passed-in value. This method should ONLY OCCUR ONCE as the FINAL STEP of any plan.")
 
 class ToolAgent(Agent, ABC):
-    """Abstract base for agents that call registered tools to complete tasks.
+    """
+    Schema-driven base for tool-using agents.
 
-    - Maintains a flat list of `Tool` objects in registration order.
-    - Provides `get_actions_context()` for prompt-time tool descriptions grouped by
-      type → source.
-    - Implements placeholder resolution for `{{stepN}}` across args payloads.
-    - Leaves strategy and execution specifics to concrete subclasses.
+    Inherits from `Agent` and `ABC`. Manages a toolbox of `Tool` objects
+    produced by `toolify`. This class does **not** implement planning/execution;
+    concrete subclasses (e.g., Planner/Orchestrator) must implement `invoke`.
+
+    Key behaviors
+    -------------
+    • Constructor mirrors `Agent.__init__` and delegates to it.
+    • `register(...)` accepts one object or a list of objects; each is normalized
+      via `toolify` into one or more `Tool` instances. Collisions are handled
+      with `mode={"raise","skip","replace"}`.
+    • `list_tools()` returns `Tool` objects (schema-first).
+    • `actions_context(with_schemas=True)` includes canonical signatures and
+      required keys (from `Tool`), not free-form text.
+
+    Not supported
+    -------------
+    • No plugin inputs. Registration accepts only: `Tool`, `Agent`, Python `callable`,
+      and MCP endpoint URL strings (as supported by `toolify`).
+
+    Thread-safety
+    -------------
+    • Registration/removal are guarded by a re-entrant lock. Read paths return copies.
+
+    Notes for subclass authors
+    --------------------------
+    • Implement `invoke(self, inputs: Mapping[str, Any]) -> Any`.
+    • If you need a prompt string, call `self.pre_invoke.invoke(inputs)` and validate
+      its type/shape before using it.
     """
 
-    def __init__(self, name, description, llm_engine, role_prompt = Prompts.DEFAULT_PROMPT):
-        """Initialize with no chat context and an empty toolbox.
+    # ----------------------------- construction ------------------------------
 
-        A canonical `_return` tool is registered for plan termination, preserving
-        existing planner/orchestrator contracts.
-        """
-        super().__init__(name, description, llm_engine, role_prompt, context_enabled = False)
-        # Flattened toolbox: ordered list of Tool objects. Grouping by type/source
-        # is computed on-demand by toolbox_by_type().
-        self._toolbox: list[Tool] = []
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        llm_engine: LLMEngine,
+        role_prompt: Optional[str] = None,
+        context_enabled: bool = True,
+        *,
+        pre_invoke: Optional[Tool] = None,
+        history_window: int = 50,
+    ) -> None:
+        # Delegate validation and defaults to Agent
+        super().__init__(
+            name=name,
+            description=description,
+            llm_engine=llm_engine,
+            role_prompt=role_prompt,
+            context_enabled=context_enabled,
+            pre_invoke=pre_invoke,
+            history_window=history_window,
+        )
+        self._toolbox: OrderedDict[str, Tool] = OrderedDict()
+        self._lock = threading.RLock()
+        self._mcp_server_tag:int = 0
         self._previous_steps: list[dict] = []
-        self._mcpo_servers = {}  # optional for MCP, added only if enabled
-        self._mcpo_counter = 0
-        self._mcp_counter = 0
-        def _return(val: Any): return val
-        self.register(tool = _return, name = "_return", description = "Returns the passed-in value. This method should ONLY OCCUR ONCE as the FINAL STEP of any plan.")
+        self.register(return_tool)
 
     def _resolve(self, obj: Any) -> Any:
-        """Recursively resolve placeholders inside args payloads.
+        """Recursively resolve {stepN} placeholders in strings, lists, and dicts.
 
-        Supports:
-        - A full-string placeholder like "{{step3}}"
-        - Inline placeholders within strings, replacing each with the corresponding
-          step result's `str()`.
-
-        Raises
-        ------
-        RuntimeError
-            If a referenced step index has not completed yet.
+        Rules
+        -----
+        - Full-string "{stepN}" → returns the referenced result (preserves type).
+        - Inline occurrences inside strings are replaced with str(previous_result).
+        - Lists and dicts are traversed recursively.
+        - Raises RuntimeError if a referenced step index is out of range or incomplete.
         """
+        import re
         if isinstance(obj, str):
-            match = re.fullmatch(r"\{step(\d+)\}", obj)
-            if match:
-                idx = int(match.group(1))
+            # Full-string token
+            m = re.fullmatch(r"\{step(\d+)\}", obj)
+            if m:
+                idx = int(m.group(1))
                 if idx >= len(self._previous_steps) or not self._previous_steps[idx]["completed"]:
                     raise RuntimeError(f"Step {idx} has not been completed yet.")
                 return self._previous_steps[idx]["result"]
 
-            return re.sub(
-                r"\{step(\d+)\}",
-                lambda m: str(self._previous_steps[int(m.group(1))]["result"])
-                if self._previous_steps[int(m.group(1))]["completed"]
-                else RuntimeError(f"Step {m.group(1)} has not been completed yet."),
-                obj
-            )
+            # Inline replacements with strict raise on incomplete
+            def _repl(match: re.Match[str]) -> str:
+                idx = int(match.group(1))
+                if idx >= len(self._previous_steps) or not self._previous_steps[idx]["completed"]:
+                    raise RuntimeError(f"Step {idx} has not been completed yet.")
+                return str(self._previous_steps[idx]["result"])
+
+            return re.sub(r"\{step(\d+)\}", _repl, obj)
 
         if isinstance(obj, list):
-            return [self._resolve(x) for x in obj]
+            return [self._resolve(v) for v in obj]
+
         if isinstance(obj, dict):
             return {k: self._resolve(v) for k, v in obj.items()}
+
         return obj
 
-    @abstractmethod
-    def strategize(self, prompt:str)->dict:
-        """Return a plan (shape determined by subclass) given a task prompt."""
-        pass
+    # --------------------------- abstract contract ---------------------------
 
     @abstractmethod
-    def execute(self, plan:list[dict])->Any:
-        """Execute a plan produced by `strategize` and return the final result."""
-        pass
-
-    def get_actions_context(self) -> str:
-        """Return a textual description of available tools formatted for prompts.
-
-        This preserves the old layout used by the planner/orchestrator prompts by
-        grouping tools by type then source.
+    def _invoke(self, prompt: str) -> Any:
         """
-        # Group tools by type -> source -> [tools] keeping insertion order
-        grouped: dict[str, dict[str, list[Tool]]] = {}
-        for tool in self._toolbox:
-            grouped.setdefault(tool.type, {})
-            grouped[tool.type].setdefault(tool.source, []).append(tool)
+        Invoke the tool-using agent with a single **input mapping**.
 
-        context = ""
-        for action_type, type_dict in grouped.items():
-            context += f"ACTION TYPE: {action_type}s\n"
-            for source, tool_list in type_dict.items():
-                context += f"- SOURCE: {source}\n"
-                for tool in tool_list:
-                    context += f"  - {tool.description}\n"
-            context += "\n"
-        return context
-
-    def list_tools(self) -> dict:
-        """Return a mapping of full tool key -> callable.
-
-        Later-registered tools override earlier ones when keys collide.
+        Subclasses must:
+        1) Validate `inputs` is a Mapping.
+        2) Optionally call `self.pre_invoke.invoke(inputs)` and validate the output.
+        3) Execute their plan/orchestration using `Tool` objects from `list_tools()`.
+        4) Return the final result (shape defined by the subclass).
         """
-        tools: dict[str, Any] = {}
-        for tool in self._toolbox:
-            tools[tool.full_name] = tool.func
-        return tools
+        raise NotImplementedError
 
-    def register(self, tool: Any, name: str|None = None, description: str | None = None) -> None:
-        """Register a callable, plugin, Agent, MCP server URL, or a `Tool` instance.
+    # ------------------------------ registration -----------------------------
 
-        Behavior
-        --------
-        - If a `Tool` instance is provided, it is appended as-is.
-        - Otherwise, `ToolFactory.toolify(...)` converts the object into one or more
-          `Tool` instances (keeps original API behavior).
-        - Multiple registrations of the same logical source are allowed; lookups are
-          last-wins by fully-qualified key.
+    def register(
+        self,
+        item: Union[Tool,Agent,str,Callable],
+        *,
+        # ---- explicit toolify knobs (callable / agent / MCP) ----
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        source: Optional[str] = None,
+        # Name-collision handling
+        name_collision_mode: str = "raise",
+        # MCP-only (handled by toolify when items are MCP endpoints/descriptors)
+        server_name: Optional[str] = None,
+        include: Optional[List[str]] = None,
+        exclude: Optional[List[str]] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> List[str]:
+        """
+        Register one or many inputs into the toolbox via `toolify`, using explicit,
+        named parameters for adapter configuration (no generic **kwargs).
+
+        Acceptable `items`:
+        - `Tool` (passthrough)
+        - `Agent` (wrapped as an AgentTool by toolify)
+        - Python `callable` (requires `name` and `description` here)
+        - MCP endpoint URL string (requires `server_name`; optional include/exclude/headers)
+
+        Parameters
+        ----------
+        items : Tool | Agent | str | callable | Iterable[...]
+            Single input or an iterable of inputs accepted by `toolify`.
+        mode : {"raise","skip","replace"}, default "raise"
+            Name-collision policy for identical `Tool.full_name`.
+
+        Adapter parameters (explicit)
+        -----------------------------
+        name : Optional[str]
+            Canonical name to assign (e.g., for callables).
+        description : Optional[str]
+            Human-readable description for prompts.
+        source : Optional[str]
+            Source label (e.g., "local", "mcp", "agent").
+        tool_type : Optional[str]
+            Logical type tag (e.g., "function", "mcp", "agent").
+        server_name : Optional[str]
+            MCP server identifier used by the adapter when `items` are MCP endpoints.
+        include : Optional[List[str]]
+            MCP tool name whitelist.
+        exclude : Optional[List[str]]
+            MCP tool name blacklist.
+        headers : Optional[dict[str,str]]
+            Optional HTTP headers for MCP adapters.
 
         Returns
         -------
-        str | None
-            A reference hint mirroring prior behavior (e.g., "function.default.<name>"
-            or "plugin.<source>"). `None` if nothing was produced.
+        List[str]
+            The list of `full_name`s that ended up registered (inserted or replaced).
+
+        Raises
+        ------
+        ToolRegistrationError
+            On invalid `mode` or name conflict under `"raise"`.
+        ToolDefinitionError
+            Propagated from `toolify` for unsupported or malformed inputs.
         """
-        # Accept a ready-made Tool instance
-        if isinstance(tool, Tool):
-            self._toolbox.append(tool)
-            return tool.full_name
+        if name_collision_mode not in ("raise", "skip", "replace"):
+            raise ToolRegistrationError("mode must be one of: 'raise', 'skip', 'replace'")
+        # Build explicit kwargs for toolify — clear and type-stable.
+        toolify_params = {
+            "name": name,
+            "description": description,
+            "source": source,
+            "server_name": server_name,
+            "include": include,
+            "exclude": exclude,
+            "headers": headers,
+        }
+        if isinstance(item, Callable) and not (isinstance(name, str) and isinstance(description, str)) and not (name.strip() and description.strip()):
+            raise ToolRegistrationError("ToolAgent.register: method missing 'name' and/or 'description'")
 
-        # Determine allowed non-Tool types (we keep same external API inputs)
-        if callable(tool):
-            _type = "function"
-        elif isinstance(tool, dict) and "method_map" in tool and "name" in tool:
-            _type = "plugin"
-        elif isinstance(tool, Agent):
-            _type = "agent"
-        elif isinstance(tool, str) and tool.endswith("/mcp"):
-            _type = "mcp"
-        else:
-            raise ValueError("Tool must be a callable, Plugin, Agent, or MCP server URL string (if MCP registration is allowed).")
+        # Toolify OUTSIDE the lock (may raise ToolDefinitionError)
+        tools = toolify(item, **toolify_params)
+        # Mutate toolbox atomically per tool under a lock
+        registered: List[str] = []
+        with self._lock:
+            for tool in tools:
+                full_name = tool.full_name
+                exists = full_name in self._toolbox
 
-        tools: list[Tool] = ToolFactory.toolify(object=tool, name=name, description=description)
-        if not tools:
-            return None
+                if exists:
+                    if name_collision_mode == "raise":
+                        raise ToolRegistrationError(
+                            f"Duplicate tool name: {full_name!r}. "
+                            f"Use mode='skip' or mode='replace' to override."
+                        )
+                    if name_collision_mode == "skip":
+                        logger.debug("ToolAgent.register: skipping duplicate %s", full_name)
+                        continue
+                    # mode == "replace"
+                    logger.debug("ToolAgent.register: replacing %s", full_name)
+                    self._toolbox[full_name] = tool
+                    registered.append(full_name)
+                else:
+                    self._toolbox[full_name] = tool
+                    registered.append(full_name)
 
-        # Append all produced Tool objects. We intentionally allow multiple
-        # registrations for the same source; lookup will resolve last-wins.
-        self._toolbox.extend(tools)
+        return registered
 
-        # Return a helpful reference string similar to prior behavior.
-        if _type == "function":
-            # return like: function.default.<method_name>
-            return f"function.default.{tools[0].name}"
-        else:
-            # return like: plugin.<source> or agent.<source> or mcp.<source>
-            return f"{tools[0].type}.{tools[0].source}"
-
-    def invoke(self, prompt):
-        """Abstract base: force subclasses to define the calling contract."""
-        raise NotImplementedError("ToolAgent is abstract; use strategize() and execute() instead.")
-
-    @property  # toolbox should not be editable from the outside
-    def toolbox(self):
-        """Return a shallow copy of the registered `Tool` list in registration order."""
-        # Return a shallow copy of the internal Tool list
-        return list(self._toolbox)
-
-    def toolbox_by_type(self) -> dict:
-        """Compatibility helper: produce the legacy nested dict view
-        { type: { source: [Tool, ...], ... }, ... }
+    def batch_register(
+        self,
+        items: Iterable[Union[Tool, Agent, str]],
+        *,
+        name_collision_mode: str = "raise",
+    ) -> List[str]:
         """
-        grouped: dict[str, dict[str, list[Tool]]] = {}
-        for tool in self._toolbox:
-            grouped.setdefault(tool.type, {})
-            grouped[tool.type].setdefault(tool.source, []).append(tool)
-        return grouped
+        Register one or many inputs into the toolbox via `toolify`, using explicit,
+        named parameters for adapter configuration (no generic **kwargs).
 
+        Acceptable `items`:
+        - `Tool` (passthrough)
+        - `Agent` (wrapped as an AgentTool by toolify)
+        - Python `callable` (requires `name` and `description` here)
+        - MCP endpoint URL string (requires `server_name`; optional include/exclude/headers)
+
+        Parameters
+        ----------
+        items : Tool | Agent | str | callable | Iterable[...]
+            Single input or an iterable of inputs accepted by `toolify`.
+        mode : {"raise","skip","replace"}, default "raise"
+            Name-collision policy for identical `Tool.full_name`.
+
+        Adapter parameters (explicit)
+        -----------------------------
+        name : Optional[str]
+            Canonical name to assign (e.g., for callables).
+        description : Optional[str]
+            Human-readable description for prompts.
+        source : Optional[str]
+            Source label (e.g., "local", "mcp", "agent").
+        tool_type : Optional[str]
+            Logical type tag (e.g., "function", "mcp", "agent").
+        server_name : Optional[str]
+            MCP server identifier used by the adapter when `items` are MCP endpoints.
+        include : Optional[List[str]]
+            MCP tool name whitelist.
+        exclude : Optional[List[str]]
+            MCP tool name blacklist.
+        headers : Optional[dict[str,str]]
+            Optional HTTP headers for MCP adapters.
+
+        Returns
+        -------
+        List[str]
+            The list of `full_name`s that ended up registered (inserted or replaced).
+
+        Raises
+        ------
+        ToolRegistrationError
+            On invalid `mode` or name conflict under `"raise"`.
+        ToolDefinitionError
+            Propagated from `toolify` for unsupported or malformed inputs.
+        """
+        if name_collision_mode not in ("raise", "skip", "replace"):
+            raise ToolRegistrationError("mode must be one of: 'raise', 'skip', 'replace'")
+        # Normalize to list without mutating toolbox yet
+        if not isinstance(items, Iterable):
+            raise ToolRegistrationError(f"Expected an Iterable collection of items, but got {type(items)}")
+        if any(not isinstance(item, (Tool, Agent, str)) for item in items):
+            raise ToolRegistrationError("When registering multiple items, raw functions are not permitted")
+        # Toolify OUTSIDE the lock (may raise ToolDefinitionError)
+        produced: List[Tool] = []
+        for obj in items:
+            toolify_params = {
+                "name": obj.name if not isinstance(obj, str) else None,
+                "description": obj.description if not isinstance(obj, str) else None,
+                "source": obj.name if isinstance(obj, Agent) else (
+                        obj.source if isinstance(obj, Tool) else None
+                    ),
+                "server_name": None if not isinstance(obj, str) else f"{self.name}_mcpserver_{self._mcp_server_tag}",
+                "include": None,
+                "exclude": None,
+                "headers": None,
+            }
+            if isinstance(obj, str): self._mcp_server_tag += 1
+            tools = toolify(obj, **toolify_params)
+            # Contract: toolify returns only Tool instances
+            if any(not isinstance(t, Tool) for t in tools):
+                raise ToolRegistrationError("toolify produced a non-Tool instance.")
+            produced.extend(tools)
+
+        # Mutate toolbox atomically per tool under a lock
+        registered: List[str] = []
+        with self._lock:
+            for tool in produced:
+                full_name = tool.full_name
+                exists = full_name in self._toolbox
+
+                if exists:
+                    if name_collision_mode == "raise":
+                        raise ToolRegistrationError(
+                            f"Duplicate tool name: {full_name!r}. "
+                            f"Use mode='skip' or mode='replace' to override."
+                        )
+                    if name_collision_mode == "skip":
+                        logger.debug("ToolAgent.register: skipping duplicate %s", full_name)
+                        continue
+                    # mode == "replace"
+                    logger.debug("ToolAgent.register: replacing %s", full_name)
+                    self._toolbox[full_name] = tool
+                    registered.append(full_name)
+                else:
+                    self._toolbox[full_name] = tool
+                    registered.append(full_name)
+
+        return registered
+
+    # ------------------------------ management -------------------------------
+
+    def has_tool(self, full_name: str) -> bool:
+        """Return True if a tool with `full_name` is registered."""
+        return full_name in self._toolbox
+
+    def remove_tool(self, full_name: str) -> bool:
+        """Remove tool by `full_name`. Returns True if it existed and was removed."""
+        with self._lock:
+            return self._toolbox.pop(full_name, None) is not None
+
+    def clear_tools(self) -> None:
+        """Remove all tools from the toolbox."""
+        with self._lock:
+            self._toolbox.clear()
+
+    def list_tools(self) -> OrderedDict[str, Tool]:
+        """
+        Return a shallow copy of the toolbox mapping.
+
+        Keys are canonical `Tool.full_name` strings; values are `Tool` instances.
+        """
+        return OrderedDict(self._toolbox)
+
+    # ------------------------------ introspection -----------------------------
+
+    def actions_context(self, *, with_schemas: bool = True) -> str:
+        """
+        Build a human-readable context block of available actions.
+
+        Parameters
+        ----------
+        with_schemas : bool, default True
+            If True, include each Tool's canonical `signature` and its required keys.
+            If False, include only `full_name` and description.
+
+        Returns
+        -------
+        str
+            A newline-joined context block suitable for inclusion in prompts.
+        """
+        lines: List[str] = []
+        for full_name, tool in self._toolbox.items():
+            if with_schemas:
+                # Use Tool's concrete properties (no attribute probing).
+                signature = tool.signature
+                required = sorted(tool.required_names)
+                desc = tool.description
+                lines.append(f"- {full_name}: {signature}")
+                if required:
+                    lines.append(f"  required: [{', '.join(required)}]")
+                if desc:
+                    lines.append(f"  {desc}")
+            else:
+                desc = tool.description
+                lines.append(f"- {full_name}: {desc}" if desc else f"- {full_name}")
+        return "\n".join(lines).strip()
+
+    # ------------------------------ serialization -----------------------------
+
+    def to_dict(self) -> dict:
+        """Summarize this ToolAgent and its toolbox (safe for logs/telemetry)."""
+        tools_block: List[dict] = []
+        for full_name, tool in self._toolbox.items():
+            # Use Tool's public properties directly.
+            rt = tool.return_type
+            rt_str = getattr(rt, "__name__", repr(rt))
+            tools_block.append({
+                "full_name": full_name,
+                "signature": tool.signature,
+                "return_type": rt_str,
+                "type": tool.type,
+                "source": tool.source,
+                "name": tool.name,
+                "description": tool.description,
+                "required": sorted(tool.required_names),
+            })
+
+        return {
+            "name": self.name,
+            "description": self.description,
+            "role_prompt": bool(self.role_prompt),
+            "context_enabled": self.context_enabled,
+            "history_window": self.history_window,
+            "attachments_count": len(self.attachments),
+            "pre_invoke": self.pre_invoke.name,
+            "tool_count": len(self._toolbox),
+            "tools": tools_block,
+        }
+
+from . import Prompts
+import json
+import asyncio
 
 class PlannerAgent(ToolAgent):
     """Single-shot planner that generates a complete step list then executes it.
@@ -216,22 +480,34 @@ class PlannerAgent(ToolAgent):
     - `is_async` determines whether execution uses `execute_async`.
     """
 
-    def __init__(self, name: str, description: str, llm_engine: LLMEngine, context_enabled = False, is_async=False):
+    def __init__(self,
+                 name: str,
+                 description: str,
+                 llm_engine: LLMEngine,
+                 context_enabled = False,
+                 *,
+                 pre_invoke: Tool|None = None,
+                 history_window: int = 50,
+                 run_concurrent=False):
         """Initialize planner state and behavior flags."""
-        super().__init__(name = name, description=description, llm_engine=llm_engine, role_prompt=Prompts.PLANNER_PROMPT)
-        self.context_enabled = context_enabled
-        self._is_async = is_async
-        self._previous_steps: list[dict] = []
+        super().__init__(name = name,
+                         description=description,
+                         llm_engine=llm_engine,
+                         role_prompt=Prompts.PLANNER_PROMPT,
+                         context_enabled = context_enabled,
+                         pre_invoke=pre_invoke,
+                         history_window=history_window)
+        self._run_concurrent = run_concurrent
 
     @property
-    def is_async(self): 
+    def run_concurrent(self): 
         """bool: When True, `.execute()` dispatches to `.execute_async()`."""
-        return self._is_async
+        return self._run_concurrent
 
-    @is_async.setter
-    def is_async(self, value: bool): 
+    @run_concurrent.setter
+    def run_concurrent(self, value: bool): 
         """Enable/disable async execution mode."""
-        self._is_async = value
+        self._run_concurrent = value
 
     @property
     def description(self):
@@ -251,7 +527,7 @@ class PlannerAgent(ToolAgent):
         The final plan is returned as a Python list, ensuring a trailing return step.
         """
         # 1) Build the AVAILABLE METHODS block from Tool objects
-        block = self.get_actions_context()
+        block = self.actions_context()
 
         user_prompt = (
             f"Decompose the following task into a JSON plan:\n{prompt}\n\n"
@@ -264,10 +540,10 @@ class PlannerAgent(ToolAgent):
         if self.context_enabled:
             messages += self._history
         messages.append({"role": "user", "content": user_prompt})
-        raw = self._llm_engine.invoke(messages = messages, file_paths = self._file_paths)
+        raw = self._llm_engine.invoke(messages = messages, file_paths = self._attachments)
         raw = re.sub(r'^```[a-zA-Z]*|```$', '', raw)
         self._history.append({"role": "assistant", "content": raw})
-        steps = list(json.loads(raw))
+        steps: list[dict] = list(json.loads(raw))
         # 3) Ensure last step is the canonical return tool
         if not steps or steps[-1].get('function') != 'function.default._return':
             steps.append({"function": "function.default._return", "args": {"val": None}})
@@ -281,39 +557,46 @@ class PlannerAgent(ToolAgent):
         step's `result` and `completed` status in `_previous_steps`.
         """
         self._previous_steps = [{"result": None, "completed": False} for _ in plan]
-        return asyncio.run(self.execute_async(plan)) if self._is_async else self._execute_sync(plan)
+        return asyncio.run(self._execute_async(plan)) if self._run_concurrent else self._execute_sync(plan)
 
     def _execute_sync(self, steps: list[dict]) -> Any:
         """Synchronous step runner; rejects async callables with a clear error."""
         tools = self.list_tools()
         for i, step in enumerate(steps):
-            fn = tools[step["function"]]
-            if inspect.iscoroutinefunction(fn):
-                raise RuntimeError(f"Function '{step['function']}' is async — use is_async=True.")
-            logging.info(f"[TOOL] {step['function']} args: {step.get("args", {})}")
+            step_tool = tools[step["function"]]
+            logging.debug(f"[TOOL] {step['function']} args: {step.get('args', {})}")
             args = self._resolve(step.get("args", {}))
-            result = fn(**args)
+            result = step_tool.invoke(inputs = args)
             self._previous_steps[i]["result"] = result
             self._previous_steps[i]["completed"] = True
         return self._previous_steps[-1]["result"]
 
-    async def execute_async(self, steps: list[dict]) -> Any:
+    async def _execute_async(self, steps: list[dict]) -> Any:
         """Asynchronous step runner with simple dependency gating via {{stepN}} use."""
         tools = self.list_tools()
 
         def get_deps(i):
-            return {
-                int(n) for n in re.findall(r"step(\d+)", json.dumps(steps[i].get("args", {})))
-            }
+            import re
+            pat = re.compile(r"\{step(\d+)\}")
+            found = set()
+            def walk(x):
+                if isinstance(x, str):
+                    for m in pat.finditer(x):
+                        found.add(int(m.group(1)))
+                elif isinstance(x, list):
+                    for v in x: walk(v)
+                elif isinstance(x, dict):
+                    for v in x.values(): walk(v)
+            walk(steps[i].get("args", {}))
+            return found
+
 
         async def run_step(i: int):
             step = steps[i]
-            fn = tools[step["function"]]
-            logging.info(f"[TOOL] {step['function']} args: {step.get("args", {})}")
+            step_tool = tools[step["function"]]
+            logging.info(f"[TOOL] {step['function']} args: {step.get('args', {})}")
             args = self._resolve(step.get("args", {}))
-            if inspect.iscoroutinefunction(fn):
-                return await fn(**args)
-            return await asyncio.get_running_loop().run_in_executor(None, lambda: fn(**args))
+            return await asyncio.get_running_loop().run_in_executor(None, lambda: step_tool.invoke(inputs = args))
 
         remaining = set(range(len(steps)))
         completed = set()
@@ -331,177 +614,27 @@ class PlannerAgent(ToolAgent):
 
         return self._previous_steps[-1]["result"]
 
-    def invoke(self, prompt: str):
+    def _invoke(self, prompt: str)-> Any:
         """High-level entry point: generate a plan, execute it, and return the final value.
 
         - Emits start/finish banners via logging for visibility.
         - Stores the raw plan text as the latest assistant turn only when `context_enabled`.
         """
-        logging.info(f"\n+---{'-'*len(self.name + ' Starting')}---+"
-                     f"\n|   {self.name} Starting   |"
-                     f"\n+---{'-'*len(self.name + ' Starting')}---+")
-
-        self._previous_steps = []  # reset step history
+        if not isinstance(prompt, str):
+            raise RuntimeError(f"{self.name}.pre_invoke must be a tool that returns a string when invoked")
+        # reset step history
+        self._previous_steps = []
+        # generate json-formatted plan
         plan = self.strategize(prompt)
+        # retrieve raw string output
         plan_raw = self._history[-1]["content"] if self._history else ""
         self._history = self._history[:-1]
-        logging.info(f"{self.name} created plan with {len(plan)} steps")
+        logging.debug(f"{self.name} created plan with {len(plan)} steps")
+        # execute plan
         result = self.execute(plan)
+        # save history
         if self.context_enabled:
             self._history.append({"role": "user", "content": prompt})
             self._history.append({"role": "assistant", "content": f"Generated plan:\n{plan_raw}\nExecuted Result: {str(result)}"})
         self._previous_steps = []
-        logging.info(   f"\n+---{'-'*len(self.name + ' Finished')}---+"
-                        f"\n|   {self.name} Finished   |"
-                        f"\n+---{'-'*len(self.name + ' Finished')}---+\n")
         return result
-
-
-class OrchestratorAgent(ToolAgent):
-    """Iterative orchestrator that plans and executes **one** tool step at a time.
-
-    - Uses `Prompts.ORCHESTRATOR_PROMPT`.
-    - Carries a compact `self._running_plan` (list of dicts) for the LLM to review.
-    - Each `strategize()` call must return a JSON object with keys:
-      `step_call` (with `function` and `args`), `explanation`, and `status`.
-    - Stops when `status == "COMPLETE"`.
-    """
-
-    def __init__(self, name: str, description: str, llm_engine: LLMEngine,
-                 context_enabled=False, max_context_chars: int = 100_000):
-        """Initialize orchestrator state (history flag, running plan, truncation budget)."""
-        super().__init__(name, description=description, llm_engine=llm_engine)
-        self.context_enabled = context_enabled
-        self.role_prompt = Prompts.ORCHESTRATOR_PROMPT
-        self._previous_steps: list[dict] = []
-        self._running_plan: list[dict] = []  # list of prior step JSONs (compact)
-        self.max_context_chars = max_context_chars
-
-    # --- helpers ---
-    def _stringify(self, value: Any) -> str:
-        """Best-effort JSON serialization; falls back to `str(value)`."""
-        if isinstance(value, (dict, list)):
-            try:
-                return json.dumps(value, ensure_ascii=False)
-            except Exception:
-                return str(value)
-        return "" if value is None else str(value)
-
-    def _truncate(self, s: str | None) -> str | None:
-        """Truncate a string to `max_context_chars` characters if necessary."""
-        if s is None:
-            return None
-        return s if len(s) <= self.max_context_chars else s[: self.max_context_chars]
-
-    def strategize(self, prompt: str) -> list[dict]:
-        """Request exactly **one** next-step JSON object from the LLM.
-
-        The prompt includes:
-        - AVAILABLE METHODS
-        - The user's task
-        - A compact running plan
-        - The latest step result (truncated), when present
-
-        Returns
-        -------
-        list[dict]
-            A single-element list containing the step object as returned by the LLM.
-        """
-        """
-        Ask for exactly ONE next-step JSON object using the unified key format.
-        """
-        available = self.get_actions_context()
-        last_result = self._truncate(self._stringify(self._previous_steps[-1]["result"])) if self._previous_steps else None
-
-        sys = {
-            "role": "system",
-            "content": Prompts.ORCHESTRATOR_PROMPT.format(TOOLS = available, MAX_EXPLAIN_WORDS = 20)
-        }
-        msgs = [sys]
-        if self.context_enabled:
-            msgs += self._history
-        user = {
-            "role": "user",
-            "content": (
-                "Generate the next single JSON object needed to complete the user's task.\n"
-                f"TASK: {prompt}\n"
-                f"RUNNING PLAN SO FAR: {json.dumps(self._running_plan, ensure_ascii=False)}\n"
-                + (f"STEP{len(self._running_plan)-1} RESULT (truncated): {last_result}\n" if last_result is not None else "")
-            )
-        }
-        msgs.append(user)
-
-        raw = self._llm_engine.invoke(messages=msgs, file_paths=self._file_paths).strip()
-        raw = re.sub(r"^```[a-zA-Z]*|```$", "", raw)
-        step = json.loads(raw)
-
-        # Validate
-        assert all(k in step for k in ("step_call", "explanation", "status")), \
-            "Returned JSON must include step_call, explanation, and status."
-        assert "function" in step["step_call"] and "args" in step["step_call"], \
-            "step_call must include function and args."
-
-        # Memoize compact plan
-        compact = {
-            "function": step["step_call"]["function"],
-            "args": step["step_call"]["args"],
-            "status": step["status"]
-        }
-        self._running_plan.append(compact)
-        return [step]
-
-    def execute(self, step_list: list[dict]) -> Any:
-        """Execute exactly one tool step returned by `strategize()`.
-
-        Resolves placeholders, validates the tool key exists, and rejects async
-        callables since this orchestrator runs synchronously by design.
-        """
-        step = step_list[0]
-        fn_key = step["step_call"]["function"]
-        tools = self.list_tools()
-        fn = tools.get(fn_key)
-        if fn is None:
-            available = ", ".join(sorted(tools.keys()))
-            raise KeyError(f"Unknown tool key '{fn_key}'. Available keys: {available}")
-
-        logging.info(f"[TOOL] {fn_key} args: {step['step_call'].get('args', {})}")
-        args = self._resolve(step["step_call"].get("args", {}))
-        if inspect.iscoroutinefunction(fn):
-            # orchestrator executes synchronously; disallow accidental async
-            raise RuntimeError(f"Function '{fn_key}' is async — switch to an async orchestrator if needed.")
-        return fn(**args)
-
-    def step(self, prompt: str) -> tuple[str, Any, str]:
-        """Convenience: plan one step, run it, return `(explanation, result, status)`."""
-        strat = self.strategize(prompt)[0]
-        explanation = strat["explanation"]
-        status = strat["status"]
-        result = self.execute([strat])
-        return explanation, result, status
-
-    def invoke(self, prompt: str) -> Any:
-        """Run step-by-step until the LLM indicates completion.
-
-        Clears memory if `context_enabled` is False to avoid cross-task leakage.
-        Stores a compact record in `_previous_steps` for each executed step.
-        """
-        logging.info(f"\n+---{'-'*len(self.name + ' Starting')}---+"
-                     f"\n|   {self.name} Starting   |"
-                     f"\n+---{'-'*len(self.name + ' Starting')}---+")
-        if not self.context_enabled:
-            self.clear_memory()
-        self._previous_steps.clear()
-        self._running_plan.clear()
-
-        status = "INCOMPLETE"
-        while status != "COMPLETE":
-            explanation, result, status = self.step(prompt)
-            self._previous_steps.append({"explanation": explanation, "result": result, "completed": True})
-
-        if not self.context_enabled:
-            self.clear_memory()
-
-        logging.info(f"\n+---{'-'*len(self.name + ' Finished')}---+"
-                     f"\n|   {self.name} Finished   |"
-                     f"\n+---{'-'*len(self.name + ' Finished')}---+\n")
-        return self._previous_steps[-1]["result"] if self._previous_steps else None

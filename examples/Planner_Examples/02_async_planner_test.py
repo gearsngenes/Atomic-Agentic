@@ -22,7 +22,7 @@ async_tester = PlannerAgent(
     name        = "Async-Delay-Tester",
     description = "Tests the ability to run methods asynchronously",
     llm_engine  = llm_engine,
-    is_async    = True,   # Toggle between async and sync planning
+    run_concurrent    = True,   # Toggle between async and sync planning
 )
 
 

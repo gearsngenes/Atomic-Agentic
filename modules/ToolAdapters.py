@@ -26,9 +26,10 @@ __all__ = ["AgentTool", "MCPProxyTool", "toolify"]
 # Agent -> Tool (invoke)
 # =========================
 
+# modules/ToolAdapters.py  — Updated AgentTool
 class AgentTool(Tool):
     """
-    Wrap an Agent as a Tool.
+    Adapter that exposes an Agent as a Tool with schema-driven introspection.
 
     Metadata
     --------
@@ -39,33 +40,47 @@ class AgentTool(Tool):
 
     Schema exposure
     ---------------
-    Mirrors the agent.pre_invoke Tool's call-plan so planners see the correct keys.
+    Mirrors the agent's `pre_invoke` Tool call-plan (arguments map, required sets,
+    varargs flags, etc.) so planners see the exact input keys & binding rules.
+
+    Signature string
+    ----------------
+    The base Tool builds a canonical, schema-derived signature of the form:
+        "agent.<agent_name>.invoke(p1:Type, p2?:Type) -> str"
+    We set `return_type` to `str` and call `_rebuild_signature_str()` after
+    overriding the plan so the prefix and parameter list match the new Tool format.
 
     Execution
     ---------
-    Accepts a flat mapping via Tool.invoke(...) and forwards it to agent.invoke(inputs).
+    Accepts a flat mapping via `Tool.invoke(inputs)` and forwards it to
+    `agent.invoke(inputs)`.
     """
 
     def __init__(self, agent: Agent) -> None:
         if not isinstance(agent, Agent):
-            raise ToolDefinitionError("AgentInvokeTool requires an Agents.Agent instance.")
-        self.pre: Tool = agent.pre_invoke
+            raise ToolDefinitionError("AgentTool requires an Agents.Agent instance.")
+
+        pre = agent.pre_invoke
+        if not isinstance(pre, Tool):
+            raise ToolDefinitionError("AgentTool requires agent.pre_invoke to be a Tools.Tool.")
+
         self.agent = agent
-        if not isinstance(self.pre, Tool):
-            raise ToolDefinitionError("AgentInvokeTool requires agent.pre_invoke to be a Tools.Tool.")
+        self.pre = pre
 
-        # Use the pre_invoke call-plan to define our binding behavior.
-        posonly_names: List[str] = list(self.pre.posonly_order)
+        # Keep a snapshot of positional-only names from the mirrored plan
+        posonly_names: List[str] = list(pre.posonly_order)
 
+        # Wrapper that rebuilds a dict for Agent.invoke
         def _agent_wrapper(*_args: Any, **_kwargs: Any) -> Any:
-            # Rebuild the flat mapping expected by Agent.invoke
             inputs: Dict[str, Any] = {}
+            # Map positional-only prefix back into named keys deterministically
             for i, pname in enumerate(posonly_names):
                 if i < len(_args):
                     inputs[pname] = _args[i]
             inputs.update(_kwargs)
             return self.agent.invoke(inputs)
 
+        # Initialize base Tool with wrapper and agent metadata
         super().__init__(
             func=_agent_wrapper,
             name="invoke",
@@ -74,73 +89,22 @@ class AgentTool(Tool):
             source=agent.name,
         )
 
-        # Mirror pre_invoke Tool's call-plan (strict; no envelopes)
-        self._arguments_map = self.pre.arguments_map
-        self.posonly_order = list(self.pre.posonly_order)
-        self.p_or_kw_names = list(self.pre.p_or_kw_names)
-        self.kw_only_names = list(self.pre.kw_only_names)
-        self.required_names = set(self.pre.required_names)
-        self.has_varargs = bool(self.pre.has_varargs)
-        self.varargs_name = self.pre.varargs_name
-        self.has_varkw = bool(self.pre.has_varkw)
-        self.varkw_name = self.pre.varkw_name
+        # ---- Mirror the pre_invoke call-plan (shallow copies to avoid aliasing) ----
+        self._arguments_map = OrderedDict((k, dict(v)) for k, v in pre.arguments_map.items())
+        self.posonly_order = list(pre.posonly_order)
+        self.p_or_kw_names = list(pre.p_or_kw_names)
+        self.kw_only_names = list(pre.kw_only_names)
+        self.required_names = set(pre.required_names)
+        self.has_varargs = bool(pre.has_varargs)
+        self.varargs_name = pre.varargs_name
+        self.has_varkw = bool(pre.has_varkw)
+        self.varkw_name = pre.varkw_name
 
+        # Explicit return type for AgentTool (agent responses are strings)
+        self._return_type = str
 
-
-# ---------- JSON Schema -> Python annotation (best-effort) ----------
-
-_JSON_TO_PY = {
-    "string": str,
-    "integer": int,
-    "number": float,
-    "boolean": bool,
-    "object": dict,
-    "array": list,
-}
-
-def _ann_from_json_type(t: Any, items: Any = None) -> Any:
-    # anyOf/oneOf/allOf -> Any (limitation)
-    if isinstance(t, list):
-        return Any
-    if t == "array":
-        if isinstance(items, Mapping) and "type" in items:
-            base = _JSON_TO_PY.get(items["type"], Any)
-            try:
-                return list[base]  # py3.9+ typing operator form
-            except TypeError:
-                return list  # fallback; purely cosmetic
-        return list
-    return _JSON_TO_PY.get(t, Any)
-
-
-# ---------- sync runner with event-loop fallback ----------
-
-def _run_sync(coro):
-    """
-    Run an async coroutine in sync context.
-    If an event loop is active, run in a separate thread.
-    """
-    try:
-        return asyncio.run(coro)
-    except RuntimeError as e:
-        # Likely "asyncio.run() cannot be called from a running event loop"
-        if "running event loop" not in str(e):
-            raise
-        q: Queue = Queue()
-
-        def _target():
-            try:
-                q.put(("ok", asyncio.run(coro)))
-            except BaseException as exc:
-                q.put(("err", exc))
-
-        t = threading.Thread(target=_target, daemon=True)
-        t.start()
-        status, payload = q.get()
-        t.join()
-        if status == "err":
-            raise payload
-        return payload
+        # Rebuild the canonical signature string to reflect mirrored schema + return type
+        self._rebuild_signature_str()
 
 
 # ---------- JSON Schema -> Python annotation (best-effort) ----------
@@ -239,9 +203,15 @@ class MCPProxyTool(Tool):
         - Derived from remote inputSchema properties/required/default (strict, named-only)
         - Unknown keys rejected by Tool.invoke BEFORE the network call.
 
+    Signature exposure:
+        - After mirroring the schema into `arguments_map`, we synthesize an
+          `inspect.Signature` that lists each parameter (order, type, default)
+          so `to_dict()["signature"]` shows a meaningful `(a: str, b?: int)` form
+          rather than the wrapper’s `(**inputs)`.
+
     Invocation:
-        - Each invoke opens a short-lived client session to server_url,
-          **initializes** the session, then calls `call_tool(tool_name, inputs)`,
+        - Each `invoke` opens a short-lived client session to `server_url`,
+          **initializes** the session, calls `call_tool(tool_name, inputs)`,
           and returns normalized text (if present) or the raw result.
     """
 
@@ -257,40 +227,36 @@ class MCPProxyTool(Tool):
         self._headers = dict(headers or {})
 
         # 1) Fetch remote description + input schema synchronously (with proper initialize())
-        description, input_schema = _run_sync(self._fetch_remote_tool_meta(self._server_url, tool_name, self._headers))
+        description, input_schema = _run_sync(
+            self._fetch_remote_tool_meta(self._server_url, tool_name, self._headers)
+        )
 
-        # 2) Build strict call plan from schema
+        # 2) Build strict call plan from schema (named-only)
         arguments_map, p_or_kw_names, required_names = self._build_from_schema(input_schema)
 
-        # 3) Build the wrapper that will call the remote tool synchronously
+        # 3) Wrapper that calls the MCP tool synchronously
         def _mcp_wrapper(**inputs: Any) -> Any:
             result = _run_sync(self._call_remote(self._server_url, tool_name, inputs, self._headers))
             result = result.model_dump()
-            import json
-            if "structuredContent" in result:
-                if "result" in result["structuredContent"]: return result["structuredContent"]["result"]
-                else: return result["structuredContent"]
-            else:
-                try:
-                    content = result["content"]
-                    texts = [c["text"] for c in content]
-                    return "".join(texts)
-                except:
-                    pass
-                return result
-            # # Prefer text content if present (typical MCP result shape)
-            # try:
-            #     content = getattr(result, "content", None)
-            #     if isinstance(content, list) and content:
-            #         texts = [getattr(c, "text", "") for c in content if hasattr(c, "text")]
-            #         joined = "".join(texts).strip()
-            #         if joined:
-            #             return joined
-            # except Exception:
-            #     pass
-            # return result
 
-        # 4) Initialize base Tool, then override the call plan
+            # Try to return concise structured value if server provided one
+            try:
+                if "structuredContent" in result:
+                    sc = result["structuredContent"]
+                    # Common case: {"result": "..."} only
+                    if isinstance(sc, dict) and "result" in sc and len(sc) == 1:
+                        return sc["result"]
+                    return sc
+                # Fallback to concatenated text content
+                content = result.get("content", [])
+                texts = [c["text"] for c in content if isinstance(c, dict) and "text" in c]
+                if texts:
+                    return "".join(texts)
+            except Exception:
+                pass
+            return result
+
+        # 4) Initialize base Tool, then override the call-plan with our schema
         super().__init__(
             func=_mcp_wrapper,
             name=tool_name,
@@ -299,16 +265,18 @@ class MCPProxyTool(Tool):
             source=server_name,
         )
 
-        # Apply strict plan (named-only)
-        self._arguments_map = arguments_map
+        # ---- Mirror schema-driven plan (strict named-only) ----
+        # Use fresh containers to avoid aliasing.
+        self._arguments_map = OrderedDict((k, dict(v)) for k, v in arguments_map.items())
         self.posonly_order = []
-        self.p_or_kw_names = p_or_kw_names
+        self.p_or_kw_names = list(p_or_kw_names)
         self.kw_only_names = []
-        self.required_names = required_names
+        self.required_names = set(required_names)
         self.has_varargs = False
         self.varargs_name = None
         self.has_varkw = False
         self.varkw_name = None
+        self._rebuild_signature_str()
 
     # ----- async helpers -----
 
@@ -321,9 +289,10 @@ class MCPProxyTool(Tool):
         async with streamablehttp_client(url=server_url, headers=headers or None) as transport:
             read, write = _extract_rw(transport)
             async with ClientSession(read, write) as session:
-                # REQUIRED handshake before any request.
-                await session.initialize()  # Establish connection/session. :contentReference[oaicite:5]{index=5}
-                tools = await session.list_tools()   # Discover available tools. :contentReference[oaicite:6]{index=6}
+                # REQUIRED handshake before any request
+                await session.initialize()
+
+                tools = await session.list_tools()
                 tool_list = getattr(tools, "tools", tools)
 
                 names = []
@@ -356,22 +325,21 @@ class MCPProxyTool(Tool):
         async with streamablehttp_client(url=server_url, headers=headers or None) as transport:
             read, write = _extract_rw(transport)
             async with ClientSession(read, write) as session:
-                await session.initialize()  # REQUIRED before call_tool. :contentReference[oaicite:7]{index=7}
-                return await session.call_tool(tool_name, dict(inputs))  # Execute. :contentReference[oaicite:8]{index=8}
+                await session.initialize()
+                return await session.call_tool(tool_name, inputs)
 
-    # ----- schema-to-plan -----
+    # ----- schema → plan -----
 
     @staticmethod
     def _build_from_schema(schema: Mapping[str, Any]) -> Tuple["OrderedDict[str, Dict[str, Any]]", List[str], set]:
         """
-        Convert a JSON Schema object into (arguments_map, p_or_kw_names, required_names).
-        Supported:
-          - 'properties' (ordered), optional 'required'
-          - per-property: 'type', optional 'items.type' for arrays, optional 'default'
-        Complex constructs (anyOf/oneOf/allOf/$ref) -> annotate as 'Any' but still
-        respect 'required' and 'default'.
+        Build an arguments_map and binding lists from a JSON Schema object.
+        Only 'properties', 'required', and 'default' are honored.
+
+        Returns:
+            (arguments_map, p_or_kw_names, required_names)
         """
-        props = schema.get("properties")
+        props = schema.get("properties") or {}
         if not isinstance(props, Mapping):
             raise ToolDefinitionError("MCPProxyTool: input_schema.properties must be a mapping.")
         required = schema.get("required") or []
@@ -473,9 +441,7 @@ def toolify(
     # callable-specific
     name: Optional[str] = None,
     description: Optional[str] = None,
-    tool_type: str = "python",
     source: Optional[str] = None,
-
     # MCP-specific (obj is an MCP URL)
     server_name: Optional[str] = None,
     headers: Optional[dict] = None,
@@ -526,8 +492,8 @@ def toolify(
                 func=obj,
                 name=name,
                 description=description,
-                type=tool_type,
-                source=source or "local",
+                type="function",
+                source=source or "default",
             )
         ]
 

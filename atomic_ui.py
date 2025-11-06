@@ -344,7 +344,7 @@ def agent_factory(cfg: AgentCfg) -> Any:
             name=cfg.name,
             description=cfg.description,
             llm_engine=engine,
-            is_async=False
+            run_concurrent=False
         )
         # tools only here; wrappers added by caller after instantiation (requires cfg_map)
         sync_toolbox_with_selection(inst, cfg.allowed_tools)

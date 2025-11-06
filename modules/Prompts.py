@@ -40,9 +40,9 @@ Finalization (required last element):
 
 # ONE-SHOT EXAMPLE
 [
-  {{ "function": "plugin.Math.mul", "args": {{ "a": 6, "b": 7 }} }},
-  {{ "function": "plugin.Math.add", "args": {{ "a": "{{step0}}", "b": 5 }} }},
-  {{ "function": "plugin.Console.print", "args": {{ "val": "My result is: {{step1}}" }} }},
+  {{ "function": "function.default.mul", "args": {{ "a": 6, "b": 7 }} }},
+  {{ "function": "function.default.add", "args": {{ "a": "{{step0}}", "b": 5 }} }},
+  {{ "function": "function.default.print", "args": {{ "val": "My result is: {{step1}}" }} }},
   {{ "function": "function.default._return", "args": {{ "val": "{{step1}}" }} }}
 ]
 """

@@ -50,7 +50,7 @@ batch_haiku_planner = PlannerAgent(
     name    ="BatchHaikuPlanner",
     description= "Orchestrates calls to the Haiku Writer Agent and displays its outputs",
     llm_engine = llm_engine,
-    is_async= True
+    run_concurrent= True
 )
 
 # Register Haiku Writing Agent
@@ -74,7 +74,7 @@ batch_math_planner = PlannerAgent(
     name    = "BatchMathPlanner",
     description="Handles tasks involving math problems and the like",
     llm_engine = llm_engine,
-    is_async = False,
+    run_concurrent = False,
 )
 
 # Register Math Plugin and print method
@@ -98,7 +98,7 @@ super_planner = PlannerAgent(
     name    = "SuperPlanner",
     description = "A planner that decomposes and delegates tasks to other planners",
     llm_engine = llm_engine,
-    is_async= True
+    run_concurrent= True
 )
 
 # Register the two batch planners to the super planner

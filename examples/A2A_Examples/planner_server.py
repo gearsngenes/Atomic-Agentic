@@ -11,7 +11,7 @@ shakespeare = A2AProxyAgent("http://localhost:5000")
 seed = PlannerAgent(name = "A2APlanner",
                     description="Creates plans on calling A2A proxy agents",
                     llm_engine=OpenAIEngine("gpt-4o-mini"),
-                    is_async=True)
+                    run_concurrent=True)
 
 seed.register(echo)
 seed.register(shakespeare)

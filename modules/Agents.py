@@ -393,7 +393,25 @@ class Agent:
             raise AgentError("pre_invoke must be a Tools.Tool instance.")
         self._pre_invoke = tool
 
-    def invoke(self, inputs: Mapping[str, Any]) -> str:
+    def _invoke(self, prompt: str) -> Any:
+        # 3) Build messages for the engine
+        messages = self._messages_for_send(prompt)
+
+        # 4) Call engine with a small signature shim
+        try:
+            text = self._llm_engine.invoke(messages, self._attachments)
+        except Exception as e:  # pragma: no cover - engine-specific failures
+            raise AgentInvocationError(f"engine invocation failed: {e}") from e
+
+        
+        # 5) Optionally record the turn in stored history
+        if self._context_enabled:
+            self._history.append({"role": "user", "content": prompt})
+            self._history.append({"role": "assistant", "content": text})
+        
+        return text
+
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
         """
         Invoke the Agent with a single **input mapping**.
 
@@ -433,37 +451,23 @@ class Agent:
 
         # 2) Run pre-invoke Tool to get the prompt (strict by default)
         try:
-            prompt_any = self._pre_invoke.invoke(inputs)  # may raise ToolInvocationError
+            prompt = self._pre_invoke.invoke(inputs)  # may raise ToolInvocationError
         except ToolInvocationError:
             # let Tool errors bubble up (they are already precise)
             raise
         except Exception as e:  # pragma: no cover - safety net
             raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
 
-        if not isinstance(prompt_any, str):
+        if not isinstance(prompt, str):
             raise AgentInvocationError(
-                f"pre_invoke returned non-string (type={type(prompt_any)!r}); "
+                f"pre_invoke returned non-string (type={type(prompt)!r}); "
                 "a prompt string is required"
             )
-        prompt: str = prompt_any
 
-        # 3) Build messages for the engine
-        messages = self._messages_for_send(prompt)
-
-        # 4) Call engine with a small signature shim
-        try:
-            text = self._llm_engine.invoke(messages, self._attachments)
-        except Exception as e:  # pragma: no cover - engine-specific failures
-            raise AgentInvocationError(f"engine invocation failed: {e}") from e
-
-        
-        # 5) Optionally record the turn in stored history
-        if self._context_enabled:
-            self._history.append({"role": "user", "content": prompt})
-            self._history.append({"role": "assistant", "content": text})
+        output = self._invoke(prompt = prompt)
 
         # 7) Allow subclasses to post-process text
-        return text
+        return output
 
     # ------------------------------ diagnostics ------------------------------
 
