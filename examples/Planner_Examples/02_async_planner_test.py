@@ -1,43 +1,35 @@
-import sys, os, logging, time, json
+import sys, os, logging, time
 from pathlib import Path
-# Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
-# ----------------- Atomic Agents ----------------
-from modules.Agents import *
 from modules.ToolAgents import PlannerAgent
+from modules.LLMEngines import OpenAIEngine
 
-# ----------------- Setup Logging ----------------
 # logging.getLogger().setLevel(level=logging.INFO)
 
-# define a global llm engine to give to each of our agents
-llm_engine = OpenAIEngine(model = "gpt-4o-mini")
+llm_engine = OpenAIEngine(model="gpt-4o-mini")
 
-def testDelayPrint():
+def testDelayPrint() -> None:
     print("Called Print, now waiting 10 seconds...")
     time.sleep(10)
 
-# Create a PlannerAgent for testing our delay print tool
 async_tester = PlannerAgent(
-    name        = "Async-Delay-Tester",
-    description = "Tests the ability to run methods asynchronously",
-    llm_engine  = llm_engine,
-    run_concurrent    = True,   # Toggle between async and sync planning
+    name="Async-Delay-Tester",
+    description="Tests the ability to run methods asynchronously",
+    llm_engine=llm_engine,
+    run_concurrent=True,   # Toggle between async and sync planning
 )
 
-
-# Register the test delay print method as a tool
-async_tester.register(tool=testDelayPrint,
-                      description = "This method gives a test print call, then delays for 10s.")
+# Register the callable (provide name + description for functions)
+async_tester.register(
+    testDelayPrint,
+    name="testDelayPrint",
+    description="Print, then delay for 10 seconds."
+)
 
 if __name__ == "__main__":
-    
-    # Compose the prompt for the planner agent: calling the delayed print statement five times
     prompt = "Run the 'testDelayPrint' method five times."
-
-    # Invoke the planner agent and time it. In theory, the methods should all start around the same time.
     start = time.time()
-    result = async_tester.invoke(prompt)
+    result = async_tester.invoke({"prompt": prompt})
     end = time.time()
-    # Should be around 10-15 seconds to complete if async, closer to 50s to a minute if sync
     print("Time taken:", end - start, "seconds")

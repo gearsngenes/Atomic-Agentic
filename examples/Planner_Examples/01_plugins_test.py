@@ -1,26 +1,25 @@
-import sys,os
+import sys, os
 from pathlib import Path
-# Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 import logging
-# math_console_demo.py
 from modules.ToolAgents import PlannerAgent
-from modules.Plugins import ParserPlugin, MathPlugin, ConsolePlugin
-from modules.LLMEngines import *
+from modules.Plugins import MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
+from modules.LLMEngines import OpenAIEngine
 
 logging.getLogger().setLevel(level=logging.INFO)
 
 print("\n───────────────────────────────\n")
 print("Testing Task Decomposition and Printing capabilities")
-# ──────────────────────────  SET-UP  ───────────────────────────
-# define a global llm_engine to give to each of our agents
-llm_engine = OpenAIEngine(model = "gpt-4o-mini")
 
+# ──────────────────────────  SET-UP  ───────────────────────────
+llm_engine = OpenAIEngine(model="gpt-4o-mini")
 planner = PlannerAgent(name="Test-Planner", description="Testing the prebuilt plugins", llm_engine=llm_engine)
-planner.register(MathPlugin)
-planner.register(ConsolePlugin)
-planner.register(ParserPlugin)
+
+# Register tool lists
+planner.batch_register(MATH_TOOLS)
+planner.batch_register(CONSOLE_TOOLS)
+planner.batch_register(PARSER_TOOLS)
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
@@ -41,32 +40,17 @@ AFTERWARDS:
 """
 
 print("\n⇢ Executing math demo …")
-planner.invoke(task_prompt)
+planner.invoke({"prompt": task_prompt})
 
-# ────────────────────────  PARSER + MATH DEMO  ─────────────────────
 print("\n───────────────────────────────\n")
 print("Now testing math and parsing capabilities…")
 task_prompt = """
 TASK
 Given the string "[23.4, 25.1, 22.8]"
-1. Parse the JSON list of numbers from the string.
-2. Print the list
-3. Then calculate the average temperature of the list.
-4. Print BOTH the extracted list's max value and its mean (each labeled as such).
+1. Extract the JSON string, then parse it into a list of numbers.
+2. Print the list.
+3. Calculate the average temperature of the list.
+4. Print BOTH the extracted list's max value and its mean (each labeled).
 """
 print("\n⇢ Executing parser+math demo …")
-planner.invoke(task_prompt)
-
-# ────────────────────────  PYTHON + CONSOLE DEMO  ─────────────────────
-# print("\n───────────────────────────────\n")
-# print("Now testing type-determining and return…")
-
-# task_prompt = """
-# TASK
-# • Return the type value of the following object: {'a': [1, 2, 3], 'b': 4.5}
-#   using PythonPlugin.get_type, and format the returned result as:
-#   "TYPE RESULT -- <result here>".
-# """
-# print("\n⇢ Executing python-type demo …")
-# tname = planner.invoke(task_prompt)
-# print("RETURNED VALUE: ", tname)
+planner.invoke({"prompt": task_prompt})

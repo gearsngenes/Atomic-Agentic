@@ -4,7 +4,6 @@ from __future__ import annotations
 import inspect
 from typing import Any, Mapping, Callable, OrderedDict as Dict, List, Optional, Tuple
 from collections import OrderedDict
-from modules.Plugins import *  # Provides Plugin-shaped dicts (see TypedDict below)
 
 
 # ───────────────────────────────────────────────────────────────────────────────

@@ -1,181 +1,133 @@
+# modules/Plugins.py
 """
-Plugins
-=======
+Plugins (Tool Lists)
+====================
 
-Lightweight, static plugin catalog exposing callable utilities as *tools*.
+This module exposes *prebuilt lists of Tools* that you can register on a
+ToolAgent/PlannerAgent via `batch_register(...)`.
 
-This module defines a `Plugin` **TypedDict** and three concrete plugin specs:
-`MathPlugin`, `ConsolePlugin`, and `ParserPlugin`. Each plugin describes a
-name and a `method_map`, where every entry contains:
+Example
+-------
+>>> from modules.Plugins import MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
+>>> planner.batch_register(MATH_TOOLS)
+>>> planner.batch_register(CONSOLE_TOOLS)
+>>> planner.batch_register(PARSER_TOOLS)
 
-    {
-        "<method_name>": {
-            "callable": <python callable>,
-            "description": "<one-line purpose and arg semantics>"
-        },
-        ...
-    }
-
-Design notes
-------------
-- **No runtime side effects** beyond defining these dicts.
-- Callables are intentionally implemented as small lambdas for brevity.
-- Descriptions are concise and optimized for LLM prompts / tool menus.
-- This file only improves documentation and readability. **No functional changes.**
+Design
+------
+- No custom Plugin classes. Each “plugin” is just a `List[Tool]`.
+- Functions are defined with clear, named parameters so Tool schemas are explicit.
+- Tool names are unique within a list to avoid registration collisions.
 """
 
-import sys
-from pathlib import Path
-# Setting the root (kept as-is for compatibility with existing imports)
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+from __future__ import annotations
 
-from typing import Any, TypedDict
-import re
+from typing import Any, List, Optional, Sequence
 import json
 import logging
+import math
+import re
 
-class Plugin(TypedDict):
+from .Tools import Tool
+
+__all__ = ["MATH_TOOLS", "CONSOLE_TOOLS", "PARSER_TOOLS"]
+
+# ────────────────────────── Math Tools ──────────────────────────
+
+def add(a: float, b: float) -> float: return a + b
+def subtract(a: float, b: float) -> float: return a - b
+def multiply(a: float, b: float) -> float: return a * b
+def divide(a: float, b: float) -> float:
+    return a / b if b != 0 else float("inf")
+def power(a: float, b: float) -> float: return a ** b
+def sqrt(x: float) -> float:
+    if x < 0:
+        raise ValueError("sqrt: x must be non-negative")
+    return math.sqrt(x)
+def mean(nums: Sequence[float]) -> float:
+    return (sum(nums) / len(nums)) if nums else 0.0
+def max_value(nums: Sequence[float]) -> float: return max(nums)
+def min_value(nums: Sequence[float]) -> float: return min(nums)
+def sin(x: float) -> float: return math.sin(x)
+def cos(x: float) -> float: return math.cos(x)
+def tan(x: float) -> float: return math.tan(x)
+def cot(x: float) -> float:
+    t = math.tan(x)
+    return (1.0 / t) if t != 0 else float("inf")
+
+MATH_TOOLS: List[Tool] = [
+    Tool(func=add,        name="add",        description="Return a + b."),
+    Tool(func=subtract,   name="subtract",   description="Return a - b."),
+    Tool(func=multiply,   name="multiply",   description="Return a * b."),
+    Tool(func=divide,     name="divide",     description="Return a / b (inf if b == 0)."),
+    Tool(func=power,      name="power",      description="Return a ** b."),
+    Tool(func=sqrt,       name="sqrt",       description="Return sqrt(x); x must be >= 0."),
+    Tool(func=mean,       name="mean",       description="Return arithmetic mean of a list of numbers."),
+    Tool(func=max_value,  name="max_value",  description="Return the maximum of a list of numbers."),
+    Tool(func=min_value,  name="min_value",  description="Return the minimum of a list of numbers."),
+    Tool(func=sin,        name="sin",        description="Return sin(x) (x in radians)."),
+    Tool(func=cos,        name="cos",        description="Return cos(x) (x in radians)."),
+    Tool(func=tan,        name="tan",        description="Return tan(x) (x in radians)."),
+    Tool(func=cot,        name="cot",        description="Return cot(x) (x in radians; inf at tan(x)=0)."),
+]
+
+# ───────────────────────── Console Tools ─────────────────────────
+
+def print_value(value: Any) -> None:
+    print(value)
+
+def user_input(prompt: str) -> str:
+    return input(prompt)
+
+def basic_config(level: str = "INFO") -> None:
+    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO))
+
+def log_message(message: str, level: str = "INFO") -> None:
+    logging.log(getattr(logging, level.upper(), logging.INFO), message)
+
+CONSOLE_TOOLS: List[Tool] = [
+    Tool(func=print_value,  name="print",        description="Print any value to the console."),
+    Tool(func=user_input,   name="user_input",   description="Prompt user for input and return the entered string."),
+    Tool(func=basic_config, name="basic_config", description="Configure root logging (level: DEBUG|INFO|WARNING|ERROR|CRITICAL)."),
+    Tool(func=log_message,  name="log",          description="Log a message at the specified level."),
+]
+
+# ───────────────────────── Parser Tools ─────────────────────────
+
+def json_loads(s: str) -> Any:
+    return json.loads(s)
+
+def to_str(x: Any) -> str:
+    return str(x)
+
+def split_string(s: str, sep: Optional[str] = None) -> List[str]:
+    return s.split(sep)
+
+def safe_eval(s: str) -> Any:
+    # Evaluate simple Python literal expressions with no builtins.
+    return eval(s, {"__builtins__": None}, {})
+
+def extract_json_string(s: str) -> Optional[str]:
     """
-    Structured specification for a plugin that can be "toolified".
-
-    Fields
-    ------
-    name : str
-        Human-readable namespace for the plugin. Used as the `<source>` segment
-        of fully-qualified tool keys, e.g., `plugin.<name>.<method>`.
-
-    method_map : dict[str, dict[str, Any]]
-        Mapping from method name → metadata dict with keys:
-          - "callable": a Python callable implementing the method.
-          - "description": short, user-facing help text for prompts/menus.
+    Try to extract a JSON object/array substring from text.
+    Returns the first {...} or [...] block if found; otherwise None.
     """
-    name: str
-    method_map: dict[str, dict[str, Any]]
+    m_obj = re.search(r"({.*})", s, re.DOTALL)
+    if m_obj:
+        return m_obj.group(1)
+    m_arr = re.search(r"(\[.*\])", s, re.DOTALL)
+    if m_arr:
+        return m_arr.group(1)
+    return None
 
+def join_strings(lst: Sequence[str], sep: str = "") -> str:
+    return sep.join(lst)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# MathPlugin
-# Basic arithmetic and trig helpers.
-# ──────────────────────────────────────────────────────────────────────────────
-MathPlugin: Plugin = {
-    "name": "MathPlugin",
-    "method_map": {
-        "add": {
-            "callable": lambda a, b: a + b,
-            "description": "Takes in two numbers 'a' and 'b' and returns their sum."
-        },
-        "subtract": {
-            "callable": lambda a, b: a - b,
-            "description": "Takes in two numbers 'a' and 'b' and returns their difference."
-        },
-        "multiply": {
-            "callable": lambda a, b: a * b,
-            "description": "Takes in two numbers 'a' and 'b' and returns their product."
-        },
-        "divide": {
-            "callable": lambda a, b: a / b if b != 0 else float('inf'),
-            "description": "Takes in two numbers 'a' and 'b' and returns their quotient."
-        },
-        "power": {
-            "callable": lambda a, b: a ** b,
-            "description": "Takes in two numbers 'a' and 'b' and returns 'a' raised to the power of 'b'."
-        },
-        "sqrt": {
-            "callable": lambda x: x ** 0.5,
-            "description": "Takes in a number 'x' and returns its square root. 'x' must be non-negative."
-        },
-        "mean": {
-            "callable": lambda nums: sum(nums) / len(nums) if nums else 0,
-            "description": "Takes in a list of numbers and returns their arithmetic mean (average)."
-        },
-        "max": {
-            "callable": lambda nums: max(nums),
-            "description": "Takes in a list of numbers and returns the maximum value."
-        },
-        "min": {
-            "callable": lambda nums: min(nums),
-            "description": "Takes in a list of numbers and returns the minimum value."
-        },
-        "sin": {
-            "callable": lambda x: __import__('math').sin(x),
-            "description": "Takes in an angle in radians and returns its sine."
-        },
-        "cos": {
-            "callable": lambda x: __import__('math').cos(x),
-            "description": "Takes in an angle in radians and returns its cosine."
-        },
-        "tan": {
-            "callable": lambda x: __import__('math').tan(x),
-            "description": "Takes in an angle in radians and returns its tangent."
-        },
-        "cot": {
-            "callable": lambda x: 1 / __import__('math').tan(x) if __import__('math').tan(x) != 0 else float('inf'),
-            "description": "Takes in an angle in radians and returns its cotangent."
-        },
-    }
-}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ConsolePlugin
-# Minimal console I/O and logging helpers.
-# ──────────────────────────────────────────────────────────────────────────────
-ConsolePlugin: Plugin = {
-    "name": "ConsolePlugin",
-    "method_map": {
-        "print": {
-            "callable": lambda value: print(value),
-            "description": "Args: value (any). Returns: None. Prints any specified value or output to the console. Value can be any type."
-        },
-        "user_input": {
-            "callable": lambda prompt: input(prompt),
-            "description": "Args: prompt (str). Returns: str. Gets user input from the console using the given prompt string."
-        },
-        "basic_config":{
-            "callable": lambda level="INFO": logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO)),
-            "description": "Args: level (str). Returns: None. Configures basic logging config with the specified log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)."
-        },
-        "log": {
-            "callable": lambda message, level="INFO": logging.log(getattr(logging, level.upper(), logging.INFO), message),
-            "description": "Args: message (str), level (str). Returns: None. Logs a message at the specified log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)."
-        },
-    }
-}
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ParserPlugin
-# Simple parsing and string utilities (JSON, split/join, eval, etc.).
-# Note: duplicate "split" key preserved intentionally (original behavior).
-# ──────────────────────────────────────────────────────────────────────────────
-ParserPlugin: Plugin = {
-    "name": "ParserPlugin",
-    "method_map": {
-        "json_loads": {
-            "callable": lambda s: json.loads(s),
-            "description": "Parses a JSON-formatted string with the json.loads() method and returns a valid Python object."
-        },
-        "to_str": {
-            "callable": lambda x: str(x),
-            "description": "Args: x (any). Returns: str. Converts a value to a string."
-        },
-        "split": {
-            "callable": lambda s, sep=None: s.split(sep),
-            "description": "Args: s (str), sep (str|None). Returns: list of str. Splits a string by the given separator."
-        },
-        "safe_eval": {
-            "callable": lambda s: eval(s, {"__builtins__": None}, {}),
-            "description": "Args: s (str). Returns: any. Safely evaluates a string as a Python literal (use with caution)."
-        },
-        "extract_json_string": {
-            "callable": lambda s: re.search(r'({.*})', s, re.DOTALL).group(1) if re.search(r'({.*})', s, re.DOTALL) else (re.search(r'(\[.*\])', s, re.DOTALL).group(1) if re.search(r'(\[.*\])', s, re.DOTALL) else None),
-            "description": "Extracts a potential json-string from text, cleaning off any excess characters or text surrounding it before passing it to 'json_loads'."
-        },
-        "split": {
-            "callable": lambda s, sep=None: s.split(sep),
-            "description": "Takes in a string and returns a list of strings that is made by splitting it at every instance of a specified separator."
-        },
-        "join": {
-            "callable": lambda lst, sep="": sep.join(lst),
-            "description": "Args: lst (list of str), sep (str). Returns: str. Joins a list of strings into a single string with the given separator."
-        },
-    }
-}
+PARSER_TOOLS: List[Tool] = [
+    Tool(func=json_loads,       name="json_loads",          description="Parse JSON string to Python value."),
+    Tool(func=to_str,           name="to_str",              description="Convert any value to string."),
+    Tool(func=split_string,     name="split",               description="Split string by separator into list of strings."),
+    Tool(func=safe_eval,        name="safe_eval",           description="Evaluate a simple Python literal safely (no builtins)."),
+    Tool(func=extract_json_string, name="extract_json_string", description="Extract first JSON object/array substring from text."),
+    Tool(func=join_strings,     name="join",                description="Join list of strings with a separator."),
+]

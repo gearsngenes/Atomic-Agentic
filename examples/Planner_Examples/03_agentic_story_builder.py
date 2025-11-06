@@ -1,20 +1,16 @@
 import sys, os
 from pathlib import Path
-# Setting the root
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 import logging
-# ───────────────────────────  local imports  ────────────────────
 from modules.Agents import Agent
 from modules.ToolAgents import PlannerAgent
-from modules.LLMEngines import *
+from modules.LLMEngines import OpenAIEngine
 
-logging.getLogger().setLevel(level=logging.INFO) # to enable us to see the agentic planning steps
+logging.getLogger().setLevel(level=logging.INFO)
 
-# define a global llm engine to give to each of our agents
-llm_engine = OpenAIEngine(model = "gpt-4o-mini")
+llm_engine = OpenAIEngine(model="gpt-4o-mini")
 
-# ───────────────────────────  ROLE PROMPTS  ─────────────────────
 OUTLINER_PROMPT = """
 You are the *Story Outliner*.
 Input: story_idea (one sentence).
@@ -41,23 +37,39 @@ Input: draft_md (markdown).
 Output: bullet-point critique ONLY (max 8 bullets).  No rewriting.
 """.strip()
 
-# ───────────────────────────  WORKER AGENTS  ────────────────────
-outliner = Agent("StoryOutliner", description = "Should be called when given a new story idea. Fleshes it out into a full, structured outline.", llm_engine=llm_engine, role_prompt= OUTLINER_PROMPT)
-writer   = Agent("StoryWriter", description = "Writes a draft based on the story outline or revision notes from a reviewer", llm_engine= llm_engine, role_prompt=WRITER_PROMPT, context_enabled=True)
-reviewer = Agent("DraftReviewer", description = "Reviews story drafts, provides revision notes back to the writer.", llm_engine=llm_engine, role_prompt=REVIEWER_PROMPT, context_enabled=True)
+outliner = Agent(
+    "StoryOutliner",
+    description="Generate a structured outline from a one-sentence idea.",
+    llm_engine=llm_engine,
+    role_prompt=OUTLINER_PROMPT
+)
+writer = Agent(
+    "StoryWriter",
+    description="Writes drafts based on the outline or reviewer notes.",
+    llm_engine=llm_engine,
+    role_prompt=WRITER_PROMPT,
+    context_enabled=True
+)
+reviewer = Agent(
+    "DraftReviewer",
+    description="Reviews drafts and provides revision notes.",
+    llm_engine=llm_engine,
+    role_prompt=REVIEWER_PROMPT,
+    context_enabled=True
+)
 
-# ───────────────────────────  ORCHESTRATOR  ─────────────────────
-orch = PlannerAgent(name = "StoryPlanner",
-                    description = "A stroy building planner that utilizes a story-outliner, writer, and reviewer to construct polished story drafts",
-                    llm_engine = llm_engine)
+orch = PlannerAgent(
+    name="StoryPlanner",
+    description="Planner that orchestrates outliner, writer, reviewer to produce a polished draft.",
+    llm_engine=llm_engine
+)
 
 orch.register(outliner)
 orch.register(reviewer)
 orch.register(writer)
 
-# ─────────────────────────────  MAIN  ───────────────────────────
 if __name__ == "__main__":
-    idea  = input("\nStory idea: ").strip()
+    idea = input("\nStory idea: ").strip()
     loops = int(input("How many review/revision cycles? "))
 
     task_prompt = (
@@ -70,18 +82,14 @@ if __name__ == "__main__":
         f"Return the final draft once it's prepared."
     )
 
-    # The orchestrator handles both planning *and* execution.
     print("\n⇢ Planning + execution …")
-    final_draft_md = orch.invoke(task_prompt)
+    final_draft_md = orch.invoke({"prompt": task_prompt})
 
     print("\n========== FINAL DRAFT ==========\n")
     print(final_draft_md)
 
-    # ───────────── save markdown file ─────────────
     out_dir = Path("examples/output_markdowns")
     out_dir.mkdir(exist_ok=True)
-    filename  = "planner_story.md"
-    filepath  = out_dir / filename
+    filepath = out_dir / "planner_story.md"
     filepath.write_text(final_draft_md, encoding="utf-8")
-
     print(f"\n✓ Story saved to: {filepath.resolve()}")

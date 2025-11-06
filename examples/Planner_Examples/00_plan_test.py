@@ -1,4 +1,4 @@
-import sys, json
+import sys
 from pathlib import Path
 
 # Setting the root

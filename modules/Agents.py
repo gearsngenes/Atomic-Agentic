@@ -12,7 +12,7 @@ Because LLMs are probabilistic, Agent outputs are **non-deterministic**.
 Why schema-first (dict inputs)?
 -------------------------------
 - A single input shape (`Mapping[str, Any]`) is predictable to call and compose.
-- Pre-invoke Tools can adapt *richer schemas and types* (e.x., `{topic, style, audience}`) into
+- Pre-invoke Tools can adapt *richer schemas and types* (e.g., `{topic, style, audience}`) into
   the final prompt **without** changing the Agent’s method signature.
 - Workflows/planners can route dicts between Agents and Tools consistently.
 
@@ -28,9 +28,8 @@ Call lifecycle (what happens on `agent.invoke(inputs)`):
      *turn* is a user->assistant pair. Stored history itself is **never trimmed**.
    - Finally, we append the **user prompt** for the current call.
 4) **Engine call**: we invoke the configured `LLMEngine` with the messages and, if any,
-   local **attachments** (file paths). We use a small compatibility shim so engines that
-   expect `(messages, file_paths=...)` or `(messages, files=...)` or just `(messages)`
-   can all work.
+   local **attachments** (file paths). A small compatibility shim allows engines that
+   expect `(messages, file_paths=...)`, `(messages, files=...)`, or just `(messages)`.
 5) **Result**: we expect the engine to return a **str**. If `context_enabled` is on,
    we append this turn (user prompt, assistant reply) to the stored history and return
    the text (non-deterministic by nature).
@@ -60,7 +59,7 @@ Common mistakes
 
 Quickstart
 ----------
->>> from LLMEngines import OpenAIEngine        # example engine
+>>> from LLMEngines import OpenAIEngine        # example engine (adjust import path as needed)
 >>> from Tools import Tool
 >>> agent = Agent(
 ...     name="Writer",
@@ -75,7 +74,7 @@ Custom pre-invoke Tool (accept richer keys):
 >>> def to_prompt(topic: str, style: str) -> str:
 ...     return f"Write about '{topic}' in a {style} style."
 ...
->>> prompt_tool = Tool(fn=to_prompt, name="to_prompt", description="topic/style -> prompt")
+>>> prompt_tool = Tool(func=to_prompt, name="to_prompt", description="topic/style -> prompt")
 >>> agent.pre_invoke = prompt_tool
 >>> agent.invoke({"topic": "unit testing", "style": "pragmatic"})
 '...'
@@ -88,7 +87,7 @@ Create one Agent per concurrent lane, or protect it with external synchronizatio
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional
 import logging
 
 # Local imports (adjust the module paths if your project structure differs)
@@ -134,13 +133,7 @@ class Agent:
       2) `pre_invoke.invoke(inputs) -> str` (default strict: requires `{"prompt": str}`).
       3) Build messages: [system?] + [last N turns] + [user(prompt)].
       4) Call `llm_engine.invoke(...)` with a small compatibility shim for attachments.
-      5) Validate the engine returned a `str`.
-      6) If `context_enabled`, append (user, assistant) to stored history.
-      7) Return the text.
-
-    Non-goals:
-    - This base class always returns a `str`. Subclasses can override `_finalize(...)`
-      to parse or structure outputs (JSON, tool-calls, etc.).
+      5) Expect a `str` result; record the turn if `context_enabled`; return the text.
 
     Thread-safety:
     - Not thread-safe. Use separate instances for concurrent invokes or add external locks.
@@ -158,9 +151,9 @@ class Agent:
     context_enabled : bool, default True
         If True, the agent includes and logs conversation context (turns).
         If False, the agent sends no prior turns and does not log new ones.
-    history_window : Optional[int], default 50
+    history_window : int, default 50
         Send-window measured in **turns** (user+assistant pairs). `0` sends no turns.
-        `None` sends all stored turns. Stored history is never trimmed.
+        Stored history is never trimmed.
     pre_invoke : Optional[Tool], default None
         Tool that converts the input mapping to a `str` prompt. If None, a strict
         identity Tool is created that accepts exactly `{"prompt": str}`.
@@ -172,21 +165,10 @@ class Agent:
     role_prompt : Optional[str] (read-write)
     llm_engine : LLMEngine (read-write, type-enforced)
     context_enabled : bool (read-write)
-    history_window : Optional[int] (read-write; see semantics above)
+    history_window : int (read-write; see semantics above)
     history : List[Dict[str, str]] (read-only view)
     attachments : List[str] (read-only view)
     pre_invoke : Tool (read-write)
-
-    Example
-    -------
-    >>> agent = Agent(
-    ...     name="Helper",
-    ...     description="Answers questions briefly.",
-    ...     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
-    ...     role_prompt="You are brief and helpful.",
-    ... )
-    >>> agent.invoke({"prompt": "What is testability in software?"})
-    'Testability is ...'
     """
 
     # ----------------------------- construction ------------------------------
@@ -219,10 +201,10 @@ class Agent:
             raise AgentError("context_enabled must be a bool.")
         self._context_enabled: bool = context_enabled
 
-        # None => send all stored turns; 0 => send none; >0 => send last N turns
-        if history_window < 0:
-            raise AgentError("history_window must be None or an int >= 0.")
-        self._history_window: Optional[int] = history_window
+        # history_window: strict int semantics (>= 0). No 'None' (send-all) mode.
+        if not isinstance(history_window, int) or history_window < 0:
+            raise AgentError("history_window must be an int >= 0.")
+        self._history_window: int = history_window
 
         # Stored message history (flat list of role/content dicts).
         # We never trim storage; we only limit what we *send* to engine.
@@ -265,14 +247,8 @@ class Agent:
 
         # prior turns (if context is enabled)
         if self._context_enabled and self._history:
-            if self._history_window is None:
-                # send all stored messages
-                prior = list(self._history)
-            else:
-                # window in turns: take last N *pairs* => 2N messages
-                pair_msgs = self._history_window * 2
-                prior = self._history[-pair_msgs:] if self._history_window > 0 else []
-
+            # window in turns: take last N *pairs* => 2N messages
+            prior = self._history[-(self._history_window * 2):] if self._history_window > 0 else []
             messages.extend(prior)
 
         # current user prompt
@@ -327,7 +303,6 @@ class Agent:
         """
         Send-window measured in **turns** (user+assistant pairs).
 
-        - None => send all stored turns.
         - 0    => send none.
         - N>0  => send last N turns (2N messages).
         """
@@ -394,6 +369,10 @@ class Agent:
         self._pre_invoke = tool
 
     def _invoke(self, prompt: str) -> Any:
+        """
+        Internal call path used by `invoke`. Assumes `prompt` is already validated
+        as a string by the base `invoke()` method.
+        """
         # 3) Build messages for the engine
         messages = self._messages_for_send(prompt)
 
@@ -403,12 +382,17 @@ class Agent:
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine invocation failed: {e}") from e
 
-        
+        # Engine contract: must return a string
+        if not isinstance(text, str):
+            raise AgentInvocationError(
+                f"engine returned non-string (type={type(text)!r}); a string is required"
+            )
+
         # 5) Optionally record the turn in stored history
         if self._context_enabled:
             self._history.append({"role": "user", "content": prompt})
             self._history.append({"role": "assistant", "content": text})
-        
+
         return text
 
     def invoke(self, inputs: Mapping[str, Any]) -> Any:
@@ -422,9 +406,7 @@ class Agent:
            - Other exceptions are wrapped as `AgentInvocationError`.
         3) Build messages: [system?] + [last N turns] + [user(prompt)].
         4) Call engine via compatibility shim (attachments supported).
-        5) Validate engine returned `str`; else raise `AgentInvocationError`.
-        6) If `context_enabled`, append (user, assistant) to stored history.
-        7) Return the (possibly `_finalize`d) text.
+        5) Return the engine's text and (if enabled) record the turn in history.
 
         Parameters
         ----------
@@ -443,8 +425,7 @@ class Agent:
         ToolInvocationError
             If the pre-invoke Tool rejects the inputs (e.g., unknown keys).
         AgentInvocationError
-            For non-string pre-invoke results, engine signature/return issues,
-            or other unexpected failures during invocation.
+            For engine signature/return issues or other unexpected failures.
         """
         if not isinstance(inputs, Mapping):
             raise TypeError("Agent.invoke expects a Mapping[str, Any].")
@@ -464,10 +445,8 @@ class Agent:
                 "a prompt string is required"
             )
 
-        output = self._invoke(prompt = prompt)
-
-        # 7) Allow subclasses to post-process text
-        return output
+        # Delegate to the internal call path
+        return self._invoke(prompt=prompt)
 
     # ------------------------------ diagnostics ------------------------------
 
@@ -476,12 +455,12 @@ class Agent:
         return {
             "name": self._name,
             "description": self._description,
-            "role_prompt": (self._role_prompt[:64] + "…") if self._role_prompt and len(self._role_prompt) > 64 else self._role_prompt,
+            "role_prompt": self._role_prompt,
             "context_enabled": self._context_enabled,
             "history_window": self._history_window,
             "history_turns": sum(1 for msg in self._history if msg.get("role") == "assistant"),
             "attachments_count": len(self._attachments),
-            "pre_invoke": getattr(self._pre_invoke, "name", type(self._pre_invoke).__name__),
+            "pre_invoke": self._pre_invoke.to_dict(),
             "engine": type(self._llm_engine).__name__,
         }
 
