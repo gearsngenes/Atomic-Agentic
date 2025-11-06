@@ -1,34 +1,44 @@
 import sys
 from pathlib import Path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+
+# Ensure local modules can be imported when running from examples/
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+
 from modules.A2Agents import A2AProxyAgent
 
 def main():
-    # Address and ports of agents to test
-    agents = {
-        "trivia": {"port": 6000, "task": "Hello, World!"},
-        "shakespeare": {"port": 5000, "task": "Who are you, and what are capable of?"},
-        "planner": {"port": 7000, "task": """
-                    Perform the following tasks:
-                    1)  Give me a fun fact about sea cucumbers".
-                    2)  Write a sonnet about bluebirds
-                    3)  Return both results in the format:
-                        Trivia Result: 
-                        <trivia result here>
+    """
+    Exercise: call a remote A2A server that wraps a schema-driven seed Agent.
 
-                        Sonnet Result: 
-                        <sonnet result here>"""}
+    New contract:
+      - Proxy .invoke(...) expects a MAPPING, not a string.
+      - The payload is sent as a single function_call parameter named "payload".
+      - .invoke(...) returns the RAW A2A Message; use helpers to parse output.
+    """
+    agents = {
+        "shakespeare": {
+            "port": 5000,
+            # Base Agent's pre-invoke Tool expects {"prompt": <str>}
+            "inputs": {"prompt": "Who art thou, and what canst thou accomplish?"}
+        },
+        # Add others as you bring them up (must expose same 'invoke/payload' surface)
+        "trivia": {"port": 6000, "inputs": {"prompt": "Hello, World!"}},
+        "planner": {"port": 7000, "inputs": {
+            "prompt": ("Give me a fun-fact and write a sonnet, and return the two strings as a dictionary,"
+            " with the keys being the names of the tools called to create each of them") }},
     }
-    
-    choice = "planner"  # change to "shakespeare" to test the shakespeare agent
-    
-    # Get the port and task for the chosen agent
-    port, task = agents[choice]["port"], agents[choice]["task"]
-    # Create the A2A client
-    a2a_client = A2AProxyAgent(f"http://localhost:{port}")
-    
-    # Give the task to the agent and print the response
-    response = a2a_client.invoke(task)
-    print(f"{choice}'s response:\n", response)
+
+    choice = "planner"
+    host = "localhost"
+    port = agents[choice]["port"]
+    inputs = agents[choice]["inputs"]
+
+    # IMPORTANT: pass full scheme in URL (http://)
+    proxy = A2AProxyAgent(url=f"http://{host}:{port}", name="A2AProxy")
+
+    # 1) Raw A2A response (full envelope)
+    raw_msg = proxy.invoke(inputs)  # returns python_a2a Message
+    print(f"\n[{choice}] RAW A2A response:\n{raw_msg}\n{type(raw_msg)}")
+
 if __name__ == "__main__":
     main()

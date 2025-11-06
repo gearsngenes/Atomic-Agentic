@@ -1,199 +1,302 @@
+# modules/A2Agents.py
+from __future__ import annotations
+
 """
 A2Agents
 ========
 
-A2A-enabled agent adapters that allow:
-1) **Proxying** requests to a remote agent (A2AProxyAgent).
-2) **Serving** a local seed Agent over the A2A protocol (A2AServerAgent).
+Schema-driven A2A adapters:
 
-Behavioral Notes
-----------------
-- This module refines documentation **only**. There are **no functional changes**.
-- Both classes follow the same high-level Agent contract used elsewhere in the codebase:
-  `attach()`, `detach()`, and `invoke()` shape, plus `name`/`description` accessors.
+- A2AProxyAgent: client-side proxy that forwards a single `payload` mapping to a
+  remote A2A agent using a function call and returns the RAW Message. The server
+  responds with FunctionResponseContent so callers can safely read:
+      raw.content.response["result"]
+
+- A2AServerAgent: server-side adapter that exposes a local `seed` Agent over
+  python-a2a. It dynamically defines a decorated A2A server class per-instance,
+  but DELAYS instantiation until `run()` so we can pass a fully-qualified URL
+  into the Agent Card (prevents "URL is required for A2A agent card" errors).
+
+Message-level pattern (no task-level mixing)
+--------------------------------------------
+We use `handle_message(...)` on the server and return `Message(FunctionResponseContent(...))`
+for function calls. This mirrors python-a2a's function-calling example.
 """
 
-from modules.Agents import Agent
-from modules.ToolAgents import ToolAgent
-from python_a2a import A2AClient, A2AServer, agent, TaskStatus, TaskState, run_server
-from typing import Any
+from typing import Any, Mapping, Dict, Optional
 
+# Project-local imports
+from .Agents import Agent
+from .Tools import Tool
+
+# python-a2a imports
+from python_a2a import (
+    A2AClient, A2AServer, run_server, agent,
+    Message, MessageRole,
+    FunctionCallContent, FunctionResponseContent, FunctionParameter,
+    TextContent
+)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+A2A_RESULT_KEY = "__py_A2A_result__"  # server uses this key inside FunctionResponseContent.response
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_mapping(name: str, obj: Any) -> Mapping[str, Any]:
+    if not isinstance(obj, Mapping):
+        raise TypeError(f"{name} expects a Mapping[str, Any]")
+    return obj  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# Proxy
+# ---------------------------------------------------------------------------
 
 class A2AProxyAgent(Agent):
     """
-    Read-only proxy to a remote A2A agent.
+    A2AProxyAgent
+    -------------
+    Client-side proxy that forwards dict inputs to a remote A2A agent via a
+    single function call: name="invoke", parameters=[("payload", <dict>)].
 
-    Construction
-    ------------
-    A2AProxyAgent(a2a_host: str)
-        - Connects to the remote A2A endpoint and fetches its "agent card".
-        - Populates `.name` and `.description` from the remote metadata.
-        - Disables local conversation context and LLM engine (this class forwards calls).
+    Contract
+    --------
+    - .invoke(inputs: Mapping) -> Message
+      Sends a FunctionCallContent and returns the RAW response Message.
+      The server replies with FunctionResponseContent so your code can do:
+          raw.content.response["result"]  # str or structured (server-defined)
 
-    Capabilities
-    ------------
-    - `invoke(prompt)` forwards the prompt to the remote agent via `A2AClient.ask(...)`.
-    - File attachment methods are **not supported** for a proxy and raise errors.
-    - Properties `name` and `description` are derived from the remote agent card.
+    - Convenience:
+        .invoke_response(inputs) -> Dict[str, Any] | None
+        Returns the `content.response` dict if present, else None.
+
+    Notes
+    -----
+    - We deliberately bypass the base Agent's pre-invoke tool here; the proxy's
+      job is transport only.
     """
 
-    def __init__(self, a2a_host: str):
-        self._client = A2AClient(a2a_host)
-        agent_card = self._client.get_agent_card()
-        self._name, self._description = agent_card.name, agent_card.description
-        self._context_enabled = False
-        self._llm_engine = None
-        self._history = []
+    def __init__(self, url: str, name: str = "A2AProxy", description: str = "Proxy to remote A2A agent"):
+        # We still call Agent.__init__ to keep consistent metadata, but the engine
+        # is never used by this proxy.
+        super().__init__(name=name, description=description, llm_engine=None, role_prompt="", context_enabled=False)
+        # Expect a FULL endpoint (e.g., "http://127.0.0.1:5000/a2a").
+        self._client = A2AClient(url)
 
-    def attach(self, file_path: str):
-        """A proxy cannot manage local file attachments."""
-        raise NotImplementedError("A2AProxyAgent does not support file attachments.")
+    # We override attach/detach to NO-OP, since the proxy doesn't hold files or context.
+    def attach(self, *file_paths: str) -> None:  # type: ignore[override]
+        return
 
-    def detach(self, file_path: str):
-        """A proxy cannot manage local file attachments."""
-        raise NotImplementedError("A2AProxyAgent does not support file attachments.")
+    def detach(self, *file_paths: str) -> None:  # type: ignore[override]
+        return
 
-    def invoke(self, prompt: str):
-        """
-        Forward the prompt to the remote A2A agent and return its string response.
+    def invoke(self, inputs: Mapping[str, Any]) -> Message:  # type: ignore[override]
+        _ensure_mapping("A2AProxyAgent.invoke", inputs)
 
-        Parameters
-        ----------
-        prompt : str
-            The user input to send to the remote agent.
+        # Typed FunctionParameter avoids `'dict' object has no attribute 'name'`.
+        call = FunctionCallContent(
+            name="invoke",
+            parameters=[FunctionParameter(name="payload", value=dict(inputs))]
+        )
+        msg = Message(content=call, role=MessageRole.USER)
+        resp = self._client.send_message(msg).content.response[A2A_RESULT_KEY]
+        return resp
 
-        Returns
-        -------
-        str
-            The remote agent's response.
-        """
-        response = self._client.ask(prompt)
-        return response
+    # Optional discovery helpers (schema mirroring)
+    def fetch_arguments_map(self) -> Optional[Dict[str, Any]]:
+        call = FunctionCallContent(
+            name="arguments_map",
+            parameters=[]
+        )
+        msg = Message(content=call, role=MessageRole.USER)
+        resp = self._client.send_message(msg)
+        if getattr(resp.content, "type", None) == "function_response":
+            return resp.content.response  # type: ignore[return-value]
+        return None
 
-    @property
-    def description(self):
-        """Remote agent description as reported by the A2A agent card."""
-        return self._description
-
-    @property
-    def name(self):
-        """Remote agent name as reported by the A2A agent card."""
-        return self._name
+    def fetch_agent_meta(self) -> Optional[Dict[str, Any]]:
+        call = FunctionCallContent(name="agent_meta", parameters=[])
+        msg = Message(content=call, role=MessageRole.USER)
+        resp = self._client.send_message(msg)
+        if getattr(resp.content, "type", None) == "function_response":
+            return resp.content.response  # type: ignore[return-value]
+        return None
 
 
-class A2AServerAgent(Agent):
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+
+class A2AServerAgent:
     """
-    Host an existing local `Agent` instance as an A2A server.
+    A2AServerAgent
+    --------------
+    Wraps a local `seed: Agent` as a python-a2a server using the message-level
+    function-calling pattern. We define a dynamic subclass of `A2AServer` with the
+    `@agent(...)` decorator, but we **instantiate it in `run()`** with the final
+    `url`, to satisfy the Agent Card requirement.
 
-    Construction
-    ------------
-    A2AServerAgent(seed: Any, host: str = "localhost", port: int = 5000)
-        - `seed` must be an instance of `Agent`. Its state (context flag, LLM engine,
-          name, role prompt, description, and history) is mirrored into this server agent.
-        - Defines an A2A server wrapper class with the same name/description/version
-          and binds `handle_task` to route incoming A2A tasks to `outer.invoke(...)`.
-
-    Capabilities
-    ------------
-    - `run(debug=True)` starts the A2A HTTP server on the configured host/port.
-    - `invoke(prompt)` calls the underlying seed agent's `invoke(...)` and mirrors
-      history when the seed had context enabled.
-    - `attach`/`detach` delegate to the seed agent.
-    - `register(tool)` ensures that only `ToolAgent` instances can be registered
-      against the seed (mirrors prior behavior/guardrails).
+    Exposed function names:
+      - "invoke":         payload: Mapping[str, Any]  -> {result: <seed.invoke(...)>}
+      - "arguments_map":  no params                  -> {arguments_map: <seed.pre_invoke.to_dict()["arguments_map"]>}
+      - "agent_meta":     no params                  -> {name, description}
     """
 
-    def __init__(self, seed: Any, host: str = "localhost", port: int = 5000):
-        if isinstance(seed, Agent):
-            self._seed = seed
-            self._context_enabled = seed.context_enabled
-            self._llm_engine = seed.llm_engine
-            self._name = seed.name
-            self._role_prompt = seed.role_prompt
-            self._description = seed.description
-            self._history = seed.history
-            self._port = port
-            self._host = host
-        else:
-            raise ValueError("A2AHostAgent must be initialized with an Agent instance as seed.")
+    def __init__(
+        self,
+        seed: Agent,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        version: str = "1.0.0",
+        host: str = "localhost",  # optional explicit card URL
+        port: int = 5000,
+    ):
+        if not isinstance(seed, Agent):
+            raise TypeError("A2AServerAgent requires a seed Agent.")
+        self.seed = seed
 
-        # Bind the outer agent for the wrapper's task handler closure.
+        self._name = name
+        self._description = description
+        self._version = version
+        self._host = host  # if provided, used verbatim in Agent Card
+        self._port = port
+
+        # runtime fields
+        self._server_cls = None
+        self._server = None
+        self._scheme: str = "http"
+
         outer = self
 
-        @agent(
-            name=seed.name,
-            description=seed.description,
-            version="1.0.0",
-            url=f"http://{self._host}:{self._port}"
-        )
-        class A2AServerWrapper(A2AServer):
-            """
-            Concrete A2A server wrapper exposing `seed` over HTTP.
+        @agent(name=name,
+               description=description,
+               version=version,
+               url=f"http://{self._host}:{self._port}"
+               )
+        class _Server(A2AServer):
+            """Dynamic per-instance server. Instantiated in run(url=...)."""
 
-            `handle_task` extracts the prompt text from the incoming task payload,
-            calls the outer agent's `invoke`, attaches the result as text content,
-            and marks the task state as COMPLETED.
-            """
-            def handle_task(self, task):
-                prompt = task.message.get("content", {}).get("text", "")
-                response_text = outer.invoke(prompt)
-                task.artifacts = [{"parts": [{"type": "text", "text": response_text}]}]
-                task.status = TaskStatus(state=TaskState.COMPLETED)
-                return task
+            def handle_message(self, message: Message) -> Message:
+                content = getattr(message, "content", None)
+                ctype = getattr(content, "type", None)
 
-        self._server = A2AServerWrapper(port=port)
+                # Text: brief help
+                if ctype == "text":
+                    return Message(
+                        content=TextContent(
+                            text="Call as function_call: name in {'invoke','arguments_map','agent_meta'}."
+                        ),
+                        role=MessageRole.AGENT,
+                        parent_message_id=message.message_id,
+                        conversation_id=message.conversation_id
+                    )
 
-    # --- Delegations to the seed agent ---------------------------------------
+                # Function call dispatch
+                if ctype == "function_call":
+                    fn = content.name
+                    params = {p.name: p.value for p in (content.parameters or [])}
 
-    def attach(self, file_path: str):
-        """Delegate file attachment to the underlying seed agent."""
-        self._seed.attach(file_path)
+                    try:
+                        if fn == "invoke":
+                            payload = params.get("payload", {})
+                            _ensure_mapping("invoke.payload", payload)
+                            result = outer.seed.invoke(payload)  # Agent returns str by contract
+                            return Message(
+                                content=FunctionResponseContent(
+                                    name="invoke",
+                                    response={A2A_RESULT_KEY: result}
+                                ),
+                                role=MessageRole.AGENT,
+                                parent_message_id=message.message_id,
+                                conversation_id=message.conversation_id
+                            )
 
-    def detach(self, file_path: str):
-        """Delegate file detachment to the underlying seed agent."""
-        self._seed.detach(file_path)
+                        if fn == "arguments_map":
+                            pre = outer.seed.pre_invoke
+                            if not isinstance(pre, Tool):
+                                raise ValueError("seed.pre_invoke is not a Tool")
+                            argmap = pre.to_dict().get("arguments_map", {})
+                            return Message(
+                                content=FunctionResponseContent(
+                                    name="arguments_map",
+                                    response={"arguments_map": argmap}
+                                ),
+                                role=MessageRole.AGENT,
+                                parent_message_id=message.message_id,
+                                conversation_id=message.conversation_id
+                            )
 
-    def register(self, tool: Any):
+                        if fn == "agent_meta":
+                            meta = {"name": outer.seed.name, "description": outer.seed.description}
+                            return Message(
+                                content=FunctionResponseContent(
+                                    name="agent_meta",
+                                    response=meta
+                                ),
+                                role=MessageRole.AGENT,
+                                parent_message_id=message.message_id,
+                                conversation_id=message.conversation_id
+                            )
+
+                        # Unknown function
+                        return Message(
+                            content=FunctionResponseContent(
+                                name=fn,
+                                response={"error": f"Unknown function '{fn}'."}
+                            ),
+                            role=MessageRole.AGENT,
+                            parent_message_id=message.message_id,
+                            conversation_id=message.conversation_id
+                        )
+
+                    except Exception as e:
+                        return Message(
+                            content=FunctionResponseContent(
+                                name=fn,
+                                response={"error": f"{type(e).__name__}: {e}"}
+                            ),
+                            role=MessageRole.AGENT,
+                            parent_message_id=message.message_id,
+                            conversation_id=message.conversation_id
+                        )
+
+                # Fallback
+                return Message(
+                    content=TextContent(text="Unsupported content type."),
+                    role=MessageRole.AGENT,
+                    parent_message_id=message.message_id,
+                    conversation_id=message.conversation_id
+                )
+
+        self._server = _Server(url = f"http://{self._host}:{self._port}")
+
+    # -----------------------------
+    # Run / URL composition
+    # -----------------------------
+    def _compose_public_url(self, *, public_host: str, port: int, scheme: str = "http") -> str:
+        # a2a clients hit "<base>/a2a"; the card URL itself should be the base origin
+        return f"{scheme}://{public_host}:{port}"
+
+    def run(
+        self,
+        *,
+        debug: bool = False,
+    ) -> None:
         """
-        Register a tool-bearing agent with the seed.
+        Start the server and publish a valid Agent Card URL.
 
-        Raises
-        ------
-        ValueError
-            If `tool` is not an instance of `ToolAgent`.
+        - If `public_url` was passed to __init__, we use it verbatim.
+        - Otherwise we compose `scheme://public_host:port`. If `public_host` is
+          not provided, default "127.0.0.1".
+        - We instantiate the dynamic A2A server *here* with `url=...`, avoiding
+          the "URL is required for A2A agent card" exception.
         """
-        if isinstance(self._seed, ToolAgent):
-            self._seed.register(tool)
-        else:
-            raise ValueError("Only ToolAgent instances can register methods.")
-
-    def invoke(self, prompt: str):
-        """
-        Invoke the underlying seed agent and (optionally) mirror history.
-
-        Parameters
-        ----------
-        prompt : str
-            The input text forwarded to the seed agent.
-
-        Returns
-        -------
-        str
-            The seed agent's response.
-        """
-        response = self._seed.invoke(prompt)
-        if self._context_enabled:
-            self._history.append({"role": "user", "content": prompt})
-            self._history.append({"role": "assistant", "content": response})
-        return response
-
-    def run(self, debug: bool = True):
-        """
-        Start serving the wrapped agent over A2A HTTP.
-
-        Parameters
-        ----------
-        debug : bool
-            Whether to launch the server in debug mode.
-        """
+        # Run HTTP listener (client uses "<final_url>/a2a")
         run_server(self._server, host=self._host, port=self._port, debug=debug)

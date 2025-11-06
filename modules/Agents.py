@@ -188,7 +188,7 @@ class Agent:
             raise AgentError("Agent 'name' must be a non-empty string.")
         if not isinstance(description, str):
             raise AgentError("Agent 'description' must be a string.")
-        if not isinstance(llm_engine, LLMEngine):
+        if not isinstance(llm_engine, (LLMEngine, type(None))):
             raise AgentError("llm_engine must be an instance of LLMEngine.")
 
         self._name = name
