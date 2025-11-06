@@ -9,13 +9,13 @@ import re
 import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import Any, Callable, Iterable, List, Mapping, Optional, Union, Dict
+from typing import Any, Callable, Iterable, List, Optional, Union, Dict
 
 from . import Prompts
 from .Agents import Agent
 from .LLMEngines import LLMEngine
 from .ToolAdapters import toolify
-from .Tools import Tool, ToolDefinitionError
+from .Tools import Tool
 
 # ──────────────────────────────────────────────────────────────────────────────
 __all__ = [
