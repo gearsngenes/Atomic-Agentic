@@ -38,6 +38,7 @@ def main():
     proxy = A2AProxyAgent(url=f"http://{host}:{port}", name="A2AProxy")
 
     # A2A response
+    print("Arg-map:", proxy.arguments_map)
     result = proxy.invoke(inputs)  # returns python_a2a Message
     print(f"\n[{choice}] RAW A2A response:\n{result}\n{type(result).__name__}")
 

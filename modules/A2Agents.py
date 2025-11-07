@@ -124,7 +124,14 @@ class A2AProxyAgent(Agent):
     @property
     def context_enabled(self)->bool:
         return self._context_enabled
-
+    @property
+    def arguments_map(self):
+        call = FunctionCallContent(name="arguments_map", parameters=[])
+        msg = Message(content=call, role=MessageRole.USER)
+        resp = self._client.send_message(msg)
+        if getattr(resp.content, "type", None) == "function_response":
+            return resp.content.response[A2A_RESULT_KEY]  # type: ignore[return-value]
+        return None
     def fetch_agent_meta(self) -> Optional[Dict[str, Any]]:
         call = FunctionCallContent(name="agent_meta", parameters=[])
         msg = Message(content=call, role=MessageRole.USER)
@@ -176,6 +183,7 @@ class A2AServerAgent(Agent):
         self._version = version
         self._host = host  # if provided, used verbatim in Agent Card
         self._port = port
+        self._arguments_map = seed.arguments_map
 
         # runtime fields
         self._server = None
@@ -224,17 +232,17 @@ class A2AServerAgent(Agent):
                                 conversation_id=message.conversation_id
                             )
 
-                        # if fn == "arguments_map":
-                        #     argmap = outer._seed.pre_invoke.to_dict().get("arguments_map", {})
-                        #     return Message(
-                        #         content=FunctionResponseContent(
-                        #             name="arguments_map",
-                        #             response={"arguments_map": argmap}
-                        #         ),
-                        #         role=MessageRole.AGENT,
-                        #         parent_message_id=message.message_id,
-                        #         conversation_id=message.conversation_id
-                        #     )
+                        if fn == "arguments_map":
+                            # argmap = outer._seed.pre_invoke.to_dict().get("arguments_map", {})
+                            return Message(
+                                content=FunctionResponseContent(
+                                    name="arguments_map",
+                                    response={A2A_RESULT_KEY: outer._seed.arguments_map}
+                                ),
+                                role=MessageRole.AGENT,
+                                parent_message_id=message.message_id,
+                                conversation_id=message.conversation_id
+                            )
 
                         if fn == "agent_meta":
                             meta = {"name": outer._seed.name, "description": outer._seed.description}

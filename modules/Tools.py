@@ -685,21 +685,21 @@ class Tool:
         - 'default' is included only when a parameter has a default; it is JSON-safe already.
         - 'mode' is a JSON-stable parameter kind token; 'kind_name' is for human display.
         """
-        argmap_serialized: OrderedDict[str, Any] = OrderedDict()
-        for name, spec in sorted(self._arguments_map.items(), key=lambda kv: kv[1]["index"]):
-            kind_enum: inspect._ParameterKind = spec["kind"]
-            entry = {
-                "index": spec["index"],
-                "mode": spec.get("mode", KIND_TO_MODE.get(kind_enum, "pos_or_kw")),
-                "kind_name": kind_enum.name,  # optional, human friendly
-                "ann": spec.get("ann", "any"),
-                "has_default": spec.get("has_default", False),
-            }
-            if "ann_meta" in spec and spec["ann_meta"] is not None:
-                entry["ann_meta"] = spec["ann_meta"]
-            if spec.get("has_default", False) and "default" in spec:
-                entry["default"] = spec["default"]  # already JSON-safe
-            argmap_serialized[name] = entry
+        # argmap_serialized: OrderedDict[str, Any] = OrderedDict()
+        # for name, spec in sorted(self._arguments_map.items(), key=lambda kv: kv[1]["index"]):
+        #     kind_enum: inspect._ParameterKind = spec["kind"]
+        #     entry = {
+        #         "index": spec["index"],
+        #         "mode": spec.get("mode", KIND_TO_MODE.get(kind_enum, "pos_or_kw")),
+        #         "kind_name": kind_enum.name,  # optional, human friendly
+        #         "ann": spec.get("ann", "any"),
+        #         "has_default": spec.get("has_default", False),
+        #     }
+        #     if "ann_meta" in spec and spec["ann_meta"] is not None:
+        #         entry["ann_meta"] = spec["ann_meta"]
+        #     if spec.get("has_default", False) and "default" in spec:
+        #         entry["default"] = spec["default"]  # already JSON-safe
+        #     argmap_serialized[name] = entry
 
         return OrderedDict(
             name=self._name,
@@ -708,7 +708,7 @@ class Tool:
             source=self._source,
             signature=self.signature,
             return_type=self._return_type,
-            arguments_map=argmap_serialized,
+            arguments_map=self.arguments_map,
             posonly_order=list(self.posonly_order),
             p_or_kw_names=list(self.p_or_kw_names),
             kw_only_names=list(self.kw_only_names),
