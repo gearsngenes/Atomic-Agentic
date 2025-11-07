@@ -27,6 +27,7 @@ from typing import Any, Mapping, Dict, Optional
 
 # Project-local imports
 from .Agents import Agent
+from .LLMEngines import LLMEngine
 from .Tools import Tool
 
 # python-a2a imports
@@ -82,19 +83,26 @@ class A2AProxyAgent(Agent):
       job is transport only.
     """
 
-    def __init__(self, url: str, name: str = "A2AProxy", description: str = "Proxy to remote A2A agent"):
+    def __init__(self, url: str,
+                 name: str|None = None,
+                 description: str|None = None):
         # We still call Agent.__init__ to keep consistent metadata, but the engine
         # is never used by this proxy.
-        super().__init__(name=name, description=description, llm_engine=None, role_prompt="", context_enabled=False)
         # Expect a FULL endpoint (e.g., "http://127.0.0.1:5000/a2a").
         self._client = A2AClient(url)
+        agent_card = self._client.get_agent_card()
+        super().__init__(name=name if name else agent_card.name,
+                         description=description if description else agent_card.description,
+                         llm_engine=None,
+                         role_prompt="default",
+                         context_enabled=False)
 
     # We override attach/detach to NO-OP, since the proxy doesn't hold files or context.
-    def attach(self, *file_paths: str) -> None:  # type: ignore[override]
-        return
+    def attach(self, path: str) -> bool:  # type: ignore[override]
+        return False
 
-    def detach(self, *file_paths: str) -> None:  # type: ignore[override]
-        return
+    def detach(self, path: str) -> bool:  # type: ignore[override]
+        return False
 
     def invoke(self, inputs: Mapping[str, Any]) -> Message:  # type: ignore[override]
         _ensure_mapping("A2AProxyAgent.invoke", inputs)
@@ -107,18 +115,15 @@ class A2AProxyAgent(Agent):
         msg = Message(content=call, role=MessageRole.USER)
         resp = self._client.send_message(msg).content.response[A2A_RESULT_KEY]
         return resp
-
-    # Optional discovery helpers (schema mirroring)
-    def fetch_arguments_map(self) -> Optional[Dict[str, Any]]:
-        call = FunctionCallContent(
-            name="arguments_map",
-            parameters=[]
-        )
-        msg = Message(content=call, role=MessageRole.USER)
-        resp = self._client.send_message(msg)
-        if getattr(resp.content, "type", None) == "function_response":
-            return resp.content.response  # type: ignore[return-value]
-        return None
+    @property
+    def role_prompt(self)->str:
+        return self._role_prompt
+    @property
+    def llm_engine(self)->LLMEngine:
+        return self._llm_engine
+    @property
+    def context_enabled(self)->bool:
+        return self._context_enabled
 
     def fetch_agent_meta(self) -> Optional[Dict[str, Any]]:
         call = FunctionCallContent(name="agent_meta", parameters=[])
@@ -133,7 +138,7 @@ class A2AProxyAgent(Agent):
 # Server
 # ---------------------------------------------------------------------------
 
-class A2AServerAgent:
+class A2AServerAgent(Agent):
     """
     A2AServerAgent
     --------------
@@ -160,23 +165,25 @@ class A2AServerAgent:
     ):
         if not isinstance(seed, Agent):
             raise TypeError("A2AServerAgent requires a seed Agent.")
-        self.seed = seed
-
-        self._name = name
-        self._description = description
+        self._seed = seed
+        super().__init__(name = name if name else seed.name,
+                         description = description if description else seed.description,
+                         llm_engine = seed.llm_engine,
+                         role_prompt = seed.role_prompt,
+                         context_enabled=seed.context_enabled,
+                         pre_invoke=seed.pre_invoke,
+                         history_window=seed.history_window)
         self._version = version
         self._host = host  # if provided, used verbatim in Agent Card
         self._port = port
 
         # runtime fields
-        self._server_cls = None
         self._server = None
-        self._scheme: str = "http"
-
+        
         outer = self
 
-        @agent(name=name,
-               description=description,
+        @agent(name=name if name else seed.name,
+               description=description if description else seed.description,
                version=version,
                url=f"http://{self._host}:{self._port}"
                )
@@ -184,8 +191,8 @@ class A2AServerAgent:
             """Dynamic per-instance server. Instantiated in run(url=...)."""
 
             def handle_message(self, message: Message) -> Message:
-                content = getattr(message, "content", None)
-                ctype = getattr(content, "type", None)
+                content = message.content
+                ctype = content.type
 
                 # Text: brief help
                 if ctype == "text":
@@ -206,8 +213,7 @@ class A2AServerAgent:
                     try:
                         if fn == "invoke":
                             payload = params.get("payload", {})
-                            _ensure_mapping("invoke.payload", payload)
-                            result = outer.seed.invoke(payload)  # Agent returns str by contract
+                            result = outer._seed.invoke(payload)  # Agent returns str by contract
                             return Message(
                                 content=FunctionResponseContent(
                                     name="invoke",
@@ -218,23 +224,20 @@ class A2AServerAgent:
                                 conversation_id=message.conversation_id
                             )
 
-                        if fn == "arguments_map":
-                            pre = outer.seed.pre_invoke
-                            if not isinstance(pre, Tool):
-                                raise ValueError("seed.pre_invoke is not a Tool")
-                            argmap = pre.to_dict().get("arguments_map", {})
-                            return Message(
-                                content=FunctionResponseContent(
-                                    name="arguments_map",
-                                    response={"arguments_map": argmap}
-                                ),
-                                role=MessageRole.AGENT,
-                                parent_message_id=message.message_id,
-                                conversation_id=message.conversation_id
-                            )
+                        # if fn == "arguments_map":
+                        #     argmap = outer._seed.pre_invoke.to_dict().get("arguments_map", {})
+                        #     return Message(
+                        #         content=FunctionResponseContent(
+                        #             name="arguments_map",
+                        #             response={"arguments_map": argmap}
+                        #         ),
+                        #         role=MessageRole.AGENT,
+                        #         parent_message_id=message.message_id,
+                        #         conversation_id=message.conversation_id
+                        #     )
 
                         if fn == "agent_meta":
-                            meta = {"name": outer.seed.name, "description": outer.seed.description}
+                            meta = {"name": outer._seed.name, "description": outer._seed.description}
                             return Message(
                                 content=FunctionResponseContent(
                                     name="agent_meta",
@@ -280,15 +283,26 @@ class A2AServerAgent:
     # -----------------------------
     # Run / URL composition
     # -----------------------------
-    def _compose_public_url(self, *, public_host: str, port: int, scheme: str = "http") -> str:
-        # a2a clients hit "<base>/a2a"; the card URL itself should be the base origin
-        return f"{scheme}://{public_host}:{port}"
+    @property
+    def seed(self)->Agent:
+        return self._seed
+    @seed.setter
+    def seed(self, val:Agent)->None:
+        self._seed = val
+    @property
+    def role_prompt(self)->str:
+        return self._seed.role_prompt
+    @property
+    def llm_engine(self)->LLMEngine:
+        return self._seed.llm_engine
+    @property
+    def context_enabled(self):
+        return self._seed.context_enabled
+    @property
+    def history_window(self)->int:
+        return self._seed.history_window
 
-    def run(
-        self,
-        *,
-        debug: bool = False,
-    ) -> None:
+    def run(self,*,debug: bool = False,) -> None:
         """
         Start the server and publish a valid Agent Card URL.
 

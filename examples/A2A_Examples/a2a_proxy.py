@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+import json
 
 # Ensure local modules can be imported when running from examples/
 sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -28,7 +29,7 @@ def main():
             " with the keys being the names of the tools called to create each of them") }},
     }
 
-    choice = "planner"
+    choice = "shakespeare"
     host = "localhost"
     port = agents[choice]["port"]
     inputs = agents[choice]["inputs"]
@@ -36,9 +37,9 @@ def main():
     # IMPORTANT: pass full scheme in URL (http://)
     proxy = A2AProxyAgent(url=f"http://{host}:{port}", name="A2AProxy")
 
-    # 1) Raw A2A response (full envelope)
-    raw_msg = proxy.invoke(inputs)  # returns python_a2a Message
-    print(f"\n[{choice}] RAW A2A response:\n{raw_msg}\n{type(raw_msg)}")
+    # A2A response
+    result = proxy.invoke(inputs)  # returns python_a2a Message
+    print(f"\n[{choice}] RAW A2A response:\n{result}\n{type(result).__name__}")
 
 if __name__ == "__main__":
     main()
