@@ -1,17 +1,19 @@
 # modules/ToolAdapters.py
 from __future__ import annotations
+
 # Base imports
-from typing import Any, Mapping, Dict, List, Tuple, Optional
+from typing import Any, Mapping, Dict, List, Tuple, Optional, get_origin, get_args
 import inspect
-from collections import OrderedDict
 import asyncio
 import threading
 from queue import Queue
 from collections import OrderedDict
 from urllib.parse import urlparse, urlunparse
+
 # MCP tools
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+
 # Atomic Agentic Imports
 from modules.Tools import Tool, ToolDefinitionError, NO_DEFAULT
 from modules.Agents import Agent
@@ -21,122 +23,17 @@ from modules.Agents import Agent
 # ───────────────────────────────────────────────────────────────────────────────
 __all__ = ["AgentTool", "MCPProxyTool", "toolify"]
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ───────────────────────────────────────────────────────────────────────────────
 
-# =========================
-# Agent -> Tool (invoke)
-# =========================
-
-# modules/ToolAdapters.py  — Updated AgentTool
-class AgentTool(Tool):
-    """
-    Adapter that exposes an Agent as a Tool with schema-driven introspection.
-
-    Metadata
-    --------
-    - type   = "agent"
-    - source = agent.name
-    - name   = "invoke"
-    - description = agent.description
-
-    Schema exposure
-    ---------------
-    Mirrors the agent's `pre_invoke` Tool call-plan (arguments map, required sets,
-    varargs flags, etc.) so planners see the exact input keys & binding rules.
-
-    Signature string
-    ----------------
-    The base Tool builds a canonical, schema-derived signature of the form:
-        "agent.<agent_name>.invoke(p1:Type, p2?:Type) -> str"
-    We set `return_type` to `str` and call `_rebuild_signature_str()` after
-    overriding the plan so the prefix and parameter list match the new Tool format.
-
-    Execution
-    ---------
-    Accepts a flat mapping via `Tool.invoke(inputs)` and forwards it to
-    `agent.invoke(inputs)`.
-    """
-
-    def __init__(self, agent: Agent) -> None:
-        if not isinstance(agent, Agent):
-            raise ToolDefinitionError("AgentTool requires an Agents.Agent instance.")
-
-        pre = agent.pre_invoke
-        if not isinstance(pre, Tool):
-            raise ToolDefinitionError("AgentTool requires agent.pre_invoke to be a Tools.Tool.")
-
-        self.agent = agent
-        self.pre = pre
-
-        # Keep a snapshot of positional-only names from the mirrored plan
-        posonly_names: List[str] = list(pre.posonly_order)
-
-        # Wrapper that rebuilds a dict for Agent.invoke
-        def _agent_wrapper(*_args: Any, **_kwargs: Any) -> Any:
-            inputs: Dict[str, Any] = {}
-            # Map positional-only prefix back into named keys deterministically
-            for i, pname in enumerate(posonly_names):
-                if i < len(_args):
-                    inputs[pname] = _args[i]
-            inputs.update(_kwargs)
-            return self.agent.invoke(inputs)
-
-        # Initialize base Tool with wrapper and agent metadata
-        super().__init__(
-            func=_agent_wrapper,
-            name="invoke",
-            description=agent.description,
-            type="agent",
-            source=agent.name,
-        )
-
-        # ---- Mirror the pre_invoke call-plan (shallow copies to avoid aliasing) ----
-        self._arguments_map = OrderedDict((k, dict(v)) for k, v in pre.arguments_map.items())
-        self.posonly_order = list(pre.posonly_order)
-        self.p_or_kw_names = list(pre.p_or_kw_names)
-        self.kw_only_names = list(pre.kw_only_names)
-        self.required_names = set(pre.required_names)
-        self.has_varargs = bool(pre.has_varargs)
-        self.varargs_name = pre.varargs_name
-        self.has_varkw = bool(pre.has_varkw)
-        self.varkw_name = pre.varkw_name
-
-        # Explicit return type for AgentTool (agent responses are strings)
-        self._return_type = str
-
-        # Rebuild the canonical signature string to reflect mirrored schema + return type
-        self._rebuild_signature_str()
-
-
-# ---------- JSON Schema -> Python annotation (best-effort) ----------
-_JSON_TO_PY = {
-    "string": str,
-    "integer": int,
-    "number": float,
-    "boolean": bool,
-    "object": dict,
-    "array": list,
-}
-
-def _ann_from_json_type(t: Any, items: Any = None) -> Any:
-    # anyOf/oneOf/allOf -> Any (limitation)
-    if isinstance(t, list):
-        return Any
-    if t == "array":
-        if isinstance(items, Mapping) and "type" in items:
-            base = _JSON_TO_PY.get(items["type"], Any)
-            try:
-                return list[base]  # py3.9+ pretty form
-            except TypeError:
-                return list
-        return list
-    return _JSON_TO_PY.get(t, Any)
-
-
-# ---------- sync runner with event-loop fallback ----------
 def _run_sync(coro):
     """
     Run an async coroutine in sync context.
     If an event loop is active, run in a separate thread.
+
+    Ref: asyncio loop rules; json & inspect behaviors require JSON-safe payloads and
+    Python-only enums should not be sent over the wire. :contentReference[oaicite:2]{index=2}
     """
     try:
         return asyncio.run(coro)
@@ -161,9 +58,12 @@ def _run_sync(coro):
 
 
 def _normalize_url(u: str) -> str:
+    """
+    Normalize Streamable-HTTP MCP URLs to include a mount path if missing.
+    MCP tools are JSON-schema driven (name/description/inputSchema). :contentReference[oaicite:3]{index=3}
+    """
     parts = urlparse(u)
     if not parts.path or parts.path == "/":
-        # Most Streamable-HTTP servers mount under /mcp; append if missing.
         parts = parts._replace(path="/mcp")
     return urlunparse(parts)
 
@@ -172,20 +72,196 @@ def _extract_rw(transport) -> Tuple[Any, Any]:
     """
     Robustly get (read, write) from the streamable transport.
 
-    Some SDKs return a transport object with .read/.write; others return a tuple,
-    sometimes including a session_id function. We accept all.
+    Some SDKs return a transport object with .read/.write; others return a tuple.
     """
-    # Object with attributes?
     r = getattr(transport, "read", None)
     w = getattr(transport, "write", None)
     if r is not None and w is not None:
         return r, w
-    # Tuple / list form
     if isinstance(transport, (tuple, list)) and len(transport) >= 2:
         return transport[0], transport[1]
     raise ToolDefinitionError("MCPProxyTool: could not extract (read, write) from transport.")
 
 
+# ---------- JSON Schema -> Python type (best-effort) ----------
+_JSON_TO_PY = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "object": dict,
+    "array": list,
+    "null": type(None),
+}
+
+def _ann_from_json_type(t: Any, items: Any = None) -> Any:
+    """
+    Map JSON Schema 'type' (+ 'items' for arrays) into a Python typing-ish object.
+    This is only a staging shape; we will turn it into a canonical string below.
+    """
+    # anyOf/oneOf/allOf -> Any (limitation)
+    if isinstance(t, list):
+        return Any
+    if t == "array":
+        if isinstance(items, Mapping) and "type" in items:
+            base = _JSON_TO_PY.get(items["type"], Any)
+            try:
+                return list[base]  # py3.9+ generic alias
+            except TypeError:
+                return list
+        return list
+    return _JSON_TO_PY.get(t, Any)
+
+def _canon_str_from_python(t: Any) -> str:
+    """
+    Convert a Python/typing annotation-ish object to a canonical string
+    that is stable and JSON/wire-friendly.
+
+    We keep this intentionally small to avoid importing private internals:
+    list[T], dict[K, V], tuple[...], union (X|Y) → 'union[...]', NoneType → 'none',
+    Any → 'any', classes → lower-cased __name__.
+    """
+    # Textual input
+    if isinstance(t, str):
+        return t.strip().lower() or "object"
+
+    # None / Any
+    if t in (type(None), None):
+        return "none"
+    if t is Any:
+        return "any"
+
+    # PEP 604 union (X|Y) or typing.Union
+    origin = get_origin(t)
+    if origin in (getattr(__import__('typing'), 'Union', None), getattr(__import__('types'), 'UnionType', None)):
+        args = [ _canon_str_from_python(a) for a in (get_args(t) or ()) ]
+        args = sorted(args)
+        non_none = [a for a in args if a != "none"]
+        if len(args) == 2 and len(non_none) == 1 and "none" in args:
+            return f"optional[{non_none[0]}]"
+        return f"union[{', '.join(args)}]"
+
+    # Containers
+    if origin is list:
+        (arg,) = get_args(t) or (Any,)
+        return f"list[{_canon_str_from_python(arg)}]"
+    if origin is dict:
+        k, v = (get_args(t) + (Any, Any))[:2]
+        return f"dict[{_canon_str_from_python(k)}, {_canon_str_from_python(v)}]"
+    if origin is tuple:
+        args = get_args(t) or ()
+        inner = ", ".join(_canon_str_from_python(a) for a in args) if args else ""
+        return f"tuple[{inner}]" if inner else "tuple"
+
+    # Bare Python classes
+    if isinstance(t, type):
+        return t.__name__.lower()
+
+    # Fallback
+    return "object"
+
+
+# ---------- URL helpers ----------
+def _is_http_url(s: str) -> bool:
+    try:
+        p = urlparse(s)
+        return p.scheme in ("http", "https") and bool(p.netloc)
+    except Exception:
+        return False
+
+
+# ---------- MCP discovery (list tool names) ----------
+async def _async_discover_mcp_tool_names(url: str, headers: Optional[dict]) -> List[str]:
+    async with streamablehttp_client(url=url, headers=headers or None) as transport:
+        read, write = _extract_rw(transport)
+        async with ClientSession(read, write) as session:
+            # REQUIRED handshake
+            await session.initialize()
+            tools_resp = await session.list_tools()
+            tool_objs = getattr(tools_resp, "tools", tools_resp)
+            return [t.name for t in tool_objs]
+
+def _discover_mcp_tool_names(url: str, headers: Optional[dict]) -> List[str]:
+    return _run_sync(_async_discover_mcp_tool_names(url, headers))
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Agent -> Tool (invoke)
+# ───────────────────────────────────────────────────────────────────────────────
+class AgentTool(Tool):
+    """
+    Adapter that exposes an Agent as a Tool with schema-driven introspection.
+
+    Metadata
+    --------
+    - type   = "agent"
+    - source = agent.name
+    - name   = "invoke"
+    - description = agent.description
+
+    Schema exposure
+    ---------------
+    Mirrors the agent's `pre_invoke` Tool call-plan (arguments map, required sets,
+    varargs flags, etc.) so planners see the exact input keys & binding rules.
+
+    Signature string
+    ----------------
+    The base Tool builds a canonical, schema-derived signature of the form:
+        "agent.<agent_name>.invoke(p1:Type, p2?:Type) -> str"
+    We set return_type to "str" and call `_rebuild_signature_str()` after
+    overriding the plan to reflect the agent’s actual output.
+    """
+
+    def __init__(self, agent: Agent) -> None:
+        if not isinstance(agent, Agent):
+            raise ToolDefinitionError("AgentTool requires an Agents.Agent instance.")
+
+        pre = agent.pre_invoke
+        if not isinstance(pre, Tool):
+            raise ToolDefinitionError("AgentTool requires agent.pre_invoke to be a Tools.Tool.")
+
+        self.agent = agent
+        self.pre = pre
+
+        posonly_names: List[str] = list(pre.posonly_order)
+
+        def _agent_wrapper(*_args: Any, **_kwargs: Any) -> Any:
+            inputs: Dict[str, Any] = {}
+            # Map positional-only prefix back into named keys deterministically
+            for i, pname in enumerate(posonly_names):
+                if i < len(_args):
+                    inputs[pname] = _args[i]
+            inputs.update(_kwargs)
+            return self.agent.invoke(inputs)
+
+        # Initialize base Tool with wrapper and agent metadata
+        super().__init__(
+            func=_agent_wrapper,
+            name="invoke",
+            description=agent.description,
+            type="agent",
+            source=agent.name,
+        )
+
+        # ---- Mirror the pre_invoke call-plan (shallow copies to avoid aliasing) ----
+        self._arguments_map = pre.arguments_map
+        self.posonly_order = list(pre.posonly_order)
+        self.p_or_kw_names = list(pre.p_or_kw_names)
+        self.kw_only_names = list(pre.kw_only_names)
+        self.required_names = set(pre.required_names)
+        self.has_varargs = bool(pre.has_varargs)
+        self.varargs_name = pre.varargs_name
+        self.has_varkw = bool(pre.has_varkw)
+        self.varkw_name = pre.varkw_name
+
+        # Explicit return type for AgentTool (agent responses are strings)
+        self._return_type = "str"
+        self._rebuild_signature_str()
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# MCP Proxy Tool
+# ───────────────────────────────────────────────────────────────────────────────
 class MCPProxyTool(Tool):
     """
     Strict, schema-driven proxy around a single MCP remote tool.
@@ -205,14 +281,14 @@ class MCPProxyTool(Tool):
 
     Signature exposure:
         - After mirroring the schema into `arguments_map`, we synthesize an
-          `inspect.Signature` that lists each parameter (order, type, default)
-          so `to_dict()["signature"]` shows a meaningful `(a: str, b?: int)` form
-          rather than the wrapper’s `(**inputs)`.
+          plan so `to_dict()["signature"]` shows `(a: str, b?: int)` rather than `(**inputs)`.
 
     Invocation:
         - Each `invoke` opens a short-lived client session to `server_url`,
           **initializes** the session, calls `call_tool(tool_name, inputs)`,
           and returns normalized text (if present) or the raw result.
+
+    MCP tools are JSON-schema driven and expect JSON-safe payloads. :contentReference[oaicite:4]{index=4}
     """
 
     def __init__(self, tool_name: str, server_name: str, server_url: str, headers: Optional[dict] = None) -> None:
@@ -237,21 +313,26 @@ class MCPProxyTool(Tool):
         # 3) Wrapper that calls the MCP tool synchronously
         def _mcp_wrapper(**inputs: Any) -> Any:
             result = _run_sync(self._call_remote(self._server_url, tool_name, inputs, self._headers))
-            result = result.model_dump()
+            # The client session commonly returns a dataclass-like object with .model_dump() (pydantic) or dict
+            try:
+                if hasattr(result, "model_dump"):
+                    result = result.model_dump()  # pydantic v2 dict :contentReference[oaicite:5]{index=5}
+            except Exception:
+                pass
 
             # Try to return concise structured value if server provided one
             try:
-                if "structuredContent" in result:
+                if isinstance(result, Mapping) and "structuredContent" in result:
                     sc = result["structuredContent"]
-                    # Common case: {"result": "..."} only
                     if isinstance(sc, dict) and "result" in sc and len(sc) == 1:
                         return sc["result"]
                     return sc
                 # Fallback to concatenated text content
-                content = result.get("content", [])
-                texts = [c["text"] for c in content if isinstance(c, dict) and "text" in c]
-                if texts:
-                    return "".join(texts)
+                if isinstance(result, Mapping):
+                    content = result.get("content", []) or []
+                    texts = [c["text"] for c in content if isinstance(c, dict) and "text" in c]
+                    if texts:
+                        return "".join(texts)
             except Exception:
                 pass
             return result
@@ -266,7 +347,6 @@ class MCPProxyTool(Tool):
         )
 
         # ---- Mirror schema-driven plan (strict named-only) ----
-        # Use fresh containers to avoid aliasing.
         self._arguments_map = OrderedDict((k, dict(v)) for k, v in arguments_map.items())
         self.posonly_order = []
         self.p_or_kw_names = list(p_or_kw_names)
@@ -355,18 +435,23 @@ class MCPProxyTool(Tool):
                 raise ToolDefinitionError(f"MCPProxyTool: property '{pname}' must be a mapping.")
 
             ptype = pspec.get("type")
-            ann = _ann_from_json_type(ptype, pspec.get("items"))
+            ann_py = _ann_from_json_type(ptype, pspec.get("items"))
+            ann_str = _canon_str_from_python(ann_py)
 
             has_default = "default" in pspec
-            default_val = pspec.get("default", NO_DEFAULT)
 
-            arguments_map[pname] = {
+            entry: Dict[str, Any] = {
                 "index": idx,
-                "kind": inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                "ann": ann,
+                "kind_name": inspect.Parameter.POSITIONAL_OR_KEYWORD.name,
+                "mode": "pos_or_kw",  # JSON/wire safe token
+                "ann": ann_str,       # canonical string
                 "has_default": bool(has_default),
-                "default": default_val if has_default else NO_DEFAULT,
             }
+            if has_default:
+                # JSON Schema defaults must already be JSON-encodable
+                entry["default"] = pspec["default"]
+
+            arguments_map[pname] = entry
             p_or_kw_names.append(pname)
 
         for n in required:
@@ -376,65 +461,9 @@ class MCPProxyTool(Tool):
         return arguments_map, p_or_kw_names, required_names
 
 
-# ---------- URL helpers ----------
-def _is_http_url(s: str) -> bool:
-    try:
-        p = urlparse(s)
-        return p.scheme in ("http", "https") and bool(p.netloc)
-    except Exception:
-        return False
-
-def _normalize_url(u: str) -> str:
-    p = urlparse(u)
-    if not p.path or p.path == "/":
-        p = p._replace(path="/mcp")
-    return urlunparse(p)
-
-
-# ---------- MCP discovery (list tool names) ----------
-async def _async_discover_mcp_tool_names(url: str, headers: Optional[dict]) -> List[str]:
-    try:
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-    except Exception as e:
-        raise ToolDefinitionError(
-            "ToolFactory: MCP client libraries not available. Install the MCP client or remove the MCP URL input."
-        ) from e
-
-    async with streamablehttp_client(url=url, headers=headers or None) as transport:
-        # robustly extract (read, write) for both transport-object and tuple forms
-        read = getattr(transport, "read", None)
-        write = getattr(transport, "write", None)
-        if read is None or write is None:
-            read, write = transport[0], transport[1]
-
-        async with ClientSession(read, write) as session:
-            # REQUIRED handshake
-            await session.initialize()
-            tools_resp = await session.list_tools()
-            tool_objs = getattr(tools_resp, "tools", tools_resp)
-            return [t.name for t in tool_objs]
-
-def _discover_mcp_tool_names(url: str, headers: Optional[dict]) -> List[str]:
-    return _run_sync(_async_discover_mcp_tool_names(url, headers))
-
-
-# ---------- filter helpers ----------
-def _filter_names(names: List[str],
-                  include: Optional[List[str]],
-                  exclude: Optional[List[str]]) -> List[str]:
-    s = list(names)
-    if include:
-        inc = set(include)
-        s = [n for n in s if n in inc]
-    if exclude:
-        exc = set(exclude)
-        s = [n for n in s if n not in exc]
-    return s
-
-
-# ---------- Public API ----------
-
+# ───────────────────────────────────────────────────────────────────────────────
+# Public factory
+# ───────────────────────────────────────────────────────────────────────────────
 def toolify(
     obj: Any,
     *,
@@ -457,6 +486,10 @@ def toolify(
 
     Raises:
         ToolDefinitionError for invalid inputs or unmet requirements.
+
+    Notes:
+        - MCP metadata and schemas are JSON-defined; we discover tools then proxy them. :contentReference[oaicite:6]{index=6}
+        - JSON wire formats must be JSON-encodable (no raw Python-only objects). :contentReference[oaicite:7]{index=7}
     """
 
     # 1) Passthrough if already a Tool
@@ -473,7 +506,12 @@ def toolify(
             raise ToolDefinitionError("ToolFactory: 'server_name' is required when toolifying an MCP URL.")
         url = _normalize_url(obj)
         names = _discover_mcp_tool_names(url, headers)
-        names = _filter_names(names, include, exclude)
+        if include:
+            inc = set(include)
+            names = [n for n in names if n in inc]
+        if exclude:
+            exc = set(exclude)
+            names = [n for n in names if n not in exc]
         if not names and fail_if_empty:
             raise ToolDefinitionError("ToolFactory: no MCP tools found after applying filters.")
         return [

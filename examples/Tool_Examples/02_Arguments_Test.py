@@ -79,8 +79,8 @@ def show_signature(tool):
     print("required_names:", meta["required_names"])
     print("arguments_map (name -> {index, kind, has_default, default}):")
     for name, spec in meta["arguments_map"].items():
-        print(f"  {name}: idx={spec['index']}, kind={spec['kind']}, "
-              f"has_default={spec['has_default']}, default={spec['default']}")
+        print(f"  {name}: idx={spec['index']}, kind={spec['kind_name']}, "
+              f"has_default={spec['has_default']}, default={spec.get('default', None)}")
 
 
 # ---------- Happy-path cases ----------

@@ -368,6 +368,10 @@ class Agent:
             raise AgentError("pre_invoke must be a Tools.Tool instance.")
         self._pre_invoke = tool
 
+    @property
+    def arguments_map(self):
+        return self.pre_invoke.arguments_map
+
     def _invoke(self, prompt: str) -> Any:
         """
         Internal call path used by `invoke`. Assumes `prompt` is already validated
