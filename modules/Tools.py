@@ -576,7 +576,7 @@ class Tool:
         return self._func
 
     @property
-    def arguments_map(self):
+    def arguments_map(self) -> OrderedDict[str, Any]:
         return self._arguments_map
 
     @property
@@ -685,21 +685,6 @@ class Tool:
         - 'default' is included only when a parameter has a default; it is JSON-safe already.
         - 'mode' is a JSON-stable parameter kind token; 'kind_name' is for human display.
         """
-        # argmap_serialized: OrderedDict[str, Any] = OrderedDict()
-        # for name, spec in sorted(self._arguments_map.items(), key=lambda kv: kv[1]["index"]):
-        #     kind_enum: inspect._ParameterKind = spec["kind"]
-        #     entry = {
-        #         "index": spec["index"],
-        #         "mode": spec.get("mode", KIND_TO_MODE.get(kind_enum, "pos_or_kw")),
-        #         "kind_name": kind_enum.name,  # optional, human friendly
-        #         "ann": spec.get("ann", "any"),
-        #         "has_default": spec.get("has_default", False),
-        #     }
-        #     if "ann_meta" in spec and spec["ann_meta"] is not None:
-        #         entry["ann_meta"] = spec["ann_meta"]
-        #     if spec.get("has_default", False) and "default" in spec:
-        #         entry["default"] = spec["default"]  # already JSON-safe
-        #     argmap_serialized[name] = entry
 
         return OrderedDict(
             name=self._name,
@@ -733,7 +718,7 @@ class Tool:
         bool, Optional[str],                          # has_varargs, varargs_name
         bool, Optional[str],                          # has_varkw, varkw_name
     ]:
-        arguments_map: "OrderedDict[str, OrderedDict[str, Any]]" = OrderedDict()
+        arguments_map: OrderedDict[str, OrderedDict[str, Any]] = OrderedDict()
         posonly_order: List[str] = []
         p_or_kw_names: List[str] = []
         kw_only_names: List[str] = []

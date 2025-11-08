@@ -1,995 +1,585 @@
+# ============================================================
+# Workflows
+# ============================================================
 """
 Workflows
 =========
 
-Overview
---------
-Workflows are **instantiated, stateful pipeline objects** that accept and return **single-dict payloads**.
-They provide **deterministic orchestration** of heterogeneous components (Tools, Agents, and other Workflows)
-through explicit **input/output schemas** and **normalized packaging**. This yields predictable composition,
-clear contracts, and auditability across complex, multi-step tasks.
+Workflows are instantiated, stateful orchestration objects that accept a **single mapping** of inputs
+and return a **mapping** shaped by an explicit `output_schema`. They provide deterministic boundary
+control around Tools, Agents, or other Workflows via:
 
-Why Use Workflows
------------------
-• **Determinism & Contracts**: Inputs are validated against declared schemas; outputs are packaged to a declared shape.  
-• **Composability**: Mix Tools, Agents, and Workflows without bespoke glue code.  
-• **Traceability**: Timestamped checkpoints capture inputs, raw results, and packaged outputs.  
-• **Provider-Agnostic**: Decouple orchestration from LLM/tool vendors and SDKs.  
-• **Safety & Guardrails**: Schema checks, packaging rules, and boundary overlays prevent silent drift.
+• `output_schema: list[str]` — the exact keys a workflow returns (required; defaults to ["__wf_result__"]
+  when not provided to the constructor).
+• `bundle_all: bool` — optional single-key envelope that wraps otherwise non-conforming results.
 
-Core Guarantees (Module-Level Contract)
----------------------------------------
-• **Single call shape**: `invoke(inputs: dict) -> dict` for every Workflow.  
-• **Schema determinism**: `input_schema` and `output_schema` define accepted keys and returned keys.  
-• **Packaging normalization**: Scalars, sequences, mappings, and records are normalized to exactly `output_schema`.
-  Optional `bundle_all` allows single-key envelopes when appropriate.  
-• **Error taxonomy**:  
-  – `ValidationError`: inputs violate schema/structure.  
-  – `SchemaError`: incompatible or illegal schema configurations.  
-  – `PackagingError`: result cannot be normalized to the declared outputs.  
-  – `ExecutionError`: underlying step raised.
+Inputs are delegated to the wrapped component(s). Workflows do **not** own an input schema. For
+documentation and UI generation, wrappers expose a **read-only** `arguments_map` that mirrors the
+wrapped component’s declared input contract.
 
-Key Concepts
-------------
-• **Boundary Overlays**: Composite patterns (e.g., Chain/Selector/MakerChecker/Map/Scatter) can expose an external
-  `output_schema`/`bundle_all` **at the boundary** without mutating children.  
-• **Hybrid Mapping (dicts)**: Partial overlaps map by key and pad/strict as configured; envelopes can be used
-  when arbitrary mappings must be preserved deterministically.  
-• **State & Memory**: Checkpoints for observability; optional clearing/reset between runs.
+Packaging Rules (in order)
+--------------------------
+1) Repeatedly unwrap `{__wf_result__: ...}` to prevent nested envelopes in composites.
+2) If the raw result is a mapping:
+   • Exact match to `output_schema` → reorder to schema order and return.
+   • Subset of `output_schema` → pad missing keys with `None` and return.
+   • Otherwise → if `bundle_all` and single-key schema, wrap; else error.
+3) If the raw result is a sequence/iterable (non-string):
+   • If single-key schema → put the entire list under that key.
+   • If lengths match → zip positionally.
+   • If shorter → pad trailing keys with `None`.
+   • If longer → error.
+4) If the raw result is a set:
+   • If single-key schema → wrap as a list under that key.
+   • Else → error.
+5) If scalar (including str):
+   • If single-key schema → wrap under the sole key.
+   • Else → error.
 
-Workflow Patterns (What they enable)
-------------------------------------
-• **ToolFlow** — *Capability Adaptation*  
-  Enable any callable “tool” to participate in schema-checked orchestration. It binds dict inputs to the tool’s
-  parameters and normalizes the tool’s return for downstream steps. Use when you want **typed, reusable operations**
-  (parsers, converters, retrievers) to plug into pipelines.
+Bundling (`bundle_all=True`) is applied **after** mapping alignment to avoid double-enveloping. It
+requires a single-key `output_schema`.
 
-• **AgentFlow** — *LLM/Agent Integration*  
-  Bridge dict-shaped inputs to an Agent’s prompting/inference interface and bring the Agent’s output back into
-  schema-checked form. Use when you need **reasoning or generation** but still want **deterministic I/O** and packaging.
-
-• **ChainFlow** — *Linear Transformation*  
-  Compose steps **sequentially** so each step’s packaged outputs become the next step’s inputs. Use when you need
-  **progressive transformation** (extract → analyze → summarize) with **clear handoff contracts**.
-
-• **MakerChecker** — *Quality Loop & Governance*  
-  Run an iterative **produce → review (→ optional judge)** cycle until approved or capped. Use when you need
-  **policy enforcement, drafting/revision**, and explicit acceptance criteria separating *creation* from *evaluation*.
-
-• **Selector** — *Policy Routing*  
-  Use a judge to select **one** branch to run from many. Use when choice depends on **inputs, policy, or heuristics**
-  (e.g., route to a specialist agent/tool). Keeps **decision logic** separate from **execution paths**.
-
-• **MapFlow** — *Heterogeneous Fan-Out by Name*  
-  Dispatch **different payloads** to **different branches** in parallel (payloads keyed by branch name), then aggregate.
-  Use when each branch performs **distinct work** on **distinct inputs** and you want **structured aggregation** or
-  optional flattening.
-
-• **ScatterFlow** — *Broadcast Fan-Out / Ensembling*  
-  Broadcast the **same inputs** to multiple branches in parallel (enforce schema alignment), then aggregate.
-  Use for **ensembles, consensus, redundancy**, or when comparing multiple approaches on the same data.
-
-Concurrency & Ordering
-----------------------
-Fan-out patterns parallelize branches while preserving **deterministic aggregation order**. Boundaries ensure that
-non-deterministic underlying steps still yield **deterministic packaged outputs**.
-
-Best Practices
---------------
-• Treat schemas as **public contracts**; prefer adapters when step keys differ.  
-• Use `bundle_all` **only** with single-key envelopes and only when you truly need to preserve an arbitrary mapping.  
-• Keep overlays at **composite boundaries**; avoid mutating child schemas for local convenience.  
-• Rely on checkpoints for **debugging, audits, and reproducibility**.  
-• Fail **fast and loud** on schema mismatches rather than silently coercing ambiguous shapes.
-
-Out of Scope (What this docstring avoids)
------------------------------------------
-• Vendor specifics (LLM/provider APIs), HTTP plumbing, or SDK nuances.  
-• Private helper semantics or logging internals.  
-• Lengthy examples; see examples/tests for concrete usage patterns.
-
-Glossary
---------
-**Schema**: Ordered list of keys defining accepted inputs or produced outputs.  
-**Packaging**: Normalization process that maps any step’s return into `output_schema`.  
-**Overlay**: External output schema/bundling applied at a composite boundary without mutating children.  
-**Envelope**: Single-key dict used to preserve arbitrary mappings or consolidate results predictably.
+This module provides:
+• `Workflow`  — base class with deterministic packaging & checkpointing.
+• `AgentFlow` — wraps an `Agent`, proxies `arguments_map`, forwards mapping to `agent.invoke`.
+• `ToolFlow`  — wraps a `Tool`,  proxies `arguments_map`, forwards mapping to `tool.invoke`.
 """
 
-# ============================================================
-# Standard Library Imports
-# ============================================================
-from __future__ import annotations  # Enables forward type hints for class references
-from abc import ABC, abstractmethod  # Abstract base classes
-from datetime import date, datetime, time                    # For timestamping checkpoints
-from typing import Any, Dict, List, Optional, Union
-from concurrent.futures import ThreadPoolExecutor
-import logging                 # Logging support
-from copy import deepcopy
-import json
-from decimal import Decimal
-from uuid import UUID
-from pathlib import Path
-from collections.abc import Mapping, Iterable, Sequence, Set
+from __future__ import annotations
+
+# =========================
+# Standard Library
+# =========================
+from abc import ABC, abstractmethod
 from dataclasses import is_dataclass, asdict
-
-
-# ============================================================
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+from collections.abc import Mapping, Iterable, Sequence, Set
+from collections import OrderedDict
+import time
+# =========================
 # Atomic-Agentic Modules
-# ============================================================
-from .Tools import Tool             # Used by ToolFlow for wrapping Tools as Workflows
-from .Agents import Agent           # Used by AgentFlow for wrapping Agents as Workflows
-# ============================================================
-# Constants
-# ============================================================
-WF_RESULT = "__wf_result__"         # Default single-output field for packaging results
-JUDGE_RESULT = "__judge_result__"   # Standard field for boolean judge outputs
+# =========================
+from .Agents import Agent
+from .Tools import Tool
 
-# Module logger for targeted observability
-logger = logging.getLogger(__name__)
+# =========================
+# Constants & Exceptions
+# =========================
+WF_RESULT = "__wf_result__"
 
 
-# Domain-specific exceptions
 class WorkflowError(Exception):
     """Base class for workflow-related errors."""
 
 
 class ValidationError(WorkflowError, ValueError):
-    """Raised for input/output validation failures."""
+    """Raised for input/type validation failures."""
 
 
 class SchemaError(ValidationError):
-    """Raised when schema definitions are malformed or incompatible."""
+    """Raised when `output_schema` is malformed or incompatible with options."""
 
 
 class PackagingError(ValidationError):
-    """Raised when a raw result cannot be deterministically packaged into the
-    configured output schema."""
+    """Raised when a raw result cannot be normalized to `output_schema`."""
 
 
 class ExecutionError(WorkflowError, RuntimeError):
-    """Raised when runtime processing (i.e., _process_inputs) fails."""
+    """Raised when a wrapped component fails during `_process_inputs`."""
 
 
-def _is_namedtuple(x) -> bool:
+# =========================
+# Helpers
+# =========================
+def _is_namedtuple(x: Any) -> bool:
     return isinstance(x, tuple) and hasattr(x, "_fields")
 
-def _namedtuple_as_mapping(x) -> dict:
+
+def _namedtuple_as_mapping(x: Any) -> Dict[str, Any]:
     return {f: getattr(x, f) for f in x._fields}
 
-# Primary, tweakable groupings
-MAPPABLE_KINDS  = (Mapping,)     # dict, defaultdict, ChainMap, etc.
-ITERABLE_KINDS  = (Iterable,)    # list/tuple/deque/set/range/generator/... (strings excluded below)
 
-# Small utility tuples for exclusions/special cases
-STRINGISH       = (str, bytes, bytearray)
+MAPPABLE_KINDS = (Mapping,)
+STRINGISH = (str, bytes, bytearray)
 
 
+# =========================
+# Base Workflow
+# =========================
 class Workflow(ABC):
     """
-    One-line
-    --------
-    Abstract base for deterministic, schema-driven orchestration with single-dict I/O.
+    Deterministic orchestration boundary.
 
-    Purpose
-    -------
-    An abstract class that orchestrates “steps” (Tools, Agents, or other Workflows) behind a uniform 
-    `invoke(inputs: dict) -> dict`. Validates inputs against `input_schema`, delegates to 
-    `_process_inputs`, and deterministically packages results to fit an `output_schema`. Maintains 
-    timestamped checkpoints of inputs & results (pre-packaged and packaged) for future reference.
-
-    Contract
-    --------
-    • Entry: `invoke(inputs: dict) -> dict` (do not override).
-    • Subclasses MUST implement `_process_inputs(inputs: dict) -> Any`.
-    • Inputs: keys MUST be a subset of `input_schema`; unexpected keys raise `ValidationError`.
-      Missing keys are allowed; subclass/tool/agent may apply defaults.
-    • Packaging: `package_results(result) -> dict` enforces `output_schema` with:
-      – Namedtuple/dataclass → mapping.
-      – Dict: exact/subset/superset → reordered/ padded/ filtered; hybrid mapping pairs extra
-        result keys to remaining schema keys by position; otherwise, if `bundle_all=True` and
-        `len(output_schema)==1`, nest under that key; else `PackagingError`.
-      – Set-like → require `bundle_all` (single-key) or error.
-      – Sequence/Iterable → positional mapping (padded or capped + exhaustion check); optional bundling.
-      – 1-key fallback: any value ⇒ `{schema[0]: value}`.
-    • Mutability: `output_schema` setter updates schema (and disables bundling if length > 1).
-      `bundle_all` setter requires single-key `output_schema` when enabling.
-
-    Key Parameters
-    --------------
-    • name: str; description: str.
-    • input_schema: list[str] (read-only via property).
-    • output_schema: list[str] (setter validates; may disable bundling).
-    • bundle_all: bool (setter validates single-key when True).
+    Public API
+    ----------
+    invoke(inputs: Mapping) -> Dict[str, Any]
+        Executes `_process_inputs(inputs)` in the subclass, then packages the raw
+        result into a dict shaped by `output_schema`.
 
     Checkpointing
     -------------
-    • Appends deep-copied `{timestamp, inputs, raw, result}` per successful invoke.
-    • Access via `checkpoints`; reset with `clear_memory()`.
+    Each `invoke` appends a checkpoint dict to `self._checkpoints` with:
+      • time     — ISO timestamp (ms precision)
+      • inputs   — the original inputs (as passed)
+      • raw      — the raw result returned by `_process_inputs`
+      • result   — the packaged output (dict)
 
-    Errors
-    ------
-    `ValidationError`, `SchemaError`, `PackagingError`, `ExecutionError`.
-
-    Example
-    -------
-    >>> out = wf.invoke({"prompt": "hello"})
-    >>> out  # keys exactly match wf.output_schema
+    Notes
+    -----
+    • Workflows do **not** declare/validate an input schema.
+    • Subclasses that wrap a single component should expose a read-only `arguments_map`
+      property for documentation (no setter).
     """
 
     def __init__(
         self,
         name: str,
-        description: str,
-        input_schema: List[str],
-        output_schema: List[str] = [WF_RESULT],
+        description: str = "",
+        *,
+        output_schema: Optional[List[str]] = None,
         bundle_all: bool = True,
     ) -> None:
-        # In/Out schema validation
-        if input_schema is None:
-            raise SchemaError("Workflow: input_schema must be a non-empty list of field names")
-        if output_schema is None or output_schema == []:
-            raise SchemaError(f"Workflow: output_schema must be a non-empty list of field names")
-        if any(not isinstance(k, str) or not k for k in input_schema):
-            raise SchemaError(f"Workflow: input_schema must contain non-empty strings")
-        if any(not isinstance(k, str) or not k for k in output_schema):
-            raise SchemaError(f"Workflow: output_schema must contain non-empty strings")
-        if bundle_all and len(output_schema) != 1:
-            raise SchemaError(
-                f"Workflow: bundle_all=True requires single-key output_schema, got {output_schema}"
-            )
-
-        self._name = name
-        self._description = description
-        self._input_schema: List[str] = list(input_schema)
-        self._output_schema: List[str] = list(output_schema)
-        self._bundle_all = bundle_all
+        self._name = str(name)
+        self._description = str(description)
+        # Output schema is not optional as a private field; default when absent.
+        self._output_schema: List[str] = list(output_schema) if output_schema else [WF_RESULT]
+        self._bundle_all: bool = bool(bundle_all)
         self._checkpoints: List[Dict[str, Any]] = []
 
-        # Observability: record how this Workflow was configured
-        logger.debug("%s: initialized with input_schema=%s output_schema=%s bundle_all=%s", self._name, self._input_schema, self._output_schema, self._bundle_all)
-    # -----------------------------
-    # Read-only configuration
-    # -----------------------------
+        self._validate_output_schema(self._output_schema)
+        if self._bundle_all and len(self._output_schema) != 1:
+            raise SchemaError(f"{self._name}: bundle_all=True requires single-key output_schema")
+
+    # ---------- Introspection ----------
     @property
-    def input_schema(self) -> List[str]:
-        return list(self._input_schema)
+    def name(self) -> str:
+        return self._name
+    @name.setter
+    def name(self, val: str)-> None:
+        self._name = val
 
     @property
-    def output_schema(self) -> List[str]:
-        """Get the current output schema (copy)."""
-        return list(self._output_schema)
+    def description(self) -> str:
+        return self._description
+    @description.setter
+    def description(self, val: str) -> None:
+        self._description = val
+
+    @property
+    @abstractmethod
+    def arguments_map(self) -> OrderedDict[str, Any]:
+        """
+        Read-only mapping describing the expected inputs of the wrapped component.
+        Base class does not implement it; wrappers should proxy to the component.
+        """
+        raise NotImplementedError
     
+    @property
+    def input_schema(self) -> List[str]:
+        return [k for k in self.arguments_map]
+
+    # ---------- Boundary controls ----------
+    @property
+    def output_schema(self) -> List[str]:
+        return list(self._output_schema)
+
+    @output_schema.setter
+    def output_schema(self, value: List[str]) -> None:
+        self._validate_output_schema(value)
+        # if new output schema != 1, then not bundling
+        self._bundle_all = self._bundle_all and len(value) == 1
+        self._output_schema = list(value)
+
     @property
     def bundle_all(self) -> bool:
         return self._bundle_all
-    
-    @property
-    def description(self):
-        return self._description
-    
-    @property
-    def name(self) -> str:
-        """Distinguished workflow name based on the tool/agent/workflow it wraps."""
-        return self._name
-    
-    # -----------------------------
-    # Mutatable attributes
-    # -----------------------------
-    @output_schema.setter
-    def output_schema(self, schema: List[str]) -> None:
-        """Set a new output schema; must be non-empty strings. If bundle_all=True, schema must be length 1."""
-        if schema is None:
-            raise TypeError("Workflow: expected a list of strings, but got a 'NoneType'")
-        if schema == []:
-            raise SchemaError("Workflow: Output Schema must be set to a non-empty list of strings.")
-        if any((not isinstance(key, str) or not key.strip()) for key in schema):
-            raise TypeError("Workflow: Output schema must be a list of strings. Mismatched type found in schema.")
-        # unbundle if more than 1 key
-        if len(schema) > 1: self._bundle_all = False
-        self._output_schema = list(schema)
-        logger.debug("%s: output_schema set to %s (bundle_all=%s)", self._name, self._output_schema, self._bundle_all)
-    
+
     @bundle_all.setter
-    def bundle_all(self, flag: bool) -> None:
-        """Enable/disable bundle-all mode; when enabling, output_schema must be length 1."""
-        # don't enable if schema is longer than 1
-        if flag and (len(self._output_schema) != 1):
-            raise ValueError(
-                f"{self.name}: enabling bundle_all requires single-key output_schema; got {self._output_schema}"
-            )
-        # always allow us to disable bundling
-        self._bundle_all = flag
+    def bundle_all(self, value: bool) -> None:
+        value = bool(value)
+        if value and len(self._output_schema) != 1:
+            raise SchemaError(f"{self._name}: bundle_all requires single-key output_schema")
+        self._bundle_all = value
 
-    # -----------------------------
-    # Checkpointing API
-    # -----------------------------
-    @property
-    def checkpoints(self) -> List[Dict[str, Any]]:
-        """A deep copy of the checkpoints history (append-only audit log)."""
-        # requires: from copy import deepcopy
-        return deepcopy(self._checkpoints)
+    # ---------- Serialization ----------
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        JSON-friendly spec: no kind/component refs.
+        """
+        return {
+            "name": self._name,
+            "description": self._description,
+            "arguments_map": dict(self.arguments_map),
+            "output_schema": list(self._output_schema),
+            "bundle_all": bool(self._bundle_all),
+        }
 
-    @property
-    def latest_result(self) -> Optional[Dict[str, Any]]:
-        """The most recent packaged result, or None if no invocations yet."""
-        if not self._checkpoints: return None
-        return deepcopy(self._checkpoints[-1].get("result"))
+    # ---------- Execution ----------
+    def invoke(self, inputs: Mapping[str, Any]) -> Dict[str, Any]:
+        start = time.time()
+        timestamp = datetime.now()
+        if not isinstance(inputs, Mapping):
+            raise ValidationError(f"{self._name}: inputs must be a mapping, got {type(inputs).__name__}")
+        raw = self._process_inputs(dict(inputs))
+        result = self.package_results(raw)
+        end = time.time()
+        
+        self._checkpoints.append(
+            {
+                "timestamp": timestamp.isoformat(timespec="milliseconds"),
+                "inputs": inputs,
+                "raw": raw,
+                "result": result,
+                "duration": end - start
+            }
+        )
+        return result
 
-    def clear_memory(self) -> None:
-        """Clear workflow checkpoints."""
-        self._checkpoints = []
-
-    # -----------------------------
-    # Packaging
-    # -----------------------------
-    def package_results(self, results: object) -> dict:
-        schema = self.output_schema
+    # ---------- Packaging ----------
+    def package_results(self, results: Any) -> Dict[str, Any]:
+        """
+        Normalize `results` to a dict matching `self._output_schema`, unwrapping WF_RESULT
+        first and preferring mapping alignment before any bundling.
+        """
+        schema = self._output_schema
         if not schema:
-            raise SchemaError(f"{self.name}: output_schema is empty")
+            raise SchemaError(f"{self._name}: output_schema is empty")
 
-        # 1) Named "record" types → treat as mapping
+        # Named records → mapping
         if _is_namedtuple(results):
             results = _namedtuple_as_mapping(results)
         elif is_dataclass(results):
             results = asdict(results)
 
-        # 2) Keep unwrapping WF_RESULT until it's not a 1-key mapping with WF_RESULT
+        # Unwrap {WF_RESULT: ...} repeatedly
         while isinstance(results, MAPPABLE_KINDS) and len(results) == 1 and WF_RESULT in results:
             results = results[WF_RESULT]
 
-        # 3) Mapping path (hybrid mapping enabled)
+        # Mapping path (exact → subset)
         if isinstance(results, MAPPABLE_KINDS):
-            # preserve declared order for schema, and insertion order for results
-            schema_list = list(schema)
-            schema_set  = set(schema)
-
-            res_keys_list = list(results.keys())
-            res_keys_set  = set(res_keys_list)
-
-            # Fast paths
-            if res_keys_set == schema_set:
-                # exact name match → reorder to schema order
-                return {k: results[k] for k in schema_list}
-
-            if res_keys_set.issubset(schema_set):
-                # results missing some schema keys → pad with None
-                return {k: results.get(k, None) for k in schema_list}
-
-            if schema_set.issubset(res_keys_set):
-                # results have extras; keep only schema keys, preserve schema order
-                return {k: results.get(k, None) for k in schema_list}
-
-            # Hybrid path:
-            #  - common keys map by name
-            #  - missing on each side must be of equal cardinality
-            common_keys = res_keys_set.intersection(schema_set)
-
-            # preserve insertion order for "only in results"
-            only_in_results = [k for k in res_keys_list if k not in schema_set]
-            # preserve declared order for "only in schema"
-            only_in_schema  = [k for k in schema_list if k not in res_keys_set]
-
-            if len(only_in_results) == len(only_in_schema):
-                # Build output starting with named matches
-                out = {k: results[k] for k in schema_list if k in common_keys}
-                # Pair remaining by position: results' insertion order → schema order
-                for src_key, dst_key in zip(only_in_results, only_in_schema):
-                    out[dst_key] = results.get(src_key)
-                # Ensure all schema keys exist (defensive; should be complete)
-                for k in schema_list:
-                    out.setdefault(k, None)
-                # Optional: log that hybrid mapping occurred (helps debugging)
-                logger.debug(f"{self.name}: hybrid dict mapping used: "
-                            f"matched={sorted(common_keys)}, "
-                            f"positional={list(zip(only_in_results, only_in_schema))}")
-                return out
-
-            # Mismatch and cannot hybrid-map: try bundling; else fail fast
-            if self.bundle_all:
-                if len(schema_list) != 1:
-                    raise PackagingError(f"{self.name}: bundle_all requires single-key schema")
-                return {schema_list[0]: dict(results)}
-
+            res_keys = set(results.keys())
+            sch_keys = set(schema)
+            if res_keys == sch_keys:
+                # reorder to schema order
+                return {k: results[k] for k in schema}
+            if res_keys.issubset(sch_keys):
+                # pad missing with None
+                return {k: results.get(k, None) for k in schema}
+            # if lengths match but keys don't 100% match
+            shared = res_keys.intersection(sch_keys)
+            res_only = list(res_keys - shared)
+            missing = list(sch_keys - shared)
+            if len(res_only) == len(missing) and len(missing)>0:
+                pos_mapped: OrderedDict = OrderedDict()
+                NOT_FILLED = object()
+                for k in schema: pos_mapped[k] = NOT_FILLED
+                for k in shared: pos_mapped[k] = results[k]
+                for i, k in enumerate(missing): pos_mapped[k] = results[res_only[i]]
+                return pos_mapped
+            # mismatch: try bundling if allowed
+            if self._bundle_all:
+                if len(schema) != 1:
+                    raise PackagingError(f"{self._name}: bundle_all requires single-key schema")
+                return {schema[0]: dict(results)}
             raise PackagingError(
-                f"{self.name}: mapping keys cannot be aligned: "
-                f"only_in_results={only_in_results}, only_in_schema={only_in_schema}. "
-                f"Provide an adapter, adjust schema, or enable bundle_all."
+                f"{self._name}: mapping keys {sorted(res_keys - sch_keys)} not in schema {sorted(sch_keys)}; "
+                f"provide adapter or enable bundle_all"
             )
 
-
-        # 4) Scalars (including strings/bytes)
-        if isinstance(results, STRINGISH) or not isinstance(results, ITERABLE_KINDS):
+        # Sets (unordered)
+        if isinstance(results, Set) and not isinstance(results, STRINGISH):
             if len(schema) == 1:
+                return {schema[0]: list(results)}
+            raise PackagingError(f"{self._name}: set-like results require single-key schema or pre-coercion")
+
+        # Sequences / other iterables (non-string)
+        if isinstance(results, (Sequence, Iterable)) and not isinstance(results, STRINGISH):
+            # package whole iter/seq inside a single key if bundling
+            if self.bundle_all:
                 return {schema[0]: results}
-            raise PackagingError(
-                f"{self.name}: scalar result cannot fit multi-key schema {schema}"
-            )
-
-        # 5) Set-like (unordered) — disallow positional use unless bundled
-        if isinstance(results, Set):
-            if self.bundle_all:
-                if len(schema) != 1:
-                    raise PackagingError(f"{self.name}: bundle_all requires single-key schema")
-                # document: order not guaranteed; if you need order, pre-sort upstream
-                return {schema[0]: list(results)}
-            raise PackagingError(
-                f"{self.name}: set-like results are unordered; bundle_all or pre-coerce to a sequence"
-            )
-
-        # 6) Sequence (ordered) — safe for positional mapping
-        if isinstance(results, Sequence) and not isinstance(results, STRINGISH):
-            seq = list(results)
-            if self.bundle_all:
-                if len(schema) != 1:
-                    raise PackagingError(f"{self.name}: bundle_all requires single-key schema")
-                return {schema[0]: seq}
-            if len(seq) > len(schema):
+            results = list(results)
+            # If more keys than schema covers, raise
+            if len(results) > len(schema):
                 raise PackagingError(
-                    f"{self.name}: too many positional items ({len(seq)}) for schema of length {len(schema)}"
+                    f"{self._name}: sequence length {len(results)} exceeds schema length {len(schema)}"
                 )
-            padded = seq + [None] * (len(schema) - len(seq))
-            return {k: v for k, v in zip(schema, padded)}
-
-        # 7) Iterable fallback (e.g., generators) — consume deterministically
-        #    Only safe for positional mapping; cap to schema length, then assert exhaustion.
-        if isinstance(results, ITERABLE_KINDS):
-            if self.bundle_all:
-                if len(schema) != 1:
-                    raise PackagingError(f"{self.name}: bundle_all requires single-key schema")
-                return {schema[0]: list(results)}
-            it = iter(results)
-            collected = []
-            for _ in range(len(schema)):
-                try:
-                    collected.append(next(it))
-                except StopIteration:
-                    break
-            # ensure no overflow beyond schema
-            try:
-                next(it)
-                raise PackagingError(
-                    f"{self.name}: iterable produced more items than schema length {len(schema)}"
-                )
-            except StopIteration:
-                pass
-            collected += [None] * (len(schema) - len(collected))
-            return {k: v for k, v in zip(schema, collected)}
-
-        # 8) Final fallback
+            # If shorter than schema, pad out
+            if len(results) < len(schema):
+                results = results + [None] * (len(schema) - len(results))
+            return {k: v for k, v in zip(schema, results)}
+        # Scalar fallback
         if len(schema) == 1:
             return {schema[0]: results}
         raise PackagingError(
-            f"{self.name}: cannot package type {type(results).__name__} into multi-key schema"
+            f"{self._name}: cannot package type {type(results).__name__} into multi-key schema"
         )
 
-    
-    # -----------------------------
-    # Template method contract
-    # -----------------------------
+    # ---------- Extension point ----------
     @abstractmethod
-    def _process_inputs(self, inputs: dict) -> Any:
+    def _process_inputs(self, inputs: Dict[str, Any]) -> Any:
         """
-        Subclass-specific processing for a single invocation.
-
-        Implementations should:
-          - Assume `inputs` may omit some fields from `input_schema` (missing keys are allowed).
-          - Forbid relying on extra/unexpected keys; `invoke` already validates and rejects them.
-          - Return any Python object (scalar, sequence, or dict). The base class will package it.
-
-        Parameters
-        ----------
-        inputs : dict
-            A dictionary of inputs keyed by `input_schema`. Missing keys are allowed and should
-            be handled by the subclass (e.g., via defaults).
-
-        Returns
-        -------
-        Any
-            The raw result to be normalized by `package_results`.
+        Subclasses must implement: perform the wrapped work and return a raw result.
+        The base class will package it according to `output_schema`/`bundle_all`.
         """
-        pass
+        raise NotImplementedError
 
-    def invoke(self, inputs: dict) -> dict:
-        """
-        Execute the workflow using the template method pattern:
-
-          1) Validate inputs against `input_schema` (unexpected keys → error).
-          2) Delegate to subclass `_process_inputs(inputs)`.
-          3) Normalize the raw result using `package_results`.
-          4) Append a checkpoint and return the normalized dict.
-
-        Parameters
-        ----------
-        inputs : dict
-            Input data; keys must be a subset of `input_schema` (unexpected keys raise).
-
-        Returns
-        -------
-        dict
-            Normalized output matching `output_schema`.
-        """
-        # Observability: log invocation start (debug-level payload)
-        logger.debug("%s: invoke called with inputs=%s", self.name, Workflow._sanitize_for_json(inputs))
-
-        # Forbid unexpected input keys; allow missing keys
-        unexpected = set(inputs.keys()) - set(self._input_schema)
-        if unexpected:
-            logger.error("%s: unexpected input keys %s (allowed: %s)", self.name, unexpected, self._input_schema)
-            raise ValidationError(f"{self.name}: Received unexpected input keys {unexpected}, not in input_schema {self._input_schema}")
-
-        # Process and package (catch runtime errors to add context)
-        start_ts = datetime.now()
-        try:
-            raw = self._process_inputs(inputs)
-        except Exception as e:
-            logger.exception("%s: _process_inputs raised an exception", self.name)
-            raise ExecutionError(f"{self.name}: execution failed") from e
-        result = self.package_results(raw)
-        end_ts = datetime.now()
-        duration_ms = (end_ts - start_ts).total_seconds() * 1000.0
-        logger.info("%s: invoke completed in %.1fms", self.name, duration_ms)
-
-        # Checkpoint (deep copies to protect audit history)
-        self._checkpoints.append({
-            "timestamp": datetime.now().isoformat(),
-            "inputs": deepcopy(Workflow._sanitize_for_json(inputs)),
-            "raw": deepcopy(Workflow._sanitize_for_json(raw)),
-            "result": deepcopy(Workflow._sanitize_for_json(result)),
-        })
-
-        return result
-
+    # ---------- Validators ----------
     @staticmethod
-    def _sanitize_for_json(value):
-        """
-        Recursively transform `value` into a JSON-serializable form that preserves
-        readability. Non-serializable leaves are wrapped with a marker.
-
-        Returns a structure safe for `json.dumps(...)`.
-        """
-        PRIMITIVES = (str, int, float, bool, type(None))
-        if isinstance(value, PRIMITIVES):
-            return value
-
-        # Common quasi-primitives → stringified with type marker
-        if isinstance(value, (datetime, date, time)): return value.isoformat()
-        if isinstance(value, Path): return str(value)
-        # Preserve Decimal precision by converting to string rather than float
-        if isinstance(value, Decimal):
-            logger.debug("%s: sanitizing Decimal value to string to avoid precision loss", type(value).__name__)
-            return str(value)
-        if isinstance(value, UUID): return str(value)
-        # Represent exceptions in a structured, descriptive form
-        if isinstance(value, Exception):
-            return {
-                "__exception__": type(value).__name__,
-                "message": str(value),
-            }
-
-        # dict: ensure string keys; recurse on values
-        if isinstance(value, dict):
-            out = {}
-            for k, v in value.items():
-                key_str = k if isinstance(k, str) else str(k)
-                out[key_str] = Workflow._sanitize_for_json(v)
-            return out
-
-        # list/tuple: recurse to list
-        if isinstance(value, (list, tuple, set, frozenset)):
-            return [Workflow._sanitize_for_json(v) for v in list(value)]
-
-        # Fallback for arbitrary objects
-        try:
-            # if it has a reasonable __json__ hook or similar in the future, could be extended
-            return {
-                "__type__": type(value).__name__,
-                "value": str(value),
-            }
-        except Exception:
-            return {
-                "__type__": type(value).__name__,
-                "value": repr(value),
-            }
+    def _validate_output_schema(schema: List[str]) -> None:
+        if not isinstance(schema, list) or not schema or not all(isinstance(k, str) for k in schema):
+            raise SchemaError("output_schema must be a non-empty list[str]")
 
 
+# =========================
+# AgentFlow
+# =========================
 class AgentFlow(Workflow):
     """
-    One-line
-    --------
-    Workflow wrapper for an `Agent` that converts dict inputs into a single prompt string.
+    Wraps a single `Agent`.
 
-    Purpose
-    -------
-    Normalizes agent calls for composition: validates inputs, converts them to a prompt string,
-    calls `agent.invoke(prompt: str)`, then packages the raw agent result to `output_schema`.
-
-    Contract
-    --------
-    • Default schemas: `input_schema=["prompt"]` (configurable, non-empty), `output_schema=[WF_RESULT]`.
-    • Inputs: subset of `input_schema`; unexpected keys → `ValidationError`.
-    • Prompt formation:
-      – If inputs contain exactly one key `["prompt"]`, pass `str(inputs["prompt"])` directly.
-      – Otherwise, sanitize the entire `inputs` via `Workflow._sanitize_for_json`, then `json.dumps(...)`
-        (UTF-8, no ASCII escaping) and pass that string to `agent.invoke(...)`.
-    • Single agent call per `invoke`. Result is packaged by base `package_results`.
-    • Checkpointing via base class.
-
-    Key Parameters
-    --------------
-    • agent: `Agent` (stateful; provides `invoke(prompt: str) -> str`).
-    • name: optional override; description derived from `agent.description`.
-    • output_schema, bundle_all: standard Workflow setters/validation apply.
-
-    Errors
-    ------
-    • `SchemaError` for empty `input_schema`.
-    • `ValidationError` for unexpected input keys or empty inputs.
-    • `PackagingError` if stringification/sanitization fails to serialize.
-    • `ExecutionError` if `agent.invoke` raises.
-
-    Example
-    -------
-    >>> af = AgentFlow(agent=my_agent)  # input_schema defaults to ["prompt"], name defaults to my_agent.name
-    >>> af.invoke({"prompt": "Summarize this."})[WF_RESULT]
+    • Inputs are forwarded **as a mapping** to `agent.invoke(inputs)`.
+    • `arguments_map` is a **read-only** proxy to `agent.arguments_map`.
+    • Outputs are normalized by the base `Workflow` packager.
     """
 
-    def __init__(self,
-                 agent: Agent,
-                 name: str = None,
-                 input_schema: list[str] = ["prompt"],
-                 output_schema: List[str] = [WF_RESULT],
-                 bundle_all: bool = True,
-    ):
-        if input_schema == []:
-            raise SchemaError("AgentFlow: Cannot initialize agent-flows with empty input schemas")
-        super().__init__(
-            name = name or agent.name,
-            description = agent.description,
-            input_schema = input_schema,
-            output_schema = output_schema,
-            bundle_all=bundle_all
-        )
-        self._agent = agent
-        logger.debug("%s: AgentFlow initialized wrapping agent=%s input_schema=%s output_schema=%s bundle_all=%s",
-                     self.name, getattr(agent, "name", None), self.input_schema, self.output_schema, self.bundle_all)
-
-    # -------------------- Introspection --------------------
-    @property
-    def agent(self) -> Agent:
-        """The wrapped Agent object."""
-        return self._agent
-    @agent.setter
-    def agent(self, val: Agent) -> None:
-        """Replaces agent"""
-        self._agent = val
-        self._description = self._agent.description
-
-    # -------------------- Execution --------------------
-    def clear_memory(self):
-        """Clear workflow checkpoints and the wrapped agent's memory."""
-        Workflow.clear_memory(self)
-        try:
-            self.agent.clear_memory()
-        except Exception:
-            logger.warning("%s: agent.clear_memory() raised an exception", self.name, exc_info=True)
-
-    def _process_inputs(self, inputs: dict) -> str:
-        """
-        Execute the wrapped agent using JSON-readable prompt normalization.
-
-        Behavior:
-        - Return the agent.invoke(stringified inputs (or value at key 'prompt'))
-        """
-        # Reject empty inputs
-        if not inputs:
-            logger.error("%s: empty inputs provided to AgentFlow", self.name)
-            raise ValidationError(f"{self.name}: AgentFlow requires a non-empty inputs dict (e.g., a 'prompt' key)")
-        # reject
-        if list(inputs.keys()) == ["prompt"]:
-            return self.agent.invoke(str(inputs["prompt"]))
-        sanitized = Workflow._sanitize_for_json(inputs)
-        # stringify the sanitized prompt payload for agents that expect a string
-        try:
-            stringified_inputs = json.dumps(sanitized, ensure_ascii=False)
-        except Exception as e:
-            logger.exception("%s: failed to JSON-encode sanitized inputs for agent invocation", self.name)
-            raise PackagingError(f"{self.name}: failed to JSON-encode inputs for agent invocation") from e
-
-        logger.debug("%s: invoking agent %s with stringified inputs (len=%d)", self.name, getattr(self.agent, "name", None), len(stringified_inputs))
-        try:
-            return self.agent.invoke(stringified_inputs)
-        except Exception as e:
-            logger.exception("%s: agent.invoke raised an exception", self.name)
-            # Wrap runtime errors to give callers a clear, domain-specific exception
-            raise ExecutionError(f"{self.name}: agent invocation failed") from e
-
-
-class ToolFlow(Workflow):
-    """
-    One-line
-    --------
-    Workflow wrapper for a single `Tool` with kwargs binding and schema-aware packaging.
-
-    Purpose
-    -------
-    Adapts a Tool’s callable to the Workflow contract: validates `inputs`, calls the Tool once
-    using dict→`**kwargs`, and packages the raw return to `output_schema`.
-
-    Contract
-    --------
-    • `input_schema` is derived from `tool.signature_map` (ordered) excluding “*args”/“**kwargs”; read-only.
-    • `output_schema` defaults to `[WF_RESULT]` (override allowed). `bundle_all` optional.
-    • Inputs: keys MUST be a subset of `input_schema`; unexpected keys → `ValidationError`.
-      Missing keys are allowed—Tool-level defaults apply.
-    • Execution: `self._tool.invoke(**inputs)` exactly once per call.
-    • Packaging obeys base rules (scalars/tuple/dict/hybrid/sequence/set/iterable handling).
-    • Checkpointing via base class.
-
-    Key Parameters
-    --------------
-    • tool: `Tool` (exposes `.invoke`, `.signature_map`, `.name`, `.description`).
-    • name: optional override (defaults to tool.name).
-    • output_schema, bundle_all: standard Workflow setters/validation apply.
-
-    Errors
-    ------
-    • `ValidationError` for unexpected keys; arity/shape mismatches raise `PackagingError`.
-    • `ExecutionError` if the Tool raises.
-
-    Example
-    -------
-    >>> tf = ToolFlow(tool=my_tool)  # input_schema derived from signature_map
-    >>> tf.invoke({"text": "hello"})[WF_RESULT]
-    """
     def __init__(
         self,
-        tool: Tool,
-        name = None,
+        agent: Agent,
+        name: str | None = None,
+        *,
         output_schema: List[str] = [WF_RESULT],
         bundle_all: bool = True,
     ) -> None:
-        # Filter out varargs/kwargs conventional placeholders if present
-        input_schema: List[str] = [p for p in list(tool.signature_map.keys()) if p not in ("*args", "**kwargs")]
-
-        # If base currently forbids empty, this will raise during super().__init__.
         super().__init__(
-            name=name or tool.name,                         # base will store; we expose a property wrapper
-            description=tool._description,           # immutable, derived below
-            input_schema=input_schema,
-            bundle_all=bundle_all,
+            name=name or f"workflow_{agent.name}",
+            description=agent.description,
             output_schema=output_schema,
+            bundle_all=bundle_all,
         )
-        # Store the tool reference                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
-        self._tool: Tool = tool
-        logger.debug("%s: ToolFlow initialized wrapping tool=%s input_schema=%s output_schema=%s bundle_all=%s",
-                     self.name, tool.name, self.input_schema, self.output_schema, self.bundle_all)
+        self._agent = agent
 
-    # ---------------------------------------------------------------------
-    # Identity & metadata (read-only)
-    # ---------------------------------------------------------------------
+    @property
+    def agent(self) -> Agent:
+        return self._agent
+    @agent.setter
+    def agent(self, val: Agent) -> None:
+        self._agent = val
+
+    @property
+    def arguments_map(self) -> Mapping[str, Any]:
+        return self.agent.arguments_map
+
+    def _process_inputs(self, inputs: Dict[str, Any]) -> Any:
+        # Dict-only invoke; Agent handles its own validation & pre-invoke shaping.
+        return self._agent.invoke(inputs)
+
+
+# =========================
+# ToolFlow
+# =========================
+class ToolFlow(Workflow):
+    """
+    Wraps a single `Tool`.
+
+    • Inputs are forwarded **as a mapping** to `tool.invoke(inputs)` (no kwargs expansion).
+    • `arguments_map` is a **read-only** proxy to `tool.arguments_map`.
+    • Outputs are normalized by the base `Workflow` packager.
+    """
+
+    def __init__(
+        self,
+        tool: Tool,
+        name: Optional[str] = None,
+        *,
+        output_schema: List[str] = [WF_RESULT],
+        bundle_all: bool = True,
+    ) -> None:
+        super().__init__(
+            name=name or f"workflow_{tool.name}",
+            description=tool.description,
+            output_schema=output_schema,
+            bundle_all=bundle_all,
+        )
+        self._tool = tool
+
     @property
     def tool(self) -> Tool:
-        """The wrapped tool (read-only)."""
         return self._tool
+    @tool.setter
+    def tool(self, val: Tool) -> None:
+        self._tool = val
 
     @property
-    def description(self):
-        template = """
-        Wraps the tool `{tool_name}` in a workflow. It expects a key-word dictionary
-        representation for the inputs to be passed into the tool for the following keys:
-        {keys}
-        
-        Wrapped Tool description: {description}
-        """
-        keys = "\n".join([f"- {key}" for key in self.input_schema]) if self.input_schema else "\n(no parameters)"
-        tool_desc = self.tool._description
-        return template.format(tool_name=self.tool.name, keys=keys, description=tool_desc.strip()).strip()
+    def arguments_map(self) -> Mapping[str, Any]:
+        return self._tool.arguments_map
 
-
-    # ---------------------------------------------------------------------
-    # Execution (template method hook)
-    # ---------------------------------------------------------------------
-    def _process_inputs(self, inputs: dict) -> Any:
-        """
-        Delegate to the underlying Tool using dict → **kwargs calling convention.
-        Missing keys are allowed (Tool defaults apply). Unexpected keys are
-        already rejected by the base `invoke`.
-        """
-        logger.debug("%s: invoking tool %s", self.name, self.tool.name)
-        try:
-            return self._tool.invoke(**inputs)
-        except Exception as e:
-            logger.exception("%s: tool.invoke raised an exception", self.name)
-            # Wrap runtime errors for callers
-            raise ExecutionError(f"{self.name}: tool invocation failed") from e
-
-    # ---------------------------------------------------------------------
-    # Memory
-    # ---------------------------------------------------------------------
-    def clear_memory(self) -> None:
-        """
-        Clear checkpoints and cascade to the Tool if it exposes a clear_memory hook.
-        """
-        super().clear_memory()
-        try:
-            self._tool.clear_memory()
-        except Exception:
-            # Clearing memory is best-effort; log and continue
-            logger.warning("%s: tool.clear_memory() raised an exception during clear_memory", self.name, exc_info=True)
+    def _process_inputs(self, inputs: Dict[str, Any]) -> Any:
+        # Dict-only invoke; Tool handles its own validation & binding.
+        return self._tool.invoke(inputs)
+    
 
 # wraps all incoming objects into workflow classes and adjusts their input/output schemas based on optional parameters
-def _to_workflow(obj: Agent | Tool | Workflow, in_sch:list[str]|None = None, out_sch:list[str]|None = None) -> Workflow:
-        if isinstance(obj, Workflow):
-            obj.output_schema = out_sch or obj.output_schema
-            return obj
-        if isinstance(obj, Agent): return AgentFlow(obj, input_schema=in_sch or ["prompt"], output_schema=out_sch or [WF_RESULT])
-        if isinstance(obj, Tool): return ToolFlow(obj, output_schema=out_sch or [WF_RESULT])
+def _to_workflow(obj: Agent | Tool | Workflow) -> Workflow:
+        if isinstance(obj, Workflow): return obj
+        if isinstance(obj, Agent): return AgentFlow(obj)
+        if isinstance(obj, Tool): return ToolFlow(obj)
         raise ValidationError(f"Object must be Agent, Tool, or Workflow. Got unexpected '{type(obj).__name__}'.")
 
 
 class ChainFlow(Workflow):
     """
-    One-line
-    --------
-    Linear, schema-checked pipeline that invokes steps in order and hands each step’s packaged output to the next.
+    Sequentially composes a list of steps (ToolFlow | AgentFlow | Workflow), forwarding the
+    mapping output of each step to the next step's input.
 
-    Purpose
-    -------
-    Compose heterogeneous steps (Workflow/ToolFlow/AgentFlow) into a deterministic chain. The chain exposes its own
-    `output_schema` as an overlay for the chain boundary without mutating the final child’s internal schema.
-
-    Contract
-    --------
-    • Steps are invoked sequentially; step N+1 receives the PACKAGED dict returned by step N’s `invoke()`.
-    • When empty, ChainFlow acts as an identity flow: `input_schema` mirrors `output_schema`.
-    • When non-empty, `input_schema` mirrors the first child; do not set it directly.
-    • Chain-level `output_schema` is an overlay applied to the final child’s raw result by base `package_results`.
-    • If ChainFlow `output_schema` has length > 1, `bundle_all` is forced False for the chain overlay.
-    • Upstream→downstream handoff:
-      – If upstream `bundle_all=True`: downstream must accept the single-key envelope.
-      – If upstream `bundle_all=False`: len(upstream.output) MUST equal len(downstream.input_schema), or raise.
-      – No implicit hybrid key remapping between children; insert explicit adapters if keys differ.
-
-    Key Parameters
+    Key properties
     --------------
-    • steps: list[Workflow|Tool|Agent]; wrapped to Workflows; set via `steps`, `add_step`, `pop`.
-    • output_schema / bundle_all: overlay for the chain boundary; reconciled independently of children.
+    • `arguments_map` (read-only): proxies the *first* step's `arguments_map`. If no steps,
+      returns an empty OrderedDict.
+    • `output_schema` / `bundle_all` (overlay): define the final, normalized shape of the
+      ChainFlow's result. The **last step** is force-aligned to these overlay values during
+      reconciliation to avoid schema drift.
 
-    Inputs & Outputs
-    ----------------
-    • Inputs: must match first child’s `input_schema`.
-    • Outputs: the chain’s final return is the base-packaged dict using the chain overlay (`output_schema`, `bundle_all`)
-      applied to the final child’s raw result.
+    Reconciliation (pairwise A → B)
+    -------------------------------
+    For each adjacent pair, we set A.output_schema := B.input_schema under these rules:
+      1) If A.out ⊆ B.in → set A.out := B.in
+      2) Else if A.bundle_all → set A.out := B.in
+      3) Else if len(A.out) == len(B.in) → set A.out := B.in
+      4) Else → raise ValidationError
 
-    Error Conditions
-    ----------------
-    • `SchemaError`/`ValidationError`: step adjacency mismatch during reconciliation; invalid overlays.
-    • `ExecutionError`: child failure; original exception chained.
+    Empty chain behavior
+    --------------------
+    • `arguments_map` → OrderedDict()
+    • `_process_inputs` → raises ExecutionError
 
-    Performance/Concurrency
-    -----------------------
-    Sequential by design; ordering is stable and deterministic.
-
-    Example
-    -------
-    >>> cf = ChainFlow(name="C").add_step(t1).add_step(t2)
-    >>> cf.output_schema = ["answer"]
-    >>> cf.invoke({"text": "hello"})["answer"]
-
-    See Also
-    --------
-    Workflow, ToolFlow, AgentFlow
+    Notes
+    -----
+    • Workflows do **not** own an input schema; we derive a step's `input_schema` from
+      its `arguments_map` (read-only) when reconciling hand-offs.
     """
-
 
     def __init__(
         self,
         name: str,
-        description: str,
-        steps: List[Agent | Tool | Workflow] | None = None,
-        output_schema: List[str]  = [WF_RESULT],
-        bundle_all = True
-    ):
-        # build steps
-        self._steps: list[Workflow] = []
-        if steps:
-            self._steps = [_to_workflow(s) for s in steps]
-        logger.debug("%s: ChainFlow initialized with %d step(s): %s", name, len(self._steps), [s.name for s in self._steps])
+        description: str = "",
+        steps: Optional[List[Any]] = None,  # Tool | Agent | Workflow accepted; normalized via _to_workflow
+        *,
+        output_schema: Optional[List[str]] = None,
+        bundle_all: bool = True,
+    ) -> None:
         super().__init__(
             name=name,
             description=description,
-            input_schema=output_schema,
             output_schema=output_schema,
-            bundle_all= bundle_all,
+            bundle_all=bundle_all,
         )
-        # Reserve for when no steps are present
+        self._steps: List[Workflow] = []
+        self._steps = [ _to_workflow(s) for s in steps ]
         self._reconcile_all()
-        self._mirror_endpoints_from_children()
 
-    # -------------------- Steps management --------------------
+    # ---------------------------- documentation proxy ----------------------------
 
     @property
-    def steps(self) -> list[Workflow]:
+    def arguments_map(self) -> OrderedDict[str, Any]:
+        # Empty chain → empty arg map, so derived input_schema (elsewhere) is []
+        if not self._steps:
+            return OrderedDict()
+        return self._steps[0].arguments_map  # read-only proxy
+
+    # ------------------------------- step management ------------------------------
+
+    @property
+    def steps(self) -> List[Workflow]:
         return list(self._steps)
 
     @steps.setter
-    def steps(self, value: list[Agent | Tool | Workflow] | None):
-        value = value or []
-        self._steps = [_to_workflow(s) for s in value]
-        if not self._steps:
-            # Keep user-configurable input/output overlays; they remain mirrored by setters.
-            logger.debug("%s: steps set to empty; ChainFlow reverting to default input schema=%s", self.name, self._output_schema)
+    def steps(self, new_steps: Optional[List[Any]]) -> None:
+        self._steps = [ _to_workflow(s) for s in (new_steps or []) ]
         self._reconcile_all()
-        self._mirror_endpoints_from_children()
 
-    def add_step(self, step: Agent | Tool | Workflow, position: int | None = None) -> None:
-        wrapped = _to_workflow(step)
+    def add_step(self, step: Any, *, position: int | None = None) -> None:
+        wf = _to_workflow(step)
         if position is None:
-            self._steps.append(wrapped)
+            self._steps.append(wf)
         else:
-            if position < 0 or position > len(self._steps):
-                raise IndexError(f"{self.name}: add_step position {position} out of range")
-            self._steps.insert(position, wrapped)
-        logger.debug("%s: added step '%s' at position=%s", self.name, wrapped.name, str(position))
+            self._steps.insert(position, wf)
         self._reconcile_all()
-        self._mirror_endpoints_from_children()
-
-    def pop(self, index: int = -1) -> Workflow:
-        removed = self._steps.pop(index)
+    def pop(self, index: int = -1) -> Optional[Workflow]:
         if not self._steps:
-            self._bundle_all = False  # empty state invariant
-            return removed
+            raise IndexError(f"ChainFlow.{self.name}.steps is empty, no workflows to pop.")
+        removed = self._steps.pop(index)
         self._reconcile_all()
-        self._mirror_endpoints_from_children()
-        logger.debug("%s: popped step '%s' (index=%d); %d steps remain", self.name, removed.name, index, len(self._steps))
+        if not self._steps:
+            # Preserve prior invariant for empty overlay
+            self._bundle_all = False
         return removed
 
-    # -------------------- Execution --------------------
-    def _process_inputs(self, inputs: dict) -> dict:
-        if not self._steps:
-            self._mirror_endpoints_from_children()
-            return inputs  # identity
-        current = inputs
-        for step in self._steps:
-            current = step.invoke(current)  # each child returns a dict
-        return current  # ChainFlow overlay packaging happens in base invoke()
+    # --------------------------------- execution ---------------------------------
 
-    # -------------------- Internals --------------------
+    def _process_inputs(self, inputs: Mapping[str, Any]) -> Any:
+        if not self._steps:
+            raise ExecutionError(f"{self._name}: cannot invoke an empty ChainFlow")
+        curr: Any = inputs
+        for i, step in enumerate(self._steps):
+            try:
+                curr = step.invoke(curr)
+            except Exception as e:
+                raise ExecutionError(
+                    f"{self._name}: step {i} ('{step.name}') failed: {e}"
+                ) from e
+        return curr
+
+    # --------------------------------- internals ---------------------------------
+
+    def _apply_tail_overlay(self) -> None:
+        """Force the last child to use the chain's overlay schema and bundling."""
+        if not self._steps:
+            return
+        tail = self._steps[-1]
+        tail.output_schema = list(self.output_schema)
+        tail.bundle_all = bool(self.bundle_all)
+
+    def _reconcile_pair(self, A: Workflow, B: Workflow, idx: int) -> None:
+        """
+        Apply A→B reconciliation rules. `idx` is the position of B (for diagnostics).
+        """
+        # Derive B's input schema from its arguments_map (read-only)
+        b_in = list(B.input_schema)
+        a_out = list(A.output_schema)
+        # When B declares no inputs, raise an error, as the transfer of data must be enabled mid-way.
+        if len(b_in) == 0:
+            raise ValueError(f"ChainFlow.{self.name}: Non-initial step {idx} must have a non-empty input schema for data transfer")
+
+        # 1) Subset → adopt B.in
+        if set(a_out).issubset(set(b_in)):
+            A.output_schema = b_in
+            return
+
+        # 2) Bundled A → adopt B.in, giving potential for matching
+        if A.bundle_all:
+            A.output_schema = b_in # potentially disables bundling
+            return
+
+        # 3) Positional compatibility by length
+        if len(a_out) == len(b_in):
+            A.output_schema = b_in
+            return
+
+        # 4) Fail fast, lengths don't match
+        raise ValidationError(
+            f"{self._name}: incompatible hand-off at step {idx-1}→{idx}; "
+            f"A.out={a_out} vs B.in={b_in}. Enable bundling or provide an adapter. "
+            f"A.bundle_all={A.bundle_all} vs B.bundle_all={B.bundle_all}"
+        )
+
     def _reconcile_all(self) -> None:
+        """Reconcile all adjacent pairs and then enforce tail overlay."""
         if not self._steps:
             return
-        for A, B in zip(self._steps, self._steps[1:]):
-            a_out = list(A.output_schema)
-            b_in  = list(B.input_schema)
-            # Skip if they match already
-            if a_out == b_in:
-                continue
-            '''
-            Mutate A's output schema if one of the following is true:
-            1) A is bundled (theoretically unbundled A out could align with B in)
-            2) A out length = B out length (positional mapping of keys 1-1)
-            3) A out is a subset of B in (pad out missing keys)
-            '''
-            if (A.bundle_all) or (len(a_out) == len(b_in)) or (set(a_out).issubset(set(b_in))):
-                A.output_schema = b_in
-                continue
-            # If none of the above are valid, then raise a domain-specific validation error
-            logger.error("%s: reconcilation failed between %s and %s: out=%s in=%s", self.name, A.name, B.name, a_out, b_in)
-            raise ValidationError(
-                    f"{self.name}: length mismatch {A.name} → {B.name}: "
-                    f"len(out)={len(a_out)} != len(in)={len(b_in)} (adapter required)"
-                )
-
-    def _mirror_endpoints_from_children(self) -> None:
-        # if no steps are present, then chainflow becomes an identity flow
-        if not self._steps:
-            self._input_schema = self.output_schema
-            logger.debug("%s: mirrored endpoints to default input schema=%s (no steps)", self.name, self._output_schema)
-            return
-        first = self._steps[0]
-        self._input_schema  = list(first.input_schema)
-        logger.debug("%s: mirrored endpoints from children: input_schema=%s output_schema=%s bundle_all=%s", self.name, self._input_schema, self._output_schema, self._bundle_all)
+        for i in range(1, len(self._steps)):
+            self._reconcile_pair(self._steps[i - 1], self._steps[i], idx=i)
+        self._apply_tail_overlay()
 
 
 class MakerChecker(Workflow):

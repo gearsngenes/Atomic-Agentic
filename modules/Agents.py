@@ -89,6 +89,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional
 import logging
+from collections import OrderedDict
 
 # Local imports (adjust the module paths if your project structure differs)
 from .LLMEngines import LLMEngine
@@ -369,7 +370,7 @@ class Agent:
         self._pre_invoke = tool
 
     @property
-    def arguments_map(self):
+    def arguments_map(self) -> OrderedDict[str, Any]:
         return self.pre_invoke.arguments_map
 
     def _invoke(self, prompt: str) -> Any:
@@ -465,7 +466,7 @@ class Agent:
             "history_turns": sum(1 for msg in self._history if msg.get("role") == "assistant"),
             "attachments_count": len(self._attachments),
             "pre_invoke": self._pre_invoke.to_dict(),
-            "engine": type(self._llm_engine).__name__,
+            "engine": type(self._llm_engine).__name__ if self._llm_engine else type(None),
         }
 
     def __repr__(self) -> str:

@@ -36,17 +36,17 @@ agent3 = Agent(
 
 def json_parse(string: str):
     return json.loads(string)
-tool1 = Tool("parser", json_parse)
+tool1 = Tool(func=json_parse, name = "parser")
 
 def separate(output: dict):
     return output.keys(), sum(list(output.values()))
-tool2 = Tool("separator", separate)
+tool2 = Tool(func=separate, name="separator")
 
 def format_out(_keys, _sum):
     return f"The keys of our dicitonary are {_keys}, and the sum of their values is is {_sum}"
-tool3 = Tool("formatter", format_out)
+tool3 = Tool(func=format_out, name="formatter")
 
-agentic_chain = False # change to switch between the agent and the tool steps
+agentic_chain = True # change to switch between the agent and the tool steps
 
 workflow = ChainFlow(
     name = "ChainFlow_Example",
