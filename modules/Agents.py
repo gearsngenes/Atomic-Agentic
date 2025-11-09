@@ -215,7 +215,7 @@ class Agent:
         self._attachments: List[str] = []
 
         # Pre-invoke Tool: strict identity by default -> requires {"prompt": str}
-        self._pre_invoke: Tool = pre_invoke or self._make_identity_prompt_tool()
+        self._pre_invoke: Tool = pre_invoke if pre_invoke is not None else self._make_identity_prompt_tool()
 
     # ------------------------------- utilities -------------------------------
 

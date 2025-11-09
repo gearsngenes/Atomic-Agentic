@@ -904,17 +904,19 @@ class Selector(Workflow):
             bundle_all=bundle_all,
         )
         # ---- Wrap & normalize judge
-        wrapped_judge: Workflow = _to_workflow(judge, out_sch = [JUDGE_RESULT])
+        wrapped_judge: Workflow = _to_workflow(judge)
+        wrapped_judge.output_schema = [JUDGE_RESULT]
         wrapped_judge.bundle_all = False
         # Mirror via private slot to match project conventions
         self._judge: Workflow = wrapped_judge
         self._name_collision_policy:str = name_collision_policy
         self._branches: OrderedDict[str, Workflow] = OrderedDict()
         # ---- Ingest branches
-        wrapped_branches: List[Workflow] = [_to_workflow(b, list(self._input_schema), output_schema) for b in branches]
-        if any(set(b.input_schema) != set(self._input_schema) for b in wrapped_branches):
+        wrapped_branches: List[Workflow] = [_to_workflow(b) for b in branches]
+        if any(set(b.input_schema) != set(self.input_schema) for b in wrapped_branches):
+            item = next((b for b in wrapped_branches if b.input_schema != self.input_schema), None)
             raise ValidationError(
-                f"{self.name}: unexpected input schema not matching judge's input schema: {self._input_schema}"
+                f"{self.name}: unexpected input schema: {item.name}: {item.input_schema}\nnot matching judge's input schema: {self.input_schema}"
             )
         if len(set([b.name for b in branches])) < len(branches):
             if self._name_collision_policy == "fail_fast":

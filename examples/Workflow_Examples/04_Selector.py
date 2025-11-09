@@ -7,7 +7,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from modules.Agents import Agent
 from modules.ToolAgents import PlannerAgent
-from modules.Plugins import MathPlugin
+from modules.Plugins import MATH_TOOLS
 from modules.LLMEngines import OpenAIEngine
 from modules.Workflows import Selector, AgentFlow, ToolFlow
 from modules.Tools import Tool
@@ -19,12 +19,22 @@ LLM = OpenAIEngine(model="gpt-4o-mini")
 # --- Branches (all must accept the same input schema: ["text"]) ---
 
 # Paleontology answerer (text -> text)
+def format_prompt(text:str) -> str:
+    return (f"Only respond to the parts of the input request related to paleontolgy, and refuse to answer, "
+            f"otherwise. The prompt:\n{text}")
+            
+prompt_tool = Tool(
+    func = format_prompt,
+    name = "format_prompt",
+    description="formats the prompt with minor clarifications"
+)
 paleo_agent = Agent(
     name="paleo",  # Selection string must match this name
     description="Answers paleontology questions in depth.",
     llm_engine=LLM,
     role_prompt="You are a paleontology expert. Answer the user's question clearly and accurately.",
     context_enabled=True,
+    pre_invoke=prompt_tool
 )
 
 # Math solver (text -> text)
@@ -32,8 +42,9 @@ math_agent = PlannerAgent(
     name="mathematician",  # Selection string must match this name
     description="Solves math problems and explains the steps.",
     llm_engine=LLM,
+    pre_invoke=prompt_tool
 )
-math_agent.register(MathPlugin)
+math_agent.batch_register(MATH_TOOLS)
 
 # Address formatter (text -> text)
 def format_addr_from_text(text: str) -> str:
@@ -49,9 +60,9 @@ def format_addr_from_text(text: str) -> str:
     return f"Bld: {bld}, St: {street}, City: {city}, State: {state} Zip: {zipc}"
 
 addr_tool = Tool(
-    "AddressFormatterText",  # Selection string must match this name
-    format_addr_from_text,
-    description="Formats a comma-separated address-like string into a single-line address.",
+    name = "AddressFormatterText",  # Selection string must match this name
+    func = format_addr_from_text,
+    description = "Formats a comma-separated address-like string into a single-line address.",
 )
 
 # --- Judge (Tool). Must return the *branch name* as a string. ---
@@ -65,18 +76,18 @@ def route_selector(text: str) -> str:
 
     # contains digits and commas -> address
     if any(ch.isdigit() for ch in lowered) and "," in lowered:
-        return "AddressFormatterText"
+        return "workflow_AddressFormatterText"
     # math-y keywords/symbols -> math
     math_tokens = ["+", "-", "*", "/", "power", "sqrt", "^", "sin", "cos", "tan", "log"]
     if any(tok in lowered for tok in math_tokens) or any(ch.isdigit() for ch in lowered):
-        return "mathematician"
+        return "workflow_mathematician"
     # default -> paleo
-    return "paleo"
+    return "workflow_paleo"
 
 judge_tool = Tool(
-    "RouteSelector",
-    route_selector,
-    description="Routes input text to the correct branch by returning its name.",
+    name = "RouteSelector",
+    func = route_selector,
+    description = "Routes input text to the correct branch by returning its name.",
 )
 
 # --- Build selector ---
@@ -95,7 +106,7 @@ workflow = Selector(
 # --- Demo inputs (dict-only invocation) ---
 examples = [
     {"text": "Difference between tyrannosaurs and dromaeosaurs?"},
-    {"text": "what is twenty minus three all to the power of 3.14159?"},
+    {"text": "what is (twenty minus three) to the power of 3.14159?"},
     {"text": "123, Fort Hamilton, New York, NY, 10364"},
 ]
 
