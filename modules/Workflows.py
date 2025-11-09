@@ -53,7 +53,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import is_dataclass, asdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from collections.abc import Mapping, Iterable, Sequence, Set
 from collections import OrderedDict
 import time
@@ -67,6 +67,7 @@ from .Tools import Tool
 # Constants & Exceptions
 # =========================
 WF_RESULT = "__wf_result__"
+JUDGE_RESULT = "__judge_result__"
 
 
 class WorkflowError(Exception):
@@ -165,6 +166,13 @@ class Workflow(ABC):
     @description.setter
     def description(self, val: str) -> None:
         self._description = val
+
+    @property
+    def checkpoints(self) -> list[dict]:
+        return self._checkpoints
+    
+    def clear_memory(self) -> None:
+        self._checkpoints = []
 
     @property
     @abstractmethod
@@ -373,6 +381,10 @@ class AgentFlow(Workflow):
     def _process_inputs(self, inputs: Dict[str, Any]) -> Any:
         # Dict-only invoke; Agent handles its own validation & pre-invoke shaping.
         return self._agent.invoke(inputs)
+    
+    def clear_memory(self):
+        super().clear_memory()
+        self.agent.clear_memory()
 
 
 # =========================
@@ -514,6 +526,11 @@ class ChainFlow(Workflow):
             # Preserve prior invariant for empty overlay
             self._bundle_all = False
         return removed
+    
+    def clear_memory(self):
+        super().clear_memory()
+        for step in self.steps:
+            step.clear_memory()
 
     # --------------------------------- execution ---------------------------------
 
@@ -584,231 +601,236 @@ class ChainFlow(Workflow):
 
 class MakerChecker(Workflow):
     """
-    One-line
-    --------
-    Iterative maker→checker composite that loops drafts through review (and optional judge) until approved or capped.
+    Maker–Checker composite with an optional Judge.
 
-    Purpose
+    Inputs
+    ------
+    • Derived from the Maker: this composite's `arguments_map` proxies `maker.arguments_map`.
+      Consequently, the composite's `input_schema` getter (from the base Workflow) yields
+      `list(maker.arguments_map.keys())`.
+
+    Outputs
     -------
-    Encapsulate a write–review loop with strict schema parity between participants. Exposes composite-level overlays
-    for external callers while preserving internal participant schemas.
+    • Returns the Maker's final draft (a mapping). The base `Workflow.invoke()` applies the
+      composite overlay (this flow's `output_schema` / `bundle_all`) at the boundary.
 
-    Contract
-    --------
-    • Parity: `maker.output_schema == checker.input_schema` and `checker.output_schema == maker.input_schema`.
-    • Judge (optional): `input_schema == maker.input_schema`, `output_schema == [JUDGE_RESULT]`, `bundle_all=False`,
-      returns `{JUDGE_RESULT: bool}`.
-    • On init or when replacing maker/checker, the composite mirrors MAKER externally:
-      `self._input_schema = maker.input_schema`; composite `output_schema` defaults to `maker.output_schema`.
-    • Callers MAY set composite `output_schema`/`bundle_all` as an overlay; internal participant schemas are unchanged.
-    • Loop:
-      1) `draft = maker.invoke(inputs)`
-      2) `revisions = checker.invoke(draft)`
-      3) If judge: `ok = judge.invoke(revisions)[JUDGE_RESULT]` (bool). If ok → stop; else `draft = maker.invoke(revisions)` and repeat.
-      4) Stop at `max_revisions` if not approved.
-    • Composite returns the latest MAKER draft; base `package_results` applies the composite overlay at the boundary.
+    Participants
+    ------------
+    • maker:  ToolFlow | AgentFlow | Workflow (required)
+    • checker: ToolFlow | AgentFlow | Workflow (required)
+    • judge:  ToolFlow | AgentFlow | Workflow (optional)
+        - Must accept the same inputs as the maker (set-equality on input keys).
+        - Must return a dict with {JUDGE_RESULT: bool}.
+        - Is configured with `output_schema=[JUDGE_RESULT]` and `bundle_all=False`.
 
-    Key Parameters
-    --------------
-    • maker, checker: Workflow|Tool|Agent (wrapped); must satisfy parity; set via properties (reconciles pair).
-    • judge: optional Workflow|Tool|Agent (wrapped and normalized as above).
-    • max_revisions: positive int safety cap.
+    Parity
+    ------
+    • maker.output_schema  := checker.input_schema  (adopt consumer's order)
+    • checker.output_schema := maker.input_schema   (adopt consumer's order)
 
-    Inputs & Outputs
-    ----------------
-    • Inputs: must match `maker.input_schema` (composite mirrors maker).
-    • Outputs: packaged draft per composite overlay (does not mutate maker/checker schemas).
+    Revisions
+    ---------
+    • max_revisions >= 0 (0 means a single Maker→Checker pass returning the first draft).
+    • If no Judge, we run (max_revisions + 1) Maker→Checker passes, feeding the Checker's
+      revisions back into the Maker each iteration.
 
-    Error Conditions
-    ----------------
-    • `SchemaError`/`ValidationError`: parity violations; incompatible judge; bad overlays.
-    • `ValidationError`: judge must return a single boolean under `JUDGE_RESULT`.
-    • `ExecutionError`: participant failure.
+    Errors
+    ------
+    • ValidationError: negative `max_revisions`; Judge result shape/type invalid.
+    • SchemaError: Judge input schema not set-equal to Maker input schema.
+    • ExecutionError: underlying participant invocation failures.
 
-    Performance/Concurrency
-    -----------------------
-    Deterministic loop; one participant call per step per iteration.
-
-    Example
-    -------
-    >>> mc = MakerChecker(maker=mk, checker=ck, max_revisions=3)
-    >>> mc.invoke(seed_inputs)  # returns packaged maker draft
-
-    See Also
-    --------
-    Workflow, ToolFlow, AgentFlow
+    Notes
+    -----
+    • No `_input_schema` is stored or mutated anywhere. All input introspection relies on
+      `arguments_map` / base `input_schema` getter of participants.
     """
-    # --------------------------
-    # Init
-    # --------------------------
+
     def __init__(
         self,
         name: str,
         description: str,
-        maker: Agent | Tool | Workflow,
-        checker: Agent | Tool | Workflow,
-        judge: Optional[Agent | Tool | Workflow] = None,
+        maker: Tool | Agent | Workflow,
+        checker: Tool | Agent | Workflow,
+        judge: Tool | Agent | Workflow,
+        *,
         max_revisions: int = 0,
         output_schema: List[str] = [WF_RESULT],
-        bundle_all: bool = True
+        bundle_all: bool = True,
     ) -> None:
-        # Normalize participants
-        maker_wf = _to_workflow(maker)
-        checker_wf = _to_workflow(checker)
-
-        # Validate max_revisions early using provided name for clear messaging
-        if max_revisions < 0:
-            raise ValidationError(f"{name or '<MakerChecker>'}: max_revisions must be >= 0; got {max_revisions}")
-
-        # Initialize base mirroring the *maker* input schema
+        # Base overlay only (no input_schema arg in base!)
         super().__init__(
             name=name,
             description=description,
-            input_schema=list(maker_wf.input_schema),
-            output_schema=list(output_schema),
-            bundle_all = bundle_all,
+            output_schema=(list(output_schema) if output_schema else [WF_RESULT]),
+            bundle_all=bundle_all,
         )
 
-        # Instance state
-        self._maker: Workflow = maker_wf
-        self._checker: Workflow = checker_wf
-        self.max_revisions: int = int(max_revisions)
+        # Validate max_revisions
+        try:
+            self._max_revisions = int(max_revisions)
+        except Exception as e:
+            raise ValidationError(f"{self._name}: max_revisions must be an int; got {max_revisions!r}") from e
+        if self._max_revisions < 0:
+            raise ValidationError(f"{self._name}: max_revisions must be >= 0; got {self._max_revisions}")
+
+        # Normalize participants (NO input-schema args here)
+        self._maker: Workflow = _to_workflow(maker)
+        self._checker: Workflow = _to_workflow(checker)
         self._judge: Optional[Workflow] = None
 
-        logger.debug("%s: MakerChecker init maker=%s checker=%s max_revisions=%d", self.name, maker_wf.name, checker_wf.name, max_revisions)
-
-        # Enforce maker <-> checker parity before initial mirror.
+        # Enforce parity between maker and checker
         self._reconcile_pair()
 
-        # Judge initial sanity (if provided)
+        # Optional judge
         if judge is not None:
-            # build judge
             j_wf = _to_workflow(judge)
+            # Judge result contract
             j_wf.output_schema = [JUDGE_RESULT]
             j_wf.bundle_all = False
-            # if maker and judge inputs don't match, this judge is not compatible
-            if set(j_wf.input_schema) != set(j_wf.input_schema):
+
+            if set(self._maker.input_schema) != set(j_wf.input_schema):
                 raise SchemaError(
-                    f"{self.name}: judge.input_schema {j_wf.input_schema} != maker.input_schema {self._maker.input_schema}"
+                    f"{self._name}: judge input keys {j_wf.input_schema} must match maker input keys {self._maker.input_schema}"
                 )
             self._judge = j_wf
 
-        # Mirror maker endpoints externally (again, after reconcile)
-        self._refresh_endpoints()
+    # -------------------------------------------------------------------------
+    # Read-only input contract (proxied from maker)
+    # -------------------------------------------------------------------------
+    @property
+    def arguments_map(self) -> "OrderedDict[str, Any]":
+        return self._maker.arguments_map
 
-
-    # --------------------------
-    # Utilities
-    # --------------------------
-    def _reconcile_pair(self) -> None:
-        """
-        Enforce maker-checker symmetry
-        """
-        self._maker.output_schema = self._checker.input_schema
-        self._checker.output_schema = self._maker.input_schema
-        # If judge's input schema length no longer matches maker, drop judge and adapter
-        if self._judge is not None and set(self._judge.input_schema) != set(self._maker.input_schema):
-            logger.info("%s: dropping judge due to input_schema mismatch (judge=%s maker=%s)", self.name, self._judge.input_schema, self._maker.input_schema)
-            self._judge = None
-
-    def _refresh_endpoints(self) -> None:
-        """
-        Mirror maker endpoints; used on initialization and when replacing maker/checker.
-        Do NOT call this at invoke-time so that explicit composite-level overlays set
-        by callers are not clobbered between invocations.
-        """
-        # must use private for input_schema
-        self._input_schema = list(self._maker.input_schema)
-        # set judge to None if judge.input_schema length no longer matches
-        if self._judge is not None and len(self._maker.input_schema) != len(self._judge.input_schema):
-            logger.info("%s: judge input_schema no longer matches maker; dropping judge", self.name)
-            self._judge = None
-        # update adapter if judge present
-        logger.debug("%s: refreshed endpoints -> input_schema=%s", self.name, self._input_schema)
-
-    # --------------------------
-    # Participant accessors
-    # --------------------------
+    # -------------------------------------------------------------------------
+    # Participant properties (setters re-enforce parity and judge compatibility)
+    # -------------------------------------------------------------------------
     @property
     def maker(self) -> Workflow:
         return self._maker
 
     @maker.setter
-    def maker(self, value: Agent | Tool | Workflow) -> None:
-        self._maker = _to_workflow(value)
-        # Maintain parity before commit
-        self._reconcile_pair()   # M.out -> C.in
-        # Mirror endpoints to maker for this composite (input/output/bundle)
-        self._refresh_endpoints()
+    def maker(self, value: Any) -> None:
+        wf = _to_workflow(value)
+        self._maker = wf
+        self._reconcile_pair()
+        # Judge compatibility after parity
+        if self._judge is not None:
+            maker_in = list(self._maker.input_schema)
+            judge_in = list(self._judge.input_schema)
+            if set(judge_in) != set(maker_in):
+                self._judge = None
 
     @property
     def checker(self) -> Workflow:
         return self._checker
 
     @checker.setter
-    def checker(self, value: Agent | Tool | Workflow) -> None:
-        self._checker = _to_workflow(value)
-        # Maintain parity before commit
-        self._reconcile_pair()     # C.out  -> M.in
-        # Mirror endpoints to maker for this composite (input/output/bundle)
-        self._refresh_endpoints()
+    def checker(self, value: Any) -> None:
+        wf = _to_workflow(value)
+        self._checker = wf
+        self._reconcile_pair()
+        # Judge remains unaffected; it compares against maker only.
 
     @property
     def judge(self) -> Optional[Workflow]:
         return self._judge
 
     @judge.setter
-    def judge(self, value: Optional[Agent | Tool | Workflow]) -> None:
-        j_wf = _to_workflow(value) if value is not None else None
-        if j_wf is None: self._judge = None; return
-        # Judge must consume maker.input; produce a boolean at JUDGE_RESULT
-        if set(j_wf.input_schema) != set(self._maker.input_schema):
+    def judge(self, value: Optional[Any]) -> None:
+        if value is None:
+            self._judge = None
+            return
+        j_wf = _to_workflow(value)
+        j_wf.output_schema = [JUDGE_RESULT]
+        j_wf.bundle_all = False
+
+        maker_in = list(self._maker.input_schema)
+        judge_in = list(j_wf.input_schema)
+        if set(judge_in) != set(maker_in):
             raise SchemaError(
-                f"{self.name}: judge.input_schema {j_wf.input_schema} != maker.input_schema length {self._maker.input_schema}"
+                f"{self._name}: judge input keys {judge_in} must match maker input keys {maker_in}"
             )
         self._judge = j_wf
-        self._judge.output_schema = [JUDGE_RESULT]
-        self._judge.bundle_all = False
 
-    # --------------------------
-    # Runtime
-    # --------------------------
-    def _process_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    # -------------------------------------------------------------------------
+    # Core execution
+    # -------------------------------------------------------------------------
+    def _process_inputs(self, inputs: Dict[str, Any]) -> Any:
         """
-        Deterministic loop:
-          1) maker(draft_0) -> draft_1
-          2) checker(draft_1) -> revisions_1
-          3) if judge: ok = judge(revisions_1)[__judge_result__] (bool)
-             - if ok: break and return draft_1
-             - else: draft_2 = maker(revisions_1), repeat
-          4) stop after max_revisions or when judge approves.
+        Run Maker → Checker, optionally loop under Judge until approved
+        or until `max_revisions` is reached.
 
-        Returns the latest maker draft (dict keyed by maker.output_schema).
+        Returns the Maker's latest draft (raw). Base Workflow will package
+        to this composite's overlay schema/bundling.
         """
-        # Initial draft from maker (keys == maker.output_schema)
-        draft = self._maker.invoke(inputs)
+        current = inputs
+        last_draft: Optional[Dict[str, Any]] = None
 
-        if self.max_revisions == 0:
-            return draft
+        for _rev in range(self._max_revisions):
+            # Maker
+            try:
+                draft = self._maker.invoke(current)
+            except Exception as e:
+                raise ExecutionError(f"{self._name}: maker invocation failed: {e}") from e
 
-        for _ in range(self.max_revisions):
-            # Checker consumes maker.input_schema and emits a revision bundle (== maker.input_schema)
-            revisions = self._checker.invoke(draft)
+            # Checker
+            try:
+                revisions = self._checker.invoke(draft)
+            except Exception as e:
+                raise ExecutionError(f"{self._name}: checker invocation failed: {e}") from e
 
+            last_draft = draft  # maker's output is the draft we ultimately return
+
+            # Judge (optional)
             if self._judge is not None:
-                decision = self._judge.invoke(revisions)  # expects maker.input_schema
-                ok = decision.get(JUDGE_RESULT)
-                if not isinstance(ok, bool):
-                    logger.error("%s: judge returned invalid decision %r", self.name, decision)
+                try:
+                    decision = self._judge.invoke(revisions)
+                except Exception as e:
+                    raise ExecutionError(f"{self._name}: judge invocation failed: {e}") from e
+
+                if not isinstance(decision, dict) or JUDGE_RESULT not in decision:
                     raise ValidationError(
-                        f"{self.name}: judge must return a single boolean at key '{JUDGE_RESULT}'; got {decision!r}"
+                        f"{self._name}: judge must return a dict with key '{JUDGE_RESULT}'"
                     )
-                if ok: break
+                ok = decision[JUDGE_RESULT]
+                if not isinstance(ok, bool):
+                    raise ValidationError(
+                        f"{self._name}: '{JUDGE_RESULT}' must be a boolean; got {type(ok).__name__}"
+                    )
+                if ok:
+                    break  # approved
+                # not approved → feed revisions back to maker
+                current = revisions
+            else:
+                # No judge: if more cycles remain, feed revisions; otherwise finish
+                current = revisions
 
-            # Feedback: maker uses revisions to produce a new draft
-            draft = self._maker.invoke(revisions)
+        return last_draft
+    
+    def clear_memory(self):
+        super().clear_memory()
+        self.maker.clear_memory()
+        self.checker.clear_memory()
+        if self.judge is not None:
+            self.judge.clear_memory()
 
-        return draft
+    # -------------------------------------------------------------------------
+    # Internal parity enforcement (no input-schema writes; use getters)
+    # -------------------------------------------------------------------------
+    def _reconcile_pair(self) -> None:
+        """
+        Enforce output schema parity between Maker and Checker:
+          maker.output_schema  := checker.input_schema
+          checker.output_schema := maker.input_schema
+        (Order is adopted from the consumer in each direction.)
+        """
+        maker_in = list(self._maker.input_schema)
+        checker_in = list(self._checker.input_schema)
+
+        # Adopt consumer's order for each producer's outputs
+        self._maker.output_schema = checker_in
+        self._checker.output_schema = maker_in
 
 
 class Selector(Workflow):
@@ -869,39 +891,45 @@ class Selector(Workflow):
         description: str,
         branches: List[Agent|Tool|Workflow],
         judge: Agent|Tool|Workflow,
+        *,
         output_schema: List[str] = [WF_RESULT],
         bundle_all: bool = True,
+        name_collision_policy = "fail_fast" #"skip" #"replace"
     ) -> None:
-        # ---- Wrap & normalize judge
-        wrapped_judge: Workflow = _to_workflow(judge, out_sch = [JUDGE_RESULT])
-        wrapped_judge.bundle_all = False
-
         # Initialize base with judge input schema mirrored into selector
         super().__init__(
             name=name,
             description=description,
-            input_schema=list(wrapped_judge.input_schema),
             output_schema=output_schema,
             bundle_all=bundle_all,
         )
-
+        # ---- Wrap & normalize judge
+        wrapped_judge: Workflow = _to_workflow(judge, out_sch = [JUDGE_RESULT])
+        wrapped_judge.bundle_all = False
         # Mirror via private slot to match project conventions
         self._judge: Workflow = wrapped_judge
-        self._input_schema = list(self._judge.input_schema)
-
+        self._name_collision_policy:str = name_collision_policy
+        self._branches: OrderedDict[str, Workflow] = OrderedDict()
         # ---- Ingest branches
         wrapped_branches: List[Workflow] = [_to_workflow(b, list(self._input_schema), output_schema) for b in branches]
-        if len(set([b.name for b in branches])) < len(branches):
-            raise ValidationError(
-                f"{self.name}: duplicate branch names detected. Names given are {[b.name for b in branches]}."
-            )
         if any(set(b.input_schema) != set(self._input_schema) for b in wrapped_branches):
             raise ValidationError(
                 f"{self.name}: unexpected input schema not matching judge's input schema: {self._input_schema}"
             )
-        self._branches: List[Workflow] = wrapped_branches
+        if len(set([b.name for b in branches])) < len(branches):
+            if self._name_collision_policy == "fail_fast":
+                raise ValidationError(
+                    f"{self.name}: duplicate branch names detected. Names given are {[b.name for b in branches]}."
+                )
+        for branch in wrapped_branches:
+            if self._name_collision_policy == "replace" or branch.name not in self._branches:
+                self._branches[branch.name] = branch
+            continue
 
     # -------------------- Properties --------------------
+    @property
+    def arguments_map(self) -> OrderedDict:
+        return self._judge.arguments_map
     @property
     def judge(self) -> Workflow:
         return self._judge
@@ -917,73 +945,67 @@ class Selector(Workflow):
         self._input_schema = list(self._judge.input_schema)
 
         # Filter branches to only those that match by set-equivalence
-        survivors: List[Workflow] = []
-        for b in self._branches:
-            try:
-                if set(b.input_schema) == set(self._input_schema):
-                    survivors.append(b)
-            except Exception:
-                # Extremely defensive: drop anything malformed
-                logging.warning(f"{self.name}: branch {b.name} did not match the new judge's input schema. it is being dropped.")
-                continue
+        survivors: OrderedDict[str, Workflow] = OrderedDict()
+        for bname, branch in self._branches.items():
+            if set(branch.input_schema) == set(self._input_schema):
+                survivors[bname] = branch
         self._branches = survivors
 
     @property
-    def branches(self) -> List[Workflow]:
-        return list(self._branches)
+    def branches(self) -> OrderedDict[str, Workflow]:
+        return OrderedDict(self._branches)
 
     @branches.setter
     def branches(self, vals: List[Agent|Tool|Workflow]) -> None:
         # Re-ingest + validate (same as constructor)
-        seen_names: set[str] = set()
-        wrapped: List[Workflow] = []
+        wrapped: OrderedDict[str, Workflow] = OrderedDict()
         for b in vals:
-            wb = _to_workflow(b, in_sch=self._input_schema, out_sch=self._output_schema)
+            wb = _to_workflow(b)
             if set(wb.input_schema) != set(self._input_schema):
                 raise ValidationError(
                     f"{self.name}: branch '{wb.name}' input_schema {wb.input_schema} "
                     f"!= selector/judge input_schema {list(self._input_schema)} (set mismatch)"
                 )
-            if wb.name in seen_names:
-                raise ValidationError(f"{self.name}: duplicate branch name '{wb.name}'")
-            seen_names.add(wb.name)
-            wrapped.append(wb)
+            if wb.name in wrapped:
+                if self._name_collision_policy == "fail_fast":
+                    raise ValidationError(f"{self.name}: duplicate branch name '{wb.name}'")
+                elif self._name_collision_policy == "skip":
+                    continue
+                else: pass
+            wrapped[wb.name] = wb
         self._branches = wrapped
 
     # -------------------- Public API --------------------
     def add_branch(self, branch: Agent|Tool|Workflow) -> None:
         # Wrap
-        wb = _to_workflow(branch, self.input_schema, self.output_schema)
+        wb = _to_workflow(branch)
         # Validate input schema set-equivalence
         if set(wb.input_schema) != set(self.input_schema):
             raise ValidationError(
                 f"{self.name}: branch '{wb.name}' input_schema {wb.input_schema} "
                 f"!= selector/judge input_schema {list(self._input_schema)} (set mismatch)"
             )
-        # Unique name
-        if any(b.name == wb.name for b in self._branches):
-            raise ValidationError(f"{self.name}: duplicate branch name '{wb.name}'")
+        # check for duplicates
+        if wb.name in self._branches:
+            if self._name_collision_policy == "fail_fast":
+                raise ValidationError(f"{self.name}: duplicate branch name '{wb.name}'")
+            elif self._name_collision_policy == "skip":
+                return
+        self._branches[wb.name] = wb
 
-        self._branches.append(wb)
-
-    def remove_branch(self, name: str|None = None, *, position: int = -1) -> Workflow:
-        if not self._branches:
-            raise IndexError(f"{self.name}: no branches to remove")
-        if name is None:
-            return self._branches.pop(position)
-        idx = next((i for i,b in enumerate(self._branches) if b.name == name), None)
-        if idx is None:
-            raise ValueError(f"{self.name}: no branch named '{name}' to remove")
-        return self._branches.pop(idx)
+    def remove_branch(self, name: str) -> Workflow:
+        if len(self._branches) == 0:
+            raise KeyError(f"{self.name}: no branches to remove")
+        return self._branches.pop(name)
 
     def clear_memory(self) -> None:
         Workflow.clear_memory(self)
         self._judge.clear_memory()
         for b in self._branches:
-            b.clear_memory()
+            self._branches[b].clear_memory()
 
     # -------------------- Execution --------------------
-    def _process_inputs(self, inputs: Dict[str, Any]) -> Any:
+    def _process_inputs(self, inputs: Mapping[str, Any]) -> Any:
         """
         Decide a branch using the judge and return the *raw* result from that branch's invoke().
         Base Workflow.invoke() will package this result according to the Selector's own
@@ -991,24 +1013,19 @@ class Selector(Workflow):
         """
         # fail fast if no branches
         if not self._branches:
-            logger.error("%s: no branches available for selection", self.name)
             raise ValidationError(f"{self.name}: There are no branches to choose from")
         # have judge select branch to invoke
         selection_raw = self._judge.invoke(inputs)
         # fail if selection isn't formatted correctly or returning a string
         if not isinstance(selection_raw, dict) or JUDGE_RESULT not in selection_raw:
-            logger.error("%s: judge returned malformed selection %r", self.name, selection_raw)
             raise ValidationError(f"{self.name}: judge must return a dict with key '{JUDGE_RESULT}'; got {selection_raw!r}")
         selection = selection_raw[JUDGE_RESULT]
         if not isinstance(selection, str) or not selection.strip():
-            logger.error("%s: judge produced empty or non-string selection %r", self.name, selection)
             raise ValidationError(f"{self.name}: judge must output a non-empty string under '{JUDGE_RESULT}', got {selection!r}")
         # Find and run branch with selection name (either the ._name or .name)
-        selected_branch = next((b for b in self._branches if b._name == selection or b.name == selection), None)
+        selected_branch = next((b for b in self._branches.values() if b.name == selection or b.name == selection), None)
         if selected_branch is None:
-            logger.error("%s: no branch matched selection '%s'", self.name, selection)
             raise ValidationError(f"{self.name}: No branches matching the name for selection '{selection}'.")
-        logger.debug("%s: selector chose branch '%s'", self.name, selected_branch.name)
         return selected_branch.invoke(inputs)
 
 

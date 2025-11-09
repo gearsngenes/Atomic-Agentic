@@ -58,7 +58,7 @@ editor_agent = Agent(
 def is_approved(prompt: str) -> bool:
     return "<<APPROVED>>" in prompt
 
-approver_tool = Tool("approver", is_approved)
+approver_tool = Tool(func = is_approved, name = "approver")
 
 # ---- MakerChecker pipeline ----
 workflow = MakerChecker(
