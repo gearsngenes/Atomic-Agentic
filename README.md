@@ -1,115 +1,101 @@
 # Atomic-Agentic
-<div align="center">
-<img src="./images/AtomicAgentic.png" width = 400 alt = "Atomic-Agentic Logo">
-</div>
 
-**Atomic-Agentic** is an agentic AI framework for professional developers and curious hobbyists who want to learn, prototype, and ship agent systems grounded in **SOLID** and **POSA (Pattern-Oriented Software Architecture)** principles—without vendor lock-in or framework magic.
+## What is Atomic-Agentic?
 
-At its core, Atomic-Agentic is **provider-agnostic**. Agents keep the **same input/output behavior** no matter which LLM you plug in—OpenAI, Gemini, Mistral, llama.cpp, and beyond. Engines are swappable; agent code stays the same. This separation of concerns lets you evaluate models, costs, and latency **without rewriting** your agent logic.
+Atomic-Agentic is a Python framework for building reliable, provider-agnostic **tool- and agent-based** systems. It offers a small set of orthogonal primitives—**Tools**, **LLM Engines**, **Agents**, and **Workflows**—that compose cleanly. Local callables, in-process Agents, and remote tools (via **MCP**) are unified behind one Tool abstraction; remote Agents interoperate over **A2A**. There are no DSLs or black-box orchestrators here—just clear, inspectable contracts in plain Python.
 
-Atomic-Agentic also embraces modern **protocol ecosystems** out of the box. It supports **A2A** (Agent-to-Agent) and **MCP/MCP-O** so your agents can run as remote services or call into remote tool servers cleanly. The framework keeps this modular and encapsulated so you don’t have to hand-roll tool exposure and schemas for common cases.
+## What it provides
 
-### Core Agentic Patterns
-<div align="center"><img src="./images/Architecture.png" width = 400 alt = "System Overview">
-</div>
+* **Portable actions (Tools):** Stateless wrappers around callables (and adapters for Agents/MCP tools) that expose an introspectable signature and a JSON-safe `arguments_map`. Tools accept **dictionary-only** inputs and surface required/optional parameters for validation, UIs, and remote calls.
+* **Swappable model adapters (LLM Engines):** Provider implementations behind a stable `invoke(messages, file_paths=…) -> str` contract. Orchestration code remains vendor-agnostic.
+* **Stateful reasoning (Agents):** Components that turn validated input into prompts, call an **LLM Engine**, and manage history/attachments. Agents can also use Tools for environment interaction and multi-step execution.
+* **Deterministic coordination (Workflows):** Wrappers that execute tools/agents and **package** raw returns into declared output schemas for predictable downstream chaining and easy testing.
+* **Interoperability:**
 
-* **Agents & Role Prompts (aka System Prompts):**
-  Define how an agent “thinks” and speaks through a clear role-prompt. Additionally, you can choose to enable conversation memory for stateful exchanges and conversations.
+  * **MCP tools** become first-class Tools via schema extraction and strict argument mapping.
+  * **A2A** enables cross-process Agent calls using the same mapping-only payload contract.
+* **Introspection & UX hooks:** Action catalogs (ids, signatures, required keys) and `to_dict()` outputs support documentation, audits, and UI generation.
+* **Observability:** Checkpoints capture inputs, raw outputs, packaged outputs, and timing to aid debugging and post-mortems.
 
-* **Tool-Using Agents:** Enable more complex behavior and expand the return types of agent output by enabling agents to invoke calls to contextualized methods or other agents. Access external tools via **MCP/MCP-O** with minimal glue. Atomic-Agentic follows two approaches to using tools.
+## Mental model
 
-  * **PlannerAgent:** Generate a single plan first, then execute all the steps in order.
-  * **OrchestratorAgent:** Generate and execute a single step at a time, and use its results as context for creating the next step.
+Think of the stack in three layers, connected by one contract:
 
-  These map naturally to classic OOP patterns: *Strategy* (choose execution approach per context) and *Template Method* (stable skeleton with tool calls as variable steps).
+* **Base**: **Tools** wrap callables; **LLM Engines** wrap providers.
+* **Middle**: **Agents** combine Tools + Engines to plan and execute work, holding persona and history.
+* **Top**: **Workflows** coordinate Tools and Agents in recognizable patterns, enforcing deterministic hand-offs.
 
-* **Remote agents:**
-  Host agents as **A2A servers** or call them **remotely via agent proxy entrypoints** for distributed, multi-agent-systems.
+Adapters “flatten” the ecosystem so local functions, Agents, and remote tools all present the same Tool interface.
 
-## Who is this for
+## Tools — portable, introspectable actions
 
-**Professional developers, students, and hobbyists.** Atomic-Agentic is conceptually accessible: it uses familiar SOLID/POSA ideas, explicit classes, and minimal magic so you can reason about behavior and change it safely.
+Tools turn Python functions (and via adapters, MCP tools or even Agents) into consistent, discoverable actions. Each Tool publishes: a canonical signature, a JSON-safe `arguments_map` (names, required keys, defaults), and a dict-only invoke surface. This makes Tools easy to validate, list, document, test, and reuse across processes.
 
-**Multi-project, multi-provider teams.** If you maintain several AI projects with **different providers/environments** (OpenAI, Gemini, Mistral, llama.cpp, on-prem) but want to **reuse the same agent concepts and interfaces**, Atomic-Agentic lets you swap engines without rewriting agents, tools, or orchestration logic.
+## LLM Engines — provider adapters
 
----
+Engines are stateless adapters around model SDKs. They accept structured chat messages (and optional file paths) and return a string. Attachment policies and vendor specifics live here, not in your orchestration code—so switching providers doesn’t force architectural changes.
 
-## Repository layout
+## Agents — stateful planners & executors
 
-**Top-level**
+Agents own persona, history windowing, and attachments. They transform validated inputs (often via a pre-invoke Tool) into prompts and call an **LLM Engine**. Tool-using Agents (e.g., Planner/Orchestrator) consume the same Tool specs to decide and execute steps. Any Agent can be **adapted into a Tool** for reuse inside other Agents or Workflows.
 
-```
-Atomic-Agentic/
-├── modules/
-├── examples/
-├── atomic_ui.py
-└── requirements.txt
-```
+## Workflows — deterministic coordination patterns
 
-**modules/** (ordered **most dependent → least**)
+Workflows wrap Tools or Agents as steps and manage inputs/outputs end-to-end. They offer recognizable patterns such as **Chain** (sequential), **Selector** (route to one branch), **Scatter/Map** (fan-out and recombine), and **Maker–Checker** (produce → judge). Crucially, Workflows **package** raw step returns to declared shapes so downstream steps don’t see ad-hoc “mystery dicts.”
 
-```
-modules/
-├── A2Agents.py       # A2A server/proxy wrappers; sits on top of tool/agent infrastructure
-├── ToolAgents.py     # Tool-using agents: Planner/Orchestrator; depends on Agents/engines/plugins/prompts
-├── Agents.py         # Core agent base (persona, optional memory, attachments); uses engines/prompts
-├── LLMEngines.py     # Provider adapters (OpenAI, Gemini, Mistral, llama.cpp); small, stable contract
-├── Plugins.py        # Plugin API + built-ins (math/console/etc.); light coupling
-└── Prompts.py        # Prompt templates/constants; leaf dependency
-```
+## Interoperability — adapters, remote tools, remote agents
 
-**examples/** (subdirectories only; one-line purpose each)
+`toolify(…)` converts local callables, Agents, and **MCP** tools into first-class Tools. MCP discovery pulls remote tool schemas and maps them to strict argument plans; calls look local to the planner. **A2A** applies the same mapping-only contract to remote Agents. Everything remains listable and inspectable (names, signatures, required keys).
 
-```
-examples/
-├── Agent_Examples/          # Basic agent persona pattern (role prompt + optional memory)
-├── A2A_Examples/            # Remote agents: run as A2A servers and call via proxies
-├── Planner_Examples/        # PlannerAgent: plan-once-then-execute workflows
-└── OrchestratorExamples/    # OrchestratorAgent: step-by-step, result-aware tool calling
-```
+## Observability & operations
 
----
+At each boundary, Workflows and Agents record checkpoints: inputs, raw outputs, packaged outputs, and timings. Deterministic packaging reduces flaky integrations; explicit errors for missing/unknown fields surface early. The result is behavior you can debug, test, and trust in CI/CD.
 
-## Installation & setup
+## Quickstart (30 seconds)
+In your python virtual environment, open the Atomic-Agentic repository folder and run:
+`pip install -r requirements.txt`
 
-```bash
-# 1) Clone
-git clone https://github.com/gearsngenes/Atomic-Agentic.git
+Then initialize in your environment API keys for OpenAI, Mistral, or Gemini for whatever LLM provider you choose.
 
-# 2) Enter the project
-cd Atomic-Agentic
+Afterwards, you can run
 
-# 3) Install dependencies (assumes your venv is already active)
-pip install -r requirements.txt
-```
 
-**4) Configure provider credentials**
-Export environment variables **or** create a `.env` at the repo root:
+```python
+from modules.LLMEngines import OpenAIEngine
+from modules.ToolAgents import PlannerAgent
+from modules.ToolAdapters import toolify
 
-```bash
-# Pick what you need
-export OPENAI_API_KEY=...
-export GOOGLE_API_KEY=...      # for Gemini
-export MISTRAL_API_KEY=...
+# 1) Define a local callable and turn it into a Tool
+def greet(name: str) -> str:
+    print("Generating a greeting...")
+    return f"Hello, {name}! Did you know that your name has {len(name)} letters in it?"
+
+# toolify() accepts callables; name/description are required for callables
+greet_tool = toolify(greet, name="greet", description="Say hello to a person")[0]
+
+# 2) Create a planner-style Agent with a swappable LLM Engine
+engine = OpenAIEngine(model="gpt-4o-mini")   # uses OPENAI_API_KEY env var if not passed explicitly
+planner = PlannerAgent(
+    name="Planner",
+    description="Plans tool calls and returns the final result.",
+    llm_engine=engine,
+)
+
+# 3) Register the Tool and inspect the action catalog
+planner.register(greet_tool)
+print(planner.actions_context())  # shows ids, signatures, and required keys
+
+# 4) Run a tiny task (pre-invoke expects a mapping with a 'prompt' string by default)
+result = planner.invoke({"prompt": "Greet Ada Lovelace and then return the message."})
+print("Result:", result)
 ```
 
-Or `.env`:
+> Tip: For more patterns, see the example scripts for Chain, Selector, Scatter/Map, and Maker–Checker.
 
-```
-OPENAI_API_KEY=...
-GOOGLE_API_KEY=...
-MISTRAL_API_KEY=...
-```
+## Who is it for (and not for)
 
-**5) Run something immediately**
+Atomic-Agentic is for engineers who want explicit contracts, composable parts, and provider choice. It is not a DSL and not a “do-everything” platform; there is no hidden state or magic. If you value clarity over wizardry, you’ll feel at home.
 
-```bash
-# Streamlit UI
-streamlit run atomic_ui.py
+## Schema-first contract (shared I/O across the stack)
 
-# OR an example (replace <script>.py with a real script in that folder)
-python examples/Agent_Examples/<script>.py
-python examples/Planner_Examples/<script>.py
-python examples/OrchestratorExamples/<script>.py
-python examples/A2A_Examples/<script>.py
-```
+All invocations use **dictionary-only** inputs. Required keys are enforced; unknown keys are rejected; defaults are JSON-safe. Tools, Agents (via pre-invoke), and Workflows publish arguments and outputs in a **consistent, printable form**. Workflows then **package** outputs to declared schemas so downstream steps receive predictable shapes. These practices make systems auditable, composable, and safe to evolve.
