@@ -26,20 +26,20 @@ def extract_hashtags(text: str) -> dict:
     return {"hashtags": tags}
 
 tool_upper = Tool(
-    "Uppercase",
-    to_upper,
-    description="Uppercases the provided text.",
+    name = "Uppercase",
+    func = to_upper,
+    description = "Uppercases the provided text.",
 )
 
 tool_stats = Tool(
-    "WordStats",
-    word_stats,
-    description="Counts characters and words in the provided text.",
+    name = "WordStats",
+    func = word_stats,
+    description ="Counts characters and words in the provided text.",
 )
 
 tool_tags = Tool(
-    "Hashtags",
-    extract_hashtags,
+    name = "Hashtags",
+    func = extract_hashtags,
     description="Extracts hashtags (without the #) from the provided text.",
 )
 
@@ -66,8 +66,8 @@ map_flat = MapFlow(
     name="MapFlowFlat",
     description="Tailored fan-out; returns a single flattened dict merged from branches.",
     branches=[tool_upper, tool_stats, tool_tags],
-    output_schema=["map_results"],
-    bundle_all=True,
+    output_schema=["upper", "stats", "tags"],
+    bundle_all=False,
     flatten=True,   # merge keys across branches; collisions raise
 )
 

@@ -57,6 +57,7 @@ from typing import Any, Dict, List, Optional, Union
 from collections.abc import Mapping, Iterable, Sequence, Set
 from collections import OrderedDict
 import time
+import asyncio, threading
 # =========================
 # Atomic-Agentic Modules
 # =========================
@@ -224,7 +225,7 @@ class Workflow(ABC):
         }
 
     # ---------- Execution ----------
-    def invoke(self, inputs: Mapping[str, Any]) -> Dict[str, Any]:
+    def invoke(self, inputs: Mapping[str, Any]) -> OrderedDict[str, Any]:
         start = time.time()
         timestamp = datetime.now()
         if not isinstance(inputs, Mapping):
@@ -245,7 +246,7 @@ class Workflow(ABC):
         return result
 
     # ---------- Packaging ----------
-    def package_results(self, results: Any) -> Dict[str, Any]:
+    def package_results(self, results: Any) -> OrderedDict[str, Any]:
         """
         Normalize `results` to a dict matching `self._output_schema`, unwrapping WF_RESULT
         first and preferring mapping alignment before any bundling.
@@ -266,33 +267,30 @@ class Workflow(ABC):
 
         # Mapping path (exact → subset)
         if isinstance(results, MAPPABLE_KINDS):
+            results:OrderedDict = OrderedDict(dict(results))
             res_keys = set(results.keys())
             sch_keys = set(schema)
             if res_keys == sch_keys:
                 # reorder to schema order
-                return {k: results[k] for k in schema}
+                return OrderedDict(results)
             if res_keys.issubset(sch_keys):
                 # pad missing with None
-                return {k: results.get(k, None) for k in schema}
-            # if lengths match but keys don't 100% match
-            shared = res_keys.intersection(sch_keys)
-            res_only = list(res_keys - shared)
-            missing = list(sch_keys - shared)
-            if len(res_only) == len(missing) and len(missing)>0:
-                pos_mapped: OrderedDict = OrderedDict()
-                NOT_FILLED = object()
-                for k in schema: pos_mapped[k] = NOT_FILLED
-                for k in shared: pos_mapped[k] = results[k]
-                for i, k in enumerate(missing): pos_mapped[k] = results[res_only[i]]
-                return pos_mapped
-            # mismatch: try bundling if allowed
-            if self._bundle_all:
+                return OrderedDict({k: results.get(k, None) for k in schema})
+            if len(res_keys) == len(sch_keys):
+                return OrderedDict({self.output_schema[i] : results[list(results.keys())[i]] for i in range(len(self.output_schema))})
+            if len(res_keys) < len(sch_keys):
+                filled: OrderedDict = OrderedDict()
+                for k in schema: filled[k] = None
+                for i, k in enumerate(list(results.keys())): filled[schema[i]] = results[k]
+                return filled
+            # if bundle_all
+            if self.bundle_all:
                 if len(schema) != 1:
                     raise PackagingError(f"{self._name}: bundle_all requires single-key schema")
                 return {schema[0]: dict(results)}
             raise PackagingError(
-                f"{self._name}: mapping keys {sorted(res_keys - sch_keys)} not in schema {sorted(sch_keys)}; "
-                f"provide adapter or enable bundle_all"
+                f"{self._name}: Failed to map keys {results.keys()} not to output schema {self.output_schema}; "
+                f"change the schema or enable bundle_all under a single key"
             )
 
         # Sets (unordered)
@@ -360,7 +358,7 @@ class AgentFlow(Workflow):
         bundle_all: bool = True,
     ) -> None:
         super().__init__(
-            name=name or f"workflow_{agent.name}",
+            name=name or agent.name,
             description=agent.description,
             output_schema=output_schema,
             bundle_all=bundle_all,
@@ -408,7 +406,7 @@ class ToolFlow(Workflow):
         bundle_all: bool = True,
     ) -> None:
         super().__init__(
-            name=name or f"workflow_{tool.name}",
+            name=name or tool.name,
             description=tool.description,
             output_schema=output_schema,
             bundle_all=bundle_all,
@@ -1033,504 +1031,453 @@ class Selector(Workflow):
 
 class MapFlow(Workflow):
     """
-    One-line
-    --------
-    Tailored fan-out that routes per-branch payloads from `inputs[branch.name]` to parallel branches and aggregates.
-
-    Purpose
+    MapFlow
     -------
-    Executes a heterogeneous set of child workflows concurrently where each branch gets its own dict payload keyed by
-    the branch’s name. `input_schema` auto-mirrors the ordered list of branch names; packaging/bundling remain a
-    boundary concern handled by the base Workflow.
+    Tailored fan-out that routes per-branch payloads from `inputs[branch_name]` to
+    parallel branches and aggregates results in declared branch order.
 
-    Contract
-    --------
-    • `input_schema` is dynamic and equals `[b.name for b in branches]` (ordered); it is rebuilt on add/remove.
-    • Only branches with a present payload are invoked; the payload MUST be a dict or a `ValidationError` is raised.
-    • Each executed branch MUST return a dict or a `ValidationError` is raised.
-    • When `flatten=False` (default): return `{branch.name: dict | None, ...}`; missing payload ⇒ `None`.
-    • When `flatten=True`: merge executed branch dicts; collisions raise `ValidationError`.
-      – Single-key envelopes `{WF_RESULT: …}` / `{JUDGE_RESULT: …}` are unwrapped first; if the inner value is a dict
-        it is merged; otherwise it is placed under `flat[branch.name]`.
-    • Child schemas are not mutated; selector/chain-level overlays apply only at the MapFlow boundary.
-
-    Key Parameters
-    --------------
-    • branches: list[Workflow|Agent|Tool]; wrapped via `_to_workflow(..., in_sch=None, out_sch=None)`. Names must be unique.
-    • flatten: bool (default False) to merge or keep per-branch results.
-    • output_schema: list[str] (default `[WF_RESULT]`) — overlay for the MapFlow boundary.
-    • bundle_all: bool (default True) — obeys base rules.
-    • max_workers: int (cap for ThreadPool).
-
-    Inputs & Outputs
+    Schema surfacing
     ----------------
-    • Inputs: keys must be a subset of current branch names. Unknown keys → `ValidationError`. Missing keys allowed.
-    • Outputs: either per-branch dict or a single flattened dict, then packaged by base with the MapFlow overlay.
+    `arguments_map` is a read-only proxy to an internal Tool (`_schema_supplier`) whose
+    keyword-only parameters mirror the current branch names and are annotated as
+    `dict[str, any]`. The supplier is rebuilt whenever branches are added/removed.
+    `input_schema` remains derived from `arguments_map` via the base Workflow.
 
-    Error Conditions
-    ----------------
-    • `ValidationError`: duplicate branch name; non-dict payload; non-dict branch result; key collision on flatten; unknown input key.
-    • `ExecutionError`: any branch raises; original exception is chained.
-    • `IndexError`/`ValueError`: remove with no branches / remove unknown name.
+    Inputs
+    ------
+    Mapping[str, Mapping] where keys are the current branch names. Unknown keys
+    raise `ValidationError`. A branch without an input is:
+      • flatten=False: present in output as `None` (not invoked)
+      • flatten=True: skipped (not invoked)
 
-    Performance/Concurrency
-    -----------------------
-    Parallel via `ThreadPoolExecutor` (up to `max_workers`). Result aggregation keeps declared branch order.
-
-    Example
+    Outputs
     -------
-    >>> mf = MapFlow(name="mf", description="per-branch", branches=[foo, bar], flatten=True)
-    >>> mf.invoke({"foo": {"x": 1}, "bar": {"y": 2}})  # {"x": 1, "y": 2}
+    flatten=False (default):
+        OrderedDict[str, dict | None] in branch order.
+    flatten=True:
+        Left-to-right merged OrderedDict. Plain dict results are expanded;
+        special envelopes `{WF_RESULT: …}` / `{JUDGE_RESULT: …}` and non-dicts
+        are stored under the branch name itself.
 
-    See Also
-    --------
-    Workflow, AgentFlow, ToolFlow, ScatterFlow
+    Name-collision policy (branch names)
+    ------------------------------------
+    Duplicates honor: "fail_fast" | "skip" | "replace" (default "fail_fast"),
+    consistent with ScatterFlow.
+
+    Errors
+    ------
+    ValidationError: unknown input key; non-mapping branch payload; flatten key collision.
+    ExecutionError: at least one branch failed (first exception is chained).
     """
-
 
     def __init__(
         self,
         name: str,
-        description: str,
-        branches: List[Union[Workflow, Agent, Tool]] = [],
-        output_schema: List[str] = [WF_RESULT],
-        bundle_all: bool = True,
-        flatten: bool = False,
+        description: str = "",
+        branches: list[Agent | Tool | Workflow] | None = None,
         *,
-        max_workers: int = 16
+        flatten: bool = False,
+        output_schema: list[str] = [WF_RESULT],
+        bundle_all: bool = True,
+        name_collision_policy: str = "fail_fast",  # "skip" | "replace"
     ) -> None:
-        # Initialize base with placeholder input_schema; we will set the private field afterwards
         super().__init__(
             name=name,
             description=description,
-            input_schema=[],  # will be rebuilt from branch names
             output_schema=output_schema,
             bundle_all=bundle_all,
         )
-
         self._flatten: bool = bool(flatten)
-        self._branches: List[Workflow] = []
-        self._max_workers = max_workers
+        self._name_collision_policy: str = name_collision_policy
+        self._branches: OrderedDict[str, Workflow] = OrderedDict()
+        self._schema_supplier: Tool | None = None  # built from branch names
 
-        # Ingest/wrap branches; enforce unique names
-        seen: set[str] = set()
-        for obj in branches or []:
-            wf = _to_workflow(obj, in_sch=None, out_sch=None)
-            if wf.name in seen:
-                raise ValueError(f"{self.name}: duplicate branch name '{wf.name}'")
-            seen.add(wf.name)
-            self._branches.append(wf)
+        # Wrap and insert initial branches honoring name-collision policy
+        for obj in (branches or []):
+            self._insert_branch(_to_workflow(obj))
 
-        # Input schema mirrors current branch names (ordered)
-        self._rebuild_input_schema_from_branch_names()
+        # Build initial schema supplier
+        self._rebuild_schema_supplier()
 
-    # -------------------- Properties --------------------
+    # -------------------- Introspection --------------------
 
     @property
-    def branches(self) -> List[Workflow]:
-        """Read-only view of branches (shallow copy)."""
-        return list(self._branches)
+    def arguments_map(self) -> OrderedDict[str, Any]:
+        """Read-only proxy to the dynamic schema supplier."""
+        if self._schema_supplier is None:
+            return OrderedDict()
+        return self._schema_supplier.arguments_map
 
-    # -------------------- Branch Management --------------------
+    @property
+    def branches(self) -> OrderedDict[str, Workflow]:
+        """Shallow copy of branches in declared order."""
+        return OrderedDict(self._branches)
 
-    def add_branch(self, obj: Union[Workflow, Agent, Tool]) -> None:
-        """
-        Add a branch. Name must be unique. Input schema is rebuilt from branch names.
-        """
-        wf = _to_workflow(obj, in_sch=None, out_sch=None)
-        if any(b.name == wf.name for b in self._branches):
-            raise ValidationError(f"{self.name}: duplicate branch name '{wf.name}'")
-        self._branches.append(wf)
-        self._rebuild_input_schema_from_branch_names()
+    # -------------------- Branch management --------------------
 
-    def remove_branch(self, name: Optional[str] = None, *, position: int = -1) -> Workflow:
-        """
-        Remove a branch by exact name or by position (default: last). Returns the removed workflow.
-        Input schema is rebuilt from branch names.
-        """
-        if not self._branches:
-            raise IndexError(f"{self.name}: no branches to remove")
+    def _insert_branch(self, wf: Workflow) -> None:
+        """Insert honoring name-collision policy."""
+        if wf.name in self._branches:
+            if self._name_collision_policy == "fail_fast":
+                raise ValidationError(f"{self.name}: duplicate branch name '{wf.name}'")
+            if self._name_collision_policy == "skip":
+                return
+            # "replace": fall through
+        self._branches[wf.name] = wf
 
-        if name is not None:
-            for i, b in enumerate(self._branches):
-                if b.name == name:
-                    removed = self._branches.pop(i)
-                    self._rebuild_input_schema_from_branch_names()
-                    return removed
-            raise ValueError(f"{self.name}: no branch named '{name}' to remove")
+    def add_branch(self, obj: Agent | Tool | Workflow) -> None:
+        """Add a branch and rebuild the schema supplier."""
+        self._insert_branch(_to_workflow(obj))
+        self._rebuild_schema_supplier()
 
-        removed = self._branches.pop(position)
-        self._rebuild_input_schema_from_branch_names()
+    def remove_branch(self, name: str) -> Workflow:
+        """Remove a branch by name and rebuild the schema supplier."""
+        try:
+            removed = self._branches.pop(name)
+        except KeyError:
+            raise KeyError(f"{self.name}: unknown branch '{name}'")
+        self._rebuild_schema_supplier()
         return removed
 
     # -------------------- Memory --------------------
 
     def clear_memory(self) -> None:
         Workflow.clear_memory(self)
-        for b in self._branches:
-            try:
-                b.clear_memory()
-            except Exception:
-                logger.warning("%s: branch.clear_memory raised during clear_memory", self.name, exc_info=True)
-
+        for wf in self._branches.values():
+            wf.clear_memory()
     # -------------------- Execution --------------------
 
-    def _process_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _process_inputs(self, inputs: Mapping[str, Any]) -> Mapping[str, Any]:
         """
-        Tailored fan-out:
-        
-        - For each branch:
-            * If inputs contains branch.name:
-                - require inputs[branch.name] to be a dict; otherwise raise ValueError
-                - schedule branch.invoke(inputs[branch.name])
-            * If inputs does not contain branch.name:
-                - flatten=False: result for branch.name := None (not invoked)
-                - flatten=True: branch is ignored (not invoked)
-
-        Returns:
-            - flatten=False: { branch.name: dict | None, ... } (all branches)
-            - flatten=True:  flattened dict merged from executed branches with collision checks;
-                             special single-key envelopes {WF_RESULT: ...}/{JUDGE_RESULT: ...}
-                             are inserted as {branch.name: <raw>} instead of flattened.
+        Execute branches concurrently with asyncio (loop-aware), preserving branch order.
+        Unknown top-level keys are rejected. Per-branch payload must be a Mapping.
         """
         if not self._branches:
-            logger.error("%s: no branches available", self.name)
-            raise ValidationError(f"{self.name}: No branches available")
+            raise ValidationError(f"{self.name}: no branches configured")
 
-        # Partition branches: which have payloads, which don't
-        to_run: List[tuple[str, Workflow, Dict[str, Any]]] = []
-        missing_names: List[str] = []
-
-        for b in self._branches:
-            if b.name in inputs:
-                payload = inputs[b.name]
-                if not isinstance(payload, dict):
-                    raise ValidationError(
-                        f"{self.name}: payload for branch '{b.name}' must be a dict; "
-                        f"got {type(payload).__name__}"
-                    )
-                to_run.append((b.name, b, payload))
+        # Partition: which branches to run vs skip
+        to_run: list[tuple[str, Workflow, Mapping[str, Any]]] = []
+        missing: list[str] = []
+        for n, wf in self._branches.items():
+            if n in inputs:
+                payload = inputs[n]
+                if not isinstance(payload, Mapping):
+                    raise ValidationError(f"{self.name}: payload for branch '{n}' must be a Mapping; got {type(payload).__name__}")
+                to_run.append((n, wf, payload))
             else:
-                missing_names.append(b.name)
+                missing.append(n)
 
-        results_by_branch: Dict[str, Optional[Dict[str, Any]]] = {}
+        async def _run_all():
+            async def _one(n: str, wf: Workflow, payload: Mapping[str, Any]):
+                return n, await asyncio.to_thread(wf.invoke, dict(payload))
+            return await asyncio.gather(
+                *(_one(n, wf, p) for n, wf, p in to_run),
+                return_exceptions=True
+            )
 
-        # Initialize defaults for missing branches (flatten=False only)
+        def _run_coro_in_worker(coro):
+            box = {}
+            def _runner():
+                box["res"] = asyncio.run(coro)
+            t = threading.Thread(target=_runner, daemon=True)
+            t.start(); t.join()
+            return box["res"]
+
+        gathered = _run_coro_in_worker(_run_all()) if to_run else []
+
+        # Collect results in declared order; propagate first exception
+        results_by_branch: OrderedDict[str, Any] = OrderedDict()
+        first_exc: BaseException | None = None
+
+        # Seed missing entries (only when not flattening)
         if not self._flatten:
-            for name in missing_names:
-                results_by_branch[name] = None
+            for n in missing:
+                results_by_branch[n] = None
 
-        first_exc: Optional[BaseException] = None
-        failing_branch: Optional[str] = None
-
-        if to_run:
-            max_workers = min(len(to_run), self._max_workers)
-            futures: List[tuple[str, Any]] = []
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                for name, wf, payload in to_run:
-                    futures.append((name, pool.submit(wf.invoke, payload)))
-
-                # Collect in declared branch order for determinism
-                for branch_name, fut in futures:
-                    if first_exc is not None:
-                        if not fut.done():
-                            fut.cancel()
-                        continue
-                    try:
-                        res = fut.result()
-                        if not isinstance(res, dict):
-                            raise ValidationError(
-                                f"{self.name}:{branch_name} returned non-dict result "
-                                f"({type(res).__name__}); expected dict"
-                            )
-                        results_by_branch[branch_name] = res
-                    except BaseException as e:
-                        first_exc = e
-                        failing_branch = branch_name
-                        # Attempt to cancel remaining
-                        for _, f in futures:
-                            if not f.done():
-                                f.cancel()
+        for n, item in zip((n for n, _, _ in to_run), gathered):
+            if isinstance(item, BaseException):
+                if first_exc is None:
+                    first_exc = item
+                continue
+            name, res = item
+            results_by_branch[name] = res
 
         if first_exc is not None:
-            logger.exception("%s: branch %s failed during MapFlow execution", self.name, failing_branch)
-            raise ExecutionError(f"{self.name}:{failing_branch} failed") from first_exc
+            raise ExecutionError(f"{self.name}: at least one branch failed") from first_exc
 
         if not self._flatten:
-            # Ensure all branches are present in the output (ordered by declaration)
-            # (Executed branches already filled; missing branches are None)
-            return {b.name: results_by_branch.get(b.name, None) for b in self._branches}
+            # Include non-executed branches earlier; now stitch executed ones in declared order
+            # Ensure final order matches self._branches
+            ordered: OrderedDict[str, Any] = OrderedDict()
+            for n in self._branches.keys():
+                ordered[n] = results_by_branch.get(n, None)
+            return ordered
 
-        # Flattening path: merge only executed branch dicts
-        flat: Dict[str, Any] = {}
-        special_keys = {WF_RESULT, JUDGE_RESULT}
+        # ---- Flatten path ----
+        flat: OrderedDict[str, Any] = OrderedDict()
+        SPECIAL_KEYS = (WF_RESULT, JUDGE_RESULT)
 
-        for b in self._branches:
-            if b.name not in results_by_branch:
-                # either missing input or (in theory) not executed; skip entirely
+        for n in self._branches.keys():
+            # Only consider executed branches
+            if not any(n == x for x, _, _ in to_run):
                 continue
-            payload = results_by_branch[b.name]
-            if payload is None:
-                # shouldn't occur here because we don't insert None for flatten=True
-                continue
+            payload = results_by_branch.get(n, None)
+            if isinstance(payload, dict):
+                # Unwrap special envelope → store under branch name
+                if any(k in payload for k in SPECIAL_KEYS):
+                    for sk in SPECIAL_KEYS:
+                        if sk in payload:
+                            flat[n] = payload[sk]
+                            break
+                else:
+                    # Plain mapping: left-to-right merge, fail fast on duplicates
+                    for k, v in payload.items():
+                        if k in flat:
+                            raise ValidationError(f"{self.name}: flatten key collision for '{k}' (originating branch '{n}')")
+                        flat[k] = v
+            else:
+                # Non-mapping → store under branch name
+                flat[n] = payload
 
-            # unwrap any special keys if using special keys
-            if _is_namedtuple(payload):
-                payload = _namedtuple_as_mapping(payload)
-            elif is_dataclass(payload):
-                payload = asdict(payload)
-            while isinstance(payload, MAPPABLE_KINDS) and len(payload.keys()) == 1 and list(payload.keys())[0] in special_keys:
-                payload = payload[list(payload.keys())[0]]
-            if not isinstance(payload, dict):
-                flat[b.name] = payload
-                continue
-
-            # Normal flatten: merge keys with collision check
-            for k, v in payload.items():
-                if k in flat:
-                    raise ValidationError(
-                        f"{self.name}: flatten key collision for '{k}' "
-                        f"(originating branch '{b.name}')"
-                    )
-                flat[k] = v
         return flat
 
-    # -------------------- Helpers --------------------
+    # -------------------- Schema supplier --------------------
 
-    def _rebuild_input_schema_from_branch_names(self) -> None:
-        """Mirror current branch names into the private input schema (ordered)."""
-        self._input_schema = [b.name for b in self._branches]
+    def _rebuild_schema_supplier(self) -> None:
+        """
+        Build the dynamic Tool whose KW-only parameters mirror branch names.
+        """
+        from typing import Dict, Any
+        import inspect
+
+        names = list(self._branches.keys())
+
+        def _identity(**kwargs) -> Dict[str, Any]:
+            # Not used for execution; only to present a truthful signature.
+            return kwargs
+
+        # Build a synthetic signature: (*, <branch>: dict[str, any], ...)
+        params = [
+            inspect.Parameter(
+                name=n,
+                kind=inspect.Parameter.KEYWORD_ONLY,
+                annotation=Dict[str, Any]
+            )
+            for n in names
+        ]
+        _identity.__signature__ = inspect.Signature(
+            parameters=params,
+            return_annotation=Dict[str, Any]
+        )
+
+        self._schema_supplier = Tool(
+            func=_identity,
+            name=f"{self.name}_inputs",
+            description="Dynamic MapFlow input schema supplier (one KW-only dict per branch).",
+            type="function",
+            source="mapflow",
+        )
 
 
 class ScatterFlow(Workflow):
     """
-    One-line
-    --------
-    Broadcast fan-out that sends the same validated input dict to all branches in parallel and aggregates.
-
-    Purpose
-    -------
-    Executes multiple child workflows concurrently against a fixed, shared input schema. Enforces set-equality of
-    branch input schemas (broadcast contract). Aggregation is either per-branch or flattened; packaging/bundling are
-    applied at the ScatterFlow boundary by the base Workflow.
+    ScatterFlow
+    -----------
+    Broadcast fan-out that sends the **same** validated input mapping to all branches in parallel and aggregates.
 
     Contract
     --------
-    • `input_schema` is fixed at construction and immutable thereafter.
-    • Every branch MUST accept an input schema set-equal to the broadcast schema.
-      – At construction, non-conforming branches are pruned.
-      – On `add_branch`, non-conforming branches raise `ValueError`.
-    • Each branch is invoked exactly once per call with the same `inputs` dict and MUST return a dict; otherwise `ValidationError`.
-    • When `flatten=False` (default): return `{branch.name: dict_result, ...}`.
-    • When `flatten=True`: merge branch results; collisions raise `ValidationError`.
-      – Single-key envelopes `{WF_RESULT: …}` / `{JUDGE_RESULT: …}` are unwrapped first; if the inner value is a dict it
-        is merged, otherwise it is stored under `flat[branch.name]`.
-    • Child schemas are not mutated; selector/chain-level overlays apply only at the ScatterFlow boundary.
-
-    Key Parameters
-    --------------
-    • input_schema: list[str] (fixed broadcast contract).
-    • branches: list[Workflow|Agent|Tool]; wrapped via `_to_workflow(..., in_sch=input_schema, out_sch=None)`. Names must be unique.
-    • flatten: bool (default False) to merge or keep per-branch results.
-    • output_schema: list[str] (default `[WF_RESULT]`) — overlay for the ScatterFlow boundary.
-    • bundle_all: bool (default True) — obeys base rules.
-    • max_workers: int (cap for ThreadPool).
-
-    Inputs & Outputs
-    ----------------
-    • Inputs: keys must be a subset of `input_schema`; unknown keys → `ValidationError`. Missing keys allowed (branch defaults may apply).
-    • Outputs: per-branch map or flattened dict, then packaged by base with the ScatterFlow overlay.
-
-    Error Conditions
-    ----------------
-    • `ValidationError`: no branches; non-dict branch result; key collision on flatten; unknown input key.
-    • `ValueError`: duplicate branch name; add of non-conforming branch.
-    • `ExecutionError`: any branch raises; original exception is chained.
-    • `IndexError`/`ValueError`: remove with no branches / remove unknown name.
-
-    Performance/Concurrency
-    -----------------------
-    Parallel via `ThreadPoolExecutor` (up to `max_workers`). Aggregation preserves declared branch order for determinism.
-
-    Example
-    -------
-    >>> sf = ScatterFlow(name="sf", description="broadcast", input_schema=["text"], branches=[a, b], flatten=True)
-    >>> sf.invoke({"text": "hello"})  # merged keys from a & b
-
-    See Also
-    --------
-    Workflow, AgentFlow, ToolFlow, MapFlow
+    • Branch set invariant: every branch MUST have an `input_schema` set-equal to the others.
+      - At construction: all provided branches are checked; mismatch → ValidationError.
+      - On add_branch: if non-empty, the new branch is checked against the current first branch; mismatch → ValidationError.
+      - If empty, the first added branch establishes the reference schema.
+    • arguments_map: read-only proxy to the **current first branch** (empty if no branches).
+      input_schema is derived from arguments_map (getter-only; no private writes).
+    • Name handling: branches are stored in an OrderedDict[str, Workflow] (insertion order).
+      Duplicates honor `name_collision_policy`: "fail_fast" | "skip" | "replace" (default "fail_fast"),
+      consistent with Selector.  # mirrors Selector’s policy knob
+    • Execution: the same `inputs` mapping is dispatched to every branch concurrently via asyncio.
+      Results aggregate either per-branch or flattened by merge.
+    • Flatten: right-biased (latest branch wins). One-key envelopes {WF_RESULT: …}/{JUDGE_RESULT: …} are unwrapped
+      before merging; non-mapping results are inserted under the branch’s name.
     """
+
     def __init__(
         self,
         name: str,
-        description: str,
-        input_schema: List[str],
-        branches: List[Union[Workflow, Agent, Tool]] = [],
-        output_schema: List[str] = [WF_RESULT],
-        bundle_all: bool = True,
-        flatten: bool = False,
+        description: str = "",
+        branches: list[Agent | Tool | Workflow] | None = None,
         *,
-        max_workers: int = 16
+        flatten: bool = False,
+        output_schema: list[str] = [WF_RESULT],
+        bundle_all: bool = True,
+        name_collision_policy: str = "fail_fast",  # "skip" | "replace"
     ) -> None:
-        # Initialize base with the broadcast schema
         super().__init__(
             name=name,
             description=description,
-            input_schema=list(input_schema),
-            output_schema=list(output_schema),
+            output_schema=output_schema,
             bundle_all=bundle_all,
         )
-
         self._flatten: bool = bool(flatten)
-        self._branches: List[Workflow] = []
-        self._max_workers = max_workers
+        self._name_collision_policy: str = name_collision_policy
+        self._branches: OrderedDict[str, Workflow] = OrderedDict()
 
-        # Ingest/wrap branches; enforce unique names; prune non-conforming schemas
-        wrapped: List[Workflow] = []
-        seen: set[str] = set()
-        for obj in branches or []:
-            wf = _to_workflow(obj, in_sch=self._input_schema)
-            if wf.name in seen:
-                raise ValueError(f"{self.name}: duplicate branch name '{wf.name}'")
-            seen.add(wf.name)
-            # Prune if schema not set-equivalent
-            if set(wf.input_schema) == set(self._input_schema):
-                wrapped.append(wf)
-        self._branches = wrapped
+        # 1) Wrap all incoming branches first
+        wrapped: list[Workflow] = [_to_workflow(obj) for obj in (branches or [])]
+
+        # 2) If non-empty, enforce set-equal input_schema across all wrapped branches
+        if wrapped:
+            ref_schema = set(wrapped[0].input_schema)
+            bad = next((b for b in wrapped if set(b.input_schema) != ref_schema), None)
+            if bad is not None:
+                raise ValidationError(
+                    f"{self.name}: branch '{bad.name}' input_schema {bad.input_schema} "
+                    f"!= reference schema {list(ref_schema)}"
+                )
+
+        # 3) Only after schema validation, insert honoring name_collision_policy
+        for wf in wrapped:
+            self._insert_branch_after_validation(wf)
 
     # -------------------- Properties --------------------
 
     @property
-    def branches(self) -> List[Workflow]:
-        """Read-only view of branches (shallow copy)."""
-        return list(self._branches)
+    def arguments_map(self) -> OrderedDict[str, Any]:
+        """Read-only proxy to the first branch's arguments_map; empty if no branches."""
+        first = next(iter(self._branches.values()), None)
+        return first.arguments_map if first is not None else OrderedDict()
+
+    @property
+    def branches(self) -> OrderedDict[str, Workflow]:
+        """Return a shallow copy of branches in declared order."""
+        return OrderedDict(self._branches)
 
     # -------------------- Branch Management --------------------
 
-    def add_branch(self, obj: Union[Workflow, Agent, Tool]) -> None:
+    def _insert_branch_after_validation(self, wf: Workflow) -> None:
         """
-        Add a branch. Name must be unique. The branch's input_schema must be
-        set-equivalent to the fixed broadcast schema or this raises ValueError.
+        Insert a branch assuming its schema is already validated (or set the reference if empty)
+        and honoring the name-collision policy.
         """
-        wf = _to_workflow(obj, in_sch=self._input_schema)
-        if any(b.name == wf.name for b in self._branches):
-            raise ValueError(f"{self.name}: duplicate branch name '{wf.name}'")
-        if set(wf.input_schema) != set(self._input_schema):
-            raise ValueError(
-                f"{self.name}: branch '{wf.name}' input_schema {wf.input_schema} "
-                f"!= broadcast input_schema {list(self._input_schema)} (set mismatch)"
-            )
-        self._branches.append(wf)
+        if wf.name in self._branches:
+            if self._name_collision_policy == "fail_fast":
+                raise ValidationError(f"{self.name}: duplicate branch name '{wf.name}'")
+            if self._name_collision_policy == "skip":
+                return
+            # "replace": fall through to overwrite
+        self._branches[wf.name] = wf
 
-    def remove_branch(self, name: Optional[str] = None, *, position: int = -1) -> Workflow:
+    def add_branch(self, obj: Agent | Tool | Workflow) -> None:
         """
-        Remove a branch by exact name or by position (default: last). Returns the removed workflow.
+        Add a single branch. If non-empty, enforce set-equal input_schema vs current first branch before inserting.
         """
-        if not self._branches:
-            raise IndexError(f"{self.name}: no branches to remove")
-        if name is not None:
-            for i, b in enumerate(self._branches):
-                if b.name == name:
-                    return self._branches.pop(i)
-            raise ValueError(f"{self.name}: no branch named '{name}' to remove")
-        # by position
-        return self._branches.pop(position)
+        wf = _to_workflow(obj)
+        first = next(iter(self._branches.values()), None)
+        if len(self._branches)>0:
+            if set(wf.input_schema) != set(self.input_schema):
+                raise ValidationError(
+                    f"{self.name}: new branch '{wf.name}' input_schema {wf.input_schema} "
+                    f"!= reference schema {list(first.input_schema)}"
+                )
+        # After schema validity, honor name-collision policy
+        self._insert_branch_after_validation(wf)
 
-    # -------------------- Memory --------------------
+    def remove_branch(self, name: str) -> Workflow:
+        """Remove a branch by exact name and return it."""
+        try:
+            return self._branches.pop(name)
+        except KeyError:
+            raise KeyError(f"{self.name}: unknown branch '{name}'")
 
     def clear_memory(self) -> None:
+        """Clear own checkpoints and cascade to children."""
         Workflow.clear_memory(self)
-        for b in self._branches:
-            try:
-                b.clear_memory()
-            except Exception:
-                logger.warning("%s: branch.clear_memory raised during clear_memory", self.name, exc_info=True)
+        for wf in self._branches.values():
+            wf.clear_memory()
 
     # -------------------- Execution --------------------
 
-    def _process_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _process_inputs(self, inputs: Mapping[str, Any]) -> Any:
         """
-        Fan out across branches concurrently and return:
-            - { branch.name: dict_result, ... } when self._flatten is False
-            - a single flattened dict when self._flatten is True
+        Run all branches in parallel, map results by branch name, and optionally flatten.
 
-        Every branch receives the same validated `inputs` dict. Each result must be a dict.
+        Returns
+        -------
+        Mapping[str, Any] when flatten=False:
+            {branch_name: branch_result, ...}
+        Mapping[str, Any] when flatten=True:
+            Right-biased merged mapping. For branch results that are mappings with special
+            keys (WF_RESULT/JUDGE_RESULT), unwrap and store under the branch name itself.
+            For plain mappings (no special keys), merge their pairs into the flat dict.
+            For non-mappings, store under the branch name.
         """
         if not self._branches:
-            logger.error("%s: no branches available", self.name)
-            raise ValidationError(f"{self.name}: No branches available")
+            raise ValidationError(f"{self.name}: no branches configured")
 
-        max_workers = min(len(self._branches), self._max_workers) if self._branches else 1
-        futures: List[tuple[str, Any]] = []
-        results_by_branch: Dict[str, Dict[str, Any]] = {}
+        async def _run_all():
+            async def _one(n: str, wf: Workflow):
+                # run sync wf.invoke in default thread pool
+                return n, await asyncio.to_thread(wf.invoke, inputs)
+            return await asyncio.gather(
+                *(_one(n, wf) for n, wf in self._branches.items()),
+                return_exceptions=True
+            )
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            for b in self._branches:
-                futures.append((b.name, pool.submit(b.invoke, inputs)))
+        def _run_coro_in_worker(coro):
+            """Always run in a short-lived thread with its own event loop (simple & robust)."""
+            box = {}
+            def _runner():
+                box["res"] = asyncio.run(coro)
+            t = threading.Thread(target=_runner, daemon=True)
+            t.start()
+            t.join()
+            return box["res"]
 
-            first_exc: Optional[BaseException] = None
-            failing_branch: Optional[str] = None
+        gathered = _run_coro_in_worker(_run_all())
 
-            # Collect in declared branch order for determinism
-            for branch_name, fut in futures:
-                if first_exc is not None:
-                    if not fut.done():
-                        fut.cancel()
-                    continue
-                try:
-                    res = fut.result()
-                    if not isinstance(res, dict):
-                        raise ValidationError(
-                            f"{self.name}:{branch_name} returned non-dict result "
-                            f"({type(res).__name__}); expected dict"
-                        )
-                    results_by_branch[branch_name] = res
-                except BaseException as e:
-                    first_exc = e
-                    failing_branch = branch_name
-                    # Attempt to cancel remaining futures
-                    for _, f in futures:
-                        if not f.done():
-                            f.cancel()
+        # Map: branch name -> result (preserve branch order)
+        results_by_branch: OrderedDict[str, Any] = OrderedDict()
+        first_exc: BaseException | None = None
+        for n, item in zip(self._branches.keys(), gathered):
+            if isinstance(item, BaseException):
+                if first_exc is None:
+                    first_exc = item
+                continue
+            # item is (name, result)
+            name, res = item
+            # Safety: ensure zipped names match returned names
+            results_by_branch[name] = res
 
-            if first_exc is not None:
-                logger.exception("%s: branch %s failed during ScatterFlow execution", self.name, failing_branch)
-                raise ExecutionError(f"{self.name}:{failing_branch} failed") from first_exc
+        if first_exc is not None:
+            raise ExecutionError(f"{self.name}: at least one branch failed") from first_exc
 
         if not self._flatten:
             return results_by_branch
 
-        # Flattening path
-        flat: Dict[str, Any] = {}
-        special_keys = {WF_RESULT, JUDGE_RESULT}
+        # ---- Flatten path ----
+        flat: OrderedDict[str, Any] = OrderedDict()
+        SPECIAL_KEYS = (WF_RESULT, JUDGE_RESULT)
 
-        for b in self._branches:
-            if b.name not in results_by_branch:
-                # either missing input or (in theory) not executed; skip entirely
+        for name in self._branches.keys():
+            if name not in results_by_branch:
                 continue
-            payload = results_by_branch[b.name]
-            if payload is None:
-                # shouldn't occur here because we don't insert None for flatten=True
-                continue
+            payload = results_by_branch[name]
 
-            # unwrap any special keys if using special keys
-            if _is_namedtuple(payload):
-                payload = _namedtuple_as_mapping(payload)
-            elif is_dataclass(payload):
-                payload = asdict(payload)
-            while isinstance(payload, MAPPABLE_KINDS) and len(payload.keys()) == 1 and list(payload.keys())[0] in special_keys:
-                payload = payload[list(payload.keys())[0]]
-            if not isinstance(payload, dict):
-                flat[b.name] = payload
-                continue
+            if isinstance(payload, dict):
+                # If it has a special key, unwrap and store under the branch name itself.
+                # Prioritize WF_RESULT over JUDGE_RESULT if both exist (rare).
+                if any(k in payload for k in SPECIAL_KEYS):
+                    for sk in SPECIAL_KEYS:
+                        if sk in payload:
+                            flat[name] = payload[sk]
+                            break
+                else:
+                    # Plain mapping: merge pairs directly (right-biased by branch order).
+                    for k, v in payload.items():
+                        flat[k] = v
+            else:
+                # Non-mapping: store under the branch name.
+                flat[name] = payload
 
-            # Normal flatten: merge keys with collision check
-            for k, v in payload.items():
-                if k in flat:
-                    raise ValidationError(
-                        f"{self.name}: flatten key collision for '{k}' "
-                        f"(originating branch '{b.name}')"
-                    )
-                flat[k] = v
         return flat

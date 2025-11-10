@@ -76,13 +76,13 @@ def route_selector(text: str) -> str:
 
     # contains digits and commas -> address
     if any(ch.isdigit() for ch in lowered) and "," in lowered:
-        return "workflow_AddressFormatterText"
+        return "AddressFormatterText"
     # math-y keywords/symbols -> math
     math_tokens = ["+", "-", "*", "/", "power", "sqrt", "^", "sin", "cos", "tan", "log"]
     if any(tok in lowered for tok in math_tokens) or any(ch.isdigit() for ch in lowered):
-        return "workflow_mathematician"
+        return "mathematician"
     # default -> paleo
-    return "workflow_paleo"
+    return "paleo"
 
 judge_tool = Tool(
     name = "RouteSelector",
