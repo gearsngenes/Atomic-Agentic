@@ -455,19 +455,21 @@ class Agent:
 
     # ------------------------------ diagnostics ------------------------------
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> OrderedDict[str, Any]:
         """A minimal diagnostic snapshot of this agent (safe to log/serialize)."""
-        return {
+        return OrderedDict({
+            # initialization variables
             "name": self._name,
             "description": self._description,
             "role_prompt": self._role_prompt,
-            "context_enabled": self._context_enabled,
-            "history_window": self._history_window,
-            "history_turns": sum(1 for msg in self._history if msg.get("role") == "assistant"),
-            "attachments_count": len(self._attachments),
             "pre_invoke": self._pre_invoke.to_dict(),
-            "engine": type(self._llm_engine).__name__ if self._llm_engine else type(None),
-        }
+            "llm": self._llm_engine.to_dict() if self._llm_engine else type(None),
+            "context_enabled": self._context_enabled,
+            # Runtime variables
+            "history_window": self._history_window,
+            "history": self._history,
+            "attachments": self._attachments,
+        })
 
     def __repr__(self) -> str:
         role_preview = ""
