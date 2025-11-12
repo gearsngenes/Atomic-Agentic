@@ -496,6 +496,10 @@ class PlannerAgent(ToolAgent):
     # -- public flag -----------------------------------------------------------
 
     @property
+    def role_prompt(self):
+        return self._role_prompt.format(TOOLS = self.actions_context())
+    
+    @property
     def run_concurrent(self) -> bool:
         """When True, `.execute()` attempts async execution; loop-safe fallback to sync."""
         return self._run_concurrent
@@ -540,7 +544,7 @@ class PlannerAgent(ToolAgent):
 
         # 2) Ask the LLM for a full plan (array of steps)
         messages = [
-            {"role": "system", "content": Prompts.PLANNER_PROMPT.format(TOOLS=self.actions_context())},
+            {"role": "system", "content": self.role_prompt},
         ]
         if self.context_enabled and self._history:
             messages += self._history[-2*self._history_window:]
@@ -737,7 +741,6 @@ class OrchestratorAgent(ToolAgent):
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        role_prompt: Optional[str] = None,
         context_enabled: bool = True,
         *,
         pre_invoke: Optional[Tool] = None,
@@ -750,7 +753,7 @@ class OrchestratorAgent(ToolAgent):
             name=name,
             description=description,
             llm_engine=llm_engine,
-            role_prompt=role_prompt or Prompts.ORCHESTRATOR_PROMPT,
+            role_prompt=Prompts.ORCHESTRATOR_PROMPT,
             context_enabled=context_enabled,
             pre_invoke=pre_invoke,
             history_window=history_window,
@@ -758,6 +761,10 @@ class OrchestratorAgent(ToolAgent):
         self._max_steps = int(max_steps)
         self._max_failures = int(max_failures)
         self._context_budget_chars = int(context_budget_chars)
+    
+    @property
+    def role_prompt(self):
+        return self._role_prompt.format(TOOLS=self.actions_context(), MAX_EXPLAIN_WORDS = 30)
 
     # ------------------------------ public API --------------------------------
 
@@ -771,7 +778,7 @@ class OrchestratorAgent(ToolAgent):
         - and a final reminder to emit one JSON object using single-brace `{stepN}` placeholders.
         """
         messages = [
-            {"role": "system", "content": Prompts.ORCHESTRATOR_PROMPT.format(TOOLS=self.actions_context(), MAX_EXPLAIN_WORDS = 30)},
+            {"role": "system", "content": self.role_prompt},
         ]
 
         # Windowed prior history (if any)
@@ -1030,3 +1037,12 @@ class OrchestratorAgent(ToolAgent):
             final_s = str(final_result)
         lines.append(f"\nFinal Result: {final_s}")
         return "\n".join(lines)
+    
+    def to_dict(self) -> OrderedDict[str,Any]:
+        base = super().to_dict()
+        base.update({
+            "max_steps": self._max_steps,
+            "max_failures": self._max_failures,
+            "context_budge_chars" : self._context_budget_chars,
+        })
+        return base
