@@ -114,7 +114,6 @@ class ToolAgent(Agent, ABC):
             history_window=history_window,
         )
         self._toolbox: OrderedDict[str, Tool] = OrderedDict()
-        self._lock = threading.RLock()
         self._mcp_server_tag: int = 0  # unique tag seed for MCP server ids
         self._previous_steps: List[Dict[str, Any]] = []
 
@@ -265,27 +264,26 @@ class ToolAgent(Agent, ABC):
 
         # Mutate toolbox atomically per tool under a lock
         registered: List[str] = []
-        with self._lock:
-            for tool in tools:
-                full_name = tool.full_name
-                exists = full_name in self._toolbox
+        for tool in tools:
+            full_name = tool.full_name
+            exists = full_name in self._toolbox
 
-                if exists:
-                    if name_collision_mode == "raise":
-                        raise ToolRegistrationError(
-                            f"Duplicate tool name: {full_name!r}. "
-                            f"Use name_collision_mode='skip' or 'replace' to override."
-                        )
-                    if name_collision_mode == "skip":
-                        logger.debug("ToolAgent.register: skipping duplicate %s", full_name)
-                        continue
-                    # name_collision_mode == "replace"
-                    logger.debug("ToolAgent.register: replacing %s", full_name)
-                    self._toolbox[full_name] = tool
-                    registered.append(full_name)
-                else:
-                    self._toolbox[full_name] = tool
-                    registered.append(full_name)
+            if exists:
+                if name_collision_mode == "raise":
+                    raise ToolRegistrationError(
+                        f"Duplicate tool name: {full_name!r}. "
+                        f"Use name_collision_mode='skip' or 'replace' to override."
+                    )
+                if name_collision_mode == "skip":
+                    logger.debug("ToolAgent.register: skipping duplicate %s", full_name)
+                    continue
+                # name_collision_mode == "replace"
+                logger.debug("ToolAgent.register: replacing %s", full_name)
+                self._toolbox[full_name] = tool
+                registered.append(full_name)
+            else:
+                self._toolbox[full_name] = tool
+                registered.append(full_name)
 
         return registered
 
@@ -360,27 +358,26 @@ class ToolAgent(Agent, ABC):
 
         # Mutate toolbox atomically per tool under a lock
         registered: List[str] = []
-        with self._lock:
-            for tool in produced:
-                full_name = tool.full_name
-                exists = full_name in self._toolbox
+        for tool in produced:
+            full_name = tool.full_name
+            exists = full_name in self._toolbox
 
-                if exists:
-                    if name_collision_mode == "raise":
-                        raise ToolRegistrationError(
-                            f"Duplicate tool name: {full_name!r}. "
-                            f"Use name_collision_mode='skip' or 'replace' to override."
-                        )
-                    if name_collision_mode == "skip":
-                        logger.debug("ToolAgent.batch_register: skipping duplicate %s", full_name)
-                        continue
-                    # name_collision_mode == "replace"
-                    logger.debug("ToolAgent.batch_register: replacing %s", full_name)
-                    self._toolbox[full_name] = tool
-                    registered.append(full_name)
-                else:
-                    self._toolbox[full_name] = tool
-                    registered.append(full_name)
+            if exists:
+                if name_collision_mode == "raise":
+                    raise ToolRegistrationError(
+                        f"Duplicate tool name: {full_name!r}. "
+                        f"Use name_collision_mode='skip' or 'replace' to override."
+                    )
+                if name_collision_mode == "skip":
+                    logger.debug("ToolAgent.batch_register: skipping duplicate %s", full_name)
+                    continue
+                # name_collision_mode == "replace"
+                logger.debug("ToolAgent.batch_register: replacing %s", full_name)
+                self._toolbox[full_name] = tool
+                registered.append(full_name)
+            else:
+                self._toolbox[full_name] = tool
+                registered.append(full_name)
 
         return registered
 
@@ -392,13 +389,11 @@ class ToolAgent(Agent, ABC):
 
     def remove_tool(self, full_name: str) -> bool:
         """Remove tool by `full_name`. Returns True if it existed and was removed."""
-        with self._lock:
-            return self._toolbox.pop(full_name, None) is not None
+        return self._toolbox.pop(full_name, None) is not None
 
     def clear_tools(self) -> None:
         """Remove all tools from the toolbox."""
-        with self._lock:
-            self._toolbox.clear()
+        self._toolbox.clear()
 
     def list_tools(self) -> OrderedDict[str, Tool]:
         """

@@ -465,8 +465,8 @@ class Agent:
             "pre_invoke": self._pre_invoke.to_dict(),
             "llm": self._llm_engine.to_dict() if self._llm_engine else type(None),
             "context_enabled": self._context_enabled,
-            # Runtime variables
             "history_window": self._history_window,
+            # Runtime variables
             "history": self._history,
             "attachments": self._attachments,
         })
