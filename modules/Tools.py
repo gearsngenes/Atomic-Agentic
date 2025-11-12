@@ -518,7 +518,7 @@ class Tool:
     ) -> None:
         self._func: Callable = func
         self._name: str = name
-        self._description: str = description
+        self._description: str = func.__doc__ or description
         self._type: str = type
         self._source: str = source
 
