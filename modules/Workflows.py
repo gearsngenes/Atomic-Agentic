@@ -212,17 +212,17 @@ class Workflow(ABC):
         self._bundle_all = value
 
     # ---------- Serialization ----------
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> OrderedDict[str, Any]:
         """
         JSON-friendly spec: no kind/component refs.
         """
-        return {
-            "name": self._name,
-            "description": self._description,
-            "arguments_map": dict(self.arguments_map),
+        return OrderedDict({
+            "name": self.name,
+            "description": self.description,
+            "arguments_map": OrderedDict(self.arguments_map),
             "output_schema": list(self._output_schema),
             "bundle_all": bool(self._bundle_all),
-        }
+        })
 
     # ---------- Execution ----------
     def invoke(self, inputs: Mapping[str, Any]) -> OrderedDict[str, Any]:
@@ -383,6 +383,11 @@ class AgentFlow(Workflow):
     def clear_memory(self):
         super().clear_memory()
         self.agent.clear_memory()
+    
+    def to_dict(self) -> OrderedDict[str, Any]:
+        base = super().to_dict()
+        base.update({"agent" : self.agent.to_dict()})
+        return base
 
 
 # =========================
@@ -427,6 +432,13 @@ class ToolFlow(Workflow):
     def _process_inputs(self, inputs: Dict[str, Any]) -> Any:
         # Dict-only invoke; Tool handles its own validation & binding.
         return self._tool.invoke(inputs)
+    
+    def to_dict(self) -> OrderedDict[str, Any]:
+        base = super().to_dict()
+        base.update(
+            {"tool":self.tool.to_dict()}
+        )
+        return base
     
 
 # wraps all incoming objects into workflow classes and adjusts their input/output schemas based on optional parameters
@@ -595,6 +607,11 @@ class ChainFlow(Workflow):
         for i in range(1, len(self._steps)):
             self._reconcile_pair(self._steps[i - 1], self._steps[i], idx=i)
         self._apply_tail_overlay()
+    
+    def to_dict(self) -> OrderedDict[str, Any]:
+        base = super().to_dict()
+        base.update({"steps":[step.to_dict() for step in self.steps]})
+        return base
 
 
 class MakerChecker(Workflow):
@@ -812,6 +829,15 @@ class MakerChecker(Workflow):
         self.checker.clear_memory()
         if self.judge is not None:
             self.judge.clear_memory()
+    
+    def to_dict(self) -> OrderedDict[str, Any]:
+        base = super().to_dict()
+        base.update({
+            "maker": self.maker.to_dict(),
+            "checker": self.checker.to_dict(),
+            "judge": self.judge.to_dict() if self.judge else None
+        })
+        return base
 
     # -------------------------------------------------------------------------
     # Internal parity enforcement (no input-schema writes; use getters)
@@ -1003,6 +1029,15 @@ class Selector(Workflow):
         self._judge.clear_memory()
         for b in self._branches:
             self._branches[b].clear_memory()
+            
+    def to_dict(self) -> OrderedDict[str, Any]:
+        base = super().to_dict()
+        base.update({
+            "judge": self.judge.to_dict(),
+            "name_collision_policy":self._name_collision_policy,
+            "branches": [branch.to_dict() for k,branch in self.branches.items()]
+        })
+        return base
 
     # -------------------- Execution --------------------
     def _process_inputs(self, inputs: Mapping[str, Any]) -> Any:
@@ -1138,6 +1173,15 @@ class MapFlow(Workflow):
             raise KeyError(f"{self.name}: unknown branch '{name}'")
         self._rebuild_schema_supplier()
         return removed
+    
+    def to_dict(self):
+        base = super().to_dict()
+        base.update({
+            "name_collision_policy":self._name_collision_policy,
+            "branches": [branch.to_dict() for k,branch in self.branches.items()],
+            "flatten": self._flatten,
+        })
+        return base
 
     # -------------------- Memory --------------------
 
@@ -1481,3 +1525,12 @@ class ScatterFlow(Workflow):
                 flat[name] = payload
 
         return flat
+    
+    def to_dict(self):
+        base = super().to_dict()
+        base.update({
+            "name_collision_policy":self._name_collision_policy,
+            "branches": [branch.to_dict() for k,branch in self.branches.items()],
+            "flatten": self._flatten,
+        })
+        return base

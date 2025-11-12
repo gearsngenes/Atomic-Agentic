@@ -438,17 +438,10 @@ class ToolAgent(Agent, ABC):
 
     # ------------------------------ serialization ----------------------------
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> OrderedDict[str, Any]:
         """Summarize this ToolAgent and its toolbox (safe for logs/telemetry)."""
-        tools_block: List[dict] = []
-        for _, tool in self._toolbox.items():
-            tools_block.append(tool.to_dict())
         _my_dict = Agent.to_dict(self)
-        new_items = {
-            "tool_count": len(self._toolbox),
-            "tools": tools_block,
-        }
-        _my_dict.update(new_items)
+        _my_dict.update({"tools": [tool.to_dict() for _, tool in self._toolbox.items()]})
         return _my_dict
 
 
