@@ -234,30 +234,7 @@ class Agent:
             description="Strict mapping {'prompt': str} -> prompt",
         )
 
-    def _messages_for_send(self, prompt: str) -> List[Dict[str, str]]:
-        """
-        Build the message list to send to the engine:
-        [system?] + [last N turns] + [current user prompt]
-        where N is `history_window`, measured in *turns*.
-        """
-        messages: List[Dict[str, str]] = []
-
-        # optional system
-        if self._role_prompt:
-            messages.append({"role": "system", "content": self._role_prompt})
-
-        # prior turns (if context is enabled)
-        if self._context_enabled and self._history:
-            # window in turns: take last N *pairs* => 2N messages
-            prior = self._history[-(self._history_window * 2):] if self._history_window > 0 else []
-            messages.extend(prior)
-
-        # current user prompt
-        messages.append({"role": "user", "content": prompt})
-        return messages
-
     # --------------------------------- API -----------------------------------
-
     @property
     def name(self) -> str:
         """Read-only agent name."""
@@ -265,8 +242,13 @@ class Agent:
 
     @property
     def description(self) -> str:
-        """Read-only agent description."""
+        """Return description agent description."""
         return self._description
+    
+    @description.setter
+    def description(self, val: str) -> None:
+        """Set description"""
+        self._description = val or "You are a helpful AI assistant"
 
     @property
     def role_prompt(self) -> Optional[str]:
@@ -275,7 +257,7 @@ class Agent:
 
     @role_prompt.setter
     def role_prompt(self, value: Optional[str]) -> None:
-        self._role_prompt = (value or None)
+        self._role_prompt = (value or "You are a helpful AI assistant")
 
     @property
     def llm_engine(self) -> LLMEngine:
@@ -379,10 +361,25 @@ class Agent:
         as a string by the base `invoke()` method.
         """
         # 3) Build messages for the engine
-        messages = self._messages_for_send(prompt)
+        logger.debug(f"[Agent - {self.name}]._invoke: Building messages")
+        messages: List[Dict[str, str]] = []
+
+        # optional system
+        if self._role_prompt:
+            messages.append({"role": "system", "content": self._role_prompt})
+
+        # prior turns (if context is enabled)
+        if self._context_enabled and self._history:
+            # window in turns: take last N *pairs* => 2N messages
+            prior = self._history[-(self._history_window * 2):] if self._history_window > 0 else []
+            messages.extend(prior)
+
+        # current user prompt
+        messages.append({"role": "user", "content": prompt})
 
         # 4) Call engine with a small signature shim
         try:
+            logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
             text = self._llm_engine.invoke(messages, self._attachments)
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine invocation failed: {e}") from e
@@ -395,6 +392,7 @@ class Agent:
 
         # 5) Optionally record the turn in stored history
         if self._context_enabled:
+            logger.debug(f"[Agent - {self.name}]._invoke: Saving prompt & response to history")
             self._history.append({"role": "user", "content": prompt})
             self._history.append({"role": "assistant", "content": text})
 
@@ -432,6 +430,7 @@ class Agent:
         AgentInvocationError
             For engine signature/return issues or other unexpected failures.
         """
+        logger.info(f"[Agent - {self.name}].invoke begin")
         if not isinstance(inputs, Mapping):
             raise TypeError("Agent.invoke expects a Mapping[str, Any].")
 
@@ -449,9 +448,10 @@ class Agent:
                 f"pre_invoke returned non-string (type={type(prompt)!r}); "
                 "a prompt string is required"
             )
-
+        result = self._invoke(prompt=prompt)
+        logger.info(f"[Agent - {self.name}].invoke end")
         # Delegate to the internal call path
-        return self._invoke(prompt=prompt)
+        return result
 
     # ------------------------------ diagnostics ------------------------------
 

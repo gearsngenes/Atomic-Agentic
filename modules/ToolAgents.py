@@ -543,6 +543,7 @@ class PlannerAgent(ToolAgent):
         user_prompt = f"Decompose the following task into a JSON plan:\n{prompt}\n\n"
 
         # 2) Ask the LLM for a full plan (array of steps)
+        logger.debug(f"[PlannerAgent - {self.name}].strategize: Building messages")
         messages = [
             {"role": "system", "content": self.role_prompt},
         ]
@@ -551,17 +552,19 @@ class PlannerAgent(ToolAgent):
         messages.append({"role": "user", "content": user_prompt})
 
         # Use positional signature to match base Agent consistency
+        logger.debug(f"[PlannerAgent - {self.name}].strategize: Invoking LLM")
         raw = self._llm_engine.invoke(messages, self._attachments)
 
         # Strip markdown fences (common LLM formatting)
+        logger.debug(f"[PlannerAgent - {self.name}].strategize: Cleaning LLM text")
         raw = re.sub(r"^```[a-zA-Z]*|```$", "", raw)
         
         return raw
     
     def load_steps(self, raw_plan: str)->list[dict]:
         """Converts raw plan JSON string into a python list"""
+        logger.debug(f"[PlannerAgent - {self.name}].load_steps: Parsing steps")
         steps: List[dict] = list(json.loads(raw_plan))
-
         if not steps or steps[-1].get("function") != "function.default._return":
             steps.append({"function": "function.default._return", "args": {"val": None}})
 
@@ -574,6 +577,7 @@ class PlannerAgent(ToolAgent):
         Uses synchronous or asynchronous execution based on `run_concurrent`.
         Tracks each step's `result` and `completed` status in `_previous_steps`.
         """
+        logger.debug(f"[PlannerAgent - {self.name}].execute: Executing steps")
         self._previous_steps = [{"result": None, "completed": False} for _ in plan]
 
         if self._run_concurrent:
@@ -595,7 +599,7 @@ class PlannerAgent(ToolAgent):
         tools = self.list_tools()
         for i, step in enumerate(steps):
             step_tool = tools[step["function"]]
-            logger.debug("[TOOL] %s args: %s", step["function"], step.get("args", {}))
+            logger.debug(f"[PlannerAgent - {self.name}]._execute_sync: Running step {i} - {step['function']}, args: {step.get('args', {})}")
             args = self._resolve(step.get("args", {}))
             result = step_tool.invoke(inputs=args)
             self._previous_steps[i]["result"] = result
@@ -629,7 +633,7 @@ class PlannerAgent(ToolAgent):
         async def run_step(i: int) -> Any:
             step = steps[i]
             step_tool = tools[step["function"]]
-            logger.info("[TOOL] %s args: %s", step["function"], step.get("args", {}))
+            logger.debug(f"[PlannerAgent - {self.name}]._execute_async: Running step {i} - {step['function']}, args: {step.get('args', {})}")
             args = self._resolve(step.get("args", {}))
             # Offload blocking tool invocation to a thread pool
             loop = asyncio.get_running_loop()
@@ -642,6 +646,7 @@ class PlannerAgent(ToolAgent):
             ready = [i for i in remaining if get_deps(i) <= completed]
             if not ready:
                 raise RuntimeError("Circular dependency in plan.")
+            logger.debug(f"[PlannerAgent - {self.name}]._execute_async: Gathered steps: {ready}")
             results = await asyncio.gather(*(run_step(i) for i in ready))
             for i, result in zip(ready, results):
                 self._previous_steps[i]["result"] = result
@@ -672,6 +677,7 @@ class PlannerAgent(ToolAgent):
 
         # Save user+assistant turn (summary) if context is enabled
         if self.context_enabled:
+            logger.debug(f"[PlannerAgent - {self.name}]._invoke: Adding user prompt & response to history")
             self._history.append({"role": "user", "content": prompt})
             self._history.append({
                 "role": "assistant",
@@ -823,10 +829,10 @@ class OrchestratorAgent(ToolAgent):
 
         while True:
             if steps_executed >= self._max_steps:
-                logger.warning("Orchestrator: max_steps (%d) reached; aborting.", self._max_steps)
+                logger.warning("[OrchestratorAgent - %s]._invoke: max_steps (%d) reached; aborting.", self.name, self._max_steps)
                 break
             if failures >= self._max_failures:
-                logger.warning("Orchestrator: max_failures (%d) reached; aborting.", self._max_failures)
+                logger.warning("[OrchestratorAgent - %s]._invoke: max_failures (%d) reached; aborting.", self.name, self._max_failures)
                 break
 
             # Ask for the next step
@@ -953,6 +959,7 @@ class OrchestratorAgent(ToolAgent):
 
         # Persist final turns if context is enabled
         if self.context_enabled:
+            logger.debug(f"[OrchestratorAgent - {self.name}]._invoke: Adding user prompt & steps taken to history")
             self._history.append({"role": "user", "content": prompt})
             self._history.append({
                 "role": "assistant",
