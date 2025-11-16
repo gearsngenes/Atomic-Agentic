@@ -87,7 +87,7 @@ Create one Agent per concurrent lane, or protect it with external synchronizatio
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Callable
 import logging
 from collections import OrderedDict
 
@@ -182,7 +182,7 @@ class Agent:
         role_prompt: Optional[str] = None,
         context_enabled: bool = True,
         *,
-        pre_invoke: Optional[Tool] = None,
+        pre_invoke: Optional[Tool|Callable] = None,
         history_window: int = 50,
     ) -> None:
         if not isinstance(name, str) or not name:
@@ -215,6 +215,14 @@ class Agent:
         self._attachments: List[str] = []
 
         # Pre-invoke Tool: strict identity by default -> requires {"prompt": str}
+        if pre_invoke is not None and isinstance(pre_invoke, Callable):
+            pre_invoke = Tool(
+                func=pre_invoke,
+                name="pre_invoke_callable",
+                description="Pre-invoke callable adapted to Tool",
+                type="function",
+                source="default",
+            )
         self._pre_invoke: Tool = pre_invoke if pre_invoke is not None else self._make_identity_prompt_tool()
 
     # ------------------------------- utilities -------------------------------
@@ -346,9 +354,17 @@ class Agent:
         return self._pre_invoke
 
     @pre_invoke.setter
-    def pre_invoke(self, tool: Tool) -> None:
+    def pre_invoke(self, tool: Tool|Callable) -> None:
+        if isinstance(tool, Callable):
+            tool = Tool(
+                func=tool,
+                name="pre_invoke_callable",
+                description="Pre-invoke callable adapted to Tool",
+                type="function",
+                source="default",
+            )
         if not isinstance(tool, Tool):
-            raise AgentError("pre_invoke must be a Tools.Tool instance.")
+            raise AgentError("pre_invoke must be a Tools.Tool instance or a callable object.")
         self._pre_invoke = tool
 
     @property

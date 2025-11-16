@@ -476,13 +476,13 @@ def toolify(
     if callable(obj):
         if not name or not isinstance(name, str):
             raise ToolDefinitionError("ToolFactory: 'name' (str) is required for callables.")
-        if not description or not isinstance(description, str):
-            raise ToolDefinitionError("ToolFactory: 'description' (str) is required for callables.")
+        if description is not None and not isinstance(description, str):
+            raise ToolDefinitionError("ToolFactory: 'description' expects a string value for callables.")
         return [
             Tool(
                 func=obj,
                 name=name,
-                description=description,
+                description= (description or obj.__doc__) or "",
                 type="function",
                 source=source or "default",
             )

@@ -53,7 +53,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import is_dataclass, asdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Callable
 from collections.abc import Mapping, Iterable, Sequence, Set
 from collections import OrderedDict
 import time
@@ -354,12 +354,13 @@ class AgentFlow(Workflow):
         agent: Agent,
         name: str | None = None,
         *,
+        description: str = "",
         output_schema: List[str] = [WF_RESULT],
         bundle_all: bool = True,
     ) -> None:
         super().__init__(
             name=name or agent.name,
-            description=agent.description,
+            description=agent.description or description,
             output_schema=output_schema,
             bundle_all=bundle_all,
         )
@@ -404,12 +405,21 @@ class ToolFlow(Workflow):
 
     def __init__(
         self,
-        tool: Tool,
+        tool: Tool | Callable,
         name: Optional[str] = None,
         *,
+        description: str = "",
         output_schema: List[str] = [WF_RESULT],
         bundle_all: bool = True,
     ) -> None:
+        if isinstance(tool, Callable):
+            tool = Tool(
+                func=tool,
+                name=name,
+                description= (description or tool.__doc__) or "",
+                type="function",
+                source="default",
+            )
         super().__init__(
             name=name or tool.name,
             description=tool.description,
