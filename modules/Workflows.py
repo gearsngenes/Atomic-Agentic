@@ -415,7 +415,7 @@ class ToolFlow(Workflow):
         if isinstance(tool, Callable):
             tool = Tool(
                 func=tool,
-                name=name,
+                name=(name or tool.__name__) or "unnamed_callable",
                 description= (description or tool.__doc__) or "",
                 type="function",
                 source="default",
@@ -432,7 +432,15 @@ class ToolFlow(Workflow):
     def tool(self) -> Tool:
         return self._tool
     @tool.setter
-    def tool(self, val: Tool) -> None:
+    def tool(self, val: Tool|Callable) -> None:
+        if isinstance(val, Callable):
+            val = Tool(
+                func=val,
+                name=self.name,
+                description= (self.description or val.__doc__) or "",
+                type="function",
+                source="default",
+            )
         self._tool = val
 
     @property
@@ -452,11 +460,11 @@ class ToolFlow(Workflow):
     
 
 # wraps all incoming objects into workflow classes and adjusts their input/output schemas based on optional parameters
-def _to_workflow(obj: Agent | Tool | Workflow) -> Workflow:
+def _to_workflow(obj: Callable | Agent | Tool | Workflow) -> Workflow:
         if isinstance(obj, Workflow): return obj
         if isinstance(obj, Agent): return AgentFlow(obj)
-        if isinstance(obj, Tool): return ToolFlow(obj)
-        raise ValidationError(f"Object must be Agent, Tool, or Workflow. Got unexpected '{type(obj).__name__}'.")
+        if isinstance(obj, Tool|Callable): return ToolFlow(obj)
+        raise ValidationError(f"Object must be Agent, Tool, Callable, or Workflow. Got unexpected '{type(obj).__name__}'.")
 
 
 class ChainFlow(Workflow):
@@ -495,7 +503,7 @@ class ChainFlow(Workflow):
         self,
         name: str,
         description: str = "",
-        steps: Optional[List[Any]] = None,  # Tool | Agent | Workflow accepted; normalized via _to_workflow
+        steps: Optional[List[Callable|Tool|Agent|Workflow]] = None,  # Tool | Agent | Workflow accepted; normalized via _to_workflow
         *,
         output_schema: Optional[List[str]] = None,
         bundle_all: bool = True,
@@ -526,17 +534,18 @@ class ChainFlow(Workflow):
         return list(self._steps)
 
     @steps.setter
-    def steps(self, new_steps: Optional[List[Any]]) -> None:
+    def steps(self, new_steps: Optional[List[Callable|Tool|Agent|Workflow]]) -> None:
         self._steps = [ _to_workflow(s) for s in (new_steps or []) ]
         self._reconcile_all()
 
-    def add_step(self, step: Any, *, position: int | None = None) -> None:
+    def add_step(self, step: Callable|Tool|Agent|Workflow, *, position: int | None = None) -> None:
         wf = _to_workflow(step)
         if position is None:
             self._steps.append(wf)
         else:
             self._steps.insert(position, wf)
         self._reconcile_all()
+
     def pop(self, index: int = -1) -> Optional[Workflow]:
         if not self._steps:
             raise IndexError(f"ChainFlow.{self.name}.steps is empty, no workflows to pop.")
@@ -675,9 +684,9 @@ class MakerChecker(Workflow):
         self,
         name: str,
         description: str,
-        maker: Tool | Agent | Workflow,
-        checker: Tool | Agent | Workflow,
-        judge: Tool | Agent | Workflow,
+        maker: Callable | Tool | Agent | Workflow,
+        checker: Callable | Tool | Agent | Workflow,
+        judge: Callable | Tool | Agent | Workflow,
         *,
         max_revisions: int = 0,
         output_schema: List[str] = [WF_RESULT],
@@ -923,8 +932,8 @@ class Selector(Workflow):
         self,
         name: str,
         description: str,
-        branches: List[Agent|Tool|Workflow],
-        judge: Agent|Tool|Workflow,
+        branches: List[Callable|Agent|Tool|Workflow],
+        judge: Callable|Agent|Tool|Workflow,
         *,
         output_schema: List[str] = [WF_RESULT],
         bundle_all: bool = True,
@@ -971,7 +980,7 @@ class Selector(Workflow):
         return self._judge
 
     @judge.setter
-    def judge(self, val: Agent|Tool|Workflow) -> None:
+    def judge(self, val: Callable|Agent|Tool|Workflow) -> None:
         # Wrap provided value
         new_judge = _to_workflow(val)
         new_judge.output_schema = [JUDGE_RESULT]
@@ -992,7 +1001,7 @@ class Selector(Workflow):
         return OrderedDict(self._branches)
 
     @branches.setter
-    def branches(self, vals: List[Agent|Tool|Workflow]) -> None:
+    def branches(self, vals: List[Callable|Agent|Tool|Workflow]) -> None:
         # Re-ingest + validate (same as constructor)
         wrapped: OrderedDict[str, Workflow] = OrderedDict()
         for b in vals:
@@ -1012,7 +1021,7 @@ class Selector(Workflow):
         self._branches = wrapped
 
     # -------------------- Public API --------------------
-    def add_branch(self, branch: Agent|Tool|Workflow) -> None:
+    def add_branch(self, branch: Callable|Agent|Tool|Workflow) -> None:
         # Wrap
         wb = _to_workflow(branch)
         # Validate input schema set-equivalence
@@ -1119,7 +1128,7 @@ class MapFlow(Workflow):
         self,
         name: str,
         description: str = "",
-        branches: list[Agent | Tool | Workflow] | None = None,
+        branches: list[Callable | Agent | Tool | Workflow] | None = None,
         *,
         flatten: bool = False,
         output_schema: list[str] = [WF_RESULT],
@@ -1170,7 +1179,7 @@ class MapFlow(Workflow):
             # "replace": fall through
         self._branches[wf.name] = wf
 
-    def add_branch(self, obj: Agent | Tool | Workflow) -> None:
+    def add_branch(self, obj: Callable | Agent | Tool | Workflow) -> None:
         """Add a branch and rebuild the schema supplier."""
         self._insert_branch(_to_workflow(obj))
         self._rebuild_schema_supplier()
@@ -1360,7 +1369,7 @@ class ScatterFlow(Workflow):
         self,
         name: str,
         description: str = "",
-        branches: list[Agent | Tool | Workflow] | None = None,
+        branches: list[Callable | Agent | Tool | Workflow] | None = None,
         *,
         flatten: bool = False,
         output_schema: list[str] = [WF_RESULT],
@@ -1422,7 +1431,7 @@ class ScatterFlow(Workflow):
             # "replace": fall through to overwrite
         self._branches[wf.name] = wf
 
-    def add_branch(self, obj: Agent | Tool | Workflow) -> None:
+    def add_branch(self, obj: Callable | Agent | Tool | Workflow) -> None:
         """
         Add a single branch. If non-empty, enforce set-equal input_schema vs current first branch before inserting.
         """

@@ -517,7 +517,7 @@ class Tool:
         source: str = "default",
     ) -> None:
         self._func: Callable = func
-        self._name: str = name
+        self._name: str = (name or func.__name__) or "unnamed_callable"
         self._description: str = (description or func.__doc__) or ""
         self._type: str = type
         self._source: str = source
