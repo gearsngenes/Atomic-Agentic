@@ -359,7 +359,7 @@ class Agent:
             tool = Tool(
                 func=tool,
                 name="pre_invoke_callable",
-                description="Pre-invoke callable adapted to Tool",
+                description=tool.__doc__ or f"Pre-invoke callable adapted to Tool for agent {self.name}",
                 type="function",
                 source="default",
             )
