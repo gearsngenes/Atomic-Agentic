@@ -192,12 +192,19 @@ class OpenAIEngine(LLMEngine):
                 blocks[user_idx]["content"].append({"type": part_type, "file_id": file_id})
 
             # 4) Call Responses API
-            resp = self.llm.responses.create(
-                model=self.model,
-                instructions=instructions,
-                input=blocks,
-                temperature=self.temperature,
-            )
+            if "gpt-5" not in self.model.lower():
+                resp = self.llm.responses.create(
+                    model=self.model,
+                    instructions=instructions,
+                    input=blocks,
+                    temperature=self.temperature,
+                )
+            else:
+                resp = self.llm.responses.create(
+                    model=self.model,
+                    instructions=instructions,
+                    input=blocks,
+                )
             return (getattr(resp, "output_text", "") or "").strip()
 
         finally:
