@@ -7,6 +7,7 @@ from __future__ import annotations
 import os, time, random
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Optional
+import os, mimetypes, warnings
 
 # Provider SDKs
 try: from openai import OpenAI
@@ -74,6 +75,10 @@ class LLMEngine(ABC):
     }
     illegal_mime_prefixes: tuple = ("audio/", "video/")
 
+    def __init__(self) -> None:
+        # persistent attachments mapping: path -> metadata
+        self._attachments: Dict[str, Dict[str, Any]] = {}
+
     @abstractmethod
     def invoke(self, messages: list[dict], file_paths: list[str] | None = None) -> str:
         """
@@ -94,14 +99,73 @@ class LLMEngine(ABC):
         """
         return {"provider": type(self).__name__}
 
+    def attach(self, path: str) -> Dict[str, Any]:
+        """Attach a local path to this engine and prepare provider metadata.
+
+        Returns the metadata dict stored for this path. Idempotent: re-attaching
+        an already-attached path returns the existing metadata.
+        """
+        if not isinstance(path, str) or not path:
+            raise TypeError("LLMEngine.attach: path must be a non-empty string")
+        if path in self._attachments:
+            return self._attachments[path]
+
+        meta: Dict[str, Any] = {"path": path, "provider": type(self).__name__, "created_at": time.time()}
+        # Delegate engine-specific preparation (upload/inlining/classification)
+        try:
+            prepared = self._prepare_attachment(path)
+            if not isinstance(prepared, dict):
+                raise TypeError("_prepare_attachment must return a dict of metadata")
+            meta.update(prepared)
+        except Exception as e:  # propagate to caller (they may want to handle)
+            meta["error"] = str(e)
+            # Do not store failing metadata; raise so caller knows attach failed.
+            raise
+
+        self._attachments[path] = meta
+        return meta
+
+    def detach(self, path: str) -> bool:
+        """Remove an attachment from this engine. Best-effort remote cleanup via
+        `_on_detach` is attempted; subclasses may override `_on_detach` to implement
+        provider-specific deletion.
+        Returns True if removed, False if path was not attached.
+        """
+        meta = self._attachments.pop(path, None)
+        if not meta:
+            return False
+        try:
+            self._on_detach(meta)
+        except Exception:
+            # best-effort: ignore remote deletion errors
+            pass
+        return True
+
+    @property
+    def attachments(self) -> Dict[str, Dict[str, Any]]:
+        """Return a shallow copy of the attachments mapping."""
+        return dict(self._attachments)
+
+    def get_attachment(self, path: str) -> Optional[Dict[str, Any]]:
+        return self._attachments.get(path)
+
+    # Hooks for subclasses to implement provider-specific behavior
+    @abstractmethod
+    def _prepare_attachment(self, path: str) -> Dict[str, Any]:
+        """Prepare a local path for reuse with this engine.
+
+        Subclasses should override this to return metadata describing how the
+        engine will refer to the file (e.g., `{'kind':'pdf','file_id':...}` or
+        `{'kind':'text','inlined_text':...}`). The base implementation raises
+        `NotImplementedError` to encourage engines to provide an implementation.
+        """
+    @abstractmethod
+    def _on_detach(self, meta: Dict[str, Any]) -> None:
+        """Optional hook called when an attachment is detached. Subclasses may
+        implement remote deletion here. Default is a no-op."""
+
 
 # ── OPENAI (Responses API + Chat fallback) ─────────────────────────────────────
-import os, mimetypes
-from typing import Any, List, Dict, Optional
-from openai import OpenAI
-
-DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
 class OpenAIEngine(LLMEngine):
     """
     OpenAI adapter using the **Responses API**.
@@ -134,6 +198,7 @@ class OpenAIEngine(LLMEngine):
     def __init__(self, model: str, api_key: str | None = None,
                  temperature: float = 0.1, inline_cutoff_chars: int = 200_000,
                  extra_illegal_exts: set[str] | None = None):
+        super().__init__()
         self.llm = OpenAI(api_key=api_key or DEFAULT_OPENAI_API_KEY)
         self.model = model
         self.temperature = float(temperature)
@@ -143,78 +208,60 @@ class OpenAIEngine(LLMEngine):
 
     # ── Public API ───────────────────────────────────────────────
     def invoke(self, messages: list[dict], file_paths: list[str] | None = None) -> str:
-        file_paths = list(dict.fromkeys(file_paths or []))  # de-dupe, preserve order
+        # Attachments are expected to be prepared via `engine.attach(path)` ahead
+        # of calling `invoke`. Passing `file_paths` here is deprecated and ignored.
+        if file_paths:
+            warnings.warn("OpenAIEngine.invoke: passing file_paths is deprecated; use engine.attach(path) before invoke", DeprecationWarning)
 
-        # 1) Validate and classify paths (raise early for illegal/unsupported)
-        classifications = [self._classify_or_raise(p) for p in file_paths]
-        # kinds: "pdf" | "image" | "text"
-
-        # 2) Build Responses blocks: instructions + role-aware turns
+        # 1) Build Responses blocks: instructions + role-aware turns
         instructions = self._collect_instructions(messages)
         blocks = self._build_role_blocks(messages)
 
         # Ensure there is a user block to carry files/inline text
         user_idx = self._ensure_user_block(blocks)
 
-        # 3) Prepare uploads/inline content
-        uploaded_ids: list[str] = []      # track for cleanup
-        total_inlined = 0
-        try:
-            # Inline text/code first (deterministic order)
-            for path, kind in classifications:
-                if kind != "text":
-                    continue
-                text = self._read_text_file(path)
+        # 2) Append prepared attachments (persistent) to the user block
+        attachments = self._attachments
+        for path, meta in attachments.items():
+            kind = meta.get("kind", "text")
+            # Inlined text
+            if meta.get("inlined") or kind == "text":
+                text = meta.get("inlined_text", "")
                 if not text:
                     continue
-                budget = self.inline_cutoff_chars - total_inlined
-                if budget <= 0:
-                    # no more room; add a small marker once
-                    if total_inlined == self.inline_cutoff_chars:
-                        blocks[user_idx]["content"].append({
-                            "type": "input_text",
-                            "text": "\n[Inline cutoff reached; additional text files omitted]\n"
-                        })
-                        total_inlined += len("[Inline cutoff reached; additional text files omitted]\n")
-                    continue
-                if len(text) > budget:
-                    text = text[:budget] + "\n…[truncated]\n"
                 header = f"\n[Inlined file: {os.path.basename(path)}]\n"
                 blocks[user_idx]["content"].append({"type": "input_text", "text": header + text})
-                total_inlined += len(text)
+                continue
 
-            # Attach PDFs and images via temporary uploads
-            for path, kind in classifications:
-                if kind not in ("pdf", "image"):
-                    continue
-                file_id = self._upload_file(path)
-                uploaded_ids.append(file_id)
+            # Uploaded handle (file_id)
+            if meta.get("uploaded") and meta.get("file_id"):
+                fid = meta.get("file_id")
                 part_type = "input_file" if kind == "pdf" else "input_image"
-                blocks[user_idx]["content"].append({"type": part_type, "file_id": file_id})
+                blocks[user_idx]["content"].append({"type": part_type, "file_id": fid})
+                continue
 
-            # 4) Call Responses API
-            if "gpt-5" not in self.model.lower():
-                resp = self.llm.responses.create(
-                    model=self.model,
-                    instructions=instructions,
-                    input=blocks,
-                    temperature=self.temperature,
-                )
-            else:
-                resp = self.llm.responses.create(
-                    model=self.model,
-                    instructions=instructions,
-                    input=blocks,
-                )
-            return (getattr(resp, "output_text", "") or "").strip()
+            # Fallback: try to attach local content directly (best-effort)
+            try:
+                self._attach_local_path(blocks[user_idx]["content"], path)
+            except Exception:
+                # ignore failing attachment for this path
+                continue
 
-        finally:
-            # 5) Best-effort cleanup for any uploads this call created
-            for fid in uploaded_ids:
-                try:
-                    self.llm.files.delete(fid)
-                except Exception:
-                    pass
+        # 3) Call Responses API
+        if "gpt-5" not in self.model.lower():
+            resp = self.llm.responses.create(
+                model=self.model,
+                instructions=instructions,
+                input=blocks,
+                temperature=self.temperature,
+            )
+        else:
+            resp = self.llm.responses.create(
+                model=self.model,
+                instructions=instructions,
+                input=blocks,
+            )
+        return (getattr(resp, "output_text", "") or "").strip()
 
     # ── Helpers: classification / validation / IO / uploads ─────
     def _classify_or_raise(self, path: str) -> tuple[str, str]:
@@ -240,6 +287,46 @@ class OpenAIEngine(LLMEngine):
 
         # default → treat as text/code (we'll inline)
         return (path, "text")
+
+    # ---------------- OpenAI attachment preparation / cleanup ----------------
+    def _prepare_attachment(self, path: str) -> Dict[str, Any]:
+        """Engine-specific preparation for a local path.
+
+        Returns a metadata dict describing how the engine will reference the file.
+        """
+        # Validate & classify
+        p, kind = self._classify_or_raise(path)
+        mime, _ = mimetypes.guess_type(path)
+        mime = mime or ""
+        ext = os.path.splitext(path)[1].lower()
+
+        if kind in ("pdf", "image"):
+            # upload once and keep the file_id
+            fid = self._upload_file(path)
+            return {
+                "kind": kind,
+                "mime": mime,
+                "ext": ext,
+                "uploaded": True,
+                "file_id": fid,
+            }
+
+        # text/code → inline
+        text = self._read_text_file(path)
+        if len(text) > self.inline_cutoff_chars:
+            text = text[: self.inline_cutoff_chars] + "\n…[truncated]\n"
+        return {"kind": "text", "inlined": True, "inlined_text": text}
+
+    def _on_detach(self, meta: Dict[str, Any]) -> None:
+        """Attempt to delete any remote file created by OpenAI Files API."""
+        fid = meta.get("file_id")
+        if not fid:
+            return
+        try:
+            self.llm.files.delete(fid)
+        except Exception:
+            # best-effort
+            pass
 
     def _collect_instructions(self, messages: list[dict]) -> str | None:
         """Concatenate all `system` message contents into a single instructions string (or None)."""
@@ -328,86 +415,19 @@ class OpenAIEngine(LLMEngine):
         header = f"\n[Inlined file: {os.path.basename(path)}]\n"
         user_parts.append({"type": "input_text", "text": header + text})
 
-    def _attach_uploaded_handle(self, user_parts: List[Dict[str, Any]], file_id: str) -> None:
-        """
-        Attach an **existing** uploaded file by inspecting its metadata:
-        - If PDF → `input_file`
-        - If image → `input_image`
-        - Otherwise, try to fetch bytes and inline as text (if `.files.content` exists).
-          If content retrieval isn't supported by the SDK, raise a clear error.
-        """
-        # Try to detect from metadata
-        filename, mime = "", ""
-        try:
-            meta = self.llm.files.retrieve(file_id)
-            filename = getattr(meta, "filename", None) or getattr(meta, "name", "") or ""
-            mime = getattr(meta, "mime_type", None) or ""
-        except Exception:
-            # Best-effort: infer by id alone (we'll try image/pdf by extension fallback)
-            pass
-
-        name_lc = (filename or "").lower()
-        is_pdf   = (mime == "application/pdf") or name_lc.endswith(".pdf")
-        is_image = (mime.startswith("image/") if mime else False) or name_lc.endswith(
-            (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic")
-        )
-
-        if is_pdf:
-            user_parts.append({"type": "input_file", "file_id": file_id})
-            return
-
-        if is_image:
-            user_parts.append({"type": "input_image", "file_id": file_id})
-            return
-
-        # Non-PDF/non-image: try to download and inline
-        text = None
-        try:
-            # Newer SDKs provide a streaming reader for file content
-            stream = self.llm.files.content(file_id)  # may raise if not supported
-            data = stream.read() if hasattr(stream, "read") else getattr(stream, "content", None)
-            if isinstance(data, bytes):
-                text = data.decode("utf-8", errors="replace")
-        except Exception:
-            # If your SDK/version doesn't support .content, we can't inline a handle-only file.
-            raise ValueError(
-                f"OpenAIEngine: file_id '{file_id}' is not a PDF/image and this SDK "
-                f"cannot fetch contents to inline. Pass a local path instead so I can read() it."
-            )
-
-        if text is None:
-            raise ValueError(
-                f"OpenAIEngine: unable to inline contents for file_id '{file_id}'."
-            )
-
-        if len(text) > self._MAX_INLINE_CHARS:
-            text = text[: self._MAX_INLINE_CHARS] + "\n…[truncated]\n"
-
-        label = filename or file_id
-        header = f"\n[Inlined file (uploaded): {label}]\n"
-        user_parts.append({"type": "input_text", "text": header + text})
-
-    @staticmethod
-    def _as_openai_file_id(handle: Any) -> str:
-        """Normalize a Files handle (string ID / dict with `id` or `file_id` / SDK object) to a string ID."""
-        if isinstance(handle, str):
-            return handle
-        if isinstance(handle, dict):
-            fid = handle.get("file_id") or handle.get("id")
-            if isinstance(fid, str) and fid:
-                return fid
-        if hasattr(handle, "id"):
-            fid = getattr(handle, "id")
-            if isinstance(fid, str) and fid:
-                return fid
-        raise TypeError(f"Unsupported OpenAI file handle type: {type(handle)}")
-
     def to_dict(self) -> Dict[str, Any]:
         """Diagnostic snapshot for OpenAIEngine: provider + model + temperature.
 
         Intentionally minimal to avoid leaking client objects or API keys.
         """
-        return {"provider": type(self).__name__, "model": getattr(self, "model", None), "temperature": getattr(self, "temperature", None)}
+        return {
+            # initialization parameters
+            "provider": type(self).__name__,
+            "model": self.model,
+            "temperature": self.temperature,
+            # runtime variables
+            "attachments": self.attachments
+            }
 
 
 # ── LLAMA.CPP (local; no remote file store) ────────────────────────────────────
@@ -429,6 +449,7 @@ class LlamaCppEngine(LLMEngine):
         n_ctx: int = 2048,
         verbose: bool = False,
     ):
+        super().__init__()
         self.llm = None
         if model_path:
             self.llm = Llama(model_path=model_path, n_ctx=n_ctx, verbose=verbose)
@@ -507,6 +528,7 @@ class GeminiEngine(LLMEngine):
 
     def __init__(self, model: str, api_key: str | None = None,
                  temperature: float = 0.1, extra_illegal_exts: set[str] | None = None):
+        super().__init__()
         self.client = genai.Client(api_key=api_key or DEFAULT_GEMINI_KEY)
         self.model = model
         self.temperature = float(temperature)
@@ -648,6 +670,7 @@ class MistralEngine(LLMEngine):
                  extra_illegal_exts: set[str] | None = None,
                  retry_sign_attempts: int = 5,
                  retry_base_delay: float = 0.3):
+        super().__init__()
         self.client = Mistral(api_key=api_key or DEFAULT_MISTRAL_KEY)
         self.model = model
         self.temperature = float(temperature)
@@ -840,6 +863,7 @@ class AzureOpenAIEngine(LLMEngine):
     implementation: `upload`, `delete`, and `invoke` are intentionally unimplemented.
     """
     def __init__(self, api_key: str, endpoint: str, api_version: str, model: str):
+        super().__init__()
         self.api_key = api_key
         self.endpoint = endpoint
         self.api_version = api_version
@@ -867,6 +891,7 @@ class BedrockEngine(LLMEngine):
     implementation: `upload`, `delete`, and `invoke` are intentionally unimplemented.
     """
     def __init__(self, access_key: str, secret_key: str, region: str, model: str):
+        super().__init__()
         self.access_key = access_key
         self.secret_key = secret_key
         self.region = region

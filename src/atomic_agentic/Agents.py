@@ -212,7 +212,6 @@ class Agent:
         self._history: List[Dict[str, str]] = []
 
         # Simple list of file paths. No existence checks, no normalization.
-        self._attachments: List[str] = []
 
         # Pre-invoke Tool: strict identity by default -> requires {"prompt": str}
         if pre_invoke is not None and isinstance(pre_invoke, Callable):
@@ -315,9 +314,9 @@ class Agent:
         self._history.clear()
 
     @property
-    def attachments(self) -> List[str]:
+    def attachments(self) -> Dict[str, Dict[str, Any]]:
         """A shallow copy of the current attachment paths."""
-        return list(self._attachments)
+        return self.llm_engine.attachments
 
     def attach(self, path: str) -> bool:
         """
@@ -325,12 +324,11 @@ class Agent:
 
         Returns True if added, False if it was already present.
         """
-        if not isinstance(path, str) or not path:
-            raise AgentError("attach(path): path must be a non-empty string.")
-        if path in self._attachments:
+        try:
+            self._llm_engine.attach(path)
+            return True
+        except ValueError:
             return False
-        self._attachments.append(path)
-        return True
 
     def detach(self, path: str) -> bool:
         """
@@ -339,7 +337,7 @@ class Agent:
         Returns True if removed, False if it was not present.
         """
         try:
-            self._attachments.remove(path)
+            self._llm_engine.detach(path)
             return True
         except ValueError:
             return False
@@ -396,7 +394,10 @@ class Agent:
         # 4) Call engine with a small signature shim
         try:
             logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
-            text = self._llm_engine.invoke(messages, self._attachments)
+            # Engines now manage their own persistent attachments via
+            # `engine.attach(path)` / `engine.detach(path)`. Do not attach/detach
+            # during invoke; simply pass the prepared messages.
+            text = self._llm_engine.invoke(messages)
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine invocation failed: {e}") from e
 
@@ -484,7 +485,6 @@ class Agent:
             "history_window": self._history_window,
             # Runtime variables
             "history": self._history,
-            "attachments": self._attachments,
         })
 
     def __repr__(self) -> str:
@@ -497,6 +497,5 @@ class Agent:
             f"Agent(name={self._name!r}, "
             f"role_prompt_preview={role_preview!r}, "
             f"history_window={self._history_window!r}, "
-            f"turns={turns}, "
-            f"attachments={len(self._attachments)})"
+            f"turns={turns})"
         )
