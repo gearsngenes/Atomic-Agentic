@@ -5,3 +5,9 @@ modules/__pycache__/
 test_code/
 .env
 *.json
+
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+src/atomic_agentic/_version.py

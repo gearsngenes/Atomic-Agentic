@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=69", "wheel", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atomic-agentic"
+description = "Provider-agnostic, schema-driven tools, agents, and workflows for building agentic systems."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+# Use git tags for versioning (PEP 440 compliant) via setuptools-scm:
+dynamic = ["version"]
+
+authors = [
+  { name = "gearsngenes" }
+]
+
+# Keep the hard deps minimal. Engines import python-dotenv at import time.
+dependencies = [
+  "python-dotenv"
+]
+
+keywords = ["agents", "workflows", "tools", "LLM", "RAG", "MCP", "A2A"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved",
+  "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+# LLM / Embedding engines
+openai  = ["openai"]
+mistral = ["mistralai"]
+gemini  = ["google-genai"]        # official GenAI SDK name per Google docs
+llama   = ["llama-cpp-python"]
+huggingface = ["huggingface-hub"]
+
+# Protocols / connectivity
+a2a = ["python-a2a"]
+mcp = ["mcp", "requests"]         # requests useful for HTTP transports
+
+# LangChain ecosystem & graph tools (used in some examples)
+langgraph = ["langgraph", "graphviz", "langchain-tavily"]
+
+# Streamlit demo UI
+demo = ["streamlit"]
+
+# Jupyter-friendly environment (kept as an extra, not core)
+notebook = ["ipykernel"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Ensure typing marker is included in the wheel.
+[tool.setuptools.package-data]
+atomic_agentic = ["py.typed"]
+
+[tool.setuptools_scm]
+# Write the resolved version into the package at build time.
+version_file = "src/atomic_agentic/_version.py"
