@@ -19,3 +19,5 @@ langgraph
 graphviz
 pydantic
 langchain-tavily
+# Streamlit demo
+streamlit 
