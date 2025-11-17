@@ -16,6 +16,8 @@ from atomic_agentic.Agents import Agent
 from atomic_agentic.Tools import Tool
 from atomic_agentic.LLMEngines import OpenAIEngine  # swap for another engine if desired
 from typing import List, Optional
+from dotenv import load_dotenv
+load_dotenv()
 
 # --------------------------- STRICT schema Tool --------------------------- #
 def lesson_prompt_strict(

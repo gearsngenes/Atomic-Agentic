@@ -3,10 +3,11 @@
 #   - OPENAI_API_KEY in your environment (or .env; your modules already call load_dotenv)
 #   - Your updated Agents.py and LLMEngines.py on PYTHONPATH (e.g., in a "modules" package)
 import os, time
+from dotenv import load_dotenv
 from atomic_agentic.LLMEngines import OpenAIEngine,MistralEngine,GeminiEngine
 from atomic_agentic.Agents import Agent
 from atomic_agentic.LLMEngines import GeminiEngine, OpenAIEngine, MistralEngine, LlamaCppEngine
-
+load_dotenv()
 # --- define our agent's llm (openai, bedrock, azure, etc.) ---
 llm = OpenAIEngine(model = "gpt-4o-mini")#MistralEngine(model = "mistral-small-latest")#GeminiEngine(model = "gemini-2.5-flash")#LlamaCppEngine(repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx   = 512, verbose = False)#
 

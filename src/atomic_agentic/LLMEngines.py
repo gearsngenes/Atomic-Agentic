@@ -8,8 +8,6 @@ import os, time, random
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Optional
 
-from dotenv import load_dotenv
-
 # Provider SDKs
 try: from openai import OpenAI
 except: pass
@@ -20,14 +18,13 @@ except: pass
 try: from llama_cpp import Llama
 except: pass
 # ── ENV / CONSTANTS ───────────────────────────────────────────────────────────
-load_dotenv()
 DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DEFAULT_GEMINI_KEY     = os.getenv("GOOGLE_API_KEY")
 DEFAULT_MISTRAL_KEY    = os.getenv("MISTRAL_API_KEY")
 
 
 # ── ABSTRACT ENGINE ───────────────────────────────────────────────────────────
-class LLMEngine:
+class LLMEngine(ABC):
     """
     Abstract, **stateless** interface for LLM provider adapters.
 
