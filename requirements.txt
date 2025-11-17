@@ -1,5 +1,4 @@
-# Environment & Jupyter requirements
-ipykernel
+# Environment requirements
 python-dotenv
 # LLM providers
 openai
@@ -15,8 +14,6 @@ uvicorn
 mcpo
 requests
 # langchain and tools
-langgraph
-graphviz
 pydantic
 langchain-tavily
 # Streamlit demo

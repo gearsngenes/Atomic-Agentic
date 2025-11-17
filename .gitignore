@@ -1,4 +1,5 @@
 .venv/
+.venv2/
 examples/output_markdowns
 output_markdowns/
 modules/__pycache__/

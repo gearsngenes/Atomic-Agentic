@@ -1,19 +1,11 @@
-import sys, os
-from pathlib import Path
+import os
 from dotenv import load_dotenv
 load_dotenv()
-# Set root to repo root
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-# --- local imports ---
-from modules.Agents import Agent
-from modules.LLMEngines import GeminiEngine, OpenAIEngine, MistralEngine, LlamaCppEngine
+from atomic_agentic.Agents import Agent
+from atomic_agentic.LLMEngines import OpenAIEngine
 
 # --- define our agent's llm (openai, bedrock, azure, etc.) ---
 llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-4o-mini")
-# llm = GeminiEngine(api_key = os.getenv("GOOGLE_API_KEY"), model = "gemini-2.5-flash")
-# llm = MistralEngine(api_key= os.getenv("MISTRAL_API_KEY"), model = "mistral-small-latest")
-# llm = LlamaCppEngine(repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx   = 512, verbose = False)
 
 # --- define our agent ---
 Agent_Atom = Agent(

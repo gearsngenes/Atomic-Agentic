@@ -8,57 +8,61 @@ description = "Provider-agnostic, schema-driven tools, agents, and workflows for
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-# Use git tags for versioning (PEP 440 compliant) via setuptools-scm:
 dynamic = ["version"]
 
-authors = [
-  { name = "gearsngenes" }
-]
-
-# Keep the hard deps minimal. Engines import python-dotenv at import time.
-dependencies = [
-  "python-dotenv"
-]
-
+authors = [{ name = "gearsngenes" }]
 keywords = ["agents", "workflows", "tools", "LLM", "RAG", "MCP", "A2A"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "License :: OSI Approved",
   "Typing :: Typed",
+  "Development Status :: 3 - Alpha"
+]
+
+# Core deps — importable everywhere, with MCP/A2A made mandatory per your request.
+dependencies = [
+  "pydantic>=2",
+  "python-dotenv",
+  "requests",
+  "mcp",             # Model Context Protocol Python SDK
+  "python-a2a",      # Agent-to-Agent (A2A) SDK
+  "uvicorn",         # ASGI server commonly used to host MCP/A2A endpoints
+  "mcpo",            # MCP→OpenAPI proxy utility
+  "uv"               # included as requested; primarily a CLI/tooling package
 ]
 
 [project.optional-dependencies]
-# LLM / Embedding engines
-openai  = ["openai"]
-mistral = ["mistralai"]
-gemini  = ["google-genai"]        # official GenAI SDK name per Google docs
-llama   = ["llama-cpp-python"]
-huggingface = ["huggingface-hub"]
+# LLM / embedding providers (kept optional)
+openai      = ["openai"]
+gemini      = ["google-genai"]       # official SDK exposes `from google import genai`
+mistral     = ["mistralai"]
+llama       = ["llama-cpp-python", "huggingface-hub"]
 
-# Protocols / connectivity
-a2a = ["python-a2a"]
-mcp = ["mcp", "requests"]         # requests useful for HTTP transports
-
-# LangChain ecosystem & graph tools (used in some examples)
-langgraph = ["langgraph", "graphviz", "langchain-tavily"]
-
-# Streamlit demo UI
+# Demo UI
 demo = ["streamlit"]
 
-# Jupyter-friendly environment (kept as an extra, not core)
-notebook = ["ipykernel"]
+# Convenience bundle for all optional providers + demo (explicitly expanded for tool compatibility)
+full = [
+  "openai",
+  "google-genai",
+  "mistralai",
+  "llama-cpp-python",
+  "huggingface-hub",
+  "streamlit"
+]
+
+[project.urls]
+Homepage = "https://github.com/gearsngenes/Atomic-Agentic"
+Issues   = "https://github.com/gearsngenes/Atomic-Agentic/issues"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Ensure typing marker is included in the wheel.
 [tool.setuptools.package-data]
 atomic_agentic = ["py.typed"]
 
 [tool.setuptools_scm]
-# Write the resolved version into the package at build time.
 version_file = "src/atomic_agentic/_version.py"
