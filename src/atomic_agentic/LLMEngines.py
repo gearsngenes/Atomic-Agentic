@@ -9,13 +9,16 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Optional
 
 from dotenv import load_dotenv
-from llama_cpp import Llama
 
 # Provider SDKs
-from openai import OpenAI
-from google import genai
-from mistralai import Mistral
-
+try: from openai import OpenAI
+except: pass
+try: from google import genai
+except: pass
+try: from mistralai import Mistral
+except: pass
+try: from llama_cpp import Llama
+except: pass
 # ── ENV / CONSTANTS ───────────────────────────────────────────────────────────
 load_dotenv()
 DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -74,6 +77,7 @@ class LLMEngine:
     }
     illegal_mime_prefixes: tuple = ("audio/", "video/")
 
+    @abstractmethod
     def invoke(self, messages: list[dict], file_paths: list[str] | None = None) -> str:
         """
         Run a single request against the backing provider.

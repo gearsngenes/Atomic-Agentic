@@ -12,18 +12,10 @@ Usage:
   - Run as-is to use the STRICT tool.
   - Set use_permissive=True in main() to try the permissive variant.
 """
-
-import sys
-from pathlib import Path
+from atomic_agentic.Agents import Agent
+from atomic_agentic.Tools import Tool
+from atomic_agentic.LLMEngines import OpenAIEngine  # swap for another engine if desired
 from typing import List, Optional
-
-# Add your repo root (adjust as needed)
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.Agents import Agent
-from modules.Tools import Tool
-from modules.LLMEngines import OpenAIEngine  # swap for another engine if desired
-
 
 # --------------------------- STRICT schema Tool --------------------------- #
 def lesson_prompt_strict(

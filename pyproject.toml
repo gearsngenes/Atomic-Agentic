@@ -42,13 +42,12 @@ llama       = ["llama-cpp-python", "huggingface-hub"]
 demo = ["streamlit"]
 
 # Convenience bundle for all optional providers + demo (explicitly expanded for tool compatibility)
-full = [
+llm-providers = [
   "openai",
   "google-genai",
   "mistralai",
   "llama-cpp-python",
   "huggingface-hub",
-  "streamlit"
 ]
 
 [project.urls]
