@@ -1,9 +1,8 @@
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+from dotenv import load_dotenv
+from atomic_agentic.ToolAgents import PlannerAgent
+from atomic_agentic.LLMEngines import OpenAIEngine
 
-from modules.ToolAgents import PlannerAgent
-from modules.LLMEngines import OpenAIEngine
+load_dotenv()
 
 # logging.getLogger().setLevel(level=logging.INFO)
 

@@ -1,11 +1,11 @@
-import sys, os, logging, time
-from pathlib import Path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+import logging, time
+from dotenv import load_dotenv
+from atomic_agentic.ToolAgents import PlannerAgent
+from atomic_agentic.LLMEngines import OpenAIEngine
 
-from modules.ToolAgents import PlannerAgent
-from modules.LLMEngines import OpenAIEngine
+load_dotenv()
 
-# logging.getLogger().setLevel(level=logging.INFO)
+logging.getLogger().setLevel(level=logging.INFO)
 
 llm_engine = OpenAIEngine(model="gpt-4o-mini")
 

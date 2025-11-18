@@ -1,9 +1,11 @@
 from dotenv import load_dotenv
-load_dotenv()
 import logging
 from atomic_agentic.ToolAgents import PlannerAgent
 from atomic_agentic.Plugins import MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
 from atomic_agentic.LLMEngines import OpenAIEngine
+
+load_dotenv()
+
 logging.getLogger().setLevel(level=logging.INFO)
 
 print("\n───────────────────────────────\n")

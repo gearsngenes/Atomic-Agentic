@@ -7,7 +7,9 @@ from dotenv import load_dotenv
 from atomic_agentic.LLMEngines import OpenAIEngine,MistralEngine,GeminiEngine
 from atomic_agentic.Agents import Agent
 from atomic_agentic.LLMEngines import GeminiEngine, OpenAIEngine, MistralEngine, LlamaCppEngine
+
 load_dotenv()
+
 # --- define our agent's llm (openai, bedrock, azure, etc.) ---
 llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 # llm = GeminiEngine(api_key = os.getenv("GOOGLE_API_KEY"), model = "gemini-2.5-flash")

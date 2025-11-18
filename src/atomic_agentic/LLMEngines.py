@@ -18,10 +18,6 @@ try: from mistralai import Mistral
 except: pass
 try: from llama_cpp import Llama
 except: pass
-# ── ENV / CONSTANTS ───────────────────────────────────────────────────────────
-DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DEFAULT_GEMINI_KEY     = os.getenv("GOOGLE_API_KEY")
-DEFAULT_MISTRAL_KEY    = os.getenv("MISTRAL_API_KEY")
 
 
 # ── ABSTRACT ENGINE ───────────────────────────────────────────────────────────
@@ -199,7 +195,7 @@ class OpenAIEngine(LLMEngine):
                  temperature: float = 0.1, inline_cutoff_chars: int = 200_000,
                  extra_illegal_exts: set[str] | None = None):
         super().__init__()
-        self.llm = OpenAI(api_key=api_key or DEFAULT_OPENAI_API_KEY)
+        self.llm = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
         self.model = model
         self.temperature = float(temperature)
         self.inline_cutoff_chars = int(inline_cutoff_chars)
@@ -534,7 +530,7 @@ class GeminiEngine(LLMEngine):
     def __init__(self, model: str, api_key: str | None = None,
                  temperature: float = 0.1, extra_illegal_exts: set[str] | None = None):
         super().__init__()
-        self.client = genai.Client(api_key=api_key or DEFAULT_GEMINI_KEY)
+        self.client = genai.Client(api_key=api_key or os.getenv("GOOGLE_API_KEY"))
         self.model = model
         self.temperature = float(temperature)
         # allow the caller to expand the illegal set
@@ -676,7 +672,7 @@ class MistralEngine(LLMEngine):
                  retry_sign_attempts: int = 5,
                  retry_base_delay: float = 0.3):
         super().__init__()
-        self.client = Mistral(api_key=api_key or DEFAULT_MISTRAL_KEY)
+        self.client = Mistral(api_key=api_key or os.getenv("MISTRAL_API_KEY"))
         self.model = model
         self.temperature = float(temperature)
         self.inline_cutoff_chars = int(inline_cutoff_chars)
