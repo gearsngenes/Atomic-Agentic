@@ -9,7 +9,10 @@ from atomic_agentic.Agents import Agent
 from atomic_agentic.LLMEngines import GeminiEngine, OpenAIEngine, MistralEngine, LlamaCppEngine
 load_dotenv()
 # --- define our agent's llm (openai, bedrock, azure, etc.) ---
-llm = OpenAIEngine(model = "gpt-4o-mini")#MistralEngine(model = "mistral-small-latest")#GeminiEngine(model = "gemini-2.5-flash")#LlamaCppEngine(repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx   = 512, verbose = False)#
+llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
+# llm = GeminiEngine(api_key = os.getenv("GOOGLE_API_KEY"), model = "gemini-2.5-flash")
+# llm = MistralEngine(api_key= os.getenv("MISTRAL_API_KEY"), model = "mistral-medium-latest")
+# llm = LlamaCppEngine(repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx   = 512, verbose = False)
 
 # --- define our agent ---
 agent = Agent(

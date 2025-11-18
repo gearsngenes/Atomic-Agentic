@@ -1,14 +1,10 @@
-import sys
-from pathlib import Path
-
-# Setting the root
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.ToolAgents import PlannerAgent
-from modules.LLMEngines import OpenAIEngine
-
+from dotenv import load_dotenv
+import os
+from atomic_agentic.ToolAgents import PlannerAgent
+from atomic_agentic.LLMEngines import OpenAIEngine
+load_dotenv()
 # LLM engine
-llm_engine = OpenAIEngine(model="gpt-4o-mini")
+llm_engine = OpenAIEngine(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
 
 # Planner agent (context optional—showing disabled here)
 planner = PlannerAgent(

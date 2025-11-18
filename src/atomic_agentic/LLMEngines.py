@@ -80,7 +80,7 @@ class LLMEngine(ABC):
         self._attachments: Dict[str, Dict[str, Any]] = {}
 
     @abstractmethod
-    def invoke(self, messages: list[dict], file_paths: list[str] | None = None) -> str:
+    def invoke(self, messages: list[dict]) -> str:
         """
         Run a single request against the backing provider.
 
@@ -207,12 +207,10 @@ class OpenAIEngine(LLMEngine):
         self.illegal_exts = set(self._ILLEGAL_EXTS) | (set(extra_illegal_exts or ()))
 
     # ── Public API ───────────────────────────────────────────────
-    def invoke(self, messages: list[dict], file_paths: list[str] | None = None) -> str:
+    def invoke(self, messages: list[dict]) -> str:
         # Attachments are expected to be prepared via `engine.attach(path)` ahead
         # of calling `invoke`. Passing `file_paths` here is deprecated and ignored.
-        if file_paths:
-            warnings.warn("OpenAIEngine.invoke: passing file_paths is deprecated; use engine.attach(path) before invoke", DeprecationWarning)
-
+        
         # 1) Build Responses blocks: instructions + role-aware turns
         instructions = self._collect_instructions(messages)
         blocks = self._build_role_blocks(messages)
@@ -425,6 +423,7 @@ class OpenAIEngine(LLMEngine):
             "provider": type(self).__name__,
             "model": self.model,
             "temperature": self.temperature,
+            "inline_cutoff_chars": self.inline_cutoff_chars,
             # runtime variables
             "attachments": self.attachments
             }
@@ -463,15 +462,21 @@ class LlamaCppEngine(LLMEngine):
         self.repo_id = repo_id
         self.filename = filename
 
-    def upload(self, path: str) -> Any:
+    def attach(self, path: str) -> Any:
         """Not supported for local inference."""
         raise NotImplementedError("LlamaCppEngine has no remote file storage.")
 
-    def delete(self, handle: Any) -> bool:
+    def detach(self, path: Any) -> bool:
         """Not supported for local inference."""
         raise NotImplementedError("LlamaCppEngine has no remote file storage.")
+    
+    def _prepare_attachment(self, path):
+        raise NotImplementedError("LlamaCppEngine has no remote file storage.")
+    
+    def _on_detach(self, meta: Dict[str, Any]) -> None:
+        raise NotImplementedError("LlamaCppEngine has no remote file storage.")
 
-    def invoke(self, messages: List[Dict[str, str]], files: Optional[List[Any]] = None) -> str:
+    def invoke(self, messages: List[Dict[str, str]]) -> str:
         """Run a local chat completion; `files` are ignored."""
         if not self.llm:
             raise RuntimeError("Llama model not loaded.")
@@ -536,71 +541,71 @@ class GeminiEngine(LLMEngine):
         self.illegal_exts = set(self._ILLEGAL_EXTS) | (set(extra_illegal_exts or ()))
 
     # ── Public API ───────────────────────────────────────────────
-    def invoke(self, messages: list[dict], file_paths: list[str] | None = None) -> str:
+    def invoke(self, messages: list[dict]) -> str:
         """
-        Generate content with Gemini:
-        - Uploads all validated files and includes the resulting File objects in `contents`.
-        - Appends user/assistant strings (non-system) after the files.
-        - Supplies system text via `system_instruction`.
-        - Deletes uploaded files created by this call (best-effort).
+        Generate content with Gemini using persistent attachments.
+        Attachments must be prepared via `engine.attach(path)` before calling invoke.
+        Passing `file_paths` is deprecated and ignored.
         """
-        file_paths = list(dict.fromkeys(file_paths or []))  # de-dupe, preserve order
-
-        # 1) Validate paths (raise early on illegal types)
-        self._validate_paths_or_raise(file_paths)
-
-        # 2) Prepare system + flat text turns (order-preserving)
+        
+        # Prepare system + flat text turns (order-preserving)
         system_instruction = self._collect_system(messages)
         flat_texts = self._collect_non_system_texts(messages)
 
-        # 3) Upload files and assemble contents
-        uploaded_files = []      # File objects (returned by upload) to include in contents
-        uploaded_names = []      # resource names (e.g., "files/abc123") for cleanup
-        try:
-            for path in file_paths:
-                fh = self._upload_path(path)           # genai File object
-                uploaded_files.append(fh)
-                uploaded_names.append(getattr(fh, "name", None))
+        # Build contents from persistent attachments
+        contents = []
+        for path, meta in self._attachments.items():
+            if meta.get("uploaded") and meta.get("file_obj") is not None:
+                contents.append(meta["file_obj"])
+            elif meta.get("inlined") and meta.get("inlined_text"):
+                contents.append(meta["inlined_text"])
+            # else: skip
+        contents.extend([t for t in flat_texts if t])  # then plain strings
 
-            contents = []
-            contents.extend(uploaded_files)            # pass File objects directly
-            contents.extend([t for t in flat_texts if t])  # then plain strings
-
-            cfg = genai.types.GenerateContentConfig(
-                temperature=self.temperature,
-                system_instruction=system_instruction or None,
-            )
-            resp = self.client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=cfg,
-            )
-            return (getattr(resp, "text", None) or "").strip()
-
-        finally:
-            # 4) Best-effort cleanup: delete any uploaded files from this call
-            for name in uploaded_names:
-                if not name:
-                    continue
-                try:
-                    self.client.files.delete(name=name)
-                except Exception:
-                    pass
+        cfg = genai.types.GenerateContentConfig(
+            temperature=self.temperature,
+            system_instruction=system_instruction or None,
+        )
+        resp = self.client.models.generate_content(
+            model=self.model,
+            contents=contents,
+            config=cfg,
+        )
+        return (getattr(resp, "text", None) or "").strip()
 
     # ── Helpers: validation / preparation / uploads ─────────────
-    def _validate_paths_or_raise(self, paths: list[str]) -> None:
-        """Raise if any path does not exist or matches disallowed MIME/ext patterns."""
-        for p in paths:
-            if not os.path.exists(p):
-                raise FileNotFoundError(f"GeminiEngine: file not found: {p}")
-            mime, _ = mimetypes.guess_type(p)
-            mime = mime or ""
-            ext = os.path.splitext(p)[1].lower()
+    # ---------------- Gemini attachment preparation / cleanup ----------------
+    def _prepare_attachment(self, path: str) -> Dict[str, Any]:
+        """Prepare a local path for Gemini: upload once and store File object."""
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"GeminiEngine: file not found: {path}")
+        mime, _ = mimetypes.guess_type(path)
+        mime = mime or ""
+        ext = os.path.splitext(path)[1].lower()
+        if ext in self.illegal_exts or any(mime.startswith(pref) for pref in self._ILLEGAL_MIME_PREFIXES):
+            raise TypeError(f"GeminiEngine: illegal/unsupported file type: {path}")
 
-            if ext in self.illegal_exts or any(mime.startswith(pref) for pref in self._ILLEGAL_MIME_PREFIXES):
-                raise TypeError(f"GeminiEngine: illegal/unsupported file type: {p}")
+        # Upload all supported files (Gemini prefers upload for all types)
+        file_obj = self._upload_path(path)
+        resource_name = getattr(file_obj, "name", None)
+        return {
+            "kind": "file",  # Gemini treats all as file
+            "mime": mime,
+            "ext": ext,
+            "uploaded": True,
+            "file_obj": file_obj,
+            "resource_name": resource_name,
+        }
 
-            # Everything else is acceptable for Gemini upload (PDF, image, text/code, Office, csv/xlsx, etc.)
+    def _on_detach(self, meta: Dict[str, Any]) -> None:
+        """Delete Gemini file resource if present."""
+        name = meta.get("resource_name")
+        if not name:
+            return
+        try:
+            self.client.files.delete(name=name)
+        except Exception:
+            pass
 
     def _collect_system(self, messages: list[dict]) -> str | None:
         """Join system message contents into a single string (or None)."""
@@ -681,79 +686,94 @@ class MistralEngine(LLMEngine):
         self.illegal_exts = set(self._ILLEGAL_EXTS) | (set(extra_illegal_exts or ()))
 
     # ── Public API ───────────────────────────────────────────────
-    def invoke(self, messages: list[dict], file_paths: list[str] | None = None) -> str:
+    def invoke(self, messages: list[dict]) -> str:
         """
-        Complete a Mistral chat turn, attaching inlined text and signed file URLs as parts.
-        Any temporary uploads created in this call are deleted best-effort.
+        Complete a Mistral chat turn using persistent attachments.
+        Attachments must be prepared via `engine.attach(path)` before calling invoke.
+        Passing `file_paths` is deprecated and ignored.
         """
-        file_paths = list(dict.fromkeys(file_paths or []))  # de-dupe, preserve order
-
-        # 1) Validate & classify
-        classifications = [self._classify_or_raise(p) for p in file_paths]  # (path, kind) where kind ∈ {'pdf','image','text'}
-
-        # 2) Start from the incoming messages
+        
+        # Start from the incoming messages
         native: list[dict] = [
             {"role": (m.get("role") or "user"), "content": (m.get("content") or "")}
             for m in messages
         ]
 
-        # 3) Ensure the last user message is a parts array we can extend
-        user_idx = self._ensure_user_parts(native)  # converts content → [{"type":"text","text":...}, ...]
+        # Ensure the last user message is a parts array we can extend
+        user_idx = self._ensure_user_parts(native)
         parts = native[user_idx]["content"]
 
-        # 4) Inline text/code with cutoff
+        # Inline text/code with cutoff from persistent attachments
         total_inlined = 0
-        for path, kind in classifications:
-            if kind != "text":
-                continue
-            text = self._read_text_file(path)
-            if not text:
-                continue
-            budget = self.inline_cutoff_chars - total_inlined
-            if budget <= 0:
-                if total_inlined == self.inline_cutoff_chars:
-                    parts.append({"type": "text", "text": "\n[Inline cutoff reached; additional text files omitted]\n"})
-                    total_inlined += len("[Inline cutoff reached; additional text files omitted]\n")
-                continue
-            if len(text) > budget:
-                text = text[:budget] + "\n…[truncated]\n"
-            header = f"\n[Inlined file: {os.path.basename(path)}]\n"
-            parts.append({"type": "text", "text": header + text})
-            total_inlined += len(text)
-
-        # 5) Upload/sign/attach PDFs & images; clean up after call
-        uploaded_ids: list[str] = []
-        try:
-            for path, kind in classifications:
-                if kind not in ("pdf", "image"):
+        for path, meta in self._attachments.items():
+            kind = meta.get("kind")
+            if kind == "text" and meta.get("inlined_text"):
+                text = meta["inlined_text"]
+                budget = self.inline_cutoff_chars - total_inlined
+                if budget <= 0:
+                    if total_inlined == self.inline_cutoff_chars:
+                        parts.append({"type": "text", "text": "\n[Inline cutoff reached; additional text files omitted]\n"})
+                        total_inlined += len("[Inline cutoff reached; additional text files omitted]\n")
                     continue
-                file_id = self._upload_file(path)
-                uploaded_ids.append(file_id)
-                url = self._sign_with_retry(file_id, self.retry_sign_attempts, self.retry_base_delay)
-                if kind == "pdf":
-                    parts.append({"type": "document_url", "document_url": url})
-                else:
-                    parts.append({"type": "image_url", "image_url": url})
+                if len(text) > budget:
+                    text = text[:budget] + "\n…[truncated]\n"
+                header = f"\n[Inlined file: {os.path.basename(path)}]\n"
+                parts.append({"type": "text", "text": header + text})
+                total_inlined += len(text)
 
-            # 6) Make the chat call
-            res = self.client.chat.complete(
-                model=self.model,
-                messages=native,
-                temperature=self.temperature,
-            )
-            msg = res.choices[0].message.content
-            if isinstance(msg, list):
-                # Some SDKs return a list of parts for the assistant
-                msg = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in msg])
-            return (msg or "").strip()
+        # Attach signed URLs for PDFs & images from persistent attachments
+        for path, meta in self._attachments.items():
+            kind = meta.get("kind")
+            if kind == "pdf" and meta.get("signed_url"):
+                parts.append({"type": "document_url", "document_url": meta["signed_url"]})
+            elif kind == "image" and meta.get("signed_url"):
+                parts.append({"type": "image_url", "image_url": meta["signed_url"]})
 
-        finally:
-            # 7) Best-effort delete uploads we created this call
-            for fid in uploaded_ids:
-                try:
-                    self.client.files.delete(file_id=fid)
-                except Exception:
-                    pass
+        # Make the chat call
+        res = self.client.chat.complete(
+            model=self.model,
+            messages=native,
+            temperature=self.temperature,
+        )
+        msg = res.choices[0].message.content
+        if isinstance(msg, list):
+            msg = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in msg])
+        return (msg or "").strip()
+    # ---------------- Mistral attachment preparation / cleanup ----------------
+    def _prepare_attachment(self, path: str) -> Dict[str, Any]:
+        """Prepare a local path for Mistral: upload and sign for PDFs/images, inline for text/code."""
+        p, kind = self._classify_or_raise(path)
+        mime, _ = mimetypes.guess_type(path)
+        mime = mime or ""
+        ext = os.path.splitext(path)[1].lower()
+
+        if kind in ("pdf", "image"):
+            file_id = self._upload_file(path)
+            signed_url = self._sign_with_retry(file_id, self.retry_sign_attempts, self.retry_base_delay)
+            return {
+                "kind": kind,
+                "mime": mime,
+                "ext": ext,
+                "uploaded": True,
+                "file_id": file_id,
+                "signed_url": signed_url,
+            }
+
+        # text/code → inline
+        text = self._read_text_file(path)
+        if len(text) > self.inline_cutoff_chars:
+            text = text[: self.inline_cutoff_chars] + "\n…[truncated]\n"
+        return {"kind": "text", "inlined": True, "inlined_text": text}
+
+    def _on_detach(self, meta: Dict[str, Any]) -> None:
+        """Delete Mistral file resource if present."""
+        file_id = meta.get("file_id")
+        if not file_id:
+            return
+        try:
+            self.client.files.delete(file_id=file_id)
+        except Exception:
+            pass
 
     # ── Helpers: validation / classification / IO / uploads ─────
     def _classify_or_raise(self, path: str) -> tuple[str, str]:

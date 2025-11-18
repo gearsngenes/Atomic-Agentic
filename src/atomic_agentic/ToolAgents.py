@@ -553,7 +553,7 @@ class PlannerAgent(ToolAgent):
 
         # Use positional signature to match base Agent consistency
         logger.debug(f"[PlannerAgent - {self.name}].strategize: Invoking LLM")
-        raw = self._llm_engine.invoke(messages, self._attachments)
+        raw = self._llm_engine.invoke(messages)
 
         # Strip markdown fences (common LLM formatting)
         logger.debug(f"[PlannerAgent - {self.name}].strategize: Cleaning LLM text")
@@ -805,8 +805,8 @@ class OrchestratorAgent(ToolAgent):
         )
         messages.append({"role": "user", "content": user_prompt})
 
-        # Engine call (attachments supported)
-        raw = self._llm_engine.invoke(messages, self._attachments)
+        # Engine call
+        raw = self._llm_engine.invoke(messages)
 
         # Strip common markdown fences (if any)
         raw = re.sub(r"^```[a-zA-Z]*|```$", "", raw).strip()
