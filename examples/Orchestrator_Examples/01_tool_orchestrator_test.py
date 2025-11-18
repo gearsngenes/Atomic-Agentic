@@ -1,12 +1,10 @@
-import os, sys, logging
-from pathlib import Path
+import logging
+from dotenv import load_dotenv
+from atomic_agentic.ToolAgents import OrchestratorAgent
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.Plugins import MATH_TOOLS, CONSOLE_TOOLS  # lists of Tool objects
 
-# Setting the repo root on sys.path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.ToolAgents import OrchestratorAgent
-from modules.LLMEngines import OpenAIEngine
-from modules.Plugins import MATH_TOOLS, CONSOLE_TOOLS  # lists of Tool objects
+load_dotenv()  # take environment variables from .env file (if exists)
 
 logging.getLogger().setLevel(logging.INFO)
 

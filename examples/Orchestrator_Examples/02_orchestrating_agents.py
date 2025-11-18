@@ -1,20 +1,14 @@
-import os, sys, logging
-from pathlib import Path
-
-# Setting the repo root on sys.path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.LLMEngines import OpenAIEngine
-from modules.ToolAgents import OrchestratorAgent
-from modules.Agents import Agent
+import logging
+from dotenv import load_dotenv
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.ToolAgents import OrchestratorAgent
+from atomic_agentic.Agents import Agent
+load_dotenv()  # take environment variables from .env file (if exists)
 
 logging.getLogger().setLevel(logging.INFO)
 
 # 1) LLM engine
-llm = OpenAIEngine(
-    model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-    api_key=os.getenv("OPENAI_API_KEY"),
-)
+llm = OpenAIEngine(model="gpt-5-mini")
 
 # 2) Helper agents (schema-first; default pre-invoke expects {"prompt": str})
 builder = Agent(
