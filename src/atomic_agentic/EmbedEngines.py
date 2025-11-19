@@ -1,18 +1,18 @@
 from __future__ import annotations
 import math, time, os, random
 from abc import ABC, abstractmethod
-from openai import OpenAI
-from google import genai
-from google.genai import types as genai_types
-from mistralai import Mistral, SDKError
-from llama_cpp import Llama  # local inference
 from typing import List, Optional, Sequence, Any
-from dotenv import load_dotenv
 
-load_dotenv()
-DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DEFAULT_GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
-DEFAULT_MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+try: from openai import OpenAI
+except: pass
+try: from google import genai
+except:pass
+try: from google.genai import types as genai_types
+except: pass
+try: from mistralai import Mistral, SDKError
+except: pass
+try: from llama_cpp import Llama  # local inference
+except: pass
 
 class EmbedEngine(ABC):
     """
@@ -105,7 +105,7 @@ class OpenAIEmbedEngine(EmbedEngine):
     def __init__(
         self,
         model: str = "text-embedding-3-small",
-        api_key: str = DEFAULT_OPENAI_API_KEY,
+        api_key: str = os.getenv("OPENAI_API_KEY"),
         dimension: int = 1536,
         normalize: bool = False,
     ):
@@ -157,7 +157,7 @@ class GeminiEmbedEngine(EmbedEngine):
     def __init__(
         self,
         model: str = "text-embedding-004",
-        api_key: str = DEFAULT_GEMINI_API_KEY,
+        api_key: str = os.getenv("GOOGLE_API_KEY"),
         dimension: int = 1536,
         *,
         task_type: Optional[str] = None,
@@ -223,7 +223,7 @@ class MistralEmbedEngine(EmbedEngine):
     def __init__(
         self,
         model: str = "mistral-embed",
-        api_key: str = DEFAULT_MISTRAL_API_KEY,
+        api_key: str = os.getenv("MISTRAL_API_KEY"),
         dimension: int = 1024,
         normalize: bool = False,
         *,
