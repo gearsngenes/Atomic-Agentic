@@ -1,10 +1,8 @@
-import sys, os
-from pathlib import Path
 from dotenv import load_dotenv
+from atomic_agentic.EmbedEngines import OpenAIEmbedEngine, GeminiEmbedEngine, MistralEmbedEngine, LlamaCppEmbedEngine
+
 load_dotenv()
-# Set root to repo root
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-from modules.EmbedEngines import OpenAIEmbedEngine, GeminiEmbedEngine, MistralEmbedEngine, LlamaCppEmbedEngine
+
 
 # --- define our embedding engine (openai, cohere, etc.) ---
 engine = LlamaCppEmbedEngine(repo_id="nomic-ai/nomic-embed-text-v1.5-GGUF", filename="nomic-embed-text-v1.5.f16.gguf", dimension=768, normalize=True, n_threads=8)

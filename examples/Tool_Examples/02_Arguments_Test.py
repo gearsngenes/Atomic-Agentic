@@ -8,7 +8,7 @@ import sys, os
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
-from modules.Tools import Tool, ToolInvocationError, ToolDefinitionError
+from atomic_agentic.Tools import Tool, ToolInvocationError, ToolDefinitionError
 
 
 # ---------- Target callables with diverse signatures ----------
@@ -79,7 +79,7 @@ def show_signature(tool):
     print("required_names:", meta["required_names"])
     print("arguments_map (name -> {index, kind, has_default, default}):")
     for name, spec in meta["arguments_map"].items():
-        print(f"  {name}: idx={spec['index']}, kind={spec['kind_name']}, "
+        print(f"  {name}: idx={spec['index']}, kind={spec['kind']}, "
               f"has_default={spec['has_default']}, default={spec.get('default', None)}")
 
 

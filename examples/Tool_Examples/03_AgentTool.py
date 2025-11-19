@@ -4,31 +4,19 @@ AgentTool demo: wrapping an Agent as a Tool with a schema taken from the Agent's
 Adjust the import path to your project layout if needed:
 from modules.ToolAdapters import AgentTool
 """
-import sys
-from pathlib import Path
+from dotenv import load_dotenv
+from atomic_agentic.Tools import Tool, ToolInvocationError
+from atomic_agentic.Agents import Agent
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.ToolAdapters import AgentTool
 
-# Make repo root importable (same pattern as 01_Tool.py)
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.Tools import Tool, ToolInvocationError
-from modules.Agents import Agent
-from modules.LLMEngines import OpenAIEngine
-from modules.ToolAdapters import AgentTool
+load_dotenv()  # take environment variables from .env file (if exists)
 
 # --- 2) Define a richer pre-invoke Tool (schema mirrors desired Agent inputs) ---
 
 def to_prompt(topic: str, style: str, *, audience: str = "general") -> str:
     """Compose a natural-language prompt from structured inputs."""
     return f"Write about '{topic}' in a {style} style for {audience} readers."
-
-prompt_tool = Tool(
-    to_prompt,
-    name="to_prompt",
-    description="Compose prompt from {topic, style, audience?}. Returns: str.",
-    type="python",
-    source="local",
-)
-
 
 # --- 3) Build the Agent and wrap it as an AgentTool ---
 
@@ -37,7 +25,7 @@ agent = Agent(
     description="Helpful writing assistant.",
     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
     role_prompt="You are a concise writing assistant.",
-    pre_invoke=prompt_tool,  # <-- schema source for AgentTool
+    pre_invoke=to_prompt,  # <-- schema source for AgentTool
 )
 
 agent_tool = AgentTool(agent)  # type="agent", source=agent.name, name="invoke"

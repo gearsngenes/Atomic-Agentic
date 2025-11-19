@@ -1,10 +1,9 @@
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).resolve().parents[2]))
+from dotenv import load_dotenv
+from atomic_agentic.A2Agents import A2AServerAgent
+from atomic_agentic.Agents import Agent
+from atomic_agentic.LLMEngines import OpenAIEngine
 
-from modules.A2Agents import A2AServerAgent
-from modules.Agents import Agent
-from modules.LLMEngines import OpenAIEngine
+load_dotenv()  # take environment variables from .env file (if exists)
 
 def main():
     """

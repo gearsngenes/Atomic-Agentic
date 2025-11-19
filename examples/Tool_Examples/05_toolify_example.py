@@ -10,20 +10,15 @@ Server for MCP path (run separately):
     # e.g., in another shell:
     #   python sample_mcp_server.py
 """
-
-import sys
-from pathlib import Path
 from typing import Any, Mapping
-
-# Make repo root importable (aligns with other examples)
-sys.path.append(str(Path(__file__).resolve().parents[2]))
-
 from urllib.parse import urlparse, urlunparse
-from modules.ToolAdapters import toolify
-from modules.Tools import Tool, ToolInvocationError
-from modules.Agents import Agent
-from modules.LLMEngines import OpenAIEngine
+from dotenv import load_dotenv
+from atomic_agentic.ToolAdapters import toolify
+from atomic_agentic.Tools import Tool, ToolInvocationError
+from atomic_agentic.Agents import Agent
+from atomic_agentic.LLMEngines import OpenAIEngine
 
+load_dotenv()  # take environment variables from .env file (if exists)
 
 # ---------- A callable we'll wrap via toolify(callable, ...) ----------
 

@@ -5,20 +5,15 @@ and invoke them with example or synthesized inputs.
 
 Server: ensure it runs Streamable-HTTP and is mounted at /mcp (or provide a full URL with path).
 """
-
-import sys, asyncio
-from pathlib import Path
+import asyncio
 from typing import Any, Mapping
-
-# repo root
-sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from urllib.parse import urlparse, urlunparse
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from modules.ToolAdapters import MCPProxyTool
-from modules.Tools import ToolInvocationError
+from atomic_agentic.ToolAdapters import MCPProxyTool
+from atomic_agentic.Tools import ToolInvocationError
 
 
 SERVER_URL  = "http://127.0.0.1:8000"   # we'll normalize to /mcp if path missing

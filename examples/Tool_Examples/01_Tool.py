@@ -4,10 +4,7 @@ Beginner-friendly demo: using Tool to wrap simple Python functions.
 Adjust the import path to your project layout if needed:
 from modules.Tools import Tool, ToolInvocationError
 """
-import sys, os
-from pathlib import Path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-from modules.Tools import Tool, ToolInvocationError
+from atomic_agentic.Tools import Tool, ToolInvocationError
 
 
 # --- 1) Define plain Python functions (the Tool wraps these) ---

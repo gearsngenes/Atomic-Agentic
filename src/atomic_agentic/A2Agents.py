@@ -1,6 +1,6 @@
 # modules/A2Agents.py
 from __future__ import annotations
-
+import logging
 """
 A2Agents
 ========
@@ -22,7 +22,7 @@ Message-level pattern (no task-level mixing)
 We use `handle_message(...)` on the server and return `Message(FunctionResponseContent(...))`
 for function calls. This mirrors python-a2a's function-calling example.
 """
-
+_logger = logging.getLogger(__name__)
 from typing import Any, Mapping, Dict, Optional
 
 # Project-local imports
@@ -90,12 +90,21 @@ class A2AProxyAgent(Agent):
         # is never used by this proxy.
         # Expect a FULL endpoint (e.g., "http://127.0.0.1:5000/a2a").
         self._client = A2AClient(url)
+        self._url = url
         agent_card = self._client.get_agent_card()
         super().__init__(name=name if name else agent_card.name,
                          description=description if description else agent_card.description,
                          llm_engine=None,
-                         role_prompt="default",
+                         role_prompt="You are a proxy Agent forwarding calls over A2A.",
                          context_enabled=False)
+
+    @property
+    def url(self) -> str:
+        return self._url
+    @url.setter
+    def url(self, val: str) -> None:
+        self._url = val
+        self._client = A2AClient(val)
 
     # We override attach/detach to NO-OP, since the proxy doesn't hold files or context.
     def attach(self, path: str) -> bool:  # type: ignore[override]
@@ -104,8 +113,12 @@ class A2AProxyAgent(Agent):
     def detach(self, path: str) -> bool:  # type: ignore[override]
         return False
 
-    def invoke(self, inputs: Mapping[str, Any]) -> Message:  # type: ignore[override]
+    def _invoke(self, inputs: Mapping[str, Any]) -> Any:
+        pass
+    
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:  # type: ignore[override]
         _ensure_mapping("A2AProxyAgent.invoke", inputs)
+        _logger.info(f"[A2AProxyAgent - {self.name}].invoke: forwarding payload to {self.url}")
 
         # Typed FunctionParameter avoids `'dict' object has no attribute 'name'`.
         call = FunctionCallContent(
@@ -113,8 +126,13 @@ class A2AProxyAgent(Agent):
             parameters=[FunctionParameter(name="payload", value=dict(inputs))]
         )
         msg = Message(content=call, role=MessageRole.USER)
-        resp = self._client.send_message(msg).content.response[A2A_RESULT_KEY]
-        return resp
+        resp = self._client.send_message(msg).content.response
+        result = resp
+        if isinstance(resp, Mapping):
+            result = resp.get(A2A_RESULT_KEY, resp)
+        _logger.info(f"[A2AProxyAgent - {self.name}].invoke: received result of type {type(result)}")
+        return result
+    
     @property
     def role_prompt(self)->str:
         return self._role_prompt
@@ -309,6 +327,12 @@ class A2AServerAgent(Agent):
     @property
     def history_window(self)->int:
         return self._seed.history_window
+    
+    def attach(self, path: str) -> bool:  # type: ignore[override]
+        return self._seed.attach(path)
+    
+    def detach(self, path: str) -> bool:  # type: ignore[override]
+        return self._seed.detach(path)
 
     def run(self,*,debug: bool = False,) -> None:
         """

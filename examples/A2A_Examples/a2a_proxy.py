@@ -1,11 +1,4 @@
-import sys
-from pathlib import Path
-import json
-
-# Ensure local modules can be imported when running from examples/
-sys.path.append(str(Path(__file__).resolve().parents[2]))
-
-from modules.A2Agents import A2AProxyAgent
+from atomic_agentic.A2Agents import A2AProxyAgent
 
 def main():
     """
