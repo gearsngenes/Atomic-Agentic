@@ -11,9 +11,9 @@ from dotenv import load_dotenv
 import streamlit as st
 load_dotenv()  # take environment variables from .env.
 # ---- Atomic-Agentic modules (ensure importable in your env) ----
-from modules.Agents import Agent
-from modules.ToolAgents import PlannerAgent, OrchestratorAgent
-from modules.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine
+from atomic_agentic.Agents import Agent
+from atomic_agentic.ToolAgents import PlannerAgent, OrchestratorAgent
+from atomic_agentic.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine
 
 # ============================== Persistence ==============================
 CONFIG_PATH = "agents.json"
