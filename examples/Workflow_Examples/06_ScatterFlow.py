@@ -1,16 +1,13 @@
 # examples/Workflow_Examples/06_ScatterFlow.py
-
-import sys, logging, json
-from pathlib import Path
+import logging, json
 from typing import Any
+from atomic_agentic.Agents import Agent
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.Tools import Tool
+from atomic_agentic.Workflows import ScatterFlow
+from dotenv import load_dotenv
 
-# Project root
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.Agents import Agent
-from modules.LLMEngines import OpenAIEngine
-from modules.Tools import Tool
-from modules.Workflows import ScatterFlow
+load_dotenv()
 
 logging.getLogger().setLevel(logging.INFO)  # or DEBUG
 

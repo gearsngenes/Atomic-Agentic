@@ -1,14 +1,12 @@
 # 02_ChainFlow.py — minimal, direct ChainFlow examples (dict-in → dict-out)
-import sys, logging, json
-from pathlib import Path
+import logging, json
+from atomic_agentic.Agents import Agent
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.Workflows import ChainFlow
+from atomic_agentic.Tools import Tool
+from dotenv import load_dotenv
 
-# Repo root on path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.Agents import Agent
-from modules.LLMEngines import OpenAIEngine
-from modules.Workflows import ChainFlow
-from modules.Tools import Tool
+load_dotenv()
 
 logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
 

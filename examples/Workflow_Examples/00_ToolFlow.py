@@ -1,13 +1,8 @@
 # examples/Workflow_Examples/00_ToolFlow.py
-import sys, logging
-from pathlib import Path
 from typing import Any, Dict, List
-
-# Repo root on path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.Tools import Tool
-from modules.Workflows import ToolFlow, WF_RESULT
+import logging
+from atomic_agentic.Tools import Tool
+from atomic_agentic.Workflows import ToolFlow, WF_RESULT
 
 logging.getLogger().setLevel(logging.INFO)  # or DEBUG for more detail
 

@@ -1,15 +1,11 @@
-import sys
 import logging
-import json
-from pathlib import Path
+from atomic_agentic.Agents import Agent
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.Workflows import MakerChecker, AgentFlow, ToolFlow
+from atomic_agentic.Tools import Tool
+from dotenv import load_dotenv
 
-# Setting the root
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.Agents import Agent
-from modules.LLMEngines import OpenAIEngine
-from modules.Workflows import MakerChecker, AgentFlow, ToolFlow
-from modules.Tools import Tool
+load_dotenv()
 
 logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
 

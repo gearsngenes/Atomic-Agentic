@@ -1,12 +1,8 @@
 import os
 import re
 import io
-import json
 from typing import Dict, Any, List, Optional
-import os, sys, time
-from pathlib import Path
 
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 # ---- PyMuPDF import: prefer modern name; fall back to legacy 'fitz' ----
 try:
     import pymupdf  # modern import name (PyMuPDF >= 1.24)  # noqa: F401
@@ -15,10 +11,13 @@ except Exception:  # pragma: no cover
     print("[WARN] Using legacy 'fitz' alias. Prefer `pip install -U pymupdf` and `import pymupdf`.")
 
 # ---- Atomic-Agentic imports (adjust if your local path differs) ----
-from modules.Tools import Tool
-from modules.Agents import Agent
-from modules.LLMEngines import OpenAIEngine
-from modules.Workflows import ToolFlow, AgentFlow, MapFlow, ChainFlow
+from atomic_agentic.Tools import Tool
+from atomic_agentic.Agents import Agent
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.Workflows import ToolFlow, AgentFlow, MapFlow, ChainFlow
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # -------- Config: no CLI needed; try ./test.pdf then assets path --------
 SAMPLE_PDF = "./examples/Workflow_Examples/test.pdf"
@@ -134,7 +133,7 @@ def build_summary_prompt(
     if figure_captions:
         blocks.append("# FIGURE_CAPTIONS\n" + figure_captions)
     final_prompt = "\n\n".join(blocks).strip()
-    print("~~~FORMATED_PROMPT~~~",final_prompt,"\n~~~~~~~~~~~~~~~~~~~~")
+    print("~~~FORMATED_PROMPT~~~\n",final_prompt,"\n~~~~~~~~~~~~~~~~~~~~")
     return final_prompt
 
 

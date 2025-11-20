@@ -1,12 +1,7 @@
-import sys, logging, json
-from pathlib import Path
+import logging, json
 from typing import Any
-
-# Project root
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.Tools import Tool
-from modules.Workflows import MapFlow
+from atomic_agentic.Tools import Tool
+from atomic_agentic.Workflows import MapFlow
 
 logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
 

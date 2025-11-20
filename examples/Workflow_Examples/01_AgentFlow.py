@@ -1,14 +1,12 @@
 # examples/Workflow_Examples/01_AgentFlow.py
-import sys, logging
-from pathlib import Path
+import logging
+from atomic_agentic.Agents import Agent
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.Tools import Tool
+from atomic_agentic.Workflows import AgentFlow
+from dotenv import load_dotenv
 
-# Repo root on path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.Agents import Agent
-from modules.LLMEngines import OpenAIEngine
-from modules.Tools import Tool
-from modules.Workflows import AgentFlow
+load_dotenv()
 
 logging.getLogger().setLevel(logging.INFO)  # or DEBUG
 

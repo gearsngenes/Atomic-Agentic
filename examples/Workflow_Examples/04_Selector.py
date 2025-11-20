@@ -1,16 +1,13 @@
-import sys
 import logging
-from pathlib import Path
+from dotenv import load_dotenv
+from atomic_agentic.Agents import Agent
+from atomic_agentic.ToolAgents import PlannerAgent
+from atomic_agentic.Plugins import MATH_TOOLS
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.Workflows import Selector
+from atomic_agentic.Tools import Tool
 
-# Project root
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from modules.Agents import Agent
-from modules.ToolAgents import PlannerAgent
-from modules.Plugins import MATH_TOOLS
-from modules.LLMEngines import OpenAIEngine
-from modules.Workflows import Selector, AgentFlow, ToolFlow
-from modules.Tools import Tool
+load_dotenv()
 
 logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
 
