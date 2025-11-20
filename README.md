@@ -52,23 +52,41 @@ Workflows wrap Tools or Agents as steps and manage inputs/outputs end-to-end. Th
 At each boundary, Workflows and Agents record checkpoints: inputs, raw outputs, packaged outputs, and timings. Deterministic packaging reduces flaky integrations; explicit errors for missing/unknown fields surface early. The result is behavior you can debug, test, and trust in CI/CD.
 
 ## Quickstart (30 seconds)
-In your python virtual environment, open the Atomic-Agentic repository folder and run:
-`pip install -r requirements.txt`
+In your python virtual environment (venv, virtualenv, or conda), open the Atomic-Agentic repository folder.
 
-Then initialize in your environment API keys for OpenAI, Mistral, or Gemini for whatever LLM provider you choose.
+This project is packaged for pip install. To build and install the package locally, run:
 
-Afterwards, you can run
+```powershell
+pip install --upgrade build
+python -m build
+pip install dist\<PACKAGE_FILENAME>.whl
+```
 
+- Replace `<PACKAGE_FILENAME>` with the generated wheel filename (for example, `atomic_agentic-0.1.0-py3-none-any.whl`) or install a source distribution:
+
+```powershell
+pip install dist\*.tar.gz
+```
+
+If you want to install development/runtime dependencies from the repository (optional), you can still run:
+
+```powershell
+pip install -r requirements.txt
+```
+
+Then initialize API keys for any LLM providers you plan to use (OpenAI, Mistral, Gemini, etc.) as environment variables.
+
+After installing the package you can run example code. Example usage (importing from the installed package):
 
 ```python
-from modules.LLMEngines import OpenAIEngine
-from modules.ToolAgents import PlannerAgent
-from modules.ToolAdapters import toolify
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.ToolAgents import PlannerAgent
+from atomic_agentic.ToolAdapters import toolify
 
 # 1) Define a local callable and turn it into a Tool
 def greet(name: str) -> str:
-    print("Generating a greeting...")
-    return f"Hello, {name}! Did you know that your name has {len(name)} letters in it?"
+  print("Generating a greeting...")
+  return f"Hello, {name}! Did you know that your name has {len(name)} letters in it?"
 
 # toolify() accepts callables; name/description are required for callables
 greet_tool = toolify(greet, name="greet", description="Say hello to a person")[0]
@@ -76,9 +94,9 @@ greet_tool = toolify(greet, name="greet", description="Say hello to a person")[0
 # 2) Create a planner-style Agent with a swappable LLM Engine
 engine = OpenAIEngine(model="gpt-4o-mini")   # uses OPENAI_API_KEY env var if not passed explicitly
 planner = PlannerAgent(
-    name="Planner",
-    description="Plans tool calls and returns the final result.",
-    llm_engine=engine,
+  name="Planner",
+  description="Plans tool calls and returns the final result.",
+  llm_engine=engine,
 )
 
 # 3) Register the Tool and inspect the action catalog
@@ -90,7 +108,7 @@ result = planner.invoke({"prompt": "Greet Ada Lovelace and then return the messa
 print("Result:", result)
 ```
 
-> Tip: For more patterns, see the example scripts for Chain, Selector, Scatter/Map, and Maker–Checker.
+Tip: For more patterns, see the example scripts for Chain, Selector, Scatter/Map, and Maker–Checker.
 
 ## Who is it for (and not for)
 
