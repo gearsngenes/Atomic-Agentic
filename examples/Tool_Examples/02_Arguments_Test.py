@@ -73,15 +73,7 @@ def show_signature(tool):
     meta = tool.to_dict()
     print(f"\n-- {tool.name} call plan --")
     print("signature:", meta["signature"])
-    print("posonly_order:", meta["posonly_order"])
-    print("p_or_kw_names:", meta["p_or_kw_names"])
-    print("kw_only_names:", meta["kw_only_names"])
-    print("required_names:", meta["required_names"])
-    print("arguments_map (name -> {index, kind, has_default, default}):")
-    for name, spec in meta["arguments_map"].items():
-        print(f"  {name}: idx={spec['index']}, kind={spec['kind']}, "
-              f"has_default={spec['has_default']}, default={spec.get('default', None)}")
-
+    print("argument map:", meta["arguments_map"])
 
 # ---------- Happy-path cases ----------
 

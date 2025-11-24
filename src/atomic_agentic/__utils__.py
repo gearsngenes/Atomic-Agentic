@@ -602,3 +602,22 @@ async def _async_discover_mcp_tool_names(url: str, headers: Optional[dict]) -> L
 
 def _discover_mcp_tool_names(url: str, headers: Optional[dict]) -> List[str]:
     return _run_sync(_async_discover_mcp_tool_names(url, headers))
+
+_JSON_TO_PY = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "object": dict,
+    "array": list,
+    "null": type(None),
+}
+
+# ---------- URL helpers ----------
+from urllib.parse import urlparse, urlunparse
+def _is_http_url(s: str) -> bool:
+    try:
+        p = urlparse(s)
+        return p.scheme in ("http", "https") and bool(p.netloc)
+    except Exception:
+        return False

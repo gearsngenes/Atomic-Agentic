@@ -6,15 +6,14 @@ import asyncio
 import json
 import logging
 import re
-import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import Any, Callable, Iterable, List, Optional, Union, Dict
+from typing import Any, Callable, Iterable, List, Optional, Union, Dict, Mapping
 
 from . import Prompts
-from .Agents import Agent
+from .Agents import *
 from .LLMEngines import LLMEngine
-from .ToolAdapters import toolify
+from .Toolify import toolify
 from .Tools import Tool
 from ._exceptions import ToolAgentError, ToolRegistrationError
 
@@ -425,7 +424,7 @@ class ToolAgent(Agent, ABC):
     def to_dict(self) -> OrderedDict[str, Any]:
         """Summarize this ToolAgent and its toolbox (safe for logs/telemetry)."""
         _my_dict = Agent.to_dict(self)
-        _my_dict.update({"tools": [tool.to_dict() for _, tool in self._toolbox.items()]})
+        _my_dict.update(OrderedDict(tools = [tool.to_dict() for _, tool in self._toolbox.items()]))
         return _my_dict
 
 
@@ -671,6 +670,11 @@ class PlannerAgent(ToolAgent):
         # Clear step tracker and return
         self._previous_steps = []
         return result
+    
+    def to_dict(self)-> OrderedDict[str, Any]:
+        data = super().to_dict()
+        data.update(OrderedDict(run_concurrent = self.run_concurrent))
+        return data
 
 
 class OrchestratorAgent(ToolAgent):

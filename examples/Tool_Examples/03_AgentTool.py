@@ -6,9 +6,8 @@ from modules.ToolAdapters import AgentTool
 """
 from dotenv import load_dotenv
 from atomic_agentic.Tools import Tool, ToolInvocationError
-from atomic_agentic.Agents import Agent
+from atomic_agentic.Agents import Agent, AgentTool
 from atomic_agentic.LLMEngines import OpenAIEngine
-from atomic_agentic.ToolAdapters import AgentTool
 
 load_dotenv()  # take environment variables from .env file (if exists)
 
@@ -37,9 +36,7 @@ def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
     print(f"\n-- {tool.full_name} call plan --")
     print("signature:", meta["signature"])
-    print("p_or_kw_names:", meta["p_or_kw_names"])
-    print("kw_only_names:", meta["kw_only_names"])
-    print("required_names:", meta["required_names"])
+    print("argument map:", meta["arguments_map"])
 
 def run_case(label: str, tool: Tool, inputs: dict) -> None:
     print(f"\n=== {label} ===")

@@ -54,9 +54,7 @@ def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
     print(f"\n-- {tool.name} call plan --")
     print("signature:", meta["signature"])
-    print("p_or_kw_names:", meta["p_or_kw_names"])
-    print("kw_only_names:", meta["kw_only_names"])
-    print("required_names:", meta["required_names"])
+    print("argument map:", meta["arguments_map"])
 
 def run_case(label: str, tool: Tool, inputs: dict) -> None:
     print(f"\n=== {label} ===")

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os, time, random
 from abc import ABC, abstractmethod
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Mapping
 import os, mimetypes
 from collections import OrderedDict
 
@@ -20,7 +20,7 @@ except: pass
 try: from llama_cpp import Llama
 except: pass
 
-__all__ = ["GeminiEngine", "LlamaCppEngine", "MistralEngine", "OpenAIEngine"]
+__all__ = ["GeminiEngine", "LlamaCppEngine", "LLMEngine", "MistralEngine", "OpenAIEngine"]
 
 # ── ABSTRACT ENGINE ───────────────────────────────────────────────────────────
 class LLMEngine(ABC):
@@ -95,9 +95,7 @@ class LLMEngine(ABC):
 
         Subclasses should extend or merge this dict with provider-specific fields.
         """
-        return OrderedDict(
-            provider = type(self).__name__
-        )
+        return OrderedDict(provider = type(self).__name__)
 
     def attach(self, path: str) -> Dict[str, Any]:
         """Attach a local path to this engine and prepare provider metadata.

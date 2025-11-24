@@ -7,7 +7,7 @@ import math
 mcp = FastMCP(name="Demo Mathematics Server")
 
 @mcp.tool()
-def mul(a: float, b: float) -> list[int]:
+def multiply(a: float, b: float) -> list[int]:
     """Multiply two numbers a, b, and return the product in a single-item list."""
     return [a * b]
 

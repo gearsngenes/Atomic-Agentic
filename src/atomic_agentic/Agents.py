@@ -87,17 +87,17 @@ Create one Agent per concurrent lane, or protect it with external synchronizatio
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Callable
+from typing import Any, Dict, List, Mapping, Optional, Callable, Union
 import logging
 from collections import OrderedDict
 
 # Local imports (adjust the module paths if your project structure differs)
-from .LLMEngines import LLMEngine
-from .Tools import Tool
+from .LLMEngines import *
+from .Tools import *
 from ._exceptions import *
 
 
-__all__ = ["Agent"]
+__all__ = ["Agent", "AgentTool"]
 
 
 logger = logging.getLogger(__name__)
@@ -443,28 +443,92 @@ class Agent:
 
     def to_dict(self) -> OrderedDict[str, Any]:
         """A minimal diagnostic snapshot of this agent (safe to log/serialize)."""
-        return OrderedDict({
-            # initialization variables
-            "name": self._name,
-            "description": self._description,
-            "role_prompt": self._role_prompt,
-            "pre_invoke": self._pre_invoke.to_dict(),
-            "llm": self._llm_engine.to_dict() if self._llm_engine else type(None),
-            "context_enabled": self._context_enabled,
-            "history_window": self._history_window,
-            # Runtime variables
-            "history": self._history,
-        })
-
-    def __repr__(self) -> str:
-        role_preview = ""
-        if self._role_prompt:
-            rp = self._role_prompt.strip().replace("\n", " ")
-            role_preview = (rp[:32] + "…") if len(rp) > 32 else rp
-        turns = sum(1 for m in self._history if m.get("role") == "assistant")
-        return (
-            f"Agent(name={self._name!r}, "
-            f"role_prompt_preview={role_preview!r}, "
-            f"history_window={self._history_window!r}, "
-            f"turns={turns})"
+        return OrderedDict(
+            agent_type = type(self).__name__,
+            name = self._name,
+            description = self._description,
+            role_prompt = self._role_prompt,
+            pre_invoke = self._pre_invoke.to_dict(),
+            llm = self._llm_engine.to_dict() if self._llm_engine else None,
+            context_enabled = self._context_enabled,
+            history_window = self._history_window,
+            history = self._history,
         )
+
+
+class AgentTool(Tool):
+    """
+    Adapter that exposes an Agent as a Tool with schema-driven introspection.
+
+    Metadata
+    --------
+    - type   = "agent"
+    - source = agent.name
+    - name   = "invoke"
+    - description = agent.description
+
+    Schema exposure
+    ---------------
+    Mirrors the agent's `pre_invoke` Tool call-plan (arguments map, required sets,
+    varargs flags, etc.) so planners see the exact input keys & binding rules.
+
+    Signature string
+    ----------------
+    The base Tool builds a canonical, schema-derived signature of the form:
+        "agent.<agent_name>.invoke(p1:Type, p2?:Type) -> str"
+    We set return_type to "str" and call `_rebuild_signature_str()` after
+    overriding the plan to reflect the agent’s actual output.
+    """
+
+    def __init__(self, agent: Agent) -> None:
+        if not isinstance(agent, Agent):
+            raise ToolDefinitionError("AgentTool requires an Agents.Agent instance.")
+
+        pre = agent.pre_invoke
+        if not isinstance(pre, Tool):
+            raise ToolDefinitionError("AgentTool requires agent.pre_invoke to be a Tools.Tool.")
+
+        self.agent = agent
+        # Initialize base Tool with agent.invoke
+        self._func = agent.invoke
+        self._name = "invoke"
+        self._description = agent.description
+        self._source = self.agent.name
+        self.module = None
+        self.qualname = None
+
+        # ---- Mirror the pre_invoke call-plan (shallow copies to avoid aliasing) ----
+        self._arguments_map = pre.arguments_map
+        self.posonly_order = list(pre.posonly_order)
+        self.p_or_kw_names = list(pre.p_or_kw_names)
+        self.kw_only_names = list(pre.kw_only_names)
+        self.required_names = set(pre.required_names)
+        self.has_varargs = bool(pre.has_varargs)
+        self.varargs_name = pre.varargs_name
+        self.has_varkw = bool(pre.has_varkw)
+        self.varkw_name = pre.varkw_name
+
+        # Explicit return type for AgentTool (agent responses are strings)
+        self._return_type = "Any"
+        self._rebuild_signature_str()
+    
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """
+        Invoke the underlying agent with validated inputs.
+
+        Raises:
+            ToolInvocationError for invocation errors.
+        """
+        try:
+            result = self.agent.invoke(inputs)
+            return result
+        except Exception as e:
+            raise ToolInvocationError(f"AgentTool.invoke error: {e}") from e
+    
+    def to_dict(self) -> OrderedDict[str, Any]:
+        """
+        Serialize AgentTool to a dict, including agent-specific metadata.
+        """
+        dict_data = super().to_dict()
+        dict_data["agent"] = self.agent.to_dict()
+        return dict_data

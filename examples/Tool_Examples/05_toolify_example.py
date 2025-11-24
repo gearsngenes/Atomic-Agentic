@@ -13,7 +13,7 @@ Server for MCP path (run separately):
 from typing import Any, Mapping
 from urllib.parse import urlparse, urlunparse
 from dotenv import load_dotenv
-from atomic_agentic.ToolAdapters import toolify
+from atomic_agentic.Toolify import toolify
 from atomic_agentic.Tools import Tool, ToolInvocationError
 from atomic_agentic.Agents import Agent
 from atomic_agentic.LLMEngines import OpenAIEngine
@@ -67,7 +67,7 @@ agent = Agent(
 # ---------- MCP server URL (normalized to /mcp if path is empty) ----------
 
 SERVER_URL = "http://127.0.0.1:8000"   # we'll normalize to /mcp if needed
-SERVER_NAME = "Demo Mathematics Server"
+SERVER_NAME = "Mathematics_Server"
 
 def normalize_streamable_http(url: str) -> str:
     parts = urlparse(url)
@@ -82,8 +82,7 @@ def show_plan(t: Tool) -> None:
     meta = t.to_dict()
     print(f"\n-- {t.full_name} --")
     print("signature:", meta["signature"])
-    print("required: ", sorted(meta["required_names"]))
-    print("params:   ", meta["p_or_kw_names"])
+    print("argument map:   ", meta["arguments_map"])
 
 def invoke_with_inputs(t: Tool, inputs: Mapping[str, Any]) -> None:
     print("inputs:", inputs)

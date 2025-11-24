@@ -12,7 +12,7 @@ from urllib.parse import urlparse, urlunparse
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from atomic_agentic.ToolAdapters import MCPProxyTool
+from atomic_agentic.Tools import MCPProxyTool
 from atomic_agentic.Tools import ToolInvocationError
 
 
@@ -54,8 +54,7 @@ def _show_plan(proxy: MCPProxyTool) -> None:
     print(f"\n-- {proxy.full_name} --")
     print("from:", proxy.source)
     print("signature:", meta["signature"])
-    print("required: ", sorted(meta["required_names"]))
-    print("params:   ", meta["p_or_kw_names"])
+    print("argument map:", meta["arguments_map"])
 
 def _invoke(proxy: MCPProxyTool, inputs: Mapping[str, Any]) -> None:
     print("inputs:", inputs)
