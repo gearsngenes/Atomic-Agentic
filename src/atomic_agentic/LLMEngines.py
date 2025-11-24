@@ -7,7 +7,8 @@ from __future__ import annotations
 import os, time, random
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, Optional
-import os, mimetypes, warnings
+import os, mimetypes
+from collections import OrderedDict
 
 # Provider SDKs
 try: from openai import OpenAI
@@ -19,6 +20,7 @@ except: pass
 try: from llama_cpp import Llama
 except: pass
 
+__all__ = ["GeminiEngine", "LlamaCppEngine", "MistralEngine", "OpenAIEngine"]
 
 # ── ABSTRACT ENGINE ───────────────────────────────────────────────────────────
 class LLMEngine(ABC):
@@ -88,12 +90,14 @@ class LLMEngine(ABC):
         """
         raise NotImplementedError("LLMEngine.invoke must be implemented by subclasses")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> OrderedDict[str, Any]:
         """Base diagnostic: only expose the provider name to avoid leaking internals.
 
         Subclasses should extend or merge this dict with provider-specific fields.
         """
-        return {"provider": type(self).__name__}
+        return OrderedDict(
+            provider = type(self).__name__
+        )
 
     def attach(self, path: str) -> Dict[str, Any]:
         """Attach a local path to this engine and prepare provider metadata.
@@ -409,20 +413,18 @@ class OpenAIEngine(LLMEngine):
         header = f"\n[Inlined file: {os.path.basename(path)}]\n"
         user_parts.append({"type": "input_text", "text": header + text})
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> OrderedDict[str, Any]:
         """Diagnostic snapshot for OpenAIEngine: provider + model + temperature.
 
         Intentionally minimal to avoid leaking client objects or API keys.
         """
-        return {
-            # initialization parameters
-            "provider": type(self).__name__,
-            "model": self.model,
-            "temperature": self.temperature,
-            "inline_cutoff_chars": self.inline_cutoff_chars,
-            # runtime variables
-            "attachments": self.attachments
-            }
+        base = super().to_dict()
+        base.update(OrderedDict(
+            model = self.model,
+            temperature = self.temperature,
+            inline_cutoff_chars = self.inline_cutoff_chars,
+        ))
+        return base
 
 
 # ── LLAMA.CPP (local; no remote file store) ────────────────────────────────────
@@ -480,27 +482,21 @@ class LlamaCppEngine(LLMEngine):
         response = self.llm.create_chat_completion(messages=messages)
         return response["choices"][0]["message"]["content"].strip()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> OrderedDict[str, Any]:
         """Diagnostic snapshot for LlamaCppEngine.
 
         Includes provider, n_ctx, verbose, and any of model_path/repo_id/filename that are set.
         Also reports whether a model is loaded.
         """
-        llm = getattr(self, "llm", None)
-        out: Dict[str, Any] = {
-            "provider": type(self).__name__,
-            "n_ctx": getattr(self, "n_ctx", None),
-            "verbose": getattr(self, "verbose", None),
-            "model_loaded": bool(llm),
-        }
-        # Include whichever model identifiers are present (non-None)
-        if getattr(self, "model_path", None):
-            out["model_path"] = self.model_path
-        if getattr(self, "repo_id", None):
-            out["repo_id"] = self.repo_id
-        if getattr(self, "filename", None):
-            out["filename"] = self.filename
-        return out
+        base = super().to_dict()
+        base.update(OrderedDict(
+            model_path = self.model_path,
+            repo_id = self.repo_id,
+            filename = self.filename,
+            n_ctx = self.n_ctx,
+            verbose = self.verbose,
+        ))
+        return base
 
 
 # ── GEMINI (flat contents: file handle objects + strings) ──────────────────────
@@ -628,12 +624,17 @@ class GeminiEngine(LLMEngine):
         abs_path = os.path.abspath(path)
         return self.client.files.upload(file=abs_path)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> OrderedDict[str, Any]:
         """Diagnostic snapshot for GeminiEngine: provider + model + temperature.
 
         Keeps output minimal to avoid leaking client or API keys.
         """
-        return {"provider": type(self).__name__, "model": getattr(self, "model", None), "temperature": getattr(self, "temperature", None)}
+        base = super().to_dict()
+        base.update(OrderedDict(
+            model = self.model,
+            temperature = self.temperature,
+        ))
+        return base
 
 
 # ── MISTRAL (Document QnA: upload -> sign -> document_url) ─────────────────────
@@ -855,20 +856,20 @@ class MistralEngine(LLMEngine):
                     # if time/random not available for some reason, sleep best-effort minimal
                     pass
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> OrderedDict[str, Any]:
         """Diagnostic snapshot for MistralEngine: provider + requested knobs.
 
         Minimal and safe: excludes client and keys.
         """
-        return {
-            "provider": type(self).__name__,
-            "model": getattr(self, "model", None),
-            "temperature": getattr(self, "temperature", None),
-            "inline_cutoff_chars": getattr(self, "inline_cutoff_chars", None),
-            "retry_sign_attempts": getattr(self, "retry_sign_attempts", None),
-            "retry_base_delay": getattr(self, "retry_base_delay", None),
-        }
-
+        base = super().to_dict()
+        base.update(OrderedDict(
+            model = self.model,
+            temperature = self.temperature,
+            inline_cutoff_chars = self.inline_cutoff_chars,
+            retry_sign_attempts = self.retry_sign_attempts,
+            retry_base_delay = self.retry_base_delay,
+        ))
+        return base
 
 # ── PLACEHOLDERS (keep the same abstract contract) ─────────────────────────────
 class AzureOpenAIEngine(LLMEngine):

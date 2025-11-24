@@ -231,7 +231,6 @@ class MCPProxyTool(Tool):
         
     def to_dict(self)-> OrderedDict[str, Any]:
         dict_data = super().to_dict()
-        dict_data["server_name"] = self._source
         dict_data["mcp_url"] = self._server_url
         dict_data["headers"] = self._headers
         return dict_data

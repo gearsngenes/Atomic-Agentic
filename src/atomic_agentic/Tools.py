@@ -238,14 +238,6 @@ class Tool:
             qualname=self.qualname,
             # Arguments metadata
             arguments_map=self.arguments_map,
-            posonly_order=list(self.posonly_order),
-            p_or_kw_names=list(self.p_or_kw_names),
-            kw_only_names=list(self.kw_only_names),
-            required_names=sorted(self.required_names),
-            has_varargs=self.has_varargs,
-            varargs_name=self.varargs_name,
-            has_varkw=self.has_varkw,
-            varkw_name=self.varkw_name,
         )
 
     # -------------------------
