@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 # Base imports
-from typing import Any, Mapping, Dict, List, Tuple, Optional, get_origin, get_args
+from typing import Any, Mapping, Dict, List, Tuple, Optional
 import inspect
 import asyncio
 import threading
@@ -15,9 +15,15 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 # Atomic Agentic Imports
-from .Tools import Tool, ToolDefinitionError
-from .Agents import Agent
-
+from .__utils__ import (
+    _run_sync,
+    _extract_rw,
+    _extract_structured_or_text,
+    _to_plain,
+    _normalize_url,
+    _discover_mcp_tool_names)
+from .Tools import Tool, ToolDefinitionError, ToolInvocationError
+from .Agents import Agent 
 # ───────────────────────────────────────────────────────────────────────────────
 # Public API
 # ───────────────────────────────────────────────────────────────────────────────
@@ -81,27 +87,13 @@ class AgentTool(Tool):
             raise ToolDefinitionError("AgentTool requires agent.pre_invoke to be a Tools.Tool.")
 
         self.agent = agent
-        self.pre = pre
-
-        posonly_names: List[str] = list(pre.posonly_order)
-
-        def _agent_wrapper(*_args: Any, **_kwargs: Any) -> Any:
-            inputs: Dict[str, Any] = {}
-            # Map positional-only prefix back into named keys deterministically
-            for i, pname in enumerate(posonly_names):
-                if i < len(_args):
-                    inputs[pname] = _args[i]
-            inputs.update(_kwargs)
-            return self.agent.invoke(inputs)
-
-        # Initialize base Tool with wrapper and agent metadata
-        super().__init__(
-            func=_agent_wrapper,
-            name="invoke",
-            description=agent.description,
-            type="agent",
-            source=agent.name,
-        )
+        # Initialize base Tool with agent.invoke
+        self._func = agent.invoke
+        self._name = "invoke"
+        self._description = agent.description
+        self._source = self.agent.name
+        self.module = None
+        self.qualname = None
 
         # ---- Mirror the pre_invoke call-plan (shallow copies to avoid aliasing) ----
         self._arguments_map = pre.arguments_map
@@ -115,145 +107,29 @@ class AgentTool(Tool):
         self.varkw_name = pre.varkw_name
 
         # Explicit return type for AgentTool (agent responses are strings)
-        self._return_type = "str"
+        self._return_type = "Any"
         self._rebuild_signature_str()
+    
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """
+        Invoke the underlying agent with validated inputs.
 
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Helpers (self-contained; ensure there is ONLY ONE definition of each)
-# ───────────────────────────────────────────────────────────────────────────────
-def _run_sync(coro):
-    """
-    Run a coroutine synchronously with robust loop handling:
-      • If no loop or the current loop is CLOSED → create a fresh loop, run, shutdown, close.
-      • If a loop is RUNNING → execute in a worker thread via asyncio.run().
-      • Else → run_until_complete on the existing idle loop.
-
-    This avoids 'Event loop is closed' after earlier asyncio.run(...) usage.
-    """
-    import asyncio
-    from queue import Queue
-    import threading
-
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = None
-
-    # No loop or closed loop → make a temporary one
-    if loop is None or loop.is_closed():
-        loop = asyncio.new_event_loop()
+        Raises:
+            ToolInvocationError for invocation errors.
+        """
         try:
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(coro)
-        finally:
-            try:
-                loop.run_until_complete(loop.shutdown_asyncgens())
-            finally:
-                asyncio.set_event_loop(None)
-                loop.close()
-
-    # Loop is running in this thread → run in a worker thread
-    if loop.is_running():
-        q: "Queue[Tuple[str, Any]]" = Queue()
-
-        def _worker():
-            try:
-                q.put(("ok", asyncio.run(coro)))
-            except BaseException as exc:  # surface original exception to caller
-                q.put(("err", exc))
-
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-        status, payload = q.get()
-        t.join()
-        if status == "err":
-            raise payload
-        return payload
-
-    # Loop exists and is idle → run directly
-    return loop.run_until_complete(coro)
-
-
-def _normalize_url(u: str) -> str:
-    """
-    Ensure a valid MCP streamable-HTTP URL. If no path is provided, default to '/mcp'.
-    """
-    from urllib.parse import urlparse, urlunparse
-    parts = urlparse(u.strip())
-    if not parts.scheme or not parts.netloc:
-        raise ToolDefinitionError(f"Invalid MCP URL: {u!r}")
-    if not parts.path or parts.path == "/":
-        parts = parts._replace(path="/mcp")
-    return urlunparse(parts)
-
-
-def _extract_rw(transport) -> Tuple[Any, Any]:
-    """
-    Obtain (read, write) callables from the transport. Some SDK variants return
-    a tuple; others expose .read/.write attributes.
-    """
-    r = getattr(transport, "read", None)
-    w = getattr(transport, "write", None)
-    if r is not None and w is not None:
-        return r, w
-    if isinstance(transport, (tuple, list)) and len(transport) >= 2:
-        return transport[0], transport[1]
-    raise ToolDefinitionError("MCPProxyTool: could not extract (read, write) from transport.")
-
-
-def _extract_structured_or_text(result: Any) -> Optional[Any]:
-    """
-    OLD behavior, restored and streamlined:
-
-    1) If `structuredContent` exists, return it.
-       • If it's exactly {'result': X}, unwrap to X.
-    2) Else if `content` exists, concatenate its 'text' blocks.
-    3) Else return None (caller can fall back to model_dump()/raw).
-    """
-    # Prefer structuredContent (attribute or mapping)
-    sc = getattr(result, "structuredContent", None)
-    if sc is None and isinstance(result, dict):
-        sc = result.get("structuredContent")
-    if sc is not None:
-        if isinstance(sc, dict) and set(sc.keys()) == {"result"}:
-            return sc["result"]
-        return sc
-
-    # Fallback to unstructured content blocks (join text)
-    content = getattr(result, "content", None)
-    if content is None and isinstance(result, dict):
-        content = result.get("content")
-    if isinstance(content, list):
-        texts = [p.get("text") for p in content if isinstance(p, dict) and "text" in p]
-        if texts:
-            return "".join(texts)
-
-    return None
-
-
-def _to_plain(result: Any) -> Any:
-    """Last resort: pydantic v2 models → dict; otherwise pass result through."""
-    try:
-        if hasattr(result, "model_dump") and callable(result.model_dump):
-            return result.model_dump()
-    except Exception:
-        pass
-    return result
-
-# ---------- MCP discovery (list tool names) ----------
-async def _async_discover_mcp_tool_names(url: str, headers: Optional[dict]) -> List[str]:
-    async with streamablehttp_client(url=url, headers=headers or None) as transport:
-        read, write = _extract_rw(transport)
-        async with ClientSession(read, write) as session:
-            # REQUIRED handshake
-            await session.initialize()
-            tools_resp = await session.list_tools()
-            tool_objs = getattr(tools_resp, "tools", tools_resp)
-            return [t.name for t in tool_objs]
-
-def _discover_mcp_tool_names(url: str, headers: Optional[dict]) -> List[str]:
-    return _run_sync(_async_discover_mcp_tool_names(url, headers))
+            result = self.agent.invoke(inputs)
+            return result
+        except Exception as e:
+            raise ToolInvocationError(f"AgentTool.invoke error: {e}") from e
+    
+    def to_dict(self) -> OrderedDict[str, Any]:
+        """
+        Serialize AgentTool to a dict, including agent-specific metadata.
+        """
+        dict_data = super().to_dict()
+        dict_data["agent"] = self.agent.to_dict()
+        return dict_data
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -274,7 +150,6 @@ class MCPProxyTool(Tool):
 
     def __init__(
         self,
-        *,
         server_url: str,
         server_name: str,
         tool_name: str,
@@ -282,25 +157,25 @@ class MCPProxyTool(Tool):
         description: str = "",
     ) -> None:
         self._server_url = _normalize_url(server_url)
-        self._server_name = str(server_name).strip()
-        self._tool_name = str(tool_name).strip()
+        self._source = str(server_name).strip()
+        self._name = str(tool_name).strip()
         self._headers = dict(headers or {})
+        self.module = None
+        self.qualname = None
 
-        if not self._server_name:
+        if not self._source:
             raise ToolDefinitionError("MCPProxyTool: 'server_name' cannot be empty.")
-        if not self._tool_name:
+        if not self._name:
             raise ToolDefinitionError("MCPProxyTool: 'tool_name' cannot be empty.")
 
         # 1) Discover schema (short-lived session)
         params_spec, required_names, remote_desc = self._discover_schema()
+        self._description = (description or remote_desc) or ""
 
         # 2) Build a KW-ONLY wrapper whose signature mirrors the remote schema
         def _wrapper(**inputs: Any) -> Any:
             # Base Tool.invoke has already validated keys/requireds (unknown keys rejected).
             return self._call_remote_once(inputs)
-
-        _wrapper.__name__ = self._tool_name
-        _wrapper.__doc__ = description or remote_desc or f"MCP proxy to {self._server_name}.{self._tool_name}"
 
         parameters: List[inspect.Parameter] = []
         for p in params_spec:
@@ -317,24 +192,49 @@ class MCPProxyTool(Tool):
             parameters=tuple(parameters),
             return_annotation=Any,
         )
+        self._func = _wrapper
+        # Build call plan once (unwrap to reach original if decorated)
+        try:
+            sig = inspect.signature(inspect.unwrap(self._func))  # :contentReference[oaicite:9]{index=9}
+        except Exception as e:
+            raise ToolDefinitionError(f"{self._name}: could not inspect callable: {e}") from e
 
-        # 3) Initialize as a normal Tool (base builds arguments_map/signature string)
-        super().__init__(
-            func=_wrapper,
-            name=self._tool_name,
-            description=_wrapper.__doc__ or "",
-            type="mcp_tool",
-            source=self._server_name,
-        )
+        (
+            self._arguments_map,
+            self.posonly_order,
+            self.p_or_kw_names,
+            self.kw_only_names,
+            self.required_names,
+            self.has_varargs,
+            self.varargs_name,
+            self.has_varkw,
+            self.varkw_name,
+        ) = self._build_arguments_map_and_plan(sig)
 
-        # Enforce named-only semantics (no varargs/kwargs)
-        self.posonly_order = []
-        self.has_varargs = False
-        self.varargs_name = None
-        self.has_varkw = False
-        self.varkw_name = None
-        self.required_names = set(required_names)
-        self._return_type = "any"  # MCP doesn’t guarantee static return types
+        self._return_type = "Any"  # MCP doesn’t guarantee static return types
+
+        self._sig_str: str = ""
+        self._rebuild_signature_str()
+        
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """
+        Invoke the remote MCP tool with validated inputs.
+
+        Raises:
+            ToolInvocationError for invocation errors.
+        """
+        try:
+            result = self._call_remote_once(inputs)
+            return result
+        except Exception as e:
+            raise ToolInvocationError(f"MCPProxyTool.invoke error: {e}") from e
+        
+    def to_dict(self)-> OrderedDict[str, Any]:
+        dict_data = super().to_dict()
+        dict_data["server_name"] = self._source
+        dict_data["mcp_url"] = self._server_url
+        dict_data["headers"] = self._headers
+        return dict_data
 
     # ── schema discovery (short-lived session) ──────────────────────────────────
     def _discover_schema(self) -> Tuple[List[Dict[str, Any]], List[str], str]:
@@ -360,13 +260,13 @@ class MCPProxyTool(Tool):
         target = None
         for t in tools:
             nm = getattr(t, "name", None) or (isinstance(t, dict) and t.get("name"))
-            if nm == self._tool_name:
+            if nm == self._name:
                 target = t
                 break
         if target is None:
             names = [getattr(t, "name", None) or (isinstance(t, dict) and t.get("name")) for t in tools]
             raise ToolDefinitionError(
-                f"MCP tool '{self._tool_name}' not found on server '{self._server_name}' @ {self._server_url}; "
+                f"MCP tool '{self._name}' not found on server '{self._source}' @ {self._server_url}; "
                 f"available: {sorted(n for n in names if n)}"
             )
 
@@ -403,7 +303,7 @@ class MCPProxyTool(Tool):
                 read, write = _extract_rw(transport)
                 async with ClientSession(read, write) as sess:
                     await sess.initialize()
-                    return await sess.call_tool(self._tool_name, dict(inputs))
+                    return await sess.call_tool(self._name, dict(inputs))
 
         raw = _run_sync(_do())
 
@@ -468,7 +368,11 @@ def toolify(
         if not names and fail_if_empty:
             raise ToolDefinitionError("ToolFactory: no MCP tools found after applying filters.")
         return [
-            MCPProxyTool(tool_name=n, server_name=server_name, server_url=url, headers=headers)
+            MCPProxyTool(
+                tool_name=n,
+                server_name=server_name,
+                server_url=url,
+                headers=headers)
             for n in names
         ]
 
@@ -483,7 +387,6 @@ def toolify(
                 func=obj,
                 name=name,
                 description= (description or obj.__doc__) or "",
-                type="function",
                 source=source or "default",
             )
         ]

@@ -56,19 +56,19 @@ def cot(x: float) -> float:
     return (1.0 / t) if t != 0 else float("inf")
 
 MATH_TOOLS: List[Tool] = [
-    Tool(func=add,        name="add",        description="Return a + b."),
-    Tool(func=subtract,   name="subtract",   description="Return a - b."),
-    Tool(func=multiply,   name="multiply",   description="Return a * b."),
-    Tool(func=divide,     name="divide",     description="Return a / b (inf if b == 0)."),
-    Tool(func=power,      name="power",      description="Return a ** b."),
-    Tool(func=sqrt,       name="sqrt",       description="Return sqrt(x); x must be >= 0."),
-    Tool(func=mean,       name="mean",       description="Return arithmetic mean of a list of numbers."),
-    Tool(func=max_value,  name="max_value",  description="Return the maximum of a list of numbers."),
-    Tool(func=min_value,  name="min_value",  description="Return the minimum of a list of numbers."),
-    Tool(func=sin,        name="sin",        description="Return sin(x) (x in radians)."),
-    Tool(func=cos,        name="cos",        description="Return cos(x) (x in radians)."),
-    Tool(func=tan,        name="tan",        description="Return tan(x) (x in radians)."),
-    Tool(func=cot,        name="cot",        description="Return cot(x) (x in radians; inf at tan(x)=0)."),
+    Tool(func=add,        name="add",        source = "Math",   description="Return a + b."),
+    Tool(func=subtract,   name="subtract",   source = "Math",   description="Return a - b."),
+    Tool(func=multiply,   name="multiply",   source = "Math",   description="Return a * b."),
+    Tool(func=divide,     name="divide",     source = "Math",   description="Return a / b (inf if b == 0)."),
+    Tool(func=power,      name="power",      source = "Math",   description="Return a ** b."),
+    Tool(func=sqrt,       name="sqrt",       source = "Math",   description="Return sqrt(x); x must be >= 0."),
+    Tool(func=mean,       name="mean",       source = "Math",   description="Return arithmetic mean of a list of numbers."),
+    Tool(func=max_value,  name="max_value",  source = "Math",   description="Return the maximum of a list of numbers."),
+    Tool(func=min_value,  name="min_value",  source = "Math",   description="Return the minimum of a list of numbers."),
+    Tool(func=sin,        name="sin",        source = "Math",   description="Return sin(x) (x in radians)."),
+    Tool(func=cos,        name="cos",        source = "Math",   description="Return cos(x) (x in radians)."),
+    Tool(func=tan,        name="tan",        source = "Math",   description="Return tan(x) (x in radians)."),
+    Tool(func=cot,        name="cot",        source = "Math",   description="Return cot(x) (x in radians; inf at tan(x)=0)."),
 ]
 
 # ───────────────────────── Console Tools ─────────────────────────
@@ -86,10 +86,10 @@ def log_message(message: str, level: str = "INFO") -> None:
     logging.log(getattr(logging, level.upper(), logging.INFO), message)
 
 CONSOLE_TOOLS: List[Tool] = [
-    Tool(func=print_value,  name="print",        description="Print any value to the console."),
-    Tool(func=user_input,   name="user_input",   description="Prompt user for input and return the entered string."),
-    Tool(func=basic_config, name="basic_config", description="Configure root logging (level: DEBUG|INFO|WARNING|ERROR|CRITICAL)."),
-    Tool(func=log_message,  name="log",          description="Log a message at the specified level."),
+    Tool(func=print_value,  name="print",        source = "Console",    description="Print any value to the console."),
+    Tool(func=user_input,   name="user_input",   source = "Console",    description="Prompt user for input and return the entered string."),
+    Tool(func=basic_config, name="basic_config", source = "Console",    description="Configure root logging (level: DEBUG|INFO|WARNING|ERROR|CRITICAL)."),
+    Tool(func=log_message,  name="log",          source = "Console",    description="Log a message at the specified level."),
 ]
 
 # ───────────────────────── Parser Tools ─────────────────────────
@@ -124,10 +124,10 @@ def join_strings(lst: Sequence[str], sep: str = "") -> str:
     return sep.join(lst)
 
 PARSER_TOOLS: List[Tool] = [
-    Tool(func=json_loads,       name="json_loads",          description="Parse JSON string to Python value."),
-    Tool(func=to_str,           name="to_str",              description="Convert any value to string."),
-    Tool(func=split_string,     name="split",               description="Split string by separator into list of strings."),
-    Tool(func=safe_eval,        name="safe_eval",           description="Evaluate a simple Python literal safely (no builtins)."),
-    Tool(func=extract_json_string, name="extract_json_string", description="Extract first JSON object/array substring from text."),
-    Tool(func=join_strings,     name="join",                description="Join list of strings with a separator."),
+    Tool(func=json_loads,           name="json_loads",           source = "Parser",  description="Parse JSON string to Python value."),
+    Tool(func=to_str,               name="to_str",               source = "Parser",  description="Convert any value to string."),
+    Tool(func=split_string,         name="split",                source = "Parser",  description="Split string by separator into list of strings."),
+    Tool(func=safe_eval,            name="safe_eval",            source = "Parser",  description="Evaluate a simple Python literal safely (no builtins)."),
+    Tool(func=extract_json_string,  name="extract_json_string",  source = "Parser",  description="Extract first JSON object/array substring from text."),
+    Tool(func=join_strings,         name="join",                 source = "Parser",  description="Join list of strings with a separator."),
 ]

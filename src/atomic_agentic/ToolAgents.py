@@ -16,14 +16,10 @@ from .Agents import Agent
 from .LLMEngines import LLMEngine
 from .ToolAdapters import toolify
 from .Tools import Tool
+from ._exceptions import ToolAgentError, ToolRegistrationError
 
 # ──────────────────────────────────────────────────────────────────────────────
-__all__ = [
-    "ToolAgent",
-    "ToolAgentError",
-    "ToolRegistrationError",
-    "PlannerAgent",
-]
+__all__ = ["PlannerAgent", "OrchestratorAgent",]
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +38,6 @@ return_tool = Tool(
         "FINAL STEP of any plan."
     ),
 )
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Errors
-# ──────────────────────────────────────────────────────────────────────────────
-
-class ToolAgentError(RuntimeError):
-    """Base exception for ToolAgent-related errors."""
-
-
-class ToolRegistrationError(ToolAgentError):
-    """Raised when registering tools fails due to collisions or bad inputs."""
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ToolAgent (abstract)

@@ -93,33 +93,28 @@ from collections import OrderedDict
 
 # Local imports (adjust the module paths if your project structure differs)
 from .LLMEngines import LLMEngine
-from .Tools import Tool, ToolInvocationError
+from .Tools import Tool
+from ._exceptions import *
 
 
-__all__ = [
-    "Agent",
-    "AgentError",
-    "AgentInvocationError",
-]
+__all__ = ["Agent"]
 
 
 logger = logging.getLogger(__name__)
 
+def identity_prompt(*, prompt: str) -> str:
+    if not isinstance(prompt, str):
+        raise ValueError("prompt must be a string")
+    return prompt
 
-# ==== Errors ==================================================================
+default_pre_invoke = Tool(func=identity_prompt,
+     name="identity_prompt",
+     description="A simple identity tool that returns the 'prompt' argument as is.",
+)
 
-
-class AgentError(RuntimeError):
-    """Base class for Agent-related errors."""
-
-
-class AgentInvocationError(AgentError):
-    """Raised when an Agent fails to prepare or process an invocation."""
-
-
-# ==== Agent ===================================================================
-
-
+# ───────────────────────────────────────────────────────────────────────────────
+# Agent
+# ───────────────────────────────────────────────────────────────────────────────
 class Agent:
     """
     Schema-driven LLM Agent.
@@ -217,29 +212,11 @@ class Agent:
         if pre_invoke is not None and isinstance(pre_invoke, Callable):
             pre_invoke = Tool(
                 func=pre_invoke,
-                name="pre_invoke_callable",
+                name="pre_invoke",
                 description="Pre-invoke callable adapted to Tool",
-                type="function",
-                source="default",
+                source=f"{self.name}",
             )
-        self._pre_invoke: Tool = pre_invoke if pre_invoke is not None else self._make_identity_prompt_tool()
-
-    # ------------------------------- utilities -------------------------------
-
-    @staticmethod
-    def _make_identity_prompt_tool() -> Tool:
-        """Create a strict Tool that requires exactly {'prompt': str} and returns it."""
-
-        def identity_prompt(*, prompt: str) -> str:
-            if not isinstance(prompt, str):
-                raise ValueError("prompt must be a string")
-            return prompt
-
-        return Tool(
-            func=identity_prompt,
-            name="identity_prompt",
-            description="Strict mapping {'prompt': str} -> prompt",
-        )
+        self._pre_invoke: Tool = pre_invoke if pre_invoke is not None else default_pre_invoke
 
     # --------------------------------- API -----------------------------------
     @property
@@ -317,31 +294,7 @@ class Agent:
     def attachments(self) -> Dict[str, Dict[str, Any]]:
         """A shallow copy of the current attachment paths."""
         return self.llm_engine.attachments
-
-    def attach(self, path: str) -> bool:
-        """
-        Add a file path to attachments if not already present.
-
-        Returns True if added, False if it was already present.
-        """
-        try:
-            self._llm_engine.attach(path)
-            return True
-        except ValueError:
-            return False
-
-    def detach(self, path: str) -> bool:
-        """
-        Remove a file path from attachments.
-
-        Returns True if removed, False if it was not present.
-        """
-        try:
-            self._llm_engine.detach(path)
-            return True
-        except ValueError:
-            return False
-
+    
     @property
     def pre_invoke(self) -> Tool:
         """
@@ -364,6 +317,22 @@ class Agent:
         if not isinstance(tool, Tool):
             raise AgentError("pre_invoke must be a Tools.Tool instance or a callable object.")
         self._pre_invoke = tool
+
+    def attach(self, path: str) -> bool:
+        """
+        Add a file path to attachments if not already present.
+
+        Returns True if added, False if it was already present.
+        """
+        return self._llm_engine.attach(path)
+
+    def detach(self, path: str) -> bool:
+        """
+        Remove a file path from attachments.
+
+        Returns True if removed, False if it was not present.
+        """
+        return self._llm_engine.detach(path)
 
     @property
     def arguments_map(self) -> OrderedDict[str, Any]:

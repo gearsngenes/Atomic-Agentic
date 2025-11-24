@@ -38,7 +38,6 @@ pre_wrapped_tool = Tool(
     func=summarize,
     name="summarize",
     description="Truncate text to a character limit (limit default: 40).",
-    type="python",
     source="local",
 )
 
@@ -53,7 +52,6 @@ pre_invoke_tool = Tool(
     func=to_prompt,
     name="to_prompt",
     description="Compose prompt from {topic, style, audience?}. Returns: str.",
-    type="python",
     source="local",
 )
 
@@ -83,7 +81,6 @@ def normalize_streamable_http(url: str) -> str:
 def show_plan(t: Tool) -> None:
     meta = t.to_dict()
     print(f"\n-- {t.full_name} --")
-    print("type/source:", t.type, "/", t.source)
     print("signature:", meta["signature"])
     print("required: ", sorted(meta["required_names"]))
     print("params:   ", meta["p_or_kw_names"])
