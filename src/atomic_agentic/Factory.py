@@ -118,9 +118,9 @@ def load_tool(data: Mapping[str, Any], **kwargs) -> Tool:
         """
         Reconstruct an AgentTool from a dict snapshot.
         """
-        agent_data = data.get("agent")
+        agent_data = data.get("agent", None)
         if not agent_data:
-            raise ToolDefinitionError("AgentTool.from_dict: missing 'agent' data.")
+            raise ToolDefinitionError("AgentTool: missing 'agent' data.")
         agent = load_agent(agent_data, **kwargs)
         return AgentTool(agent=agent)
     elif tool_type == "MCPProxyTool":
@@ -133,7 +133,7 @@ def load_tool(data: Mapping[str, Any], **kwargs) -> Tool:
         headers = data.get("headers", None)
         description = data.get("description", "")
         if not server_url or not server_name or not tool_name:
-            raise ToolDefinitionError("MCPProxyTool.from_dict: missing required fields.")
+            raise ToolDefinitionError("MCPProxyTool: missing required fields.")
         return MCPProxyTool(
             server_url=server_url,
             server_name=server_name,

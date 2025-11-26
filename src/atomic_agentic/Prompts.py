@@ -21,7 +21,7 @@ Placeholder policy:
 
 Finalization (required last element):
 {{
-  "function": "function.default._return",
+  "function": "Tool.default._return",
   "args": {{ "val": "{{stepK}}" }}   // K refers to the step index whose value is the final result
 }}
 
@@ -33,17 +33,17 @@ Finalization (required last element):
    - If a string needs a prior result inside it, include the placeholder as the entire value or as part of the string,
      e.g., "val": "Result: {{step0}}" (allowed) — but never compute with operators.
 4) NEVER reference a result from a step that HASN'T been completed yet (no forward references). "{{stepN}}" can only point to a step index N < current step index.
-5) ONLY use "function.default._return" once as the FINAL step of the JSON array. If no return value is required, then pass null.
+5) ONLY use "Tool.default._return" once as the FINAL step of the JSON array. If no return value is required, then pass null.
 6) Keep plans minimal and linear; do not emit nested arrays or objects beyond the specified step schema.
 7) If user input is referencing the result of a previously executed plan, then use that context to re-create the plan with
    the adjusted requests/requirements from the user input.
 
 # ONE-SHOT EXAMPLE
 [
-  {{ "function": "function.default.mul", "args": {{ "a": 6, "b": 7 }} }},
-  {{ "function": "function.default.add", "args": {{ "a": "{{step0}}", "b": 5 }} }},
-  {{ "function": "function.default.print", "args": {{ "val": "My result is: {{step1}}" }} }},
-  {{ "function": "function.default._return", "args": {{ "val": "{{step1}}" }} }}
+  {{ "function": "Tool.default.mul", "args": {{ "a": 6, "b": 7 }} }},
+  {{ "function": "Tool.default.add", "args": {{ "a": "{{step0}}", "b": 5 }} }},
+  {{ "function": "Tool.default.print", "args": {{ "val": "My result is: {{step1}}" }} }},
+  {{ "function": "Tool.default._return", "args": {{ "val": "{{step1}}" }} }}
 ]
 """
 
@@ -77,7 +77,7 @@ Placeholder policy:
 3) Prefer placeholders over copying: if an arg equals a previous step’s result, pass "{{stepK}}", not the literal value.
 4) When the overall task is complete, emit the canonical return and mark COMPLETE:
    {{
-     "step_call": {{ "function": "function.default._return", "args": {{ "val": "{{stepK}}" }} }},
+     "step_call": {{ "function": "Tool.default._return", "args": {{ "val": "{{stepK}}" }} }},
      "explanation": "Return the final result.",
      "status": "COMPLETE"
    }}
@@ -86,14 +86,14 @@ Placeholder policy:
 # ONE-SHOT EXAMPLES
 // Next step (still working):
 {{
-  "step_call": {{ "function": "function.default.mul", "args": {{ "a": "{{step0}}", "b": 10 }} }},
+  "step_call": {{ "function": "Tool.default.mul", "args": {{ "a": "{{step0}}", "b": 10 }} }},
   "explanation": "Scale the prior result by 10.",
   "status": "INCOMPLETE"
 }}
 
 // Finish (return the result):
 {{
-  "step_call": {{ "function": "function.default._return", "args": {{ "val": "{{step1}}" }} }},
+  "step_call": {{ "function": "Tool.default._return", "args": {{ "val": "{{step1}}" }} }},
   "explanation": "Return final value.",
   "status": "COMPLETE"
 }}

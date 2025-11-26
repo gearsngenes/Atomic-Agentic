@@ -63,32 +63,13 @@ import asyncio, threading
 # =========================
 from .Agents import Agent
 from .Tools import Tool
+from ._exceptions import *
 
 # =========================
 # Constants & Exceptions
 # =========================
 WF_RESULT = "__wf_result__"
 JUDGE_RESULT = "__judge_result__"
-
-
-class WorkflowError(Exception):
-    """Base class for workflow-related errors."""
-
-
-class ValidationError(WorkflowError, ValueError):
-    """Raised for input/type validation failures."""
-
-
-class SchemaError(ValidationError):
-    """Raised when `output_schema` is malformed or incompatible with options."""
-
-
-class PackagingError(ValidationError):
-    """Raised when a raw result cannot be normalized to `output_schema`."""
-
-
-class ExecutionError(WorkflowError, RuntimeError):
-    """Raised when a wrapped component fails during `_process_inputs`."""
 
 
 # =========================
@@ -216,13 +197,13 @@ class Workflow(ABC):
         """
         JSON-friendly spec: no kind/component refs.
         """
-        return OrderedDict({
-            "name": self.name,
-            "description": self.description,
-            "arguments_map": OrderedDict(self.arguments_map),
-            "output_schema": list(self._output_schema),
-            "bundle_all": bool(self._bundle_all),
-        })
+        return OrderedDict(
+            workflow_type = type(self).__name__,
+            name = self.name,
+            description = self.description,
+            output_schema = list(self.output_schema),
+            bundle_all = self.bundle_all
+        )
 
     # ---------- Execution ----------
     def invoke(self, inputs: Mapping[str, Any]) -> OrderedDict[str, Any]:
@@ -272,13 +253,14 @@ class Workflow(ABC):
             sch_keys = set(schema)
             if res_keys == sch_keys:
                 # reorder to schema order
-                return OrderedDict(results)
+                return OrderedDict({k:results[k] for k in schema})
             if res_keys.issubset(sch_keys):
                 # pad missing with None
                 return OrderedDict({k: results.get(k, None) for k in schema})
             if len(res_keys) == len(sch_keys):
                 return OrderedDict({self.output_schema[i] : results[list(results.keys())[i]] for i in range(len(self.output_schema))})
             if len(res_keys) < len(sch_keys):
+                # if keys don't match, assume positional mapping
                 filled: OrderedDict = OrderedDict()
                 for k in schema: filled[k] = None
                 for i, k in enumerate(list(results.keys())): filled[schema[i]] = results[k]
@@ -287,7 +269,7 @@ class Workflow(ABC):
             if self.bundle_all:
                 if len(schema) != 1:
                     raise PackagingError(f"{self._name}: bundle_all requires single-key schema")
-                return {schema[0]: dict(results)}
+                return OrderedDict({schema[0]: dict(results)})
             raise PackagingError(
                 f"{self._name}: Failed to map keys {results.keys()} not to output schema {self.output_schema}; "
                 f"change the schema or enable bundle_all under a single key"
@@ -372,6 +354,7 @@ class AgentFlow(Workflow):
     @agent.setter
     def agent(self, val: Agent) -> None:
         self._agent = val
+        self._description = val.description
 
     @property
     def arguments_map(self) -> Mapping[str, Any]:
@@ -387,7 +370,7 @@ class AgentFlow(Workflow):
     
     def to_dict(self) -> OrderedDict[str, Any]:
         base = super().to_dict()
-        base.update({"agent" : self.agent.to_dict()})
+        base.update(OrderedDict(agent = self.agent.to_dict()))
         return base
 
 
@@ -442,6 +425,7 @@ class ToolFlow(Workflow):
                 source="default",
             )
         self._tool = val
+        self._description = val.description
 
     @property
     def arguments_map(self) -> Mapping[str, Any]:
@@ -453,9 +437,7 @@ class ToolFlow(Workflow):
     
     def to_dict(self) -> OrderedDict[str, Any]:
         base = super().to_dict()
-        base.update(
-            {"tool":self.tool.to_dict()}
-        )
+        base.update(OrderedDict(tool = self.tool.to_dict()))
         return base
     
 
@@ -629,7 +611,7 @@ class ChainFlow(Workflow):
     
     def to_dict(self) -> OrderedDict[str, Any]:
         base = super().to_dict()
-        base.update({"steps":[step.to_dict() for step in self.steps]})
+        base.update(OrderedDict(steps = [step.to_dict() for step in self.steps]))
         return base
 
 
@@ -851,11 +833,11 @@ class MakerChecker(Workflow):
     
     def to_dict(self) -> OrderedDict[str, Any]:
         base = super().to_dict()
-        base.update({
-            "maker": self.maker.to_dict(),
-            "checker": self.checker.to_dict(),
-            "judge": self.judge.to_dict() if self.judge else None
-        })
+        base.update(OrderedDict(
+            maker = self.maker.to_dict(),
+            checker = self.checker.to_dict(),
+            judge = self.judge.to_dict() if self.judge else None
+        ))
         return base
 
     # -------------------------------------------------------------------------
@@ -1051,11 +1033,11 @@ class Selector(Workflow):
             
     def to_dict(self) -> OrderedDict[str, Any]:
         base = super().to_dict()
-        base.update({
-            "judge": self.judge.to_dict(),
-            "name_collision_policy":self._name_collision_policy,
-            "branches": [branch.to_dict() for k,branch in self.branches.items()]
-        })
+        base.update(OrderedDict(
+            judge =  self.judge.to_dict(),
+            name_collision_policy = self._name_collision_policy,
+            branches = [branch.to_dict() for k,branch in self.branches.items()]
+        ))
         return base
 
     # -------------------- Execution --------------------
@@ -1195,11 +1177,11 @@ class MapFlow(Workflow):
     
     def to_dict(self):
         base = super().to_dict()
-        base.update({
-            "name_collision_policy":self._name_collision_policy,
-            "branches": [branch.to_dict() for k,branch in self.branches.items()],
-            "flatten": self._flatten,
-        })
+        base.update(OrderedDict(
+            name_collision_policy = self._name_collision_policy,
+            branches = [branch.to_dict() for k,branch in self.branches.items()],
+            flatten = self._flatten,
+        ))
         return base
 
     # -------------------- Memory --------------------
@@ -1547,9 +1529,9 @@ class ScatterFlow(Workflow):
     
     def to_dict(self):
         base = super().to_dict()
-        base.update({
-            "name_collision_policy":self._name_collision_policy,
-            "branches": [branch.to_dict() for k,branch in self.branches.items()],
-            "flatten": self._flatten,
-        })
+        base.update(OrderedDict(
+            name_collision_policy= self._name_collision_policy,
+            branches = [branch.to_dict() for k,branch in self.branches.items()],
+            flatten = self._flatten,
+        ))
         return base

@@ -38,6 +38,8 @@ return_tool = Tool(
     ),
 )
 
+RETURN_KEY = return_tool.full_name
+
 # ──────────────────────────────────────────────────────────────────────────────
 # ToolAgent (abstract)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -258,10 +260,10 @@ class ToolAgent(Agent, ABC):
                         f"Use name_collision_mode='skip' or 'replace' to override."
                     )
                 if name_collision_mode == "skip":
-                    logger.debug("ToolAgent.register: skipping duplicate %s", full_name)
+                    logger.info("ToolAgent.register: skipping duplicate %s", full_name)
                     continue
                 # name_collision_mode == "replace"
-                logger.debug("ToolAgent.register: replacing %s", full_name)
+                logger.info("ToolAgent.register: replacing %s", full_name)
                 self._toolbox[full_name] = tool
                 registered.append(full_name)
             else:
@@ -352,10 +354,10 @@ class ToolAgent(Agent, ABC):
                         f"Use name_collision_mode='skip' or 'replace' to override."
                     )
                 if name_collision_mode == "skip":
-                    logger.debug("ToolAgent.batch_register: skipping duplicate %s", full_name)
+                    logger.info("ToolAgent.batch_register: skipping duplicate %s", full_name)
                     continue
                 # name_collision_mode == "replace"
-                logger.debug("ToolAgent.batch_register: replacing %s", full_name)
+                logger.info("ToolAgent.batch_register: replacing %s", full_name)
                 self._toolbox[full_name] = tool
                 registered.append(full_name)
             else:
@@ -388,7 +390,7 @@ class ToolAgent(Agent, ABC):
 
     # ------------------------------ introspection -----------------------------
 
-    def actions_context(self, *, with_schemas: bool = True) -> str:
+    def actions_context(self) -> str:
         """
         Build a **human-readable** context block of available actions for prompts.
 
@@ -405,18 +407,14 @@ class ToolAgent(Agent, ABC):
         """
         lines: List[str] = []
         for full_name, tool in self._toolbox.items():
-            if with_schemas:
-                signature = tool.signature
-                required = sorted(tool.required_names)
-                desc = tool.description
-                lines.append(f"- {full_name}: {signature}")
-                if required:
-                    lines.append(f"  required: [{', '.join(required)}]")
-                if desc:
-                    lines.append(f"  {desc}")
-            else:
-                desc = tool.description
-                lines.append(f"- {full_name}: {desc}" if desc else f"- {full_name}")
+            signature = tool.signature
+            required = list(tool.required_names)
+            desc = tool.description
+            lines.append(f"- {signature}")
+            if required:
+                lines.append(f"  required: [{', '.join(required)}]")
+            if desc:
+                lines.append(f"  {desc}")
         return "\n".join(lines).strip()
 
     # ------------------------------ serialization ----------------------------
@@ -493,25 +491,6 @@ class PlannerAgent(ToolAgent):
             raise ToolAgentError("run_concurrent must be a bool.")
         self._run_concurrent = value
 
-    # -- optional decorated description (kept for compatibility) --------------
-
-    @property
-    def description(self) -> str:  # type: ignore[override]
-        """
-        Decorated description exposed to UIs/planners.
-
-        Note: underlying human-authored description is stored in `_description`.
-        """
-        return (
-            f"~~Planner Agent {self.name}~~\n"
-            f"This agent decomposes tasks into a list of tool calls.\n"
-            f"Description: {self._description}"
-        )
-
-    @description.setter
-    def description(self, val: str) -> None:  # type: ignore[override]
-        self._description = val
-
     # -- planning & execution --------------------------------------------------
 
     def strategize(self, prompt: str) -> List[dict]:
@@ -526,7 +505,7 @@ class PlannerAgent(ToolAgent):
         user_prompt = f"Decompose the following task into a JSON plan:\n{prompt}\n\n"
 
         # 2) Ask the LLM for a full plan (array of steps)
-        logger.debug(f"[PlannerAgent - {self.name}].strategize: Building messages")
+        logger.info(f"{self.name}.strategize: Building messages")
         messages = [
             {"role": "system", "content": self.role_prompt},
         ]
@@ -535,21 +514,21 @@ class PlannerAgent(ToolAgent):
         messages.append({"role": "user", "content": user_prompt})
 
         # Use positional signature to match base Agent consistency
-        logger.debug(f"[PlannerAgent - {self.name}].strategize: Invoking LLM")
+        logger.info(f"{self.name}.strategize: Invoking LLM")
         raw = self._llm_engine.invoke(messages)
 
         # Strip markdown fences (common LLM formatting)
-        logger.debug(f"[PlannerAgent - {self.name}].strategize: Cleaning LLM text")
+        logger.info(f"{self.name}.strategize: Cleaning LLM text")
         raw = re.sub(r"^```[a-zA-Z]*|```$", "", raw)
         
         return raw
     
     def load_steps(self, raw_plan: str)->list[dict]:
         """Converts raw plan JSON string into a python list"""
-        logger.debug(f"[PlannerAgent - {self.name}].load_steps: Parsing steps")
+        logger.info(f"{self.name}.load_steps: Parsing steps")
         steps: List[dict] = list(json.loads(raw_plan))
-        if not steps or steps[-1].get("function") != "function.default._return":
-            steps.append({"function": "function.default._return", "args": {"val": None}})
+        if not steps or steps[-1].get("function") != RETURN_KEY:
+            steps.append({"function": RETURN_KEY, "args": {"val": None}})
 
         return steps
 
@@ -560,7 +539,7 @@ class PlannerAgent(ToolAgent):
         Uses synchronous or asynchronous execution based on `run_concurrent`.
         Tracks each step's `result` and `completed` status in `_previous_steps`.
         """
-        logger.debug(f"[PlannerAgent - {self.name}].execute: Executing steps")
+        logger.info(f"{self.name}.execute: Executing steps")
         self._previous_steps = [{"result": None, "completed": False} for _ in plan]
 
         if self._run_concurrent:
@@ -582,7 +561,7 @@ class PlannerAgent(ToolAgent):
         tools = self.list_tools()
         for i, step in enumerate(steps):
             step_tool = tools[step["function"]]
-            logger.debug(f"[PlannerAgent - {self.name}]._execute_sync: Running step {i} - {step['function']}, args: {step.get('args', {})}")
+            logger.info(f"{self.name}._execute_sync: Running step {i} - {step['function']}, args: {step.get('args', {})}")
             args = self._resolve(step.get("args", {}))
             result = step_tool.invoke(inputs=args)
             self._previous_steps[i]["result"] = result
@@ -616,7 +595,7 @@ class PlannerAgent(ToolAgent):
         async def run_step(i: int) -> Any:
             step = steps[i]
             step_tool = tools[step["function"]]
-            logger.debug(f"[PlannerAgent - {self.name}]._execute_async: Running step {i} - {step['function']}, args: {step.get('args', {})}")
+            logger.info(f"{self.name}._execute_async: Running step {i} - {step['function']}, args: {step.get('args', {})}")
             args = self._resolve(step.get("args", {}))
             # Offload blocking tool invocation to a thread pool
             loop = asyncio.get_running_loop()
@@ -629,7 +608,7 @@ class PlannerAgent(ToolAgent):
             ready = [i for i in remaining if get_deps(i) <= completed]
             if not ready:
                 raise RuntimeError("Circular dependency in plan.")
-            logger.debug(f"[PlannerAgent - {self.name}]._execute_async: Gathered steps: {ready}")
+            logger.info(f"{self.name}._execute_async: Gathered steps: {ready}")
             results = await asyncio.gather(*(run_step(i) for i in ready))
             for i, result in zip(ready, results):
                 self._previous_steps[i]["result"] = result
@@ -660,7 +639,7 @@ class PlannerAgent(ToolAgent):
 
         # Save user+assistant turn (summary) if context is enabled
         if self.context_enabled:
-            logger.debug(f"[PlannerAgent - {self.name}]._invoke: Adding user prompt & response to history")
+            logger.info(f"{self.name}._invoke: Adding user prompt & response to history")
             self._history.append({"role": "user", "content": prompt})
             self._history.append({
                 "role": "assistant",
@@ -700,7 +679,7 @@ class OrchestratorAgent(ToolAgent):
         - Unknown tool / placeholder resolution errors are recorded and allow repair,
           bounded by `max_failures`.
         - If the model returns "COMPLETE" for a non-`_return` step, a soft
-          `"function.default._return"` is appended with the latest result.
+          `"Tool.default._return"` is appended with the latest result.
     • Guards:
         - `max_steps` hard-stops after N executed steps.
         - `max_failures` hard-stops after M failed iterations.
@@ -813,14 +792,13 @@ class OrchestratorAgent(ToolAgent):
         self._previous_steps = []
 
         tools = self.list_tools()
-        RETURN_KEY = "function.default._return"
 
         while True:
             if steps_executed >= self._max_steps:
-                logger.warning("[OrchestratorAgent - %s]._invoke: max_steps (%d) reached; aborting.", self.name, self._max_steps)
+                logger.warning("%s._invoke: max_steps (%d) reached; aborting.", self.name, self._max_steps)
                 break
             if failures >= self._max_failures:
-                logger.warning("[OrchestratorAgent - %s]._invoke: max_failures (%d) reached; aborting.", self.name, self._max_failures)
+                logger.warning("%s._invoke: max_failures (%d) reached; aborting.", self.name, self._max_failures)
                 break
 
             # Ask for the next step
@@ -947,7 +925,7 @@ class OrchestratorAgent(ToolAgent):
 
         # Persist final turns if context is enabled
         if self.context_enabled:
-            logger.debug(f"[OrchestratorAgent - {self.name}]._invoke: Adding user prompt & steps taken to history")
+            logger.info(f"{self.name}._invoke: Adding user prompt & steps taken to history")
             self._history.append({"role": "user", "content": prompt})
             self._history.append({
                 "role": "assistant",

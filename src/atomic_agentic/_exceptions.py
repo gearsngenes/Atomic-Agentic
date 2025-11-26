@@ -1,7 +1,20 @@
 # ───────────────────────────────────────────────────────────────────────────────
 # Exceptions
 # ───────────────────────────────────────────────────────────────────────────────
-__all__ = ["ToolError", "ToolDefinitionError", "ToolInvocationError", "AgentError", "AgentInvocationError","ToolAgentError", "ToolRegistrationError"]
+__all__ = [
+    "ToolError",
+    "ToolDefinitionError",
+    "ToolInvocationError",
+    "AgentError",
+    "AgentInvocationError",
+    "ToolAgentError",
+    "ToolRegistrationError",
+    "WorkflowError",
+    "ValidationError",
+    "SchemaError",
+    "PackagingError",
+    "ExecutionError"
+    ]
 
 class ToolError(Exception):
     """Base exception for Tool-related errors."""
@@ -29,3 +42,23 @@ class ToolAgentError(RuntimeError):
 
 class ToolRegistrationError(ToolAgentError):
     """Raised when registering tools fails due to collisions or bad inputs."""
+
+
+class WorkflowError(Exception):
+    """Base class for workflow-related errors."""
+
+
+class ValidationError(WorkflowError, ValueError):
+    """Raised for input/type validation failures."""
+
+
+class SchemaError(ValidationError):
+    """Raised when `output_schema` is malformed or incompatible with options."""
+
+
+class PackagingError(ValidationError):
+    """Raised when a raw result cannot be normalized to `output_schema`."""
+
+
+class ExecutionError(WorkflowError, RuntimeError):
+    """Raised when a wrapped component fails during `_process_inputs`."""
