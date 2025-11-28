@@ -400,7 +400,6 @@ class ToolFlow(Workflow):
                 func=tool,
                 name=(name or tool.__name__) or "unnamed_callable",
                 description= (description or tool.__doc__) or "",
-                type="function",
                 source="default",
             )
         super().__init__(
@@ -421,7 +420,6 @@ class ToolFlow(Workflow):
                 func=val,
                 name=self.name,
                 description= (self.description or val.__doc__) or "",
-                type="function",
                 source="default",
             )
         self._tool = val
@@ -1319,7 +1317,6 @@ class MapFlow(Workflow):
             func=_identity,
             name=f"{self.name}_inputs",
             description="Dynamic MapFlow input schema supplier (one KW-only dict per branch).",
-            type="function",
             source="mapflow",
         )
 
