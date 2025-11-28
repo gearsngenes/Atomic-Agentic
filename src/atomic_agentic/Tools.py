@@ -13,6 +13,7 @@ from typing import (
     Tuple,
     Dict
 )
+import logging
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -29,6 +30,8 @@ from .__utils__ import (
     _JSON_TO_PY,
     KIND_TO_MODE,
 )
+
+logger = logging.getLogger(__name__)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Public API
@@ -70,11 +73,7 @@ class Tool:
         self.qualname = getattr(self.func, "__qualname__", None)
 
         if self.module is None or self.qualname is None:
-            raise TypeError(
-                f"Callable {self.func!r} must be an accessible and retrievable function. "
-                "Provided callable has no `__module__` or `__qualname__`; "
-                f"cannot safely dehydrate."
-            )
+            logger.warning(f"{func.__name__} lacks either a module ({self.module}) or qualname ({self.qualname}) load from in future reference")
 
         # Build call plan once (unwrap to reach original if decorated)
         try:

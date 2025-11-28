@@ -24,6 +24,7 @@ for function calls. This mirrors python-a2a's function-calling example.
 """
 _logger = logging.getLogger(__name__)
 from typing import Any, Mapping, Dict, Optional
+from collections import OrderedDict
 
 # Project-local imports
 from .Agents import Agent
@@ -114,7 +115,7 @@ class A2AProxyAgent(Agent):
         return False
 
     def _invoke(self, inputs: Mapping[str, Any]) -> Any:
-        pass
+        raise NotImplementedError("A2AProxyAgent._invoke is not implemented")
     
     def invoke(self, inputs: Mapping[str, Any]) -> Any:  # type: ignore[override]
         _ensure_mapping("A2AProxyAgent.invoke", inputs)
@@ -157,6 +158,11 @@ class A2AProxyAgent(Agent):
         if getattr(resp.content, "type", None) == "function_response":
             return resp.content.response  # type: ignore[return-value]
         return None
+    def to_dict(self)-> OrderedDict[str, Any]:
+        dict_data = super().to_dict()
+        dict_data.update(OrderedDict(
+            url = self._url,
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -346,3 +352,12 @@ class A2AServerAgent(Agent):
         """
         # Run HTTP listener (client uses "<final_url>/a2a")
         run_server(self._server, host=self._host, port=self._port, debug=debug)
+    
+    def to_dict(self) -> OrderedDict[str, Any]:
+        dict_data = super().to_dict()
+        dict_data.update(OrderedDict(
+            seed = self.seed.to_dict(),
+            host = self._host,
+            port = self._port
+        ))
+        return dict_data

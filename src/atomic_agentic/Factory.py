@@ -105,7 +105,7 @@ def load_tool(data: Mapping[str, Any], **kwargs) -> Tool:
                 f"Cannot reconstruct Tool: failed to retrieve callable {module}.{qualname}: {e}"
             ) from e
 
-        name = data.get("name", "")
+        name = data.get("name", "Unnamed_Tool")
         description = data.get("description", "")
         source = data.get("source", "default")
         return Tool(
@@ -194,5 +194,15 @@ def load_agent(data: Mapping[str, Any], **kwargs) -> Agent:
                 context_budget_chars=data.get("context_budget_chars", 15_000),
             )
         agent.batch_register(tools, name_collision_mode=name_collision_mode)
+    elif agent_type == "A2ASeverAgent":
+        seed = load_agent(data["seed"],**kwargs)
+        agent = A2AServerAgent(
+            seed = seed,
+            name = name,
+            description=description,
+            host = data["host"],
+            port = data["port"])
+    elif agent_type == "A2AProxyAgent":
+        agent = A2AProxyAgent(url = data["url"], name = name, description = description)
     agent._history = data.get("history", [])
     return agent
