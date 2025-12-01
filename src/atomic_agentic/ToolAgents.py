@@ -638,10 +638,11 @@ class PlannerAgent(ToolAgent):
         result = self.execute(plan)
 
         # Save user+assistant turn (summary) if context is enabled
-        if self.context_enabled:
-            logger.info(f"{self.name}._invoke: Adding user prompt & response to history")
-            self._history.append({"role": "user", "content": prompt})
-            self._history.append({
+        self._newest_history.append({
+            "role":"user",
+            "content": prompt
+        })
+        self._newest_history.append({
                 "role": "assistant",
                 "content": f"Generated plan:\n{plan_raw}\nExecuted Result: {str(result)}",
             })
@@ -923,14 +924,11 @@ class OrchestratorAgent(ToolAgent):
                     final_result = ret
                 break  # Completed
 
-        # Persist final turns if context is enabled
-        if self.context_enabled:
-            logger.info(f"{self.name}._invoke: Adding user prompt & steps taken to history")
-            self._history.append({"role": "user", "content": prompt})
-            self._history.append({
-                "role": "assistant",
-                "content": self._format_final_summary(self._previous_steps, final_result),
-            })
+        self._newest_history.append({"role": "user", "content": prompt})
+        self._newest_history.append({
+            "role": "assistant",
+            "content": self._format_final_summary(self._previous_steps, final_result),
+        })
 
         # Reset internal step tracker for next call
         self._previous_steps = []
