@@ -4,10 +4,11 @@ Atomic-Agentic is a Python framework for building reliable, testable “agentic�
 
 - **Tools** (portable actions),
 - **LLM Engines** (provider adapters),
-- **Agents** (stateful planners/executors),
+- **Agents** (stateful planners / orchestrators),
 - **Workflows** (deterministic orchestration patterns).
 
-Everything speaks the **same language**: a single, schema-first **dictionary I/O contract**. No DSLs, no black-box orchestrators—just clear, inspectable Python.
+Everything speaks the **same language**: a single, schema-first **dictionary I/O contract**.  
+No DSLs, no black-box orchestrators—just clear, inspectable Python.
 
 ---
 
@@ -26,9 +27,11 @@ pip install dist\<PACKAGE_FILENAME>.whl
 
 # On macOS / Linux
 pip install dist/*.whl
-```
+````
 
-> Replace `<PACKAGE_FILENAME>` with the generated wheel filename (e.g. `atomic_agentic-0.1.0-py3-none-any.whl`).
+> Replace `<PACKAGE_FILENAME>` with the generated wheel filename
+> (e.g. `atomic_agentic-0.1.0-py3-none-any.whl`).
+>
 > Alternatively, you can install the source distribution:
 >
 > ```bash
@@ -49,7 +52,7 @@ Set environment variables for whichever providers you plan to use:
 * `MISTRAL_API_KEY`
 * `GOOGLE_API_KEY`
 
-(See `LLMEngines.py` for details on each adapter.)
+(See `LLMEngines.py` and `EmbedEngines.py` for provider-specific details.)
 
 ### 3. Run a tiny example
 
@@ -87,16 +90,17 @@ result = planner.invoke({"prompt": "Greet Ada Lovelace and then return the messa
 print("Result:", result)
 ```
 
-Tip: For more complex orchestration patterns, see the `Workflows` module and its `ChainFlow`, `ScatterFlow`, `Selector`, and `MakerChecker` classes.
+Tip: For more complex orchestration patterns, see the `Workflows` module and its
+`ChainFlow`, `MapFlow`, `ScatterFlow`, `Selector`, and `MakerChecker` classes.
 
 ---
 
 ## What it provides
 
 * **Portable actions (Tools)**
-  Stateless wrappers around callables (and adapters around MCP tools / remote agents) that:
+  Stateless wrappers around callables (and adapters around Agents, MCP tools, and remote agents) that:
 
-  * Enforce **dict-only** input (`invoke(inputs: Mapping[str, Any]) -> Any`),
+  * Enforce **dict-only** input: `invoke(inputs: Mapping[str, Any]) -> Any`,
   * Introspect signatures into `arguments_map` (required/optional params),
   * Expose JSON-friendly metadata via `to_dict()` for validation, UIs, and remote calls.
 
@@ -107,12 +111,16 @@ Tip: For more complex orchestration patterns, see the `Workflows` module and its
 
   contract, plus attachment management via `attach(path)` / `detach(path)`. Orchestration code remains vendor-agnostic, and Agents include a small compatibility shim for engines that accept additional attachment-related parameters.
 
-* **Stateful reasoning (Agents)**
+* **Embedding engines (for vector search/RAG)**
+  A parallel stack of `EmbedEngine` implementations to turn text into vectors, with the same emphasis on simple contracts and provider-agnostic usage.
+
+* **Stateful reasoning and orchestration (Agents)**
   Components that:
 
   * Turn validated **input mappings** into prompt strings via a **pre-invoke Tool**,
   * Own persona (system role-prompt), history windowing, and attachments,
   * Call an `LLMEngine` for non-deterministic model outputs,
+  * Optionally orchestrate Tools iteratively (`OrchestratorAgent`) or as a single-shot planner (`PlannerAgent`),
   * Can themselves be wrapped as Tools or used inside Workflows.
 
 * **Deterministic coordination (Workflows)**
@@ -121,13 +129,13 @@ Tip: For more complex orchestration patterns, see the `Workflows` module and its
   * Accept a mapping input,
   * Execute Tools / Agents / other Workflows as steps,
   * Package outputs according to an explicit `output_schema` (plus optional `bundle_all`),
-  * Support patterns like `ChainFlow`, `ScatterFlow`, `Selector`, and `MakerChecker`,
+  * Support patterns like `ChainFlow`, `MapFlow`, `ScatterFlow`, `Selector`, and `MakerChecker`,
   * Record checkpoints for observability.
 
 * **Interoperability**
 
-  * **MCP tools** become first-class `Tool` instances via schema extraction and strict argument mapping.
-  * **A2A** (python-a2a) allows cross-process Agent calls using the same mapping-only contract.
+  * **MCP**: Remote MCP tools become first-class `MCPProxyTool` instances via schema extraction and strict argument mapping.
+  * **A2A**: python-a2a adapters allow cross-process Agent calls using the same mapping-only contract.
 
 * **Introspection & UX hooks**
 
@@ -138,7 +146,7 @@ Tip: For more complex orchestration patterns, see the `Workflows` module and its
 * **Observability**
 
   * Workflows append checkpoints (`inputs`, `raw`, `result`, timestamps),
-  * Errors are surfaced through domain-specific exception types (`ToolError`, `AgentError`, `WorkflowError`, etc).
+  * Errors are surfaced through domain-specific exception types.
 
 ---
 
@@ -148,13 +156,14 @@ Think of the stack in three layers, all talking via the **same** mapping-based c
 
 * **Base layer**
 
-  * **Tools** wrap callables or MCP tools.
-  * **LLM Engines** wrap provider SDKs (OpenAI, Mistral, Gemini).
+  * **Tools** wrap callables, Agents, and MCP tools.
+  * **LLM Engines** wrap provider SDKs (OpenAI, Mistral, Gemini, LlamaCpp).
+  * **Embed Engines** wrap provider embedding APIs.
 
 * **Middle layer**
 
   * **Agents** own persona + history + attachments, call LLM Engines,
-  * `ToolAgent` / `PlannerAgent` manage a toolbox of Tools and orchestrate tool calls.
+  * `ToolAgent` / `PlannerAgent` / `OrchestratorAgent` manage a toolbox of Tools and orchestrate tool calls.
 
 * **Top layer**
 
@@ -169,7 +178,7 @@ The single, shared contract is:
 
 ## Tools — portable, introspectable actions
 
-A `Tool` is a thin wrapper around a callable (or MCP tool / adapter) with a strict dict-only interface:
+A `Tool` is a thin wrapper around a callable (or MCP tool / adapter / Agent) with a strict dict-only interface:
 
 ```python
 from atomic_agentic.Tools import Tool
@@ -187,7 +196,7 @@ add_tool = Tool(
 result = add_tool.invoke({"a": 2, "b": 3})  # 5.0
 ```
 
-### Key behavior
+### Core behavior
 
 * **Invocation**
 
@@ -202,16 +211,67 @@ result = add_tool.invoke({"a": 2, "b": 3})  # 5.0
   * `signature` is a human-readable string (for prompts and UIs).
   * `to_dict()` produces a JSON-friendly metadata structure suitable for registries and remote calls.
 
-* **Construction paths**
+### Tool adapters
 
-  * Wrap a callable directly via `Tool(...)`, or
-  * Use `toolify(...)` to normalize callables, Agents, MCP tools, and URLs into `Tool` instances.
+Atomic-Agentic provides several adapter types built on top of `Tool`:
+
+#### AgentTool — Agents as Tools
+
+Defined in `Agents.py`:
+
+* **`AgentTool`** exposes an `Agent` as a `Tool`:
+
+  * Metadata:
+
+    * `type = "agent"`
+    * `source = agent.name`
+    * `name = "invoke"`
+    * `description = agent.description`
+  * **Schema exposure:**
+
+    * Mirrors the Agent’s **pre-invoke Tool** call-plan.
+    * `arguments_map`, required/optional sets, and var-args flags are copied from the Agent’s `pre_invoke` Tool.
+  * `invoke(inputs)` simply calls `agent.invoke(inputs)` and re-raises errors as `ToolInvocationError`.
+
+This makes Agents indistinguishable from Tools to higher layers (planner agents, workflows, registries).
+
+#### MCPProxyTool — remote MCP tools as local Tools
+
+Defined in `Tools.py`:
+
+* **`MCPProxyTool`** proxies a single MCP server tool as a normal dict-first Tool:
+
+  * On construction:
+
+    * Opens a short-lived MCP session,
+    * Calls `initialize` / `list_tools`,
+    * Extracts the tool’s `inputSchema` and description,
+    * Builds a keyword-only signature in server property order for `arguments_map`.
+  * On `invoke(inputs)`:
+
+    * Opens a fresh MCP session,
+    * Calls `initialize` / `call_tool`,
+    * Returns **structured content** when possible or a text fallback,
+    * Closes cleanly (no background loop).
+
+MCPProxyTool is what the library uses under the hood to call MCP tools remotely while still enforcing the same dict-only, schema-first behavior as local Tools.
+
+#### toolify — normalizing arbitrary inputs into Tools
+
+`Toolify.toolify(...)` is the main helper for getting everything into Tool form:
+
+* If given a `Tool` → returns `[Tool]`.
+* If given an `Agent` → returns `[AgentTool(agent)]`.
+* If given an MCP URL string → discovers MCP tools and returns a list of `MCPProxyTool` instances (one per MCP tool).
+* If given a callable → validates name/description and wraps it in a `Tool`.
+
+`ToolAgent.register` and `ToolAgent.batch_register` use `toolify` internally, so callers can pass callables, Agents, MCP endpoints, or Tools interchangeably.
 
 ---
 
 ## LLM Engines — provider adapters
 
-Engines are **stateless** adapters around model SDKs (e.g., OpenAI, Mistral, Gemini). They hide provider details behind a simple contract:
+Engines are **stateless** adapters around model SDKs (e.g., OpenAI, Mistral, Gemini, LlamaCpp). They hide provider details behind a simple contract:
 
 ```python
 from atomic_agentic.LLMEngines import OpenAIEngine
@@ -219,7 +279,7 @@ from atomic_agentic.LLMEngines import OpenAIEngine
 engine = OpenAIEngine(model="gpt-4o-mini")
 reply = engine.invoke([
     {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "Say hello."},
+    {"role": "user",   "content": "Say hello."},
 ])
 ```
 
@@ -227,29 +287,52 @@ reply = engine.invoke([
 
 * `invoke(messages: list[dict]) -> str`
 
-  * Messages are provider-agnostic dicts (role/content).
+  * Messages are provider-agnostic dicts (`role` / `content`).
   * Engines return the assistant’s message text as a `str`.
+
 * Attachments:
 
   * `attach(path: str)` and `detach(path: str)` manage a persistent mapping of file paths.
   * Engines decide how to upload/inline/attach files.
-* Agents include a compatibility shim so engines that accept extra attachment-related parameters still work.
+  * Agents include a compatibility shim so engines that accept extra attachment-related parameters still work.
 
 ### Included engines (see `LLMEngines.py`)
 
-* `OpenAIEngine` — uses the OpenAI Responses API; API key via `OPENAI_API_KEY`.
-* `MistralEngine` — Mistral client; API key via `MISTRAL_API_KEY`.
-* `GeminiEngine` — Google Gemini; API key via `GOOGLE_API_KEY`.
+* `OpenAIEngine`
+  Uses OpenAI’s Responses API; API key via `OPENAI_API_KEY`.
 
-Each engine focuses on:
+* `MistralEngine`
+  Mistral client; API key via `MISTRAL_API_KEY`.
 
-* Correct attachment handling,
-* Reasonable defaults (temperature, inline cutoffs),
-* Clear error surfaces (type / value errors for unsupported file types, etc).
+* `GeminiEngine`
+  Google Gemini client; API key via `GOOGLE_API_KEY`.
+
+* `LlamaCppEngine`
+  Local inference using `llama_cpp`. Useful when you want a local/offline LLM with the same engine interface.
 
 ---
 
-## Agents — stateful planners & executors
+## Embedding Engines — vectorization layer
+
+`EmbedEngines.py` contains embedding engines that follow a simple contract:
+
+* Base `EmbedEngine`:
+
+  * `embed(texts: Sequence[str]) -> list[list[float]]`
+  * Handles normalization, dimension consistency, and type coercion to `list[float]`.
+
+### Included embedding engines
+
+* `OpenAIEmbedEngine` — OpenAI embeddings.
+* `GeminiEmbedEngine` — Google embedding APIs via `google.genai`.
+* `MistralEmbedEngine` — Mistral embeddings.
+* `LlamaCppEmbedEngine` — local inference using `llama_cpp`.
+
+These can be dropped into your own vector stores / RAG stacks without coupling orchestration logic to a specific provider.
+
+---
+
+## Agents — stateful planners & orchestrators
 
 Agents connect input schemas, prompt building, model calls, and history.
 
@@ -280,13 +363,13 @@ From `Agents.py`:
   * `llm_engine` (must be an `LLMEngine`)
   * `context_enabled: bool`
   * `history_window: int` — send-window in turns (user+assistant pairs)
-  * `history: list[dict]` — read-only view of all stored turns
+  * `history: list[dict]` — read-only view of stored turns
   * `attachments: dict[path, metadata]` — read-only view
   * `pre_invoke: Tool` — mapping → prompt converter
 
-### Tool-using Agents
+### ToolAgent — Agents with a toolbox
 
-`ToolAgents.py` introduces agents that manage a toolbox of `Tool` instances.
+`ToolAgents.py` introduces tool-using Agents.
 
 #### `ToolAgent`
 
@@ -300,15 +383,57 @@ From `Agents.py`:
 
 Subclasses override `_invoke(self, prompt: str) -> Any` to define planning/execution semantics.
 
-#### `PlannerAgent`
+#### `PlannerAgent` — single-shot planner
 
-A single-shot planner:
+A single-shot planner that uses the LLM once to produce a full plan:
 
 * Uses `Prompts.PLANNER_PROMPT` with `{TOOLS}` replaced by `actions_context()`.
-* Calls the LLM once to generate a JSON array of steps.
-* Ensures the final step is a canonical `_return` tool.
-* Executes steps synchronously or, when `run_concurrent=True`, with async fan-out (event-loop-safe fallback).
-* Designed for “tool use” style tasks where the model decides which Tools to call in which order.
+* LLM returns a JSON array of steps.
+* Planner:
+
+  * Validates the plan,
+  * Ensures the final step is a canonical `_return` tool (exposed as `RETURN_KEY`),
+  * Executes each step in order (optionally concurrently when `run_concurrent=True`),
+  * Returns the final `_return` payload.
+
+Suitable for “tool use” style tasks where a one-shot plan is acceptable.
+
+#### `OrchestratorAgent` — iterative orchestrator
+
+`OrchestratorAgent` is an **iterative, schema-driven tool orchestrator**:
+
+* Uses `Prompts.ORCHESTRATOR_PROMPT`, again with `{TOOLS}` filled from `actions_context()`.
+
+* Each iteration, the LLM returns exactly one JSON object:
+
+  ```jsonc
+  {
+    "step_call": { "function": "<type>.<source>.<name>", "args": { ... } },
+    "explanation": "why this step",
+    "status": "CONTINUE" | "COMPLETE"
+  }
+  ```
+
+  No prose, no markdown fences.
+
+* OrchestratorAgent:
+
+  * Looks up the Tool by its canonical `full_name`,
+  * Calls `Tool.invoke(args)` and records the result,
+  * Maintains a structured `_previous_steps` list (function, args, explanation, result, and flags),
+  * Injects a compact “Previous Steps” summary into each iteration’s prompt,
+  * Iterates until:
+
+    * `status == "COMPLETE"`, or
+    * `max_steps` steps executed, or
+    * `max_failures` failed iterations.
+
+* History policy:
+
+  * The full, multi-step reasoning is visible **within** each call’s prompt (but not exploded into separate stored turns).
+  * At the end, if `context_enabled=True`, the original prompt and the final answer are appended to `history`.
+
+This pattern is useful when you want the model to **plan, execute, and adapt** step-by-step, while still keeping control over schemas, tools, and limits.
 
 ---
 
@@ -324,12 +449,14 @@ A single-shot planner:
 
     * Delegates to `_process_inputs(inputs)` in subclasses,
     * Packages the raw result into a dict shaped by `output_schema`.
+
 * Boundary controls:
 
-  * `output_schema: list[str]` — required, default `["__wf_result__"]` if not supplied.
-  * `bundle_all: bool` — optional single-key envelope for non-conforming raw results.
+  * `output_schema: list[str]` — required; defaults to `[WF_RESULT]` (where `WF_RESULT = "__wf_result__"`) if not supplied.
+  * `bundle_all: bool` — optional single-key envelope (must align with a single-key `output_schema`).
   * `arguments_map` — proxies expected inputs of wrapped components (subclasses implement).
-  * `input_schema: list[str]` — derived from `arguments_map` (keys in order).
+  * `input_schema: list[str]` — derived from `arguments_map`.
+
 * Checkpointing:
 
   * Each `invoke` appends a checkpoint with:
@@ -338,46 +465,136 @@ A single-shot planner:
     * `inputs`,
     * `raw` (unpackaged result),
     * `result` (packaged dict).
-  * Accessible via a `checkpoints` property (see `Workflows.py`).
+  * Accessible via a `checkpoints` property.
+
+Workflows intentionally **don’t** declare their own input schema; they surface the schema of what they wrap.
+
+### ToolFlow and AgentFlow — wrapping existing components
+
+To make composition uniform, Atomic-Agentic wraps Tools and Agents in Workflow adapters:
+
+* **`AgentFlow`**
+
+  * Wraps a single `Agent`.
+  * Inputs are forwarded as `agent.invoke(inputs)`.
+  * `arguments_map` is a read-only proxy to `agent.arguments_map`.
+  * Output packaging handled by `Workflow`.
+
+* **`ToolFlow`**
+
+  * Wraps a single `Tool` or callable.
+  * Callables are first turned into a `Tool`.
+  * Inputs are forwarded as `tool.invoke(inputs)`.
+  * `arguments_map` proxies `tool.arguments_map`.
+
+A helper, **`_to_workflow(obj)`**, normalizes:
+
+* `Workflow` → returned as-is,
+* `Agent` → wrapped as `AgentFlow`,
+* `Tool` / callable → wrapped as `ToolFlow`.
+
+All composite flows below use `_to_workflow`, so you can pass Tools, Agents, callables, or Workflows interchangeably.
 
 ### Included patterns
 
-* **`ChainFlow`**
-  Sequential composition:
+#### ChainFlow — sequential composition
 
-  * Takes a list of steps (Tool/Agent/Workflow wrappers).
-  * Forwards each step’s mapping output as the next input.
-  * `arguments_map` proxies the first step’s `arguments_map`.
-  * Useful as a deterministic, testable alternative to “chain-of-thought” style planning.
+`ChainFlow` sequentially composes a list of steps (any combination of `ToolFlow`, `AgentFlow`, or other `Workflow` instances):
 
-* **`ScatterFlow`**
-  Scatter/gather pattern:
+* Forwards each step’s mapping output as the next step’s input.
+* `arguments_map` proxies the **first** step’s `arguments_map`.
+* `output_schema` / `bundle_all` define the final result shape; the **last step** is aligned to these overlay values.
 
-  * Fans out inputs across multiple branches (Tools/Agents/Workflows).
-  * Collects results into a normalized mapping shaped by `output_schema`.
-  * Good for parallelizable tasks (e.g., multi-model or multi-datasource queries).
+Useful as a deterministic, testable alternative to “chain-of-thought” style planning.
 
-* **`Selector`**
-  Conditional router:
+#### MapFlow — per-branch payload fan-out
 
-  * Uses a judge (Workflow/Tool/Agent) to decide which branch to run.
-  * Judge outputs a standardized decision (`JUDGE_RESULT`).
-  * Returns the chosen branch’s packaged result.
-  * Cleanly separates decision logic from branch implementations.
+`MapFlow` is a **tailored fan-out** pattern where each branch gets its own payload:
 
-* **`MakerChecker`**
-  Maker–Checker composite:
+* Inputs:
 
-  * `Maker` produces a draft result.
-  * `Checker` reviews/edits/approves or rejects the draft.
-  * Optional `Judge` can arbitrate or choose between maker/edits.
-  * Composite exposes input schema derived from the Maker’s `arguments_map`.
+  * Expects a mapping of `branch_name -> payload_mapping`.
+  * Unknown branch names raise `ValidationError`.
+  * If a branch has no payload:
 
-Together, these patterns help you:
+    * `flatten=False` → branch appears in output as `None`,
+    * `flatten=True` → branch is skipped entirely.
 
-* Keep orchestration deterministic and testable,
-* Centralize packaging and error handling,
-* Observe behavior via checkpoints.
+* Schema surfacing:
+
+  * `arguments_map` is proxied from an internal “schema supplier” Tool whose keyword-only parameters mirror the current branch names, annotated as `dict[str, Any]`.
+  * When branches change, the supplier is rebuilt; `input_schema` remains derived from `arguments_map`.
+
+* Outputs:
+
+  * `flatten=False` (default):
+
+    * Ordered mapping `branch_name -> branch_result | None` in branch order.
+
+  * `flatten=True`:
+
+    * Left-to-right merge of branch outputs:
+
+      * Plain dicts are merged key-by-key,
+      * Special envelopes `{WF_RESULT: ...}` / `{JUDGE_RESULT: ...}` and non-dicts are stored under the branch name.
+
+Good when each branch operates on a **different** part of the input.
+
+#### ScatterFlow — broadcast fan-out
+
+`ScatterFlow` is a broadcast fan-out where **every branch** sees the **same** validated input mapping:
+
+* Contract:
+
+  * Every branch must have an `input_schema` **set-equal** to the others.
+  * At construction and on `add_branch`, new branches are checked for schema equality; mismatches raise `ValidationError`.
+  * `arguments_map` proxies the first branch’s `arguments_map`.
+
+* Execution:
+
+  * The same `inputs` mapping is dispatched to every branch concurrently via asyncio.
+  * Results can be:
+
+    * Collected per-branch, or
+    * Flattened via a merge policy similar to `MapFlow` (branch results merged left-to-right, with special handling for envelopes and collisions).
+
+Good for multi-model or multi-datasource queries where everyone needs the same input.
+
+#### Selector — judge-based router
+
+`Selector` uses a judge component to decide which branch to execute:
+
+* Judge:
+
+  * Is itself a `Workflow`/Tool/Agent (normalized via `_to_workflow`).
+  * Returns a standardized decision under the `JUDGE_RESULT` key.
+
+* Flow:
+
+  1. Inputs go to the judge,
+  2. Judge picks a branch name,
+  3. Inputs are forwarded to the chosen branch,
+  4. The branch’s packaged result becomes the Selector’s result.
+
+Branches are stored in an ordered mapping; name collisions are handled by a `name_collision_policy` (`"fail_fast" | "skip" | "replace"`) shared with `ScatterFlow`.
+
+#### MakerChecker — maker–checker composite
+
+`MakerChecker` composes maker/checker (and optionally judge) workflows:
+
+* Maker:
+
+  * Produces a draft result from the initial inputs.
+
+* Checker:
+
+  * Reviews, edits, or approves the draft.
+
+* Optional Judge:
+
+  * Can arbitrate or choose between drafts/edits in more complex setups.
+
+`MakerChecker` exposes an input schema derived from the Maker’s `arguments_map` and packages the final result via its own `output_schema`.
 
 ---
 
@@ -385,20 +602,27 @@ Together, these patterns help you:
 
 ### MCP (Model Context Protocol)
 
-Using `__utils__` and `Toolify`, the library can:
+Atomic-Agentic treats MCP tools as first-class primitives via `MCPProxyTool` and `toolify`:
 
-* Discover MCP tools exposed by an MCP server,
-* Normalize them into regular `Tool` instances,
-* Enforce strict argument mapping (no hidden params),
-* Make MCP tools indistinguishable from local Tools to Agents/Workflows.
+* It can:
 
-This means you can mix:
+  * Connect to an MCP server,
+  * Discover tools and their `inputSchema`,
+  * Materialize them as `MCPProxyTool` instances.
+
+* Each `MCPProxyTool`:
+
+  * Presents a local `Tool`-like interface (`invoke(mapping)`),
+  * Enforces a keyword-only schema based on the remote `inputSchema`,
+  * Returns structured content whenever possible.
+
+You can mix:
 
 * Local Python callables,
-* MCP tools,
-* Remote Agents,
+* MCP tools (via `MCPProxyTool`),
+* AgentTools,
 
-in the same Planner/Workflow without changing orchestration code.
+in the same Planner/Orchestrator/Workflow without changing orchestration code.
 
 ### A2A (Agent-to-Agent)
 
@@ -406,17 +630,38 @@ in the same Planner/Workflow without changing orchestration code.
 
 * **`A2AProxyAgent`** — client-side proxy:
 
-  * Sends a single `payload` mapping to a remote A2A Agent via python-a2a,
-  * Returns the raw message,
-  * Convenience method `invoke_response(inputs) -> dict | None` extracts the response payload.
+  * `invoke(inputs)` sends a single `payload` mapping to a remote A2A Agent via python-a2a and returns the raw message.
+  * Convenience `invoke_response(inputs) -> dict | None` extracts the response payload when present.
 
 * **`A2AServerAgent`** — server-side adapter:
 
   * Wraps a local seed `Agent`,
   * Exposes it as a python-a2a server,
-  * Uses the same mapping-only contract as local Agents (`inputs: Mapping`).
+  * Uses the same mapping-only contract as local Agents.
 
-This keeps cross-process calls aligned with the rest of the library: **no special types**, just dicts.
+Cross-process calls stay aligned with the rest of the library: **no special types**, just dicts.
+
+---
+
+## Factory helpers — reconstructing from dicts
+
+`Factory.py` provides helpers to reconstruct objects from their `to_dict()` snapshots:
+
+* `load_llm(data: Mapping[str, Any], **kwargs) -> LLMEngine`
+* `load_tool(data: Mapping[str, Any], **kwargs) -> Tool`
+* `load_agent(data: Mapping[str, Any], **kwargs) -> Agent`
+
+These use the `"provider"` / `"type"` metadata in the snapshots and support:
+
+* Core Engines (`OpenAIEngine`, `MistralEngine`, `GeminiEngine`, `LlamaCppEngine`),
+* Tools (`Tool`, `AgentTool`, `MCPProxyTool`),
+* Agents (`Agent`, `PlannerAgent`, `OrchestratorAgent`, `A2AProxyAgent`, `A2AServerAgent`).
+
+This is useful for:
+
+* Config-driven systems (YAML/JSON configs → objects),
+* Persistence and replay,
+* Simple remote registries.
 
 ---
 
@@ -472,16 +717,17 @@ This makes systems:
 
 * Explore:
 
-  * `Tools.py` for Tool behavior and introspection.
-  * `LLMEngines.py` for provider-specific adapters.
-  * `Agents.py` and `ToolAgents.py` for Agents and Planners.
-  * `Workflows.py` for orchestration patterns.
+  * `Tools.py` for Tool behavior, `AgentTool`, `MCPProxyTool`, and introspection.
+  * `LLMEngines.py` for provider-specific LLM adapters.
+  * `EmbedEngines.py` for embedding engines.
+  * `Agents.py` and `ToolAgents.py` for Agents, Planners, and Orchestrators.
+  * `Workflows.py` for orchestration patterns (`ChainFlow`, `MapFlow`, `ScatterFlow`, `Selector`, `MakerChecker`, `AgentFlow`, `ToolFlow`).
   * `Plugins.py` for prebuilt tool lists (e.g., `MATH_TOOLS`, `CONSOLE_TOOLS`, `PARSER_TOOLS`).
 
 * Start small:
 
   * Wrap a couple of local functions as Tools,
-  * Add a `PlannerAgent` with an `LLMEngine`,
-  * Compose them with a `ChainFlow` or `MakerChecker` Workflow.
+  * Add a `PlannerAgent` or `OrchestratorAgent` with an `LLMEngine`,
+  * Compose them with a `ChainFlow`, `MapFlow`, `ScatterFlow`, or `MakerChecker` Workflow.
 
 Atomic-Agentic gives you small, sharp building blocks; the rest is just Python.
