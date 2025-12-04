@@ -86,11 +86,12 @@ class A2AProxyAgent(Agent):
 
     def __init__(self, url: str,
                  name: str|None = None,
-                 description: str|None = None):
+                 description: str|None = None,
+                 headers: Any|None = None):
         # We still call Agent.__init__ to keep consistent metadata, but the engine
         # is never used by this proxy.
         # Expect a FULL endpoint (e.g., "http://127.0.0.1:5000/a2a").
-        self._client = A2AClient(url)
+        self._client = A2AClient(url, headers = headers)
         self._url = url
         agent_card = self._client.get_agent_card()
         super().__init__(name=name if name else agent_card.name,
