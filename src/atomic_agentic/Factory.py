@@ -6,9 +6,7 @@ from .Tools import *
 from .Agents import *
 from .ToolAgents import *
 from .A2Agents import *
-from .LLMEngines import *
 from ._exceptions import *
-import importlib
 
 __all__ = [
     "load_llm",
@@ -82,7 +80,7 @@ def load_llm(data: Mapping[str, Any], **kwargs) -> LLMEngine:
         raise ValueError(f"Unknown LLMEngine provider: {engine_type}")
 
 def load_tool(data: Mapping[str, Any], **kwargs) -> Tool:
-    """Reconstruct a ToolAdapter from a dict snapshot."""
+    """Reconstruct a Tool from a dict snapshot."""
     tool_type = data.get("tool_type", None)
     if tool_type is None or tool_type not in VALID_TOOL_TYPES:
         raise ToolInvocationError("Tool type must be specified and valid.")
@@ -146,7 +144,7 @@ def load_agent(data: Mapping[str, Any], **kwargs) -> Agent:
     """Reconstruct an Agent from a dict snapshot."""
     agent_type = data.get("agent_type", None)
     if agent_type is None or agent_type not in VALID_AGENT_TYPES:
-        raise AgentError("Agent type mus be.")
+        raise AgentError(f"Agent type must be a valid option from {VALID_AGENT_TYPES}.")
     name = data.get("name", "UnnamedAgent")
     description = data.get("description", "")
     role_prompt = data.get("role_prompt", None)
@@ -194,7 +192,7 @@ def load_agent(data: Mapping[str, Any], **kwargs) -> Agent:
                 context_budget_chars=data.get("context_budget_chars", 15_000),
             )
         agent.batch_register(tools, name_collision_mode=name_collision_mode)
-    elif agent_type == "A2ASeverAgent":
+    elif agent_type == "A2AServerAgent":
         seed = load_agent(data["seed"],**kwargs)
         agent = A2AServerAgent(
             seed = seed,

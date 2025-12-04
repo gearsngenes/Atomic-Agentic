@@ -342,7 +342,6 @@ class Agent:
                 func=tool,
                 name=f"{self.name}_pre_invoke",
                 description=tool.__doc__ or f"Pre-invoke callable adapted to Tool for agent {self.name}",
-                type="function",
                 source="default",
             )
         if not isinstance(tool, Tool):

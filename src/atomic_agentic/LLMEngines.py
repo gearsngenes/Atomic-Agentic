@@ -29,12 +29,9 @@ class LLMEngine(ABC):
 
     Contract
     --------
-    - `invoke(messages, file_paths=None) -> str` must be implemented by subclasses.
+    - `invoke(messages: list[str, str]) -> str` must be implemented by subclasses.
       * `messages`: a list of `{"role": str, "content": str}` dicts in chat order
         (roles typically: "system", "user", "assistant").
-      * `file_paths`: optional list of local file paths the *Agent* wants to include.
-        The *Agent* is the only stateful owner of these paths; engines decide how to
-        upload/inline/ignore per provider.
 
     Expectations for concrete engines
     ---------------------------------
@@ -83,7 +80,6 @@ class LLMEngine(ABC):
         Run a single request against the backing provider.
 
         Subclasses **must**:
-        - Validate `file_paths`.
         - Upload/inline/attach as required by the provider.
         - Best-effort delete temporary resources.
         - Return the assistant's message text.
@@ -207,7 +203,7 @@ class OpenAIEngine(LLMEngine):
     # ── Public API ───────────────────────────────────────────────
     def invoke(self, messages: list[dict]) -> str:
         # Attachments are expected to be prepared via `engine.attach(path)` ahead
-        # of calling `invoke`. Passing `file_paths` here is deprecated and ignored.
+        # of calling `invoke`.
         
         # 1) Build Responses blocks: instructions + role-aware turns
         instructions = self._collect_instructions(messages)
@@ -535,7 +531,6 @@ class GeminiEngine(LLMEngine):
         """
         Generate content with Gemini using persistent attachments.
         Attachments must be prepared via `engine.attach(path)` before calling invoke.
-        Passing `file_paths` is deprecated and ignored.
         """
         
         # Prepare system + flat text turns (order-preserving)
@@ -685,7 +680,6 @@ class MistralEngine(LLMEngine):
         """
         Complete a Mistral chat turn using persistent attachments.
         Attachments must be prepared via `engine.attach(path)` before calling invoke.
-        Passing `file_paths` is deprecated and ignored.
         """
         
         # Start from the incoming messages

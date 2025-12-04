@@ -113,10 +113,6 @@ class Tool:
         return self._description
 
     @property
-    def type(self) -> str:
-        return self._type
-
-    @property
     def source(self) -> str:
         return self._source
 

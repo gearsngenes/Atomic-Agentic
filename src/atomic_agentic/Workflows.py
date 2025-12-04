@@ -443,7 +443,7 @@ class ToolFlow(Workflow):
 def _to_workflow(obj: Callable | Agent | Tool | Workflow) -> Workflow:
         if isinstance(obj, Workflow): return obj
         if isinstance(obj, Agent): return AgentFlow(obj)
-        if isinstance(obj, Tool|Callable): return ToolFlow(obj)
+        if isinstance(obj, (Tool, Callable)): return ToolFlow(obj)
         raise ValidationError(f"Object must be Agent, Tool, Callable, or Workflow. Got unexpected '{type(obj).__name__}'.")
 
 
@@ -495,7 +495,7 @@ class ChainFlow(Workflow):
             bundle_all=bundle_all,
         )
         self._steps: List[Workflow] = []
-        self._steps = [ _to_workflow(s) for s in steps ]
+        self._steps = [ _to_workflow(s) for s in steps if steps is not None]
         self._reconcile_all()
 
     # ---------------------------- documentation proxy ----------------------------

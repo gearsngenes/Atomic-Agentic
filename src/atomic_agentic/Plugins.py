@@ -8,7 +8,7 @@ ToolAgent/PlannerAgent via `batch_register(...)`.
 
 Example
 -------
->>> from modules.Plugins import MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
+>>> from atomic_agentic.Plugins import MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
 >>> planner.batch_register(MATH_TOOLS)
 >>> planner.batch_register(CONSOLE_TOOLS)
 >>> planner.batch_register(PARSER_TOOLS)

@@ -61,7 +61,7 @@ class ToolAgent(Agent, ABC):
     • `batch_register(...)` accepts an **Iterable** of (Tool|Agent|str); raw callables
       are intentionally **not** allowed in batch mode.
     • `list_tools()` returns an `OrderedDict[str, Tool]` (schema-first).
-    • `actions_context(with_schemas=True)` returns a **human-readable** block: tool ids,
+    • `actions_context()` returns a **human-readable** block: tool ids,
       signatures, required keys; suitable for inclusion in prompts.
 
     Thread-safety
@@ -244,7 +244,6 @@ class ToolAgent(Agent, ABC):
             "headers": headers,
         }
 
-        # Toolify OUTSIDE the lock (may raise ToolDefinitionError)
         tools = toolify(item, **toolify_params)
 
         # Mutate toolbox atomically per tool under a lock
@@ -319,7 +318,6 @@ class ToolAgent(Agent, ABC):
                 "When registering multiple items, raw functions are not permitted"
             )
 
-        # Toolify OUTSIDE the lock (may raise ToolDefinitionError)
         produced: List[Tool] = []
         for obj in items:
             toolify_params = {
@@ -393,12 +391,6 @@ class ToolAgent(Agent, ABC):
     def actions_context(self) -> str:
         """
         Build a **human-readable** context block of available actions for prompts.
-
-        Parameters
-        ----------
-        with_schemas : bool, default True
-            If True, include each Tool's canonical `signature` and its required keys.
-            If False, include only `full_name` and description.
 
         Returns
         -------
@@ -493,13 +485,12 @@ class PlannerAgent(ToolAgent):
 
     # -- planning & execution --------------------------------------------------
 
-    def strategize(self, prompt: str) -> List[dict]:
+    def strategize(self, prompt: str) -> str:
         """
         Ask the LLM for a **full plan** (JSON array of steps) using the available tools.
 
         The system prompt contains the formatted AVAILABLE METHODS; the user prompt carries
-        the task. The raw JSON string is stored in history (assistant turn). The final plan
-        (a list of step dicts) is returned, ensuring a trailing return step.
+        the task. `strategize` then returns the cleaned, raw JSON string to be parsed.
         """
         # 1) Format the user request into a json-decomposition task
         user_prompt = f"Decompose the following task into a JSON plan:\n{prompt}\n\n"
