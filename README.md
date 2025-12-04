@@ -223,7 +223,6 @@ Defined in `Agents.py`:
 
   * Metadata:
 
-    * `type = "agent"`
     * `source = agent.name`
     * `name = "invoke"`
     * `description = agent.description`
