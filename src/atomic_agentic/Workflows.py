@@ -58,6 +58,7 @@ from collections.abc import Mapping, Iterable, Sequence, Set
 from collections import OrderedDict
 import time
 import asyncio, threading
+import logging
 # =========================
 # Atomic-Agentic Modules
 # =========================
@@ -86,6 +87,11 @@ def _namedtuple_as_mapping(x: Any) -> Dict[str, Any]:
 MAPPABLE_KINDS = (Mapping,)
 STRINGISH = (str, bytes, bytearray)
 
+
+# =========================
+# Workflow logger
+# =========================
+logger = logging.getLogger(__name__)
 
 # =========================
 # Base Workflow
@@ -209,6 +215,7 @@ class Workflow(ABC):
     def invoke(self, inputs: Mapping[str, Any]) -> OrderedDict[str, Any]:
         start = time.time()
         timestamp = datetime.now()
+        logger.info(f"[{type(self).__name__}.{self.name}.invoke started]")
         if not isinstance(inputs, Mapping):
             raise ValidationError(f"{self._name}: inputs must be a mapping, got {type(inputs).__name__}")
         raw = self._process_inputs(dict(inputs))
@@ -224,6 +231,7 @@ class Workflow(ABC):
                 "duration": end - start
             }
         )
+        logger.info(f"[{type(self).__name__}.{self.name}.invoke finished]")
         return result
 
     # ---------- Packaging ----------
@@ -495,7 +503,7 @@ class ChainFlow(Workflow):
             bundle_all=bundle_all,
         )
         self._steps: List[Workflow] = []
-        self._steps = [ _to_workflow(s) for s in steps if steps is not None]
+        self._steps = [ _to_workflow(s) for s in (steps if steps is not None else [])]
         self._reconcile_all()
 
     # ---------------------------- documentation proxy ----------------------------
@@ -549,6 +557,7 @@ class ChainFlow(Workflow):
         curr: Any = inputs
         for i, step in enumerate(self._steps):
             try:
+                logger.info(f"{self.name} step ({i+1}/{len(self._steps)}): {step.name}")
                 curr = step.invoke(curr)
             except Exception as e:
                 raise ExecutionError(
@@ -772,36 +781,35 @@ class MakerChecker(Workflow):
     # -------------------------------------------------------------------------
     def _process_inputs(self, inputs: Dict[str, Any]) -> Any:
         """
-        Run Maker → Checker, optionally loop under Judge until approved
-        or until `max_revisions` is reached.
+        Create the first draft at the beginning, then iterate through revisions.
+        For each revision, run Checker, optionally pass through Judge, and update
+        draft if Judge is not present or did not approve.
 
-        Returns the Maker's latest draft (raw). Base Workflow will package
+        Returns the Maker's final draft (raw). Base Workflow will package
         to this composite's overlay schema/bundling.
         """
-        current = inputs
-        last_draft: Optional[Dict[str, Any]] = None
+        # Create the first draft at the beginning
+        try:
+            logger.info(f"{self.name}.maker making draft 1")
+            draft = self._maker.invoke(inputs)
+        except Exception as e:
+            raise ExecutionError(f"{self._name}: maker invocation failed: {e}") from e
 
+        # Iterate through revision cycles
         for _rev in range(self._max_revisions):
-            # Maker
-            try:
-                draft = self._maker.invoke(current)
-            except Exception as e:
-                raise ExecutionError(f"{self._name}: maker invocation failed: {e}") from e
-
             # Checker
             try:
                 revisions = self._checker.invoke(draft)
+                logger.info(f"{self.name}.checker revision ({_rev + 1}/{self._max_revisions})")
             except Exception as e:
                 raise ExecutionError(f"{self._name}: checker invocation failed: {e}") from e
-
-            last_draft = draft  # maker's output is the draft we ultimately return
 
             # Judge (optional)
             if self._judge is not None:
                 try:
                     decision = self._judge.invoke(revisions)
                 except Exception as e:
-                    raise ExecutionError(f"{self._name}: judge invocation failed: {e}") from e
+                    raise ExecutionError(f"{self._name}.judge.invoke failed: {e}") from e
 
                 if not isinstance(decision, dict) or JUDGE_RESULT not in decision:
                     raise ValidationError(
@@ -813,14 +821,23 @@ class MakerChecker(Workflow):
                         f"{self._name}: '{JUDGE_RESULT}' must be a boolean; got {type(ok).__name__}"
                     )
                 if ok:
-                    break  # approved
-                # not approved → feed revisions back to maker
-                current = revisions
+                    logger.info(f"{self.name}.judge early approval after ({_rev}/{self._max_revisions}) revisions")
+                    break  # approved, keep current draft
+                # not approved → create updated draft from revisions
+                try:
+                    logger.debug(f"{self.name}.maker making draft {_rev + 2}")
+                    draft = self._maker.invoke(revisions)
+                except Exception as e:
+                    raise ExecutionError(f"{self._name}: maker invocation failed: {e}") from e
             else:
-                # No judge: if more cycles remain, feed revisions; otherwise finish
-                current = revisions
+                # No judge: create updated draft from revisions
+                try:
+                    logger.debug(f"{self.name}.maker making draft {_rev + 2}")
+                    draft = self._maker.invoke(revisions)
+                except Exception as e:
+                    raise ExecutionError(f"{self._name}: maker invocation failed: {e}") from e
 
-        return last_draft
+        return draft
     
     def clear_memory(self):
         super().clear_memory()
@@ -1049,6 +1066,7 @@ class Selector(Workflow):
         if not self._branches:
             raise ValidationError(f"{self.name}: There are no branches to choose from")
         # have judge select branch to invoke
+        logger.debug(f"{self.name}.judge invoked")
         selection_raw = self._judge.invoke(inputs)
         # fail if selection isn't formatted correctly or returning a string
         if not isinstance(selection_raw, dict) or JUDGE_RESULT not in selection_raw:
@@ -1060,6 +1078,7 @@ class Selector(Workflow):
         selected_branch = next((b for b in self._branches.values() if b.name == selection or b.name == selection), None)
         if selected_branch is None:
             raise ValidationError(f"{self.name}: No branches matching the name for selection '{selection}'.")
+        logger.info(f"{self.name} selected branch '{selection}'")
         return selected_branch.invoke(inputs)
 
 
@@ -1212,6 +1231,7 @@ class MapFlow(Workflow):
 
         async def _run_all():
             async def _one(n: str, wf: Workflow, payload: Mapping[str, Any]):
+                logger.debug(f"{self.name} invoking branch {wf.name}")
                 return n, await asyncio.to_thread(wf.invoke, dict(payload))
             return await asyncio.gather(
                 *(_one(n, wf, p) for n, wf, p in to_run),
@@ -1257,6 +1277,7 @@ class MapFlow(Workflow):
             return ordered
 
         # ---- Flatten path ----
+        logger.info(f"{self.name} flattening its results-by-branch output")
         flat: OrderedDict[str, Any] = OrderedDict()
         SPECIAL_KEYS = (WF_RESULT, JUDGE_RESULT)
 
@@ -1265,7 +1286,7 @@ class MapFlow(Workflow):
             if not any(n == x for x, _, _ in to_run):
                 continue
             payload = results_by_branch.get(n, None)
-            if isinstance(payload, dict):
+            if isinstance(payload, Mapping):
                 # Unwrap special envelope → store under branch name
                 if any(k in payload for k in SPECIAL_KEYS):
                     for sk in SPECIAL_KEYS:
@@ -1460,6 +1481,7 @@ class ScatterFlow(Workflow):
         async def _run_all():
             async def _one(n: str, wf: Workflow):
                 # run sync wf.invoke in default thread pool
+                logger.debug(f"{self.name} invoking branch {wf.name}")
                 return n, await asyncio.to_thread(wf.invoke, inputs)
             return await asyncio.gather(
                 *(_one(n, wf) for n, wf in self._branches.items()),
@@ -1498,6 +1520,7 @@ class ScatterFlow(Workflow):
             return results_by_branch
 
         # ---- Flatten path ----
+        logger.info(f"{self.name} flattening its results-by-branch output")
         flat: OrderedDict[str, Any] = OrderedDict()
         SPECIAL_KEYS = (WF_RESULT, JUDGE_RESULT)
 
@@ -1506,7 +1529,7 @@ class ScatterFlow(Workflow):
                 continue
             payload = results_by_branch[name]
 
-            if isinstance(payload, dict):
+            if isinstance(payload, Mapping):
                 # If it has a special key, unwrap and store under the branch name itself.
                 # Prioritize WF_RESULT over JUDGE_RESULT if both exist (rare).
                 if any(k in payload for k in SPECIAL_KEYS):

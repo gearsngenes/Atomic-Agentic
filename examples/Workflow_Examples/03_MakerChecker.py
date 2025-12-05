@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
+logging.basicConfig(level = logging.INFO)#logging.DEBUG)
 
 # ---- LLM ----
 LLM = OpenAIEngine(model="gpt-4o", temperature=0.7)

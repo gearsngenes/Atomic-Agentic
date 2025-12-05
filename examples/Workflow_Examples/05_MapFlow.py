@@ -3,7 +3,7 @@ from typing import Any
 from atomic_agentic.Tools import Tool
 from atomic_agentic.Workflows import MapFlow
 
-logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
+logging.basicConfig(level = logging.INFO)#logging.DEBUG)
 
 # -------------------------
 # Branch tools (each returns a dict)

@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.getLogger().setLevel(logging.INFO)  # or DEBUG
+logging.basicConfig(level=logging.INFO)  # or DEBUG
 
 print("=== AgentFlow examples (schema-driven dict inputs) ===")
 

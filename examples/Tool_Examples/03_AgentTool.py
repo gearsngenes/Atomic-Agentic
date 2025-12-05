@@ -11,6 +11,10 @@ from atomic_agentic.LLMEngines import OpenAIEngine
 
 load_dotenv()  # take environment variables from .env file (if exists)
 
+import logging
+
+logging.basicConfig(level = logging.INFO)
+
 # --- 2) Define a richer pre-invoke Tool (schema mirrors desired Agent inputs) ---
 
 def to_prompt(topic: str, style: str, *, audience: str = "general") -> str:

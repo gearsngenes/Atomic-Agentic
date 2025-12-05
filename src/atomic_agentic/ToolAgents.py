@@ -496,7 +496,7 @@ class PlannerAgent(ToolAgent):
         user_prompt = f"Decompose the following task into a JSON plan:\n{prompt}\n\n"
 
         # 2) Ask the LLM for a full plan (array of steps)
-        logger.info(f"{self.name}.strategize: Building messages")
+        logger.debug(f"{self.name}.strategize: Building messages")
         messages = [
             {"role": "system", "content": self.role_prompt},
         ]
@@ -505,18 +505,18 @@ class PlannerAgent(ToolAgent):
         messages.append({"role": "user", "content": user_prompt})
 
         # Use positional signature to match base Agent consistency
-        logger.info(f"{self.name}.strategize: Invoking LLM")
+        logger.debug(f"{self.name}.strategize: Invoking LLM")
         raw = self._llm_engine.invoke(messages)
 
         # Strip markdown fences (common LLM formatting)
-        logger.info(f"{self.name}.strategize: Cleaning LLM text")
+        logger.debug(f"{self.name}.strategize: Cleaning LLM text")
         raw = re.sub(r"^```[a-zA-Z]*|```$", "", raw)
         
         return raw
     
     def load_steps(self, raw_plan: str)->list[dict]:
         """Converts raw plan JSON string into a python list"""
-        logger.info(f"{self.name}.load_steps: Parsing steps")
+        logger.debug(f"{self.name}.load_steps: Parsing steps")
         steps: List[dict] = list(json.loads(raw_plan))
         if not steps or steps[-1].get("function") != RETURN_KEY:
             steps.append({"function": RETURN_KEY, "args": {"val": None}})
@@ -530,7 +530,7 @@ class PlannerAgent(ToolAgent):
         Uses synchronous or asynchronous execution based on `run_concurrent`.
         Tracks each step's `result` and `completed` status in `_previous_steps`.
         """
-        logger.info(f"{self.name}.execute: Executing steps")
+        logger.debug(f"{self.name}.execute: Executing steps")
         self._previous_steps = [{"result": None, "completed": False} for _ in plan]
 
         if self._run_concurrent:
@@ -552,7 +552,7 @@ class PlannerAgent(ToolAgent):
         tools = self.list_tools()
         for i, step in enumerate(steps):
             step_tool = tools[step["function"]]
-            logger.info(f"{self.name}._execute_sync: Running step {i} - {step['function']}, args: {step.get('args', {})}")
+            logger.info(f"{type(self).__name__}.{self.name}._execute_sync: Running step {i} - {step['function']}, args: {step.get('args', {})}")
             args = self._resolve(step.get("args", {}))
             result = step_tool.invoke(inputs=args)
             self._previous_steps[i]["result"] = result
@@ -586,7 +586,7 @@ class PlannerAgent(ToolAgent):
         async def run_step(i: int) -> Any:
             step = steps[i]
             step_tool = tools[step["function"]]
-            logger.info(f"{self.name}._execute_async: Running step {i} - {step['function']}, args: {step.get('args', {})}")
+            logger.info(f"{type(self).__name__}.{self.name}._execute_async: Running step {i} - {step['function']}, args: {step.get('args', {})}")
             args = self._resolve(step.get("args", {}))
             # Offload blocking tool invocation to a thread pool
             loop = asyncio.get_running_loop()
@@ -867,6 +867,7 @@ class OrchestratorAgent(ToolAgent):
 
             # Execute the tool (arg validation is handled by the Tool itself)
             try:
+                logger.info(f"{self.name}._invoke: executing step {step_index}: {tool.full_name}")
                 result = tool.invoke(inputs=resolved_args)
             except Exception as e:
                 self._previous_steps[step_index].update({

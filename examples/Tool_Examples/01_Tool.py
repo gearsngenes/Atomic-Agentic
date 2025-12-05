@@ -5,7 +5,9 @@ Adjust the import path to your project layout if needed:
 from modules.Tools import Tool, ToolInvocationError
 """
 from atomic_agentic.Tools import Tool, ToolInvocationError
+import logging
 
+logging.basicConfig(level = logging.INFO)
 
 # --- 1) Define plain Python functions (the Tool wraps these) ---
 

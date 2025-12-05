@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
+logging.basicConfig(level = logging.INFO)#logging.DEBUG)
 
 agent1 = Agent(
     name="Agent1",

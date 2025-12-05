@@ -9,7 +9,7 @@ from atomic_agentic.Tools import Tool
 
 load_dotenv()
 
-logging.getLogger().setLevel(logging.INFO)#logging.DEBUG)
+logging.basicConfig(level = logging.INFO)#logging.DEBUG)
 
 LLM = OpenAIEngine(model="gpt-4o-mini")
 

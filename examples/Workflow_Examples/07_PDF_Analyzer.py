@@ -19,6 +19,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import logging
+logging.basicConfig(level = logging.INFO)
+
 # -------- Config: no CLI needed; try ./test.pdf then assets path --------
 SAMPLE_PDF = "./examples/Workflow_Examples/test.pdf"
 DEFAULT_MODEL = "gpt-4o-mini"

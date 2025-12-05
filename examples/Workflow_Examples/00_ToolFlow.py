@@ -2,10 +2,9 @@
 from typing import Any, Dict, List
 import logging
 from atomic_agentic.Tools import Tool
-from atomic_agentic.Workflows import ToolFlow, WF_RESULT
+from atomic_agentic.Workflows import ToolFlow
 
-logging.getLogger().setLevel(logging.INFO)  # or DEBUG for more detail
-
+logging.basicConfig(level=logging.INFO)
 print("=== ToolFlow examples (schema-driven dict inputs) ===")
 
 # -------------------------------------------------------------------

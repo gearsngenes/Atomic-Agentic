@@ -149,6 +149,7 @@ class Tool:
             _args: list/tuple for extra *args (if function declares VAR_POSITIONAL)
             _kwargs: mapping for extra **kwargs (if function declares VAR_KEYWORD)
         """
+        logger.info(f"[{self.full_name}.invoke started]")
         if not isinstance(inputs, Mapping):
             raise ToolInvocationError(f"{self._name}: inputs must be a mapping")
 
@@ -214,11 +215,13 @@ class Tool:
 
         # Final call
         try:
-            return self._func(*args, **kwargs)
+            result = self._func(*args, **kwargs)
         except ToolInvocationError:
             raise
         except Exception as e:
             raise ToolInvocationError(f"{self._name}: invocation failed: {e}") from e
+        logger.info(f"[{self.full_name}.invoke finished]")
+        return result
 
     # -------------------------
     # Introspection & serialization
@@ -457,12 +460,13 @@ class MCPProxyTool(Tool):
         Raises:
             ToolInvocationError for invocation errors.
         """
+        logger.info(f"[{self.full_name}.invoke started]")
         try:
             result = self._call_remote_once(inputs)
-            return result
         except Exception as e:
             raise ToolInvocationError(f"MCPProxyTool.invoke error: {e}") from e
-        
+        logger.info(f"[{self.full_name}.invoke started]")
+        return result
     def to_dict(self)-> OrderedDict[str, Any]:
         dict_data = super().to_dict()
         dict_data["mcp_url"] = self._server_url

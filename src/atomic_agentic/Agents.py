@@ -487,13 +487,14 @@ class Agent:
         AgentInvocationError
             For engine signature/return issues or other unexpected failures.
         """
-        logger.info(f"[Agent - {self.name}].invoke begin")
+        logger.info(f"[{type(self).__name__}.{self.name}.invoke started]")
 
         if not isinstance(inputs, Mapping):
             raise TypeError("Agent.invoke expects a Mapping[str, Any].")
 
         # 2) Run pre-invoke Tool to get the prompt (strict by default)
         try:
+            logger.info(f"{self.name} preprocessing inputs")
             prompt = self._pre_invoke.invoke(inputs)  # may raise ToolInvocationError
         except ToolInvocationError:
             # Let Tool errors bubble up (they are already precise).
@@ -519,7 +520,7 @@ class Agent:
             # Ensure no stale data leaks across invocations.
             self._newest_history.clear()
 
-        logger.info(f"[Agent - {self.name}].invoke end")
+        logger.info(f"[{type(self).__name__}.{self.name}.invoke finished]")
         return result
 
     # ------------------------------ diagnostics ------------------------------
@@ -569,11 +570,11 @@ class AgentTool(Tool):
     def __init__(self, agent: Agent) -> None:
         if not isinstance(agent, Agent):
             raise ToolDefinitionError("AgentTool requires a valid Agent instance.")
-        self.agent = agent
+        self._agent = agent
 
         # Initialize as a Tool with the agent's description.
         super().__init__(
-            func=self.agent.invoke,
+            func=self._agent.invoke,
             name="invoke",
             description=agent.description,
             source=agent.name,
@@ -598,6 +599,10 @@ class AgentTool(Tool):
         # Explicit return type for AgentTool (agent responses are arbitrary)
         self._return_type = "Any"
         self._rebuild_signature_str()
+    
+    @property
+    def agent(self)-> Agent:
+        return self._agent
 
     def invoke(self, inputs: Mapping[str, Any]) -> Any:
         """
@@ -608,16 +613,18 @@ class AgentTool(Tool):
         ToolInvocationError
             For invocation errors.
         """
+        logger.info(f"[{self.full_name}.invoke started]")
         try:
-            result = self.agent.invoke(inputs)
-            return result
+            result = self._agent.invoke(inputs)
         except Exception as e:
-            raise ToolInvocationError(f"AgentTool.invoke error: {e}") from e
+            raise ToolInvocationError(f"{self.full_name}.invoke error: {e}") from e
+        logger.info(f"[{self.full_name}.invoke finished]")
+        return result
 
     def to_dict(self) -> OrderedDict[str, Any]:
         """
         Serialize AgentTool to a dict, including agent-specific metadata.
         """
         dict_data = super().to_dict()
-        dict_data["agent"] = self.agent.to_dict()
+        dict_data["agent"] = self._agent.to_dict()
         return dict_data
