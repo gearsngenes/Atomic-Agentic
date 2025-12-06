@@ -149,7 +149,7 @@ class Tool:
             _args: list/tuple for extra *args (if function declares VAR_POSITIONAL)
             _kwargs: mapping for extra **kwargs (if function declares VAR_KEYWORD)
         """
-        logger.info(f"[{self.full_name}.invoke started]")
+        logger.debug(f"[{self.full_name}.invoke started]")
         if not isinstance(inputs, Mapping):
             raise ToolInvocationError(f"{self._name}: inputs must be a mapping")
 
@@ -220,7 +220,7 @@ class Tool:
             raise
         except Exception as e:
             raise ToolInvocationError(f"{self._name}: invocation failed: {e}") from e
-        logger.info(f"[{self.full_name}.invoke finished]")
+        logger.debug(f"[{self.full_name}.invoke finished]")
         return result
 
     # -------------------------
@@ -460,12 +460,12 @@ class MCPProxyTool(Tool):
         Raises:
             ToolInvocationError for invocation errors.
         """
-        logger.info(f"[{self.full_name}.invoke started]")
+        logger.debug(f"[{self.full_name}.invoke started]")
         try:
             result = self._call_remote_once(inputs)
         except Exception as e:
             raise ToolInvocationError(f"MCPProxyTool.invoke error: {e}") from e
-        logger.info(f"[{self.full_name}.invoke started]")
+        logger.debug(f"[{self.full_name}.invoke started]")
         return result
     def to_dict(self)-> OrderedDict[str, Any]:
         dict_data = super().to_dict()
@@ -539,12 +539,14 @@ class MCPProxyTool(Tool):
             async with streamablehttp_client(url=self._server_url, headers=self._headers or None) as transport:
                 read, write = _extract_rw(transport)
                 async with ClientSession(read, write) as sess:
+                    logger.debug(f"{self.full_name} starting a session with '{self._server_url}'")
                     await sess.initialize()
                     return await sess.call_tool(self._name, dict(inputs))
 
         raw = _run_sync(_do())
 
         # Structured-first, then text fallback, else model_dump/raw.
+        logger.debug(f"{self.full_name} extracting the structured content from MCP response")
         val = _extract_structured_or_text(raw)
         if val is not None:
             return val

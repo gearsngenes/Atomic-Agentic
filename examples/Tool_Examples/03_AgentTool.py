@@ -2,7 +2,7 @@
 AgentTool demo: wrapping an Agent as a Tool with a schema taken from the Agent's pre_invoke Tool.
 
 Adjust the import path to your project layout if needed:
-from modules.ToolAdapters import AgentTool
+from atomic_agentic.Agents import AgentTool
 """
 from dotenv import load_dotenv
 from atomic_agentic.Tools import Tool, ToolInvocationError

@@ -4,7 +4,7 @@ from atomic_agentic.LLMEngines import OpenAIEngine
 
 load_dotenv()
 
-# logging.getLogger().setLevel(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)
 
 llm_engine = OpenAIEngine(model="gpt-4o-mini")
 

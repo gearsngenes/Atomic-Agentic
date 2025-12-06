@@ -109,8 +109,8 @@ Below are **drop-in** engine initializations. Each snippet also shows a minimal 
 > Assumes your project structure exposes these:
 >
 > ```py
-> from modules.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine, LlamaCppEngine
-> from modules.Agents import Agent
+> from atomic_agentic.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine, LlamaCppEngine
+> from atomic_agentic.Agents import Agent
 > ```
 
 ---
@@ -118,8 +118,8 @@ Below are **drop-in** engine initializations. Each snippet also shows a minimal 
 #### OpenAI (Responses API)
 
 ```python
-from modules.LLMEngines import OpenAIEngine
-from modules.Agents import Agent
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.Agents import Agent
 
 # Requires: OPENAI_API_KEY in environment (dotenv supported by the repo)
 llm = OpenAIEngine(
@@ -145,8 +145,8 @@ print(agent.invoke("Give me a 2-line explanation of attention in transformers.")
 #### Google Gemini
 
 ```python
-from modules.LLMEngines import GeminiEngine
-from modules.Agents import Agent
+from atomic_agentic.LLMEngines import GeminiEngine
+from atomic_agentic.Agents import Agent
 
 # Requires: GOOGLE_API_KEY in environment
 llm = GeminiEngine(
@@ -171,8 +171,8 @@ print(agent.invoke("List 3 practical tips for prompt engineering."))
 #### Mistral AI
 
 ```python
-from modules.LLMEngines import MistralEngine
-from modules.Agents import Agent
+from atomic_agentic.LLMEngines import MistralEngine
+from atomic_agentic.Agents import Agent
 
 # Requires: MISTRAL_API_KEY in environment
 llm = MistralEngine(
@@ -202,8 +202,8 @@ print(agent.invoke("What are two pros and two cons of RAG vs fine-tuning?"))
 **Option A — local .gguf path**
 
 ```python
-from modules.LLMEngines import LlamaCppEngine
-from modules.Agents import Agent
+from atomic_agentic.LLMEngines import LlamaCppEngine
+from atomic_agentic.Agents import Agent
 
 llm = LlamaCppEngine(
     model_path="/path/to/model.gguf",  # local file path
@@ -225,8 +225,8 @@ print(agent.invoke("Summarize the benefits of quantization for edge inference.")
 **Option B — pull from Hugging Face repo**
 
 ```python
-from modules.LLMEngines import LlamaCppEngine
-from modules.Agents import Agent
+from atomic_agentic.LLMEngines import LlamaCppEngine
+from atomic_agentic.Agents import Agent
 
 llm = LlamaCppEngine(
     repo_id="TheBloke/phi-3-mini-4k-instruct-GGUF",  # example

@@ -2,7 +2,7 @@
 Sample script to exercise the new Tool class invocation logic.
 
 Adjust the import below to match your project layout:
-from modules.Tools import Tool, ToolInvocationError, ToolDefinitionError
+from atomic_agentic.Tools import Tool, ToolInvocationError, ToolDefinitionError
 """
 import sys, os
 from pathlib import Path

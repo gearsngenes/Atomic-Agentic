@@ -42,6 +42,11 @@ task_prompt = (
     f"After executing all tools, return the final result from tool_3."
 )
 
-print("Invoking planner…")
-final = planner.invoke({"prompt": task_prompt})
+print("Strategizing...")
+plan_raw = planner.strategize(task_prompt)
+print("plan string:\n",plan_raw)
+print("Loading...")
+plan = planner.load_steps(plan_raw)
+print("Executing...")
+final = planner.execute(plan)
 print("\nFinal Result:\n", final)

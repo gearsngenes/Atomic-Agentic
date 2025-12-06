@@ -2,7 +2,7 @@
 Beginner-friendly demo: using Tool to wrap simple Python functions.
 
 Adjust the import path to your project layout if needed:
-from modules.Tools import Tool, ToolInvocationError
+from atomic_agentic.Tools import Tool, ToolInvocationError
 """
 from atomic_agentic.Tools import Tool, ToolInvocationError
 import logging

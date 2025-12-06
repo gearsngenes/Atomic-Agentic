@@ -6,7 +6,7 @@ from atomic_agentic.LLMEngines import OpenAIEngine
 
 load_dotenv()
 
-logging.getLogger().setLevel(level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 
 print("\n───────────────────────────────\n")
 print("Testing Task Decomposition and Printing capabilities")

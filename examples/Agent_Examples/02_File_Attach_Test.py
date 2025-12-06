@@ -1,7 +1,7 @@
 # example_doc_summarizer.py
 # Requires:
 #   - OPENAI_API_KEY in your environment (or .env; your modules already call load_dotenv)
-#   - Your updated Agents.py and LLMEngines.py on PYTHONPATH (e.g., in a "modules" package)
+#   - Your updated Agents.py and LLMEngines.py on PYTHONPATH
 import os, time
 from dotenv import load_dotenv
 from atomic_agentic.LLMEngines import OpenAIEngine,MistralEngine,GeminiEngine

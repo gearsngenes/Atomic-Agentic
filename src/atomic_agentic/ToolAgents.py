@@ -552,7 +552,7 @@ class PlannerAgent(ToolAgent):
         tools = self.list_tools()
         for i, step in enumerate(steps):
             step_tool = tools[step["function"]]
-            logger.info(f"{type(self).__name__}.{self.name}._execute_sync: Running step {i} - {step['function']}, args: {step.get('args', {})}")
+            logger.info(f"{type(self).__name__}.{self.name} - [STEP {i}: {step['function']}, args: {step.get('args', {})}]")
             args = self._resolve(step.get("args", {}))
             result = step_tool.invoke(inputs=args)
             self._previous_steps[i]["result"] = result
@@ -586,7 +586,7 @@ class PlannerAgent(ToolAgent):
         async def run_step(i: int) -> Any:
             step = steps[i]
             step_tool = tools[step["function"]]
-            logger.info(f"{type(self).__name__}.{self.name}._execute_async: Running step {i} - {step['function']}, args: {step.get('args', {})}")
+            logger.info(f"{type(self).__name__}.{self.name} - [STEP {i}: {step['function']}, args: {step.get('args', {})}]")
             args = self._resolve(step.get("args", {}))
             # Offload blocking tool invocation to a thread pool
             loop = asyncio.get_running_loop()
@@ -599,7 +599,7 @@ class PlannerAgent(ToolAgent):
             ready = [i for i in remaining if get_deps(i) <= completed]
             if not ready:
                 raise RuntimeError("Circular dependency in plan.")
-            logger.info(f"{self.name}._execute_async: Gathered steps: {ready}")
+            logger.debug(f"{self.name}._execute_async: Gathered steps: {ready}")
             results = await asyncio.gather(*(run_step(i) for i in ready))
             for i, result in zip(ready, results):
                 self._previous_steps[i]["result"] = result
@@ -834,7 +834,7 @@ class OrchestratorAgent(ToolAgent):
             step_index = len(self._previous_steps)
             self._previous_steps.append({
                 "function": function if isinstance(function, str) else "<invalid>",
-                "args": args if isinstance(args, (dict, list, str, int, float, bool, type(None))) else {},
+                "args": args if isinstance(args, dict) else {},
                 "explanation": explanation if isinstance(explanation, str) else "",
                 "result": None,
                 "ok": False,
@@ -867,7 +867,7 @@ class OrchestratorAgent(ToolAgent):
 
             # Execute the tool (arg validation is handled by the Tool itself)
             try:
-                logger.info(f"{self.name}._invoke: executing step {step_index}: {tool.full_name}")
+                logger.info(f"{type(self).__name__}.{self.name} - [STEP {step_index}: {function}, args: {args}]")
                 result = tool.invoke(inputs=resolved_args)
             except Exception as e:
                 self._previous_steps[step_index].update({

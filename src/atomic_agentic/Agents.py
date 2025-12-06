@@ -494,7 +494,7 @@ class Agent:
 
         # 2) Run pre-invoke Tool to get the prompt (strict by default)
         try:
-            logger.info(f"{self.name} preprocessing inputs")
+            logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
             prompt = self._pre_invoke.invoke(inputs)  # may raise ToolInvocationError
         except ToolInvocationError:
             # Let Tool errors bubble up (they are already precise).
@@ -511,10 +511,12 @@ class Agent:
         self._newest_history.clear()
 
         # Delegate to the internal call path
+        logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
         result = self._invoke(prompt=prompt)
 
         # Centralized history policy: only `_update_history` may touch `_history`.
         if self._context_enabled:
+            logger.debug(f"Agent.{self.name} updating history")
             self._update_history()
         else:
             # Ensure no stale data leaks across invocations.
