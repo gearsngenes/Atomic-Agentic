@@ -2,6 +2,7 @@
 # Exceptions
 # ───────────────────────────────────────────────────────────────────────────────
 __all__ = [
+    "LLMEngineError",
     "ToolError",
     "ToolDefinitionError",
     "ToolInvocationError",
@@ -15,6 +16,9 @@ __all__ = [
     "PackagingError",
     "ExecutionError"
     ]
+
+class LLMEngineError(RuntimeError):
+    """Raised when an LLM engine fails to complete an invocation."""
 
 class ToolError(Exception):
     """Base exception for Tool-related errors."""
