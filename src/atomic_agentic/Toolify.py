@@ -5,7 +5,7 @@ from .__utils__ import (
 )
 from .Tools import *
 from .Agents import *
-from ._exceptions import ToolDefinitionError
+from .Exceptions import ToolDefinitionError
 from typing import List, Optional, Union, Callable
 def toolify(
         obj: Union[Tool, Agent, str, Callable],

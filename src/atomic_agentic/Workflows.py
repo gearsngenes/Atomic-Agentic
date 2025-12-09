@@ -64,7 +64,7 @@ import logging
 # =========================
 from .Agents import Agent
 from .Tools import Tool
-from ._exceptions import *
+from .Exceptions import *
 
 # =========================
 # Constants & Exceptions

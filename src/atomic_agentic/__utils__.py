@@ -34,7 +34,7 @@ try:
 except Exception:  # pragma: no cover - optional
     _attrs = None  # type: ignore
 
-from ._exceptions import *
+from .Exceptions import *
 
 # Sentinel to mark "no default" for parameters
 NO_DEFAULT = object()

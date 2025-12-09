@@ -26,8 +26,8 @@ except: Mistral = None
 try: from llama_cpp import Llama
 except: Llama = None
 
-from ._primitives import LLMEngine
-from ._exceptions import LLMEngineError
+from .Primitives import LLMEngine
+from .Exceptions import LLMEngineError
 
 __all__ = ["GeminiEngine", "LlamaCppEngine", "LLMEngine", "MistralEngine", "OpenAIEngine"]
 
@@ -73,10 +73,10 @@ class OpenAIEngine(LLMEngine):
 
     # Extra illegal extensions for this provider (merged with base `illegal_attachment_exts`)
     _ILLEGAL_EXTS: set[str] = {
-        ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z",  # archives
-        ".exe", ".dll", ".so", ".bin", ".o",  # executables/binaries
-        ".db", ".sqlite",  # databases
-        ".h5", ".pt", ".pth", ".onnx",  # model weights
+        ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z", # archives
+        ".exe", ".dll", ".so", ".bin", ".o",          # executables/binaries
+        ".db", ".sqlite",                             # databases
+        ".h5", ".pt", ".pth", ".onnx",                # model weights
     }
 
     # MIME prefixes we never accept even if extension would otherwise pass.
@@ -126,7 +126,7 @@ class OpenAIEngine(LLMEngine):
             )
 
         # Honor the base engine's timeout knob when constructing the OpenAI client.
-        # The official SDK exposes a `timeout` option for this. :contentReference[oaicite:2]{index=2}
+        # The official SDK exposes a `timeout` option for this.
         self.llm = OpenAI(
             api_key=api_key or os.getenv("OPENAI_API_KEY"),
             timeout=self._timeout_seconds,
@@ -175,6 +175,14 @@ class OpenAIEngine(LLMEngine):
         instructions = self._collect_instructions(messages)
         blocks = self._build_role_blocks(messages)
 
+        payload: Dict[str, Any] = {"blocks": blocks}
+        if instructions:
+            payload["instructions"] = instructions
+
+        # No attachments: avoid creating an artificial empty user turn.
+        if not attachments:
+            return payload
+
         # Find or create a `user` block to hold attachments.
         user_idx = self._ensure_user_block(blocks)
         user_parts: List[Dict[str, Any]] = blocks[user_idx]["content"]
@@ -182,8 +190,8 @@ class OpenAIEngine(LLMEngine):
         for path, meta in attachments.items():
             kind = str(meta.get("kind", "text"))
 
-            # Inlined text
-            if meta.get("inlined") or kind == "text":
+            # Inlined text (text/code attachments prepared by _prepare_attachment).
+            if meta.get("inlined"):
                 text = str(meta.get("inlined_text") or "")
                 if not text:
                     continue
@@ -202,16 +210,13 @@ class OpenAIEngine(LLMEngine):
                     user_parts.append({"type": "input_image", "file_id": file_id})
                 continue
 
-            # Fallback: try to handle the local path directly
+            # Fallback: try to handle the local path directly (older metadata, etc.)
             try:
                 self._attach_local_path(user_parts, path)
             except Exception:
                 # Best-effort; silently skip failing attachments.
                 continue
 
-        payload: Dict[str, Any] = {"blocks": blocks}
-        if instructions:
-            payload["instructions"] = instructions
         return payload
 
     def _call_provider(self, payload: Dict[str, Any]) -> Any:
@@ -240,6 +245,8 @@ class OpenAIEngine(LLMEngine):
     def _extract_text(self, response: Any) -> str:
         """
         Extract the assistant's textual reply from a Responses API response object.
+
+        Returns the empty string when no text is present (does not raise).
         """
         return (getattr(response, "output_text", None) or "").strip()
 
@@ -250,34 +257,42 @@ class OpenAIEngine(LLMEngine):
         - PDFs/images → upload once to Files API; metadata contains `file_id`.
         - Text/code → inline as text (UTF-8, with a length cutoff).
         """
-        kind = self._classify_path(path)
-        mime, _ = mimetypes.guess_type(path)
-        mime = mime or ""
-        ext = os.path.splitext(path)[1].lower()
+        try:
+            kind = self._classify_path(path)
+            mime, _ = mimetypes.guess_type(path)
+            mime = mime or ""
+            ext = os.path.splitext(path)[1].lower()
 
-        # PDF/image: upload and keep a handle
-        if kind in ("pdf", "image"):
-            file_id = self._upload_file(path)
+            # PDF/image: upload and keep a handle
+            if kind in ("pdf", "image"):
+                file_id = self._upload_file(path)
+                return {
+                    "kind": kind,
+                    "mime": mime,
+                    "ext": ext,
+                    "uploaded": True,
+                    "file_id": file_id,
+                }
+
+            # Text/code → inline as text
+            text = self._read_text_file(path)
+            if len(text) > self.inline_cutoff_chars:
+                text = text[: self.inline_cutoff_chars] + "\n…[truncated]\n"
+
             return {
-                "kind": kind,
+                "kind": "text",
                 "mime": mime,
                 "ext": ext,
-                "uploaded": True,
-                "file_id": file_id,
+                "inlined": True,
+                "inlined_text": text,
             }
-
-        # Text/code → inline as text
-        text = self._read_text_file(path)
-        if len(text) > self.inline_cutoff_chars:
-            text = text[: self.inline_cutoff_chars] + "\n…[truncated]\n"
-
-        return {
-            "kind": "text",
-            "mime": mime,
-            "ext": ext,
-            "inlined": True,
-            "inlined_text": text,
-        }
+        except LLMEngineError:
+            raise
+        except Exception as exc:
+            # Normalize unexpected errors to LLMEngineError so callers see a consistent type.
+            raise LLMEngineError(
+                f"OpenAIEngine._prepare_attachment failed for {path!r}"
+            ) from exc
 
     def _on_detach(self, meta: Mapping[str, Any]) -> None:
         """
@@ -374,7 +389,7 @@ class OpenAIEngine(LLMEngine):
         """
         Upload a local file to the OpenAI Files API and return its `file_id`.
 
-        We use purpose="assistants" which is appropriate for model context files. :contentReference[oaicite:3]{index=3}
+        We use purpose="assistants" which is appropriate for model context files.
         """
         with open(path, "rb") as fp:
             f = self.llm.files.create(file=fp, purpose="assistants")
@@ -436,14 +451,13 @@ class OpenAIEngine(LLMEngine):
         )
         return base
 
-
 # ── GEMINI (flat contents: file objects + strings) ─────────────────────────────
 class GeminiEngine(LLMEngine):
     """
     Google Gemini adapter using the Google Gen AI SDK.
 
-    Strategy per call
-    -----------------
+    Flow per call
+    -------------
     1) Engine-level attachments are prepared via `attach(path)`:
        - `_prepare_attachment` uploads supported files via `client.files.upload`.
        - Attachment metadata stores the returned File object and its resource name.
@@ -491,8 +505,8 @@ class GeminiEngine(LLMEngine):
         model:
             Gemini model identifier (e.g. "gemini-2.5-flash", "gemini-2.0-pro").
         api_key:
-            Optional API key. If omitted, the SDK uses GOOGLE_API_KEY
-            env vars. :contentReference[oaicite:3]{index=3}
+            Optional API key. If omitted, the client uses the GOOGLE_API_KEY
+            environment variable.
         temperature:
             Sampling temperature for text generation.
         extra_illegal_exts:
@@ -515,7 +529,7 @@ class GeminiEngine(LLMEngine):
             )
 
         # Honor the base engine's timeout knob via http_options.
-        # The SDK accepts a plain dict here. :contentReference[oaicite:4]{index=4}
+        # The SDK accepts a plain dict for HTTP options.
         http_options: Dict[str, Any] = {
             "timeout": int(self._timeout_seconds * 1000),  # ms
         }
@@ -546,8 +560,9 @@ class GeminiEngine(LLMEngine):
         """
         Extend the base validation with Gemini-specific MIME-type checks.
 
-        We reject audio/video upfront; other illegal types are controlled by
-        `illegal_attachment_exts`.
+        Base validation has already ensured that `path` exists, is a file,
+        and passes the coarse extension policy. Here we reject audio/video
+        upfront; other illegal types are controlled by `illegal_attachment_exts`.
         """
         super()._validate_attachment_path(path)
 
@@ -562,29 +577,49 @@ class GeminiEngine(LLMEngine):
         """
         Prepare a local path for Gemini: upload once and store the File object.
 
-        The metadata returned here is opaque to the base; only this class needs
-        to understand its shape.
+        The base engine has already validated the path and extension and applied
+        MIME-based checks via `_validate_attachment_path`. This method assumes
+        the path is supported and focuses on:
+
+        - uploading the file via the Gemini Files API, and
+        - returning metadata of the form:
+
+            {
+                "kind": "file",
+                "mime": <str>,
+                "ext": <str>,
+                "uploaded": True,
+                "file_obj": <File>,
+                "resource_name": <str | None>,
+            }
+
+        The metadata shape is opaque to the base engine and only interpreted
+        by this class.
         """
-        if not os.path.exists(path):
-            raise LLMEngineError(f"GeminiEngine.attach: file not found: {path!r}")
+        try:
+            mime, _ = mimetypes.guess_type(path)
+            mime = mime or ""
+            ext = os.path.splitext(path)[1].lower()
 
-        mime, _ = mimetypes.guess_type(path)
-        mime = mime or ""
-        ext = os.path.splitext(path)[1].lower()
+            file_obj = self._upload_path(path)
+            resource_name = getattr(file_obj, "name", None)
 
-        # Base + subclass `_validate_attachment_path` already rejected illegal
-        # extensions and audio/video MIME types.
-        file_obj = self._upload_path(path)
-        resource_name = getattr(file_obj, "name", None)
-
-        return {
-            "kind": "file",
-            "mime": mime,
-            "ext": ext,
-            "uploaded": True,
-            "file_obj": file_obj,
-            "resource_name": resource_name,
-        }
+            return {
+                "kind": "file",
+                "mime": mime,
+                "ext": ext,
+                "uploaded": True,
+                "file_obj": file_obj,
+                "resource_name": resource_name,
+            }
+        except LLMEngineError:
+            raise
+        except Exception as exc:
+            # Normalize unexpected errors into LLMEngineError so callers see a
+            # consistent engine-level error type.
+            raise LLMEngineError(
+                f"GeminiEngine._prepare_attachment failed for {path!r}"
+            ) from exc
 
     def _on_detach(self, meta: Mapping[str, Any]) -> None:
         """
@@ -614,6 +649,9 @@ class GeminiEngine(LLMEngine):
 
         - `messages` are normalized chat turns (role/content strings).
         - `attachments` is a snapshot of the engine's attachment metadata.
+
+        Attachments are added first so they are available to all subsequent
+        text turns, followed by the plain text messages in order.
         """
         system_instruction = self._collect_system(messages)
         flat_texts = self._collect_non_system_texts(messages)
@@ -621,7 +659,7 @@ class GeminiEngine(LLMEngine):
         contents: List[Any] = []
 
         # Attach uploaded files first so they are available for all text turns.
-        for _path, meta in attachments.items():
+        for path, meta in attachments.items():
             if meta.get("uploaded") and meta.get("file_obj") is not None:
                 contents.append(meta["file_obj"])
             elif meta.get("inlined") and meta.get("inlined_text"):
@@ -641,7 +679,7 @@ class GeminiEngine(LLMEngine):
 
         Retries and backoff are handled by the base `_call_with_retries` wrapper.
         """
-        # Use the canonical GenerateContentConfig type from google.genai.types. :contentReference[oaicite:5]{index=5}
+        # Use GenerateContentConfig to carry temperature and system instruction.
         cfg = genai.types.GenerateContentConfig(
             temperature=self.temperature,
             system_instruction=payload.get("system_instruction") or None,
@@ -657,7 +695,7 @@ class GeminiEngine(LLMEngine):
         """
         Extract the assistant's textual reply from a Gen AI SDK response object.
 
-        The SDK exposes a `.text` convenience property for text responses. :contentReference[oaicite:6]{index=6}
+        The SDK exposes a `.text` convenience property for text responses.
         """
         return response.text
 
@@ -700,7 +738,7 @@ class GeminiEngine(LLMEngine):
         """
         Upload a local path via the Gemini Files API and return the File object.
 
-        The Gen AI SDK supports passing File objects directly in `contents`. :contentReference[oaicite:7]{index=7}
+        The Gen AI SDK supports passing File objects directly in `contents`.
         """
         abs_path = os.path.abspath(path)
         return self.client.files.upload(file=abs_path)
@@ -740,8 +778,8 @@ class MistralEngine(LLMEngine):
        - snapshot current attachments,
        - call `_build_provider_payload` to:
          * convert messages into Mistral's chat schema
-         * ensure the last user message has a parts array
-         * append inline text and signed URL parts
+         * ensure the last user message has a `content` parts array
+         * append inline text and signed URL parts to that last user turn
        - call `_call_with_retries` → `_call_provider`
        - call `_extract_text` to normalize the response.
     3) `detach(path)` triggers best-effort deletion of uploaded files via
@@ -794,8 +832,8 @@ class MistralEngine(LLMEngine):
             Optional human-friendly name for this engine instance. Defaults to
             `"mistral:{model}"`.
         timeout_seconds:
-            Suggested timeout per completion call (honored by the base engine's
-            retry/timeout config where applicable).
+            Suggested timeout per completion call. Used to configure the underlying
+            `httpx.Client` passed into the Mistral SDK.
         max_retries, retry_backoff_base, retry_backoff_max:
             Passed through to the shared `LLMEngine` retry handler for the chat call.
         """
@@ -813,6 +851,7 @@ class MistralEngine(LLMEngine):
         )
 
         import httpx
+
         self.client = Mistral(
             api_key=api_key or os.getenv("MISTRAL_API_KEY", ""),
             client=httpx.Client(timeout=self._timeout_seconds),
@@ -836,7 +875,9 @@ class MistralEngine(LLMEngine):
         """
         Extend the base validation with Mistral-specific MIME-type checks.
 
-        We reject audio/video upfront; other illegal types are controlled by
+        Base `_validate_attachment_path` has already ensured that `path` exists,
+        is a file, and passes the coarse extension policy. Here we reject
+        audio/video upfront; other illegal types are controlled by
         `illegal_attachment_exts`.
         """
         super()._validate_attachment_path(path)
@@ -848,12 +889,33 @@ class MistralEngine(LLMEngine):
                 f"MistralEngine.attach: MIME type {mime!r} is not supported"
             )
 
-    def _prepare_attachment(self, path: str) -> Dict[str, Any]:
+    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         """
         Prepare a local path for Mistral: upload/sign or inline as text/code.
 
-        - PDFs/images → upload + sign; store `file_id` + `signed_url`.
-        - Text/code → read & inline, respecting `inline_cutoff_chars`.
+        Metadata shapes:
+
+        - PDFs/images → upload + sign; store `file_id` + `signed_url`:
+
+            {
+                "kind": "pdf" | "image",
+                "mime": <str>,
+                "ext": <str>,
+                "uploaded": True,
+                "file_id": <str>,
+                "signed_url": <str>,
+            }
+
+        - Text/code → read & inline, respecting `inline_cutoff_chars` as a
+          per-file safety cap (the global cap is enforced in `_build_provider_payload`):
+
+            {
+                "kind": "text",
+                "mime": <str>,
+                "ext": <str>,
+                "inlined": True,
+                "inlined_text": <str>,
+            }
         """
         try:
             kind = self._classify_kind(path)
@@ -891,10 +953,11 @@ class MistralEngine(LLMEngine):
                 f"MistralEngine._prepare_attachment failed for {path!r}"
             ) from exc
 
-    def _on_detach(self, meta: Dict[str, Any]) -> None:
+    def _on_detach(self, meta: Mapping[str, Any]) -> None:
         """
         Delete Mistral file resource if present (best-effort).
 
+        `meta` is the metadata previously returned by `_prepare_attachment`.
         Errors are swallowed; the base engine logs detach errors at debug level.
         """
         file_id = meta.get("file_id")
@@ -903,7 +966,8 @@ class MistralEngine(LLMEngine):
         try:
             self.client.files.delete(file_id=file_id)
         except Exception:
-            pass
+            # Best-effort cleanup only.
+            return
 
     # ------------------------------------------------------------------ #
     # Template hooks for invocation
@@ -917,19 +981,24 @@ class MistralEngine(LLMEngine):
         """
         Map normalized messages + prepared attachments to Mistral chat schema.
 
-        - `messages` are already validated and have lowercase `role` and string `content`.
+        - `messages` are already validated and have lowercase `role` and
+          string `content`.
         - `attachments` is a snapshot of `self._attachments` at invoke time.
+
+        Inline text from attachments and signed URLs are appended as parts to
+        the **last user message** so they are clearly associated with the most
+        recent user query.
         """
         # Start from normalized messages.
-        native: List[Dict[str, Any]] = [
+        chat_messages: List[Dict[str, Any]] = [
             {"role": m["role"], "content": m["content"]} for m in messages
         ]
 
         # Ensure the last user message is a parts array we can extend.
-        user_idx = self._ensure_user_parts(native)
-        parts = native[user_idx]["content"]
+        user_idx = self._ensure_user_parts(chat_messages)
+        parts = chat_messages[user_idx]["content"]
 
-        # Inline text/code with cutoff from persistent attachments.
+        # Inline text/code with a global cutoff across all attachments.
         total_inlined = 0
         cutoff_marker = "\n[Inline cutoff reached; additional text files omitted]\n"
         for path, meta in attachments.items():
@@ -946,8 +1015,10 @@ class MistralEngine(LLMEngine):
                 text = inlined_text
                 if len(text) > budget:
                     text = text[:budget] + "\n…[truncated]\n"
+
                 header = f"\n[Inlined file: {os.path.basename(path)}]\n"
                 parts.append({"type": "text", "text": header + text})
+                # We treat `inline_cutoff_chars` as a soft cap, so this is approximate.
                 total_inlined += len(text)
 
         # Attach signed URLs for PDFs & images from persistent attachments.
@@ -959,7 +1030,7 @@ class MistralEngine(LLMEngine):
             elif kind == "image" and signed_url:
                 parts.append({"type": "image_url", "image_url": signed_url})
 
-        return {"messages": native}
+        return {"messages": chat_messages}
 
     def _call_provider(self, payload: Any) -> Any:
         """
@@ -971,7 +1042,6 @@ class MistralEngine(LLMEngine):
             model=self.model,
             messages=payload["messages"],
             temperature=self.temperature,
-            
         )
 
     def _extract_text(self, response: Any) -> str:
@@ -988,7 +1058,7 @@ class MistralEngine(LLMEngine):
         return (msg or "").strip()
 
     # ------------------------------------------------------------------ #
-    # Helpers: classification / IO / uploads
+    # Mistral-specific helpers (not part of the template surface)
     # ------------------------------------------------------------------ #
 
     def _classify_kind(self, path: str) -> str:
@@ -998,9 +1068,6 @@ class MistralEngine(LLMEngine):
         Base `_validate_attachment_path` has already checked existence and coarse
         extension policy; here we only bucket by type.
         """
-        if not os.path.exists(path):
-            raise LLMEngineError(f"MistralEngine.attach: file not found: {path!r}")
-
         mime, _ = mimetypes.guess_type(path)
         mime = mime or ""
         ext = os.path.splitext(path)[1].lower()
@@ -1012,7 +1079,7 @@ class MistralEngine(LLMEngine):
         # Fallback: treat as text/code and attempt to inline.
         return "text"
 
-    def _ensure_user_parts(self, native: List[Dict[str, Any]]) -> int:
+    def _ensure_user_parts(self, messages: List[Dict[str, Any]]) -> int:
         """
         Ensure there is a user message with `content` as a parts list.
 
@@ -1022,16 +1089,16 @@ class MistralEngine(LLMEngine):
         idx = next(
             (
                 i
-                for i in range(len(native) - 1, -1, -1)
-                if (native[i].get("role") or "").lower() == "user"
+                for i in range(len(messages) - 1, -1, -1)
+                if (messages[i].get("role") or "").lower() == "user"
             ),
             None,
         )
         if idx is None:
-            native.append({"role": "user", "content": []})
-            idx = len(native) - 1
+            messages.append({"role": "user", "content": []})
+            idx = len(messages) - 1
 
-        content = native[idx].get("content", "")
+        content = messages[idx].get("content", "")
         if isinstance(content, list):
             # already parts
             return idx
@@ -1039,7 +1106,7 @@ class MistralEngine(LLMEngine):
         parts: List[Dict[str, Any]] = []
         if isinstance(content, str) and content:
             parts.append({"type": "text", "text": content})
-        native[idx]["content"] = parts
+        messages[idx]["content"] = parts
         return idx
 
     def _read_text_file(self, path: str) -> str:
@@ -1097,35 +1164,74 @@ class MistralEngine(LLMEngine):
 
 # ── LLAMA.CPP (local; no remote file store) ────────────────────────────────────
 class LlamaCppEngine(LLMEngine):
+    """
+    Local llama.cpp adapter using `llama-cpp-python`.
+
+    This engine wraps a local GGUF/GGML model via `llama_cpp.Llama` and plugs
+    into the shared `LLMEngine` template:
+
+    - Conversation turns are passed through as an OpenAI-style `messages` list.
+    - Attachments are **not supported**; any attempt to attach a file will
+      fail with an `LLMEngineError`.
+    - `invoke(...)` is inherited from `LLMEngine` and must not be overridden.
+      Provider-specific behavior is implemented via the template hooks:
+        `_build_provider_payload`, `_call_provider`, `_extract_text`,
+        `_prepare_attachment`.
+    """
+
     def __init__(
         self,
         model_path: Optional[str] = None,
         repo_id: Optional[str] = None,
         filename: Optional[str] = None,
         n_ctx: int = 2048,
-        n_threads: Optional[int] = None,         # new
-        n_threads_batch: Optional[int] = None,   # optional new
+        n_threads: Optional[int] = None,
+        n_threads_batch: Optional[int] = None,
         verbose: bool = False,
         *,
         name: Optional[str] = None,
     ) -> None:
+        """
+        Parameters
+        ----------
+        model_path:
+            Path to a local GGUF/GGML model file. Required if `repo_id`/`filename`
+            are not provided.
+        repo_id:
+            Optional Hugging Face repo ID for `Llama.from_pretrained(...)`.
+            Must be used together with `filename` when `model_path` is omitted.
+        filename:
+            Model filename within the given `repo_id` for `from_pretrained`.
+        n_ctx:
+            Context window size to configure on the llama.cpp model.
+        n_threads:
+            Optional number of CPU threads to use for token generation.
+        n_threads_batch:
+            Optional number of threads to use for batching.
+        verbose:
+            If True, enable verbose logging from the underlying llama.cpp runtime.
+        name:
+            Optional human-friendly engine name; defaults to `"llama_cpp"`.
+        """
         super().__init__(name=name or "llama_cpp")
 
         if Llama is None:
-            raise RuntimeError("llama-cpp-python is required for LlamaCppEngine")
+            raise RuntimeError("LlamaCppEngine requires the `llama-cpp-python` package.")
 
-        llama_kwargs = dict(
-            n_ctx=n_ctx,
-            verbose=verbose,
-        )
+        llama_kwargs: Dict[str, Any] = {
+            "n_ctx": int(n_ctx),
+            "verbose": bool(verbose),
+        }
         if n_threads is not None:
-            llama_kwargs["n_threads"] = n_threads
+            llama_kwargs["n_threads"] = int(n_threads)
         if n_threads_batch is not None:
-            llama_kwargs["n_threads_batch"] = n_threads_batch
+            llama_kwargs["n_threads_batch"] = int(n_threads_batch)
 
         if model_path:
+            # Local file path.
             self.llm = Llama(model_path=model_path, **llama_kwargs)
         elif repo_id and filename:
+            # Hugging Face repo/filename.
             self.llm = Llama.from_pretrained(
                 repo_id=repo_id,
                 filename=filename,
@@ -1133,9 +1239,9 @@ class LlamaCppEngine(LLMEngine):
             )
         else:
             raise LLMEngineError(
-                "LlamaCppEngine requires either `model_path` or both `repo_id` and `filename`."
+                "LlamaCppEngine requires either `model_path` or both "
+                "`repo_id` and `filename`."
             )
-
 
         self.n_ctx = int(n_ctx)
         self.verbose = bool(verbose)
@@ -1158,16 +1264,17 @@ class LlamaCppEngine(LLMEngine):
         - `messages` are already validated (role/content strings).
         - `attachments` are ignored; this engine does not support attachments.
         """
-        # We simply pass the messages through unchanged.
+        # llama-cpp-python exposes an OpenAI-compatible chat API, so we
+        # simply pass the messages through unchanged.
         return {"messages": messages}
 
     def _call_provider(self, payload: Any) -> Any:
         """
         Perform a single llama.cpp chat completion call.
 
-        Retries and error-wrapping are handled by `LLMEngine`'s `_call_with_retries`.
+        Retries and error-wrapping are handled by `LLMEngine._call_with_retries`.
         """
-        if self.llm is None:
+        if getattr(self, "llm", None) is None:
             raise LLMEngineError("LlamaCppEngine: model is not loaded.")
         return self.llm.create_chat_completion(messages=payload["messages"])
 
@@ -1175,8 +1282,9 @@ class LlamaCppEngine(LLMEngine):
         """
         Extract assistant text from a llama.cpp chat completion response.
 
-        Expected structure (matching llama-cpp-python's OpenAI-compatible API):
-        response["choices"][0]["message"]["content"] -> str
+        Expected structure (OpenAI-compatible):
+
+            response["choices"][0]["message"]["content"] -> str
         """
         try:
             choices = response["choices"]
@@ -1196,7 +1304,7 @@ class LlamaCppEngine(LLMEngine):
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         """
-        LlamaCppEngine does not support attachments.
+        Attachments are not supported for local llama.cpp models.
 
         Any call to `attach(path)` will fail via this method.
         """
@@ -1213,9 +1321,9 @@ class LlamaCppEngine(LLMEngine):
 
     def to_dict(self) -> OrderedDict[str, Any]:
         """
-        Diagnostic snapshot for LlamaCppEngine.
+        Diagnostic snapshot for LlamaCppEngine (no secrets).
 
-        Includes n_ctx, verbose, and any of model_path/repo_id/filename that are set.
+        Includes `n_ctx`, `verbose`, and model loading parameters.
         """
         base = super().to_dict()
         base.update(
@@ -1228,7 +1336,6 @@ class LlamaCppEngine(LLMEngine):
             )
         )
         return base
-
 
 # ── PLACEHOLDERS (keep the same abstract contract) ─────────────────────────────
 class AzureOpenAIEngine(LLMEngine):

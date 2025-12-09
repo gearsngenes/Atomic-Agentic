@@ -6,7 +6,7 @@ import random
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Mapping, Optional
-from ._exceptions import LLMEngineError
+from .Exceptions import LLMEngineError
 
 logger = logging.getLogger(__name__)
 

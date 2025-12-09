@@ -17,7 +17,7 @@ import logging
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from ._exceptions import ToolDefinitionError, ToolInvocationError
+from .Exceptions import ToolDefinitionError, ToolInvocationError
 
 from .__utils__ import (
     _canonize_annotation,

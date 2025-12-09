@@ -15,7 +15,7 @@ from .Agents import *
 from .LLMEngines import LLMEngine
 from .Toolify import toolify
 from .Tools import Tool
-from ._exceptions import ToolAgentError, ToolRegistrationError
+from .Exceptions import ToolAgentError, ToolRegistrationError
 
 # ──────────────────────────────────────────────────────────────────────────────
 __all__ = ["PlannerAgent", "OrchestratorAgent",]
