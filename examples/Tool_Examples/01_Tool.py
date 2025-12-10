@@ -6,6 +6,7 @@ from atomic_agentic.Tools import Tool, ToolInvocationError
 """
 from atomic_agentic.Tools import Tool, ToolInvocationError
 import logging
+import json
 
 logging.basicConfig(level = logging.INFO)
 
@@ -32,21 +33,21 @@ t_add = Tool(
     add,
     name="add",
     description="Add two integers. Args: a:int (required), b:int=0. Returns: int.",
-    source="local",
+    namespace="local",
 )
 
 t_greet = Tool(
     greet,
     name="greet",
     description="Greet a person. Args: name:str (required), excited:bool=False (keyword-only). Returns: str.",
-    source="local",
+    namespace="local",
 )
 
 t_sum = Tool(
     summarize,
     name="summarize",
     description="Summarize text. Args: text:str (required), max_chars:int (required). Returns: str.",
-    source="local",
+    namespace="local",
 )
 
 
@@ -56,7 +57,7 @@ def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
     print(f"\n-- {tool.name} call plan --")
     print("signature:", meta["signature"])
-    print("argument map:", meta["arguments_map"])
+    print("argument map:\n", json.dumps(tool.arguments_map, indent = 2))
 
 def run_case(label: str, tool: Tool, inputs: dict) -> None:
     print(f"\n=== {label} ===")

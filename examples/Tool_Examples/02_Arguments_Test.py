@@ -4,7 +4,7 @@ Sample script to exercise the new Tool class invocation logic.
 Adjust the import below to match your project layout:
 from atomic_agentic.Tools import Tool, ToolInvocationError, ToolDefinitionError
 """
-import sys, os
+import sys, json
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
@@ -49,13 +49,13 @@ class Accumulator:
 
 # ---------- Wrap them as Tools ----------
 
-t_mix = Tool(mix_sig, name="mix_sig", description="Mixed kinds", source="local")
-t_kwargs = Tool(kwargs_only, name="kwargs_only", description="KW-only", source="local")
-t_var = Tool(with_varargs, name="with_varargs", description="Varargs + Varkw", source="local")
-t_defs = Tool(defaults_only, name="defaults_only", description="Defaults only", source="local")
+t_mix = Tool(mix_sig, name="mix_sig", description="Mixed kinds", namespace="local")
+t_kwargs = Tool(kwargs_only, name="kwargs_only", description="KW-only", namespace="local")
+t_var = Tool(with_varargs, name="with_varargs", description="Varargs + Varkw", namespace="local")
+t_defs = Tool(defaults_only, name="defaults_only", description="Defaults only", namespace="local")
 
 acc = Accumulator()
-t_add = Tool(acc.add, name="acc.add", description="Bound method add", source="local")
+t_add = Tool(acc.add, name="acc_add", description="Bound method add", namespace="local")
 
 
 # ---------- Helpers ----------
@@ -69,11 +69,11 @@ def run_case(label, tool: Tool, inputs:dict):
         print("ERR:", e)
 
 
-def show_signature(tool):
+def show_signature(tool: Tool):
     meta = tool.to_dict()
     print(f"\n-- {tool.name} call plan --")
     print("signature:", meta["signature"])
-    print("argument map:", meta["arguments_map"])
+    print("argument map:", json.dumps(tool.arguments_map, indent = 2))
 
 # ---------- Happy-path cases ----------
 

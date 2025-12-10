@@ -5,7 +5,7 @@ import os
 import random
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from .Exceptions import LLMEngineError
 
 logger = logging.getLogger(__name__)
@@ -373,4 +373,394 @@ class LLMEngine(ABC):
             "max_retries": self._max_retries,
             "attachments": list(self._attachments.keys()),
             "provider": type(self).__name__,
+        }
+
+from typing import Mapping, Callable, Optional
+from collections import OrderedDict
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Tool primitive
+# ───────────────────────────────────────────────────────────────────────────────
+
+from collections import OrderedDict
+from .Exceptions import ToolDefinitionError, ToolInvocationError
+
+ArgumentMap = OrderedDict[str, Dict[str, Any]]
+
+
+class Tool:
+    """Concrete base Tool primitive.
+
+    This class provides a *dict-first* invocation interface around an underlying
+    callable. It implements the template method::
+
+        invoke(inputs) -> to_arg_kwarg(inputs) -> execute(args, kwargs)
+
+    Subclasses such as MCPProxyTool and AgentTool are expected to override only
+    the helper hooks used at construction time (``_get_mod_qual``,
+    ``_build_io_schemas``, ``_compute_is_persistible``) and, where necessary,
+    the :meth:`to_arg_kwarg` / :meth:`execute` methods. The public
+    :meth:`invoke` method must not be overridden.
+
+    The argument schema is exposed via :attr:`arguments_map` as an
+    OrderedDict whose values are JSON-serialisable metadata dictionaries with
+    the following keys:
+
+    - ``index``  : ``int`` – the parameter position.
+    - ``kind``   : ``str`` – one of
+      ``{"POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY", "VAR_POSITIONAL", "VAR_KEYWORD"}``.
+    - ``type``   : ``str`` – a human-readable type name, e.g. ``"int"``.
+    - ``default``: optional – present only if the parameter has a default.
+
+    ``return_type`` is always stored as a string as well.
+    """
+
+    def __init__(
+        self,
+        function: Callable[..., Any],
+        name: Optional[str] = None,
+        namespace: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> None:
+        if not callable(function):
+            raise ToolDefinitionError(f"Tool function must be callable, got {type(function)!r}")
+        self._function: Callable[..., Any] = function
+        self._name: str = name or getattr(function, "__name__", "unnamed_callable") or "unnamed_callable"
+        self._namespace: str = namespace or "default"
+        self._description: str = description or (getattr(function, "__doc__", None) or "")
+
+        # Identity in import space (may be overridden by subclasses).
+        self._module, self._qualname = self._get_mod_qual(function)
+
+        # Build argument schema and return type from the current function.
+        self._arguments_map, self._return_type = self._build_io_schemas()
+
+        # Persistibility flag exposed as a public property.
+        self._is_persistible_internal: bool = self._compute_is_persistible()
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def namespace(self) -> str:
+        return self._namespace
+
+    @property
+    def description(self) -> str:
+        return self._description
+
+    @property
+    def function(self) -> Callable[..., Any]:
+        return self._function
+
+    @function.setter
+    def function(self, func: Callable[..., Any]) -> None:
+        """Update the underlying callable and refresh schema & identity."""
+        if not callable(func):
+            raise ToolDefinitionError(f"Tool function must be callable, got {type(func)!r}")
+        self._function = func
+        self._module, self._qualname = self._get_mod_qual(func)
+        self._arguments_map, self._return_type = self._build_io_schemas()
+        self._is_persistible_internal = self._compute_is_persistible()
+
+    @property
+    def arguments_map(self) -> ArgumentMap:
+        """Ordered mapping of parameter name → {index, kind, type, default?}."""
+        return self._arguments_map
+
+    @property
+    def return_type(self) -> str:
+        """Return type (always as a string)."""
+        return self._return_type
+
+    @property
+    def module(self) -> Optional[str]:
+        return self._module
+
+    @property
+    def qualname(self) -> Optional[str]:
+        return self._qualname
+
+    @property
+    def is_persistible(self) -> bool:
+        """Whether this Tool can be reconstructed from its serialized form."""
+        return self._is_persistible_internal
+
+    @property
+    def full_name(self) -> str:
+        """Fully-qualified tool name of the form ``Type.namespace.name``."""
+        return f"{type(self).__name__}.{self._namespace}.{self._name}"
+
+    @property
+    def signature(self) -> str:
+        """Human-readable signature derived from ``arguments_map`` and
+        ``return_type``."""
+        params: List[str] = []
+        for name, meta in self._arguments_map.items():
+            kind = meta.get("kind", "")
+            type_name = meta.get("type", "Any")
+            default_marker = ""
+            if "default" in meta:
+                default_marker = " = ..."
+            if kind == "VAR_POSITIONAL":
+                param_str = f"*{name}: {type_name}{default_marker}"
+            elif kind == "VAR_KEYWORD":
+                param_str = f"**{name}: {type_name}{default_marker}"
+            else:
+                param_str = f"{name}: {type_name}{default_marker}"
+            params.append(param_str)
+        params_str = ", ".join(params)
+        return f"{self.full_name}({params_str}) -> {self._return_type}"
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return f"{self.signature}: {self._description}"
+
+    __str__ = __repr__
+
+    # ------------------------------------------------------------------ #
+    # Template method
+    # ------------------------------------------------------------------ #
+
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """Invoke the tool using a dict-like mapping of inputs.
+
+        This is the *only* public entrypoint for execution. Subclasses must not
+        override this method; instead they can customise :meth:`to_arg_kwarg`
+        and :meth:`execute`.
+        """
+        if not isinstance(inputs, Mapping):
+            raise ToolInvocationError(f"{self._name}: inputs must be a mapping")
+        args, kwargs = self.to_arg_kwarg(inputs)
+        return self.execute(args, kwargs)
+
+    # ------------------------------------------------------------------ #
+    # Overridable helpers
+    # ------------------------------------------------------------------ #
+
+    def _get_mod_qual(self, function: Callable[..., Any]) -> tuple[Optional[str], Optional[str]]:
+        """Determine ``(module, qualname)`` for callable-based tools.
+
+        Subclasses that do not use Python import identity (e.g. MCPProxyTool)
+        should override this to return ``(None, None)``.
+        """
+        module = getattr(function, "__module__", None)
+        qualname = getattr(function, "__qualname__", None)
+        return module, qualname
+
+    def _build_io_schemas(self) -> tuple[ArgumentMap, str]:
+        """Construct ``arguments_map`` and ``return_type`` from the wrapped
+        callable's signature.
+
+        Subclasses such as MCPProxyTool and AgentTool override this to build
+        their schema from external definitions.
+        """
+        import inspect
+
+        sig = inspect.signature(self._function)
+        arg_map: ArgumentMap = OrderedDict()
+        for index, (name, param) in enumerate(sig.parameters.items()):
+            # Map the inspect.Parameter.kind to our string form
+            kind_name = param.kind.name  # e.g. "POSITIONAL_ONLY"
+
+            # Derive a simple type string from the annotation
+            ann = param.annotation
+            if ann is inspect._empty:
+                type_str = "Any"
+            elif isinstance(ann, str):
+                type_str = ann
+            elif hasattr(ann, "__name__"):
+                type_str = ann.__name__  # type: ignore[assignment]
+            else:
+                type_str = type(ann).__name__
+
+            meta: Dict[str, Any] = {
+                "index": index,
+                "kind": kind_name,
+                "type": type_str,
+            }
+            if param.default is not inspect._empty:
+                meta["default"] = param.default
+            arg_map[name] = meta
+
+        # Return type as a string
+        ret_ann = sig.return_annotation
+        if ret_ann is inspect._empty:
+            return_type = "Any"
+        elif isinstance(ret_ann, str):
+            return_type = ret_ann
+        elif hasattr(ret_ann, "__name__"):
+            return_type = ret_ann.__name__  # type: ignore[assignment]
+        else:
+            return_type = type(ret_ann).__name__
+
+        return arg_map, return_type
+
+    def _compute_is_persistible(self) -> bool:
+        """Default persistibility check for callable-based tools.
+
+        A Tool is considered persistible if its function has both ``__module__``
+        and ``__qualname__`` and does not appear to be a local/helper function.
+        Subclasses can override this with their own criteria.
+        """
+        if not self._module or not self._qualname:
+            return False
+        # Heuristic: local/helper functions usually contain '<locals>' in qualname.
+        if "<locals>" in self._qualname:
+            return False
+        return True
+
+    # ------------------------------------------------------------------ #
+    # Dict → (*args, **kwargs) mapping
+    # ------------------------------------------------------------------ #
+
+    def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
+        """Default implementation for mapping input dicts to ``(*args, **kwargs)``.
+
+        The base policy is:
+
+        - Required parameters (those without ``default`` and not VAR_*) must be present.
+        - Unknown keys raise if there is no VAR_KEYWORD parameter; otherwise they
+          are accepted and passed through in ``**kwargs``.
+        - POSITIONAL_ONLY parameters are always passed positionally.
+        - POSITIONAL_OR_KEYWORD and KEYWORD_ONLY parameters are passed as
+          keywords (Python accepts this for both kinds).
+        - VAR_POSITIONAL expects the mapping to contain the parameter name with
+          a sequence value; these are appended to ``*args``.
+        - VAR_KEYWORD collects all remaining unknown keys into ``**kwargs``.
+        """
+        data: Dict[str, Any] = dict(inputs)
+
+        # Compute parameter ordering and kinds
+        param_items = sorted(self._arguments_map.items(), key=lambda kv: kv[1].get("index", 0))
+        param_names = {name for name, _ in param_items}
+
+        varpos_name: Optional[str] = None
+        varkw_name: Optional[str] = None
+        for name, meta in param_items:
+            kind = meta.get("kind")
+            if kind == "VAR_POSITIONAL" and varpos_name is None:
+                varpos_name = name
+            elif kind == "VAR_KEYWORD" and varkw_name is None:
+                varkw_name = name
+
+        # Unknown key handling
+        unknown_keys = set(data.keys()) - param_names
+        if unknown_keys and varkw_name is None:
+            raise ToolInvocationError(f"{self._name}: unknown parameters: {sorted(unknown_keys)}")
+
+        # Required parameter check (exclude VAR_*)
+        required_names = [
+            name
+            for name, meta in param_items
+            if meta.get("kind") not in {"VAR_POSITIONAL", "VAR_KEYWORD"}
+            and "default" not in meta
+        ]
+        missing = [name for name in required_names if name not in data]
+        if missing:
+            raise ToolInvocationError(f"{self._name}: missing required parameters: {missing}")
+
+        args: List[Any] = []
+        kwargs: Dict[str, Any] = {}
+
+        # First, handle named parameters in order
+        for name, meta in param_items:
+            kind = meta.get("kind")
+            has_default = "default" in meta
+            value_provided = name in data
+
+            if kind == "VAR_POSITIONAL":
+                # Expect a sequence under this key, if provided
+                if value_provided:
+                    val = data[name]
+                    if not isinstance(val, (list, tuple)):
+                        raise ToolInvocationError(
+                            f"{self._name}: var-positional parameter '{name}' must be a list or tuple"
+                        )
+                    args.extend(list(val))
+                continue
+
+            if kind == "VAR_KEYWORD":
+                # Handled after all named parameters
+                continue
+
+            if not value_provided and has_default:
+                val = meta["default"]
+            elif value_provided:
+                val = data[name]
+            else:
+                # Required parameters should already have been validated above
+                continue
+
+            if kind == "POSITIONAL_ONLY":
+                args.append(val)
+            else:
+                # POS_OR_KEYWORD or KEYWORD_ONLY – pass as keyword argument
+                kwargs[name] = val
+
+        # Handle VAR_KEYWORD by collecting unknown keys + any explicit mapping under its own name
+        if varkw_name is not None:
+            extra_kwargs: Dict[str, Any] = {}
+            # If caller explicitly supplied a mapping for the VAR_KEYWORD parameter name, merge it.
+            if varkw_name in data:
+                explicit = data[varkw_name]
+                if not isinstance(explicit, Mapping):
+                    raise ToolInvocationError(
+                        f"{self._name}: var-keyword parameter '{varkw_name}' must be a mapping if provided"
+                    )
+                extra_kwargs.update(dict(explicit))
+            # Include unknown keys
+            for key in unknown_keys:
+                if key in extra_kwargs or key in kwargs:
+                    raise ToolInvocationError(
+                        f"{self._name}: duplicate key '{key}' in **kwargs aggregation"
+                    )
+                extra_kwargs[key] = data[key]
+            kwargs.update(extra_kwargs)
+
+        return tuple(args), kwargs
+
+    # ------------------------------------------------------------------ #
+    # Execution
+    # ------------------------------------------------------------------ #
+
+    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+        """Execute the underlying callable.
+
+        Subclasses may override this to change *how* a tool is executed (for
+        example, by making a remote MCP call or invoking an Agent), but should
+        not change the high-level semantics.
+        """
+        try:
+            return self._function(*args, **kwargs)
+        except ToolInvocationError:
+            # Allow explicit ToolInvocationError to propagate unchanged.
+            raise
+        except Exception as e:  # pragma: no cover - thin wrapper
+            raise ToolInvocationError(f"{self._name}: invocation failed: {e}") from e
+
+    # ------------------------------------------------------------------ #
+    # Introspection / serialization
+    # ------------------------------------------------------------------ #
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize this tool's header and argument schema.
+
+        Note that deserialisation is handled by :mod:`Factory`; this method does
+        *not* perform any persistibility checks and will not raise solely
+        because :attr:`is_persistible` is ``False``.
+        """
+        return {
+            "tool_type": type(self).__name__,
+            "name": self._name,
+            "namespace": self._namespace,
+            "description": self._description,
+            "signature": self.signature,
+            "module": self._module,
+            "qualname": self._qualname,
+            "is_persistible": self.is_persistible,
         }

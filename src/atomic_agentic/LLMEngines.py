@@ -1190,6 +1190,9 @@ class LlamaCppEngine(LLMEngine):
         verbose: bool = False,
         *,
         name: Optional[str] = None,
+        max_retries = 2,
+        retry_backoff_base = 0.5,
+        retry_backoff_max = 8
     ) -> None:
         """
         Parameters
@@ -1213,7 +1216,11 @@ class LlamaCppEngine(LLMEngine):
         name:
             Optional human-friendly engine name; defaults to `"llama_cpp"`.
         """
-        super().__init__(name=name or "llama_cpp")
+        super().__init__(
+            name=name or "llama_cpp",
+            max_retries=max_retries,
+            retry_backoff_base=retry_backoff_base,
+            retry_backoff_max=retry_backoff_max)
 
         if Llama is None:
             raise RuntimeError("LlamaCppEngine requires the `llama-cpp-python` package.")
