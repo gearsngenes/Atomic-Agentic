@@ -5,8 +5,11 @@ import os
 import random
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Mapping, Optional, Tuple
-from .Exceptions import LLMEngineError
+from typing import Any, Dict, List, Mapping, Optional, get_origin, get_args
+from .Exceptions import LLMEngineError, ToolDefinitionError, ToolInvocationError
+from typing import Mapping, Callable, Optional
+from collections import OrderedDict
+import inspect
 
 logger = logging.getLogger(__name__)
 
@@ -375,15 +378,10 @@ class LLMEngine(ABC):
             "provider": type(self).__name__,
         }
 
-from typing import Mapping, Callable, Optional
-from collections import OrderedDict
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Tool primitive
 # ───────────────────────────────────────────────────────────────────────────────
-
-from collections import OrderedDict
-from .Exceptions import ToolDefinitionError, ToolInvocationError
 
 ArgumentMap = OrderedDict[str, Dict[str, Any]]
 
@@ -506,7 +504,7 @@ class Tool:
             type_name = meta.get("type", "Any")
             default_marker = ""
             if "default" in meta:
-                default_marker = " = ..."
+                default_marker = f" = {str(meta["default"])}"
             if kind == "VAR_POSITIONAL":
                 param_str = f"*{name}: {type_name}{default_marker}"
             elif kind == "VAR_KEYWORD":
@@ -552,51 +550,95 @@ class Tool:
         qualname = getattr(function, "__qualname__", None)
         return module, qualname
 
+    def _format_annotation(self, ann: Any) -> str:
+        """Convert a type annotation into a readable string.
+
+        Behaviour:
+        - If missing/empty → 'Any'.
+        - If already a string → returned as-is.
+        - If a parameterized / generic type (e.g. List[Dict[str, int]] or dict[str, int]):
+          builds the full nested structure string.
+        - If a plain class → its name (e.g. 'int', 'MyModel').
+        - Otherwise → best-effort str(ann).
+        """
+
+        # Missing / unknown annotation
+        if ann is inspect._empty or ann is None:
+            return "Any"
+
+        # Forward reference or explicit string annotation
+        if isinstance(ann, str):
+            return ann
+
+        # typing / generic / PEP 585 parameterized types
+        origin = get_origin(ann)
+        if origin is not None:
+            # Recursively format origin and args
+            origin_str = self._format_annotation(origin)
+            args = get_args(ann)
+            if not args:
+                return origin_str
+            args_str = ", ".join(self._format_annotation(a) for a in args)
+            return f"{origin_str}[{args_str}]"
+
+        # Plain classes / types
+        module = getattr(ann, "__module__", None)
+        name = getattr(ann, "__name__", None)
+        if module == "builtins" and name:
+            # int, str, dict, list, etc.
+            return name
+        if name:
+            # Custom or library class
+            return name
+
+        # Fallback: best-effort string representation
+        return str(ann)
+
     def _build_io_schemas(self) -> tuple[ArgumentMap, str]:
         """Construct ``arguments_map`` and ``return_type`` from the wrapped
         callable's signature.
 
-        Subclasses such as MCPProxyTool and AgentTool override this to build
-        their schema from external definitions.
+        Rules:
+        - If an annotation is present, it *always* defines the type string.
+        - If no annotation but a default value exists, the type string is
+          derived from ``type(default)``.
+        - If neither is present, the type string is 'Any'.
         """
-        import inspect
 
         sig = inspect.signature(self._function)
         arg_map: ArgumentMap = OrderedDict()
-        for index, (name, param) in enumerate(sig.parameters.items()):
-            # Map the inspect.Parameter.kind to our string form
-            kind_name = param.kind.name  # e.g. "POSITIONAL_ONLY"
 
-            # Derive a simple type string from the annotation
+        for index, (name, param) in enumerate(sig.parameters.items()):
+            kind_name = param.kind.name  # e.g. "POSITIONAL_ONLY"
             ann = param.annotation
-            if ann is inspect._empty:
-                type_str = "Any"
-            elif isinstance(ann, str):
-                type_str = ann
-            elif hasattr(ann, "__name__"):
-                type_str = ann.__name__  # type: ignore[assignment]
+            default = param.default
+
+            # Decide the source of the type information:
+            # 1) annotation if present,
+            # 2) otherwise the default's type if present,
+            # 3) otherwise "Any".
+            if ann is not inspect._empty:
+                raw_type = ann
+            elif default is not inspect._empty:
+                raw_type = type(default)
             else:
-                type_str = type(ann).__name__
+                raw_type = inspect._empty
+
+            type_str = self._format_annotation(raw_type)
 
             meta: Dict[str, Any] = {
                 "index": index,
                 "kind": kind_name,
                 "type": type_str,
             }
-            if param.default is not inspect._empty:
-                meta["default"] = param.default
+            if default is not inspect._empty:
+                meta["default"] = default
+
             arg_map[name] = meta
 
-        # Return type as a string
+        # Return type: annotation if present, else 'Any'
         ret_ann = sig.return_annotation
-        if ret_ann is inspect._empty:
-            return_type = "Any"
-        elif isinstance(ret_ann, str):
-            return_type = ret_ann
-        elif hasattr(ret_ann, "__name__"):
-            return_type = ret_ann.__name__  # type: ignore[assignment]
-        else:
-            return_type = type(ret_ann).__name__
+        return_type = self._format_annotation(ret_ann)
 
         return arg_map, return_type
 
