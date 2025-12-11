@@ -19,6 +19,9 @@ __all__ = [
     "Agent"
 ]
 
+# ───────────────────────────────────────────────────────────────────────────────
+# LLMEngine primitive
+# ───────────────────────────────────────────────────────────────────────────────
 
 class LLMEngine(ABC):
     """
@@ -306,11 +309,7 @@ class LLMEngine(ABC):
     # Abstract Helpers
     # --------------------------------------------------------------------- #
     @abstractmethod
-    def _build_provider_payload(
-        self,
-        messages: List[Dict[str, str]],
-        attachments: Mapping[str, Mapping[str, Any]],
-    ) -> Any:
+    def _build_provider_payload(self, messages: List[Dict[str, str]], attachments: Mapping[str, Mapping[str, Any]]) -> Any:
         """
         Convert normalized messages and attachments into the provider-specific
         request payload.
@@ -441,13 +440,25 @@ class Tool:
     def name(self) -> str:
         return self._name
 
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
+
     @property
     def namespace(self) -> str:
         return self._namespace
 
+    @namespace.setter
+    def namespace(self, value: str) -> None:
+        self._namespace = value
+
     @property
     def description(self) -> str:
         return self._description
+
+    @description.setter
+    def description(self, value: str) -> None:
+        self._description = value
 
     @property
     def function(self) -> Callable[..., Any]:
@@ -773,7 +784,7 @@ class Tool:
         try:
             result = self._function(*args, **kwargs)
         except Exception as e:  # pragma: no cover - thin wrapper
-            raise ToolInvocationError(f"{self._name}: invocation failed: {e}") from e
+            raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
         return result
 
 
@@ -789,9 +800,9 @@ class Tool:
         """
         return {
             "tool_type": type(self).__name__,
-            "name": self._name,
-            "namespace": self._namespace,
-            "description": self._description,
+            "name": self.name,
+            "namespace": self.namespace,
+            "description": self.description,
             "signature": self.signature,
             "module": self._module,
             "qualname": self._qualname,
@@ -815,7 +826,7 @@ def identity_post(*, result: Any) -> Any:
     return result
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Agent
+# Agent Primitive
 # ───────────────────────────────────────────────────────────────────────────────
 
 class Agent:
@@ -1185,6 +1196,9 @@ class Agent:
             True if removed, False if it was not present.
         """
         return self._llm_engine.detach(path)
+
+    def clear_attachments(self) -> None:
+        return self.llm_engine.clear_attachments()
 
     def clear_memory(self) -> None:
         """Clear the stored message history."""

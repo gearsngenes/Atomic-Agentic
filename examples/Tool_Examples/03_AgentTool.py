@@ -5,9 +5,10 @@ Adjust the import path to your project layout if needed:
 from atomic_agentic.Agents import AgentTool
 """
 from dotenv import load_dotenv
-from atomic_agentic.Tools import Tool, ToolInvocationError
-from atomic_agentic.Agents import Agent, AgentTool
+from atomic_agentic.Tools import Tool, AgentTool, ToolInvocationError
+from atomic_agentic.Agents import Agent
 from atomic_agentic.LLMEngines import OpenAIEngine
+import json
 
 load_dotenv()  # take environment variables from .env file (if exists)
 
@@ -40,7 +41,7 @@ def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
     print(f"\n-- {tool.full_name} call plan --")
     print("signature:", meta["signature"])
-    print("argument map:", meta["arguments_map"])
+    print("argument map:", json.dumps(tool.arguments_map, indent = 2))
 
 def run_case(label: str, tool: Tool, inputs: dict) -> None:
     print(f"\n=== {label} ===")
