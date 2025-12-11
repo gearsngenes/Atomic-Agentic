@@ -64,7 +64,7 @@ def lesson_prompt_strict(
 
 
 strict_tool = Tool(
-    func=lesson_prompt_strict,
+    function=lesson_prompt_strict,
     name="lesson_prompt_strict",
     description="Strict schema: {grade_level, subject, topic, duration_min?, objectives[], constraints[]?, tone?} → prompt",
 )
@@ -110,7 +110,7 @@ def lesson_prompt_permissive(**kwargs) -> str:
 
 
 permissive_tool = Tool(
-    func=lesson_prompt_permissive,
+    function=lesson_prompt_permissive,
     name="lesson_prompt_permissive",
     description="Permissive: accepts extra keys; uses defaults; builds a lesson-planning prompt.",
 )

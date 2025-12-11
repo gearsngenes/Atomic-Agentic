@@ -936,9 +936,9 @@ class Agent:
         # identity pre-invoke by default -> requires {"prompt": str} 
         if pre_invoke is None:
             pre_invoke: Tool = Tool(identity_pre,
-                                          "pre_invoke",
-                                          self.name,
-                                          identity_pre.__doc__)
+                                    "pre_invoke",
+                                    self.name,
+                                    identity_pre.__doc__)
         # keep pre_invoke as-is if its a Tool
         elif isinstance(pre_invoke, Tool):
             pre_invoke = pre_invoke
@@ -946,13 +946,13 @@ class Agent:
         else:
             raise ValueError("pre_invoke must be a Tools.Tool instance or a callable object.")
         # if the return type isn't 'any' or 'string' or 'str', then raise an error.
-        if self._pre_invoke.return_type.lower() not in ["str", "any", "string"]:
+        if pre_invoke.return_type.lower() not in ["str", "any", "string"]:
             raise AgentError(
                 f"pre_invoke Tool for agent {self._name} must return a type str (or type 'Any' as superset containing 'str'); "
                 f"got {self.pre_invoke.return_type}."
             )
         # set pre-invoke
-        self._pre_invoke = pre_invoke
+        self._pre_invoke: Tool = pre_invoke
         
         # ~~~ Post-Invoke Tool Preparation ~~~
         # turn callable to post-invoke tool
@@ -1255,19 +1255,15 @@ class Agent:
 
         # 3) Build messages for this run
         logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
-        messages: List[Dict[str, str]] = []
-
-        # Optional system message
-        if self._role_prompt:
-            messages.append({"role": "system", "content": self._role_prompt})
+        # 3.a) Add role_prompt 
+        messages: List[Dict[str, str]] = [{"role": "system", "content": self.role_prompt}]
 
         # Prior turns (if context is enabled)
         if self._context_enabled and self._history:
+            if self._history_window is None: prior = self._history
             # window in turns: take last N *pairs* => 2N messages
-            if self._history_window > 0:
-                prior = self._history[-(self._history_window * 2):]
-            else:
-                prior = self._history
+            elif self._history_window > 0: prior = self._history[-(self._history_window * 2):]
+            else: prior = self._history
             messages.extend(prior)
 
         # Current user prompt
@@ -1278,14 +1274,11 @@ class Agent:
         logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
         raw_result = self._invoke(prompt=prompt, messages=messages)
 
-        # 5) Centralized history policy: only `_update_history` may touch `_history`.
+        # 5) Centralized history policy
         if self._context_enabled:
             logger.debug(f"Agent.{self.name} updating history")
             self._history.extend(self._newest_history)
-            self._newest_history.clear()
-        else:
-            # Ensure no stale data leaks across invocations.
-            self._newest_history.clear()
+        self._newest_history.clear()
 
         # 6) Run post-invoke Tool on the raw result
         try:
