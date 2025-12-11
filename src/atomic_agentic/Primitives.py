@@ -5,8 +5,8 @@ import os
 import random
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Mapping, Optional, get_origin, get_args
-from .Exceptions import LLMEngineError, ToolDefinitionError, ToolInvocationError
+from typing import Any, Dict, List, Mapping, Optional, Union, get_origin, get_args
+from .Exceptions import *
 from typing import Mapping, Callable, Optional
 from collections import OrderedDict
 import inspect
@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "LLMEngine",
+    "Tool",
+    "Agent"
 ]
 
 
@@ -80,10 +82,9 @@ class LLMEngine(ABC):
         # Persistent mapping: local path -> provider-specific metadata
         self._attachments: Dict[str, Mapping[str, Any]] = {}
 
-    # --------------------------------------------------------------------- #
-    # Public surface
-    # --------------------------------------------------------------------- #
-
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
     @property
     def name(self) -> str:
         """Human-friendly identifier for this engine instance."""
@@ -100,8 +101,9 @@ class LLMEngine(ABC):
         # Return a shallow copy to discourage mutation of internal state.
         return dict(self._attachments)
 
-    # Attach / detach ----------------------------------------------------- #
-
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
     def attach(self, path: str) -> Mapping[str, Any]:
         """
         Attach a local file path to this engine.
@@ -158,8 +160,6 @@ class LLMEngine(ABC):
         for path in list(self._attachments.keys()):
             self.detach(path)
 
-    # Template `invoke` --------------------------------------------------- #
-
     def invoke(self, messages: List[Dict[str, str]]) -> str:
         """
         Template method that defines the engine invocation lifecycle.
@@ -174,7 +174,6 @@ class LLMEngine(ABC):
         Subclasses **must not** override this method; they customize behavior
         via the protected hooks documented below.
         """
-        start = time.time()
         try:
             normalized = self._normalize_messages(messages)
             attachments = dict(self._attachments)
@@ -193,16 +192,11 @@ class LLMEngine(ABC):
             raise
         except Exception as exc:
             raise LLMEngineError(f"{self._name}.invoke failed") from exc
-        finally:
-            duration = time.time() - start
-            logger.debug(
-                "LLMEngine %s.invoke completed in %.3fs", self._name, duration
-            )
 
-    # --------------------------------------------------------------------- #
-    # Shared helpers used by the template
-    # --------------------------------------------------------------------- #
 
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
     def _normalize_messages(
         self, messages: List[Dict[str, Any]]
     ) -> List[Dict[str, str]]:
@@ -309,9 +303,8 @@ class LLMEngine(ABC):
         return isinstance(exc, (TimeoutError, ConnectionError))
 
     # --------------------------------------------------------------------- #
-    # Abstract hooks for subclasses
+    # Abstract Helpers
     # --------------------------------------------------------------------- #
-
     @abstractmethod
     def _build_provider_payload(
         self,
@@ -351,7 +344,8 @@ class LLMEngine(ABC):
         - return an opaque metadata mapping used later by `_build_provider_payload`.
         """
         raise NotImplementedError
-
+    
+    @abstractmethod
     def _on_detach(self, meta: Mapping[str, Any]) -> None:
         """
         Optional hook called when an attachment is detached.
@@ -360,23 +354,23 @@ class LLMEngine(ABC):
         Default implementation is a no-op.
         """
         # Intentionally a no-op by default.
-        return None
+        raise NotImplementedError
+
 
     # --------------------------------------------------------------------- #
-    # Introspection
+    # Serialization
     # --------------------------------------------------------------------- #
-
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> OrderedDict[str, Any]:
         """
         Shallow, non-secret configuration snapshot for debugging / logging.
         """
-        return {
+        return OrderedDict({
             "name": self._name,
             "timeout_seconds": self._timeout_seconds,
             "max_retries": self._max_retries,
-            "attachments": list(self._attachments.keys()),
+            "attachments": self._attachments,
             "provider": type(self).__name__,
-        }
+        })
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -413,6 +407,9 @@ class Tool:
     ``return_type`` is always stored as a string as well.
     """
 
+    # ------------------------------------------------------------------ #
+    # Construction
+    # ------------------------------------------------------------------ #
     def __init__(
         self,
         function: Callable[..., Any],
@@ -436,10 +433,10 @@ class Tool:
         # Persistibility flag exposed as a public property.
         self._is_persistible_internal: bool = self._compute_is_persistible()
 
+
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
-
     @property
     def name(self) -> str:
         return self._name
@@ -515,15 +512,18 @@ class Tool:
         params_str = ", ".join(params)
         return f"{self.full_name}({params_str}) -> {self._return_type}"
 
+
+    # ------------------------------------------------------------------ #
+    # Stringification
+    # ------------------------------------------------------------------ #
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return f"{self.signature}: {self._description}"
 
     __str__ = __repr__
 
     # ------------------------------------------------------------------ #
-    # Template method
+    # Public API
     # ------------------------------------------------------------------ #
-
     def invoke(self, inputs: Mapping[str, Any]) -> Any:
         """Invoke the tool using a dict-like mapping of inputs.
 
@@ -534,12 +534,13 @@ class Tool:
         if not isinstance(inputs, Mapping):
             raise ToolInvocationError(f"{self._name}: inputs must be a mapping")
         args, kwargs = self.to_arg_kwarg(inputs)
-        return self.execute(args, kwargs)
+        result = self.execute(args, kwargs)
+        return result
+
 
     # ------------------------------------------------------------------ #
-    # Overridable helpers
+    # Helpers
     # ------------------------------------------------------------------ #
-
     def _get_mod_qual(self, function: Callable[..., Any]) -> tuple[Optional[str], Optional[str]]:
         """Determine ``(module, qualname)`` for callable-based tools.
 
@@ -656,10 +657,6 @@ class Tool:
             return False
         return True
 
-    # ------------------------------------------------------------------ #
-    # Dict → (*args, **kwargs) mapping
-    # ------------------------------------------------------------------ #
-
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         """Default implementation for mapping input dicts to ``(*args, **kwargs)``.
 
@@ -766,10 +763,6 @@ class Tool:
 
         return tuple(args), kwargs
 
-    # ------------------------------------------------------------------ #
-    # Execution
-    # ------------------------------------------------------------------ #
-
     def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
         """Execute the underlying callable.
 
@@ -778,17 +771,15 @@ class Tool:
         not change the high-level semantics.
         """
         try:
-            return self._function(*args, **kwargs)
-        except ToolInvocationError:
-            # Allow explicit ToolInvocationError to propagate unchanged.
-            raise
+            result = self._function(*args, **kwargs)
         except Exception as e:  # pragma: no cover - thin wrapper
             raise ToolInvocationError(f"{self._name}: invocation failed: {e}") from e
+        return result
+
 
     # ------------------------------------------------------------------ #
-    # Introspection / serialization
+    # Serialization
     # ------------------------------------------------------------------ #
-
     def to_dict(self) -> Dict[str, Any]:
         """Serialize this tool's header and argument schema.
 
@@ -806,3 +797,566 @@ class Tool:
             "qualname": self._qualname,
             "is_persistible": self.is_persistible,
         }
+
+
+def identity_pre(*, prompt: str) -> str:
+    if not isinstance(prompt, str):
+        raise ValueError("prompt must be a string")
+    return prompt
+
+def identity_post(*, result: Any) -> Any:
+    """
+    Default post-invoke identity function.
+
+    This function accepts a single argument named ``result`` and returns it
+    unchanged. It is wrapped as a Tool and used when no explicit ``post_invoke``
+    Tool is provided.
+    """
+    return result
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Agent
+# ───────────────────────────────────────────────────────────────────────────────
+
+class Agent:
+    """
+    Schema-driven LLM Agent.
+
+    An Agent is a stateful software unit that points to an LLM and carries a persona
+    (system role-prompt). It accepts a single **input mapping** and uses a **pre-invoke
+    Tool** to convert that mapping into a **prompt string** before invoking the engine.
+
+    Core behavior:
+    - `invoke(inputs: Mapping[str, Any]) -> Any`
+      1) Validate inputs (must be a Mapping).
+      2) `pre_invoke.invoke(inputs) -> str` (default strict: requires `{"prompt": str}`).
+      3) Build messages: [system?] + [last N turns] + [user(prompt)].
+      4) Call `llm_engine.invoke(messages)` to obtain a raw result (base Agent expects `str`).
+      5) Pass the raw result through `post_invoke` (a single-parameter Tool) to obtain the final output.
+      6) Record the turn if `context_enabled`; return the final result.
+
+    Inputs and schema
+    -----------------
+    - Inputs are always a mapping (`Mapping[str, Any]`).
+    - The schema is defined entirely by the `pre_invoke` Tool, which:
+      - validates and normalizes the incoming mapping,
+      - converts it into a prompt string.
+
+    History and context
+    -------------------
+    - The Agent keeps an in-memory history of messages as a flat list of dicts:
+      `{"role": "user"|"assistant"|"system", "content": str}`.
+    - `history_window` controls how many *turns* (user+assistant pairs) from the tail
+      of the history are included when building messages.
+    - History is append-only; no trimming or summarization is performed by default.
+
+    Parameters
+    ----------
+    name : str
+        Logical name for this agent (read-only).
+    description : str
+        Short, human-readable description (read-only).
+    llm_engine : LLMEngine
+        Engine used to perform the model call. Must be an instance of `LLMEngine`.
+    role_prompt : Optional[str], default None
+        Optional system persona. If None or empty, no system message is sent.
+    context_enabled : bool, default True
+        If True, the agent includes and logs conversation context (turns).
+        If False, the agent sends no prior turns and does not log new ones.
+    history_window : int, default 50
+        Send-window measured in **turns** (user+assistant pairs). `0` sends no turns.
+        Stored history is never trimmed.
+    pre_invoke : Optional[Tool or Callable], default None
+        Tool that converts the input mapping to a `str` prompt. If None, a strict
+        identity Tool is created that accepts exactly `{"prompt": str}`.
+    post_invoke : Optional[Tool or Callable], default None
+        Tool that converts the raw result from :meth:`_invoke` into the final
+        return value. It must accept exactly one parameter. If None, a default
+        identity Tool is used that returns its single argument unchanged.
+
+    Properties (selected)
+    ---------------------
+    name : str (read-only)
+    description : str (read-only)
+    role_prompt : Optional[str] (read-write)
+    llm_engine : LLMEngine (read-write, type-enforced)
+    context_enabled : bool (read-write)
+    history_window : int (read-write; see semantics above)
+    history : List[Dict[str, str]] (read-only view)
+    attachments : Dict[str, Dict[str, Any]] (read-only view)
+    pre_invoke : Tool (read-write)
+    post_invoke : Tool (read-write)
+    """
+
+    # ------------------------------------------------------------------ #
+    # Construction
+    # ------------------------------------------------------------------ #
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        llm_engine: LLMEngine,
+        role_prompt: Optional[str] = None,
+        context_enabled: bool = True,
+        *,
+        pre_invoke: Optional[Tool | Callable] = None,
+        post_invoke: Optional[Tool | Callable] = None,
+        history_window: Optional[int] = None,
+    ) -> None:
+        
+        # set the core attributes
+        self._name = name
+        self._description = description
+        self._llm_engine: LLMEngine = llm_engine
+        self._role_prompt: Optional[str] = role_prompt or "You are a helpful AI assistant"
+        self._context_enabled: bool = context_enabled
+
+        # history_window: strict int semantics (>= 0). 'None' means (send-all) mode.
+        if history_window is not None and (not isinstance(history_window, int) or history_window < 0):
+            raise AgentError("history_window must be an int >= 0 or be 'None'.")
+        self._history_window: Optional[int] = history_window
+
+        # Stored message history (flat list of role/content dicts).
+        # We never trim storage; we only limit what we *send* to the engine.
+        self._history: List[Dict[str, str]] = []
+
+        # Per-invoke buffer for the newest run. This is populated inside `_invoke`
+        # and committed to `_history` by `_update_history` if `context_enabled` is True.
+        self._newest_history: List[Dict[str, str]] = []
+
+        # ~~~ Pre-Invoke Tool preparation ~~~
+        # turn callable to pre-invoke tool
+        if pre_invoke is not None and isinstance(pre_invoke, Callable):
+            pre_invoke = Tool(
+                function=pre_invoke,
+                name="pre_invoke",
+                namespace=self._name,
+                description="Pre-invoke callable adapted to Tool",
+            )
+        # identity pre-invoke by default -> requires {"prompt": str} 
+        if pre_invoke is None:
+            pre_invoke: Tool = Tool(identity_pre,
+                                          "pre_invoke",
+                                          self.name,
+                                          identity_pre.__doc__)
+        # keep pre_invoke as-is if its a Tool
+        elif isinstance(pre_invoke, Tool):
+            pre_invoke = pre_invoke
+        # raise error otherwise
+        else:
+            raise ValueError("pre_invoke must be a Tools.Tool instance or a callable object.")
+        # if the return type isn't 'any' or 'string' or 'str', then raise an error.
+        if self._pre_invoke.return_type.lower() not in ["str", "any", "string"]:
+            raise AgentError(
+                f"pre_invoke Tool for agent {self._name} must return a type str (or type 'Any' as superset containing 'str'); "
+                f"got {self.pre_invoke.return_type}."
+            )
+        # set pre-invoke
+        self._pre_invoke = pre_invoke
+        
+        # ~~~ Post-Invoke Tool Preparation ~~~
+        # turn callable to post-invoke tool
+        if post_invoke is not None and isinstance(post_invoke, Callable):
+            post_invoke = Tool(post_invoke,
+                               "post_invoke",
+                               self.name,
+                               identity_post.__doc__ or f"Post-invoke callable adapted to Tool")
+        # identity post-invoke by default -> requires single {"result": Any}
+        if post_invoke is None:
+            post_tool: Tool = Tool(identity_post,
+                                   "post_invoke",
+                                   self.name,
+                                   identity_post.__doc__)
+        # keep post_invoke as-is if its a Tool
+        elif isinstance(post_invoke, Tool):
+            post_tool = post_invoke
+        # raise error otherwise
+        else:
+            raise ValueError("post_invoke must be a Tools.Tool instance or a callable object.")
+        # if post_invoke's arguments map is not one parameter long, then raise an error
+        post_arg_map = post_tool.arguments_map
+        if len(post_arg_map) != 1:
+            raise AgentError(
+                f"post_invoke Tool for agent {self._name} must accept exactly one parameter; "
+                f"got {len(post_arg_map)}."
+            )
+        # set post-invoke
+        self._post_invoke: Tool = post_tool
+        # cache the single parameter name for efficient calls.
+        self._post_param_name: str = next(iter(post_arg_map.keys()))
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
+    @property
+    def name(self) -> str:
+        """Read-only agent name."""
+        return self._name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
+
+    @property
+    def description(self) -> str:
+        """Return description agent description."""
+        return self._description
+
+    @description.setter
+    def description(self, val: str) -> None:
+        """Set description"""
+        self._description = val.strip() or f"A helpful AI assistant named {self._name}"
+
+    @property
+    def role_prompt(self) -> Optional[str]:
+        """Optional system persona (first message if set)."""
+        return self._role_prompt
+
+    @role_prompt.setter
+    def role_prompt(self, value: str) -> None:
+        if not isinstance(value, str):
+            raise TypeError(f"role_prompt must be a 'str', but got '{type(value).__name__}'")
+        self._role_prompt = value.strip() or "You are a helpful AI assistant"
+    
+    @property
+    def llm_engine(self) -> LLMEngine:
+        """LLMEngine used for this agent."""
+        return self._llm_engine
+
+    @llm_engine.setter
+    def llm_engine(self, engine: LLMEngine) -> None:
+        if not isinstance(engine, LLMEngine):
+            raise TypeError("llm_engine must be an instance of LLMEngine.")
+        self._llm_engine = engine
+
+    @property
+    def context_enabled(self) -> bool:
+        """
+        Whether the agent uses conversation context
+        (sends prior turns and logs new ones).
+        """
+        return self._context_enabled
+
+    @context_enabled.setter
+    def context_enabled(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise ValueError("context_enabled must be a bool.")
+        self._context_enabled = value
+
+    @property
+    def history_window(self) -> int:
+        """
+        Number of *turns* (user+assistant pairs) to include from the tail of the
+        conversation history when building messages for the engine.
+        """
+        return self._history_window
+
+    @history_window.setter
+    def history_window(self, value: int) -> None:
+        if not isinstance(value, int) or value < 0:
+            raise ValueError("history_window must be an int >= 0.")
+        self._history_window = value
+
+    @property
+    def history(self) -> List[Dict[str, str]]:
+        """Return a shallow copy of the stored message history (never trimmed)."""
+        return list(self._history)
+
+    @property
+    def attachments(self) -> Dict[str, Dict[str, Any]]:
+        """A shallow copy of the current attachment paths."""
+        return self.llm_engine.attachments
+
+    @property
+    def pre_invoke(self) -> Tool:
+        """
+        Tool that converts the input mapping into a **prompt string**.
+
+        By default this is a strict identity tool that requires *exactly*:
+            {"prompt": <str>}
+        and returns that string.
+
+        You can set this to any Tool instance that:
+        - accepts a Mapping[str, Any]-like object, and
+        - returns a `str` when invoked.
+
+        For convenience, setting it to a plain callable will wrap it in a Tool.
+        """
+        return self._pre_invoke
+
+    @pre_invoke.setter
+    def pre_invoke(self, tool: Union[Tool, Callable[..., str]]) -> None:
+        """
+        Set the pre-invoke Tool.
+
+        Parameters
+        ----------
+        tool : Tool or callable
+            - If a Tool, it is used as-is.
+            - If a callable, it is wrapped as a Tool with a simple signature.
+        """
+        if isinstance(tool, Callable):
+            tool = Tool(
+                function=tool,
+                name="pre_invoke",
+                namespace=self.name,
+                description=tool.__doc__ or f"Pre-invoke callable adapted to Tool for agent {self.name}",
+            )
+        elif not isinstance(tool, Tool):
+            raise ValueError("pre_invoke must be a Tools.Tool instance or a callable object.")
+        if tool.return_type.lower() not in ['any', 'str', 'string']:
+            raise AgentError(f"pre_invoke must return a type 'str' after preprocessing the inputs. Got '{tool.return_type}'")
+        self._pre_invoke = tool
+
+    @property
+    def post_invoke(self) -> Tool:
+        """
+        Tool that converts the raw result from :meth:`_invoke` into the final
+        return value for :meth:`invoke`.
+
+        This Tool must accept exactly one parameter. The base Agent enforces
+        this constraint when the Tool is set.
+        """
+        return self._post_invoke
+
+    @post_invoke.setter
+    def post_invoke(self, tool: Union[Tool, Callable[..., Any]]) -> None:
+        """
+        Set the post-invoke Tool.
+
+        Parameters
+        ----------
+        tool : Tool or callable
+            - If a Tool, it is used as-is.
+            - If a callable, it is wrapped as a Tool with a simple signature.
+        """
+        if isinstance(tool, Callable):
+            tool = Tool(
+                function=tool,
+                name="post_invoke",
+                namespace=self.name,
+                description=tool.__doc__ or f"Post-invoke callable adapted to Tool for agent {self.name}",
+            )
+        elif not isinstance(tool, Tool):
+            raise ValueError("post_invoke must be a Tools.Tool instance or a callable object.")
+
+        post_arg_map = tool.arguments_map
+        if len(post_arg_map) != 1:
+            raise AgentError(
+                f"post_invoke Tool for agent {self.name} must accept exactly one parameter; "
+                f"got {len(post_arg_map)}."
+            )
+
+        self._post_invoke = tool
+        self._post_param_name = next(iter(post_arg_map.keys()))
+    
+    @property
+    def arguments_map(self) -> OrderedDict[str, Any]:
+        """
+        Mirror of the pre_invoke Tool's arguments map.
+
+        Exposed primarily so that planners and higher-level workflows can inspect
+        the agent's input schema (required names, ordering, etc.).
+        """
+        return OrderedDict(self.pre_invoke.arguments_map)
+
+
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+    def attach(self, path: str) -> Mapping[str, Any]:
+        """
+        Add a file path to attachments via the underlying engine.
+
+        Returns
+        -------
+        bool
+            True if added, False if it was already present.
+        """
+        return self._llm_engine.attach(path)
+
+    def detach(self, path: str) -> bool:
+        """
+        Remove a file path from attachments via the underlying engine.
+
+        Returns
+        -------
+        bool
+            True if removed, False if it was not present.
+        """
+        return self._llm_engine.detach(path)
+
+    def clear_memory(self) -> None:
+        """Clear the stored message history."""
+        self._history.clear()
+        self._newest_history.clear()
+    
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """Invoke the Agent with a single **input mapping**.
+
+        Steps
+        -----
+        1) Validate ``inputs`` is a :class:`~collections.abc.Mapping`.
+        2) ``prompt = pre_invoke.invoke(inputs)`` → must be a ``str``.
+           - If the Tool raises :class:`ToolInvocationError`, it propagates unchanged.
+           - Other exceptions are wrapped as :class:`AgentInvocationError`.
+        3) Build the messages list from the optional role prompt, the windowed
+           history, and the current user ``prompt``.
+        4) Delegate to :meth:`_invoke`, which performs the actual engine call and
+           populates ``_newest_history`` for this run.
+        5) If ``context_enabled`` is True, call update history with the _newest_history to commit
+           the newest turn(s) into persistent history.
+        6) Run ``post_invoke`` on the raw result to obtain the final output and
+           return it.
+
+        Parameters
+        ----------
+        inputs : Mapping[str, Any]
+            Input mapping to be adapted to a prompt string via ``pre_invoke``.
+
+        Returns
+        -------
+        Any
+            The Agent's response. For the base Agent, this is the result of the
+            ``post_invoke`` Tool applied to the raw LLM output.
+
+        Raises
+        ------
+        TypeError
+            If ``inputs`` is not a Mapping.
+        ToolInvocationError
+            If the pre- or post-invoke Tool rejects the inputs.
+        AgentInvocationError
+            For unexpected runtime errors in Tools or the engine.
+        """
+        logger.info(f"[{type(self).__name__}.{self.name}.invoke started]")
+
+        # 1) Validate inputs
+        if not isinstance(inputs, Mapping):
+            raise TypeError("Agent.invoke expects a Mapping[str, Any].")
+
+        # 2) Run pre-invoke Tool to get the prompt (strict by default)
+        try:
+            logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
+            prompt = self._pre_invoke.invoke(inputs)  # may raise ToolInvocationError
+        except ToolInvocationError:
+            # Let Tool errors bubble up (they are already precise).
+            raise
+        except Exception as e:  # pragma: no cover - safety net
+            raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
+
+        if not isinstance(prompt, str):
+            raise AgentInvocationError(
+                f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
+            )
+
+        # Reset the per-invoke buffer before running the core logic.
+        self._newest_history.clear()
+
+        # 3) Build messages for this run
+        logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
+        messages: List[Dict[str, str]] = []
+
+        # Optional system message
+        if self._role_prompt:
+            messages.append({"role": "system", "content": self._role_prompt})
+
+        # Prior turns (if context is enabled)
+        if self._context_enabled and self._history:
+            # window in turns: take last N *pairs* => 2N messages
+            if self._history_window > 0:
+                prior = self._history[-(self._history_window * 2):]
+            else:
+                prior = self._history
+            messages.extend(prior)
+
+        # Current user prompt
+        user_msg = {"role": "user", "content": prompt}
+        messages.append(user_msg)
+
+        # 4) Delegate to the internal call path
+        logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
+        raw_result = self._invoke(prompt=prompt, messages=messages)
+
+        # 5) Centralized history policy: only `_update_history` may touch `_history`.
+        if self._context_enabled:
+            logger.debug(f"Agent.{self.name} updating history")
+            self._history.extend(self._newest_history)
+            self._newest_history.clear()
+        else:
+            # Ensure no stale data leaks across invocations.
+            self._newest_history.clear()
+
+        # 6) Run post-invoke Tool on the raw result
+        try:
+            logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
+            result = self._post_invoke.invoke({self._post_param_name: raw_result})
+        except ToolInvocationError:
+            # Let Tool errors bubble up directly
+            raise
+        except Exception as e:  # pragma: no cover - safety net
+            raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
+
+        logger.info(f"[{type(self).__name__}.{self.name}.invoke finished]")
+        return result
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    def _invoke(self, prompt: str, messages: List[Dict[str, str]]) -> Any:
+        """Internal call path used by :meth:`invoke`.
+
+        This base implementation:
+        - Invokes the configured LLM engine with the provided ``messages``.
+        - Populates ``_newest_history`` with the *current turn only*
+          (user + assistant messages).
+
+        Subclasses may override this method to implement more complex behavior,
+        but **must not** mutate ``self._history`` directly. Instead, they should
+        either:
+        - append messages to ``self._newest_history``, or
+        - store richer run data on ``self`` for :meth:`_update_history` to
+          summarize and commit.
+        """
+        # 1) Call engine (attachments are managed by the engine itself)
+        try:
+            logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
+            text = self._llm_engine.invoke(messages)
+        except Exception as e:  # pragma: no cover - engine-specific failures
+            raise AgentInvocationError(f"engine invocation failed: {e}") from e
+
+        # 2) Engine contract: base Agent expects a string
+        if not isinstance(text, str):
+            raise AgentInvocationError(
+                f"engine returned non-string (type={type(text)!r}); a string is required"
+            )
+
+        # 3) Record the current turn into the per-invoke buffer.
+        # The base Agent simply stores the user prompt and raw assistant text.
+        if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "user":
+            user_msg = messages[-1]
+        else:
+            user_msg = {"role": "user", "content": prompt}
+
+        self._newest_history.append(user_msg)
+        self._newest_history.append({"role": "assistant", "content": text})
+
+        return text
+
+    # ------------------------------------------------------------------ #
+    # Serialization
+    # ------------------------------------------------------------------ #
+    def to_dict(self) -> OrderedDict[str, Any]:
+        """A minimal diagnostic snapshot of this agent (safe to log/serialize)."""
+        return OrderedDict(
+            agent_type=type(self).__name__,
+            name=self._name,
+            description=self._description,
+            role_prompt=self._role_prompt,
+            pre_invoke=self._pre_invoke.to_dict(),
+            post_invoke=self._post_invoke.to_dict(),
+            llm=self._llm_engine.to_dict() if self._llm_engine else None,
+            context_enabled=self._context_enabled,
+            history_window=self._history_window,
+            history=self._history,
+        )

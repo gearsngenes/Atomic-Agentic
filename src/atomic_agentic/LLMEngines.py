@@ -1320,7 +1320,8 @@ class LlamaCppEngine(LLMEngine):
             "use plain text in messages instead."
         )
 
-    # No `_on_detach` override is required; the base implementation is a no-op.
+    def _on_detach():
+        pass
 
     # ------------------------------------------------------------------ #
     # Introspection
