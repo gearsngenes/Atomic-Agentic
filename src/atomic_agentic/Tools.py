@@ -367,7 +367,10 @@ class MCPProxyTool(Tool):
         self._headers: Dict[str, str] = dict(headers or {})
 
         # Discover tools once and stash the schema for this tool
-        all_tools = list_mcp_tools(server_url=self._server_url, headers=self._headers)
+        try:
+            all_tools = list_mcp_tools(server_url=self._server_url, headers=self._headers)
+        except Exception as e:
+            raise ValueError(f"Failed to connect to server on '{server_url}'. Got error: {e}")
         if tool_name not in all_tools:
             raise ToolDefinitionError(
                 f"MCPProxyTool: tool {tool_name!r} not found on MCP server {self._server_url!r}"
@@ -437,8 +440,34 @@ class MCPProxyTool(Tool):
         self._is_persistible_internal = self._compute_is_persistible()
 
     @property
+    def server_url(self) -> str:
+        return self._server_url
+    
+    @server_url.setter
+    def server_url(self, value: str):
+        try:
+            all_tools = list_mcp_tools(value, headers = self._headers)
+        except Exception as e:
+            raise ValueError(f"Failed to connect to server on '{value}'. Got error: {e}")
+        if self.name not in all_tools:
+            raise ToolDefinitionError(f"'{self.name}' is not present in this new MCP serverl's list")
+        self._mcpdata = all_tools[self.name]
+        self._server_url = value
+        new_function = functools.partial(
+            call_mcp_tool_once,
+            server_url=self._server_url,
+            tool_name=self._name,
+            headers=self._headers,
+        )
+        self._function = new_function
+        self._module, self._qualname = self._get_mod_qual(new_function)
+        self._arguments_map, self._return_type = self._build_io_schemas()
+        self._is_persistible_internal = self._compute_is_persistible()
+    
+    @property
     def function(self) -> Callable:
         return self._function
+    
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
@@ -685,7 +714,6 @@ class MCPProxyTool(Tool):
         base.update(
             {
                 "server_url": self._server_url,
-                "headers": list(self._headers.keys()) if self._headers is not None else None,
             }
         )
         return base
