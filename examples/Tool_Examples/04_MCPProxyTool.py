@@ -49,12 +49,14 @@ async def _list_remote_tools(url: str) -> list[str]:
             tool_objs = getattr(tools_resp, "tools", tools_resp)
             return [t.name for t in tool_objs]
 
+import json
+
 def _show_plan(proxy: MCPProxyTool) -> None:
     meta = proxy.to_dict()
     print(f"\n-- {proxy.full_name} --")
-    print("from:", proxy.source)
+    print("from:", proxy.namespace)
     print("signature:", meta["signature"])
-    print("argument map:", meta["arguments_map"])
+    print("argument map:", json.dumps(proxy.arguments_map, indent = 2))
 
 def _invoke(proxy: MCPProxyTool, inputs: Mapping[str, Any]) -> None:
     print("inputs:", inputs)
@@ -71,7 +73,7 @@ def main() -> None:
     print("Discovered tools:", tool_names)
 
     for name in tool_names:
-        proxy = MCPProxyTool(tool_name=name, server_name=SERVER_NAME, server_url=resolved, headers=HEADERS)
+        proxy = MCPProxyTool(tool_name=name, namespace=SERVER_NAME, server_url=resolved, headers=HEADERS)
         _show_plan(proxy)
 
         inputs = EXAMPLE_INPUTS.get(name)

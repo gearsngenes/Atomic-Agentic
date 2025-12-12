@@ -536,19 +536,6 @@ def _normalize_url(u: str) -> str:
     return urlunparse(parts)
 
 
-def _extract_rw(transport) -> Tuple[Any, Any]:
-    """
-    Obtain (read, write) callables from the transport. Some SDK variants return
-    a tuple; others expose .read/.write attributes.
-    """
-    r = getattr(transport, "read", None)
-    w = getattr(transport, "write", None)
-    if r is not None and w is not None:
-        return r, w
-    if isinstance(transport, (tuple, list)) and len(transport) >= 2:
-        return transport[0], transport[1]
-    raise ToolDefinitionError("MCPProxyTool: could not extract (read, write) from transport.")
-
 
 def _extract_structured_or_text(result: Any) -> Optional[Any]:
     """

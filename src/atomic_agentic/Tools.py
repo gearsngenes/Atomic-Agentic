@@ -1,17 +1,18 @@
 # Tools.py
 from __future__ import annotations
-import inspect
-from collections import OrderedDict 
-import inspect
 from collections import OrderedDict
+import functools
+import asyncio
+import threading
 from typing import (
     Any,
     Mapping,
     Callable,
     List,
     Optional,
-    Tuple,
-    Dict
+    Dict,
+    Awaitable,
+    TypeVar,
 )
 import logging
 from mcp import ClientSession
@@ -19,18 +20,6 @@ from mcp.client.streamable_http import streamablehttp_client
 
 from .Exceptions import ToolDefinitionError, ToolInvocationError
 from .Primitives import Tool, Agent, ArgumentMap
-
-from .__utils__ import (
-    _canonize_annotation,
-    _jsonify_default,
-    _run_sync,
-    _extract_rw,
-    _extract_structured_or_text,
-    _to_plain,
-    _normalize_url,
-    _JSON_TO_PY,
-    KIND_TO_MODE,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -156,185 +145,547 @@ class AgentTool(Tool):
         ))
         return base
 
+
 # ───────────────────────────────────────────────────────────────────────────────
-# MCP Proxy Tool
+# MCP helper functions (generic, class-independent)
+# ───────────────────────────────────────────────────────────────────────────────
+T = TypeVar("T")
+
+def _run_coro_sync(coro: Awaitable[T]) -> T:
+    """
+    Run an async coroutine from sync code, even if we're already inside
+    an event loop.
+
+    - If no loop is running in this thread, uses asyncio.run(coro).
+    - If a loop *is* running, spins up a fresh event loop in a worker
+      thread, runs the coroutine there, and returns the result.
+
+    This avoids the common "Cannot run the event loop while another loop
+    is running" error you get in notebooks / async apps.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop in this thread → safe to use asyncio.run.
+        return asyncio.run(coro)
+
+    # Already inside a running loop → run coro in a separate thread.
+    result_box: List[T] = []
+    error_box: List[BaseException] = []
+
+    def runner() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(coro)
+            result_box.append(result)
+        except BaseException as exc:  # noqa: BLE001
+            error_box.append(exc)
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+
+    if error_box:
+        raise error_box[0]
+    if not result_box:
+        raise RuntimeError("Coroutine completed without result")
+
+    return result_box[0]
+
+def list_mcp_tools(
+    server_url: str,
+    headers: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    List tools exposed by an MCP server over streamable HTTP.
+
+    This is a *synchronous* helper that:
+
+    - Opens a short-lived MCP session to `server_url`,
+    - Initializes the session,
+    - Calls `list_tools`,
+    - Returns a mapping of tool name → metadata dict with:
+        - "name"          : str
+        - "description"   : str
+        - "input_schema"  : dict | None     (JSON Schema)
+        - "output_schema" : dict | None     (JSON Schema, if provided)
+        - "raw"           : the original Tool object (for advanced use)
+
+    It does *not* depend on any __utils__ helpers and is safe to call
+    from both sync code and from within a running event loop via
+    `_run_coro_sync`.
+    """
+
+    async def _do() -> Dict[str, Dict[str, Any]]:
+        headers_dict: Optional[Dict[str, str]] = dict(headers) if headers else None
+
+        # Connect to the MCP server over streamable HTTP.
+        async with streamablehttp_client(server_url, headers=headers_dict) as (
+            read_stream,
+            write_stream,
+            _,
+        ):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                tools_resp = await session.list_tools()
+
+        # Newer SDKs return a ListToolsResult with `.tools`
+        tools = getattr(tools_resp, "tools", tools_resp)
+        result: Dict[str, Dict[str, Any]] = {}
+
+        if not tools:
+            return result
+
+
+        for tool in tools:
+            # Name
+            name = getattr(tool, "name", None)
+            if name is None and isinstance(tool, Mapping):
+                name = tool.get("name")
+            if not name:
+                continue
+            name_str = str(name)
+
+            # Description
+            description = getattr(tool, "description", None)
+            if description is None and isinstance(tool, Mapping):
+                description = tool.get("description")
+            description_str = str(description) if description is not None else ""
+
+            # Input schema (JSON Schema) if present
+            input_schema = getattr(tool, "inputSchema", None)
+            if input_schema is None and isinstance(tool, Mapping):
+                input_schema = tool.get("inputSchema")
+
+            # Output schema if present (structured output) – newer MCP servers
+            output_schema = getattr(tool, "outputSchema", None)
+            if output_schema is None and isinstance(tool, Mapping):
+                output_schema = tool.get("outputSchema")
+
+            result[name_str] = {
+                "name": name_str,
+                "description": description_str,
+                "input_schema": input_schema,
+                "output_schema": output_schema,
+                "raw": tool,
+            }
+
+        return result
+
+    return _run_coro_sync(_do())
+
+def call_mcp_tool_once(
+    server_url: str,
+    tool_name: str,
+    inputs: Mapping[str, Any],
+    headers: Optional[Mapping[str, str]] = None,
+) -> Any:
+    """
+    Call a single MCP tool exactly once, synchronously.
+
+    This is designed to be partially applied with `server_url`, `tool_name`,
+    and `headers` so that the resulting callable has the shape:
+
+        fn(inputs: Mapping[str, Any]) -> Any
+
+    which can be used as the underlying function for a dict-first Tool.
+
+    Parameters
+    ----------
+    server_url:
+        Streamable HTTP MCP endpoint (e.g. "http://localhost:8000/mcp").
+    tool_name:
+        Name of the tool on that server.
+    inputs:
+        Dict-like payload to send as the tool's arguments.
+    headers:
+        Optional HTTP headers (e.g. auth) for the MCP transport.
+
+    Returns
+    -------
+    Any
+        Structured result if available (from `structuredContent` or dict),
+        otherwise a best-effort text/string representation, otherwise the
+        raw CallToolResult object.
+    """
+
+    async def _do() -> Any:
+        headers_dict: Optional[Dict[str, str]] = dict(headers) if headers else None
+
+        try:
+            async with streamablehttp_client(server_url, headers=headers_dict) as (
+                read_stream,
+                write_stream,
+                _,
+            ):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    raw = await session.call_tool(
+                        tool_name,
+                        arguments=dict(inputs),
+                    )
+        except Exception as exc:  # noqa: BLE001
+            # Let MCP/network errors become ToolInvocationError so callers
+            # see a consistent error type.
+            raise ToolInvocationError(
+                f"Error calling MCP tool '{tool_name}' at '{server_url}': {exc}"
+            ) from exc
+
+        return raw #_normalize_mcp_call_result()
+
+    return _run_coro_sync(_do())
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# MCP-Proxy Tool
 # ───────────────────────────────────────────────────────────────────────────────
 class MCPProxyTool(Tool):
     """
     Proxy a single MCP server tool as a normal dict-first Tool.
 
-    • __init__: open short-lived session, `initialize`, `list_tools`, extract the
-      tool’s `inputSchema` + description, close. Build a *keyword-only* signature
-      in server property order (for display only; JSON objects are unordered by spec).
-
-    • invoke(): open short-lived session, `initialize`, `call_tool`, then return
-      **structured content** (or joined text fallback), close. No background loop,
-      so scripts terminate cleanly.
+    Construction:
+    - Discovers the tool via `list_mcp_tools(server_url, headers)`.
+    - Extracts JSON Schema `input_schema` / `output_schema` and description.
+    - Binds a dict-first function that calls the MCP tool exactly once.
     """
 
+    # ------------------------------------------------------------------ #
+    # Construction
+    # ------------------------------------------------------------------ #
     def __init__(
         self,
         server_url: str,
-        server_name: str,
         tool_name: str,
-        headers: Optional[Dict[str, str]] = None,
+        namespace: str,
         description: str = "",
+        headers: Optional[Dict[str, str]] = None,
     ) -> None:
-        self._server_url = _normalize_url(server_url)
-        self._source = str(server_name).strip()
-        self._name = str(tool_name).strip()
-        self._headers = dict(headers or {})
-        self.module = None
-        self.qualname = None
+        self._server_url = str(server_url)
+        self._headers: Dict[str, str] = dict(headers or {})
 
-        if not self._source:
-            raise ToolDefinitionError("MCPProxyTool: 'server_name' cannot be empty.")
-        if not self._name:
-            raise ToolDefinitionError("MCPProxyTool: 'tool_name' cannot be empty.")
-
-        # 1) Discover schema (short-lived session)
-        params_spec, required_names, remote_desc = self._discover_schema()
-        self._description = (description or remote_desc) or ""
-
-        # 2) Build a KW-ONLY wrapper whose signature mirrors the remote schema
-        def _wrapper(**inputs: Any) -> Any:
-            # Base Tool.invoke has already validated keys/requireds (unknown keys rejected).
-            return self._call_remote_once(inputs)
-
-        parameters: List[inspect.Parameter] = []
-        for p in params_spec:
-            default = inspect._empty if not p["has_default"] else p["default"]
-            parameters.append(
-                inspect.Parameter(
-                    name=p["name"],
-                    kind=inspect.Parameter.KEYWORD_ONLY,  # MCP uses a single JSON object (keyword-only)
-                    default=default,
-                    annotation=p["py_type"],
-                )
-            )
-        _wrapper.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
-            parameters=tuple(parameters),
-            return_annotation=Any,
-        )
-        self._func = _wrapper
-        # Build call plan once (unwrap to reach original if decorated)
-        try:
-            sig = inspect.signature(inspect.unwrap(self._func))  # :contentReference[oaicite:9]{index=9}
-        except Exception as e:
-            raise ToolDefinitionError(f"{self._name}: could not inspect callable: {e}") from e
-
-        (
-            self._arguments_map,
-            self.posonly_order,
-            self.p_or_kw_names,
-            self.kw_only_names,
-            self.required_names,
-            self.has_varargs,
-            self.varargs_name,
-            self.has_varkw,
-            self.varkw_name,
-        ) = self._build_arguments_map_and_plan(sig)
-
-        self._return_type = "Any"  # MCP doesn’t guarantee static return types
-
-        self._sig_str: str = ""
-        self._rebuild_signature_str()
-        
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
-        """
-        Invoke the remote MCP tool with validated inputs.
-
-        Raises:
-            ToolInvocationError for invocation errors.
-        """
-        logger.debug(f"[{self.full_name}.invoke started]")
-        try:
-            result = self._call_remote_once(inputs)
-        except Exception as e:
-            raise ToolInvocationError(f"MCPProxyTool.invoke error: {e}") from e
-        logger.debug(f"[{self.full_name}.invoke started]")
-        return result
-    def to_dict(self)-> OrderedDict[str, Any]:
-        dict_data = super().to_dict()
-        dict_data["mcp_url"] = self._server_url
-        dict_data["headers"] = self._headers
-        return dict_data
-
-    # ── schema discovery (short-lived session) ──────────────────────────────────
-    def _discover_schema(self) -> Tuple[List[Dict[str, Any]], List[str], str]:
-        """
-        Connect → initialize → list_tools → extract tool → close.
-
-        Returns:
-          - params_spec: list of {"name","py_type","has_default","default"} in server property order
-          - required_names: list of required property names
-          - description: tool description string (or "")
-        """
-        async def _fetch():
-            async with streamablehttp_client(url=self._server_url, headers=self._headers or None) as transport:
-                read, write = _extract_rw(transport)
-                async with ClientSession(read, write) as sess:
-                    await sess.initialize()
-                    tools_resp = await sess.list_tools()
-            return tools_resp
-
-        tools_resp = _run_sync(_fetch())
-        tools = getattr(tools_resp, "tools", tools_resp)
-
-        target = None
-        for t in tools:
-            nm = getattr(t, "name", None) or (isinstance(t, dict) and t.get("name"))
-            if nm == self._name:
-                target = t
-                break
-        if target is None:
-            names = [getattr(t, "name", None) or (isinstance(t, dict) and t.get("name")) for t in tools]
+        # Discover tools once and stash the schema for this tool
+        all_tools = list_mcp_tools(server_url=self._server_url, headers=self._headers)
+        if tool_name not in all_tools:
             raise ToolDefinitionError(
-                f"MCP tool '{self._name}' not found on server '{self._source}' @ {self._server_url}; "
-                f"available: {sorted(n for n in names if n)}"
+                f"MCPProxyTool: tool {tool_name!r} not found on MCP server {self._server_url!r}"
             )
 
-        desc = getattr(target, "description", None) or (isinstance(target, dict) and target.get("description")) or ""
+        self._mcpdata: Dict[str, Any] = all_tools[tool_name]
+        name = tool_name
 
-        schema = (
-            getattr(target, "inputSchema", None)
-            or (isinstance(target, dict) and target.get("inputSchema"))
-            or {}
+        # Prefer MCP description; fall back to explicit description, then a stub
+        effective_description = (
+            (self._mcpdata.get("description") or description).strip()
+            or "undescribed MCP tool"
         )
-        props: Mapping[str, Any] = schema.get("properties") or {}
-        required_list: List[str] = schema.get("required") or []
 
-        params_spec: List[Dict[str, Any]] = []
-        # Preserve server-reported property order for display/signature only (JSON objects are unordered by spec).
-        for name, meta in (props.items() if isinstance(props, Mapping) else []):
-            meta = meta or {}
-            py_type = _JSON_TO_PY.get(meta.get("type"), Any)
-            has_default = "default" in meta
-            default = meta.get("default", inspect._empty)
-            params_spec.append(
-                {"name": name, "py_type": py_type, "has_default": has_default, "default": default}
+        # Underlying function: dict-first → MCP call
+        function = functools.partial(
+            call_mcp_tool_once,
+            server_url=self._server_url,
+            tool_name=name,
+            headers=self._headers,
+        )
+
+        super().__init__(
+            function=function,
+            name=name,
+            namespace=namespace,
+            description=effective_description,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @name.setter  # override base setter
+    def name(self, value: str) -> None:
+        """
+        When the MCP tool name changes, update metadata and function binding
+        to point to the new tool on the same server.
+        """
+        new_name = str(value).strip()
+        if not new_name:
+            raise ToolDefinitionError("MCPProxyTool.name cannot be empty.")
+
+        if getattr(self, "_name", None) == new_name:
+            return  # no-op
+
+        all_tools = list_mcp_tools(server_url=self._server_url, headers=self._headers)
+        if new_name not in all_tools:
+            raise ToolDefinitionError(
+                f"{self.full_name}: tool {new_name!r} not found on MCP server {self._server_url!r}"
             )
 
-        return params_spec, list(required_list), desc
+        self._name = new_name
+        self._mcpdata = all_tools[new_name]
+        new_function = functools.partial(
+            call_mcp_tool_once,
+            server_url=self._server_url,
+            tool_name=self._name,
+            headers=self._headers,
+        )
+        self._function = new_function
+        self._module, self._qualname = self._get_mod_qual(new_function)
+        self._arguments_map, self._return_type = self._build_io_schemas()
+        self._is_persistible_internal = self._compute_is_persistible()
 
-    # ── one-shot invoke (short-lived session) ───────────────────────────────────
-    def _call_remote_once(self, inputs: Mapping[str, Any]) -> Any:
+    @property
+    def function(self) -> Callable:
+        return self._function
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    def _get_mod_qual(
+        self,
+        function: Callable[..., Any],
+    ) -> tuple[Optional[str], Optional[str]]:
         """
-        initialize → call_tool → extract structured/text → close.
+        MCP-backed tools don't map to a stable Python import path.
+        We explicitly opt-out of import-based identity.
         """
-        async def _do():
-            async with streamablehttp_client(url=self._server_url, headers=self._headers or None) as transport:
-                read, write = _extract_rw(transport)
-                async with ClientSession(read, write) as sess:
-                    logger.debug(f"{self.full_name} starting a session with '{self._server_url}'")
-                    await sess.initialize()
-                    return await sess.call_tool(self._name, dict(inputs))
+        return None, None
 
-        raw = _run_sync(_do())
+    def _compute_is_persistible(self) -> bool:
+        """
+        Consider an MCPProxyTool persistible if:
+        - it has a server URL, namespace, and tool name,
+        - and the named tool still exists on the server.
 
-        # Structured-first, then text fallback, else model_dump/raw.
-        logger.debug(f"{self.full_name} extracting the structured content from MCP response")
-        val = _extract_structured_or_text(raw)
-        if val is not None:
-            return val
-        return _to_plain(raw)
+        Network errors are treated as non-persistible.
+        """
+        if not (self._server_url and self._name):
+            return False
+
+        try:
+            tools = list_mcp_tools(self._server_url, self._headers)
+        except Exception:
+            return False
+
+        return self._name in tools
+
+    def _build_io_schemas(self) -> tuple[ArgumentMap, str]:
+        """
+        Construct `arguments_map` and `return_type` from MCP `input_schema`
+        and `output_schema`.
+
+        - All parameters are KEYWORD_ONLY (MCP sends a single JSON object).
+        - Required parameters come from `input_schema["required"]`.
+        - Optional parameters are marked as having a default (if provided by
+          the schema; otherwise we give them a placeholder default of None).
+        - Return type is derived from `output_schema` if provided; otherwise "Any".
+        """
+
+        arg_map: ArgumentMap = ArgumentMap()
+
+        # ----- Inputs: JSON Schema → ArgumentMap -----
+        input_schema = self._mcpdata.get("input_schema")
+        if isinstance(input_schema, Mapping):
+            props = input_schema.get("properties") or {}
+            if not isinstance(props, Mapping):
+                props = {}
+
+            required = input_schema.get("required") or []
+            if not isinstance(required, (list, tuple)):
+                required = []
+            required_set = {str(name) for name in required}
+
+            for index, (raw_name, raw_meta) in enumerate(props.items()):
+                name = str(raw_name)
+                meta_schema = raw_meta or {}
+                if not isinstance(meta_schema, Mapping):
+                    meta_schema = {}
+
+                type_str = self._json_schema_type_to_str(meta_schema)
+                param_meta: Dict[str, Any] = {
+                    "index": index,
+                    "kind": "KEYWORD_ONLY",
+                    "type": type_str,
+                }
+
+                if name in required_set:
+                    # Required param: no 'default' key so Tool.to_arg_kwarg treats it as required.
+                    pass
+                else:
+                    # Optional param: mark as having a default so base Tool logic
+                    # doesn't consider it required. If the schema provides a
+                    # default, surface it; otherwise use None as a placeholder.
+                    if "default" in meta_schema:
+                        param_meta["default"] = meta_schema.get("default")
+                arg_map[name] = param_meta
+
+        # ----- Output: JSON Schema → return_type string -----
+        return_type = "Any"
+        output_schema = self._mcpdata.get("output_schema")
+        if isinstance(output_schema, Mapping):
+            return_type = self._json_schema_type_to_str(output_schema)
+
+        return arg_map, return_type
+
+    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+        """
+        Execute the underlying MCP call using the dict-only function.
+        """
+        if args:
+            raise ToolInvocationError(
+                f"{self.full_name}: MCP tools do not accept positional arguments; got {args!r}"
+            )
+        raw = self._function(inputs = kwargs)
+        return self._normalize_mcp_result(raw)
+
+    # ------------------------------------------------------------------ #
+    # Class specific helpers
+    # ------------------------------------------------------------------ #
+    def _normalize_mcp_result(self, raw: Any):
+        # 1) Direct CallToolResult: prefer structuredContent if present
+        structured = getattr(raw, "structuredContent", None)
+        structured_return = None
+        if structured not in (None, [], {}):
+            structured_return = structured
+
+        # 2) Tuple (content, structured_data)
+        if isinstance(raw, tuple) and len(raw) == 2:
+            contents, structured_data = raw
+            if structured_data not in (None, [], {}):
+                structured_return = structured_data
+            raw = contents  # fall through to content handling
+        
+        # 3) Dict ({"content":..., "structuredContent":...})
+        if isinstance(raw, Mapping) and "structuredContent" in raw:
+            structured_return = raw["structuredContent"]
+        
+        # if structured_return != None
+        if structured_return is not None:
+            if isinstance(structured_return, Mapping):
+                if len(structured_return) == 1 and "result" in structured_return:
+                    return structured_return["result"]
+            return structured_return
+        
+        if isinstance(raw, Mapping):
+            return dict(raw)
+
+        # 4) Content-only result
+        contents = getattr(raw, "content", raw)
+        if isinstance(contents, (list, tuple)):
+            texts: List[str] = []
+            for item in contents:
+                # Text-like content blocks (e.g. mcp.types.TextContent)
+                text = getattr(item, "text", None)
+                if isinstance(text, str):
+                    texts.append(text)
+                elif isinstance(item, str):
+                    texts.append(item)
+            if texts:
+                return "\n".join(texts)
+
+        # 5) Fallback: return as-is
+        return raw
+    
+    @staticmethod
+    def _json_primitive_to_str(json_type: str, schema: Mapping[str, Any]) -> str:
+        """
+        Map a single JSON Schema primitive 'type' value to a Python-ish type string.
+
+        For arrays, try to inspect `items.type` to refine the inner type if available.
+        """
+        mapping: Dict[str, str] = {
+            "string": "str",
+            "number": "float",
+            "integer": "int",
+            "boolean": "bool",
+            "object": "Dict[str, Any]",
+            "array": "List[Any]",
+            "null": "None",
+        }
+
+        if json_type == "array":
+            items = schema.get("items")
+            if isinstance(items, Mapping):
+                inner = MCPProxyTool._json_schema_type_to_str(items)
+                return f"List[{inner}]"
+
+        return mapping.get(json_type, "Any")
+
+    @staticmethod
+    def _json_schema_type_to_str(schema: Mapping[str, Any]) -> str:
+        """
+        Best-effort conversion from a JSON Schema fragment to a type string.
+
+        Handles:
+        - `type: "string" | "integer" | "number" | "boolean" | "object" | "array" | "null"`
+        - union types such as `["string", "null"]`
+        - falls back to "Any" when type is missing or unknown.
+        """
+        if not isinstance(schema, Mapping):
+            return "Any"
+
+        t = schema.get("type")
+
+        # Union types expressed as a list, e.g. ["string", "null"]
+        if isinstance(t, (list, tuple)):
+            parts: List[str] = []
+            for item in t:
+                if isinstance(item, str):
+                    parts.append(MCPProxyTool._json_primitive_to_str(item, schema))
+            parts = [p for p in parts if p]
+            return " | ".join(parts) if parts else "Any"
+
+        # Simple primitive type
+        if isinstance(t, str):
+            return MCPProxyTool._json_primitive_to_str(t, schema)
+
+        # No explicit "type": we don't attempt to infer from enum/format/etc.
+        return "Any"
+
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+    def refresh(self, headers: Any) -> None:
+        """
+        Re-fetch this tool's definition from the MCP server and rebuild
+        its argument/return schemas and function binding.
+        """
+        self._headers = headers
+        all_tools = list_mcp_tools(server_url=self._server_url, headers=self._headers)
+        if self._name not in all_tools:
+            raise ToolDefinitionError(
+                f"{self.full_name}: tool {self._name!r} no longer exists on MCP server {self._server_url!r}"
+            )
+
+        self._mcpdata = all_tools[self._name]
+        new_function = functools.partial(
+            call_mcp_tool_once,
+            server_url=self._server_url,
+            tool_name=self._name,
+            headers=self._headers,
+        )
+        # This will rebuild argument map, return type, and persistibility flag.
+        self._function = new_function
+        self._module, self._qualname = self._get_mod_qual(new_function)
+        self._arguments_map, self._return_type = self._build_io_schemas()
+        self._is_persistible_internal = self._compute_is_persistible()
+
+    # ------------------------------------------------------------------ #
+    # Serialization
+    # ------------------------------------------------------------------ #
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Extend the base Tool serialization with MCP connection details.
+
+        Note: we deliberately do **not** include header values to avoid
+        leaking credentials; only their presence/keys.
+        """
+        base = super().to_dict()
+        base.update(
+            {
+                "server_url": self._server_url,
+                "headers": list(self._headers.keys()) if self._headers is not None else None,
+            }
+        )
+        return base
