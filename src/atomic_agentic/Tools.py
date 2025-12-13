@@ -359,7 +359,7 @@ class MCPProxyTool(Tool):
         self,
         server_url: str,
         tool_name: str,
-        namespace: str,
+        namespace: str = None,
         description: str = "",
         headers: Optional[Dict[str, str]] = None,
     ) -> None:
@@ -396,7 +396,7 @@ class MCPProxyTool(Tool):
         super().__init__(
             function=function,
             name=name,
-            namespace=namespace,
+            namespace=namespace or "mcp",
             description=effective_description,
         )
 

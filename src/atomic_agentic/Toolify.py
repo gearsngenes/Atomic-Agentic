@@ -1,87 +1,188 @@
-from .__utils__ import (
-    _normalize_url,
-    _discover_mcp_tool_names,
-    _is_http_url
-)
-from .Tools import *
-from .Agents import *
+from __future__ import annotations
+
+from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
+
+from .Tools import Tool, AgentTool, MCPProxyTool, list_mcp_tools
+from .Agents import Agent
 from .Exceptions import ToolDefinitionError
-from typing import List, Optional, Union, Callable
+
+__all__ = ["toolify"]
+
 def toolify(
-        obj: Union[Tool, Agent, str, Callable],
-        *,
-        # callable-specific
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        source: Optional[str] = None,
-        # MCP-specific (obj is an MCP URL)
-        server_name: Optional[str] = None,
-        headers: Optional[dict] = None,
-        include: Optional[List[str]] = None,
-        exclude: Optional[List[str]] = None,
-        fail_if_empty: bool = True,
-    ) -> List[Tool]:
-        """
-        Create packaged Tools from one of: Tool | Agent | callable | MCP URL (str).
+    component: Union[Tool, Agent, str, Callable[..., Any]],
+    **kwargs: Any,
+) -> List[Tool]:
+    """
+    Normalize a single component into a list of Tool instances.
 
-        Returns:
-            list[Tool]
+    Parameters
+    ----------
+    component:
+        One of:
+        - Tool       → returned as `[component]` (passthrough).
+        - Agent      → wrapped as `AgentTool` and returned in a list.
+        - callable   → wrapped as a plain `Tool` using `name`/`description`/`namespace`.
+        - str        → treated as an MCP HTTP endpoint URL, materialised as one
+                       or more `MCPProxyTool` instances.
 
-        Raises:
-            ToolDefinitionError for invalid inputs or unmet requirements.
+    Keyword-only configuration
+    --------------------------
+    name : Optional[str]
+        For callables: required logical name.
+        For MCP URLs: optional remote tool name. If omitted, all tools on the
+        server are instantiated (subject to `include`/`exclude`).
+    description : Optional[str]
+        Human-readable description. For MCP tools, this is only a fallback:
+        the remote description wins when present.
+    namespace : Optional[str]
+        Logical namespace for the Tool. Defaults to:
+        - For callables: `source` if provided, else `"default"`.
+        - For MCP URLs: `server_name` if provided, else `source`, else `"mcp"`.
+    source : Optional[str]
+        Backwards-compatibility alias for `namespace` (legacy API).
+    server_name : Optional[str]
+        Backwards-compatibility alias used as the MCP namespace label when
+        `component` is an MCP URL string.
+    headers : Optional[Mapping[str, str]]
+        HTTP headers for MCP transport (auth, etc.). The *presence* of this key
+        is required when `component` is a string; the value may be `None` if
+        no headers are needed.
+    include : Optional[Sequence[str]]
+        When toolifying an MCP URL with no explicit `name`, restrict to this
+        whitelist of remote tool names.
+    exclude : Optional[Sequence[str]]
+        When toolifying an MCP URL with no explicit `name`, drop these tool
+        names after any `include` filter is applied.
 
-        Notes:
-            - MCP metadata and schemas are JSON-defined; we discover tools then proxy them. :contentReference[oaicite:6]{index=6}
-            - JSON wire formats must be JSON-encodable (no raw Python-only objects). :contentReference[oaicite:7]{index=7}
-        """
+    Returns
+    -------
+    List[Tool]
+        One or more Tool instances derived from `component`.
 
-        # 1) Passthrough if already a Tool
-        if isinstance(obj, Tool):
-            return [obj]
+    Raises
+    ------
+    ToolDefinitionError
+        For invalid inputs, missing required metadata, or MCP discovery issues.
+    """
 
-        # 2) Agent -> AgentTool
-        if isinstance(obj, Agent):
-            return [AgentTool(obj)]
+    # Keep an original view so we can detect presence of keys (e.g. headers).
+    original_kwargs = dict(kwargs)
 
-        # 3) MCP URL -> list of MCPProxyTool
-        if isinstance(obj, str) and _is_http_url(obj):
-            if not server_name:
-                raise ToolDefinitionError("ToolFactory: 'server_name' is required when toolifying an MCP URL.")
-            url = _normalize_url(obj)
-            names = _discover_mcp_tool_names(url, headers)
-            if include:
-                inc = set(include)
-                names = [n for n in names if n in inc]
-            if exclude:
-                exc = set(exclude)
-                names = [n for n in names if n not in exc]
-            if not names and fail_if_empty:
-                raise ToolDefinitionError("ToolFactory: no MCP tools found after applying filters.")
+    # Extract supported kwargs with backwards-compatible aliases
+    name = kwargs.pop("name", None)
+    description = kwargs.pop("description", None)
+    namespace_kw = kwargs.pop("namespace", None)
+    headers = kwargs.pop("headers", None)
+    include = kwargs.pop("include", None)
+    exclude = kwargs.pop("exclude", None)
+
+    # If any unexpected kwargs remain, surface them early (fail-fast contract)
+    if kwargs:
+        unexpected = ", ".join(sorted(kwargs.keys()))
+        raise ToolDefinitionError(
+            f"toolify: unexpected keyword argument(s): {unexpected}"
+        )
+
+    # 1) Passthrough if already a Tool
+    if isinstance(component, Tool):
+        return [component]
+
+    # 2) Agent → AgentTool
+    if isinstance(component, Agent):
+        return [AgentTool(component)]
+
+    # 3) MCP URL → MCPProxyTool(s)
+    if isinstance(component, str):
+        url = component.strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            raise ToolDefinitionError(
+                "toolify: when `component` is a string it must be an MCP HTTP URL "
+                "(e.g. 'http://localhost:8000/mcp')."
+            )
+
+        # Enforce your contract: headers key must be present (value may be None).
+        if "headers" not in original_kwargs:
+            raise ToolDefinitionError(
+                "toolify: 'headers' keyword must be provided (it may be None) "
+                "when toolifying an MCP URL string."
+            )
+
+        # Determine namespace label for MCP tools
+        namespace = namespace_kw
+
+        # (a) Explicit remote tool name → single MCPProxyTool
+        if name:
+            if not isinstance(name, str):
+                raise ToolDefinitionError("toolify: 'name' must be a string.")
+            effective_description = (description or "").strip()
             return [
                 MCPProxyTool(
-                    tool_name=n,
-                    server_name=server_name,
                     server_url=url,
-                    headers=headers)
-                for n in names
-            ]
-
-        # 4) callable -> Tool
-        if callable(obj):
-            if not name or not isinstance(name, str):
-                raise ToolDefinitionError("ToolFactory: 'name' (str) is required for callables.")
-            if description is not None and not isinstance(description, str):
-                raise ToolDefinitionError("ToolFactory: 'description' expects a string value for callables.")
-            return [
-                Tool(
-                    func=obj,
-                    name=name,
-                    description= (description or obj.__doc__) or "",
-                    source=source or "default",
+                    tool_name=name,
+                    namespace=namespace,
+                    description=effective_description,
+                    headers=headers,
                 )
             ]
 
-        # 5) Unsupported
-        raise ToolDefinitionError(
-            "ToolFactory: unsupported input. Expected Tool | Agent | callable | MCP URL string."
-        )
+        # (b) No explicit name → discover all remote tools and filter
+        try:
+            all_tools = list_mcp_tools(server_url=url, headers=headers)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolDefinitionError(
+                f"toolify: failed to discover MCP tools at {url!r}: {exc}"
+            ) from exc
+
+        names = list(all_tools.keys())
+
+        if include:
+            include_set = {str(n) for n in include}
+            names = [n for n in names if n in include_set]
+
+        if exclude:
+            exclude_set = {str(n) for n in exclude}
+            names = [n for n in names if n not in exclude_set]
+
+        if not names:
+            raise ToolDefinitionError(
+                    f"toolify: no MCP tools discovered for {url!r} after filtering."
+                )
+
+        tools: List[Tool] = [
+            MCPProxyTool(
+                server_url=url,
+                tool_name=tool_name,
+                namespace=namespace,
+                headers=headers,
+            )
+            for tool_name in names
+        ]
+        return tools
+
+    # 4) Raw callable → Tool
+    if callable(component):
+        if not name or not isinstance(name, str):
+            raise ToolDefinitionError(
+                "toolify: 'name' (str) is required when toolifying a callable."
+            )
+        if description is not None and not isinstance(description, str):
+            raise ToolDefinitionError(
+                "toolify: 'description' must be a string when provided for callables."
+            )
+
+        namespace = namespace_kw
+        effective_description = (description or component.__doc__ or "").strip()
+
+        return [
+            Tool(
+                function=component,
+                name=name,
+                namespace=namespace,
+                description=effective_description,
+            )
+        ]
+
+    # 5) Unsupported type
+    raise ToolDefinitionError(
+        "toolify: unsupported input type. Expected Tool | Agent | callable | MCP URL string."
+    )
