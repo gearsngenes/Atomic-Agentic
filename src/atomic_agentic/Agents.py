@@ -61,6 +61,7 @@ import re
 import string
 import threading
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TypedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .Exceptions import (
     ToolAgentError,
@@ -72,6 +73,8 @@ from .LLMEngines import LLMEngine
 from .Primitives import Agent
 from .Toolify import toolify
 from .Tools import Tool
+from .Prompts import PLANNER_PROMPT
+
 
 __all__ = ["Agent", "ToolAgent", "BlackboardEntry", "return_tool"]
 
@@ -113,7 +116,9 @@ class BlackboardEntry(TypedDict):
     # the completed step result (any python object)
     result: Any
 
-
+# ───────────────────────────────────────────────────────────────────────────────
+# Base 'ToolAgent' class
+# ───────────────────────────────────────────────────────────────────────────────
 class ToolAgent(Agent, ABC):
     """
     Abstract base class for tool-using agents (Planner/Orchestrator/etc.).
@@ -567,13 +572,11 @@ class ToolAgent(Agent, ABC):
         # Commit blackboard AFTER _run (never during).
         if self.context_enabled:
             self._blackboard.extend(new_blackboard_steps)
-            assistant_bb_text = self.blackboard_dumps()
         else:
-            assistant_bb_text = self.blackboard_dumps(new_blackboard_steps)
-            self._blackboard.clear()
-
+            pass
+        assistant_text = f"{self.name} generated the following response:\n{json.dumps({"__llm_response__": return_value}, indent=2, default=str)}"
         self._newest_history.append(user_msg)
-        self._newest_history.append({"role": "assistant", "content": assistant_bb_text})
+        self._newest_history.append({"role": "assistant", "content": assistant_text})
 
         return return_value
 
@@ -623,3 +626,314 @@ class ToolAgent(Agent, ABC):
             d["tool_calls_limit"] = self._tool_calls_limit
             d["tool_calls_made"] = self._tool_calls_made
         return d
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Plan-first 'PlanActAgent' class
+# ───────────────────────────────────────────────────────────────────────────────
+class PlanActAgent(ToolAgent):
+    """
+    Plan-then-execute (ReWOO-style) ToolAgent.
+
+    - Exactly ONE LLM call produces a JSON plan: List[{"tool": str, "args": dict}, ...]
+    - Executes steps sequentially (default) or concurrently by dependency "waves"
+      when run_concurrent=True.
+    - Uses ToolAgent's existing placeholder resolution and tool gateway.
+    - Fail-fast: any parse/validation error or tool failure raises immediately.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        llm_engine: LLMEngine,
+        context_enabled: bool = False,
+        *,
+        tool_calls_limit: Optional[int] = None,
+        pre_invoke: Optional[Tool | Callable[..., Any]] = None,
+        post_invoke: Optional[Tool | Callable[..., Any]] = None,
+        history_window: Optional[int] = None,
+        run_concurrent: bool = False,
+    ) -> None:
+        super().__init__(
+            name=name,
+            description=description,
+            llm_engine=llm_engine,
+            role_prompt=PLANNER_PROMPT,
+            context_enabled=context_enabled,
+            tool_calls_limit=tool_calls_limit,
+            pre_invoke=pre_invoke,
+            post_invoke=post_invoke,
+            history_window=history_window,
+        )
+        self._run_concurrent: bool = bool(run_concurrent)
+
+    @property
+    def run_concurrent(self) -> bool:
+        return self._run_concurrent
+
+    @run_concurrent.setter
+    def run_concurrent(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise ToolAgentError("run_concurrent must be a bool.")
+        self._run_concurrent = value
+
+    def _run(
+        self,
+        *,
+        messages: List[Dict[str, str]],
+    ) -> tuple[List[BlackboardEntry], Any]:
+        # Persisted board snapshot (read-only for this run)
+        persisted: List[BlackboardEntry] = self.blackboard
+        base_len = len(persisted)
+
+        # 3.a) Optionally augment the LAST user message with blackboard view (raw args)
+        planning_messages = messages
+        if self.context_enabled:
+            bb_view = self.blackboard_dumps(obj=None, raw_results=True, indent=0)
+            planning_messages = list(messages)
+            last = dict(planning_messages[-1])
+            hi = base_len - 1
+            last["content"] = (
+                f"{last.get('content', '')}\n\n"
+                f"PREVIOUS STEPS (global indices 0..{hi if hi >= 0 else -1}):\n"
+                f"{bb_view}\n\n"
+                f"INDEXING:\n"
+                f"- The view above corresponds to indices 0..{hi if hi >= 0 else -1}.\n"
+                f"- New plan steps you emit MUST continue from index {base_len}.\n"
+                f"- Use placeholders like <<__step__N>> with these GLOBAL indices.\n"
+            )
+            planning_messages[-1] = last
+
+        # 3.b) Single LLM call to produce plan string
+        plan_text = self._llm_engine.invoke(planning_messages).strip()
+        plan_text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*|\s*```\s*$", "", plan_text).strip()
+
+        # 3.c) Parse and load steps; ensure return tool is last
+        try:
+            parsed = json.loads(plan_text)
+        except Exception as exc:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: failed to parse plan JSON: {exc}"
+            ) from exc
+
+        if not isinstance(parsed, list):
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: plan must be a JSON array (list).")
+
+        plan: List[Dict[str, Any]] = []
+        for i, step in enumerate(parsed):
+            if not isinstance(step, dict):
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: plan step {i} must be an object/dict.")
+            tool_name = step.get("tool")
+            args = step.get("args")
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: step {i} missing non-empty 'tool' string.")
+            if not isinstance(args, dict):
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: step {i} missing 'args' object/dict.")
+            if not self.has_tool(tool_name):
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool {tool_name!r} in step {i}.")
+            plan.append({"tool": tool_name, "args": args})
+
+        if not plan:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: plan cannot be empty.")
+
+        return_name = return_tool.full_name
+        return_positions = [i for i, s in enumerate(plan) if s["tool"] == return_name]
+        if len(return_positions) > 1:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: plan may contain return tool only once.")
+        if return_positions and return_positions[0] != len(plan) - 1:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: return tool must be the final step.")
+        if not return_positions:
+            # Auto-append return: return the last step's result using GLOBAL index
+            last_global_idx = base_len + (len(plan) - 1)
+            plan.append({"tool": return_name, "args": {"val": f"<<__step__{last_global_idx}>>"}})
+
+        # 3.d) If non-return steps exceed tool call limit, raise (return does not count)
+        non_return_count = sum(1 for s in plan if s["tool"] != return_name)
+        if self.tool_calls_limit is not None and non_return_count > self.tool_calls_limit:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan requires {non_return_count} tool calls "
+                f"but tool_calls_limit={self.tool_calls_limit}."
+            )
+
+        # 3.e) Pre-allocate NEW (uncompleted) blackboard entries to update in-place
+        new_steps: List[BlackboardEntry] = []
+        for step in plan:
+            new_steps.append(
+                {
+                    "tool": step["tool"],
+                    "raw_args": dict(step["args"]),
+                    "resolved_args": {},
+                    "completed": False,
+                    "result": None,
+                }
+            )
+
+        # Global board used for dependency checks / resolution (persisted + new)
+        board: List[BlackboardEntry] = persisted + new_steps
+        uncompleted: set[int] = set(range(len(new_steps)))
+
+        # 3.e/f) Execute steps in waves
+        while uncompleted:
+            batch = self._collect_step_dependencies(
+                uncompleted=uncompleted,
+                board=board,
+                base_len=base_len,
+            )
+            if not batch:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: no runnable steps remain (deadlock/cycle/forward-ref)."
+                )
+
+            # Snapshot board for this batch (read-only for the duration of batch execution)
+            board_snapshot: List[BlackboardEntry] = list(persisted) + list(new_steps)
+
+            results = self._run_steps_batch(
+                step_idxs=batch,
+                board_snapshot=board_snapshot,
+                base_len=base_len,
+            )
+
+            for local_idx, result, resolved_args in results:
+                entry = new_steps[local_idx]
+                entry["resolved_args"] = resolved_args
+                entry["result"] = result
+                entry["completed"] = True
+                uncompleted.discard(local_idx)
+
+        # 3.f) Return final result + new steps (ToolAgent expects (new_steps, return_value))
+        return_value = new_steps[-1]["result"]
+        return new_steps, return_value
+
+    def _collect_step_dependencies(
+        self,
+        *,
+        uncompleted: set[int],
+        board: Sequence[BlackboardEntry],
+        base_len: int,
+    ) -> List[int]:
+        """
+        Return the next runnable step indices (LOCAL indices into the NEW plan steps).
+
+        - If run_concurrent is False: returns exactly ONE step, in plan order.
+        - If run_concurrent is True: returns ALL ready steps (dependency wave).
+        """
+        if not uncompleted:
+            return []
+
+        # Sequential mode: always next step in order of appearance
+        if not self.run_concurrent:
+            return [min(uncompleted)]
+
+        def extract_refs(obj: Any) -> set[int]:
+            found: set[int] = set()
+
+            def walk(x: Any) -> None:
+                if isinstance(x, str):
+                    for m in _STEP_TOKEN.finditer(x):
+                        found.add(int(m.group(1)))
+                elif isinstance(x, list):
+                    for v in x:
+                        walk(v)
+                elif isinstance(x, dict):
+                    for v in x.values():
+                        walk(v)
+
+            walk(obj)
+            return found
+
+        ready: List[int] = []
+        for local_idx in sorted(uncompleted):
+            global_idx = base_len + local_idx
+            raw_args = board[global_idx].get("raw_args", {})
+
+            refs = extract_refs(raw_args)
+            runnable = True
+            for ref_idx in refs:
+                if ref_idx < 0 or ref_idx >= len(board):
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: invalid placeholder <<__step__{ref_idx}>> "
+                        f"(board size={len(board)})."
+                    )
+                dep = board[ref_idx]
+                if not bool(dep.get("completed", False)):
+                    # If referencing persisted steps, that's an invariant violation (they should be completed)
+                    if ref_idx < base_len:
+                        raise ToolAgentError(
+                            f"{type(self).__name__}.{self.name}: referenced prior step {ref_idx} is not completed."
+                        )
+                    runnable = False
+                    break
+
+            if runnable:
+                ready.append(local_idx)
+
+        return ready
+
+    def _run_steps_batch(
+        self,
+        *,
+        step_idxs: List[int],
+        board_snapshot: Sequence[BlackboardEntry],
+        base_len: int,
+    ) -> List[tuple[int, Any, Dict[str, Any]]]:
+        """
+        Execute a batch of LOCAL step indices.
+
+        Returns a list of tuples:
+            (local_step_idx, result, resolved_args)
+        """
+        if not step_idxs:
+            return []
+
+        def run_one(local_idx: int) -> tuple[int, Any, Dict[str, Any]]:
+            entry = board_snapshot[base_len + local_idx]
+
+            tool_name = entry.get("tool")
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: invalid tool name at local step {local_idx}: {tool_name!r}"
+                )
+
+            raw_args_obj = entry.get("raw_args", {})
+            if not isinstance(raw_args_obj, dict):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: raw_args must be a dict at local step {local_idx}; "
+                    f"got {type(raw_args_obj).__name__!r}"
+                )
+
+            # Execute via ToolAgent gateway:
+            # - reserves tool-call budget
+            # - resolves placeholders against `board_snapshot`
+            # - invokes the tool
+            result = self._call_tool(tool_name, raw_args_obj, board=board_snapshot)
+
+            # Only after a successful tool call do we compute resolved_args for bookkeeping.
+            resolved_args_obj = self._resolve_step_refs(raw_args_obj, board=board_snapshot)
+            if not isinstance(resolved_args_obj, dict):
+                # Defensive: raw_args is a dict, so resolved should remain a dict; if not, fail loudly.
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: resolved_args must be a dict at local step {local_idx}; "
+                    f"got {type(resolved_args_obj).__name__!r}"
+                )
+
+            return local_idx, result, dict(resolved_args_obj)
+
+        # Sequential mode: caller passes one idx per wave.
+        if (not self.run_concurrent) or len(step_idxs) == 1:
+            return [run_one(step_idxs[0])]
+
+        # Concurrent: execute dependency wave in parallel.
+        results: List[tuple[int, Any, Dict[str, Any]]] = []
+        executor = ThreadPoolExecutor()
+        try:
+            futures = [executor.submit(run_one, i) for i in step_idxs]
+            for fut in as_completed(futures):
+                results.append(fut.result())
+        finally:
+            # Best-effort: cancel any not-yet-started work on failure; running threads can’t be force-stopped. :contentReference[oaicite:4]{index=4}
+            executor.shutdown(wait=True, cancel_futures=True)
+
+        # Deterministic return ordering (useful for tests / logs).
+        results.sort(key=lambda t: t[0])
+        return results
+
