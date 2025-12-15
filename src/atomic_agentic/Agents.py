@@ -480,7 +480,8 @@ class ToolAgent(Agent, ABC):
         tool = self._get_tool_unlocked(tool_full_name)
 
         # Enforce limit correctly under concurrency.
-        self._reserve_tool_call_or_raise()
+        if tool.full_name != return_tool.full_name:
+            self._reserve_tool_call_or_raise()
 
         resolved_inputs = self._resolve_step_refs(dict(inputs), board=board)
 
@@ -553,10 +554,7 @@ class ToolAgent(Agent, ABC):
         `_run()` must not mutate `self._blackboard`.
         """
         self._reset_tool_calls_made()
-
-        # Stateless runs must not leak prior runs into this run.
-        if not self.context_enabled:
-            self._blackboard.clear()
+        user_msg = {"role": "user", "content": messages[-1]["content"]}
 
         new_blackboard_steps, return_value = self._run(messages=messages)
 
@@ -574,7 +572,6 @@ class ToolAgent(Agent, ABC):
             assistant_bb_text = self.blackboard_dumps(new_blackboard_steps)
             self._blackboard.clear()
 
-        user_msg = {"role": "user", "content": messages[-1]["content"]}
         self._newest_history.append(user_msg)
         self._newest_history.append({"role": "assistant", "content": assistant_bb_text})
 
@@ -614,3 +611,15 @@ class ToolAgent(Agent, ABC):
             super().clear_memory()
             self._blackboard.clear()
             self._reset_tool_calls_made()
+    
+    # ------------------------------------------------------------------ #
+    # Serialization
+    # ------------------------------------------------------------------ #
+    def to_dict(self) -> OrderedDict[str, Any]:
+        d = super().to_dict()
+        with self._invoke_lock:
+            d["toolbox"] = [t.to_dict() for t in self._toolbox.values()]
+            d["blackboard"] = self._blackboard.copy()
+            d["tool_calls_limit"] = self._tool_calls_limit
+            d["tool_calls_made"] = self._tool_calls_made
+        return d
