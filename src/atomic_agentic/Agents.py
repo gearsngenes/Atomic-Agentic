@@ -632,7 +632,7 @@ class ToolAgent(Agent, ABC):
 # ───────────────────────────────────────────────────────────────────────────────
 class PlanActAgent(ToolAgent):
     """
-    Plan-then-execute (ReWOO-style) ToolAgent.
+    Plan-first-then-execute (ReWOO-style) ToolAgent.
 
     - Exactly ONE LLM call produces a JSON plan: List[{"tool": str, "args": dict}, ...]
     - Executes steps sequentially (default) or concurrently by dependency "waves"

@@ -1,6 +1,7 @@
-from dotenv import load_dotenv
 import os
-from atomic_agentic.ToolAgents import PlannerAgent
+from dotenv import load_dotenv
+
+from atomic_agentic.Agents import PlanActAgent
 from atomic_agentic.LLMEngines import OpenAIEngine
 
 load_dotenv()
@@ -8,45 +9,49 @@ load_dotenv()
 # LLM engine
 llm_engine = OpenAIEngine(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
 
-# Planner agent (context optional—showing disabled here)
-planner = PlannerAgent(
-    name="Test-Planner",
-    description="Testing simple, sequential planning over local python tools.",
+# PlanAct agent (ReWOO-style: one plan LLM call, then execute tools)
+agent = PlanActAgent(
+    name="Test-PlanAct",
+    description="Testing one-shot planning + execution over local python tools.",
     llm_engine=llm_engine,
-    context_enabled=False,
+    context_enabled=True,    # True => persists blackboard across runs
+    run_concurrent=False,     # True => run dependency waves concurrently
 )
 
-# Simple local tools
-def tool_1(seed: int):
+# Simple local tools (docstrings become tool descriptions if you omit description=...)
+def tool_1(seed: int) -> str:
+    """Processes seed input and passes it to the next tool."""
     print("Tool 1 executed")
     return f"1) Result from tool_1. Seed was: {seed}"
 
-def tool_2(t1_result: str):
+
+def tool_2(t1_result: str) -> str:
+    """Processes the result from tool_1."""
     print("Tool 2 executed")
     return t1_result + "\n2) Result from tool_2"
 
-def tool_3(t2_result: str):
+
+def tool_3(t2_result: str) -> str:
+    """Finalizes the result based on tool_2 output."""
     print("Tool 3 executed")
     return t2_result + "\n3) Result from tool_3"
 
-# Register tools (callables require name & description)
-planner.register(tool_1, name="tool_1", description="Processes seed input and passes it to the next tool.")
-planner.register(tool_2, name="tool_2", description="Processes the result from tool_1.")
-planner.register(tool_3, name="tool_3", description="Finalizes the result based on tool_2 output.")
+
+# Register tools (callables are wrapped into Tool instances via toolify)
+t1_full = agent.register(tool_1, namespace="local")[0]
+t2_full = agent.register(tool_2, namespace="local")[0]
+t3_full = agent.register(tool_3, namespace="local")[0]
 
 seed = 32
 
+# Use the fully-qualified tool ids to make the example deterministic.
 task_prompt = (
-    f"Call the tools in sequence: tool_1 with a seed value of {seed}, "
-    f"then tool_2 with tool_1's result, then tool_3 with tool_2's result. "
-    f"After executing all tools, return the final result from tool_3."
+    f"Call the tools 1, 2, and 3 in sequential order, with the initial seed = {seed}"
 )
 
-print("Strategizing...")
-plan_raw = planner.strategize(task_prompt)
-print("plan string:\n",plan_raw)
-print("Loading...")
-plan = planner.load_steps(plan_raw)
-print("Executing...")
-final = planner.execute(plan)
+final = agent.invoke({"prompt": task_prompt})
+
 print("\nFinal Result:\n", final)
+
+# Optional: inspect executed steps (even if context_enabled=False, the view is useful for debugging)
+print("\nBlackboard (resolved args):\n", agent.blackboard_dumps(raw_results=True))

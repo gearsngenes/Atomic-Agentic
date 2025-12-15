@@ -1,11 +1,11 @@
 from dotenv import load_dotenv
 import logging
-from atomic_agentic.ToolAgents import PlannerAgent
+
+from atomic_agentic.Agents import PlanActAgent
 from atomic_agentic.Plugins import MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
 from atomic_agentic.LLMEngines import OpenAIEngine
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 
 print("\n───────────────────────────────\n")
@@ -13,12 +13,18 @@ print("Testing Task Decomposition and Printing capabilities")
 
 # ──────────────────────────  SET-UP  ───────────────────────────
 llm_engine = OpenAIEngine(model="gpt-4o-mini")
-planner = PlannerAgent(name="Test-Planner", description="Testing the prebuilt plugins", llm_engine=llm_engine)
+agent = PlanActAgent(
+    name="Test-PlanAct",
+    description="Testing the prebuilt plugins with one-shot planning + execution.",
+    llm_engine=llm_engine,
+    context_enabled=False,
+    run_concurrent=False,
+)
 
 # Register tool lists
-planner.batch_register(MATH_TOOLS)
-planner.batch_register(CONSOLE_TOOLS)
-planner.batch_register(PARSER_TOOLS)
+agent.batch_register(MATH_TOOLS)
+agent.batch_register(CONSOLE_TOOLS)
+agent.batch_register(PARSER_TOOLS)
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
@@ -33,13 +39,12 @@ TASK 2:
   Compute the length of the hypotenuse c.
 
 AFTERWARDS:
-• Print your answers for each task, preceded by a label for what
-  question they are answering.
+• Print your answers for each task, preceded by a label for what question they are answering.
 • Return None as the end result.
 """
 
 print("\n⇢ Executing math demo …")
-planner.invoke({"prompt": task_prompt})
+agent.invoke({"prompt": task_prompt})
 
 print("\n───────────────────────────────\n")
 print("Now testing math and parsing capabilities…")
@@ -50,6 +55,8 @@ Given the string "[23.4, 25.1, 22.8]"
 2. Print the list.
 3. Calculate the average temperature of the list.
 4. Print BOTH the extracted list's max value and its mean (each labeled).
+• Return None as the end result.
 """
+
 print("\n⇢ Executing parser+math demo …")
-planner.invoke({"prompt": task_prompt})
+agent.invoke({"prompt": task_prompt})
