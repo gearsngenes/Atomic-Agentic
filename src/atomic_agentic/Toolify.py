@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
 
 from .Tools import Tool, AgentTool, MCPProxyTool, list_mcp_tools
-from .Agents import Agent
+from .Primitives import Agent
 from .Exceptions import ToolDefinitionError
 
 __all__ = ["toolify"]
@@ -161,6 +161,9 @@ def toolify(
 
     # 4) Raw callable → Tool
     if callable(component):
+        if not name or name is None:
+            try: name = component.__name__
+            except: raise
         if not name or not isinstance(name, str):
             raise ToolDefinitionError(
                 "toolify: 'name' (str) is required when toolifying a callable."
@@ -171,7 +174,7 @@ def toolify(
             )
 
         namespace = namespace_kw
-        effective_description = (description or component.__doc__ or "").strip()
+        effective_description = (description or component.__doc__ or "undescribed").strip()
 
         return [
             Tool(

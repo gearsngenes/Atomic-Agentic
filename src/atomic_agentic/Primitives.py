@@ -1286,7 +1286,7 @@ class Agent:
 
         # 4) Delegate to the internal call path
         logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
-        raw_result = self._invoke(prompt=prompt, messages=messages)
+        raw_result = self._invoke(messages=messages)
 
         # 5) Centralized history policy
         if self._context_enabled:
@@ -1310,7 +1310,7 @@ class Agent:
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
-    def _invoke(self, prompt: str, messages: List[Dict[str, str]]) -> Any:
+    def _invoke(self, messages: List[Dict[str, str]]) -> Any:
         """Internal call path used by :meth:`invoke`.
 
         This base implementation:
@@ -1340,11 +1340,8 @@ class Agent:
 
         # 3) Record the current turn into the per-invoke buffer.
         # The base Agent simply stores the user prompt and raw assistant text.
-        if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "user":
-            user_msg = messages[-1]
-        else:
-            user_msg = {"role": "user", "content": prompt}
-
+        user_msg = messages[-1]
+        
         self._newest_history.append(user_msg)
         self._newest_history.append({"role": "assistant", "content": text})
 
