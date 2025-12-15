@@ -10,6 +10,7 @@ from .Exceptions import *
 from typing import Mapping, Callable, Optional
 from collections import OrderedDict
 import inspect
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -934,6 +935,9 @@ class Agent:
         # Per-invoke buffer for the newest run. This is populated inside `_invoke`
         # and committed to `_history` by `_update_history` if `context_enabled` is True.
         self._newest_history: List[Dict[str, str]] = []
+        
+        #invoke lock
+        self._invoke_lock = threading.RLock()
 
         # ~~~ Pre-Invoke Tool preparation ~~~
         # turn callable to pre-invoke tool
@@ -1202,8 +1206,9 @@ class Agent:
 
     def clear_memory(self) -> None:
         """Clear the stored message history."""
-        self._history.clear()
-        self._newest_history.clear()
+        with self._invoke_lock:
+            self._history.clear()
+            self._newest_history.clear()
     
     def invoke(self, inputs: Mapping[str, Any]) -> Any:
         """Invoke the Agent with a single **input mapping**.
@@ -1243,69 +1248,66 @@ class Agent:
         AgentInvocationError
             For unexpected runtime errors in Tools or the engine.
         """
-        logger.info(f"[{type(self).__name__}.{self.name}.invoke started]")
+        
+        # main invoke lock        
+        with self._invoke_lock:
+            logger.info(f"[{type(self).__name__}.{self.name}.invoke started]")
+            if not isinstance(inputs, Mapping):
+                raise TypeError("Agent.invoke expects a Mapping[str, Any].")
+            # Preprocess inputs to prompt string
+            try:
+                logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
+                prompt = self._pre_invoke.invoke(inputs)
+            except ToolInvocationError:
+                raise
+            except Exception as e:  # pragma: no cover
+                raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
 
-        # 1) Validate inputs
-        if not isinstance(inputs, Mapping):
-            raise TypeError("Agent.invoke expects a Mapping[str, Any].")
+            if not isinstance(prompt, str):
+                raise AgentInvocationError(
+                    f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
+                )
+            # Empty any prior history buffer
+            self._newest_history.clear()
 
-        # 2) Run pre-invoke Tool to get the prompt (strict by default)
-        try:
-            logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
-            prompt = self._pre_invoke.invoke(inputs)  # may raise ToolInvocationError
-        except ToolInvocationError:
-            # Let Tool errors bubble up (they are already precise).
-            raise
-        except Exception as e:  # pragma: no cover - safety net
-            raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
+            # Build messages
+            logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
+            messages: List[Dict[str, str]] = [{"role": "system", "content": self.role_prompt}]
 
-        if not isinstance(prompt, str):
-            raise AgentInvocationError(
-                f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
-            )
+            if self._context_enabled and self._history:
+                if self._history_window is None:
+                    prior = self._history
+                elif self._history_window > 0:
+                    prior = self._history[-(self._history_window * 2):]
+                else:
+                    prior = self._history
+                messages.extend(prior)
 
-        # Reset the per-invoke buffer before running the core logic.
-        self._newest_history.clear()
+            user_msg = {"role": "user", "content": prompt}
+            messages.append(user_msg)
 
-        # 3) Build messages for this run
-        logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
-        # 3.a) Add role_prompt 
-        messages: List[Dict[str, str]] = [{"role": "system", "content": self.role_prompt}]
+            # Invoke core logic
+            logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
+            raw_result = self._invoke(messages=messages)
 
-        # Prior turns (if context is enabled)
-        if self._context_enabled and self._history:
-            if self._history_window is None: prior = self._history
-            # window in turns: take last N *pairs* => 2N messages
-            elif self._history_window > 0: prior = self._history[-(self._history_window * 2):]
-            else: prior = self._history
-            messages.extend(prior)
+            # Update history if enabled
+            if self._context_enabled:
+                logger.debug(f"Agent.{self.name} updating history")
+                self._history.extend(self._newest_history)
+            self._newest_history.clear()
 
-        # Current user prompt
-        user_msg = {"role": "user", "content": prompt}
-        messages.append(user_msg)
+            # Postprocess raw result
+            try:
+                logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
+                result = self._post_invoke.invoke({self._post_param_name: raw_result})
+            except ToolInvocationError:
+                raise
+            except Exception as e:  # pragma: no cover
+                raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
 
-        # 4) Delegate to the internal call path
-        logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
-        raw_result = self._invoke(messages=messages)
-
-        # 5) Centralized history policy
-        if self._context_enabled:
-            logger.debug(f"Agent.{self.name} updating history")
-            self._history.extend(self._newest_history)
-        self._newest_history.clear()
-
-        # 6) Run post-invoke Tool on the raw result
-        try:
-            logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
-            result = self._post_invoke.invoke({self._post_param_name: raw_result})
-        except ToolInvocationError:
-            # Let Tool errors bubble up directly
-            raise
-        except Exception as e:  # pragma: no cover - safety net
-            raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
-
-        logger.info(f"[{type(self).__name__}.{self.name}.invoke finished]")
-        return result
+            # Final logging and return
+            logger.info(f"[{type(self).__name__}.{self.name}.invoke finished]")
+            return result
 
     # ------------------------------------------------------------------ #
     # Helpers

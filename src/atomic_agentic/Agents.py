@@ -77,12 +77,27 @@ class ToolAgent(Agent, ABC):
     """
     Abstract base class for tool-using agents (Planner/Orchestrator/etc.).
 
-    Core responsibilities:
-      1) toolbox: registry of Tools (keyed by Tool.full_name)
-      2) blackboard: list of step entries (persisted across runs iff context_enabled)
-      3) tool-call budgeting: per-run limit + concurrency-safe counter
-      4) shared step placeholder resolver: <<__step__N>> (0-based)
-      5) Template Method: _invoke(messages) delegates to _run(...)
+    Key contracts (per your refactor decisions)
+    -------------------------------------------
+    - Thread-safety:
+        * Concurrent calls to `invoke()` are serialized by the base `Agent`'s
+          per-instance invoke lock.
+        * ToolAgent does NOT mutate `self._blackboard` during `_run()`.
+        * If a subclass parallelizes tool calls inside a single run, the tool-call
+          budget counter remains atomic via `_tool_calls_lock`.
+
+    - Blackboard lifecycle:
+        * `self._blackboard` is committed ONLY by this base class in `_invoke()`.
+        * `_run()` must treat the blackboard as read-only reference data.
+        * `_run()` returns a list of NEW executed steps which are appended (only
+          if `context_enabled=True`).
+
+    - Placeholders:
+        * Canonical step placeholder format is `<<__step__N>>` (0-based index).
+        * Placeholder resolution defaults to the frozen snapshot of the blackboard
+          taken at the start of `_invoke()` (so resolution is stable during `_run()`).
+        * Subclasses that need “existing + new-steps-so-far” resolution should pass
+          an explicit `board=` to `_call_tool(...)` / `_resolve_step_refs(...)`.
     """
 
     def __init__(
@@ -98,7 +113,6 @@ class ToolAgent(Agent, ABC):
         post_invoke: Optional[Tool | Callable[..., Any]] = None,
         history_window: Optional[int] = None,
     ) -> None:
-        # Validate and store the *template* on self._role_prompt via base Agent init.
         template = self._validate_role_prompt_template(role_prompt)
 
         super().__init__(
@@ -112,25 +126,23 @@ class ToolAgent(Agent, ABC):
             history_window=history_window,
         )
 
-        # Toolbox + lock (safe registry access if other threads inspect/register tools)
         self._toolbox: OrderedDict[str, Tool] = OrderedDict()
-        self._toolbox_lock = threading.RLock()
-
-        # Blackboard + lock (base exposes a safe read/copy + can guard resolver reads)
         self._blackboard: List[BlackboardEntry] = []
-        self._blackboard_lock = threading.RLock()
 
-        # Tool-call budgeting (per-run) — MUST be concurrency-safe
+        # Frozen snapshot used for stable placeholder resolution during _run().
+        self._blackboard_snapshot: tuple[BlackboardEntry, ...] = tuple()
+
+        # Tool-call budgeting (keep lock to support potential intra-run parallelism)
         self._tool_calls_lock = threading.Lock()
         self._tool_calls_made: int = 0
         self._tool_calls_limit: Optional[int] = None
-        self.tool_calls_limit = tool_calls_limit  # validated
+        self.tool_calls_limit = tool_calls_limit
 
         # Always include the canonical return tool (avoid collisions by skipping).
         self.register(return_tool, name_collision_mode="skip")
 
     # ------------------------------------------------------------------ #
-    # Role prompt templating: template is stored in _role_prompt; getter formats
+    # Role prompt templating
     # ------------------------------------------------------------------ #
     @staticmethod
     def _validate_role_prompt_template(template: Any) -> str:
@@ -203,6 +215,7 @@ class ToolAgent(Agent, ABC):
             )
         except Exception as exc:  # pragma: no cover
             raise ToolAgentError(f"Failed to format ToolAgent role_prompt template: {exc}") from exc
+
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
@@ -222,44 +235,48 @@ class ToolAgent(Agent, ABC):
 
     @property
     def blackboard(self) -> List[BlackboardEntry]:
-        """Read-only view (shallow copy) of the persisted blackboard."""
-        with self._blackboard_lock:
+        # Consistent snapshot for external reads (base Agent serializes invoke).
+        with self._invoke_lock:
             return list(self._blackboard)
 
     # ------------------------------------------------------------------ #
-    # Toolbox helpers
+    # Toolbox helpers (public reads are lock-protected; internal calls use unlocked helper)
     # ------------------------------------------------------------------ #
     def list_tools(self) -> OrderedDict[str, Tool]:
-        with self._toolbox_lock:
+        with self._invoke_lock:
             return OrderedDict(self._toolbox)
 
     def has_tool(self, tool_full_name: str) -> bool:
-        with self._toolbox_lock:
+        with self._invoke_lock:
             return tool_full_name in self._toolbox
 
     def get_tool(self, tool_full_name: str) -> Tool:
-        with self._toolbox_lock:
+        with self._invoke_lock:
             tool = self._toolbox.get(tool_full_name)
         if tool is None:
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool {tool_full_name!r}.")
         return tool
 
+    def _get_tool_unlocked(self, tool_full_name: str) -> Tool:
+        # Used by _call_tool to avoid deadlocks if subclasses parallelize tool calls.
+        tool = self._toolbox.get(tool_full_name)
+        if tool is None:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool {tool_full_name!r}.")
+        return tool
+
     def remove_tool(self, tool_full_name: str) -> bool:
-        with self._toolbox_lock:
+        with self._invoke_lock:
             return self._toolbox.pop(tool_full_name, None) is not None
 
     def clear_tools(self) -> None:
-        with self._toolbox_lock:
+        with self._invoke_lock:
             self._toolbox.clear()
 
     # ------------------------------------------------------------------ #
     # Prompt helpers
     # ------------------------------------------------------------------ #
     def actions_context(self) -> str:
-        """
-        String representation of all tools in the toolbox for prompt injection.
-        """
-        with self._toolbox_lock:
+        with self._invoke_lock:
             tools = list(self._toolbox.values())
         return "\n".join(f"-- {t}" for t in tools)
 
@@ -281,17 +298,16 @@ class ToolAgent(Agent, ABC):
         if obj is None:
             obj = self.blackboard
 
-        args = "raw_args" if raw_results else "resolved_args"
-
-        view = [{"tool": s.get("tool"), "args": s.get(args, {})} for s in obj]
+        args_key = "raw_args" if raw_results else "resolved_args"
+        view = [{"tool": s.get("tool"), "args": s.get(args_key, {})} for s in obj]
 
         try:
-            return json.dumps(view, indent = indent, default = str)
+            return json.dumps(view, indent=indent, default=str)
         except Exception:
             return str(view)
 
     # ------------------------------------------------------------------ #
-    # Tool Registration
+    # Tool Registration (mutations are serialized against invoke via base invoke lock)
     # ------------------------------------------------------------------ #
     def register(
         self,
@@ -315,7 +331,7 @@ class ToolAgent(Agent, ABC):
                 name=name,
                 description=description,
                 namespace=namespace,
-                headers=headers,  # MCP URL contract: key presence required when component is str
+                headers=headers,
                 include=include,
                 exclude=exclude,
             )
@@ -325,7 +341,7 @@ class ToolAgent(Agent, ABC):
             raise ToolRegistrationError(f"toolify failed for {component!r}: {exc}") from exc
 
         registered: List[str] = []
-        with self._toolbox_lock:
+        with self._invoke_lock:
             for tool in tools:
                 key = tool.full_name
                 if key in self._toolbox:
@@ -335,31 +351,32 @@ class ToolAgent(Agent, ABC):
                         )
                     if name_collision_mode == "skip":
                         continue
-                self._toolbox[key] = tool  # replace or new
+                self._toolbox[key] = tool
                 registered.append(key)
 
         return registered
 
     def batch_register(
         self,
-        tools: List[Callable|Tool|Agent],
+        tools: Sequence[Callable[..., Any] | Tool | Agent],
         name_collision_mode: str = "raise",
     ) -> List[str]:
         registered: List[str] = []
         for obj in tools:
-            if type(obj) in (Tool, Agent):
-                name, description = obj.name, obj.description
+            if isinstance(obj, (Tool, Agent)):
+                nm, desc = obj.name, obj.description
             elif callable(obj):
-                name, description = obj.__name__, obj.__doc__
+                nm, desc = obj.__name__, obj.__doc__
             else:
                 raise ToolRegistrationError(
                     f"batch_register expected Tool, Agent, or callable; got {type(obj).__name__!r}."
                 )
+
             registered.extend(
                 self.register(
                     obj,
-                    name=name,
-                    description=description,
+                    name=nm,
+                    description=desc,
                     namespace=self.name,
                     name_collision_mode=name_collision_mode,
                 )
@@ -374,13 +391,6 @@ class ToolAgent(Agent, ABC):
             self._tool_calls_made = 0
 
     def _reserve_tool_call_or_raise(self) -> None:
-        """
-        Atomically check the limit and increment tool_calls_made.
-
-        Reserve-first semantics are intentional:
-          - Correct under concurrency (prevents overshooting limit).
-          - Counts attempts (failures consume budget) to avoid runaway retries.
-        """
         with self._tool_calls_lock:
             limit = self._tool_calls_limit
             if limit is not None and self._tool_calls_made >= limit:
@@ -390,26 +400,22 @@ class ToolAgent(Agent, ABC):
                 )
             self._tool_calls_made += 1
 
-    def _call_tool(self, tool_full_name: str, inputs: Mapping[str, Any]) -> Any:
-        """
-        Execute a tool by full name with tool-call budget enforcement.
-
-        This method:
-          1) Reserves a budget slot (atomic check+increment)
-          2) Resolves step placeholders in inputs using the current self._blackboard
-          3) Invokes the tool
-        """
+    def _call_tool(
+        self,
+        tool_full_name: str,
+        inputs: Mapping[str, Any],
+        *,
+        board: Optional[Sequence[BlackboardEntry]] = None,
+    ) -> Any:
         if not isinstance(tool_full_name, str) or not tool_full_name.strip():
             raise ToolAgentError("_call_tool requires a non-empty tool_full_name string.")
         if not isinstance(inputs, Mapping):
             raise ToolAgentError("_call_tool requires inputs to be a Mapping[str, Any].")
 
-        tool = self.get_tool(tool_full_name)
-
-        # Enforce limit correctly under concurrency.
+        tool = self._get_tool_unlocked(tool_full_name)
         self._reserve_tool_call_or_raise()
 
-        resolved_inputs = self._resolve_step_refs(dict(inputs))
+        resolved_inputs = self._resolve_step_refs(dict(inputs), board=board)
 
         try:
             return tool.invoke(resolved_inputs)
@@ -421,55 +427,42 @@ class ToolAgent(Agent, ABC):
             ) from exc
 
     # ------------------------------------------------------------------ #
-    # Step placeholder resolution (uses ONLY self._blackboard)
+    # Step placeholder resolution (defaults to frozen snapshot)
     # ------------------------------------------------------------------ #
-    def _resolve_step_refs(self, obj: Any) -> Any:
-        """
-        Resolve step placeholders against the current self._blackboard.
+    def _resolve_step_refs(self, obj: Any, *, board: Optional[Sequence[BlackboardEntry]] = None) -> Any:
+        if board is None:
+            board = self._blackboard_snapshot
 
-        Canonical:
-          - <<__step__N>> where N is 0-based index
-        Optional legacy (if enabled):
-          - {stepN}
-        """
         if isinstance(obj, str):
             # Canonical full match => typed result
             m = _STEP_TOKEN.fullmatch(obj)
             if m:
-                return self._step_result_by_index(int(m.group(1)))
+                return self._step_result_by_index(int(m.group(1)), board=board)
 
-            # Canonical inline substitution => str(result)
             def repl(match: re.Match[str]) -> str:
-                result = self._step_result_by_index(int(match.group(1)))
-                try: stringified = repr(result)
-                except: stringified = str(result)
-                return stringified
+                result = self._step_result_by_index(int(match.group(1)), board=board)
+                try: return repr(result)
+                except Exception: return str(result)
 
-            text = _STEP_TOKEN.sub(repl, obj)
-
-            return text
+            return _STEP_TOKEN.sub(repl, obj)
 
         if isinstance(obj, list):
-            return [self._resolve_step_refs(v) for v in obj]
+            return [self._resolve_step_refs(v, board=board) for v in obj]
 
         if isinstance(obj, dict):
-            return {k: self._resolve_step_refs(v) for k, v in obj.items()}
+            return {k: self._resolve_step_refs(v, board=board) for k, v in obj.items()}
 
         return obj
 
-    def _step_result_by_index(self, idx: int) -> Any:
+    def _step_result_by_index(self, idx: int, *, board: Sequence[BlackboardEntry]) -> Any:
         if not isinstance(idx, int):
             raise ToolAgentError(f"Step reference must be an int; got {type(idx).__name__!r}.")
         if idx < 0:
             raise ToolAgentError(f"Step reference must be >= 0; got {idx}.")
+        if idx >= len(board):
+            raise ToolAgentError(f"Step reference {idx} out of range (blackboard length={len(board)}).")
 
-        with self._blackboard_lock:
-            if idx >= len(self._blackboard):
-                raise ToolAgentError(
-                    f"Step reference {idx} out of range (blackboard length={len(self._blackboard)})."
-                )
-            step = self._blackboard[idx]
-
+        step = board[idx]
         if not bool(step.get("completed", False)):
             raise ToolAgentError(f"Referenced step {idx} has not been completed yet.")
         if "result" not in step:
@@ -481,38 +474,43 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     def _invoke(self, *, messages: List[Dict[str, str]]) -> Any:
         """
-        FINAL template method (do not override in subclasses).
+        FINAL template method (do not override).
 
         Subclasses implement:
-          _run(messages=..., blackboard=...) -> (loaded_blackboard, new_step_strings, return_value)
+          _run(messages=...) -> (new_blackboard_steps, return_value)
+
+        `_run()` must not mutate `self._blackboard`. It should create/execute NEW
+        steps and return them as a list.
         """
-        user_msg = {"role":"user", "content": messages[-1]["content"]}
+        # base Agent.invoke serializes calls; we're inside that lock here.
         self._reset_tool_calls_made()
 
-        # Stateless runs must not leak prior runs into this run.
         if not self.context_enabled:
-            with self._blackboard_lock:
-                self._blackboard.clear()
+            self._blackboard.clear()
 
-        new_blackboard_steps, return_value = self._run(
-            messages=messages,
-            blackboard=self._blackboard,
-        )
+        # Freeze blackboard view for stable placeholder resolution during _run().
+        self._blackboard_snapshot = tuple(self._blackboard)
+
+        new_blackboard_steps, return_value = self._run(messages=messages)
 
         if not isinstance(new_blackboard_steps, list):
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}._run must return a list of new steps for the blackboard; "
-                f"got {type(new_blackboard_steps).__name__!r}."
+                f"{type(self).__name__}.{self.name}._run must return (list[BlackboardEntry], Any); "
+                f"got {type(new_blackboard_steps).__name__!r} for first element."
             )
 
+        # Commit blackboard AFTER _run (never during).
         if self.context_enabled:
-            with self._blackboard_lock:
-                self._blackboard.extend(new_blackboard_steps)
+            self._blackboard.extend(new_blackboard_steps)
+            assistant_bb_text = self.blackboard_view()
         else:
-            with self._blackboard_lock:
-                self._blackboard.clear()
+            assistant_bb_text = self.blackboard_view(new_blackboard_steps)
+            self._blackboard.clear()
+
+        user_msg = {"role": "user", "content": messages[-1]["content"]}
         self._newest_history.append(user_msg)
-        self._newest_history.append({"role" : "assistant", "content" : self.blackboard_view()})
+        self._newest_history.append({"role": "assistant", "content": assistant_bb_text})
+
         return return_value
 
     @abstractmethod
@@ -520,16 +518,21 @@ class ToolAgent(Agent, ABC):
         self,
         *,
         messages: List[Dict[str, str]],
-        blackboard: List[BlackboardEntry],
     ) -> tuple[List[BlackboardEntry], Any]:
         """
         Subclass hook.
 
         Must return:
-          1) new_blackboard_steps: new steps generated steps that were run for a given task
-          2) return_value: final output value for this run
+          1) new_blackboard_steps: NEW steps that were executed for this run
+          2) return_value: the final output for this run
 
-        Per your architecture: _run() should populate self._newest_history.
+        IMPORTANT:
+        - Must NOT mutate `self._blackboard`.
+        - If you need placeholder resolution that can reference “existing steps
+          + new-steps-so-far”, build a local board like:
+              local_board = list(self._blackboard_snapshot) + new_steps_so_far
+          and call:
+              self._call_tool(..., board=local_board)
         """
         raise NotImplementedError
 
@@ -537,7 +540,8 @@ class ToolAgent(Agent, ABC):
     # Memory lifecycle
     # ------------------------------------------------------------------ #
     def clear_memory(self) -> None:
-        super().clear_memory()
-        with self._blackboard_lock:
+        with self._invoke_lock:
+            super().clear_memory()
             self._blackboard.clear()
-        self._reset_tool_calls_made()
+            self._blackboard_snapshot = tuple()
+            self._reset_tool_calls_made()
