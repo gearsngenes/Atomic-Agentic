@@ -34,3 +34,5 @@ while True:
 
     result = my_planner.invoke({"prompt": query})
     print(f"Result: {result}\n")
+    print(f"Blackboard:\n{my_planner.blackboard_dumps(raw_results=True, indent=2)}")
+    print("-" * 40 + "\n")

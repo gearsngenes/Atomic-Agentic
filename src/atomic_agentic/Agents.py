@@ -558,10 +558,30 @@ class ToolAgent(Agent, ABC):
 
         `_run()` must not mutate `self._blackboard`.
         """
+        # Reset per-invoke tool call counter.
         self._reset_tool_calls_made()
-        user_msg = {"role": "user", "content": messages[-1]["content"]}
-
-        new_blackboard_steps, return_value = self._run(messages=messages)
+        # Save the latest message for newest history
+        prompt = messages[-1]["content"]
+        user_msg = {"role": "user", "content": prompt}
+        # if context_enabled, inject blackboard + indexing info into last user msg
+        base_len = len(self.blackboard)
+        run_messages = list(messages)
+        if self.context_enabled:
+            bb_view = self.blackboard_dumps(obj=None, raw_results=True, indent=2)
+            last = dict(run_messages[-1])
+            hi = base_len - 1
+            last["content"] = (
+                f"{last.get('content', '')}\n\n"
+                f"PREVIOUS STEPS (global indices 0..{hi if hi >= 0 else -1}):\n"
+                f"{bb_view}\n\n"
+                f"INDEXING:\n"
+                f"- The view above corresponds to indices 0..{hi if hi >= 0 else -1}.\n"
+                f"- New steps you emit MUST continue from index {base_len}.\n"
+                f"- Use placeholders like \"<<__step__N>>\" with these GLOBAL indices.\n"
+            )
+            run_messages[-1] = last
+        # Call _run() to get newly executed steps + return value
+        new_blackboard_steps, return_value = self._run(messages=run_messages)
 
         if not isinstance(new_blackboard_steps, list):
             raise ToolAgentError(
@@ -576,10 +596,11 @@ class ToolAgent(Agent, ABC):
             pass
         try: str_res = repr(return_value)
         except: str_res = str(return_value)
+        # Update newest history
         assistant_text = f"Generated steps:\n{self.blackboard_dumps(new_blackboard_steps, raw_results=True)}\nResult produced:\n{str_res}"
         self._newest_history.append(user_msg)
         self._newest_history.append({"role": "assistant", "content": assistant_text})
-
+        # Return final value
         return return_value
 
     @abstractmethod
@@ -688,29 +709,11 @@ class PlanActAgent(ToolAgent):
         persisted: List[BlackboardEntry] = self.blackboard
         base_len = len(persisted)
 
-        # 3.a) Optionally augment the LAST user message with blackboard view (raw args)
-        planning_messages = messages
-        if self.context_enabled:
-            bb_view = self.blackboard_dumps(obj=None, raw_results=True, indent=0)
-            planning_messages = list(messages)
-            last = dict(planning_messages[-1])
-            hi = base_len - 1
-            last["content"] = (
-                f"{last.get('content', '')}\n\n"
-                f"PREVIOUS STEPS (global indices 0..{hi if hi >= 0 else -1}):\n"
-                f"{bb_view}\n\n"
-                f"INDEXING:\n"
-                f"- The view above corresponds to indices 0..{hi if hi >= 0 else -1}.\n"
-                f"- New plan steps you emit MUST continue from index {base_len}.\n"
-                f"- Use placeholders like <<__step__N>> with these GLOBAL indices.\n"
-            )
-            planning_messages[-1] = last
-
-        # 3.b) Single LLM call to produce plan string
-        plan_text = self._llm_engine.invoke(planning_messages).strip()
+        # Single LLM call to produce plan string
+        plan_text = self._llm_engine.invoke(messages).strip()
         plan_text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*|\s*```\s*$", "", plan_text).strip()
 
-        # 3.c) Parse and load steps; ensure return tool is last
+        # Parse and load steps; ensure return tool is last
         try:
             parsed = json.loads(plan_text)
         except Exception as exc:
@@ -939,6 +942,9 @@ class PlanActAgent(ToolAgent):
         results.sort(key=lambda t: t[0])
         return results
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Iterative Plan 'ReActAgent' class
+# ───────────────────────────────────────────────────────────────────────────────
 class ReActAgent(ToolAgent):
     """
     Dynamic, step-by-step tool-using agent (ReAct-style).
