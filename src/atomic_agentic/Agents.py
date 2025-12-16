@@ -73,7 +73,7 @@ from .LLMEngines import LLMEngine
 from .Primitives import Agent
 from .Toolify import toolify
 from .Tools import Tool
-from .Prompts import PLANNER_PROMPT
+from .Prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
 
 
 __all__ = ["Agent", "ToolAgent", "BlackboardEntry", "return_tool"]
@@ -574,7 +574,9 @@ class ToolAgent(Agent, ABC):
             self._blackboard.extend(new_blackboard_steps)
         else:
             pass
-        assistant_text = f"{self.name} generated the following response:\n{json.dumps({"__llm_response__": return_value}, indent=2, default=str)}"
+        try: str_res = repr(return_value)
+        except: str_res = str(return_value)
+        assistant_text = f"Generated steps:\n{self.blackboard_dumps(new_blackboard_steps, raw_results=True)}\nResult produced:\n{str_res}"
         self._newest_history.append(user_msg)
         self._newest_history.append({"role": "assistant", "content": assistant_text})
 
@@ -937,3 +939,64 @@ class PlanActAgent(ToolAgent):
         results.sort(key=lambda t: t[0])
         return results
 
+class ReActAgent(ToolAgent):
+    """
+    Dynamic, step-by-step tool-using agent (ReAct-style).
+
+    - Iteratively asks the LLM for exactly ONE step JSON object:
+        {"tool": "<Tool.full_name>", "args": {...}}
+    - Executes the step immediately and feeds the result back to the LLM as an
+      observation (a user message) so the next step can adapt at runtime.
+    - Termination:
+        * If the model emits the canonical return tool, execute it and stop.
+        * If `tool_calls_limit` (non-return calls) has been reached, auto-execute
+          the return tool on the latest completed result and stop (no extra LLM call).
+    - Fail-fast:
+        * Any parse/shape/tool-lookup error raises immediately.
+        * Any tool execution error raises immediately (no partial step commit).
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        llm_engine: LLMEngine,
+        context_enabled: bool = False,
+        *,
+        tool_calls_limit: int = 25,
+        pre_invoke: Optional[Tool | Callable[..., Any]] = None,
+        post_invoke: Optional[Tool | Callable[..., Any]] = None,
+        history_window: Optional[int] = None,
+    ) -> None:
+        if not isinstance(tool_calls_limit, int) or tool_calls_limit <= 0:
+            raise ToolAgentError("ReActAgent.tool_calls_limit must be a positive int.")
+
+        super().__init__(
+            name=name,
+            description=description,
+            llm_engine=llm_engine,
+            role_prompt=ORCHESTRATOR_PROMPT,
+            context_enabled=context_enabled,
+            tool_calls_limit=tool_calls_limit,
+            pre_invoke=pre_invoke,
+            post_invoke=post_invoke,
+            history_window=history_window,
+        )
+
+    @property
+    def tool_calls_limit(self) -> int:
+        """Max allowed non-return tool calls per run (must be a positive int)."""
+        return self._tool_calls_limit
+
+    @tool_calls_limit.setter
+    def tool_calls_limit(self, value: int) -> None:
+        if not isinstance(value, int) or value <= 0:
+            raise ToolAgentError("ReActAgent.tool_calls_limit must be a positive int.")
+        self._tool_calls_limit = value
+
+    def _run(
+        self,
+        *,
+        messages: List[Dict[str, str]],
+    ) -> tuple[List[BlackboardEntry], Any]:
+        NotImplemented
