@@ -992,6 +992,17 @@ class ReActAgent(ToolAgent):
     # Properties
     # ------------------------------------------------------------------ #    
     @property
+    def tool_calls_limit(self) -> Optional[int]:
+        """Max allowed tool calls per invoke() run. None means unlimited."""
+        return self._tool_calls_limit
+
+    @tool_calls_limit.setter
+    def tool_calls_limit(self, value: Optional[int]) -> None:
+        if value is None or value <= 0:
+            raise ToolAgentError("ReActAgent requires a tool_calls_limit >= 0.")
+        self._tool_calls_limit = value
+
+    @property
     def preview_limit(self) -> Optional[int]:
         """
         Max characters allowed in the observation preview of `running_result`.
