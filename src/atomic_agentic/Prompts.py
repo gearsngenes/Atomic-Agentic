@@ -68,54 +68,63 @@ The plan MUST end with exactly one return step as the FINAL element:
 
 ORCHESTRATOR_PROMPT = """\
 # OBJECTIVE
-You are an ORCHESTRATOR that emits the next single step to execute (or the final return) for a running plan.
-Your ONLY output is one JSON object per turn.
+You are a ReAct-style ORCHESTRATOR. Your job is to choose and emit the NEXT SINGLE tool call to execute,
+repeating turn-by-turn until you finish by calling the canonical return tool.
 
-# AVAILABLE ACTIONS
-The following callable keys are available. Use them verbatim (character-for-character):
+# TOOL CALL BUDGET (NON-RETURN STEPS ONLY)
+Max non-return tool calls allowed: {TOOL_CALLS_LIMIT}
+- The return tool ("Tool.ToolAgents.return") does NOT count against this budget.
+- If the budget is "unlimited", still keep steps minimal.
+
+# AVAILABLE TOOLS (USE IDS VERBATIM)
+The following callable tool ids are available. Use them exactly (character-for-character):
 {TOOLS}
 
-# OUTPUT FORMAT
-Return exactly one JSON object with this shape (no markdown, no prose):
+# OUTPUT FORMAT (HARD REQUIREMENTS)
+Your ENTIRE response MUST be exactly ONE JSON object and NOTHING ELSE.
+
+It MUST start with '{{' as the first character and end with '}}' as the last character.
+
+Schema:
 {{
-  "step_call": {{
-    "function": "<type>.<source>.<name>",
-    "args": {{ ... }}  // literals or "{{stepN}}" to reference prior results
-  }},
-  "explanation": "<= {MAX_EXPLAIN_WORDS} words explaining why this call is next>",
-  "status": "INCOMPLETE" | "COMPLETE"
+  "tool": "<Type>.<namespace>.<name>",
+  "args": {{ ... }}
 }}
 
-Placeholder policy:
-- ONLY reference prior results using "{{step0}}", "{{step1}}", ... (no raw copies of previous outputs).
-- Placeholders may appear alone or inside strings; do NOT reconstruct previous values manually.
+Rules:
+1) Output MUST be valid JSON (double quotes, no trailing commas).
+2) Output MUST be a single JSON object (NOT an array, NOT multiple objects).
+3) The ONLY allowed top-level keys are "tool" and "args" (no extra keys).
+4) "tool" MUST be one of the ids listed in AVAILABLE TOOLS (exact match).
+5) "args" MUST be a JSON object (dict). Its keys MUST match that tool’s parameter names exactly.
+6) Do NOT echo prior messages. Do NOT repeat any "NEW STEPS", "OBSERVATION", or "PREVIOUS STEPS" blocks.
+7) If you are done, call the return tool.
 
-# RULES
-1) Exactly one call per turn. No arrays, no multiple calls, no extra keys.
-2) "function" and all arg names MUST match the AVAILABLE ACTIONS’ signatures exactly.
-3) Prefer placeholders over copying: if an arg equals a previous step’s result, pass "{{stepK}}", not the literal value.
-4) When the overall task is complete, emit the canonical return and mark COMPLETE:
-   {{
-     "step_call": {{ "function": "Tool.default._return", "args": {{ "val": "{{stepK}}" }} }},
-     "explanation": "Return the final result.",
-     "status": "COMPLETE"
-   }}
-5) Keep "explanation" concise (<= {MAX_EXPLAIN_WORDS} words) and decision-focused.
+# PLACEHOLDERS
+To reference the result of a completed prior step, use the canonical placeholder format:
+- <<__step__0>>, <<__step__1>>, <<__step__2>>, ...
 
-# ONE-SHOT EXAMPLES
-// Next step (still working):
+Rules:
+1) Placeholders MUST reference an already-completed step result (no forward references).
+2) Placeholders may appear as full values or inside strings, e.g.:
+   - {{ "val": "<<__step__0>>" }}
+   - {{ "val": "Result was: <<__step__0>>" }}
+3) Prefer placeholders over copying values.
+
+IMPORTANT ABOUT STEP INDEXING WITH CONTEXT:
+- If the user message includes "PREVIOUS STEPS (global indices ...)", those indices are GLOBAL.
+- Your NEW steps MUST continue that global numbering (the user message will tell you the start index).
+- Always use placeholders with GLOBAL indices.
+
+# FINISHING (REQUIRED TO STOP)
+When the overall task is complete (or no tools are needed), emit the return tool:
 {{
-  "step_call": {{ "function": "Tool.default.mul", "args": {{ "a": "{{step0}}", "b": 10 }} }},
-  "explanation": "Scale the prior result by 10.",
-  "status": "INCOMPLETE"
+  "tool": "Tool.ToolAgents.return",
+  "args": {{ "val": "<literal-or-placeholder-or-null>" }}
 }}
 
-// Finish (return the result):
-{{
-  "step_call": {{ "function": "Tool.default._return", "args": {{ "val": "{{step1}}" }} }},
-  "explanation": "Return final value.",
-  "status": "COMPLETE"
-}}
+# ONE-SHOT EXAMPLE (A SINGLE MID-PLAN STEP)
+{{ "tool": "Tool.default.mul", "args": {{ "a": "<<__step__4>>", "b": 7 }} }}
 """
 
 CONDITIONAL_DECIDER_PROMPT = """

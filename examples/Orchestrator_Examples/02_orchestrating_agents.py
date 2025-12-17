@@ -1,16 +1,15 @@
 import logging
+
 from dotenv import load_dotenv
+
+from atomic_agentic.Agents import Agent, ReActAgent
 from atomic_agentic.LLMEngines import OpenAIEngine
-from atomic_agentic.ToolAgents import OrchestratorAgent
-from atomic_agentic.Agents import Agent
-load_dotenv()  # take environment variables from .env file (if exists)
 
-logging.getLogger().setLevel(logging.INFO)
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
-# 1) LLM engine
 llm = OpenAIEngine(model="gpt-5-mini")
 
-# 2) Helper agents (schema-first; default pre-invoke expects {"prompt": str})
 builder = Agent(
     name="CodeBuilderAgent",
     description="Generates Python code per request/revision.",
@@ -36,27 +35,31 @@ reviewer = Agent(
     history_window=10,
 )
 
-# 3) Orchestrator (sequential single-step loop)
-orchestrator = OrchestratorAgent(
+orchestrator = ReActAgent(
     name="AgenticOrchestrator",
     description="Orchestrates calls between the code builder and the code reviewer.",
     llm_engine=llm,
     history_window=10,
-    max_steps=20,
-    max_failures=5,
+    tool_calls_limit=25,
+    context_enabled=False,
+    preview_limit=2_500,
 )
 
-# 4) Register both agents as tools
+# Register both agents as tools.
 orchestrator.register(builder)
 orchestrator.register(reviewer)
 
-# 5) Dynamic task (schema-first: mapping with 'prompt')
 task = (
-    "Write a Python class that scaffolds an agentic AI design with clean OOP and provider-agnostic "
-    "LLM backends (e.g., Bedrock, OpenAI, llama-cpp-python). First, have the CodeBuilderAgent draft "
-    "the implementation; then have CodeReviewer review and propose improvements; apply the improvements "
-    "by calling the builder again; repeat until the reviewer returns 'Approved'; finally, return the "
-    "latest approved code."
+    "Write a Python module that scaffolds an agentic AI design with clean OOP and provider-agnostic "
+    "LLM backends (e.g., Bedrock, OpenAI, llama-cpp-python).\n\n"
+    "Process:\n"
+    "1) Call the builder tool to draft code.\n"
+    "2) Call the reviewer tool to critique it.\n"
+    "3) If the reviewer returns 'Approved', stop and return the latest code.\n"
+    "4) Otherwise, call the builder again with the review feedback and iterate.\n\n"
+    "IMPORTANT:\n"
+    "- When calling tools, your args object MUST match the tool's argument schema shown in AVAILABLE TOOLS.\n"
+    "- For these AgentTool tools (default Agents), call them with: {\"prompt\": \"...\"} (NOT wrapped in 'inputs').\n"
 )
 
 result = orchestrator.invoke({"prompt": task})

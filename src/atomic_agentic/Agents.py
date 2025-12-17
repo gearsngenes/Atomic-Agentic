@@ -487,7 +487,7 @@ class ToolAgent(Agent, ABC):
         # Enforce limit correctly under concurrency.
         if tool.full_name != return_tool.full_name:
             self._reserve_tool_call_or_raise()
-
+        logger.info(f"[{self.name}.TOOL]: {tool_full_name!r}, args: {json.dumps(inputs)}.")
         resolved_inputs = self._resolve_step_refs(dict(inputs), board=board)
 
         try:
@@ -949,17 +949,15 @@ class ReActAgent(ToolAgent):
     """
     Dynamic, step-by-step tool-using agent (ReAct-style).
 
-    - Iteratively asks the LLM for exactly ONE step JSON object:
-        {"tool": "<Tool.full_name>", "args": {...}}
-    - Executes the step immediately and feeds the result back to the LLM as an
-      observation (a user message) so the next step can adapt at runtime.
-    - Termination:
-        * If the model emits the canonical return tool, execute it and stop.
-        * If `tool_calls_limit` (non-return calls) has been reached, auto-execute
-          the return tool on the latest completed result and stop (no extra LLM call).
-    - Fail-fast:
-        * Any parse/shape/tool-lookup error raises immediately.
-        * Any tool execution error raises immediately (no partial step commit).
+    Message choreography (per-loop):
+      1) call LLM on messages_snapshot -> step_text
+      2) parse a SINGLE step object -> (tool_name, raw_args)
+      3) append that step as an assistant message (canonical JSON)
+      4) execute tool, record completed blackboard entry, update running_result
+      5) append a user message containing:
+           - NEW STEPS THIS RUN (only new_steps)
+           - OBSERVATION (running_result preview)
+           - request for the next single-step dict
     """
 
     def __init__(
@@ -969,14 +967,12 @@ class ReActAgent(ToolAgent):
         llm_engine: LLMEngine,
         context_enabled: bool = False,
         *,
-        tool_calls_limit: int = 25,
+        tool_calls_limit: Optional[int] = 25,
+        preview_limit: Optional[int] = None,
         pre_invoke: Optional[Tool | Callable[..., Any]] = None,
         post_invoke: Optional[Tool | Callable[..., Any]] = None,
         history_window: Optional[int] = None,
     ) -> None:
-        if not isinstance(tool_calls_limit, int) or tool_calls_limit <= 0:
-            raise ToolAgentError("ReActAgent.tool_calls_limit must be a positive int.")
-
         super().__init__(
             name=name,
             description=description,
@@ -989,20 +985,278 @@ class ReActAgent(ToolAgent):
             history_window=history_window,
         )
 
+        self._preview_limit: Optional[int] = None
+        self.preview_limit = preview_limit
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #    
     @property
-    def tool_calls_limit(self) -> int:
-        """Max allowed non-return tool calls per run (must be a positive int)."""
-        return self._tool_calls_limit
+    def preview_limit(self) -> Optional[int]:
+        """
+        Max characters allowed in the observation preview of `running_result`.
 
-    @tool_calls_limit.setter
-    def tool_calls_limit(self, value: int) -> None:
+        - None: no truncation (entire stringified result is shown)
+        - positive int: truncate to at most that many characters
+        """
+        return self._preview_limit
+
+    @preview_limit.setter
+    def preview_limit(self, value: Optional[int]) -> None:
+        if value is None:
+            self._preview_limit = None
+            return
         if not isinstance(value, int) or value <= 0:
-            raise ToolAgentError("ReActAgent.tool_calls_limit must be a positive int.")
-        self._tool_calls_limit = value
+            raise ToolAgentError("preview_limit must be None or a positive int.")
+        self._preview_limit = value
 
+    # ------------------------------------------------------------------ #
+    # Internal helpers
+    # ------------------------------------------------------------------ #
+    def _tool_calls_made_snapshot(self) -> int:
+        with self._tool_calls_lock:
+            return int(self._tool_calls_made)
+
+    @staticmethod
+    def _strip_markdown_fences(text: str) -> str:
+        cleaned = text.strip()
+        cleaned = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _safe_stringify(value: Any) -> str:
+        try:
+            return repr(value)
+        except Exception:
+            try:
+                return str(value)
+            except Exception:  # pragma: no cover
+                return "<unstringifiable result>"
+
+    def _truncate_preview(self, text: str) -> str:
+        limit = self._preview_limit
+        if limit is None:
+            return text
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "… [truncated]"
+
+    def _parse_single_step(self, text: str) -> tuple[str, Dict[str, Any]]:
+        """
+        Parse exactly one step dict from the LLM output.
+
+        Expected schema:
+            {"tool": "<Tool.full_name>", "args": {...}}
+
+        Robustness:
+        - Strips markdown fences.
+        - If extra text exists, extracts the LAST JSON object matching the schema.
+        """
+        cleaned = self._strip_markdown_fences(text).strip()
+        logger.debug("%s.%s: LLM raw step output (preview): %r", type(self).__name__, self.name, cleaned[:1500])
+
+        if not cleaned:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: LLM returned empty step output.")
+
+        if cleaned.lstrip().startswith("["):
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: expected a single JSON object, got an array.")
+
+        def validate(obj: Any) -> tuple[str, Dict[str, Any]] | None:
+            if not isinstance(obj, dict):
+                return None
+            if set(obj.keys()) != {"tool", "args"}:
+                return None
+            tool_name = obj.get("tool")
+            args = obj.get("args")
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: 'tool' must be a non-empty string.")
+            if not isinstance(args, dict):
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: 'args' must be a JSON object/dict.")
+            return tool_name, args
+
+        # Fast path: pure JSON object
+        if cleaned.lstrip().startswith("{"):
+            try:
+                obj = json.loads(cleaned)
+                out = validate(obj)
+                if out is not None:
+                    return out
+            except Exception:
+                pass
+
+        # Tolerant path: scan for step-like JSON objects and pick the last one.
+        decoder = json.JSONDecoder()
+        candidates: list[tuple[int, str, Dict[str, Any]]] = []
+
+        for m in re.finditer(r"{", cleaned):
+            start = m.start()
+            try:
+                parsed, _end = decoder.raw_decode(cleaned, start)
+            except Exception:
+                continue
+            out = validate(parsed)
+            if out is None:
+                continue
+            tool_name, args = out
+            candidates.append((start, tool_name, dict(args)))
+
+        if not candidates:
+            preview = cleaned if len(cleaned) <= 800 else cleaned[:800] + "…"
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: could not find a valid step object in LLM output. "
+                f"Output preview: {preview!r}"
+            )
+
+        _, tool_name, args = max(candidates, key=lambda t: t[0])
+        if len(candidates) > 1:
+            logger.warning(
+                "%s.%s: multiple step-like JSON objects found; using the last one.",
+                type(self).__name__,
+                self.name,
+            )
+        return tool_name, args
+
+    def _build_observation_user_message(
+        self,
+        *,
+        base_len: int,
+        new_steps: List[BlackboardEntry],
+        running_result: Any,
+    ) -> Dict[str, str]:
+        if new_steps:
+            hi = base_len + len(new_steps) - 1
+            steps_range = f"{base_len}..{hi}"
+            produced_by = str(hi)
+            next_idx = base_len + len(new_steps)
+        else:
+            steps_range = f"(none yet; next index is {base_len})"
+            produced_by = "N/A"
+            next_idx = base_len
+
+        steps_dump = self.blackboard_dumps(new_steps, raw_results=True, indent=2)
+        preview_text = self._truncate_preview(self._safe_stringify(running_result))
+
+        content = (
+            "NEW STEPS THIS RUN (RAW ARGS; GLOBAL INDICES):\n"
+            f"{steps_range}\n"
+            f"{steps_dump}\n\n"
+            "INDEXING:\n"
+            f"- New steps you emit MUST continue from global index {next_idx}.\n"
+            "- Use placeholders like \"<<__step__N>>\" with GLOBAL indices.\n\n"
+            "OBSERVATION (latest running result):\n"
+            f"- produced_by_global_step: {produced_by}\n"
+            f"- value_preview: {preview_text}\n\n"
+            "Now emit EXACTLY ONE next-step JSON object with keys \"tool\" and \"args\" and no other text."
+        )
+        return {"role": "user", "content": content}
+
+    # ------------------------------------------------------------------ #
+    # Core loop
+    # ------------------------------------------------------------------ #
     def _run(
         self,
         *,
         messages: List[Dict[str, str]],
     ) -> tuple[List[BlackboardEntry], Any]:
-        NotImplemented
+        persisted: List[BlackboardEntry] = self.blackboard
+        base_len = len(persisted)
+
+        new_steps: List[BlackboardEntry] = []
+        running_result: Any = "No intermediate results produced yet"
+        last_tool_called: str = ""
+
+        messages_snapshot: List[Dict[str, str]] = list(messages)
+
+        while True:
+            # If return already executed, we're done.
+            if last_tool_called == return_tool.full_name:
+                return new_steps, running_result
+
+            # Auto-return if the (non-return) budget is exhausted.
+            limit = self.tool_calls_limit
+            made = self._tool_calls_made_snapshot()
+            if limit is not None and made >= limit:
+                last_non_return_local_idx: Optional[int] = None
+                for i in range(len(new_steps) - 1, -1, -1):
+                    if new_steps[i].get("tool") != return_tool.full_name and bool(new_steps[i].get("completed", False)):
+                        last_non_return_local_idx = i
+                        break
+
+                if last_non_return_local_idx is None:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: tool usage limit reached ({made}/{limit}) "
+                        "but no completed non-return step exists to return."
+                    )
+
+                last_global_idx = base_len + last_non_return_local_idx
+                raw_args = {"val": f"<<__step__{last_global_idx}>>"}
+
+                board = list(persisted) + list(new_steps)
+                result = self._call_tool(return_tool.full_name, raw_args, board=board)
+
+                resolved_any = self._resolve_step_refs(dict(raw_args), board=board)
+                if not isinstance(resolved_any, dict):
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: resolved args must be a dict; got {type(resolved_any).__name__!r}."
+                    )
+
+                new_steps.append(
+                    {
+                        "tool": return_tool.full_name,
+                        "raw_args": dict(raw_args),
+                        "resolved_args": dict(resolved_any),
+                        "completed": True,
+                        "result": result,
+                    }
+                )
+                return new_steps, result
+
+            # 1) Ask LLM for next step (based on current snapshot).
+            step_text = self._llm_engine.invoke(messages_snapshot)
+            tool_name, raw_args_any = self._parse_single_step(step_text)
+
+            # 2) Save the step as an assistant message (canonical JSON).
+            canonical_step = json.dumps({"tool": tool_name, "args": raw_args_any}, indent=2)
+            messages_snapshot.append({"role": "assistant", "content": canonical_step})
+
+            # 3) Execute and record.
+            if not self.has_tool(tool_name):
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool {tool_name!r}.")
+
+            raw_args: Dict[str, Any] = dict(raw_args_any)
+            board_for_step = list(persisted) + list(new_steps)
+
+            result = self._call_tool(tool_name, raw_args, board=board_for_step)
+
+            resolved_any = self._resolve_step_refs(dict(raw_args), board=board_for_step)
+            if not isinstance(resolved_any, dict):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: resolved args must be a dict; got {type(resolved_any).__name__!r}."
+                )
+
+            new_steps.append(
+                {
+                    "tool": tool_name,
+                    "raw_args": dict(raw_args),
+                    "resolved_args": dict(resolved_any),
+                    "completed": True,
+                    "result": result,
+                }
+            )
+
+            running_result = result
+            last_tool_called = tool_name
+
+            # If return tool executed, stop immediately.
+            if last_tool_called == return_tool.full_name:
+                return new_steps, running_result
+
+            # 4) Append observation + request as the next user message.
+            messages_snapshot.append(
+                self._build_observation_user_message(
+                    base_len=base_len,
+                    new_steps=new_steps,
+                    running_result=running_result,
+                )
+            )
