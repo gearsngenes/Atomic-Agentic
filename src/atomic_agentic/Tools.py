@@ -220,10 +220,6 @@ def list_mcp_tools(
         - "input_schema"  : dict | None     (JSON Schema)
         - "output_schema" : dict | None     (JSON Schema, if provided)
         - "raw"           : the original Tool object (for advanced use)
-
-    It does *not* depend on any __utils__ helpers and is safe to call
-    from both sync code and from within a running event loop via
-    `_run_coro_sync`.
     """
 
     async def _do() -> Dict[str, Dict[str, Any]]:

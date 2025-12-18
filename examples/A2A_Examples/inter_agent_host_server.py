@@ -39,21 +39,9 @@ def main() -> None:
         tool_calls_limit=16,
     )
 
-    # Register remote agents as tools (A2AgentTool is already a Tool instance).
-    trivia_tool = A2AgentTool(url="http://localhost:6000")
-    math_tool = A2AgentTool(url="http://localhost:7000")
-
-    # Preserve each tool’s remote namespace (agent-card name) and description.
-    seed.register(
-        trivia_tool,
-        namespace=trivia_tool.namespace,
-        name_collision_mode="replace",
-    )
-    seed.register(
-        math_tool,
-        namespace=math_tool.namespace,
-        name_collision_mode="replace",
-    )
+    # Register each sub-server as an A2AgentTool
+    seed.register("http://localhost:6000")
+    seed.register("http://localhost:7000")
 
     host = A2AgentHost(seed_agent=seed, host="localhost", port=8000, version="1.0.0")
     host.run(debug=True)
