@@ -795,7 +795,7 @@ class Tool:
     def to_dict(self) -> Dict[str, Any]:
         """Serialize this tool's header and argument schema.
 
-        Note that deserialisation is handled by :mod:`Factory`; this method does
+        Note that deserialisation will handled by a future :mod:`Factory`; this method does
         *not* perform any persistibility checks and will not raise solely
         because :attr:`is_persistible` is ``False``.
         """
