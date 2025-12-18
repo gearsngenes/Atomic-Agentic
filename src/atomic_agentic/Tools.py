@@ -762,141 +762,130 @@ def a2agent_host_invoker(client, inputs: Mapping[str, Any]) -> Any:  # type: ign
 class A2AgentTool(Tool):
     """
     A2AgentTool
-    -------------
-    Client-side proxy that forwards dict inputs to a remote A2A agent via a
-    single function call: name="invoke", parameters=[("payload", <dict>)].
+    -----------
+    Client-side proxy Tool that forwards a single JSON object (a mapping of
+    inputs) to a remote A2A agent via a single function call:
 
-    Contract
-    --------
-    - .invoke(inputs: Mapping) -> Message
-      Sends a FunctionCallContent and returns the RAW response Message.
-      The server replies with FunctionResponseContent so your code can do:
-          raw.content.response["result"]  # str or structured (server-defined)
+      - name="invoke", parameters=[("payload", <dict(inputs)>)]
 
-    - Convenience:
-        .invoke_response(inputs) -> Dict[str, Any] | None
-        Returns the `content.response` dict if present, else None.
+    This class intentionally overrides :meth:`to_arg_kwarg` and :meth:`execute`
+    to support the transport semantics of A2A-backed tools, while keeping
+    :meth:`Tool.invoke` as the single public entrypoint.
 
-    Notes
-    -----
-    - We deliberately bypass the base Agent's pre-invoke tool here; the proxy's
-      job is transport only.
+    Metadata / schema
+    -----------------
+    On construction and on :meth:`refresh`, the tool calls the remote function
+    "agent_metadata" to populate:
+
+      - arguments_map (remote agent's declared input schema)
+      - return_type   (remote agent's declared output type)
+
+    Changing :attr:`url` or :attr:`headers` triggers a full :meth:`refresh`,
+    rebinding the underlying client and rebuilding schemas.
     """
 
-    def __init__(self, url: str,
-                 headers: Any|None = None):
-        # We still call Agent.__init__ to keep consistent metadata, but the engine
-        # is never used by this proxy.
-        # Expect a FULL endpoint (e.g., "http://127.0.0.1:5000/a2a").
-        self._client = A2AClient(url, headers = headers)
+    def __init__(self, url: str, headers: Any | None = None) -> None:
         self._url = url
         self._headers = headers
+        self._client = A2AClient(url, headers=headers)
+
         agent_card = self._client.get_agent_card()
-        super().__init__(name= "invoke",
-                         description=agent_card.description,
-                         namespace=agent_card.name,
-                         function=functools.partial(a2agent_host_invoker, client = self._client)
-                         )
+        super().__init__(
+            name="invoke",
+            description=agent_card.description,
+            namespace=agent_card.name,
+            function=functools.partial(a2agent_host_invoker, client=self._client),
+        )
+
+    def refresh(self, headers: Any | None = None) -> None:
+        """
+        Re-fetch the agent card and remote schemas, and rebuild the client and
+        function binding. Mirrors the intent of MCPProxyTool.refresh().
+        """
+        self._headers = headers
+        self._client = A2AClient(self._url, headers=self._headers)
+
+        try:
+            agent_card = self._client.get_agent_card()
+        except Exception as e:  # pragma: no cover
+            raise ToolDefinitionError(f"{self.full_name}: failed to fetch A2A agent card: {e}") from e
+
+        # Update exposed identity/metadata
+        namespace = agent_card.name
+        description = agent_card.description
+        # Rebind callable + rebuild schemas
+        function = functools.partial(a2agent_host_invoker, client=self._client)
+        super().__init__(
+            name="invoke",
+            description=description,
+            namespace=namespace,
+            function=function,
+        )
 
     @property
     def url(self) -> str:
         return self._url
+
     @url.setter
     def url(self, val: str) -> None:
         self._url = val
-        self._client = A2AClient(val)
+        self.refresh(self._headers)
 
     @property
-    def headers(self) -> Any:
+    def headers(self) -> Any | None:
         return self._headers
+
     @headers.setter
-    def headers(self, val: Any) -> None:
-        self._headers = val
-        self._client = A2AClient(self._url, headers = val)
+    def headers(self, val: Any | None) -> None:
+        self.refresh(val)
 
-    @property
-    def url(self) -> str:
-        return self._url
-    @url.setter
-    def url(self, val: str) -> None:
-        self._url = val
-        self._client = A2AClient(val, headers = self._headers)
-
-    # We override attach/detach to NO-OP, since the proxy doesn't hold files or context.
-    def attach(self, path: str) -> bool:  # type: ignore[override]
-        return False
-
-    def detach(self, path: str) -> bool:  # type: ignore[override]
-        return False
-    
     def _build_io_schemas(self) -> tuple[ArgumentMap, str]:
-        """
-        Construct `arguments_map` and `return_type` from the remote A2A agent's
-        pre-invoke and post-invoke tools.
-
-        - All parameters are KEYWORD_ONLY (A2A sends a single JSON object).
-        - Required parameters come from pre-invoke's `arguments_map`.
-        - Return type is derived from post-invoke's `return_type`.
-        """
-
-        call = FunctionCallContent(name="arguments_map", parameters=[])
+        """Construct ``arguments_map`` and ``return_type`` from remote "agent_metadata"."""
+        call = FunctionCallContent(name="agent_metadata", parameters=[])
         msg = Message(content=call, role=MessageRole.USER)
+
         resp = self._client.send_message(msg)
-        if getattr(resp.content, "type", None) == "function_response":
-            arg_map = resp.content.response[A2A_RESULT_KEY]  # type: ignore[return-value]
-        else:
-            raise ToolDefinitionError(f"{self.full_name}: failed to fetch pre-invoke argument map from A2A agent")
-        return_type = "Any"
-        return arg_map, return_type
+        if getattr(resp.content, "type", None) != "function_response":
+            raise ToolDefinitionError(f"{self.full_name}: failed to fetch agent_metadata from A2A agent")
+
+        payload = resp.content.response
+        if not isinstance(payload, Mapping):
+            raise ToolDefinitionError(f"{self.full_name}: agent_metadata response must be a mapping")
+
+        if "arguments_map" not in payload or "return_type" not in payload:
+            raise ToolDefinitionError(f"{self.full_name}: agent_metadata response missing required keys")
+
+        args_map = payload["arguments_map"]
+        if not isinstance(args_map, Mapping):
+            raise ToolDefinitionError(f"{self.full_name}: agent_metadata.arguments_map must be a mapping")
+        return_type = str(payload["return_type"])
+        return args_map, return_type
 
     def _get_mod_qual(
         self,
         function: Callable[..., Any],
     ) -> tuple[Optional[str], Optional[str]]:
-        """
-        A2A-backed tools don't map to a stable Python import path.
-        We explicitly opt-out of import-based identity.
-        """
+        """A2A-backed tools don't map to a stable Python import path."""
         return None, None
-    
+
     def _compute_is_persistible(self) -> bool:
         try:
             agent_card = self._client.get_agent_card()
-        except:
+        except Exception:
             return False
         return bool(agent_card.name and agent_card.description and self._url)
-    
+
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
-        """Default implementation for mapping input dicts to ``(*args, **kwargs)``.
-
-        The base policy is:
-
-        - Required parameters (those without ``default`` and not VAR_*) must be present.
-        - Unknown keys raise if there is no VAR_KEYWORD parameter; otherwise they
-          are accepted and passed through in ``**kwargs``.
-        - POSITIONAL_ONLY parameters are always passed positionally.
-        - POSITIONAL_OR_KEYWORD and KEYWORD_ONLY parameters are passed as
-          keywords (Python accepts this for both kinds).
-        - VAR_POSITIONAL expects the mapping to contain the parameter name with
-          a sequence value; these are appended to ``*args``.
-        - VAR_KEYWORD collects all remaining unknown keys into ``**kwargs``.
-        """
         return tuple([]), dict(inputs)
 
     def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
-        """Execute the underlying callable.
-
-        Subclasses may override this to change *how* a tool is executed (for
-        example, by making a remote MCP call or invoking an Agent), but should
-        not change the high-level semantics.
-        """
         try:
-            result = self._function(kwargs) # function = a2agent_host_invoker(client = self._client, inputs = kwargs)
-        except Exception as e:  # pragma: no cover - thin wrapper
+            result = self._function(inputs = kwargs)
+        except Exception as e:  # pragma: no cover
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
         return result
-    def to_dict(self)-> OrderedDict[str, Any]:
+
+    def to_dict(self) -> OrderedDict[str, Any]:
         dict_data = super().to_dict()
-        dict_data.update(OrderedDict(
-            url = self._url,
-        ))
+        dict_data.update(OrderedDict(url=self._url))
+        return dict_data
