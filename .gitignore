@@ -12,4 +12,4 @@ dist/
 .pytest_cache/
 .mypy_cache/
 src/atomic_agentic/_version.py
-atomic-ui.py
+atomic_ui.py
