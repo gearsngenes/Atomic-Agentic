@@ -62,6 +62,12 @@ import string
 import threading
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TypedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from python_a2a import (
+    A2AClient, A2AServer, run_server, agent,
+    Message, MessageRole,
+    FunctionCallContent, FunctionResponseContent, FunctionParameter,
+    TextContent
+)
 
 from .Exceptions import (
     ToolAgentError,
@@ -76,7 +82,7 @@ from .Tools import Tool
 from .Prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
 
 
-__all__ = ["Agent", "ToolAgent", "BlackboardEntry", "return_tool"]
+__all__ = ["Agent", "ToolAgent", "BlackboardEntry", "return_tool", "A2AgentHost"]
 
 logger = logging.getLogger(__name__)
 
@@ -1239,3 +1245,161 @@ class ReActAgent(ToolAgent):
                 "Now emit EXACTLY ONE JSON object for the next step and no other object."
             )
             messages_snapshot.append({"role": "user", "content": new_user_msg})
+
+
+A2A_RESULT_KEY = "__py_A2A_result__"
+
+# ───────────────────────────────────────────────────────────────────────────────
+# A2AgentHost wrapper class
+# ───────────────────────────────────────────────────────────────────────────────
+class A2AgentHost:
+    """
+    A2AgentHost
+    --------------
+    Wraps a local `seed: Agent` as a python-a2a server using the message-level
+    function-calling pattern. We define a dynamic subclass of `A2AServer` with the
+    `@agent(...)` decorator, but we **instantiate it in `run()`** with the final
+    `url`, to satisfy the Agent Card requirement.
+
+    Exposed function names:
+      - "invoke":         payload: Mapping[str, Any]  -> {result: <seed.invoke(...)>}
+      - "arguments_map":  no params                  -> {arguments_map: <seed.pre_invoke.to_dict()["arguments_map"]>}
+      - "agent_meta":     no params                  -> {name, description}
+    """
+
+    def __init__(
+        self,
+        agent: Agent,
+        version: str = "1.0.0",
+        host: str = "localhost",
+        port: int = 5000,
+    ):
+        if not isinstance(agent, Agent):
+            raise TypeError("A2AServerAgent requires a seed Agent.")
+        self._agent = agent
+        self._version = version
+        self._host = host  # if provided, used verbatim in Agent Card
+        self._port = port
+        self._arguments_map = agent.arguments_map
+
+        # runtime fields
+        self._server = None
+        outer = self
+
+        @agent(name=agent.name,
+               description=agent.description,
+               version=version,
+               url=f"http://{host}:{port}"
+               )
+        class _Server(A2AServer):
+            """Dynamic per-instance server. Instantiated in run(url=...)."""
+
+            def handle_message(self, message: Message) -> Message:
+                content = message.content
+                ctype = content.type
+
+                # Text: brief help
+                if ctype == "text":
+                    return Message(
+                        content=TextContent(
+                            text="Call as function_call: name in {'invoke','arguments_map','agent_meta'}."
+                        ),
+                        role=MessageRole.AGENT,
+                        parent_message_id=message.message_id,
+                        conversation_id=message.conversation_id
+                    )
+
+                # Function call dispatch
+                if ctype == "function_call":
+                    fn = content.name
+                    params = {p.name: p.value for p in (content.parameters or [])}
+
+                    try:
+                        if fn == "invoke":
+                            payload = params.get("payload", {})
+                            result = outer._agent.invoke(payload)  # Agent returns str by contract
+                            return Message(
+                                content=FunctionResponseContent(
+                                    name="invoke",
+                                    response={A2A_RESULT_KEY: result}
+                                ),
+                                role=MessageRole.AGENT,
+                                parent_message_id=message.message_id,
+                                conversation_id=message.conversation_id
+                            )
+                        if fn == "agent_metadata":
+                            meta = {
+                                "arguments_map": outer._agent.arguments_map,
+                                "return_type": outer._agent.post_invoke.return_type}
+                            return Message(
+                                content=FunctionResponseContent(
+                                    name="agent_meta",
+                                    response=meta
+                                ),
+                                role=MessageRole.AGENT,
+                                parent_message_id=message.message_id,
+                                conversation_id=message.conversation_id
+                            )
+
+                        # Unknown function
+                        return Message(
+                            content=FunctionResponseContent(
+                                name=fn,
+                                response={"error": f"Unknown function '{fn}'."}
+                            ),
+                            role=MessageRole.AGENT,
+                            parent_message_id=message.message_id,
+                            conversation_id=message.conversation_id
+                        )
+
+                    except Exception as e:
+                        return Message(
+                            content=FunctionResponseContent(
+                                name=fn,
+                                response={"error": f"{type(e).__name__}: {e}"}
+                            ),
+                            role=MessageRole.AGENT,
+                            parent_message_id=message.message_id,
+                            conversation_id=message.conversation_id
+                        )
+
+                # Fallback
+                return Message(
+                    content=TextContent(text="Unsupported content type."),
+                    role=MessageRole.AGENT,
+                    parent_message_id=message.message_id,
+                    conversation_id=message.conversation_id
+                )
+
+        self._server = _Server(url = f"http://{self._host}:{self._port}")
+
+    @property
+    def agent(self) -> Agent:
+        """The wrapped Agent instance."""
+        return self._agent
+
+    @property
+    def host(self) -> str:
+        """The host address the server will bind to."""
+        return self._host
+
+    @property
+    def port(self) -> int:
+        """The port number the server will listen on."""
+        return self._port
+
+    # -----------------------------
+    # Run / URL composition
+    # -----------------------------
+    def run(self,*,debug: bool = False,) -> None:
+        """
+        Start the server and publish a valid Agent Card URL.
+
+        - If `public_url` was passed to __init__, we use it verbatim.
+        - Otherwise we compose `scheme://public_host:port`. If `public_host` is
+          not provided, default "127.0.0.1".
+        - We instantiate the dynamic A2A server *here* with `url=...`, avoiding
+          the "URL is required for A2A agent card" exception.
+        """
+        # Run HTTP listener (client uses "<final_url>/a2a")
+        run_server(self._server, host=self._host, port=self._port, debug=debug)

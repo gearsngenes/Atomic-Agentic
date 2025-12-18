@@ -17,6 +17,13 @@ from typing import (
 import logging
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+# python-a2a imports
+from python_a2a import (
+    A2AClient, A2AServer, run_server, agent,
+    Message, MessageRole,
+    FunctionCallContent, FunctionResponseContent, FunctionParameter,
+    TextContent
+)
 
 from .Exceptions import ToolDefinitionError, ToolInvocationError
 from .Primitives import Tool, Agent, ArgumentMap
@@ -717,3 +724,179 @@ class MCPProxyTool(Tool):
             }
         )
         return base
+
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+A2A_RESULT_KEY = "__py_A2A_result__"  # server uses this key inside FunctionResponseContent.response
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _ensure_mapping(name: str, obj: Any) -> Mapping[str, Any]:
+    if not isinstance(obj, Mapping):
+        raise TypeError(f"{name} expects a Mapping[str, Any]")
+    return obj  # type: ignore[return-value]
+
+def a2agent_host_invoker(client, inputs: Mapping[str, Any]) -> Any:  # type: ignore[override]
+    _ensure_mapping("A2AProxyAgent.invoke", inputs)
+
+    # Typed FunctionParameter avoids `'dict' object has no attribute 'name'`.
+    call = FunctionCallContent(
+        name="invoke",
+        parameters=[FunctionParameter(name="payload", value=dict(inputs))]
+    )
+    msg = Message(content=call, role=MessageRole.USER)
+    resp = client.send_message(msg).content.response
+    result = resp
+    if isinstance(resp, Mapping):
+        result = resp.get(A2A_RESULT_KEY, resp)
+    return result
+
+# ───────────────────────────────────────────────────────────────────────────────
+# A2AgentTool
+# ───────────────────────────────────────────────────────────────────────────────
+class A2AgentTool(Tool):
+    """
+    A2AgentTool
+    -------------
+    Client-side proxy that forwards dict inputs to a remote A2A agent via a
+    single function call: name="invoke", parameters=[("payload", <dict>)].
+
+    Contract
+    --------
+    - .invoke(inputs: Mapping) -> Message
+      Sends a FunctionCallContent and returns the RAW response Message.
+      The server replies with FunctionResponseContent so your code can do:
+          raw.content.response["result"]  # str or structured (server-defined)
+
+    - Convenience:
+        .invoke_response(inputs) -> Dict[str, Any] | None
+        Returns the `content.response` dict if present, else None.
+
+    Notes
+    -----
+    - We deliberately bypass the base Agent's pre-invoke tool here; the proxy's
+      job is transport only.
+    """
+
+    def __init__(self, url: str,
+                 headers: Any|None = None):
+        # We still call Agent.__init__ to keep consistent metadata, but the engine
+        # is never used by this proxy.
+        # Expect a FULL endpoint (e.g., "http://127.0.0.1:5000/a2a").
+        self._client = A2AClient(url, headers = headers)
+        self._url = url
+        self._headers = headers
+        agent_card = self._client.get_agent_card()
+        super().__init__(name= "invoke",
+                         description=agent_card.description,
+                         namespace=agent_card.name,
+                         function=functools.partial(a2agent_host_invoker, client = self._client)
+                         )
+
+    @property
+    def url(self) -> str:
+        return self._url
+    @url.setter
+    def url(self, val: str) -> None:
+        self._url = val
+        self._client = A2AClient(val)
+
+    @property
+    def headers(self) -> Any:
+        return self._headers
+    @headers.setter
+    def headers(self, val: Any) -> None:
+        self._headers = val
+        self._client = A2AClient(self._url, headers = val)
+
+    @property
+    def url(self) -> str:
+        return self._url
+    @url.setter
+    def url(self, val: str) -> None:
+        self._url = val
+        self._client = A2AClient(val, headers = self._headers)
+
+    # We override attach/detach to NO-OP, since the proxy doesn't hold files or context.
+    def attach(self, path: str) -> bool:  # type: ignore[override]
+        return False
+
+    def detach(self, path: str) -> bool:  # type: ignore[override]
+        return False
+    
+    def _build_io_schemas(self) -> tuple[ArgumentMap, str]:
+        """
+        Construct `arguments_map` and `return_type` from the remote A2A agent's
+        pre-invoke and post-invoke tools.
+
+        - All parameters are KEYWORD_ONLY (A2A sends a single JSON object).
+        - Required parameters come from pre-invoke's `arguments_map`.
+        - Return type is derived from post-invoke's `return_type`.
+        """
+
+        call = FunctionCallContent(name="arguments_map", parameters=[])
+        msg = Message(content=call, role=MessageRole.USER)
+        resp = self._client.send_message(msg)
+        if getattr(resp.content, "type", None) == "function_response":
+            arg_map = resp.content.response[A2A_RESULT_KEY]  # type: ignore[return-value]
+        else:
+            raise ToolDefinitionError(f"{self.full_name}: failed to fetch pre-invoke argument map from A2A agent")
+        return_type = "Any"
+        return arg_map, return_type
+
+    def _get_mod_qual(
+        self,
+        function: Callable[..., Any],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        A2A-backed tools don't map to a stable Python import path.
+        We explicitly opt-out of import-based identity.
+        """
+        return None, None
+    
+    def _compute_is_persistible(self) -> bool:
+        try:
+            agent_card = self._client.get_agent_card()
+        except:
+            return False
+        return bool(agent_card.name and agent_card.description and self._url)
+    
+    def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
+        """Default implementation for mapping input dicts to ``(*args, **kwargs)``.
+
+        The base policy is:
+
+        - Required parameters (those without ``default`` and not VAR_*) must be present.
+        - Unknown keys raise if there is no VAR_KEYWORD parameter; otherwise they
+          are accepted and passed through in ``**kwargs``.
+        - POSITIONAL_ONLY parameters are always passed positionally.
+        - POSITIONAL_OR_KEYWORD and KEYWORD_ONLY parameters are passed as
+          keywords (Python accepts this for both kinds).
+        - VAR_POSITIONAL expects the mapping to contain the parameter name with
+          a sequence value; these are appended to ``*args``.
+        - VAR_KEYWORD collects all remaining unknown keys into ``**kwargs``.
+        """
+        return tuple([]), dict(inputs)
+
+    def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+        """Execute the underlying callable.
+
+        Subclasses may override this to change *how* a tool is executed (for
+        example, by making a remote MCP call or invoking an Agent), but should
+        not change the high-level semantics.
+        """
+        try:
+            result = self._function(kwargs) # function = a2agent_host_invoker(client = self._client, inputs = kwargs)
+        except Exception as e:  # pragma: no cover - thin wrapper
+            raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
+        return result
+    def to_dict(self)-> OrderedDict[str, Any]:
+        dict_data = super().to_dict()
+        dict_data.update(OrderedDict(
+            url = self._url,
+        ))
