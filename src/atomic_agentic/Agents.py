@@ -998,7 +998,7 @@ class ReActAgent(ToolAgent):
 
     @tool_calls_limit.setter
     def tool_calls_limit(self, value: Optional[int]) -> None:
-        if value is None or value <= 0:
+        if value is None or not isinstance(value, int) or value <= 0:
             raise ToolAgentError("ReActAgent requires a tool_calls_limit >= 0.")
         self._tool_calls_limit = value
 
@@ -1040,10 +1040,7 @@ class ReActAgent(ToolAgent):
         try:
             return repr(value)
         except Exception:
-            try:
-                return str(value)
-            except Exception:  # pragma: no cover
-                return "<unstringifiable result>"
+            return str(value)
 
     def _truncate_preview(self, text: str) -> str:
         limit = self._preview_limit
@@ -1128,40 +1125,6 @@ class ReActAgent(ToolAgent):
             )
         return tool_name, args
 
-    def _build_observation_user_message(
-        self,
-        *,
-        base_len: int,
-        new_steps: List[BlackboardEntry],
-        running_result: Any,
-    ) -> Dict[str, str]:
-        if new_steps:
-            hi = base_len + len(new_steps) - 1
-            steps_range = f"{base_len}..{hi}"
-            produced_by = str(hi)
-            next_idx = base_len + len(new_steps)
-        else:
-            steps_range = f"(none yet; next index is {base_len})"
-            produced_by = "N/A"
-            next_idx = base_len
-
-        steps_dump = self.blackboard_dumps(new_steps, raw_results=True, indent=2)
-        preview_text = self._truncate_preview(self._safe_stringify(running_result))
-
-        content = (
-            "NEW STEPS THIS RUN (RAW ARGS; GLOBAL INDICES):\n"
-            f"{steps_range}\n"
-            f"{steps_dump}\n\n"
-            "INDEXING:\n"
-            f"- New steps you emit MUST continue from global index {next_idx}.\n"
-            "- Use placeholders like \"<<__step__N>>\" with GLOBAL indices.\n\n"
-            "OBSERVATION (latest running result):\n"
-            f"- produced_by_global_step: {produced_by}\n"
-            f"- value_preview: {preview_text}\n\n"
-            "Now emit EXACTLY ONE next-step JSON object with keys \"tool\" and \"args\" and no other text."
-        )
-        return {"role": "user", "content": content}
-
     # ------------------------------------------------------------------ #
     # Core loop
     # ------------------------------------------------------------------ #
@@ -1232,14 +1195,18 @@ class ReActAgent(ToolAgent):
             messages_snapshot.append({"role": "assistant", "content": canonical_step})
 
             # 3) Execute and record.
+            
+            # 3.a) Validate tool exists.
             if not self.has_tool(tool_name):
                 raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool {tool_name!r}.")
 
             raw_args: Dict[str, Any] = dict(raw_args_any)
             board_for_step = list(persisted) + list(new_steps)
 
+            # 3.b) Call tool via ToolAgent gateway.
             result = self._call_tool(tool_name, raw_args, board=board_for_step)
 
+            # 3.c) Record completed step with resolved args.
             resolved_any = self._resolve_step_refs(dict(raw_args), board=board_for_step)
             if not isinstance(resolved_any, dict):
                 raise ToolAgentError(
@@ -1264,10 +1231,11 @@ class ReActAgent(ToolAgent):
                 return new_steps, running_result
 
             # 4) Append observation + request as the next user message.
-            messages_snapshot.append(
-                self._build_observation_user_message(
-                    base_len=base_len,
-                    new_steps=new_steps,
-                    running_result=running_result,
-                )
+            global_idx = base_len + len(new_steps) - 1
+            preview_text = self._truncate_preview(self._safe_stringify(running_result))
+            new_user_msg = (
+                f"STEP {global_idx} EXECUTED TOOL {tool_name!r}.\n"
+                f"OBSERVED RESULT: {preview_text}\n\n"
+                "Now emit EXACTLY ONE JSON object for the next step and no other object."
             )
+            messages_snapshot.append({"role": "user", "content": new_user_msg})

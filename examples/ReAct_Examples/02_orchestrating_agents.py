@@ -4,23 +4,37 @@ from dotenv import load_dotenv
 
 from atomic_agentic.Agents import Agent, ReActAgent
 from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.Tools import Tool
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 llm = OpenAIEngine(model="gpt-5-mini")
 
+def builder_prestep(task: str | None, revision_notes: str | None) -> str:
+    if revision_notes:
+        return f"Please rebuild code for the following task: {task}\n\nRevision Notes from earlier: {revision_notes}\n\nPlease provide the updated code."
+    elif task:
+        return f"Task: {task}\n\nPlease implement the initial code."
+    else:
+        raise ValueError("Either task or revision_notes must be provided.")
+
 builder = Agent(
     name="CodeBuilderAgent",
-    description="Generates Python code per request/revision.",
+    description="Generates Python code per user request OR revises its earlier drafts from revision notes (provide one or the other).",
     llm_engine=llm,
     role_prompt=(
         "You are a senior software engineer who writes Python code for requested tasks.\n"
         "Return ONLY the code, with no explanations."
     ),
     context_enabled=True,
+    pre_invoke=builder_prestep,
     history_window=10,
 )
+
+
+def reviewer_prestep(draft_code: str) -> str:
+    return f"Please review the following code for the task: {draft_code}\n\nReturn revision suggestions or 'Approved' if no changes are needed."
 
 reviewer = Agent(
     name="CodeReviewer",
@@ -32,6 +46,7 @@ reviewer = Agent(
         "needed, return 'Approved'."
     ),
     context_enabled=True,
+    pre_invoke=reviewer_prestep,
     history_window=10,
 )
 
