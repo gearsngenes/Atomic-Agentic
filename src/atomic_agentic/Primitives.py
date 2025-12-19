@@ -1429,11 +1429,16 @@ class Workflow(ABC):
     - Outputs: normalized and packaged against an ordered `output_schema`
       template using policy-driven packaging rules.
 
-    Output schema
-    -------------
-    - If provided as list[str], all fields are required (default = NO_VAL).
-    - If provided as mapping[str, Any], values are defaults (including None);
-      required fields must explicitly use NO_VAL.
+    IO schemas
+    ----------
+    - `arguments_map` is REQUIRED at construction time and is the authoritative
+      source for `input_schema`.
+    - `input_schema` mirrors `output_schema` format: OrderedDict[str, Any] where
+      each value is either a default or NO_VAL.
+    - Public mutation is disallowed: `arguments_map`, `input_schema`, and
+      `output_schema` are read-only properties.
+    - Subclasses may refresh schemas via `_set_io_schemas(arguments_map=..., output_schema=...)`
+      when internal components change.
 
     Packaging policies
     ------------------
@@ -1446,6 +1451,11 @@ class Workflow(ABC):
     ----------
     Final validation that *no* keys remain set to NO_VAL is performed in `invoke()`,
     not inside the packaging helpers.
+
+    Memory
+    ------
+    `clear_memory()` clears workflow checkpoints. Subclasses may extend via
+    polymorphism.
     """
 
     def __init__(
@@ -1453,7 +1463,8 @@ class Workflow(ABC):
         *,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        output_schema: Union[List[str], Mapping[str, Any]] = None,
+        arguments_map: Mapping[str, Mapping[str, Any]],
+        output_schema: Optional[Union[List[str], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.UNBUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
     ) -> None:
@@ -1463,15 +1474,18 @@ class Workflow(ABC):
         if output_schema is None:
             output_schema = [DEF_RES_KEY]
 
-        self._output_schema = self._normalize_output_schema(output_schema)
-        if len(self._output_schema) == 0:
-            raise SchemaError("Workflow.output_schema must contain at least one key")
-
         self._bundling_policy = BundlingPolicy(bundling_policy)
         self._mapping_policy = MappingPolicy(mapping_policy)
 
         self._invoke_lock = threading.RLock()
         self._checkpoints: List[WorkflowCheckpoint] = []
+
+        # Normalized IO state (set by _set_io_schemas)
+        self._arguments_map: OrderedDict[str, Dict[str, Any]]
+        self._input_schema: OrderedDict[str, Any]
+        self._output_schema: OrderedDict[str, Any]
+
+        self._set_io_schemas(arguments_map=arguments_map, output_schema=output_schema)
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -1483,6 +1497,15 @@ class Workflow(ABC):
     @property
     def description(self) -> Optional[str]:
         return self._description
+
+    @property
+    def arguments_map(self) -> Mapping[str, Mapping[str, Any]]:
+        # Shallow copy to discourage external mutation.
+        return OrderedDict(self._arguments_map)
+
+    @property
+    def input_schema(self) -> OrderedDict[str, Any]:
+        return OrderedDict(self._input_schema)
 
     @property
     def output_schema(self) -> OrderedDict[str, Any]:
@@ -1561,6 +1584,14 @@ class Workflow(ABC):
     def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any]:
         """Subclass-defined execution step; returns (metadata, raw_result)."""
         raise NotImplementedError
+
+    # ------------------------------------------------------------------ #
+    # Memory
+    # ------------------------------------------------------------------ #
+    def clear_memory(self) -> None:
+        """Clear workflow-owned memory (checkpoints). Subclasses may extend."""
+        with self._invoke_lock:
+            self._checkpoints.clear()
 
     # ------------------------------------------------------------------ #
     # Final validation (kept separate from packaging)
@@ -1759,6 +1790,33 @@ class Workflow(ABC):
     # ------------------------------------------------------------------ #
     # Schema helpers
     # ------------------------------------------------------------------ #
+    def _set_io_schemas(
+        self,
+        *,
+        arguments_map: ArgumentMap,
+        output_schema: Union[List[str], Mapping[str, Any]],
+    ) -> None:
+        """
+        Normalize and set:
+          - _arguments_map (ordered, meta dicts copied)
+          - _input_schema  (defaults from arguments_map else NO_VAL)
+          - _output_schema (normalized output template)
+
+        Intentionally protected: callers should be Workflow subclasses.
+        """
+        input_schema: OrderedDict[str, Any] = OrderedDict()
+
+        for name, meta in arguments_map.items():
+            input_schema[name] = meta.get("default", default = NO_VAL)
+
+        normalized_out = self._normalize_output_schema(output_schema)
+        if len(normalized_out) == 0:
+            raise SchemaError("Workflow.output_schema must contain at least one key")
+
+        self._arguments_map = arguments_map
+        self._input_schema = input_schema
+        self._output_schema = normalized_out
+
     def _normalize_output_schema(
         self, schema: Union[List[str], Mapping[str, Any]]
     ) -> OrderedDict[str, Any]:
@@ -1799,6 +1857,8 @@ class Workflow(ABC):
             workflow_type=type(self).__name__,
             name=self._name,
             description=self._description,
+            arguments_map=self.arguments_map,
+            input_schema=self.input_schema,
             output_schema=self.output_schema,
             bundling_policy=self._bundling_policy.value,
             mapping_policy=self._mapping_policy.value,
