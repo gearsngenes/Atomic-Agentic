@@ -36,7 +36,6 @@ __all__ = [
 # ───────────────────────────────────────────────────────────────────────────────
 # LLMEngine primitive
 # ───────────────────────────────────────────────────────────────────────────────
-
 class LLMEngine(ABC):
     """
     Base template-method primitive for LLM provider adapters.
@@ -389,9 +388,7 @@ class LLMEngine(ABC):
 # ───────────────────────────────────────────────────────────────────────────────
 # Tool primitive
 # ───────────────────────────────────────────────────────────────────────────────
-
 ArgumentMap = OrderedDict[str, Dict[str, Any]]
-
 
 class Tool:
     """Concrete base Tool primitive.
@@ -825,6 +822,9 @@ class Tool:
         }
 
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Agent Primitive
+# ───────────────────────────────────────────────────────────────────────────────
 def identity_pre(*, prompt: str) -> str:
     if not isinstance(prompt, str):
         raise ValueError("prompt must be a string")
@@ -840,9 +840,6 @@ def identity_post(*, result: Any) -> Any:
     """
     return result
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Agent Primitive
-# ───────────────────────────────────────────────────────────────────────────────
 
 class Agent:
     """
@@ -1381,10 +1378,10 @@ class Agent:
             history=self._history,
         )
 
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Workflow primitive
 # ───────────────────────────────────────────────────────────────────────────────
-
 class _NoValSentinel:
     """Sentinel used to mark required output fields in an output schema template."""
     __slots__ = ()
@@ -1392,15 +1389,12 @@ class _NoValSentinel:
     def __repr__(self) -> str:  # pragma: no cover
         return "NO_VAL"
 
-
 NO_VAL: Any = _NoValSentinel()
-
 
 class BundlingPolicy(str, Enum):
     """Controls whether raw results are bundled into a single output field."""
     BUNDLE = "BUNDLE"
     UNBUNDLE = "UNBUNDLE"
-
 
 class MappingPolicy(str, Enum):
     """Controls how mapping-shaped raw outputs are interpreted."""
@@ -1408,7 +1402,6 @@ class MappingPolicy(str, Enum):
     IGNORE_EXTRA = "IGNORE_EXTRA"
     MATCH_FIRST_STRICT = "MATCH_FIRST_STRICT"
     MATCH_FIRST_LENIENT = "MATCH_FIRST_LENIENT"
-
 
 @dataclass(frozen=True, slots=True)
 class WorkflowCheckpoint:
@@ -1422,7 +1415,6 @@ class WorkflowCheckpoint:
     packaged_output: OrderedDict[str, Any]
     metadata: Dict[str, Any]
 
-
 DEF_RES_KEY = "__RESULT__"
 
 class Workflow(ABC):
@@ -1432,9 +1424,9 @@ class Workflow(ABC):
     Workflows are a deterministic *packaging boundary*:
 
     - Inputs: always a Mapping[str, Any]
-    - Execution: subclasses implement `_invoke(inputs)` and may record metadata
-      and returns any metadata along side the raw result
-    - Outputs: normalized and validated against an ordered `output_schema`
+    - Execution: subclasses implement `_invoke(inputs)` and return
+      (metadata: Mapping[str, Any], raw: Any)
+    - Outputs: normalized and packaged against an ordered `output_schema`
       template using policy-driven packaging rules.
 
     Output schema
@@ -1449,6 +1441,11 @@ class Workflow(ABC):
       (requires output_schema length == 1).
     - BundlingPolicy.UNBUNDLE: attempt to coerce raw output into a Mapping or
       non-text Sequence; then apply MappingPolicy/sequence/scalar rules.
+
+    Validation
+    ----------
+    Final validation that *no* keys remain set to NO_VAL is performed in `invoke()`,
+    not inside the packaging helpers.
     """
 
     def __init__(
@@ -1472,6 +1469,7 @@ class Workflow(ABC):
 
         self._bundling_policy = BundlingPolicy(bundling_policy)
         self._mapping_policy = MappingPolicy(mapping_policy)
+
         self._invoke_lock = threading.RLock()
         self._checkpoints: List[WorkflowCheckpoint] = []
 
@@ -1514,6 +1512,15 @@ class Workflow(ABC):
     # Public API (Template Method)
     # ------------------------------------------------------------------ #
     def invoke(self, inputs: Mapping[str, Any]) -> OrderedDict[str, Any]:
+        """
+        Template method:
+        1) Validate inputs is mapping
+        2) Run _invoke() -> (metadata, raw)
+        3) Package raw -> packaged (may still contain NO_VAL)
+        4) Validate packaged contains no NO_VAL
+        5) Save checkpoint
+        6) Return packaged
+        """
         if not isinstance(inputs, ABCMapping):
             raise ValidationError("Workflow.invoke: inputs must be a mapping")
 
@@ -1522,15 +1529,18 @@ class Workflow(ABC):
             run_id = uuid4().hex
 
             try:
-                # return the raw result and the metadata associated with running it
                 metadata, raw = self._invoke(inputs)
             except Exception as exc:
                 raise ExecutionError(f"{type(self).__name__}._invoke failed") from exc
 
-            if not isinstance(metadata, Mapping):
+            if not isinstance(metadata, ABCMapping):
                 raise ValidationError("Workflow._invoke: returned metadata must be a mapping")
 
             packaged = self.package(raw)
+
+            # Final completeness validation happens HERE, not in packaging helpers.
+            self._validate_packaged(packaged)
+
             ended = datetime.now(timezone.utc)
             elapsed = (ended - started).total_seconds()
 
@@ -1542,20 +1552,40 @@ class Workflow(ABC):
                 inputs=dict(inputs),
                 raw_output=raw,
                 packaged_output=OrderedDict(packaged),
-                metadata=metadata,
+                metadata=dict(metadata),  # snapshot
             )
             self._checkpoints.append(checkpoint)
             return packaged
 
     @abstractmethod
-    def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Dict, Any]:
-        """Subclass-defined execution step; returns any raw result."""
+    def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any]:
+        """Subclass-defined execution step; returns (metadata, raw_result)."""
         raise NotImplementedError
+
+    # ------------------------------------------------------------------ #
+    # Final validation (kept separate from packaging)
+    # ------------------------------------------------------------------ #
+    def _validate_packaged(self, packaged: Mapping[str, Any]) -> None:
+        """
+        Raise if any output fields remain NO_VAL after packaging.
+
+        This method is intentionally called by `invoke()` and not by `package()`
+        to keep packaging responsibilities separate from final contract validation.
+        """
+        missing = [k for k, v in packaged.items() if v is NO_VAL]
+        if missing:
+            raise PackagingError(f"Workflow packaging: missing required output fields: {missing}")
 
     # ------------------------------------------------------------------ #
     # Packaging
     # ------------------------------------------------------------------ #
     def package(self, raw: Any) -> OrderedDict[str, Any]:
+        """
+        Package a raw result into the workflow's output schema.
+
+        IMPORTANT: This method does not perform final NO_VAL validation.
+        That validation is performed by `invoke()` via `_validate_packaged()`.
+        """
         keys = list(self._output_schema.keys())
         if not keys:
             raise SchemaError("Workflow has empty output_schema; cannot package results")
@@ -1574,13 +1604,10 @@ class Workflow(ABC):
         template = OrderedDict(self._output_schema)
 
         if isinstance(normalized, ABCMapping):
-            packaged = self._package_from_mapping(template, normalized)
-        elif self._is_non_text_sequence(normalized):
-            packaged = self._package_from_sequence(template, normalized)  # type: ignore[arg-type]
-        else:
-            packaged = self._package_from_scalar(template, normalized)
-
-        return self._resolve_missing(packaged)
+            return self._package_from_mapping(template, normalized)
+        if self._is_non_text_sequence(normalized):
+            return self._package_from_sequence(template, normalized)  # type: ignore[arg-type]
+        return self._package_from_scalar(template, normalized)
 
     def _normalize_raw(self, raw: Any) -> Any:
         if isinstance(raw, ABCMapping) or self._is_non_text_sequence(raw):
@@ -1667,6 +1694,7 @@ class Workflow(ABC):
 
             missing_keys = [k for k in schema_keys if template[k] is NO_VAL]
 
+            # If already filled, strict rejects any extra values; lenient ignores them.
             if not missing_keys:
                 if extras_values and self._mapping_policy == MappingPolicy.MATCH_FIRST_STRICT:
                     raise PackagingError(
@@ -1675,6 +1703,7 @@ class Workflow(ABC):
                     )
                 return template
 
+            # Too many extras: strict errors; lenient truncates.
             if len(extras_values) > len(missing_keys):
                 if self._mapping_policy == MappingPolicy.MATCH_FIRST_LENIENT:
                     extras_values = extras_values[: len(missing_keys)]
@@ -1699,15 +1728,24 @@ class Workflow(ABC):
         keys = list(template.keys())
         values = list(seq)
 
-        if len(values) > len(keys):
-            raise PackagingError(
-                "Workflow packaging (SEQUENCE): too many values "
-                f"({len(values)}) for output_schema ({len(keys)})"
-            )
+        # If the sequence fits, positional-fill and return.
+        if len(values) <= len(keys):
+            for i, v in enumerate(values):
+                template[keys[i]] = v
+            return template
 
-        for i, v in enumerate(values):
-            template[keys[i]] = v
-        return template
+        # Overflow: policy decides whether we truncate or raise.
+        if self._mapping_policy in (MappingPolicy.IGNORE_EXTRA, MappingPolicy.MATCH_FIRST_LENIENT):
+            # Ignore extras by truncating to schema length.
+            for i, k in enumerate(keys):
+                template[k] = values[i]
+            return template
+
+        # STRICT and MATCH_FIRST_STRICT both reject overflow for sequences.
+        raise PackagingError(
+            "Workflow packaging (SEQUENCE): too many values "
+            f"({len(values)}) for output_schema ({len(keys)}) under policy {self._mapping_policy.value}"
+        )
 
     def _package_from_scalar(
         self,
@@ -1717,12 +1755,6 @@ class Workflow(ABC):
         keys = list(template.keys())
         template[keys[0]] = value
         return template
-
-    def _resolve_missing(self, packaged: OrderedDict[str, Any]) -> OrderedDict[str, Any]:
-        missing = [k for k, v in packaged.items() if v is NO_VAL]
-        if not missing:
-            return packaged
-        raise PackagingError(f"Workflow packaging: missing required output fields: {missing}")
 
     # ------------------------------------------------------------------ #
     # Schema helpers
