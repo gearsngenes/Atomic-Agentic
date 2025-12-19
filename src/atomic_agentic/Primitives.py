@@ -11,14 +11,27 @@ from typing import Mapping, Callable, Optional
 from collections import OrderedDict
 import inspect
 import threading
+from collections.abc import Mapping as ABCMapping, Sequence as ABCSequence
+from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from uuid import uuid4
+
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "LLMEngine",
     "Tool",
-    "Agent"
+    "Agent",
+    "Workflow",
+    "WorkflowCheckpoint",
+    "BundlingPolicy",
+    "MappingPolicy",
+    "NO_VAL",
+    "DEF_RES_KEY"
 ]
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # LLMEngine primitive
@@ -513,7 +526,8 @@ class Tool:
             type_name = meta.get("type", "Any")
             default_marker = ""
             if "default" in meta:
-                default_marker = f" = {str(meta["default"])}"
+                default = str(meta['default'])
+                default_marker = f" = {default}"
             if kind == "VAR_POSITIONAL":
                 param_str = f"*{name}: {type_name}{default_marker}"
             elif kind == "VAR_KEYWORD":
@@ -1365,4 +1379,395 @@ class Agent:
             context_enabled=self._context_enabled,
             history_window=self._history_window,
             history=self._history,
+        )
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Workflow primitive
+# ───────────────────────────────────────────────────────────────────────────────
+
+class _NoValSentinel:
+    """Sentinel used to mark required output fields in an output schema template."""
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return "NO_VAL"
+
+
+NO_VAL: Any = _NoValSentinel()
+
+
+class BundlingPolicy(str, Enum):
+    """Controls whether raw results are bundled into a single output field."""
+    BUNDLE = "BUNDLE"
+    UNBUNDLE = "UNBUNDLE"
+
+
+class MappingPolicy(str, Enum):
+    """Controls how mapping-shaped raw outputs are interpreted."""
+    STRICT = "STRICT"
+    IGNORE_EXTRA = "IGNORE_EXTRA"
+    MATCH_FIRST_STRICT = "MATCH_FIRST_STRICT"
+    MATCH_FIRST_LENIENT = "MATCH_FIRST_LENIENT"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowCheckpoint:
+    """A single workflow invocation record."""
+    run_id: str
+    started_at: datetime
+    ended_at: datetime
+    elapsed_s: float
+    inputs: Mapping[str, Any]
+    raw_output: Any
+    packaged_output: OrderedDict[str, Any]
+    metadata: Dict[str, Any]
+
+
+DEF_RES_KEY = "__RESULT__"
+
+class Workflow(ABC):
+    """
+    Base template-method primitive for Workflow orchestrators.
+
+    Workflows are a deterministic *packaging boundary*:
+
+    - Inputs: always a Mapping[str, Any]
+    - Execution: subclasses implement `_invoke(inputs)` and may record metadata
+      and returns any metadata along side the raw result
+    - Outputs: normalized and validated against an ordered `output_schema`
+      template using policy-driven packaging rules.
+
+    Output schema
+    -------------
+    - If provided as list[str], all fields are required (default = NO_VAL).
+    - If provided as mapping[str, Any], values are defaults (including None);
+      required fields must explicitly use NO_VAL.
+
+    Packaging policies
+    ------------------
+    - BundlingPolicy.BUNDLE: bundle raw output into the single schema key
+      (requires output_schema length == 1).
+    - BundlingPolicy.UNBUNDLE: attempt to coerce raw output into a Mapping or
+      non-text Sequence; then apply MappingPolicy/sequence/scalar rules.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        output_schema: Union[List[str], Mapping[str, Any]] = None,
+        bundling_policy: BundlingPolicy = BundlingPolicy.UNBUNDLE,
+        mapping_policy: MappingPolicy = MappingPolicy.STRICT,
+    ) -> None:
+        self._name = name or type(self).__name__
+        self._description = description
+
+        if output_schema is None:
+            output_schema = [DEF_RES_KEY]
+
+        self._output_schema = self._normalize_output_schema(output_schema)
+        if len(self._output_schema) == 0:
+            raise SchemaError("Workflow.output_schema must contain at least one key")
+
+        self._bundling_policy = BundlingPolicy(bundling_policy)
+        self._mapping_policy = MappingPolicy(mapping_policy)
+        self._invoke_lock = threading.RLock()
+        self._checkpoints: List[WorkflowCheckpoint] = []
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> Optional[str]:
+        return self._description
+
+    @property
+    def output_schema(self) -> OrderedDict[str, Any]:
+        return OrderedDict(self._output_schema)
+
+    @property
+    def output_keys(self) -> tuple[str, ...]:
+        return tuple(self._output_schema.keys())
+
+    @property
+    def bundling_policy(self) -> BundlingPolicy:
+        return self._bundling_policy
+
+    @property
+    def mapping_policy(self) -> MappingPolicy:
+        return self._mapping_policy
+
+    @property
+    def checkpoints(self) -> tuple[WorkflowCheckpoint, ...]:
+        return tuple(self._checkpoints)
+
+    @property
+    def latest_checkpoint(self) -> Optional[WorkflowCheckpoint]:
+        return self._checkpoints[-1] if self._checkpoints else None
+
+    # ------------------------------------------------------------------ #
+    # Public API (Template Method)
+    # ------------------------------------------------------------------ #
+    def invoke(self, inputs: Mapping[str, Any]) -> OrderedDict[str, Any]:
+        if not isinstance(inputs, ABCMapping):
+            raise ValidationError("Workflow.invoke: inputs must be a mapping")
+
+        with self._invoke_lock:
+            started = datetime.now(timezone.utc)
+            run_id = uuid4().hex
+
+            try:
+                # return the raw result and the metadata associated with running it
+                metadata, raw = self._invoke(inputs)
+            except Exception as exc:
+                raise ExecutionError(f"{type(self).__name__}._invoke failed") from exc
+
+            if not isinstance(metadata, Mapping):
+                raise ValidationError("Workflow._invoke: returned metadata must be a mapping")
+
+            packaged = self.package(raw)
+            ended = datetime.now(timezone.utc)
+            elapsed = (ended - started).total_seconds()
+
+            checkpoint = WorkflowCheckpoint(
+                run_id=run_id,
+                started_at=started,
+                ended_at=ended,
+                elapsed_s=elapsed,
+                inputs=dict(inputs),
+                raw_output=raw,
+                packaged_output=OrderedDict(packaged),
+                metadata=metadata,
+            )
+            self._checkpoints.append(checkpoint)
+            return packaged
+
+    @abstractmethod
+    def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Dict, Any]:
+        """Subclass-defined execution step; returns any raw result."""
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------ #
+    # Packaging
+    # ------------------------------------------------------------------ #
+    def package(self, raw: Any) -> OrderedDict[str, Any]:
+        keys = list(self._output_schema.keys())
+        if not keys:
+            raise SchemaError("Workflow has empty output_schema; cannot package results")
+
+        # Bundling short-circuit
+        if self._bundling_policy == BundlingPolicy.BUNDLE:
+            if len(keys) != 1:
+                raise SchemaError(
+                    "BundlingPolicy.BUNDLE requires output_schema of length 1 "
+                    f"(got {len(keys)})"
+                )
+            return OrderedDict([(keys[0], raw)])
+
+        # UNBUNDLE flow
+        normalized = self._normalize_raw(raw)
+        template = OrderedDict(self._output_schema)
+
+        if isinstance(normalized, ABCMapping):
+            packaged = self._package_from_mapping(template, normalized)
+        elif self._is_non_text_sequence(normalized):
+            packaged = self._package_from_sequence(template, normalized)  # type: ignore[arg-type]
+        else:
+            packaged = self._package_from_scalar(template, normalized)
+
+        return self._resolve_missing(packaged)
+
+    def _normalize_raw(self, raw: Any) -> Any:
+        if isinstance(raw, ABCMapping) or self._is_non_text_sequence(raw):
+            return raw
+
+        # Pydantic v2 models: model_dump()
+        md = getattr(raw, "model_dump", None)
+        if callable(md):
+            try:
+                dumped = md()
+                if isinstance(dumped, ABCMapping):
+                    return dumped
+            except Exception:
+                pass
+
+        # NamedTuple: _asdict()
+        ad = getattr(raw, "_asdict", None)
+        if callable(ad):
+            try:
+                dumped = ad()
+                if isinstance(dumped, ABCMapping):
+                    return dumped
+            except Exception:
+                pass
+
+        # Dataclass
+        if is_dataclass(raw):
+            try:
+                dumped = asdict(raw)
+                if isinstance(dumped, ABCMapping):
+                    return dumped
+            except Exception:
+                pass
+
+        # Plain object with __dict__
+        try:
+            dumped = vars(raw)
+            if isinstance(dumped, ABCMapping):
+                return dumped
+        except Exception:
+            pass
+
+        return raw
+
+    def _is_non_text_sequence(self, x: Any) -> bool:
+        return isinstance(x, ABCSequence) and not isinstance(x, (str, bytes, bytearray))
+
+    def _package_from_mapping(
+        self,
+        template: OrderedDict[str, Any],
+        mapping: Mapping[str, Any],
+    ) -> OrderedDict[str, Any]:
+        schema_keys = list(template.keys())
+
+        if self._mapping_policy == MappingPolicy.STRICT:
+            for k in mapping.keys():
+                if k not in template:
+                    raise PackagingError(f"Workflow packaging (STRICT): unexpected key {k!r}")
+            for k in schema_keys:
+                if k in mapping:
+                    template[k] = mapping[k]
+            return template
+
+        if self._mapping_policy == MappingPolicy.IGNORE_EXTRA:
+            for k, v in mapping.items():
+                if k in template:
+                    template[k] = v
+            return template
+
+        if self._mapping_policy in (MappingPolicy.MATCH_FIRST_STRICT, MappingPolicy.MATCH_FIRST_LENIENT):
+            if self._mapping_policy == MappingPolicy.MATCH_FIRST_STRICT:
+                if len(mapping) > len(schema_keys):
+                    raise PackagingError(
+                        "Workflow packaging (MATCH_FIRST_STRICT): mapping has more keys "
+                        f"({len(mapping)}) than output_schema ({len(schema_keys)})"
+                    )
+
+            extras_values: List[Any] = []
+            for k, v in mapping.items():
+                if k in template:
+                    template[k] = v
+                else:
+                    extras_values.append(v)
+
+            missing_keys = [k for k in schema_keys if template[k] is NO_VAL]
+
+            if not missing_keys:
+                if extras_values and self._mapping_policy == MappingPolicy.MATCH_FIRST_STRICT:
+                    raise PackagingError(
+                        "Workflow packaging (MATCH_FIRST_STRICT): output_schema already filled "
+                        f"but received {len(extras_values)} extra values"
+                    )
+                return template
+
+            if len(extras_values) > len(missing_keys):
+                if self._mapping_policy == MappingPolicy.MATCH_FIRST_LENIENT:
+                    extras_values = extras_values[: len(missing_keys)]
+                else:
+                    raise PackagingError(
+                        "Workflow packaging (MATCH_FIRST_*): too many extra values "
+                        f"({len(extras_values)}) for remaining schema slots ({len(missing_keys)})"
+                    )
+
+            for idx, v in enumerate(extras_values):
+                template[missing_keys[idx]] = v
+
+            return template
+
+        raise PackagingError(f"Unknown mapping policy: {self._mapping_policy!r}")
+
+    def _package_from_sequence(
+        self,
+        template: OrderedDict[str, Any],
+        seq: ABCSequence[Any],
+    ) -> OrderedDict[str, Any]:
+        keys = list(template.keys())
+        values = list(seq)
+
+        if len(values) > len(keys):
+            raise PackagingError(
+                "Workflow packaging (SEQUENCE): too many values "
+                f"({len(values)}) for output_schema ({len(keys)})"
+            )
+
+        for i, v in enumerate(values):
+            template[keys[i]] = v
+        return template
+
+    def _package_from_scalar(
+        self,
+        template: OrderedDict[str, Any],
+        value: Any,
+    ) -> OrderedDict[str, Any]:
+        keys = list(template.keys())
+        template[keys[0]] = value
+        return template
+
+    def _resolve_missing(self, packaged: OrderedDict[str, Any]) -> OrderedDict[str, Any]:
+        missing = [k for k, v in packaged.items() if v is NO_VAL]
+        if not missing:
+            return packaged
+        raise PackagingError(f"Workflow packaging: missing required output fields: {missing}")
+
+    # ------------------------------------------------------------------ #
+    # Schema helpers
+    # ------------------------------------------------------------------ #
+    def _normalize_output_schema(
+        self, schema: Union[List[str], Mapping[str, Any]]
+    ) -> OrderedDict[str, Any]:
+        if isinstance(schema, list):
+            if not schema:
+                raise SchemaError("output_schema list must be non-empty")
+            out = OrderedDict()
+            for k in schema:
+                if not isinstance(k, str) or not k:
+                    raise SchemaError("output_schema list keys must be non-empty strings")
+                if k in out:
+                    raise SchemaError(f"duplicate output_schema key: {k!r}")
+                out[k] = NO_VAL
+            return out
+
+        if isinstance(schema, ABCMapping):
+            if not schema:
+                raise SchemaError("output_schema mapping must be non-empty")
+            out = OrderedDict()
+            for k, default in schema.items():
+                if not isinstance(k, str) or not k:
+                    raise SchemaError("output_schema mapping keys must be non-empty strings")
+                if k in out:
+                    raise SchemaError(f"duplicate output_schema key: {k!r}")
+                out[k] = default
+            return out
+
+        raise SchemaError(
+            "output_schema must be a list[str] or mapping[str, Any]; "
+            f"got {type(schema)!r}"
+        )
+
+    # ------------------------------------------------------------------ #
+    # Serialization
+    # ------------------------------------------------------------------ #
+    def to_dict(self) -> OrderedDict[str, Any]:
+        return OrderedDict(
+            workflow_type=type(self).__name__,
+            name=self._name,
+            description=self._description,
+            output_schema=self.output_schema,
+            bundling_policy=self._bundling_policy.value,
+            mapping_policy=self._mapping_policy.value,
         )
