@@ -1465,7 +1465,7 @@ class Workflow(ABC):
         description: Optional[str] = None,
         arguments_map: Mapping[str, Mapping[str, Any]],
         output_schema: Optional[Union[List[str], Mapping[str, Any]]] = None,
-        bundling_policy: BundlingPolicy = BundlingPolicy.UNBUNDLE,
+        bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
     ) -> None:
         self._name = name or type(self).__name__
@@ -1511,9 +1511,11 @@ class Workflow(ABC):
     def output_schema(self) -> OrderedDict[str, Any]:
         return OrderedDict(self._output_schema)
 
-    @property
-    def output_keys(self) -> tuple[str, ...]:
-        return tuple(self._output_schema.keys())
+    @output_schema.setter
+    def output_schema(self, value: Optional[Union[List[str], Mapping[str, Any]]]) -> None:
+        if value is None:
+            value = [DEF_RES_KEY]
+        self._set_io_schemas(arguments_map=self.arguments_map, output_schema=value)
 
     @property
     def bundling_policy(self) -> BundlingPolicy:
@@ -1581,7 +1583,7 @@ class Workflow(ABC):
             return packaged
 
     @abstractmethod
-    def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any]:
+    def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Mapping, Any]:
         """Subclass-defined execution step; returns (metadata, raw_result)."""
         raise NotImplementedError
 
