@@ -1,52 +1,63 @@
 # examples/Workflow_Examples/01_AgentFlow.py
+from __future__ import annotations
+
 import logging
-from atomic_agentic.Agents import Agent
-from atomic_agentic.LLMEngines import OpenAIEngine
-from atomic_agentic.Tools import Tool
-from atomic_agentic.Workflows import AgentFlow
+
 from dotenv import load_dotenv
 
-load_dotenv()
+from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.Agents import Agent
+from atomic_agentic.Tools import Tool
+from atomic_agentic.Workflows import AgentFlow
 
+load_dotenv()
 logging.basicConfig(level=logging.INFO)  # or DEBUG
 
 print("=== AgentFlow examples (schema-driven dict inputs) ===")
 
 # -------------------------------------------------------------------
 # Base Agent setup
-# Contract: Agent.invoke accepts a MAPPING; default pre-invoke requires {'prompt': str}.
+# Contract: Agent.invoke accepts a mapping; default pre_invoke requires {'prompt': str}.
 # -------------------------------------------------------------------
 my_agent = Agent(
     name="MyAgent",
     description="Concise assistant.",
-    role_prompt="You are a concise assistant. Reply in one short paragraph.",
     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
+    role_prompt="You are a concise assistant. Reply in one short paragraph.",
     context_enabled=True,
 )
 
-# AgentFlow requires explicit output_schema (single-key is common for text answers)
+# AgentFlow packages the agent's raw output under the schema.
 flow = AgentFlow(agent=my_agent, output_schema=["answer"])
 
 # 1) Basic call (strict default: {'prompt': str})
 res1 = flow.invoke({"prompt": "Hello! In one line, what is entropy?"})
-print("1) ", res1)
+print("1)", res1)
 
 # 2) Another call
 res2 = flow.invoke({"prompt": "Give a one-sentence definition of Bayes' theorem."})
-print("2) ", res2)
+print("2)", res2)
 
 # -------------------------------------------------------------------
 # Custom pre-invoke Tool: accept {'question': str} -> returns a prompt string.
-# Demonstrates schema flexibility WITHOUT relying on hidden key remapping.
+# Demonstrates schema flexibility (Agent.arguments_map mirrors pre_invoke).
 # -------------------------------------------------------------------
 def question_to_prompt(*, question: str) -> str:
     return f"Answer in one sentence: {question}"
 
-q_tool = Tool(func=question_to_prompt, name="question_to_prompt", description="{'question': str} -> prompt")
+
+q_tool = Tool(
+    function=question_to_prompt,
+    name="question_to_prompt",
+    namespace=my_agent.name,
+    description="Convert {'question': str} into a prompt string.",
+)
+
 my_agent.pre_invoke = q_tool
 
+# New AgentFlow instance (or reuse the old one; both will work).
 flow_q = AgentFlow(agent=my_agent, output_schema=["answer"])
 
 # 3) Invoke with custom key schema supported by pre-invoke Tool
 res3 = flow_q.invoke({"question": "State the central limit theorem in one sentence."})
-print("3) ", res3)
+print("3)", res3)

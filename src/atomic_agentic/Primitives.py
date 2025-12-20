@@ -1177,7 +1177,7 @@ class Agent:
         self._post_param_name = next(iter(post_arg_map.keys()))
     
     @property
-    def arguments_map(self) -> OrderedDict[str, Any]:
+    def arguments_map(self) -> ArgumentMap:
         """
         Mirror of the pre_invoke Tool's arguments map.
 
@@ -1442,8 +1442,9 @@ class Workflow(ABC):
 
     Packaging policies
     ------------------
-    - BundlingPolicy.BUNDLE: bundle raw output into the single schema key
-      (requires output_schema length == 1).
+    - BundlingPolicy.BUNDLE: bundle raw output into the single schema key.
+      This policy is ONLY applied when output_schema length == 1. Otherwise,
+      it is ignored and packaging proceeds in UNBUNDLE mode.
     - BundlingPolicy.UNBUNDLE: attempt to coerce raw output into a Mapping or
       non-text Sequence; then apply MappingPolicy/sequence/scalar rules.
 
@@ -1463,7 +1464,7 @@ class Workflow(ABC):
         *,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        arguments_map: Mapping[str, Mapping[str, Any]],
+        arguments_map: ArgumentMap,
         output_schema: Optional[Union[List[str], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
@@ -1481,7 +1482,7 @@ class Workflow(ABC):
         self._checkpoints: List[WorkflowCheckpoint] = []
 
         # Normalized IO state (set by _set_io_schemas)
-        self._arguments_map: OrderedDict[str, Dict[str, Any]]
+        self._arguments_map: ArgumentMap
         self._input_schema: OrderedDict[str, Any]
         self._output_schema: OrderedDict[str, Any]
 
@@ -1499,9 +1500,9 @@ class Workflow(ABC):
         return self._description
 
     @property
-    def arguments_map(self) -> Mapping[str, Mapping[str, Any]]:
+    def arguments_map(self) -> ArgumentMap:
         # Shallow copy to discourage external mutation.
-        return OrderedDict(self._arguments_map)
+        return OrderedDict((k, dict(v)) for k, v in self._arguments_map.items())
 
     @property
     def input_schema(self) -> OrderedDict[str, Any]:
@@ -1583,7 +1584,7 @@ class Workflow(ABC):
             return packaged
 
     @abstractmethod
-    def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Mapping, Any]:
+    def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any]:
         """Subclass-defined execution step; returns (metadata, raw_result)."""
         raise NotImplementedError
 
@@ -1623,16 +1624,11 @@ class Workflow(ABC):
         if not keys:
             raise SchemaError("Workflow has empty output_schema; cannot package results")
 
-        # Bundling short-circuit
-        if self._bundling_policy == BundlingPolicy.BUNDLE:
-            if len(keys) != 1:
-                raise SchemaError(
-                    "BundlingPolicy.BUNDLE requires output_schema of length 1 "
-                    f"(got {len(keys)})"
-                )
+        # Bundling is ONLY considered when schema length == 1.
+        if self._bundling_policy == BundlingPolicy.BUNDLE and len(keys) == 1:
             return OrderedDict([(keys[0], raw)])
 
-        # UNBUNDLE flow
+        # UNBUNDLE flow (also used when BUNDLE is set but schema length != 1)
         normalized = self._normalize_raw(raw)
         template = OrderedDict(self._output_schema)
 
@@ -1806,16 +1802,30 @@ class Workflow(ABC):
 
         Intentionally protected: callers should be Workflow subclasses.
         """
+        if not isinstance(arguments_map, OrderedDict):
+            # Normalize to OrderedDict for determinism.
+            arguments_map = OrderedDict(arguments_map)
+
+        normalized_args: ArgumentMap = OrderedDict()
         input_schema: OrderedDict[str, Any] = OrderedDict()
 
         for name, meta in arguments_map.items():
-            input_schema[name] = meta.get("default", default = NO_VAL)
+            if not isinstance(name, str) or not name:
+                raise SchemaError("Workflow.arguments_map keys must be non-empty strings")
+            if not isinstance(meta, ABCMapping):
+                raise SchemaError(
+                    "Workflow.arguments_map values must be mappings (per-arg metadata); "
+                    f"for key {name!r} got {type(meta)!r}"
+                )
+            meta_dict = dict(meta)
+            normalized_args[name] = meta_dict
+            input_schema[name] = meta_dict.get("default", NO_VAL)
 
         normalized_out = self._normalize_output_schema(output_schema)
         if len(normalized_out) == 0:
             raise SchemaError("Workflow.output_schema must contain at least one key")
 
-        self._arguments_map = arguments_map
+        self._arguments_map = normalized_args
         self._input_schema = input_schema
         self._output_schema = normalized_out
 
