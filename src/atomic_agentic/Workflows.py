@@ -172,7 +172,6 @@ class MonoFlow(Workflow):
         *,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        arguments_map: Optional[ArgumentMap] = None,
         output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
@@ -186,7 +185,7 @@ class MonoFlow(Workflow):
         super().__init__(
             name=name or component.name,
             description=description or component.description,
-            arguments_map=arguments_map or component.arguments_map,
+            arguments_map=component.arguments_map,
             output_schema=output_schema,
             bundling_policy=bundling_policy,
             mapping_policy=mapping_policy,
