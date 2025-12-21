@@ -1494,10 +1494,16 @@ class Workflow(ABC):
     @property
     def name(self) -> str:
         return self._name
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
 
     @property
     def description(self) -> Optional[str]:
         return self._description
+    @description.setter
+    def description(self, value: str) -> None:
+        self._description = value
 
     @property
     def arguments_map(self) -> ArgumentMap:
@@ -1521,10 +1527,16 @@ class Workflow(ABC):
     @property
     def bundling_policy(self) -> BundlingPolicy:
         return self._bundling_policy
+    @bundling_policy.setter
+    def bundling_policy(self, value: BundlingPolicy) -> None:
+        self._bundling_policy = BundlingPolicy(value)
 
     @property
     def mapping_policy(self) -> MappingPolicy:
         return self._mapping_policy
+    @mapping_policy.setter
+    def mapping_policy(self, value: MappingPolicy) -> None:
+        self._mapping_policy = MappingPolicy(value)
 
     @property
     def checkpoints(self) -> tuple[WorkflowCheckpoint, ...]:

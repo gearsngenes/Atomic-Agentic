@@ -150,20 +150,29 @@ class AgentFlow(Workflow):
         return d
 
 
-class MonoFlow(Workflow):
-    """Decorator-style Workflow wrapper (russian-doll packaging).
+class AdapterFlow(Workflow):
+    """A concrete, generic Workflow wrapper for Tools, Agents, and Workflows.
 
-    MonoFlow wraps a single component that is either:
+    AdapterFlow wraps a single component that is either:
+
     - Tool      -> normalized to ToolFlow
     - Agent     -> normalized to AgentFlow
     - Workflow  -> used as-is
 
     Key behavior:
+
     - The wrapped component is executed as a Workflow, producing an *already-packaged*
       output mapping.
     - That mapping is returned as this wrapper's "raw" result, so this wrapper's
       packaging rules can re-package / transform the mapping again.
-    - This enables nested wrappers to repeatedly re-package layer by layer.
+    - AdapterFlow is a mutable configuration boundary: changes to name/description,
+      output_schema, bundling_policy, and mapping_policy are mirrored into the wrapped
+      component.
+
+    Notes:
+
+    - The wrapped component is intentionally not swappable after construction.
+    - arguments_map and input_schema remain read-only and always mirror the component.
     """
 
     def __init__(
@@ -173,69 +182,97 @@ class MonoFlow(Workflow):
         name: Optional[str] = None,
         description: Optional[str] = None,
         output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
-        bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
-        mapping_policy: MappingPolicy = MappingPolicy.STRICT,
+        bundling_policy: Optional[Union[BundlingPolicy, str]] = None,
+        mapping_policy: Optional[Union[MappingPolicy, str]] = None,
     ) -> None:
-        if not isinstance(component, (Workflow, Tool, Agent)):
-            raise ValidationError(
-                "MonoFlow: component must be a Workflow, Tool, or Agent; "
-                f"got {type(component).__name__}"
-            )
+        normalized = self._normalize_component(component=component)
 
+        effective_name = name if name is not None else normalized.name
+        effective_description = description if description is not None else normalized.description
+        effective_output_schema = output_schema if output_schema is not None else normalized.output_schema
+        effective_bundling = (
+            BundlingPolicy(bundling_policy) if bundling_policy is not None else normalized.bundling_policy
+        )
+        effective_mapping = (
+            MappingPolicy(mapping_policy) if mapping_policy is not None else normalized.mapping_policy
+        )
+
+        # arguments_map is always taken directly from the normalized component.
         super().__init__(
-            name=name or component.name,
-            description=description or component.description,
-            arguments_map=component.arguments_map,
-            output_schema=output_schema,
-            bundling_policy=bundling_policy,
-            mapping_policy=mapping_policy,
+            name=effective_name,
+            description=effective_description,
+            arguments_map=normalized.arguments_map,
+            output_schema=effective_output_schema,
+            bundling_policy=effective_bundling,
+            mapping_policy=effective_mapping,
         )
 
-        self._component: Workflow = self._normalize_component(
-            component=component,
-            output_schema=output_schema,
-            bundling_policy=bundling_policy,
-            mapping_policy=mapping_policy,
-        )
+        self._component = normalized
+        self._mirror_to_component()
 
     @property
     def component(self) -> Workflow:
         return self._component
 
-    @component.setter
-    def component(self, value: Union[Tool, Agent, Workflow]) -> None:
-        normalized = self._normalize_component(
-            component=value,
-            output_schema=self.output_schema,
-            bundling_policy=self.bundling_policy,
-            mapping_policy=self.mapping_policy,
-        )
-        self._component = normalized
-        self._set_io_schemas(arguments_map=self._component.arguments_map, output_schema=self.output_schema)
+    # ------------------------------------------------------------------ #
+    # Mirrored, mutable properties
+    # ------------------------------------------------------------------ #
+    @Workflow.name.setter  # type: ignore[misc]
+    def name(self, value: str) -> None:
+        Workflow.name.fset(self, value)  # type: ignore[misc]
+        self._component.name = self.name
 
+    @Workflow.description.setter  # type: ignore[misc]
+    def description(self, value: Optional[str]) -> None:
+        Workflow.description.fset(self, value)  # type: ignore[misc]
+        self._component.description = self.description
+
+    @Workflow.output_schema.setter  # type: ignore[misc]
+    def output_schema(self, value: Optional[Union[list[str], Mapping[str, Any]]]) -> None:
+        Workflow.output_schema.fset(self, value)  # type: ignore[misc]
+        self._component.output_schema = self.output_schema
+
+    @Workflow.bundling_policy.setter  # type: ignore[misc]
+    def bundling_policy(self, value: Union[BundlingPolicy, str]) -> None:
+        Workflow.bundling_policy.fset(self, value)  # type: ignore[misc]
+        self._component.bundling_policy = self.bundling_policy
+
+    @Workflow.mapping_policy.setter  # type: ignore[misc]
+    def mapping_policy(self, value: Union[MappingPolicy, str]) -> None:
+        Workflow.mapping_policy.fset(self, value)  # type: ignore[misc]
+        self._component.mapping_policy = self.mapping_policy
+
+    # ------------------------------------------------------------------ #
+    # Execution
+    # ------------------------------------------------------------------ #
     def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any]:
         # Run the component as a workflow, yielding a mapping result.
         raw_mapping = self._component.invoke(inputs)
+
+        raw: Mapping = raw_mapping
+
+        # Avoid definitively unintended duplicate nesting for single-key bundling:
+        # If the component already returned {k: value} and we are about to BUNDLE into k again,
+        # unwrap to `value` so that this wrapper's packaging produces {k: value} (not {k:{k:...}}).
+        if (
+            self.bundling_policy == BundlingPolicy.BUNDLE
+            and len(self.output_schema) == 1
+            and isinstance(raw_mapping, Mapping)
+        ):
+            schema_key = next(iter(self.output_schema.keys()))
+            if len(raw_mapping) == 1 and schema_key in raw_mapping:
+                raw = raw_mapping[schema_key]
 
         # Start metadata from the wrapped component's latest checkpoint (if any).
         latest = self._component.latest_checkpoint
         base_meta: Mapping[str, Any] = latest.metadata if latest is not None else {}
         meta = dict(base_meta)  # shallow copy to avoid ghost mutation
 
-        # Track nesting depth.
-        prior_depth = meta.get("__component_depth__", 0)
+        prior_depth = meta.get("__WF_WRAP_DEPTH__", 0)
         depth = (prior_depth + 1) if isinstance(prior_depth, int) and prior_depth >= 0 else 1
+        meta["__WF_WRAP_DEPTH__"] = depth
 
-        meta.update(
-            {
-                "__component_executed__": self._component.name,
-                "__component_depth__": depth,
-                "__component_schema__": self._component.output_schema,
-            }
-        )
-
-        # IMPORTANT: return the mapping as "raw" so *this* workflow's packaging rules apply.
-        return meta, raw_mapping
+        return meta, raw
 
     def to_dict(self) -> OrderedDict[str, Any]:
         d = super().to_dict()
@@ -246,37 +283,33 @@ class MonoFlow(Workflow):
         )
         return d
 
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    def _mirror_to_component(self) -> None:
+        """Push this wrapper's mutable configuration down into the component."""
+        self._component.name = self.name
+        self._component.description = self.description
+        self._component.output_schema = self.output_schema
+        self._component.bundling_policy = self.bundling_policy
+        self._component.mapping_policy = self.mapping_policy
+
+        # Ensure our IO schemas remain consistent with the component's arguments_map.
+        self._set_io_schemas(arguments_map=self._component.arguments_map, output_schema=self.output_schema)
+
     @staticmethod
-    def _normalize_component(
-        *,
-        component: Union[Workflow, Tool, Agent],
-        output_schema: Optional[Union[list[str], Mapping[str, Any]]],
-        bundling_policy: BundlingPolicy,
-        mapping_policy: MappingPolicy,
-    ) -> Workflow:
+    def _normalize_component(*, component: Union[Workflow, Tool, Agent]) -> Workflow:
         """Normalize Tool/Agent into ToolFlow/AgentFlow; Workflow passes through."""
         if isinstance(component, Workflow):
             return component
 
         if isinstance(component, Tool):
-            # Inner ToolFlow uses wrapper-provided output_schema/policies for russian-doll packaging.
-            return ToolFlow(
-                component,
-                output_schema=output_schema,
-                bundling_policy=bundling_policy,
-                mapping_policy=mapping_policy,
-            )
+            return ToolFlow(component)
 
         if isinstance(component, Agent):
-            return AgentFlow(
-                component,
-                output_schema=output_schema,
-                bundling_policy=bundling_policy,
-                mapping_policy=mapping_policy,
-            )
+            return AgentFlow(component)
 
-        # Defensive (should be unreachable due to caller guards)
         raise ValidationError(
-            "MonoFlow: component must be a Workflow, Tool, or Agent; "
+            "AdapterFlow: component must be a Workflow, Tool, or Agent; "
             f"got {type(component).__name__}"
         )
