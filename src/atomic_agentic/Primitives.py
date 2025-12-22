@@ -29,7 +29,7 @@ __all__ = [
     "BundlingPolicy",
     "MappingPolicy",
     "NO_VAL",
-    "DEF_RES_KEY"
+    "DEFAULT_WF_KEY"
 ]
 
 
@@ -1415,7 +1415,7 @@ class WorkflowCheckpoint:
     packaged_output: OrderedDict[str, Any]
     metadata: Dict[str, Any]
 
-DEF_RES_KEY = "__RESULT__"
+DEFAULT_WF_KEY = "__RESULT__"
 
 class Workflow(ABC):
     """
@@ -1473,7 +1473,7 @@ class Workflow(ABC):
         self._description = description
 
         if output_schema is None:
-            output_schema = [DEF_RES_KEY]
+            output_schema = [DEFAULT_WF_KEY]
 
         self._bundling_policy = BundlingPolicy(bundling_policy)
         self._mapping_policy = MappingPolicy(mapping_policy)
@@ -1521,7 +1521,7 @@ class Workflow(ABC):
     @output_schema.setter
     def output_schema(self, value: Optional[Union[List[str], Mapping[str, Any]]]) -> None:
         if value is None:
-            value = [DEF_RES_KEY]
+            value = [DEFAULT_WF_KEY]
         self._set_io_schemas(arguments_map=self.arguments_map, output_schema=value)
 
     @property

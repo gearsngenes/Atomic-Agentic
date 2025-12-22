@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from typing import Any, Optional, Union
 
 from .Exceptions import ValidationError
-from .Primitives import Agent, ArgumentMap, BundlingPolicy, MappingPolicy, Tool, Workflow
+from .Primitives import Agent, ArgumentMap, BundlingPolicy, MappingPolicy, Tool, Workflow, DEFAULT_WF_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +27,14 @@ __all__ = [
     "Workflow",
     "ToolFlow",
     "AgentFlow",
-    "MonoFlow",
+    "AdapterFlow",
+    "DEFAULT_WF_KEY",
 ]
 
 
+#------------------------------------------------------------------------------#
+# Thin Tool Workflow Adapter
+#------------------------------------------------------------------------------#
 class ToolFlow(Workflow):
     """A thin Workflow boundary around a single :class:`~atomic_agentic.Primitives.Tool`.
 
@@ -85,6 +89,9 @@ class ToolFlow(Workflow):
         return d
 
 
+#------------------------------------------------------------------------------#
+# Thin Agent Workflow Adapter
+#------------------------------------------------------------------------------#
 class AgentFlow(Workflow):
     """A thin Workflow boundary around a single :class:`~atomic_agentic.Primitives.Agent`.
 
@@ -149,6 +156,11 @@ class AgentFlow(Workflow):
         )
         return d
 
+
+#------------------------------------------------------------------------------#
+# Generic Workflow Wrapper/Adapter
+#------------------------------------------------------------------------------#
+ADAPTER_DEPTH = "__ADAPTER_DEPTH__"
 
 class AdapterFlow(Workflow):
     """A concrete, generic Workflow wrapper for Tools, Agents, and Workflows.
@@ -217,29 +229,46 @@ class AdapterFlow(Workflow):
     # ------------------------------------------------------------------ #
     # Mirrored, mutable properties
     # ------------------------------------------------------------------ #
-    @Workflow.name.setter  # type: ignore[misc]
+    @property
+    def name(self) -> str:
+        return self._name
+    @name.setter
     def name(self, value: str) -> None:
-        Workflow.name.fset(self, value)  # type: ignore[misc]
+        self._name = value
         self._component.name = self.name
 
-    @Workflow.description.setter  # type: ignore[misc]
-    def description(self, value: Optional[str]) -> None:
-        Workflow.description.fset(self, value)  # type: ignore[misc]
+    @property
+    def description(self) -> str:
+        return self._description
+    @description.setter
+    def description(self, value: str) -> None:
+        self._description = value
         self._component.description = self.description
 
-    @Workflow.output_schema.setter  # type: ignore[misc]
+    @property
+    def output_schema(self) -> Optional[Union[list[str], Mapping[str, Any]]]:
+        return self._output_schema
+    @output_schema.setter
     def output_schema(self, value: Optional[Union[list[str], Mapping[str, Any]]]) -> None:
-        Workflow.output_schema.fset(self, value)  # type: ignore[misc]
+        if value is None:
+            value = [DEFAULT_WF_KEY]
+        self._set_io_schemas(arguments_map=self.arguments_map, output_schema=value)
         self._component.output_schema = self.output_schema
 
-    @Workflow.bundling_policy.setter  # type: ignore[misc]
+    @property
+    def bundling_policy(self) -> BundlingPolicy:
+        return self._bundling_policy
+    @bundling_policy.setter
     def bundling_policy(self, value: Union[BundlingPolicy, str]) -> None:
-        Workflow.bundling_policy.fset(self, value)  # type: ignore[misc]
+        self._bundling_policy = BundlingPolicy(value)
         self._component.bundling_policy = self.bundling_policy
 
-    @Workflow.mapping_policy.setter  # type: ignore[misc]
+    @property
+    def mapping_policy(self) -> MappingPolicy:
+        return self._mapping_policy
+    @mapping_policy.setter
     def mapping_policy(self, value: Union[MappingPolicy, str]) -> None:
-        Workflow.mapping_policy.fset(self, value)  # type: ignore[misc]
+        self._mapping_policy = MappingPolicy(value)
         self._component.mapping_policy = self.mapping_policy
 
     # ------------------------------------------------------------------ #
@@ -268,9 +297,9 @@ class AdapterFlow(Workflow):
         base_meta: Mapping[str, Any] = latest.metadata if latest is not None else {}
         meta = dict(base_meta)  # shallow copy to avoid ghost mutation
 
-        prior_depth = meta.get("__WF_WRAP_DEPTH__", 0)
+        prior_depth = meta.get(ADAPTER_DEPTH, 0)
         depth = (prior_depth + 1) if isinstance(prior_depth, int) and prior_depth >= 0 else 1
-        meta["__WF_WRAP_DEPTH__"] = depth
+        meta[ADAPTER_DEPTH] = depth
 
         return meta, raw
 
