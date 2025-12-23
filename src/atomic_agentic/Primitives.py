@@ -816,6 +816,7 @@ class Tool:
             "namespace": self.namespace,
             "description": self.description,
             "signature": self.signature,
+            "return_type": self.return_type,
             "module": self._module,
             "qualname": self._qualname,
             "is_persistible": self.is_persistible,
