@@ -17,13 +17,21 @@ from collections.abc import Mapping
 from typing import Any, Optional, Union
 
 from .Exceptions import ValidationError
-from .Primitives import Agent, ArgumentMap, BundlingPolicy, MappingPolicy, Tool, Workflow, DEFAULT_WF_KEY
+from .Primitives import (
+    Agent,
+    BundlingPolicy,
+    MappingPolicy,
+    AbsentValPolicy,
+    Tool,
+    Workflow,
+    DEFAULT_WF_KEY)
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "BundlingPolicy",
     "MappingPolicy",
+    "AbsentValPolicy",
     "Workflow",
     "ToolFlow",
     "AgentFlow",
@@ -51,6 +59,7 @@ class ToolFlow(Workflow):
         output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
+        absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
     ) -> None:
         if not isinstance(tool, Tool):
             raise ValidationError(f"ToolFlow: tool must be a Tool; got {type(tool).__name__}")
@@ -64,6 +73,7 @@ class ToolFlow(Workflow):
             output_schema=output_schema,
             bundling_policy=bundling_policy,
             mapping_policy=mapping_policy,
+            absent_val_policy=absent_val_policy,
         )
 
     @property
@@ -108,6 +118,7 @@ class AgentFlow(Workflow):
         output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
+        absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
     ) -> None:
         if not isinstance(agent, Agent):
             raise ValidationError(f"AgentFlow: agent must be an Agent; got {type(agent).__name__}")
@@ -119,6 +130,7 @@ class AgentFlow(Workflow):
             output_schema=output_schema,
             bundling_policy=bundling_policy,
             mapping_policy=mapping_policy,
+            absent_val_policy=absent_val_policy,
         )
 
         self._agent = agent
@@ -194,8 +206,9 @@ class AdapterFlow(Workflow):
         name: Optional[str] = None,
         description: Optional[str] = None,
         output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
-        bundling_policy: Optional[Union[BundlingPolicy, str]] = None,
-        mapping_policy: Optional[Union[MappingPolicy, str]] = None,
+        bundling_policy: Optional[BundlingPolicy] = None,
+        mapping_policy: Optional[MappingPolicy] = None,
+        absent_val_policy: Optional[AbsentValPolicy] = None,
     ) -> None:
         normalized = self._normalize_component(component=component)
 
@@ -208,6 +221,7 @@ class AdapterFlow(Workflow):
         effective_mapping = (
             MappingPolicy(mapping_policy) if mapping_policy is not None else normalized.mapping_policy
         )
+        effective_absent_val_policy = absent_val_policy if absent_val_policy is not None else normalized.absent_val_policy
 
         # arguments_map is always taken directly from the normalized component.
         super().__init__(
@@ -217,6 +231,7 @@ class AdapterFlow(Workflow):
             output_schema=effective_output_schema,
             bundling_policy=effective_bundling,
             mapping_policy=effective_mapping,
+            absent_val_policy=effective_absent_val_policy,
         )
 
         self._component = normalized
@@ -270,6 +285,14 @@ class AdapterFlow(Workflow):
     def mapping_policy(self, value: Union[MappingPolicy, str]) -> None:
         self._mapping_policy = MappingPolicy(value)
         self._component.mapping_policy = self.mapping_policy
+    
+    @property
+    def absent_val_policy(self) -> AbsentValPolicy:
+        return self._absent_val_policy
+    @absent_val_policy.setter
+    def absent_val_policy(self, value: Union[AbsentValPolicy, str]) -> None:
+        self._absent_val_policy = AbsentValPolicy(value)
+        self._component.absent_val_policy = self.absent_val_policy
 
     # ------------------------------------------------------------------ #
     # Execution
@@ -322,6 +345,7 @@ class AdapterFlow(Workflow):
         self._component.output_schema = self.output_schema
         self._component.bundling_policy = self.bundling_policy
         self._component.mapping_policy = self.mapping_policy
+        self._component.absent_val_policy = self.absent_val_policy
 
         # Ensure our IO schemas remain consistent with the component's arguments_map.
         self._set_io_schemas(arguments_map=self._component.arguments_map, output_schema=self.output_schema)

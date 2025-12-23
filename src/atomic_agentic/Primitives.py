@@ -28,6 +28,7 @@ __all__ = [
     "WorkflowCheckpoint",
     "BundlingPolicy",
     "MappingPolicy",
+    "AbsentValPolicy",
     "NO_VAL",
     "DEFAULT_WF_KEY"
 ]
@@ -1404,6 +1405,12 @@ class MappingPolicy(str, Enum):
     MATCH_FIRST_STRICT = "MATCH_FIRST_STRICT"
     MATCH_FIRST_LENIENT = "MATCH_FIRST_LENIENT"
 
+class AbsentValPolicy(str, Enum):
+    """Controls how missing output fields are handled."""
+    RAISE = "RAISE"
+    DROP = "DROP"
+    FILL = "FILL"
+
 @dataclass(frozen=True, slots=True)
 class WorkflowCheckpoint:
     """A single workflow invocation record."""
@@ -1469,6 +1476,8 @@ class Workflow(ABC):
         output_schema: Optional[Union[List[str], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
+        absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
+        default_absent_val: Any = None,
     ) -> None:
         self._name = name or type(self).__name__
         self._description = description
@@ -1478,6 +1487,8 @@ class Workflow(ABC):
 
         self._bundling_policy = BundlingPolicy(bundling_policy)
         self._mapping_policy = MappingPolicy(mapping_policy)
+        self._absent_val_policy = AbsentValPolicy(absent_val_policy)
+        self._default_absent_val = default_absent_val
 
         self._invoke_lock = threading.RLock()
         self._checkpoints: List[WorkflowCheckpoint] = []
@@ -1538,10 +1549,24 @@ class Workflow(ABC):
     @mapping_policy.setter
     def mapping_policy(self, value: MappingPolicy) -> None:
         self._mapping_policy = MappingPolicy(value)
+    
+    @property
+    def absent_val_policy(self) -> AbsentValPolicy:
+        return self._absent_val_policy
+    @absent_val_policy.setter
+    def absent_val_policy(self, value: AbsentValPolicy) -> None:
+        self._absent_val_policy = AbsentValPolicy(value)
+    
+    @property
+    def default_absent_val(self) -> Any:
+        return self._default_absent_val
+    @default_absent_val.setter
+    def default_absent_val(self, value: Any) -> None:
+        self._default_absent_val = value
 
     @property
-    def checkpoints(self) -> tuple[WorkflowCheckpoint, ...]:
-        return tuple(self._checkpoints)
+    def checkpoints(self) -> List[WorkflowCheckpoint]:
+        return list(self._checkpoints)
 
     @property
     def latest_checkpoint(self) -> Optional[WorkflowCheckpoint]:
@@ -1575,13 +1600,16 @@ class Workflow(ABC):
             if not isinstance(metadata, ABCMapping):
                 raise ValidationError("Workflow._invoke: returned metadata must be a mapping")
 
+            metadata = dict(metadata) # snapshot metadata to avoid external mutation
+
             packaged = self.package(raw)
 
             # Final completeness validation happens HERE, not in packaging helpers.
-            self._validate_packaged(packaged)
+            packaged, missing_key_info = self._validate_packaged(packaged)
 
             ended = datetime.now(timezone.utc)
             elapsed = (ended - started).total_seconds()
+            metadata.update(missing_key_info)
 
             checkpoint = WorkflowCheckpoint(
                 run_id=run_id,
@@ -1591,7 +1619,7 @@ class Workflow(ABC):
                 inputs=dict(inputs),
                 raw_output=raw,
                 packaged_output=OrderedDict(packaged),
-                metadata=dict(metadata),  # snapshot
+                metadata=metadata,
             )
             self._checkpoints.append(checkpoint)
             return packaged
@@ -1612,16 +1640,35 @@ class Workflow(ABC):
     # ------------------------------------------------------------------ #
     # Final validation (kept separate from packaging)
     # ------------------------------------------------------------------ #
-    def _validate_packaged(self, packaged: Mapping[str, Any]) -> None:
+    def _validate_packaged(self, packaged: Mapping[str, Any]) -> tuple[Mapping[str, Any],...]:
         """
         Raise if any output fields remain NO_VAL after packaging.
 
         This method is intentionally called by `invoke()` and not by `package()`
         to keep packaging responsibilities separate from final contract validation.
         """
+        # Find any missing keys
         missing = [k for k, v in packaged.items() if v is NO_VAL]
-        if missing:
+        # Return as-is if no keys are missing
+        if not missing:
+            return packaged
+        # Raise an error if policy is RAISE
+        if self._absent_val_policy == AbsentValPolicy.RAISE:
             raise PackagingError(f"Workflow packaging: missing required output fields: {missing}")
+
+        new_packaged = OrderedDict()
+        # Fill in missing values if policy is FILL
+        if missing and self._absent_val_policy == AbsentValPolicy.FILL:
+            for k in self.output_schema.keys():
+                new_packaged[k] = packaged.get(k) if packaged.get(k) is not NO_VAL else self._default_absent_val
+        # Drop missing values if policy is DROP
+        elif missing and self._absent_val_policy == AbsentValPolicy.DROP:
+            for k,v in packaged.items():
+                if v is not NO_VAL:
+                    new_packaged[k] = v
+        meta_data = {"keys_filled": missing} if missing and self._absent_val_policy == AbsentValPolicy.FILL else {"keys_dropped": missing}
+        # Return finalized dictionary
+        return new_packaged, meta_data
 
     # ------------------------------------------------------------------ #
     # Packaging
@@ -1635,7 +1682,7 @@ class Workflow(ABC):
         """
         keys = list(self._output_schema.keys())
         if not keys:
-            raise SchemaError("Workflow has empty output_schema; cannot package results")
+            return OrderedDict() # If no keys, return an empty OrderedDict
 
         # Bundling is ONLY considered when schema length == 1.
         if self._bundling_policy == BundlingPolicy.BUNDLE and len(keys) == 1:
@@ -1835,8 +1882,6 @@ class Workflow(ABC):
             input_schema[name] = meta_dict.get("default", NO_VAL)
 
         normalized_out = self._normalize_output_schema(output_schema)
-        if len(normalized_out) == 0:
-            raise SchemaError("Workflow.output_schema must contain at least one key")
 
         self._arguments_map = normalized_args
         self._input_schema = input_schema
@@ -1846,8 +1891,6 @@ class Workflow(ABC):
         self, schema: Union[List[str], Mapping[str, Any]]
     ) -> OrderedDict[str, Any]:
         if isinstance(schema, list):
-            if not schema:
-                raise SchemaError("output_schema list must be non-empty")
             out = OrderedDict()
             for k in schema:
                 if not isinstance(k, str) or not k:
@@ -1858,8 +1901,6 @@ class Workflow(ABC):
             return out
 
         if isinstance(schema, ABCMapping):
-            if not schema:
-                raise SchemaError("output_schema mapping must be non-empty")
             out = OrderedDict()
             for k, default in schema.items():
                 if not isinstance(k, str) or not k:
@@ -1887,4 +1928,6 @@ class Workflow(ABC):
             output_schema=self.output_schema,
             bundling_policy=self._bundling_policy.value,
             mapping_policy=self._mapping_policy.value,
+            absent_val_policy=self._absent_val_policy.value,
+            default_absent_val=self._default_absent_val,
         )
