@@ -363,8 +363,7 @@ class LLMEngine(ABC):
         """
         Optional hook called when an attachment is detached.
 
-        Subclasses may implement provider-specific cleanup (e.g. remote delete).
-        Default implementation is a no-op.
+        Subclasses implement provider-specific cleanup (e.g. remote delete).
         """
         # Intentionally a no-op by default.
         raise NotImplementedError
@@ -682,19 +681,49 @@ class Tool:
         return True
 
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
-        """Default implementation for mapping input dicts to ``(*args, **kwargs)``.
+        """
+        Default implementation for mapping input dicts to ``(*args, **kwargs)``.
 
-        The base policy is:
+        Summary of policy:
 
-        - Required parameters (those without ``default`` and not VAR_*) must be present.
-        - Unknown keys raise if there is no VAR_KEYWORD parameter; otherwise they
-          are accepted and passed through in ``**kwargs``.
-        - POSITIONAL_ONLY parameters are always passed positionally.
-        - POSITIONAL_OR_KEYWORD and KEYWORD_ONLY parameters are passed as
-          keywords (Python accepts this for both kinds).
-        - VAR_POSITIONAL expects the mapping to contain the parameter name with
-          a sequence value; these are appended to ``*args``.
-        - VAR_KEYWORD collects all remaining unknown keys into ``**kwargs``.
+        - Required parameters (no ``default`` and not VAR_*) must be present in
+            the input mapping or :class:`ToolInvocationError` is raised.
+        - Unknown keys are accepted only if the wrapped callable declares a
+            ``**kwargs`` (VAR_KEYWORD) parameter; otherwise an error is raised.
+        - ``POSITIONAL_ONLY`` parameters (``/``-style) are always passed
+            positionally and will be pulled out of the mapping into ``*args``.
+        - ``POSITIONAL_OR_KEYWORD`` and ``KEYWORD_ONLY`` parameters are passed
+            as keyword arguments (i.e., in ``**kwargs``) when present in the mapping.
+        - ``VAR_POSITIONAL`` (``*args``) is handled by expecting the mapping to
+            contain a sequence value under the var-positional parameter name;
+            that sequence is appended to the positional ``args`` tuple.
+        - ``VAR_KEYWORD`` (``**kwargs``) collects all remaining unknown keys and
+            (optionally) merges with an explicit mapping provided under its own name
+            in the inputs.
+
+        Examples:
+
+        - Given ``def f(a, b, /, c=3)`` and inputs ``{"a":1, "b":2}``, the
+            function will be called as ``f(1, 2)`` (returned ``args=(1,2), kwargs={}``).
+        - Given ``def g(x, *rest, **kw)`` and inputs ``{"x": 1, "rest": [2,3],
+            "foo": "bar"}``, the call will be ``g(1, 2, 3, foo="bar")`` (``args=(1,2,3)``,
+            ``kwargs={"foo":"bar"}``).
+        - Missing required parameters (not present and without a default) raise
+            ``ToolInvocationError``.
+
+        Notes / edge-cases:
+
+        - The method expects the input keys named exactly as the function's
+            parameter names; it does not perform type coercion beyond Python's
+            normal call-time behavior.
+        - For ``VAR_POSITIONAL`` the input must be a sequence (list/tuple); the
+            sequence's elements are appended to positional args.
+        - For ``VAR_KEYWORD``, if the caller provides a mapping under the
+            parameter's own name, it is merged with unknown keys (unknown keys
+            take precedence if duplicate names appear).
+
+        This docstring documents behaviour only; the implementation is intentionally
+        left as-is to preserve existing semantics and tests.
         """
         data: Dict[str, Any] = dict(inputs)
 
@@ -977,7 +1006,7 @@ class Agent:
         if pre_invoke.return_type.lower() not in ["str", "any", "string"]:
             raise AgentError(
                 f"pre_invoke Tool for agent {self._name} must return a type str (or type 'Any' as superset containing 'str'); "
-                f"got {self.pre_invoke.return_type}."
+                f"got {pre_invoke.return_type}."
             )
         # set pre-invoke
         self._pre_invoke: Tool = pre_invoke
@@ -1198,8 +1227,8 @@ class Agent:
 
         Returns
         -------
-        bool
-            True if added, False if it was already present.
+        Mapping[str, Any]
+            The attachment path and metadata.
         """
         return self._llm_engine.attach(path)
 
@@ -1640,7 +1669,7 @@ class Workflow(ABC):
     # ------------------------------------------------------------------ #
     # Final validation (kept separate from packaging)
     # ------------------------------------------------------------------ #
-    def _validate_packaged(self, packaged: Mapping[str, Any]) -> tuple[Mapping[str, Any],...]:
+    def _validate_packaged(self, packaged: Mapping[str, Any]) -> tuple[Mapping[str, Any], Dict[str, Any]]:
         """
         Raise if any output fields remain NO_VAL after packaging.
 
@@ -1651,7 +1680,7 @@ class Workflow(ABC):
         missing = [k for k, v in packaged.items() if v is NO_VAL]
         # Return as-is if no keys are missing
         if not missing:
-            return packaged
+            return packaged, {}
         # Raise an error if policy is RAISE
         if self._absent_val_policy == AbsentValPolicy.RAISE:
             raise PackagingError(f"Workflow packaging: missing required output fields: {missing}")
