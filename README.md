@@ -392,21 +392,15 @@ qa_agent = Agent(
     pre_invoke=question_to_prompt,  # maps {"question": ...} -> prompt string
 )
 
-# 3) Wrap the agent so its output is a state update mapping {"answer": ...}
-qa_flow = AgentFlow(qa_agent, output_schema=["answer"])  # bundles the LLM string into {"answer": ...}
-
-# 4) Wrap again as a stateful node adapter:
+# 3) Wrap the agent as a stateful node adapter:
 #    - validates the component's declared inputs are a subset of QAState keys
 #    - filters the incoming state down to only the needed keys (here: {"question"})
 #    - returns a partial update compatible with LangGraph
-qa_node = StateIOFlow(qa_flow, state_schema=QAState)
+qa_node = StateIOFlow(qa_agent, state_schema=QAState)
 
-def answer_node(state: QAState) -> QAState:
-    return qa_node.invoke(state)  # returns {"answer": "..."} (a Partial<QAState>)
-
-# 5) Build and run a tiny graph
+# 4) Build and run a tiny graph
 graph = StateGraph(QAState)
-graph.add_node("answer", answer_node)
+graph.add_node("answer", qa_node.invoke)
 graph.add_edge(START, "answer")
 graph.add_edge("answer", END)
 
