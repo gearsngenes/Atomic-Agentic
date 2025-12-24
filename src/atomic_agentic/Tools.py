@@ -110,7 +110,7 @@ class AgentTool(Tool):
         and ``__qualname__`` and does not appear to be a local/helper function.
         Subclasses can override this with their own criteria.
         """
-        self.agent.pre_invoke.is_persistible and self.agent.post_invoke.is_persistible
+        return self.agent.pre_invoke.is_persistible and self.agent.post_invoke.is_persistible
 
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         """Default implementation for mapping input dicts to ``(*args, **kwargs)``.
