@@ -4,9 +4,10 @@ This module contains Workflow adapters and decorators around Tools, Agents, and 
 
 - ToolFlow and AgentFlow are thin GoF-style Adapters that normalize a Tool/Agent
   into the Workflow execution + packaging boundary.
-- MonoFlow is a Decorator-style Workflow wrapper designed for "russian-doll"
-  composition, where each wrapper layer can re-package / transform the mapping
-  produced by the wrapped component.
+- AdapterFlow is an adapter Workflow wrapper designed to generalize/normalize any
+  Tool, Agent, or Workflow (composition or otherwise) into a single Workflow Node.
+- StateIOFlow is a specialized AdapterFlow for specialized use-cases (like in LanGraph)
+  that requires the output schema to align with the input schema.
 """
 
 from __future__ import annotations
