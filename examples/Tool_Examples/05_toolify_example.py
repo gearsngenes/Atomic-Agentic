@@ -82,14 +82,6 @@ SERVER_URL = "http://127.0.0.1:8000"  # we'll normalize to /mcp if needed
 MCP_NAMESPACE = "demo.mcp"
 MCP_HEADERS: MutableMapping[str, str] | None = None  # presence of 'headers' is required
 
-
-def normalize_streamable_http(url: str) -> str:
-    parts = urlparse(url)
-    if not parts.path or parts.path == "/":
-        parts = parts._replace(path="/mcp")
-    return urlunparse(parts)
-
-
 # ---------- Helpers ----------
 
 
@@ -215,13 +207,12 @@ def main() -> None:
     )
 
     # 4) MCP URL -> list of MCPProxyTools (bulk case)
-    resolved = normalize_streamable_http(SERVER_URL)
     print("\n[4] MCP URL -> bulk MCPProxyTools via toolify(url, namespace=..., headers=...)")
-    print("[MCP] Connecting to:", resolved)
+    print("[MCP] Connecting to:", SERVER_URL)
     try:
         # NOTE: toolify requires that 'headers' be present (may be None).
         mcp_tools = toolify(
-            resolved,
+            SERVER_URL,
             namespace=MCP_NAMESPACE,
             headers=MCP_HEADERS,
         )
@@ -251,7 +242,7 @@ def main() -> None:
                 f"toolify(url, name={first_name!r}, namespace=..., headers=...)"
             )
             single_tools = toolify(
-                resolved,
+                SERVER_URL,
                 name=first_name,
                 namespace=MCP_NAMESPACE,
                 headers=MCP_HEADERS,

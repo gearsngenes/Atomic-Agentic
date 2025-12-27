@@ -16,11 +16,27 @@ from typing import (
 import logging
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from urllib.parse import urlparse, urlunparse
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from .base import Tool, ArgumentMap
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_mcp_url(url: str) -> str:
+        """Normalize an MCP server URL so that the path is `/mcp` when the
+        provided URL has an empty or root path.
+
+        Examples:
+            - "http://localhost:8000" -> "http://localhost:8000/mcp"
+            - "http://localhost:8000/" -> "http://localhost:8000/mcp"
+            - "http://localhost:8000/mcp" -> unchanged
+        """
+        parts = urlparse(str(url))
+        if not parts.path or parts.path == "/":
+                parts = parts._replace(path="/mcp")
+        return urlunparse(parts)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Public API
@@ -95,6 +111,9 @@ def list_mcp_tools(
         - "output_schema" : dict | None     (JSON Schema, if provided)
         - "raw"           : the original Tool object (for advanced use)
     """
+
+    # Normalize the provided URL to point at the MCP mount path when needed
+    server_url = _normalize_mcp_url(server_url)
 
     async def _do() -> Dict[str, Dict[str, Any]]:
         headers_dict: Optional[Dict[str, str]] = dict(headers) if headers else None
@@ -240,7 +259,7 @@ class MCPProxyTool(Tool):
         description: str = "",
         headers: Optional[Dict[str, str]] = None,
     ) -> None:
-        self._server_url = str(server_url)
+        self._server_url = _normalize_mcp_url(str(server_url))
         self._headers: Dict[str, str] = dict(headers or {})
 
         # Discover tools once and stash the schema for this tool
@@ -322,6 +341,7 @@ class MCPProxyTool(Tool):
     
     @server_url.setter
     def server_url(self, value: str):
+        value = _normalize_mcp_url(value)
         try:
             all_tools = list_mcp_tools(value, headers = self._headers)
         except Exception as e:
