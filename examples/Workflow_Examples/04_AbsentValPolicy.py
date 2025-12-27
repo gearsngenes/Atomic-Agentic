@@ -4,9 +4,9 @@ from typing import Any, Mapping
 
 from dotenv import load_dotenv
 
-from atomic_agentic.Primitives import AbsentValPolicy
-from atomic_agentic.Tools import Tool
-from atomic_agentic.workflows.Workflows import ToolFlow, BundlingPolicy, MappingPolicy
+from atomic_agentic.workflows import AbsentValPolicy
+from atomic_agentic.tools import Tool
+from atomic_agentic.workflows.workflows import ToolFlow, BundlingPolicy, MappingPolicy
 
 
 # -----------------------------------------------------------------------------
