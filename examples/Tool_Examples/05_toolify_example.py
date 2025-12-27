@@ -19,9 +19,9 @@ from dotenv import load_dotenv
 
 from atomic_agentic.Toolify import toolify
 from atomic_agentic.Tools import Tool
-from atomic_agentic.Agents import Agent
-from atomic_agentic.LLMEngines import OpenAIEngine
-from atomic_agentic.Exceptions import ToolInvocationError
+from atomic_agentic.agents.toolagents import Agent
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.core.Exceptions import ToolInvocationError
 
 load_dotenv()  # take environment variables from .env file (if exists)
 

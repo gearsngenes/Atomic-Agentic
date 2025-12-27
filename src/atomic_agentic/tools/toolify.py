@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
 
-from .Exceptions import ToolDefinitionError
+from .core.Exceptions import ToolDefinitionError
 from .Primitives import Agent
 from .Tools import A2AgentTool, AgentTool, MCPProxyTool, Tool, list_mcp_tools
 

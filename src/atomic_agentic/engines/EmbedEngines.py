@@ -1,8 +1,17 @@
 from __future__ import annotations
-import math, time, os, random
 from abc import ABC, abstractmethod
-from typing import List, Optional, Sequence, Any
+import logging
+import math
+import os
+import random
+import time
+from typing import (
+    Any,
+    List,
+    Optional,
+    Sequence,)
 
+# Embedding engine SDK imports
 try: from openai import OpenAI
 except: pass
 try: from google import genai
@@ -14,6 +23,19 @@ except: pass
 try: from llama_cpp import Llama  # local inference
 except: pass
 
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "EmbedEngine",
+    "OpenAIEmbedEngine",
+    "GeminiEmbedEngine",
+    "MistralEmbedEngine",
+    "LlamaCppEmbedEngine",
+    ]
+
+# ───────────────────────────────────────────────────────────────────────────────
+# EmbedEngine primitive
+# ───────────────────────────────────────────────────────────────────────────────
 class EmbedEngine(ABC):
     """
     Abstract base class for all embedding engines.
@@ -75,6 +97,10 @@ class EmbedEngine(ABC):
         norm = math.sqrt(sum((x * x) for x in vec)) or 1.0
         return [x / norm for x in vec]
 
+
+# ───────────────────────────────────────────────────────────────────────────────
+# OpenAI EmbedEngine
+# ───────────────────────────────────────────────────────────────────────────────
 class OpenAIEmbedEngine(EmbedEngine):
     """
     OpenAI implementation of the EmbedEngine interface.
@@ -134,6 +160,10 @@ class OpenAIEmbedEngine(EmbedEngine):
             )
         return out
 
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Gemini EmbedEngine
+# ───────────────────────────────────────────────────────────────────────────────
 class GeminiEmbedEngine(EmbedEngine):
     """
     Google Gemini text-embedding engine.
@@ -211,6 +241,10 @@ class GeminiEmbedEngine(EmbedEngine):
             )
         return out
 
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Mistral EmbedEngine
+# ───────────────────────────────────────────────────────────────────────────────
 class MistralEmbedEngine(EmbedEngine):
     """
     Mistral implementation of EmbedEngine with retry/backoff.
@@ -295,6 +329,10 @@ class MistralEmbedEngine(EmbedEngine):
                 time.sleep(max(0.0, sleep_s + jitter))
                 attempt += 1
 
+
+# ───────────────────────────────────────────────────────────────────────────────
+# LLamaCPP EmbedEngine
+# ───────────────────────────────────────────────────────────────────────────────
 class LlamaCppEmbedEngine(EmbedEngine):
     """
     Local embedding engine using llama-cpp-python (GGUF models),

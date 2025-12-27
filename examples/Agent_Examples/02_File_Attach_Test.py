@@ -4,9 +4,9 @@
 #   - Your updated Agents.py and LLMEngines.py on PYTHONPATH
 import os, time
 from dotenv import load_dotenv
-from atomic_agentic.LLMEngines import OpenAIEngine,MistralEngine,GeminiEngine
-from atomic_agentic.Agents import Agent
-from atomic_agentic.LLMEngines import GeminiEngine, OpenAIEngine, MistralEngine, LlamaCppEngine
+from atomic_agentic.engines.LLMEngines import OpenAIEngine,MistralEngine,GeminiEngine
+from atomic_agentic.agents.toolagents import Agent
+from atomic_agentic.engines.LLMEngines import GeminiEngine, OpenAIEngine, MistralEngine, LlamaCppEngine
 
 load_dotenv()
 

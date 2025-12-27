@@ -2,9 +2,9 @@ import logging
 
 from dotenv import load_dotenv
 
-from atomic_agentic.Agents import ReActAgent
-from atomic_agentic.LLMEngines import OpenAIEngine
-from atomic_agentic.Plugins import CONSOLE_TOOLS, MATH_TOOLS  # lists of Tool objects
+from atomic_agentic.agents.toolagents import ReActAgent
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.tools.Plugins import CONSOLE_TOOLS, MATH_TOOLS  # lists of Tool objects
 
 load_dotenv()  # take environment variables from .env file (if exists)
 

@@ -13,9 +13,9 @@ import time
 
 from dotenv import load_dotenv
 
-from atomic_agentic.Agents import Agent, PlanActAgent
-from atomic_agentic.Plugins import MATH_TOOLS
-from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.agents.toolagents import Agent, PlanActAgent
+from atomic_agentic.tools.Plugins import MATH_TOOLS
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)

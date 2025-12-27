@@ -126,12 +126,3 @@ When the overall task is complete (or no tools are needed), emit the return tool
 # ONE-SHOT EXAMPLE (A SINGLE MID-PLAN STEP)
 {{ "tool": "Tool.default.mul", "args": {{ "a": "<<__step__4>>", "b": 7 }} }}
 """
-
-CONDITIONAL_DECIDER_PROMPT = """
-You are a router. Pick exactly ONE workflow (by exact name) that is best suited for a user task.
-
-AVAILABLE WORKFLOWS (name: description):
-{branches}
-
-When you are given the user task, return ONLY the selected workflow name, nothing else.
-""".strip()

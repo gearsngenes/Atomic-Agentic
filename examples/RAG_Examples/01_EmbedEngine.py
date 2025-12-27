@@ -1,5 +1,5 @@
 from dotenv import load_dotenv
-from atomic_agentic.EmbedEngines import OpenAIEmbedEngine, GeminiEmbedEngine, MistralEmbedEngine, LlamaCppEmbedEngine
+from atomic_agentic.engines.EmbedEngines import OpenAIEmbedEngine, GeminiEmbedEngine, MistralEmbedEngine, LlamaCppEmbedEngine
 
 load_dotenv()
 

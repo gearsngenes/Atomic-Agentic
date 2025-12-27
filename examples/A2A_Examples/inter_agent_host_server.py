@@ -20,8 +20,8 @@ Then test:
 
 from dotenv import load_dotenv
 
-from atomic_agentic.Agents import PlanActAgent, A2AgentHost
-from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.agents.toolagents import PlanActAgent, A2AgentHost
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.Tools import A2AgentTool
 
 load_dotenv()

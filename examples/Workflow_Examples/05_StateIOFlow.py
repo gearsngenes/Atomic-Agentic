@@ -30,9 +30,9 @@ except Exception as exc:  # pragma: no cover
         "This example requires 'langgraph'. Install with: pip install langgraph"
     ) from exc
 
-from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.Primitives import Agent, Tool
-from atomic_agentic.Workflows import StateIOFlow
+from atomic_agentic.workflows.Workflows import StateIOFlow
 
 
 # ---------------------------------------------------------------------

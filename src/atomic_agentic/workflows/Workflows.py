@@ -25,15 +25,16 @@ from typing import (
 )
 
 
-from .Exceptions import ValidationError, SchemaError
-from .Primitives import (
-    Agent,
+from ..core.Exceptions import ValidationError, SchemaError
+from ..tools import Tool
+from ..agents import Agent
+from .base import (
+    Workflow,
     BundlingPolicy,
     MappingPolicy,
     AbsentValPolicy,
-    Tool,
-    Workflow,
-    DEFAULT_WF_KEY)
+    DEFAULT_WF_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
