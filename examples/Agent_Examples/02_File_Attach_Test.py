@@ -5,7 +5,7 @@
 import os, time
 from dotenv import load_dotenv
 from atomic_agentic.engines.LLMEngines import OpenAIEngine,MistralEngine,GeminiEngine
-from atomic_agentic.agents.toolagents import Agent
+from atomic_agentic.agents import Agent
 from atomic_agentic.engines.LLMEngines import GeminiEngine, OpenAIEngine, MistralEngine, LlamaCppEngine
 
 load_dotenv()

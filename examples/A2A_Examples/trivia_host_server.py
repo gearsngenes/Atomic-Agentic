@@ -11,7 +11,8 @@ Then test:
 """
 from dotenv import load_dotenv
 
-from atomic_agentic.agents.toolagents import Agent, A2AgentHost
+from atomic_agentic.agents import Agent
+from atomic_agentic.a2a import A2AgentHost
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()

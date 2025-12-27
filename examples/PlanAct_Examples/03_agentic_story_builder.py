@@ -2,7 +2,8 @@ from dotenv import load_dotenv
 from pathlib import Path
 import logging
 
-from atomic_agentic.agents.toolagents import Agent, PlanActAgent
+from atomic_agentic.agents import Agent
+from atomic_agentic.agents.tool_agents import PlanActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()

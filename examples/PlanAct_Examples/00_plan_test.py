@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-from atomic_agentic.agents.toolagents import PlanActAgent
+from atomic_agentic.agents.tool_agents import PlanActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()

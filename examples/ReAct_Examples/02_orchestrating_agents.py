@@ -2,9 +2,9 @@ import logging
 
 from dotenv import load_dotenv
 
-from atomic_agentic.agents.toolagents import Agent, ReActAgent
+from atomic_agentic.agents import Agent
+from atomic_agentic.agents.tool_agents import ReActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.tools import Tool
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
