@@ -13,7 +13,7 @@ import logging
 import threading
 
 from ..engines.LLMEngines import LLMEngine
-from ..tools import Tool, ArgumentMap
+from ..tools.base import Tool, ArgumentMap
 from ..core.Exceptions import (
     AgentError,
     AgentInvocationError,

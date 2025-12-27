@@ -11,10 +11,9 @@ from typing import (
 )
 # python-a2a imports
 from python_a2a import (
-    A2AClient, A2AServer, run_server, agent,
+    A2AClient,
     Message, MessageRole,
-    FunctionCallContent, FunctionResponseContent, FunctionParameter,
-    TextContent
+    FunctionCallContent, FunctionParameter,
 )
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError

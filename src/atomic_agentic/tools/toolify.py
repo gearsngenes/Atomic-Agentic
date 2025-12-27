@@ -3,8 +3,11 @@ from __future__ import annotations
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
 
 from ..core.Exceptions import ToolDefinitionError
-from ..agents import Agent
-from ..tools import A2AgentTool, AgentTool, MCPProxyTool, Tool, list_mcp_tools
+from ..agents.base import Agent
+from .base import Tool
+from .a2a import A2AgentTool
+from .invokable import AgentTool
+from .mcp import MCPProxyTool, list_mcp_tools
 
 __all__ = ["toolify"]
 

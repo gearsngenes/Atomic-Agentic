@@ -1,21 +1,13 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from collections import OrderedDict
-import json
-import logging
-import re
-import string
-import threading
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TypedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Mapping
 from python_a2a import (
     A2AServer, run_server, agent,
     Message, MessageRole, FunctionResponseContent,
     TextContent
 )
 
-from ..agents import Agent
+from ..agents.base import Agent
 
 A2A_RESULT_KEY = "__py_A2A_result__"
 

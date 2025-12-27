@@ -29,7 +29,7 @@ import math
 import re
 
 # Import the Tool primitive directly (avoids pulling optional MCP deps from .Tools)
-from .Primitives import Tool
+from .base import Tool
 
 __all__ = ["MATH_TOOLS", "CONSOLE_TOOLS", "PARSER_TOOLS"]
 

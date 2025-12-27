@@ -17,8 +17,8 @@ import logging
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from .core.Exceptions import ToolDefinitionError, ToolInvocationError
-from .Primitives import Tool, Agent, ArgumentMap
+from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
+from .base import Tool, ArgumentMap
 
 logger = logging.getLogger(__name__)
 
