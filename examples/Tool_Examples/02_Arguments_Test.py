@@ -70,7 +70,7 @@ def run_case(label, tool: Tool, inputs:dict):
 def show_signature(tool: Tool):
     meta = tool.to_dict()
     print(f"\n-- {tool.name} call plan --")
-    print("signature:", meta["signature"])
+    print("signature:", tool.signature)
     print("argument map:", json.dumps(tool.arguments_map, indent = 2))
 
 # ---------- Happy-path cases ----------

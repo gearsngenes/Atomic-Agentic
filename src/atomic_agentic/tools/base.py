@@ -12,14 +12,14 @@ from typing import (
     get_origin,
 )
 
-ArgumentMap = OrderedDict[str, Dict[str, Any]]
-
 from ..core.Exceptions import *
+from ..core.Invokable import AtomicInvokable, ArgumentMap
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Tool primitive
 # ───────────────────────────────────────────────────────────────────────────────
-class Tool:
+class Tool(AtomicInvokable):
     """Concrete base Tool primitive.
 
     This class provides a *dict-first* invocation interface around an underlying
@@ -29,7 +29,8 @@ class Tool:
 
     Subclasses such as MCPProxyTool and AgentTool are expected to override only
     the helper hooks used at construction time (``_get_mod_qual``,
-    ``_build_io_schemas``, ``_compute_is_persistible``) and, where necessary,
+    ``_build_args_returns`` (preferred) or ``_build_io_schemas`` for compatibility,
+    ``_compute_is_persistible``) and, where necessary,
     the :meth:`to_arg_kwarg` / :meth:`execute` methods. The public
     :meth:`invoke` method must not be overridden.
 
@@ -58,18 +59,20 @@ class Tool:
     ) -> None:
         if not callable(function):
             raise ToolDefinitionError(f"Tool function must be callable, got {type(function)!r}")
-        self._function: Callable[..., Any] = function
-        self._name: str = name or getattr(function, "__name__", "unnamed_callable") or "unnamed_callable"
-        self._namespace: str = namespace or "default"
-        self._description: str = description or (getattr(function, "__doc__", None) or "")
 
-        # Identity in import space (may be overridden by subclasses).
+        # Underlying callable and identity
+        self._function: Callable[..., Any] = function
+        self._namespace: str = namespace or "default"
         self._module, self._qualname = self._get_mod_qual(function)
 
-        # Build argument schema and return type from the current function.
-        self._arguments_map, self._return_type = self._build_io_schemas()
+        # Prepare name and description (AtomicInvokable requires non-empty description)
+        inferred_name = name or getattr(function, "__name__", "unnamed_callable") or "unnamed_callable"
+        inferred_description = (description or getattr(function, "__doc__", "") or "undescribed").strip() or "undescribed"
 
-        # Persistibility flag exposed as a public property.
+        # Delegate name/description validation and arguments/return type setup
+        super().__init__(name=inferred_name, description=inferred_description)
+
+        # Compute persistibility flag now that module/qualname are set
         self._is_persistible_internal: bool = self._compute_is_persistible()
 
 
@@ -77,28 +80,12 @@ class Tool:
     # Properties
     # ------------------------------------------------------------------ #
     @property
-    def name(self) -> str:
-        return self._name
-
-    @name.setter
-    def name(self, value: str) -> None:
-        self._name = value
-
-    @property
     def namespace(self) -> str:
         return self._namespace
 
     @namespace.setter
     def namespace(self, value: str) -> None:
         self._namespace = value
-
-    @property
-    def description(self) -> str:
-        return self._description
-
-    @description.setter
-    def description(self, value: str) -> None:
-        self._description = value
 
     @property
     def function(self) -> Callable[..., Any]:
@@ -111,18 +98,9 @@ class Tool:
             raise ToolDefinitionError(f"Tool function must be callable, got {type(func)!r}")
         self._function = func
         self._module, self._qualname = self._get_mod_qual(func)
-        self._arguments_map, self._return_type = self._build_io_schemas()
+        args, ret = self.build_args_returns()
+        self._arguments_map, self._return_type = args, ret
         self._is_persistible_internal = self._compute_is_persistible()
-
-    @property
-    def arguments_map(self) -> ArgumentMap:
-        """Ordered mapping of parameter name → {index, kind, type, default?}."""
-        return self._arguments_map
-
-    @property
-    def return_type(self) -> str:
-        """Return type (always as a string)."""
-        return self._return_type
 
     @property
     def module(self) -> Optional[str]:
@@ -164,15 +142,6 @@ class Tool:
         params_str = ", ".join(params)
         return f"{self.full_name}({params_str}) -> {self._return_type}"
 
-
-    # ------------------------------------------------------------------ #
-    # Stringification
-    # ------------------------------------------------------------------ #
-    def __repr__(self) -> str:  # pragma: no cover - trivial
-        return f"{self.signature}: {self._description}"
-
-    __str__ = __repr__
-
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
@@ -188,7 +157,6 @@ class Tool:
         args, kwargs = self.to_arg_kwarg(inputs)
         result = self.execute(args, kwargs)
         return result
-
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -247,17 +215,12 @@ class Tool:
         # Fallback: best-effort string representation
         return str(ann)
 
-    def _build_io_schemas(self) -> tuple[ArgumentMap, str]:
+    def build_args_returns(self) -> tuple[ArgumentMap, str]:
         """Construct ``arguments_map`` and ``return_type`` from the wrapped
         callable's signature.
 
-        Rules:
-        - If an annotation is present, it *always* defines the type string.
-        - If no annotation but a default value exists, the type string is
-          derived from ``type(default)``.
-        - If neither is present, the type string is 'Any'.
+        This is the new canonical hook (replaces ``_build_io_schemas``).
         """
-
         sig = inspect.signature(self._function)
         arg_map: ArgumentMap = OrderedDict()
 
@@ -458,7 +421,6 @@ class Tool:
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
         return result
 
-
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
@@ -469,14 +431,11 @@ class Tool:
         *not* perform any persistibility checks and will not raise solely
         because :attr:`is_persistible` is ``False``.
         """
-        return {
-            "tool_type": type(self).__name__,
-            "name": self.name,
+        d = super().to_dict()
+        d.update({
             "namespace": self.namespace,
-            "description": self.description,
-            "signature": self.signature,
-            "return_type": self.return_type,
-            "module": self._module,
-            "qualname": self._qualname,
-            "is_persistible": self.is_persistible,
-        }
+            "module": self.module,
+            "qualname": self.qualname,
+            "is_persistible": self.is_persistible
+        })
+        return d

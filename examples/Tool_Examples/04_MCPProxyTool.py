@@ -27,7 +27,7 @@ def _show_plan(proxy: MCPProxyTool) -> None:
     meta = proxy.to_dict()
     print(f"\n-- {proxy.full_name} --")
     print("from:", proxy.namespace)
-    print("signature:", meta["signature"])
+    print("signature:", proxy.signature)
     print("argument map:", json.dumps(proxy.arguments_map, indent = 2))
 
 def _invoke(proxy: MCPProxyTool, inputs: Mapping[str, Any]) -> None:

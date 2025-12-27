@@ -42,7 +42,7 @@ agent_tool = AgentTool(agent)  # type="agent", source=agent.name, name="invoke"
 def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
     print(f"\n-- {tool.full_name} call plan --")
-    print("signature:", meta["signature"])
+    print("signature:", tool.signature)
     print("argument map:", json.dumps(tool.arguments_map, indent = 2))
 
 def run_case(label: str, tool: Tool, inputs: dict) -> None:

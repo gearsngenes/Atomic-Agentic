@@ -57,7 +57,7 @@ t_sum = Tool(
 def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
     print(f"\n-- {tool.name} call plan --")
-    print("signature:", meta["signature"])
+    print("signature:", tool.signature)
     print("argument map:\n", json.dumps(tool.arguments_map, indent = 2))
 
 def run_case(label: str, tool: Tool, inputs: dict) -> None:

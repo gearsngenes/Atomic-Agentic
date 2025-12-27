@@ -332,7 +332,7 @@ class MCPProxyTool(Tool):
         )
         self._function = new_function
         self._module, self._qualname = self._get_mod_qual(new_function)
-        self._arguments_map, self._return_type = self._build_io_schemas()
+        self._arguments_map, self._return_type = self.build_args_returns()
         self._is_persistible_internal = self._compute_is_persistible()
 
     @property
@@ -358,7 +358,7 @@ class MCPProxyTool(Tool):
         )
         self._function = new_function
         self._module, self._qualname = self._get_mod_qual(new_function)
-        self._arguments_map, self._return_type = self._build_io_schemas()
+        self._arguments_map, self._return_type = self.build_args_returns()
         self._is_persistible_internal = self._compute_is_persistible()
     
     @property
@@ -396,7 +396,7 @@ class MCPProxyTool(Tool):
 
         return self._name in tools
 
-    def _build_io_schemas(self) -> tuple[ArgumentMap, str]:
+    def build_args_returns(self) -> tuple[ArgumentMap, str]:
         """
         Construct `arguments_map` and `return_type` from MCP `input_schema`
         and `output_schema`.
@@ -594,7 +594,7 @@ class MCPProxyTool(Tool):
         # This will rebuild argument map, return type, and persistibility flag.
         self._function = new_function
         self._module, self._qualname = self._get_mod_qual(new_function)
-        self._arguments_map, self._return_type = self._build_io_schemas()
+        self._arguments_map, self._return_type = self.build_args_returns()
         self._is_persistible_internal = self._compute_is_persistible()
 
     # ------------------------------------------------------------------ #
@@ -607,11 +607,7 @@ class MCPProxyTool(Tool):
         Note: we deliberately do **not** include header values to avoid
         leaking credentials; only their presence/keys.
         """
-        base = super().to_dict()
-        base.update(
-            {
-                "server_url": self._server_url,
-            }
-        )
-        return base
+        d = super().to_dict()
+        d.update({"server_url": self._server_url,})
+        return d
 
