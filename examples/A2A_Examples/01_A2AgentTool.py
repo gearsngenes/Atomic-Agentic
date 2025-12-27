@@ -12,7 +12,7 @@ Usage examples:
 
 from typing import Any, Dict
 
-from atomic_agentic.Tools import A2AgentTool
+from atomic_agentic.tools.a2a import A2AgentTool
 
 
 DEFAULT_TARGETS: Dict[str, Dict[str, Any]] = {
@@ -37,7 +37,7 @@ DEFAULT_TARGETS: Dict[str, Dict[str, Any]] = {
 
 
 def main() -> None:
-    target = "inter"
+    target = "math"
     url = DEFAULT_TARGETS[target]["url"]
     inputs = {"prompt": DEFAULT_TARGETS[target]["prompt"]}
 
