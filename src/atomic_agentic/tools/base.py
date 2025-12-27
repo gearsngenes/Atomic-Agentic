@@ -11,11 +11,14 @@ from typing import (
     get_args,
     get_origin,
 )
+
+ArgumentMap = OrderedDict[str, Dict[str, Any]]
+
+from ..core.Exceptions import *
+
 # ───────────────────────────────────────────────────────────────────────────────
 # Tool primitive
 # ───────────────────────────────────────────────────────────────────────────────
-ArgumentMap = OrderedDict[str, Dict[str, Any]]
-
 class Tool:
     """Concrete base Tool primitive.
 

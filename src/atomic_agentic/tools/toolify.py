@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
 
-from .core.Exceptions import ToolDefinitionError
-from .Primitives import Agent
-from .Tools import A2AgentTool, AgentTool, MCPProxyTool, Tool, list_mcp_tools
+from ..core.Exceptions import ToolDefinitionError
+from ..agents import Agent
+from ..tools import A2AgentTool, AgentTool, MCPProxyTool, Tool, list_mcp_tools
 
 __all__ = ["toolify"]
 

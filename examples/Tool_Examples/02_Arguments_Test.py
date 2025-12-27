@@ -4,11 +4,9 @@ Sample script to exercise the new Tool class invocation logic.
 Adjust the import below to match your project layout:
 from atomic_agentic.Tools import Tool, ToolInvocationError, ToolDefinitionError
 """
-import sys, json
-from pathlib import Path
-sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
-
-from atomic_agentic.Tools import Tool, ToolInvocationError, ToolDefinitionError
+import json
+from atomic_agentic.tools import Tool
+from atomic_agentic.core.Exceptions import ToolInvocationError, ToolDefinitionError
 
 
 # ---------- Target callables with diverse signatures ----------
