@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from atomic_agentic.agents.tool_agents import PlanActAgent
 from atomic_agentic.a2a import A2AtomicHost
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.tools.a2a import A2AProxyTool
+from atomic_agentic.tools import A2AProxyTool
 
 
 load_dotenv()

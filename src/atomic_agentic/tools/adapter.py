@@ -14,15 +14,11 @@ class AdapterTool(Tool):
     # ------------------------------------------------------------------ #
     # Construction
     # ------------------------------------------------------------------ #
-    def __init__(self, component: AtomicInvokable):
-        # extract tool creation inputs
-        function = component.invoke
-        name = component.name
-        namespace = component.name
-        description = component.description
+    def __init__(self, component: AtomicInvokable, namespace: str|None = None):
         # set private variable
         self._component = component
-        super().__init__(function, name, namespace, description)
+        # set core attributes
+        super().__init__(component.invoke, component.name, namespace, component.description)
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -35,7 +31,7 @@ class AdapterTool(Tool):
     def component(self, value: AtomicInvokable)-> None:
         self._component = value
         self._function = self._component.invoke
-        self._namespace = value.name
+        self._name = f"{self._component.name}_invoke"
         self._description = value.description
         # Identity in import space (may be overridden by subclasses)
         self._module, self._qualname = self._get_mod_qual(self.function)
@@ -51,17 +47,7 @@ class AdapterTool(Tool):
     @name.setter
     def name(self, val: str) -> None:
         self.component.name = val
-        self._name = "invoke"
-        self._namespace = val
-
-    @property
-    def namespace(self) -> str:
-        return self._namespace
-
-    @namespace.setter
-    def namespace(self, val: str) -> None:
-        self.component.name = val
-        self._namespace = val
+        self._name = f"{self.component.name}_invoke"
 
     @property
     def description(self) -> str:
