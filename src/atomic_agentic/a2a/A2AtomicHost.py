@@ -7,18 +7,18 @@ from python_a2a import (
     TextContent
 )
 
-from ..agents.base import Agent
+from ..core.Invokable import AtomicInvokable
 
 A2A_RESULT_KEY = "__py_A2A_result__"
 
 # ───────────────────────────────────────────────────────────────────────────────
-# A2AgentHost wrapper class
+# A2AtomicHost wrapper class
 # ───────────────────────────────────────────────────────────────────────────────
-class A2AgentHost:
+class A2AtomicHost:
     """
-    A2AgentHost
+    A2AtomicHost
     -----------
-    Wraps a local :class:`~atomic_agentic.Primitives.Agent` as a python-a2a server
+    Wraps a local AtomicInvokable as a python-a2a server
     using the message-level function-calling pattern.
 
     Exposed function names:
@@ -28,14 +28,14 @@ class A2AgentHost:
 
     def __init__(
         self,
-        seed_agent: Agent,
+        component: AtomicInvokable,
         version: str = "1.0.0",
         host: str = "localhost",
         port: int = 5000,
     ) -> None:
-        if not isinstance(seed_agent, Agent):
-            raise TypeError("A2AgentHost requires a seed Agent.")
-        self._seed_agent = seed_agent
+        if not isinstance(component, AtomicInvokable):
+            raise TypeError("A2AtomicHost requires a seed Agent.")
+        self._component = component
         self._version = version
         self._host = host
         self._port = port
@@ -43,8 +43,8 @@ class A2AgentHost:
         outer = self
 
         @agent(
-            name=seed_agent.name,
-            description=seed_agent.description,
+            name=component.name,
+            description=component.description,
             version=version,
             url=f"http://{host}:{port}",
         )
@@ -76,7 +76,7 @@ class A2AgentHost:
                             payload = params.get("payload", {})
                             if not isinstance(payload, Mapping):
                                 raise TypeError("invoke expects 'payload' to be a mapping")
-                            result = outer._seed_agent.invoke(payload)  # returns Any
+                            result = outer._component.invoke(payload)  # returns Any
                             return Message(
                                 content=FunctionResponseContent(
                                     name="invoke",
@@ -87,14 +87,14 @@ class A2AgentHost:
                                 conversation_id=message.conversation_id,
                             )
 
-                        if fn == "agent_metadata":
+                        if fn == "invokable_metadata":
                             meta = {
-                                "arguments_map": outer._seed_agent.arguments_map,
-                                "return_type": outer._seed_agent.post_invoke.return_type,
+                                "arguments_map": outer._component.arguments_map,
+                                "return_type": outer._component.return_type,
                             }
                             return Message(
                                 content=FunctionResponseContent(
-                                    name="agent_metadata",
+                                    name="invokable_metadata",
                                     response=meta,
                                 ),
                                 role=MessageRole.AGENT,
@@ -135,9 +135,9 @@ class A2AgentHost:
         self._server = _Server(url=f"http://{self._host}:{self._port}")
 
     @property
-    def seed_agent(self) -> Agent:
+    def component(self) -> AtomicInvokable:
         """The wrapped Agent instance."""
-        return self._seed_agent
+        return self._component
 
     @property
     def host(self) -> str:

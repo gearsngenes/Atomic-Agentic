@@ -12,7 +12,7 @@ Then test:
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import Agent
-from atomic_agentic.a2a import A2AgentHost
+from atomic_agentic.a2a import A2AtomicHost
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()
@@ -34,7 +34,7 @@ def main() -> None:
         ),
     )
 
-    host = A2AgentHost(seed_agent=seed, host="localhost", port=6000, version="1.0.0")
+    host = A2AtomicHost(component=seed, host="localhost", port=6000, version="1.0.0")
     host.run(debug=True)
 
 

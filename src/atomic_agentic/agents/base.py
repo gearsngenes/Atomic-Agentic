@@ -19,6 +19,7 @@ from ..core.Exceptions import (
     AgentInvocationError,
     ToolInvocationError,
 )
+from ..core.Invokable import AtomicInvokable
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def identity_post(*, result: Any) -> Any:
     return result
 
 
-class Agent:
+class Agent(AtomicInvokable):
     """
     Schema-driven LLM Agent.
 
@@ -127,9 +128,7 @@ class Agent:
         history_window: Optional[int] = None,
     ) -> None:
         
-        # set the core attributes
-        self._name = name
-        self._description = description
+        # Set the agent-specific attributes
         self._llm_engine: LLMEngine = llm_engine
         self._role_prompt: Optional[str] = role_prompt or "You are a helpful AI assistant"
         self._context_enabled: bool = context_enabled
@@ -210,29 +209,13 @@ class Agent:
         self._post_invoke: Tool = post_tool
         # cache the single parameter name for efficient calls.
         self._post_param_name: str = next(iter(post_arg_map.keys()))
+        
+        # set the core AtomicInvokable attributes
+        super().__init__(name = name, description=description)
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
-    @property
-    def name(self) -> str:
-        """Read-only agent name."""
-        return self._name
-
-    @name.setter
-    def name(self, value: str) -> None:
-        self._name = value
-
-    @property
-    def description(self) -> str:
-        """Return description agent description."""
-        return self._description
-
-    @description.setter
-    def description(self, val: str) -> None:
-        """Set description"""
-        self._description = val.strip() or f"A helpful AI assistant named {self._name}"
-
     @property
     def role_prompt(self) -> Optional[str]:
         """Optional system persona (first message if set)."""

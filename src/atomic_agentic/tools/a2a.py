@@ -18,11 +18,7 @@ from python_a2a import (
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from .base import Tool, ArgumentMap
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-A2A_RESULT_KEY = "__py_A2A_result__"  # server uses this key inside FunctionResponseContent.response
-
+from ..a2a.A2AtomicHost import A2A_RESULT_KEY
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -32,7 +28,7 @@ def _ensure_mapping(name: str, obj: Any) -> Mapping[str, Any]:
         raise TypeError(f"{name} expects a Mapping[str, Any]")
     return obj  # type: ignore[return-value]
 
-def a2agent_host_invoker(client, inputs: Mapping[str, Any]) -> Any:  # type: ignore[override]
+def a2atomic_host_invoker(client, inputs: Mapping[str, Any]) -> Any:  # type: ignore[override]
     _ensure_mapping("A2AProxyAgent.invoke", inputs)
 
     # Typed FunctionParameter avoids `'dict' object has no attribute 'name'`.
@@ -44,15 +40,15 @@ def a2agent_host_invoker(client, inputs: Mapping[str, Any]) -> Any:  # type: ign
     resp = client.send_message(msg).content.response
     result = resp
     if isinstance(resp, Mapping):
-        result = resp.get(A2A_RESULT_KEY, resp)
+        result = resp.get(A2A_RESULT_KEY, result)
     return result
 
 # ───────────────────────────────────────────────────────────────────────────────
-# A2AgentTool
+# A2AProxyTool
 # ───────────────────────────────────────────────────────────────────────────────
-class A2AgentTool(Tool):
+class A2AProxyTool(Tool):
     """
-    A2AgentTool
+    A2AProxyTool
     -----------
     Client-side proxy Tool that forwards a single JSON object (a mapping of
     inputs) to a remote A2A agent via a single function call:
@@ -85,7 +81,7 @@ class A2AgentTool(Tool):
             name="invoke",
             description=agent_card.description,
             namespace=agent_card.name,
-            function=functools.partial(a2agent_host_invoker, client=self._client),
+            function=functools.partial(a2atomic_host_invoker, client=self._client),
         )
 
     def refresh(self, headers: Any | None = None) -> None:
@@ -105,7 +101,7 @@ class A2AgentTool(Tool):
         namespace = agent_card.name
         description = agent_card.description
         # Rebind callable + rebuild schemas
-        function = functools.partial(a2agent_host_invoker, client=self._client)
+        function = functools.partial(a2atomic_host_invoker, client=self._client)
         super().__init__(
             name="invoke",
             description=description,
@@ -130,34 +126,54 @@ class A2AgentTool(Tool):
     def headers(self, val: Any | None) -> None:
         self.refresh(val)
 
-    def _build_io_schemas(self) -> tuple[ArgumentMap, str]:
+    def build_args_returns(self) -> tuple[ArgumentMap, str]:
         """Construct ``arguments_map`` and ``return_type`` from remote "agent_metadata"."""
-        call = FunctionCallContent(name="agent_metadata", parameters=[])
+        call = FunctionCallContent(name="invokable_metadata", parameters=[])
         msg = Message(content=call, role=MessageRole.USER)
 
         resp = self._client.send_message(msg)
         if getattr(resp.content, "type", None) != "function_response":
-            raise ToolDefinitionError(f"{self.full_name}: failed to fetch agent_metadata from A2A agent")
+            raise ToolDefinitionError(f"{self.full_name}: failed to fetch invokable_metadata from A2A agent")
 
         payload = resp.content.response
         if not isinstance(payload, Mapping):
-            raise ToolDefinitionError(f"{self.full_name}: agent_metadata response must be a mapping")
+            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata response must be a mapping")
 
         if "arguments_map" not in payload or "return_type" not in payload:
-            raise ToolDefinitionError(f"{self.full_name}: agent_metadata response missing required keys")
+            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata response missing required keys")
 
-        args_map = payload["arguments_map"]
-        if not isinstance(args_map, Mapping):
-            raise ToolDefinitionError(f"{self.full_name}: agent_metadata.arguments_map must be a mapping")
-        return_type = str(payload["return_type"])
-        return args_map, return_type
+        # Coerce the remote arguments_map (which may have been JSON-serialized
+        # and thus is a plain dict) into the expected OrderedDict shape and
+        # validate parameter metadata.
+        raw_args_map = payload["arguments_map"]
+        if not isinstance(raw_args_map, Mapping):
+            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.arguments_map must be a mapping")
+
+        args_map: OrderedDict[str, dict] = OrderedDict()
+        for key, meta in raw_args_map.items():
+            if not isinstance(key, str):
+                raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.arguments_map keys must be strings")
+            if not isinstance(meta, Mapping):
+                raise ToolDefinitionError(f"{self.full_name}: metadata for argument '{key}' must be a mapping")
+            meta_dict = dict(meta)
+            # Minimal validation of expected fields
+            if "index" not in meta_dict or "kind" not in meta_dict or "type" not in meta_dict:
+                raise ToolDefinitionError(
+                    f"{self.full_name}: metadata for argument '{key}' missing required keys (index, kind, type)"
+                )
+            args_map[key] = meta_dict
+
+        return_type = payload["return_type"]
+        if not isinstance(return_type, str):
+            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.return_type must be a str")
+        return OrderedDict(args_map), return_type
 
     def _get_mod_qual(
         self,
         function: Callable[..., Any],
     ) -> tuple[Optional[str], Optional[str]]:
         """A2A-backed tools don't map to a stable Python import path."""
-        return None, None
+        return a2atomic_host_invoker.__module__, a2atomic_host_invoker.__qualname__
 
     def _compute_is_persistible(self) -> bool:
         try:

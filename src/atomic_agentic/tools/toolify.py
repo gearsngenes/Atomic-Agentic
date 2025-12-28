@@ -5,7 +5,7 @@ from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
 from ..core.Exceptions import ToolDefinitionError
 from ..core.Invokable import AtomicInvokable
 from .base import Tool
-from .a2a import A2AgentTool
+from .a2a import A2AProxyTool
 from .adapter import AdapterTool
 from .mcp import MCPProxyTool, list_mcp_tools
 
@@ -66,9 +66,6 @@ def toolify(
         For invalid inputs, missing required metadata, or remote discovery issues.
     """
 
-    # Keep an original view so we can detect presence of keys (e.g. headers).
-    original_kwargs = dict(kwargs)
-
     # Extract supported kwargs
     name = kwargs.pop("name", None)
     description = kwargs.pop("description", None)
@@ -86,7 +83,7 @@ def toolify(
     if isinstance(component, Tool):
         return [component]
 
-    # 2) Agent → AgentTool
+    # 2) AtomicInvokable → AdapterTool
     if isinstance(component, AtomicInvokable):
         return [AdapterTool(component)]
 
@@ -95,11 +92,11 @@ def toolify(
         url = component.strip()
 
         # Enforce contract: headers key must be present (value may be None).
-        if "headers" not in original_kwargs:
-            raise ToolDefinitionError(
-                "toolify: 'headers' keyword must be provided (it may be None) "
-                "when toolifying a remote endpoint string."
-            )
+        # if "headers" not in original_kwargs:
+        #     raise ToolDefinitionError(
+        #         "toolify: 'headers' keyword must be provided (it may be None) "
+        #         "when toolifying a remote endpoint string."
+        #     )
 
         # Both MCP and A2A implementations here are HTTP-based.
         if not (url.startswith("http://") or url.startswith("https://")):
@@ -115,7 +112,7 @@ def toolify(
         all_tools: Mapping[str, Any] | None = None
         try:
             all_tools = list_mcp_tools(server_url=url, headers=headers)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             mcp_exc = exc
 
         if all_tools is not None:
@@ -164,7 +161,7 @@ def toolify(
         try:
             # Instantiation fetches the agent card; failures here strongly indicate
             # this is not an A2A agent endpoint (or auth/network is invalid).
-            return [A2AgentTool(url=url, headers=headers)]
+            return [A2AProxyTool(url=url, headers=headers)]
         except Exception as exc:  # noqa: BLE001
             a2a_exc = exc
 
@@ -210,5 +207,5 @@ def toolify(
 
     # 5) Unsupported type
     raise ToolDefinitionError(
-        "toolify: unsupported input type. Expected Tool | Agent | callable | endpoint URL string."
+        "toolify: unsupported input type. Expected AtomicInvokable | Callable | A2A/MCP endpoint URL string."
     )

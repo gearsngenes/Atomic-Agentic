@@ -12,26 +12,30 @@ Usage examples:
 
 from typing import Any, Dict
 
-from atomic_agentic.tools.a2a import A2AgentTool
+from atomic_agentic.tools.a2a import A2AProxyTool
 
 
 DEFAULT_TARGETS: Dict[str, Dict[str, Any]] = {
     "trivia": {
         "url": "http://localhost:6000",
-        "prompt": "Give me one interesting trivia fact about octopuses.",
+        "inputs":{"prompt": "Give me one interesting trivia fact about octopuses."},
     },
+    # "math": {
+    #     "url": "http://localhost:7000",
+    #     "inputs": {"prompt": "Compute (12.5 * 3) + sqrt(81) and return only the final number."},
+    # },
     "math": {
-        "url": "http://localhost:7000",
-        "prompt": "Compute (12.5 * 3) + sqrt(81) and return only the final number.",
+        "url":"http://localhost:7000",
+        "inputs": {"a":5, "b": 6}
     },
     "inter": {
         "url": "http://localhost:8000",
-        "prompt": (
+        "inputs":{"prompt": (
             "Use your remote agents to: "
             "1) get one fun trivia fact about honeybees, "
             "2) compute 18^2 - 10, "
             "then return a dictionary with keys 'fact' and 'math'."
-        ),
+        )},
     },
 }
 
@@ -39,9 +43,9 @@ DEFAULT_TARGETS: Dict[str, Dict[str, Any]] = {
 def main() -> None:
     target = "math"
     url = DEFAULT_TARGETS[target]["url"]
-    inputs = {"prompt": DEFAULT_TARGETS[target]["prompt"]}
+    inputs = DEFAULT_TARGETS[target]["inputs"]
 
-    tool = A2AgentTool(url=url)
+    tool = A2AProxyTool(url=url)
 
     print("\n=== A2A TOOL METADATA ===")
     print("full_name :", tool.full_name)
