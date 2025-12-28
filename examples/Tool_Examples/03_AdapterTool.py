@@ -5,8 +5,7 @@ Adjust the import path to your project layout if needed:
 from atomic_agentic.tools.adapter import AdapterTool
 """
 from dotenv import load_dotenv
-from atomic_agentic.tools import Tool
-from atomic_agentic.tools.adapter import AdapterTool
+from atomic_agentic.tools import Tool, AdapterTool
 from atomic_agentic.core.Exceptions import ToolInvocationError
 from atomic_agentic.agents import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine

@@ -7,7 +7,7 @@ Server: ensure it runs Streamable-HTTP and is mounted at /mcp (or provide a full
 """
 from typing import Any, Mapping
 import json
-from atomic_agentic.tools.mcp import MCPProxyTool, list_mcp_tools 
+from atomic_agentic.tools import MCPProxyTool, list_mcp_tools 
 from atomic_agentic.core.Exceptions import ToolInvocationError
 
 

@@ -25,19 +25,17 @@ load_dotenv()
 def main() -> None:
     llm = OpenAIEngine(model="gpt-4o-mini")
 
-    # seed = PlanActAgent(
-    #     name="MathPlannerAgent",
-    #     description="Planner that solves problems by calling math tools.",
-    #     llm_engine=llm,
-    #     context_enabled=False,
-    #     run_concurrent=False,
-    #     tool_calls_limit=12,
-    # )
+    seed = PlanActAgent(
+        name="MathPlannerAgent",
+        description="Planner that solves problems by calling math tools.",
+        llm_engine=llm,
+        context_enabled=False,
+        run_concurrent=False,
+        tool_calls_limit=12,
+    )
     
-    seed = MATH_TOOLS[0]
-
     # Register only plugin tools (math)
-    # seed.batch_register(MATH_TOOLS, name_collision_mode="raise")
+    seed.batch_register(MATH_TOOLS, name_collision_mode="raise")
 
     host = A2AtomicHost(component=seed, host="localhost", port=7000, version="1.0.0")
     host.run(debug=True)
