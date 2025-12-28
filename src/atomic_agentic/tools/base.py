@@ -433,6 +433,7 @@ class Tool(AtomicInvokable):
         """
         d = super().to_dict()
         d.update({
+            "tool_type": type(self).__name__,
             "namespace": self.namespace,
             "module": self.module,
             "qualname": self.qualname,

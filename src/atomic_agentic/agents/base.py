@@ -14,6 +14,7 @@ import threading
 
 from ..engines.LLMEngines import LLMEngine
 from ..tools.base import Tool, ArgumentMap
+from ..tools.adapter import AdapterTool
 from ..core.Exceptions import (
     AgentError,
     AgentInvocationError,
@@ -123,14 +124,22 @@ class Agent(AtomicInvokable):
         role_prompt: Optional[str] = None,
         context_enabled: bool = True,
         *,
-        pre_invoke: Optional[Tool | Callable] = None,
-        post_invoke: Optional[Tool | Callable] = None,
+        pre_invoke: Optional[AtomicInvokable | Callable] = None,
+        post_invoke: Optional[AtomicInvokable | Callable] = None,
         history_window: Optional[int] = None,
     ) -> None:
-        
+
+        # Prepare pre_invoke and post_invoke
+        self._pre_invoke = self._prepare_pretool(pre_invoke, name)
+        self._post_invoke = self._prepare_posttool(post_invoke, name)
+        self._post_param_name = list(self.post_invoke.arguments_map.keys())[0]
+
+        # set the core AtomicInvokable attributes
+        super().__init__(name=name, description=description)
+
         # Set the agent-specific attributes
         self._llm_engine: LLMEngine = llm_engine
-        self._role_prompt: Optional[str] = role_prompt or "You are a helpful AI assistant"
+        self._role_prompt: str = role_prompt.strip() or "You are a helpful AI assistant"
         self._context_enabled: bool = context_enabled
 
         # history_window: strict int semantics (>= 0). 'None' means (send-all) mode.
@@ -149,82 +158,18 @@ class Agent(AtomicInvokable):
         #invoke lock
         self._invoke_lock = threading.RLock()
 
-        # ~~~ Pre-Invoke Tool preparation ~~~
-        # turn callable to pre-invoke tool
-        if pre_invoke is not None and isinstance(pre_invoke, Callable):
-            pre_invoke = Tool(
-                function=pre_invoke,
-                name="pre_invoke",
-                namespace=self._name,
-                description="Pre-invoke callable adapted to Tool",
-            )
-        # identity pre-invoke by default -> requires {"prompt": str} 
-        if pre_invoke is None:
-            pre_invoke: Tool = Tool(identity_pre,
-                                    "pre_invoke",
-                                    self.name,
-                                    identity_pre.__doc__)
-        # keep pre_invoke as-is if its a Tool
-        elif isinstance(pre_invoke, Tool):
-            pre_invoke = pre_invoke
-        # raise error otherwise
-        else:
-            raise ValueError("pre_invoke must be a Tools.Tool instance or a callable object.")
-        # if the return type isn't 'any' or 'string' or 'str', then raise an error.
-        if pre_invoke.return_type.lower() not in ["str", "any", "string"]:
-            raise AgentError(
-                f"pre_invoke Tool for agent {self._name} must return a type str (or type 'Any' as superset containing 'str'); "
-                f"got {pre_invoke.return_type}."
-            )
-        # set pre-invoke
-        self._pre_invoke: Tool = pre_invoke
-        
-        # ~~~ Post-Invoke Tool Preparation ~~~
-        # turn callable to post-invoke tool
-        if post_invoke is not None and isinstance(post_invoke, Callable):
-            post_invoke = Tool(post_invoke,
-                               "post_invoke",
-                               self.name,
-                               identity_post.__doc__ or f"Post-invoke callable adapted to Tool")
-        # identity post-invoke by default -> requires single {"result": Any}
-        if post_invoke is None:
-            post_tool: Tool = Tool(identity_post,
-                                   "post_invoke",
-                                   self.name,
-                                   identity_post.__doc__)
-        # keep post_invoke as-is if its a Tool
-        elif isinstance(post_invoke, Tool):
-            post_tool = post_invoke
-        # raise error otherwise
-        else:
-            raise ValueError("post_invoke must be a Tools.Tool instance or a callable object.")
-        # if post_invoke's arguments map is not one parameter long, then raise an error
-        post_arg_map = post_tool.arguments_map
-        if len(post_arg_map) != 1:
-            raise AgentError(
-                f"post_invoke Tool for agent {self._name} must accept exactly one parameter; "
-                f"got {len(post_arg_map)}."
-            )
-        # set post-invoke
-        self._post_invoke: Tool = post_tool
-        # cache the single parameter name for efficient calls.
-        self._post_param_name: str = next(iter(post_arg_map.keys()))
-        
-        # set the core AtomicInvokable attributes
-        super().__init__(name = name, description=description)
-
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
     @property
-    def role_prompt(self) -> Optional[str]:
+    def role_prompt(self) -> str:
         """Optional system persona (first message if set)."""
         return self._role_prompt
 
     @role_prompt.setter
-    def role_prompt(self, value: str) -> None:
-        if not isinstance(value, str):
-            raise TypeError(f"role_prompt must be a 'str', but got '{type(value).__name__}'")
+    def role_prompt(self, value: Optional[str]) -> None:
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"role_prompt must be of type 'str' or 'None', but got {type(value).__name__}")
         self._role_prompt = value.strip() or "You are a helpful AI assistant"
     
     @property
@@ -294,7 +239,7 @@ class Agent(AtomicInvokable):
         return self._pre_invoke
 
     @pre_invoke.setter
-    def pre_invoke(self, tool: Union[Tool, Callable[..., str]]) -> None:
+    def pre_invoke(self, tool: Optional[Union[Callable, AtomicInvokable]]) -> None:
         """
         Set the pre-invoke Tool.
 
@@ -303,20 +248,20 @@ class Agent(AtomicInvokable):
         tool : Tool or callable
             - If a Tool, it is used as-is.
             - If a callable, it is wrapped as a Tool with a simple signature.
-        """
-        if isinstance(tool, Callable):
-            tool = Tool(
-                function=tool,
-                name="pre_invoke",
-                namespace=self.name,
-                description=tool.__doc__ or f"Pre-invoke callable adapted to Tool for agent {self.name}",
-            )
-        elif not isinstance(tool, Tool):
-            raise ValueError("pre_invoke must be a Tools.Tool instance or a callable object.")
-        if tool.return_type.lower() not in ['any', 'str', 'string']:
-            raise AgentError(f"pre_invoke must return a type 'str' after preprocessing the inputs. Got '{tool.return_type}'")
-        self._pre_invoke = tool
 
+        Behaviour:
+        - Use the centralized helper to create/validate the candidate Tool.
+        - Compute the new (arguments_map, return_type) based on the candidate
+          and the current `post_invoke` before mutating internal state.
+        - If the build would not result in the required types, raise `AgentError`.
+        """
+        # Create candidate tool (do not mutate state yet)
+        candidate = self._prepare_pretool(tool, self.name)
+        # Apply the candidate and sync internal schema
+        self._pre_invoke = candidate
+        args, ret = self.build_args_returns()
+        self._arguments_map, self._return_type = args, ret
+    
     @property
     def post_invoke(self) -> Tool:
         """
@@ -329,7 +274,7 @@ class Agent(AtomicInvokable):
         return self._post_invoke
 
     @post_invoke.setter
-    def post_invoke(self, tool: Union[Tool, Callable[..., Any]]) -> None:
+    def post_invoke(self, tool: Optional[Union[Callable, AtomicInvokable]]) -> None:
         """
         Set the post-invoke Tool.
 
@@ -338,37 +283,18 @@ class Agent(AtomicInvokable):
         tool : Tool or callable
             - If a Tool, it is used as-is.
             - If a callable, it is wrapped as a Tool with a simple signature.
+
+        Behaviour:
+        - Use the centralized helper to create the candidate Tool.
+        - Compute the new (arguments_map, return_type) based on the candidate
+          and the current `pre_invoke` before mutating internal state.
+        - If the build would not result in the required types, raise `AgentError`.
         """
-        if isinstance(tool, Callable):
-            tool = Tool(
-                function=tool,
-                name="post_invoke",
-                namespace=self.name,
-                description=tool.__doc__ or f"Post-invoke callable adapted to Tool for agent {self.name}",
-            )
-        elif not isinstance(tool, Tool):
-            raise ValueError("post_invoke must be a Tools.Tool instance or a callable object.")
-
-        post_arg_map = tool.arguments_map
-        if len(post_arg_map) != 1:
-            raise AgentError(
-                f"post_invoke Tool for agent {self.name} must accept exactly one parameter; "
-                f"got {len(post_arg_map)}."
-            )
-
-        self._post_invoke = tool
-        self._post_param_name = next(iter(post_arg_map.keys()))
-    
-    @property
-    def arguments_map(self) -> ArgumentMap:
-        """
-        Mirror of the pre_invoke Tool's arguments map.
-
-        Exposed primarily so that planners and higher-level workflows can inspect
-        the agent's input schema (required names, ordering, etc.).
-        """
-        return OrderedDict(self.pre_invoke.arguments_map)
-
+        # Create candidate tool (do not mutate state yet)
+        candidate = self._prepare_posttool(tool, self.name)
+        self._post_invoke = candidate
+        self._post_param_name = next(iter(candidate.arguments_map.keys()), None)
+        self._arguments_map, self._return_type = self.build_args_returns()
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -400,9 +326,8 @@ class Agent(AtomicInvokable):
 
     def clear_memory(self) -> None:
         """Clear the stored message history."""
-        with self._invoke_lock:
-            self._history.clear()
-            self._newest_history.clear()
+        self._history.clear()
+        self._newest_history.clear()
     
     def invoke(self, inputs: Mapping[str, Any]) -> Any:
         """Invoke the Agent with a single **input mapping**.
@@ -506,6 +431,56 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+    def _prepare_pretool(self, tool: Optional[Union[Callable, AtomicInvokable]], name: str):
+        # if None provided
+        if tool is None:
+            tool = identity_pre
+        # Normalize to Tool
+        if isinstance(tool, Tool):
+            candidate = tool
+        elif isinstance(tool, Callable):
+            candidate = Tool(
+                function=tool,
+                name="pre_invoke",
+                namespace=name,
+                description=tool.__doc__ or f"pre-invoke callable adapted to Tool for agent {name}",
+            )
+        elif isinstance(tool, AtomicInvokable):
+            candidate = AdapterTool(tool)
+        else:
+            raise ValueError("pre_invoke must be a Tool instance or a callable object.")
+        # Validate candidate by computing the resulting schema
+        if not candidate.return_type in {"str", "any"}:
+            raise AgentError("Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke")
+        return candidate
+
+    def _prepare_posttool(self, tool: Optional[Union[Callable,AtomicInvokable]], name: str):
+        # if None provided
+        if tool is None:
+            tool = identity_post
+        # Normalize to Tool
+        if isinstance(tool, Tool):
+            candidate = tool
+        elif isinstance(tool, Callable):
+            candidate = Tool(
+                function=tool,
+                name="post_invoke",
+                namespace=name,
+                description=tool.__doc__ or f"post-invoke callable adapted to Tool for agent {name}",
+            )
+        elif isinstance(tool, AtomicInvokable):
+            candidate = AdapterTool(tool)
+        else:
+            raise ValueError("post_invoke must be a Tool instance or a callable object.")
+        # Validate candidate by computing the resulting schema
+        if len(candidate.arguments_map) != 1:
+            raise AgentError("Agent.post_invoke must take in a single input argument in order to post-process the Agent._invoke() output")
+        return candidate
+
+    def build_args_returns(self) -> tuple[ArgumentMap, str]:
+        """Return the Agent's input argument map (mirroring pre_invoke) and the post_invoke return type."""
+        return OrderedDict(self._pre_invoke.arguments_map), str(self._post_invoke.return_type)
+
     def _invoke(self, messages: List[Dict[str, str]]) -> Any:
         """Internal call path used by :meth:`invoke`.
 
@@ -550,8 +525,6 @@ class Agent(AtomicInvokable):
         """A minimal diagnostic snapshot of this agent (safe to log/serialize)."""
         return OrderedDict(
             agent_type=type(self).__name__,
-            name=self._name,
-            description=self._description,
             role_prompt=self._role_prompt,
             pre_invoke=self._pre_invoke.to_dict(),
             post_invoke=self._post_invoke.to_dict(),
