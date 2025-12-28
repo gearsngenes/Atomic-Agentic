@@ -3,17 +3,17 @@ from __future__ import annotations
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
 
 from ..core.Exceptions import ToolDefinitionError
-from ..agents.base import Agent
+from ..core.Invokable import AtomicInvokable
 from .base import Tool
 from .a2a import A2AgentTool
-from .invokable import AgentTool
+from .adapter import AdapterTool
 from .mcp import MCPProxyTool, list_mcp_tools
 
 __all__ = ["toolify"]
 
 
 def toolify(
-    component: Union[Tool, Agent, str, Callable[..., Any]],
+    component: Union[AtomicInvokable, str, Callable[..., Any]],
     **kwargs: Any,
 ) -> List[Tool]:
     """
@@ -87,8 +87,8 @@ def toolify(
         return [component]
 
     # 2) Agent → AgentTool
-    if isinstance(component, Agent):
-        return [AgentTool(component)]
+    if isinstance(component, AtomicInvokable):
+        return [AdapterTool(component)]
 
     # 3) String → MCP-by-default, then A2A fallback
     if isinstance(component, str):

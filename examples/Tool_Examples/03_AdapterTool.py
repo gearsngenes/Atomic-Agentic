@@ -6,7 +6,7 @@ from atomic_agentic.Agents import AgentTool
 """
 from dotenv import load_dotenv
 from atomic_agentic.tools import Tool
-from atomic_agentic.tools.invokable import AgentTool
+from atomic_agentic.tools.adapter import AdapterTool
 from atomic_agentic.core.Exceptions import ToolInvocationError
 from atomic_agentic.agents import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
@@ -34,7 +34,7 @@ agent = Agent(
     pre_invoke=to_prompt,  # <-- schema source for AgentTool
 )
 
-agent_tool = AgentTool(agent)  # type="agent", source=agent.name, name="invoke"
+agent_tool = AdapterTool(agent)  # type="agent", source=agent.name, name="invoke"
 
 
 # --- 4) Utility helpers for inspection & runs (same vibe as 01_Tool.py) ---

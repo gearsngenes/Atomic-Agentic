@@ -5,42 +5,42 @@ from typing import (
     Dict,
     Mapping)
 from .base import Tool, ArgumentMap
-from ..agents.base import Agent
+from ..core.Invokable import AtomicInvokable
 from ..core.Exceptions import ToolInvocationError
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent Tool
 # ───────────────────────────────────────────────────────────────────────────────
-class AgentTool(Tool):
+class AdapterTool(Tool):
     # ------------------------------------------------------------------ #
     # Construction
     # ------------------------------------------------------------------ #
-    def __init__(self, agent: Agent):
+    def __init__(self, component: AtomicInvokable):
         # extract tool creation inputs
-        function = agent.invoke
+        function = component.invoke
         name = "invoke"
-        namespace = agent.name
-        description = agent.description
+        namespace = component.name
+        description = component.description
         # set private variable
-        self._agent = agent
+        self._component = component
         super().__init__(function, name, namespace, description)
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
     @property
-    def agent(self) -> Agent:
-        return self._agent
+    def component(self) -> AtomicInvokable:
+        return self._component
     
-    @agent.setter
-    def agent(self, value: Agent)-> None:
-        self._agent = value
-        self._function = self._agent.invoke
+    @component.setter
+    def component(self, value: AtomicInvokable)-> None:
+        self._component = value
+        self._function = self._component.invoke
         self._namespace = value.name
         self._description = value.description
         # Identity in import space (may be overridden by subclasses)
         self._module, self._qualname = self._get_mod_qual(self.function)
         # Build argument schema and return type from the current function.
-        self._arguments_map, self._return_type = self._build_io_schemas()
+        self._arguments_map, self._return_type = self.build_args_returns()
         # Persistibility flag exposed as a public property.
         self._is_persistible_internal: bool = self._compute_is_persistible()
     
@@ -63,7 +63,7 @@ class AgentTool(Tool):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
-    def _build_io_schemas(self) -> tuple[ArgumentMap, str]:
+    def build_args_returns(self) -> tuple[ArgumentMap, str]:
         """Construct ``arguments_map`` and ``return_type`` from the wrapped
         callable's signature.
 
@@ -73,7 +73,7 @@ class AgentTool(Tool):
           derived from ``type(default)``.
         - If neither is present, the type string is 'Any'.
         """
-        return self.agent.pre_invoke.arguments_map, self.agent.post_invoke.return_type
+        return self.component.arguments_map, self.component.return_type
 
     def _compute_is_persistible(self) -> bool:
         """Default persistibility check for callable-based tools.
@@ -82,7 +82,7 @@ class AgentTool(Tool):
         and ``__qualname__`` and does not appear to be a local/helper function.
         Subclasses can override this with their own criteria.
         """
-        return self.agent.pre_invoke.is_persistible and self.agent.post_invoke.is_persistible
+        return self.component.pre_invoke.is_persistible and self.component.post_invoke.is_persistible
 
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         """Default implementation for mapping input dicts to ``(*args, **kwargs)``.
@@ -120,6 +120,6 @@ class AgentTool(Tool):
     def to_dict(self)-> OrderedDict[str, Any]:
         base = super().to_dict()
         base.update(OrderedDict(
-            agent = self.agent.to_dict()
+            agent = self.component.to_dict()
         ))
         return base
