@@ -17,7 +17,7 @@ class AdapterTool(Tool):
     def __init__(self, component: AtomicInvokable):
         # extract tool creation inputs
         function = component.invoke
-        name = "invoke"
+        name = component.name
         namespace = component.name
         description = component.description
         # set private variable
@@ -47,14 +47,30 @@ class AdapterTool(Tool):
     @property
     def name(self) -> str:
         return self._name
-    
+
+    @name.setter
+    def name(self, val: str) -> None:
+        self.component.name = val
+        self._name = "invoke"
+        self._namespace = val
+
     @property
     def namespace(self) -> str:
         return self._namespace
-    
+
+    @namespace.setter
+    def namespace(self, val: str) -> None:
+        self.component.name = val
+        self._namespace = val
+
     @property
     def description(self) -> str:
         return self._description
+
+    @description.setter
+    def description(self, val: str) -> None:
+        self.component.description = val
+        self._description = val
     
     @property
     def function(self) -> Callable:

@@ -91,13 +91,6 @@ def toolify(
     if isinstance(component, str):
         url = component.strip()
 
-        # Enforce contract: headers key must be present (value may be None).
-        # if "headers" not in original_kwargs:
-        #     raise ToolDefinitionError(
-        #         "toolify: 'headers' keyword must be provided (it may be None) "
-        #         "when toolifying a remote endpoint string."
-        #     )
-
         # Both MCP and A2A implementations here are HTTP-based.
         if not (url.startswith("http://") or url.startswith("https://")):
             raise ToolDefinitionError(

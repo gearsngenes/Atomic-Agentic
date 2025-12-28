@@ -71,6 +71,7 @@ from ..core.Exceptions import (
     ToolRegistrationError,
 )
 from ..core.Prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
+from ..core.Invokable import AtomicInvokable
 from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool
 from ..tools.Toolify import toolify
@@ -151,8 +152,8 @@ class ToolAgent(Agent, ABC):
         context_enabled: bool = False,
         *,
         tool_calls_limit: Optional[int] = None,
-        pre_invoke: Optional[Tool | Callable[..., Any]] = None,
-        post_invoke: Optional[Tool | Callable[..., Any]] = None,
+        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         history_window: Optional[int] = None,
     ) -> None:
         template = self._validate_role_prompt_template(role_prompt)
@@ -244,9 +245,7 @@ class ToolAgent(Agent, ABC):
         IMPORTANT: ``self._role_prompt`` stores the *template* string, not the final
         formatted prompt.
         """
-        template = self._role_prompt or ""
-        if not isinstance(template, str) or not template.strip():
-            raise ToolAgentError("ToolAgent has an invalid role_prompt template stored on _role_prompt.")
+        template = self._role_prompt
 
         tool_calls_limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
         try:
@@ -353,7 +352,7 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     def register(
         self,
-        component: Callable[..., Any] | Tool | Agent | str,
+        component: Callable[..., Any] | AtomicInvokable | str,
         *,
         name: Optional[str] = None,
         description: Optional[str] = None,
@@ -408,17 +407,17 @@ class ToolAgent(Agent, ABC):
 
     def batch_register(
         self,
-        tools: Sequence[Callable[..., Any] | Tool | Agent],
+        tools: Sequence[Callable[..., Any] | AtomicInvokable],
         *,
         name_collision_mode: str = "raise",
     ) -> List[str]:
         """Register a batch of components."""
         registered: List[str] = []
         for obj in tools:
-            if isinstance(obj, (Tool, Agent)):
+            if isinstance(obj, AtomicInvokable):
                 nm, desc = obj.name, obj.description
             elif callable(obj):
-                nm, desc = obj.__name__, obj.__doc__
+                nm, desc = obj.__name__ or "unnamed_callable", obj.__doc__ or f"unnamed_callable registered for {self.name}"
             else:
                 raise ToolRegistrationError(
                     f"batch_register expected Tool, Agent, or callable; got {type(obj).__name__!r}."
@@ -644,8 +643,7 @@ class ToolAgent(Agent, ABC):
             d["toolbox"] = [t.to_dict() for t in self._toolbox.values()]
             d["blackboard"] = self._blackboard.copy()
             d["tool_calls_limit"] = self._tool_calls_limit
-            d["tool_calls_made"] = self._tool_calls_made
-        return d
+        return OrderedDict(d)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Plan-first 'PlanActAgent' class
@@ -669,8 +667,8 @@ class PlanActAgent(ToolAgent):
         context_enabled: bool = False,
         *,
         tool_calls_limit: Optional[int] = None,
-        pre_invoke: Optional[Tool | Callable[..., Any]] = None,
-        post_invoke: Optional[Tool | Callable[..., Any]] = None,
+        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         history_window: Optional[int] = None,
         run_concurrent: bool = False,
     ) -> None:
@@ -966,8 +964,8 @@ class ReActAgent(ToolAgent):
         *,
         tool_calls_limit: Optional[int] = 25,
         preview_limit: Optional[int] = None,
-        pre_invoke: Optional[Tool | Callable[..., Any]] = None,
-        post_invoke: Optional[Tool | Callable[..., Any]] = None,
+        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         history_window: Optional[int] = None,
     ) -> None:
         super().__init__(

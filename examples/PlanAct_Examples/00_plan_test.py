@@ -11,7 +11,7 @@ llm_engine = OpenAIEngine(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY
 
 # PlanAct agent (ReWOO-style: one plan LLM call, then execute tools)
 agent = PlanActAgent(
-    name="Test-PlanAct",
+    name="Test_PlanAct",
     description="Testing one-shot planning + execution over local python tools.",
     llm_engine=llm_engine,
     context_enabled=True,    # True => persists blackboard across runs
@@ -54,4 +54,4 @@ final = agent.invoke({"prompt": task_prompt})
 print("\nFinal Result:\n", final)
 
 # Optional: inspect executed steps (even if context_enabled=False, the view is useful for debugging)
-print("\nBlackboard (resolved args):\n", agent.blackboard_dumps(raw_results=True))
+print("\nBlackboard (resolved args):\n", agent.blackboard_dumps(raw_results=False))
