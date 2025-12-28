@@ -44,7 +44,7 @@ def a2atomic_host_invoker(client, inputs: Mapping[str, Any]) -> Any:  # type: ig
     return result
 
 # ───────────────────────────────────────────────────────────────────────────────
-# A2AProxyTool
+# A2A-Proxy Tool
 # ───────────────────────────────────────────────────────────────────────────────
 class A2AProxyTool(Tool):
     """

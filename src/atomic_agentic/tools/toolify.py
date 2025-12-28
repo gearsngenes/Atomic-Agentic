@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, List, Mapping, Union
 
 from ..core.Exceptions import ToolDefinitionError
 from ..core.Invokable import AtomicInvokable
@@ -11,7 +11,9 @@ from .mcp import MCPProxyTool, list_mcp_tools
 
 __all__ = ["toolify"]
 
-
+# ───────────────────────────────────────────────────────────────────────────────
+# toolify
+# ───────────────────────────────────────────────────────────────────────────────
 def toolify(
     component: Union[AtomicInvokable, str, Callable[..., Any]],
     **kwargs: Any,
@@ -85,7 +87,7 @@ def toolify(
 
     # 2) AtomicInvokable → AdapterTool
     if isinstance(component, AtomicInvokable):
-        return [AdapterTool(component)]
+        return [AdapterTool(component, namespace=namespace_kw)]
 
     # 3) String → MCP-by-default, then A2A fallback
     if isinstance(component, str):

@@ -7,8 +7,10 @@ from typing import (
 from .base import Tool, ArgumentMap
 from ..core.Invokable import AtomicInvokable
 from ..core.Exceptions import ToolInvocationError
+
+
 # ───────────────────────────────────────────────────────────────────────────────
-# Agent Tool
+# Adapter Tool
 # ───────────────────────────────────────────────────────────────────────────────
 class AdapterTool(Tool):
     # ------------------------------------------------------------------ #

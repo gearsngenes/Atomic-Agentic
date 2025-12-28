@@ -17,7 +17,7 @@ from ..core.Invokable import AtomicInvokable, ArgumentMap
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Tool primitive
+# Tool Invokable
 # ───────────────────────────────────────────────────────────────────────────────
 class Tool(AtomicInvokable):
     """Concrete base Tool primitive.
