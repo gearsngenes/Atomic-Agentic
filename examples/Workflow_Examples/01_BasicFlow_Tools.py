@@ -1,4 +1,4 @@
-# examples/Workflow_Examples/01_ToolFlow.py
+# examples/Workflow_Examples/01_BasicFlow.py
 from __future__ import annotations
 
 import logging
@@ -6,10 +6,10 @@ from typing import Any
 
 from atomic_agentic.tools import Tool
 from atomic_agentic.workflows import BundlingPolicy, MappingPolicy
-from atomic_agentic.workflows.workflows import ToolFlow
+from atomic_agentic.workflows.workflows import BasicFlow
 
 logging.basicConfig(level=logging.INFO)
-print("=== ToolFlow examples (schema-driven dict inputs) ===")
+print("=== BasicFlow examples (schema-driven dict inputs) ===")
 
 
 # -------------------------------------------------------------------
@@ -27,8 +27,8 @@ my_tool = Tool(
     description="Duplicate 'text' n times and return {'x': <str>, 'n': <int>}.",
 )
 
-tf = ToolFlow(
-    tool=my_tool,
+tf = BasicFlow(
+    component=my_tool,
     output_schema=["x", "n"],
     # BundlingPolicy is ignored when schema length != 1; UNBUNDLE behavior applies.
     bundling_policy=BundlingPolicy.BUNDLE,
@@ -64,8 +64,8 @@ len_tool = Tool(
     description="Compute the length of s.",
 )
 
-wf_len = ToolFlow(
-    tool=len_tool,
+wf_len = BasicFlow(
+    component=len_tool,
     output_schema=["length"],  # single-key schema
     bundling_policy=BundlingPolicy.BUNDLE,  # bundles raw scalar under 'length'
 )
@@ -88,8 +88,8 @@ list_tool = Tool(
     description="Split string on whitespace.",
 )
 
-wf_list_bundle = ToolFlow(
-    tool=list_tool,
+wf_list_bundle = BasicFlow(
+    component=list_tool,
     output_schema=["tokens"],
     bundling_policy=BundlingPolicy.BUNDLE,  # bundles list under 'tokens'
 )
@@ -113,8 +113,8 @@ pos_tool = Tool(
     description="Comma-split raw into [name, age, state].",
 )
 
-wf_list_zip = ToolFlow(
-    tool=pos_tool,
+wf_list_zip = BasicFlow(
+    component=pos_tool,
     output_schema=["name", "age", "state"],
     bundling_policy=BundlingPolicy.UNBUNDLE,  # activates sequence->schema packaging
     mapping_policy=MappingPolicy.STRICT,
@@ -138,8 +138,8 @@ overflow_tool = Tool(
     description="Return four ints for overflow packaging demo.",
 )
 
-wf_overflow_truncate = ToolFlow(
-    tool=overflow_tool,
+wf_overflow_truncate = BasicFlow(
+    component=overflow_tool,
     output_schema=["a", "b", "c"],  # only 3 schema keys
     bundling_policy=BundlingPolicy.UNBUNDLE,
     mapping_policy=MappingPolicy.IGNORE_EXTRA,  # truncates extra sequence items
@@ -164,6 +164,6 @@ set_tool = Tool(
     description="Set of unique characters.",
 )
 
-wf_set_bundle = ToolFlow(tool=set_tool, output_schema=["chars"])
+wf_set_bundle = BasicFlow(component=set_tool, output_schema=["chars"])
 print("\n-- set return -> bundle under 'chars' --")
 print("invoke:", wf_set_bundle.invoke({"s": "mississippi"}))

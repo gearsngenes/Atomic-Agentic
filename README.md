@@ -344,9 +344,7 @@ So “scalar” outputs become `{ "__RESULT__": raw }` under the default policy.
 
 ### Built-in workflow adapters
 
-- `ToolFlow`: wrap a single Tool as a Workflow
-- `AgentFlow`: wrap a single Agent as a Workflow
-- `AdapterFlow`: generic wrapper for Tool/Agent/Workflow with re-packaging
+- `BasicFlow`: wrap a single Tool/Agent/Workflow as a Workflow (replaces `ToolFlow`/`AgentFlow`)
 - `StateIOFlow`: graph-node wrapper for stateful orchestration frameworks (e.g., LangGraph)
 
 ---

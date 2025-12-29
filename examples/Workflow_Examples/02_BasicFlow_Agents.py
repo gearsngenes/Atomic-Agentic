@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.agents.tool_agents import Agent
 from atomic_agentic.tools import Tool
-from atomic_agentic.workflows.workflows import AgentFlow
+from atomic_agentic.workflows.workflows import BasicFlow
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)  # or DEBUG
@@ -28,7 +28,7 @@ my_agent = Agent(
 )
 
 # AgentFlow packages the agent's raw output under the schema.
-flow = AgentFlow(agent=my_agent, output_schema=["answer"])
+flow = BasicFlow(component=my_agent, output_schema=["answer"])
 
 # 1) Basic call (strict default: {'prompt': str})
 res1 = flow.invoke({"prompt": "Hello! In one line, what is entropy?"})
@@ -56,7 +56,7 @@ q_tool = Tool(
 my_agent.pre_invoke = q_tool
 
 # New AgentFlow instance (or reuse the old one; both will work).
-flow_q = AgentFlow(agent=my_agent, output_schema=["answer"])
+flow_q = BasicFlow(component=my_agent, output_schema=["answer"])
 
 # 3) Invoke with custom key schema supported by pre-invoke Tool
 res3 = flow_q.invoke({"question": "State the central limit theorem in one sentence."})

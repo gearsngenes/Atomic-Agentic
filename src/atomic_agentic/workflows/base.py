@@ -1,29 +1,22 @@
 from __future__ import annotations
 
 import logging
-import os
-import random
-import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Mapping, Optional, Union, get_origin, get_args
-from ..core.Exceptions import *
-from typing import Mapping, Callable, Optional
+from typing import Any, Dict, List, Mapping, Optional, Union, Tuple, Sequence
+from typing import Mapping, Optional
+from collections.abc import Sequence as Sequence
 from collections import OrderedDict
-import inspect
 import threading
-from collections.abc import Mapping as ABCMapping, Sequence as ABCSequence
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from uuid import uuid4
-
+from ..core.Exceptions import *
+from ..core.Invokable import ArgumentMap, AtomicInvokable
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "LLMEngine",
-    "Tool",
-    "Agent",
     "Workflow",
     "WorkflowCheckpoint",
     "BundlingPolicy",
@@ -75,9 +68,9 @@ class WorkflowCheckpoint:
     packaged_output: OrderedDict[str, Any]
     metadata: Dict[str, Any]
 
-DEFAULT_WF_KEY = "__RESULT__"
+DEFAULT_WF_KEY = "result"
 
-class Workflow(ABC):
+class Workflow(AtomicInvokable, ABC):
     """
     Base template-method primitive for Workflow orchestrators.
 
@@ -121,59 +114,38 @@ class Workflow(ABC):
 
     def __init__(
         self,
+        name: str,
+        description: str,
         *,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        arguments_map: ArgumentMap,
         output_schema: Optional[Union[List[str], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
     ) -> None:
-        self._name = name or type(self).__name__
-        self._description = description
 
-        if output_schema is None:
-            output_schema = [DEFAULT_WF_KEY]
+        # initialize name, description, arguments-map, return-type
+        super().__init__(name = name, description = description)
 
+        # packaging policies
         self._bundling_policy = BundlingPolicy(bundling_policy)
         self._mapping_policy = MappingPolicy(mapping_policy)
         self._absent_val_policy = AbsentValPolicy(absent_val_policy)
         self._default_absent_val = default_absent_val
 
+        # invoke thread lock
         self._invoke_lock = threading.RLock()
+        
+        # checkpoints
         self._checkpoints: List[WorkflowCheckpoint] = []
 
-        # Normalized IO state (set by _set_io_schemas)
-        self._arguments_map: ArgumentMap
-        self._input_schema: OrderedDict[str, Any]
-        self._output_schema: OrderedDict[str, Any]
-
-        self._set_io_schemas(arguments_map=arguments_map, output_schema=output_schema)
+        # initialize input/output schemas
+        if output_schema is None: output_schema = [DEFAULT_WF_KEY]
+        self._normalize_schemas(self.arguments_map, output_schema)
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
-    @property
-    def name(self) -> str:
-        return self._name
-    @name.setter
-    def name(self, value: str) -> None:
-        self._name = value
-
-    @property
-    def description(self) -> Optional[str]:
-        return self._description
-    @description.setter
-    def description(self, value: str) -> None:
-        self._description = value
-
-    @property
-    def arguments_map(self) -> ArgumentMap:
-        # Shallow copy to discourage external mutation.
-        return OrderedDict((k, dict(v)) for k, v in self._arguments_map.items())
-
     @property
     def input_schema(self) -> OrderedDict[str, Any]:
         return OrderedDict(self._input_schema)
@@ -184,13 +156,13 @@ class Workflow(ABC):
 
     @output_schema.setter
     def output_schema(self, value: Optional[Union[List[str], Mapping[str, Any]]]) -> None:
-        if value is None:
-            value = [DEFAULT_WF_KEY]
-        self._set_io_schemas(arguments_map=self.arguments_map, output_schema=value)
+        if value is None: value = [DEFAULT_WF_KEY]
+        self._normalize_schemas(self.arguments_map, value)
 
     @property
     def bundling_policy(self) -> BundlingPolicy:
         return self._bundling_policy
+
     @bundling_policy.setter
     def bundling_policy(self, value: BundlingPolicy) -> None:
         self._bundling_policy = BundlingPolicy(value)
@@ -198,13 +170,15 @@ class Workflow(ABC):
     @property
     def mapping_policy(self) -> MappingPolicy:
         return self._mapping_policy
+
     @mapping_policy.setter
     def mapping_policy(self, value: MappingPolicy) -> None:
         self._mapping_policy = MappingPolicy(value)
-    
+
     @property
     def absent_val_policy(self) -> AbsentValPolicy:
         return self._absent_val_policy
+
     @absent_val_policy.setter
     def absent_val_policy(self, value: AbsentValPolicy) -> None:
         self._absent_val_policy = AbsentValPolicy(value)
@@ -212,6 +186,7 @@ class Workflow(ABC):
     @property
     def default_absent_val(self) -> Any:
         return self._default_absent_val
+
     @default_absent_val.setter
     def default_absent_val(self, value: Any) -> None:
         self._default_absent_val = value
@@ -229,40 +204,37 @@ class Workflow(ABC):
     # ------------------------------------------------------------------ #
     def invoke(self, inputs: Mapping[str, Any]) -> OrderedDict[str, Any]:
         """
-        Template method:
-        1) Validate inputs is mapping
-        2) Run _invoke() -> (metadata, raw)
-        3) Package raw -> packaged (may still contain NO_VAL)
-        4) Validate packaged contains no NO_VAL
-        5) Save checkpoint
-        6) Return packaged
+        Run the invoke method
         """
-        if not isinstance(inputs, ABCMapping):
+        # 1) validate is mapping
+        if not isinstance(inputs, Mapping):
             raise ValidationError("Workflow.invoke: inputs must be a mapping")
 
         with self._invoke_lock:
             started = datetime.now(timezone.utc)
             run_id = uuid4().hex
 
+            # 2) run _invoke()
             try:
                 metadata, raw = self._invoke(inputs)
             except Exception as exc:
                 raise ExecutionError(f"{type(self).__name__}._invoke failed") from exc
 
-            if not isinstance(metadata, ABCMapping):
+            if not isinstance(metadata, Mapping):
                 raise ValidationError("Workflow._invoke: returned metadata must be a mapping")
 
             metadata = dict(metadata) # snapshot metadata to avoid external mutation
-
+            
+            # 3) package raw result
             packaged = self.package(raw)
 
-            # Final completeness validation happens HERE, not in packaging helpers.
+            # 4) validate that no NO_VAL's are present (drop, fill, or raise)
             packaged, missing_key_info = self._validate_packaged(packaged)
 
+            # 5) update checkpoints
             ended = datetime.now(timezone.utc)
             elapsed = (ended - started).total_seconds()
             metadata.update(missing_key_info)
-
             checkpoint = WorkflowCheckpoint(
                 run_id=run_id,
                 started_at=started,
@@ -274,10 +246,12 @@ class Workflow(ABC):
                 metadata=metadata,
             )
             self._checkpoints.append(checkpoint)
+
+            # 6) return
             return packaged
 
     @abstractmethod
-    def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any]:
+    def _invoke(self, inputs: Mapping[str, Any]) -> Tuple[Mapping[str, Any], Any]:
         """Subclass-defined execution step; returns (metadata, raw_result)."""
         raise NotImplementedError
 
@@ -286,13 +260,12 @@ class Workflow(ABC):
     # ------------------------------------------------------------------ #
     def clear_memory(self) -> None:
         """Clear workflow-owned memory (checkpoints). Subclasses may extend."""
-        with self._invoke_lock:
-            self._checkpoints.clear()
+        self._checkpoints.clear()
 
     # ------------------------------------------------------------------ #
     # Final validation (kept separate from packaging)
     # ------------------------------------------------------------------ #
-    def _validate_packaged(self, packaged: Mapping[str, Any]) -> tuple[Mapping[str, Any], Dict[str, Any]]:
+    def _validate_packaged(self, packaged: Mapping[str, Any]) -> Tuple[Mapping[str, Any], Dict[str, Any]]:
         """
         Raise if any output fields remain NO_VAL after packaging.
 
@@ -344,14 +317,14 @@ class Workflow(ABC):
         normalized = self._normalize_raw(raw)
         template = OrderedDict(self._output_schema)
 
-        if isinstance(normalized, ABCMapping):
+        if isinstance(normalized, Mapping):
             return self._package_from_mapping(template, normalized)
         if self._is_non_text_sequence(normalized):
             return self._package_from_sequence(template, normalized)  # type: ignore[arg-type]
         return self._package_from_scalar(template, normalized)
 
     def _normalize_raw(self, raw: Any) -> Any:
-        if isinstance(raw, ABCMapping) or self._is_non_text_sequence(raw):
+        if isinstance(raw, Mapping) or self._is_non_text_sequence(raw):
             return raw
 
         # Pydantic v2 models: model_dump()
@@ -359,7 +332,7 @@ class Workflow(ABC):
         if callable(md):
             try:
                 dumped = md()
-                if isinstance(dumped, ABCMapping):
+                if isinstance(dumped, Mapping):
                     return dumped
             except Exception:
                 pass
@@ -369,7 +342,7 @@ class Workflow(ABC):
         if callable(ad):
             try:
                 dumped = ad()
-                if isinstance(dumped, ABCMapping):
+                if isinstance(dumped, Mapping):
                     return dumped
             except Exception:
                 pass
@@ -378,7 +351,7 @@ class Workflow(ABC):
         if is_dataclass(raw):
             try:
                 dumped = asdict(raw)
-                if isinstance(dumped, ABCMapping):
+                if isinstance(dumped, Mapping):
                     return dumped
             except Exception:
                 pass
@@ -386,7 +359,7 @@ class Workflow(ABC):
         # Plain object with __dict__
         try:
             dumped = vars(raw)
-            if isinstance(dumped, ABCMapping):
+            if isinstance(dumped, Mapping):
                 return dumped
         except Exception:
             pass
@@ -394,7 +367,7 @@ class Workflow(ABC):
         return raw
 
     def _is_non_text_sequence(self, x: Any) -> bool:
-        return isinstance(x, ABCSequence) and not isinstance(x, (str, bytes, bytearray))
+        return isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray))
 
     def _package_from_mapping(
         self,
@@ -464,7 +437,7 @@ class Workflow(ABC):
     def _package_from_sequence(
         self,
         template: OrderedDict[str, Any],
-        seq: ABCSequence[Any],
+        seq: Sequence[Any],
     ) -> OrderedDict[str, Any]:
         keys = list(template.keys())
         values = list(seq)
@@ -500,12 +473,16 @@ class Workflow(ABC):
     # ------------------------------------------------------------------ #
     # Schema helpers
     # ------------------------------------------------------------------ #
-    def _set_io_schemas(
-        self,
-        *,
-        arguments_map: ArgumentMap,
-        output_schema: Union[List[str], Mapping[str, Any]],
-    ) -> None:
+    def build_args_returns(self) -> Tuple[ArgumentMap, str]:
+        return self._get_arguments(), OrderedDict.__name__
+
+    @abstractmethod
+    def _get_arguments(self)-> ArgumentMap:
+        raise NotImplementedError
+
+    def _normalize_schemas(self,
+                           arguments_map: ArgumentMap,
+                           output_schema: Union[List[str], Mapping[str, Any]]) -> None:
         """
         Normalize and set:
           - _arguments_map (ordered, meta dicts copied)
@@ -514,72 +491,32 @@ class Workflow(ABC):
 
         Intentionally protected: callers should be Workflow subclasses.
         """
-        if not isinstance(arguments_map, OrderedDict):
-            # Normalize to OrderedDict for determinism.
-            arguments_map = OrderedDict(arguments_map)
+        # normalize input-schema from an arguments map
+        normalized_input_schema = OrderedDict()
+        for key, meta in arguments_map.items():
+            normalized_input_schema.update({key : meta.get("default", NO_VAL)})
 
-        normalized_args: ArgumentMap = OrderedDict()
-        input_schema: OrderedDict[str, Any] = OrderedDict()
+        # normalize output-schema from a mapping or list
+        if isinstance(output_schema, Mapping):
+            normalized_output_schema = OrderedDict(output_schema)
+        else:
+            normalized_output_schema = OrderedDict((key, NO_VAL) for key in output_schema)
 
-        for name, meta in arguments_map.items():
-            if not isinstance(name, str) or not name:
-                raise SchemaError("Workflow.arguments_map keys must be non-empty strings")
-            if not isinstance(meta, ABCMapping):
-                raise SchemaError(
-                    "Workflow.arguments_map values must be mappings (per-arg metadata); "
-                    f"for key {name!r} got {type(meta)!r}"
-                )
-            meta_dict = dict(meta)
-            normalized_args[name] = meta_dict
-            input_schema[name] = meta_dict.get("default", NO_VAL)
-
-        normalized_out = self._normalize_output_schema(output_schema)
-
-        self._arguments_map = normalized_args
-        self._input_schema = input_schema
-        self._output_schema = normalized_out
-
-    def _normalize_output_schema(
-        self, schema: Union[List[str], Mapping[str, Any]]
-    ) -> OrderedDict[str, Any]:
-        if isinstance(schema, list):
-            out = OrderedDict()
-            for k in schema:
-                if not isinstance(k, str) or not k:
-                    raise SchemaError("output_schema list keys must be non-empty strings")
-                if k in out:
-                    raise SchemaError(f"duplicate output_schema key: {k!r}")
-                out[k] = NO_VAL
-            return out
-
-        if isinstance(schema, ABCMapping):
-            out = OrderedDict()
-            for k, default in schema.items():
-                if not isinstance(k, str) or not k:
-                    raise SchemaError("output_schema mapping keys must be non-empty strings")
-                if k in out:
-                    raise SchemaError(f"duplicate output_schema key: {k!r}")
-                out[k] = default
-            return out
-
-        raise SchemaError(
-            "output_schema must be a list[str] or mapping[str, Any]; "
-            f"got {type(schema)!r}"
-        )
+        # copy argument map (shallow copy of meta dicts) so schemas stay consistent
+        self._input_schema = normalized_input_schema
+        self._output_schema = normalized_output_schema
 
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
-    def to_dict(self) -> OrderedDict[str, Any]:
-        return OrderedDict(
-            workflow_type=type(self).__name__,
-            name=self._name,
-            description=self._description,
-            arguments_map=self.arguments_map,
+    def to_dict(self) -> dict[str, Any]:
+        d = super().to_dict()
+        d.update(OrderedDict(
             input_schema=self.input_schema,
             output_schema=self.output_schema,
             bundling_policy=self._bundling_policy.value,
             mapping_policy=self._mapping_policy.value,
             absent_val_policy=self._absent_val_policy.value,
             default_absent_val=self._default_absent_val,
-        )
+        ))
+        return d

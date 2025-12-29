@@ -112,7 +112,7 @@ class AtomicInvokable(ABC):
             else:
                 params.append(f"{param}: {ptype}")
         params_str = ", ".join(params)
-        return f"{self.name}({params_str}) -> {self.return_type}"
+        return f"{type(self).__name__}.{self.name}({params_str}) -> {self.return_type}"
 
     # ---------------------------------------------------------------- #
     # Abstract contract
@@ -137,6 +137,7 @@ class AtomicInvokable(ABC):
         Does *not* include `signature` by default, per request.
         """
         return {
+            "type": type(self).__name__,
             "name": self.name,
             "description": self.description,
             "arguments_map": self.arguments_map,

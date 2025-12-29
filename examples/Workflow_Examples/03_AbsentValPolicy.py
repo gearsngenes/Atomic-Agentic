@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 from atomic_agentic.workflows import AbsentValPolicy
 from atomic_agentic.tools import Tool
-from atomic_agentic.workflows.workflows import ToolFlow, BundlingPolicy, MappingPolicy
+from atomic_agentic.workflows.workflows import BasicFlow, BundlingPolicy, MappingPolicy
 
 
 # -----------------------------------------------------------------------------
@@ -50,7 +50,7 @@ TOOLS: list[tuple[str, Tool]] = [
 # -----------------------------------------------------------------------------
 # Runner
 # -----------------------------------------------------------------------------
-def run_once(*, label: str, flow: ToolFlow, inputs: Mapping[str, Any]) -> None:
+def run_once(*, label: str, flow: BasicFlow, inputs: Mapping[str, Any]) -> None:
     print(f"\n--- {label} ---")
     print("inputs:", dict(inputs))
     try:
@@ -62,14 +62,14 @@ def run_once(*, label: str, flow: ToolFlow, inputs: Mapping[str, Any]) -> None:
 
 def exercise_tool(tool_label: str, tool: Tool) -> None:
     print("\n" + "=" * 78)
-    print(f"TOOLFLOW CASE: {tool_label}")
+    print(f"BASICFLOW CASE: {tool_label}")
     print(f"Tool: {tool.full_name}")
     print(f"Expected output_schema: {OUTPUT_SCHEMA}")
     print("=" * 78)
 
     for policy in (AbsentValPolicy.RAISE, AbsentValPolicy.FILL, AbsentValPolicy.DROP):
-        flow = ToolFlow(
-            tool=tool,
+        flow = BasicFlow(
+            component=tool,
             output_schema=OUTPUT_SCHEMA,
             bundling_policy=BundlingPolicy.UNBUNDLE,
             mapping_policy=MappingPolicy.STRICT,
@@ -87,7 +87,7 @@ def exercise_tool(tool_label: str, tool: Tool) -> None:
 
 
 def main() -> None:
-    print("=== AbsentValPolicy smoke test (ToolFlow only) ===")
+    print("=== AbsentValPolicy smoke test (BasicFlow only) ===")
     print("This intentionally creates missing outputs vs output_schema=['a','b','c'].\n")
     for label, tool in TOOLS:
         exercise_tool(label, tool)
