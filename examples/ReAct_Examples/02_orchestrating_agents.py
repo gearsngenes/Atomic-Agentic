@@ -3,7 +3,7 @@ import logging
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import Agent
-from atomic_agentic.agents.tool_agents import ReActAgent
+from atomic_agentic.agents import ReActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()
@@ -11,17 +11,23 @@ logging.basicConfig(level=logging.INFO)
 
 llm = OpenAIEngine(model="gpt-5-mini")
 
-def builder_prestep(task: str | None, revision_notes: str | None) -> str:
+def builder_prestep(task: str | None = None, revision_notes: str | None = None) -> str:
     if revision_notes:
-        return f"Please rebuild code for the following task: {task}\n\nRevision Notes from earlier: {revision_notes}\n\nPlease provide the updated code."
+        return f"""
+    Read and internalize the following feedback from a code, and once you have, use your best judgement
+    from the revision notes to re-build the last code you : {revision_notes}\n\n
+    Please provide the updated code."""
     elif task:
-        return f"Task: {task}\n\nPlease implement the initial code."
+        return f"Implement code so that it meets the user's request:\n{task}"
     else:
         raise ValueError("Either task or revision_notes must be provided.")
 
 builder = Agent(
     name="CodeBuilderAgent",
-    description="Generates Python code per user request OR revises its earlier drafts from revision notes (provide one or the other).",
+    description="""
+    Generates Python code per user request OR revises its latest drafts from revision notes. If this is
+    the first draft of a code, provide ONLY the task. If you are sending feedback to revise the latest
+    draft, send ONLY the revision notes.""",
     llm_engine=llm,
     role_prompt=(
         "You are a senior software engineer who writes Python code for requested tasks.\n"
@@ -34,16 +40,18 @@ builder = Agent(
 
 
 def reviewer_prestep(draft_code: str) -> str:
-    return f"Please review the following code for the task: {draft_code}\n\nReturn revision suggestions or 'Approved' if no changes are needed."
+    return f"Please review and provide feedback for the following code: ```python\n{draft_code}\n```"
 
 reviewer = Agent(
     name="CodeReviewer",
-    description="Reviews code from the builder and returns revision suggestions or 'Approved'.",
+    description="Reviews draft code from the builder and returns revision suggestions or 'Approved'.",
     llm_engine=llm,
     role_prompt=(
         "You are an expert Python performance analyst. Thoroughly and brutally evaluate the code for "
-        "accuracy, readability, and SOLID design. Return ONLY revision suggestions. If no changes are "
+        "accuracy, readability, and correctness. Return ONLY revision suggestions. If no changes are "
         "needed, return 'Approved'."
+        "\nDo NOT be stingy with handing out the 'Approved' flag. If you fail to find DRASTIC room "
+        "for improvement, correction, or optimization, then you should provide an approval."
     ),
     context_enabled=True,
     pre_invoke=reviewer_prestep,
@@ -55,7 +63,7 @@ orchestrator = ReActAgent(
     description="Orchestrates calls between the code builder and the code reviewer.",
     llm_engine=llm,
     history_window=10,
-    tool_calls_limit=25,
+    tool_calls_limit=10,
     context_enabled=False,
     preview_limit=2_500,
 )
@@ -71,10 +79,9 @@ task = (
     "1) Call the builder tool to draft code.\n"
     "2) Call the reviewer tool to critique it.\n"
     "3) If the reviewer returns 'Approved', stop and return the latest code.\n"
-    "4) Otherwise, call the builder again with the review feedback and iterate.\n\n"
-    "IMPORTANT:\n"
-    "- When calling tools, your args object MUST match the tool's argument schema shown in AVAILABLE TOOLS.\n"
-    "- For these AgentTool tools (default Agents), call them with: {\"prompt\": \"...\"} (NOT wrapped in 'inputs').\n"
+    "4) Otherwise, call the builder again and send ONLY the revision notes feedback and iterate.\n\n"
+    "Note: Do NOT try use the ENTIRE # of tool call limits you have. consider this if you start "
+    "approaching your limit"
 )
 
 result = orchestrator.invoke({"prompt": task})
