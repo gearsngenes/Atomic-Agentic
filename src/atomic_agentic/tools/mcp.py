@@ -12,6 +12,7 @@ from typing import (
     Awaitable,
     TypeVar,
 )
+from collections import OrderedDict
 
 import logging
 from mcp import ClientSession
@@ -131,10 +132,8 @@ def list_mcp_tools(
         # Newer SDKs return a ListToolsResult with `.tools`
         tools = getattr(tools_resp, "tools", tools_resp)
         result: Dict[str, Dict[str, Any]] = {}
-
         if not tools:
             return result
-
 
         for tool in tools:
             # Name
@@ -168,9 +167,7 @@ def list_mcp_tools(
                 "output_schema": output_schema,
                 "raw": tool,
             }
-
         return result
-
     return _run_coro_sync(_do())
 
 def call_mcp_tool_once(
@@ -297,7 +294,7 @@ class MCPProxyTool(Tool):
         )
 
     # ------------------------------------------------------------------ #
-    # Properties
+    # Atomic-Invokable Properties
     # ------------------------------------------------------------------ #
     @property
     def name(self) -> str:
@@ -313,6 +310,7 @@ class MCPProxyTool(Tool):
         if not new_name:
             raise ToolDefinitionError("MCPProxyTool.name cannot be empty.")
 
+        # handles edge case of initializing self._name for the first time
         if getattr(self, "_name", None) == new_name:
             return  # no-op
 
@@ -335,6 +333,16 @@ class MCPProxyTool(Tool):
         self._arguments_map, self._return_type = self.build_args_returns()
         self._is_persistible_internal = self._compute_is_persistible()
 
+    # ------------------------------------------------------------------ #
+    # Tool Properties
+    # ------------------------------------------------------------------ #
+    @property
+    def function(self) -> Callable:
+        return self._function
+
+    # ------------------------------------------------------------------ #
+    # MCP-Proxy-Tool Properties
+    # ------------------------------------------------------------------ #
     @property
     def server_url(self) -> str:
         return self._server_url
@@ -360,42 +368,10 @@ class MCPProxyTool(Tool):
         self._module, self._qualname = self._get_mod_qual(new_function)
         self._arguments_map, self._return_type = self.build_args_returns()
         self._is_persistible_internal = self._compute_is_persistible()
-    
-    @property
-    def function(self) -> Callable:
-        return self._function
-    
+
     # ------------------------------------------------------------------ #
-    # Helpers
+    # Atomic-Invokable Helpers
     # ------------------------------------------------------------------ #
-    def _get_mod_qual(
-        self,
-        function: Callable[..., Any],
-    ) -> tuple[Optional[str], Optional[str]]:
-        """
-        MCP-backed tools don't map to a stable Python import path.
-        We explicitly opt-out of import-based identity.
-        """
-        return None, None
-
-    def _compute_is_persistible(self) -> bool:
-        """
-        Consider an MCPProxyTool persistible if:
-        - it has a server URL, namespace, and tool name,
-        - and the named tool still exists on the server.
-
-        Network errors are treated as non-persistible.
-        """
-        if not (self._server_url and self._name):
-            return False
-
-        try:
-            tools = list_mcp_tools(self._server_url, self._headers)
-        except Exception:
-            return False
-
-        return self._name in tools
-
     def build_args_returns(self) -> tuple[ArgumentMap, str]:
         """
         Construct `arguments_map` and `return_type` from MCP `input_schema`
@@ -408,7 +384,7 @@ class MCPProxyTool(Tool):
         - Return type is derived from `output_schema` if provided; otherwise "Any".
         """
 
-        arg_map: ArgumentMap = ArgumentMap()
+        arg_map: ArgumentMap = OrderedDict()
 
         # ----- Inputs: JSON Schema → ArgumentMap -----
         input_schema = self._mcpdata.get("input_schema")
@@ -454,6 +430,34 @@ class MCPProxyTool(Tool):
 
         return arg_map, return_type
 
+    def _compute_is_persistible(self) -> bool:
+        """
+        Consider an MCPProxyTool persistible if:
+        - it has a server URL, namespace, and tool name,
+        - and the named tool still exists on the server.
+
+        Network errors are treated as non-persistible.
+        """
+        try:
+            tools = list_mcp_tools(self._server_url, self._headers)
+        except Exception:
+            return False
+
+        return self._name in tools
+
+    # ------------------------------------------------------------------ #
+    # Tool Helpers
+    # ------------------------------------------------------------------ #
+    def _get_mod_qual(
+        self,
+        function: Callable[..., Any],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        MCP-backed tools don't map to a stable Python import path.
+        We explicitly opt-out of import-based identity.
+        """
+        return call_mcp_tool_once.__module__, call_mcp_tool_once.__qualname__
+
     def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
         """
         Execute the underlying MCP call using the dict-only function.
@@ -466,7 +470,7 @@ class MCPProxyTool(Tool):
         return self._normalize_mcp_result(raw)
 
     # ------------------------------------------------------------------ #
-    # Class specific helpers
+    # MCP-Proxy-Tool Helpers
     # ------------------------------------------------------------------ #
     def _normalize_mcp_result(self, raw: Any):
         # 1) Direct CallToolResult: prefer structuredContent if present

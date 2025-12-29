@@ -12,15 +12,14 @@ from typing import (
 import logging
 import threading
 
-from ..engines.LLMEngines import LLMEngine
-from ..tools.base import Tool, ArgumentMap
-from ..tools.adapter import AdapterTool
 from ..core.Exceptions import (
     AgentError,
     AgentInvocationError,
     ToolInvocationError,
 )
-from ..core.Invokable import AtomicInvokable
+from ..core.Invokable import AtomicInvokable, ArgumentMap
+from ..engines.LLMEngines import LLMEngine
+from ..tools import Tool, toolify
 
 logger = logging.getLogger(__name__)
 
@@ -129,13 +128,33 @@ class Agent(AtomicInvokable):
         history_window: Optional[int] = None,
     ) -> None:
 
-        # Prepare pre_invoke and post_invoke
-        self._pre_invoke = self._prepare_pretool(pre_invoke, name)
-        self._post_invoke = self._prepare_posttool(post_invoke, name)
-        self._post_param_name = list(self.post_invoke.arguments_map.keys())[0]
-
-        # set the core AtomicInvokable attributes
-        super().__init__(name=name, description=description)
+        # Prepare pre_invoke
+        pre_tool = toolify(pre_invoke or identity_pre,
+                           name = "pre_invoke",
+                           namespace = name,
+                           description = f"The tool that preprocesses inputs into a string for Agent {name}")[0]
+        if pre_tool.return_type.lower() not in {"any", "str"}:
+            raise AgentError("Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke")
+        # Prepare post_invoke
+        post_tool = toolify(post_invoke or identity_post,
+                           name = "post_invoke",
+                           namespace = name,
+                           description = f"The tool that postprocesses outputs of Agent {name}")[0]
+        required = 0
+        if len(post_tool.arguments_map) == 0:
+            raise AgentError("Agent.post_invoke must expect least 1 argument")
+        if len(post_tool.arguments_map) == 1:
+            self._post_param_name = list(post_tool.arguments_map.keys())[0]
+        else:
+            for arg in post_tool.arguments_map:
+                if "default" not in post_tool.arguments_map[arg]:
+                    required += 1
+                    self._post_param_name = arg
+            if required != 1:
+                raise AgentError(f"Agent.post_invoke must have exactly 1 required argument, got {required}")
+        # Set Pre/Post invoke
+        self._pre_invoke = pre_tool
+        self._post_invoke = post_tool
 
         # Set the agent-specific attributes
         self._llm_engine: LLMEngine = llm_engine
@@ -155,11 +174,14 @@ class Agent(AtomicInvokable):
         # and committed to `_history` by `_update_history` if `context_enabled` is True.
         self._newest_history: List[Dict[str, str]] = []
         
-        #invoke lock
+        # invoke lock
         self._invoke_lock = threading.RLock()
 
+        # set the core AtomicInvokable attributes
+        super().__init__(name=name, description=description)
+
     # ------------------------------------------------------------------ #
-    # Properties
+    # Agent Properties
     # ------------------------------------------------------------------ #
     @property
     def role_prompt(self) -> str:
@@ -239,13 +261,13 @@ class Agent(AtomicInvokable):
         return self._pre_invoke
 
     @pre_invoke.setter
-    def pre_invoke(self, tool: Optional[Union[Callable, AtomicInvokable]]) -> None:
+    def pre_invoke(self, candidate: Optional[Union[Callable, AtomicInvokable]]) -> None:
         """
         Set the pre-invoke Tool.
 
         Parameters
         ----------
-        tool : Tool or callable
+        candidate : Atomic-Invokable or callable
             - If a Tool, it is used as-is.
             - If a callable, it is wrapped as a Tool with a simple signature.
 
@@ -255,10 +277,15 @@ class Agent(AtomicInvokable):
           and the current `post_invoke` before mutating internal state.
         - If the build would not result in the required types, raise `AgentError`.
         """
-        # Create candidate tool (do not mutate state yet)
-        candidate = self._prepare_pretool(tool, self.name)
+        # Prepare pre_invoke
+        pre_tool = toolify(candidate or identity_pre,
+                           name = "pre_invoke",
+                           namespace = self.name,
+                           description = f"The tool that preprocesses inputs into a string for Agent {self.name}")[0]
+        if pre_tool.return_type.lower() not in {"any", "str"}:
+            raise AgentError("Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke")
         # Apply the candidate and sync internal schema
-        self._pre_invoke = candidate
+        self._pre_invoke = pre_tool
         args, ret = self.build_args_returns()
         self._arguments_map, self._return_type = args, ret
     
@@ -274,7 +301,7 @@ class Agent(AtomicInvokable):
         return self._post_invoke
 
     @post_invoke.setter
-    def post_invoke(self, tool: Optional[Union[Callable, AtomicInvokable]]) -> None:
+    def post_invoke(self, candidate: Optional[Union[Callable, AtomicInvokable]]) -> None:
         """
         Set the post-invoke Tool.
 
@@ -291,10 +318,74 @@ class Agent(AtomicInvokable):
         - If the build would not result in the required types, raise `AgentError`.
         """
         # Create candidate tool (do not mutate state yet)
-        candidate = self._prepare_posttool(tool, self.name)
-        self._post_invoke = candidate
-        self._post_param_name = next(iter(candidate.arguments_map.keys()), None)
+        post_tool = toolify(candidate or identity_post,
+                           name = "post_invoke",
+                           namespace = self.name,
+                           description = f"The tool that postprocesses outputs of Agent {self.name}")[0]
+        required = 0
+        if len(post_tool.arguments_map) == 0:
+            raise AgentError("Agent.post_invoke must expect least 1 argument")
+        if len(post_tool.arguments_map) == 1:
+            self._post_param_name = list(post_tool.arguments_map.keys())[0]
+        else:
+            for arg in post_tool.arguments_map:
+                if "default" not in post_tool.arguments_map[arg]:
+                    required += 1
+                    self._post_param_name = arg
+            if required != 1:
+                raise AgentError(f"Agent.post_invoke must have exactly 1 required argument, got {required}")
+        self._post_invoke = post_tool
         self._arguments_map, self._return_type = self.build_args_returns()
+
+    # ------------------------------------------------------------------ #
+    # Atomic-Invokable Helpers
+    # ------------------------------------------------------------------ #
+    def build_args_returns(self) -> tuple[ArgumentMap, str]:
+        """Return the Agent's input argument map (mirroring pre_invoke) and the post_invoke return type."""
+        return OrderedDict(self._pre_invoke.arguments_map), str(self._post_invoke.return_type)
+
+    def _compute_is_persistible(self):
+        return self.pre_invoke.is_persistible and self.post_invoke.is_persistible
+
+    # ------------------------------------------------------------------ #
+    # Agent Helpers
+    # ------------------------------------------------------------------ #
+    def _invoke(self, messages: List[Dict[str, str]]) -> Any:
+        """Internal call path used by :meth:`invoke`.
+
+        This base implementation:
+        - Invokes the configured LLM engine with the provided ``messages``.
+        - Populates ``_newest_history`` with the *current turn only*
+          (user + assistant messages).
+
+        Subclasses may override this method to implement more complex behavior,
+        but **must not** mutate ``self._history`` directly. Instead, they should
+        either:
+        - append messages to ``self._newest_history``, or
+        - store richer run data on ``self`` for :meth:`_update_history` to
+          summarize and commit.
+        """
+        # 1) Call engine (attachments are managed by the engine itself)
+        try:
+            logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
+            text = self._llm_engine.invoke(messages)
+        except Exception as e:  # pragma: no cover - engine-specific failures
+            raise AgentInvocationError(f"engine invocation failed: {e}") from e
+
+        # 2) Engine contract: base Agent expects a string
+        if not isinstance(text, str):
+            raise AgentInvocationError(
+                f"engine returned non-string (type={type(text)!r}); a string is required"
+            )
+
+        # 3) Record the current turn into the per-invoke buffer.
+        # The base Agent simply stores the user prompt and raw assistant text.
+        user_msg = messages[-1]
+        
+        self._newest_history.append(user_msg)
+        self._newest_history.append({"role": "assistant", "content": text})
+
+        return text
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -427,96 +518,6 @@ class Agent(AtomicInvokable):
             # Final logging and return
             logger.info(f"[{type(self).__name__}.{self.name}.invoke finished]")
             return result
-
-    # ------------------------------------------------------------------ #
-    # Helpers
-    # ------------------------------------------------------------------ #
-    def _prepare_pretool(self, tool: Optional[Union[Callable, AtomicInvokable]], name: str):
-        # if None provided
-        if tool is None:
-            tool = identity_pre
-        # Normalize to Tool
-        if isinstance(tool, Tool):
-            candidate = tool
-        elif isinstance(tool, Callable):
-            candidate = Tool(
-                function=tool,
-                name="pre_invoke",
-                namespace=name,
-                description=tool.__doc__ or f"pre-invoke callable adapted to Tool for agent {name}",
-            )
-        elif isinstance(tool, AtomicInvokable):
-            candidate = AdapterTool(tool)
-        else:
-            raise ValueError("pre_invoke must be a Tool instance or a callable object.")
-        # Validate candidate by computing the resulting schema
-        if not candidate.return_type in {"str", "any"}:
-            raise AgentError("Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke")
-        return candidate
-
-    def _prepare_posttool(self, tool: Optional[Union[Callable,AtomicInvokable]], name: str):
-        # if None provided
-        if tool is None:
-            tool = identity_post
-        # Normalize to Tool
-        if isinstance(tool, Tool):
-            candidate = tool
-        elif isinstance(tool, Callable):
-            candidate = Tool(
-                function=tool,
-                name="post_invoke",
-                namespace=name,
-                description=tool.__doc__ or f"post-invoke callable adapted to Tool for agent {name}",
-            )
-        elif isinstance(tool, AtomicInvokable):
-            candidate = AdapterTool(tool)
-        else:
-            raise ValueError("post_invoke must be a Tool instance or a callable object.")
-        # Validate candidate by computing the resulting schema
-        if len(candidate.arguments_map) != 1:
-            raise AgentError("Agent.post_invoke must take in a single input argument in order to post-process the Agent._invoke() output")
-        return candidate
-
-    def build_args_returns(self) -> tuple[ArgumentMap, str]:
-        """Return the Agent's input argument map (mirroring pre_invoke) and the post_invoke return type."""
-        return OrderedDict(self._pre_invoke.arguments_map), str(self._post_invoke.return_type)
-
-    def _invoke(self, messages: List[Dict[str, str]]) -> Any:
-        """Internal call path used by :meth:`invoke`.
-
-        This base implementation:
-        - Invokes the configured LLM engine with the provided ``messages``.
-        - Populates ``_newest_history`` with the *current turn only*
-          (user + assistant messages).
-
-        Subclasses may override this method to implement more complex behavior,
-        but **must not** mutate ``self._history`` directly. Instead, they should
-        either:
-        - append messages to ``self._newest_history``, or
-        - store richer run data on ``self`` for :meth:`_update_history` to
-          summarize and commit.
-        """
-        # 1) Call engine (attachments are managed by the engine itself)
-        try:
-            logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
-            text = self._llm_engine.invoke(messages)
-        except Exception as e:  # pragma: no cover - engine-specific failures
-            raise AgentInvocationError(f"engine invocation failed: {e}") from e
-
-        # 2) Engine contract: base Agent expects a string
-        if not isinstance(text, str):
-            raise AgentInvocationError(
-                f"engine returned non-string (type={type(text)!r}); a string is required"
-            )
-
-        # 3) Record the current turn into the per-invoke buffer.
-        # The base Agent simply stores the user prompt and raw assistant text.
-        user_msg = messages[-1]
-        
-        self._newest_history.append(user_msg)
-        self._newest_history.append({"role": "assistant", "content": text})
-
-        return text
 
     # ------------------------------------------------------------------ #
     # Serialization

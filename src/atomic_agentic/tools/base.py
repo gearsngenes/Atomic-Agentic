@@ -72,12 +72,33 @@ class Tool(AtomicInvokable):
         # Delegate name/description validation and arguments/return type setup
         super().__init__(name=inferred_name, description=inferred_description)
 
-        # Compute persistibility flag now that module/qualname are set
-        self._is_persistible_internal: bool = self._compute_is_persistible()
-
+    # ------------------------------------------------------------------ #
+    # Atomic-Invokable Properties
+    # ------------------------------------------------------------------ #
+    @property
+    def signature(self) -> str:
+        """Human-readable signature derived from ``arguments_map`` and
+        ``return_type``."""
+        params: List[str] = []
+        for name, meta in self._arguments_map.items():
+            kind = meta.get("kind", "")
+            type_name = meta.get("type", "Any")
+            default_marker = ""
+            if "default" in meta:
+                default = str(meta['default'])
+                default_marker = f" = {default}"
+            if kind == "VAR_POSITIONAL":
+                param_str = f"*{name}: {type_name}{default_marker}"
+            elif kind == "VAR_KEYWORD":
+                param_str = f"**{name}: {type_name}{default_marker}"
+            else:
+                param_str = f"{name}: {type_name}{default_marker}"
+            params.append(param_str)
+        params_str = ", ".join(params)
+        return f"{self.full_name}({params_str}) -> {self._return_type}"
 
     # ------------------------------------------------------------------ #
-    # Properties
+    # Tool Properties
     # ------------------------------------------------------------------ #
     @property
     def namespace(self) -> str:
@@ -111,110 +132,13 @@ class Tool(AtomicInvokable):
         return self._qualname
 
     @property
-    def is_persistible(self) -> bool:
-        """Whether this Tool can be reconstructed from its serialized form."""
-        return self._is_persistible_internal
-
-    @property
     def full_name(self) -> str:
         """Fully-qualified tool name of the form ``Type.namespace.name``."""
         return f"{type(self).__name__}.{self._namespace}.{self._name}"
 
-    @property
-    def signature(self) -> str:
-        """Human-readable signature derived from ``arguments_map`` and
-        ``return_type``."""
-        params: List[str] = []
-        for name, meta in self._arguments_map.items():
-            kind = meta.get("kind", "")
-            type_name = meta.get("type", "Any")
-            default_marker = ""
-            if "default" in meta:
-                default = str(meta['default'])
-                default_marker = f" = {default}"
-            if kind == "VAR_POSITIONAL":
-                param_str = f"*{name}: {type_name}{default_marker}"
-            elif kind == "VAR_KEYWORD":
-                param_str = f"**{name}: {type_name}{default_marker}"
-            else:
-                param_str = f"{name}: {type_name}{default_marker}"
-            params.append(param_str)
-        params_str = ", ".join(params)
-        return f"{self.full_name}({params_str}) -> {self._return_type}"
-
     # ------------------------------------------------------------------ #
-    # Public API
+    # Atomic-Invokable Helpers
     # ------------------------------------------------------------------ #
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
-        """Invoke the tool using a dict-like mapping of inputs.
-
-        This is the *only* public entrypoint for execution. Subclasses must not
-        override this method; instead they can customise :meth:`to_arg_kwarg`
-        and :meth:`execute`.
-        """
-        if not isinstance(inputs, Mapping):
-            raise ToolInvocationError(f"{self._name}: inputs must be a mapping")
-        args, kwargs = self.to_arg_kwarg(inputs)
-        result = self.execute(args, kwargs)
-        return result
-
-    # ------------------------------------------------------------------ #
-    # Helpers
-    # ------------------------------------------------------------------ #
-    def _get_mod_qual(self, function: Callable[..., Any]) -> tuple[Optional[str], Optional[str]]:
-        """Determine ``(module, qualname)`` for callable-based tools.
-
-        Subclasses that do not use Python import identity (e.g. MCPProxyTool)
-        should override this to return ``(None, None)``.
-        """
-        module = getattr(function, "__module__", None)
-        qualname = getattr(function, "__qualname__", None)
-        return module, qualname
-
-    def _format_annotation(self, ann: Any) -> str:
-        """Convert a type annotation into a readable string.
-
-        Behaviour:
-        - If missing/empty → 'Any'.
-        - If already a string → returned as-is.
-        - If a parameterized / generic type (e.g. List[Dict[str, int]] or dict[str, int]):
-          builds the full nested structure string.
-        - If a plain class → its name (e.g. 'int', 'MyModel').
-        - Otherwise → best-effort str(ann).
-        """
-
-        # Missing / unknown annotation
-        if ann is inspect._empty or ann is None:
-            return "Any"
-
-        # Forward reference or explicit string annotation
-        if isinstance(ann, str):
-            return ann
-
-        # typing / generic / PEP 585 parameterized types
-        origin = get_origin(ann)
-        if origin is not None:
-            # Recursively format origin and args
-            origin_str = self._format_annotation(origin)
-            args = get_args(ann)
-            if not args:
-                return origin_str
-            args_str = ", ".join(self._format_annotation(a) for a in args)
-            return f"{origin_str}[{args_str}]"
-
-        # Plain classes / types
-        module = getattr(ann, "__module__", None)
-        name = getattr(ann, "__name__", None)
-        if module == "builtins" and name:
-            # int, str, dict, list, etc.
-            return name
-        if name:
-            # Custom or library class
-            return name
-
-        # Fallback: best-effort string representation
-        return str(ann)
-
     def build_args_returns(self) -> tuple[ArgumentMap, str]:
         """Construct ``arguments_map`` and ``return_type`` from the wrapped
         callable's signature.
@@ -271,6 +195,63 @@ class Tool(AtomicInvokable):
         if "<locals>" in self._qualname:
             return False
         return True
+
+    # ------------------------------------------------------------------ #
+    # Tool Helpers
+    # ------------------------------------------------------------------ #
+    def _get_mod_qual(self, function: Callable[..., Any]) -> tuple[Optional[str], Optional[str]]:
+        """Determine ``(module, qualname)`` for callable-based tools.
+
+        Subclasses that do not use Python import identity (e.g. MCPProxyTool)
+        should override this to return ``(None, None)``.
+        """
+        module = getattr(function, "__module__", None)
+        qualname = getattr(function, "__qualname__", None)
+        return module, qualname
+
+    def _format_annotation(self, ann: Any) -> str:
+        """Convert a type annotation into a readable string.
+
+        Behaviour:
+        - If missing/empty → 'Any'.
+        - If already a string → returned as-is.
+        - If a parameterized / generic type (e.g. List[Dict[str, int]] or dict[str, int]):
+          builds the full nested structure string.
+        - If a plain class → its name (e.g. 'int', 'MyModel').
+        - Otherwise → best-effort str(ann).
+        """
+
+        # Missing / unknown annotation
+        if ann is inspect._empty or ann is None:
+            return "Any"
+
+        # Forward reference or explicit string annotation
+        if isinstance(ann, str):
+            return ann
+
+        # typing / generic / PEP 585 parameterized types
+        origin = get_origin(ann)
+        if origin is not None:
+            # Recursively format origin and args
+            origin_str = self._format_annotation(origin)
+            args = get_args(ann)
+            if not args:
+                return origin_str
+            args_str = ", ".join(self._format_annotation(a) for a in args)
+            return f"{origin_str}[{args_str}]"
+
+        # Plain classes / types
+        module = getattr(ann, "__module__", None)
+        name = getattr(ann, "__name__", None)
+        if module == "builtins" and name:
+            # int, str, dict, list, etc.
+            return name
+        if name:
+            # Custom or library class
+            return name
+
+        # Fallback: best-effort string representation
+        return str(ann)
 
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         """
@@ -422,6 +403,22 @@ class Tool(AtomicInvokable):
         return result
 
     # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """Invoke the tool using a dict-like mapping of inputs.
+
+        This is the *only* public entrypoint for execution. Subclasses must not
+        override this method; instead they can customise :meth:`to_arg_kwarg`
+        and :meth:`execute`.
+        """
+        if not isinstance(inputs, Mapping):
+            raise ToolInvocationError(f"{self._name}: inputs must be a mapping")
+        args, kwargs = self.to_arg_kwarg(inputs)
+        result = self.execute(args, kwargs)
+        return result
+
+    # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> Dict[str, Any]:
@@ -433,7 +430,6 @@ class Tool(AtomicInvokable):
         """
         d = super().to_dict()
         d.update({
-            "tool_type": type(self).__name__,
             "namespace": self.namespace,
             "module": self.module,
             "qualname": self.qualname,

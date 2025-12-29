@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import Any, Mapping
+from typing import Any, Mapping, Dict
 import re
 
 ArgumentMap = OrderedDict[str, dict[str, Any]]
@@ -50,6 +50,7 @@ class AtomicInvokable(ABC):
 
         self._arguments_map: ArgumentMap = args
         self._return_type: str = ret
+        self._is_persistible: bool = self._compute_is_persistible()
 
     # ---------------------------------------------------------------- #
     # Name + description with validation
@@ -80,6 +81,10 @@ class AtomicInvokable(ABC):
             raise ValueError("description must be a non-empty string")
         self._description = value.strip()
 
+    @property
+    def is_persistible(self) -> bool:
+        self._is_persistible
+    
     # ---------------------------------------------------------------- #
     # Exposed read-only derived properties
     # ---------------------------------------------------------------- #
@@ -118,6 +123,10 @@ class AtomicInvokable(ABC):
     # Abstract contract
     # ---------------------------------------------------------------- #
     @abstractmethod
+    def _compute_is_persistible(self) -> bool:
+        raise NotImplementedError
+    
+    @abstractmethod
     def build_args_returns(self) -> tuple[ArgumentMap, str]:
         """Return (arguments_map, return_type)."""
         raise NotImplementedError
@@ -130,7 +139,7 @@ class AtomicInvokable(ABC):
     # ---------------------------------------------------------------- #
     # Default metadata serialization
     # ---------------------------------------------------------------- #
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """
         Minimal metadata serialization.
 

@@ -70,62 +70,34 @@ class A2AProxyTool(Tool):
     Changing :attr:`url` or :attr:`headers` triggers a full :meth:`refresh`,
     rebinding the underlying client and rebuilding schemas.
     """
-
-    def __init__(self, url: str, headers: Any | None = None) -> None:
+    # ------------------------------------------------------------------ #
+    # Construction
+    # ------------------------------------------------------------------ #
+    def __init__(self,
+                 url: str,
+                 namespace: str | None = None,
+                 headers: Any | None = None) -> None:
         self._url = url
-        self._headers = headers
         self._client = A2AClient(url, headers=headers)
 
         agent_card = self._client.get_agent_card()
         super().__init__(
-            name="invoke",
+            name=agent_card.name,
             description=agent_card.description,
-            namespace=agent_card.name,
+            namespace=namespace,
             function=functools.partial(a2atomic_host_invoker, client=self._client),
         )
 
-    def refresh(self, headers: Any | None = None) -> None:
-        """
-        Re-fetch the agent card and remote schemas, and rebuild the client and
-        function binding. Mirrors the intent of MCPProxyTool.refresh().
-        """
-        self._headers = headers
-        self._client = A2AClient(self._url, headers=self._headers)
-
-        try:
-            agent_card = self._client.get_agent_card()
-        except Exception as e:  # pragma: no cover
-            raise ToolDefinitionError(f"{self.full_name}: failed to fetch A2A agent card: {e}") from e
-
-        # Update exposed identity/metadata
-        namespace = agent_card.name
-        description = agent_card.description
-        # Rebind callable + rebuild schemas
-        function = functools.partial(a2atomic_host_invoker, client=self._client)
-        super().__init__(
-            name="invoke",
-            description=description,
-            namespace=namespace,
-            function=function,
-        )
-
+    # ------------------------------------------------------------------ #
+    # A2A-Proxy-Tool Properties
+    # ------------------------------------------------------------------ #
     @property
     def url(self) -> str:
         return self._url
 
-    @url.setter
-    def url(self, val: str) -> None:
-        self._url = val
-        self.refresh(self._headers)
-
-    @property
-    def headers(self) -> Any | None:
-        return self._headers
-
-    @headers.setter
-    def headers(self, val: Any | None) -> None:
-        self.refresh(val)
-
+    # ------------------------------------------------------------------ #
+    # Atomic-Invokable Helpers
+    # ------------------------------------------------------------------ #
     def build_args_returns(self) -> tuple[ArgumentMap, str]:
         """Construct ``arguments_map`` and ``return_type`` from remote "agent_metadata"."""
         call = FunctionCallContent(name="invokable_metadata", parameters=[])
@@ -168,6 +140,16 @@ class A2AProxyTool(Tool):
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.return_type must be a str")
         return OrderedDict(args_map), return_type
 
+    def _compute_is_persistible(self) -> bool:
+        try:
+            agent_card = self._client.get_agent_card()
+        except Exception:
+            return False
+        return agent_card.name == self.name
+
+    # ------------------------------------------------------------------ #
+    # Tool Helpers
+    # ------------------------------------------------------------------ #
     def _get_mod_qual(
         self,
         function: Callable[..., Any],
@@ -175,24 +157,44 @@ class A2AProxyTool(Tool):
         """A2A-backed tools don't map to a stable Python import path."""
         return a2atomic_host_invoker.__module__, a2atomic_host_invoker.__qualname__
 
-    def _compute_is_persistible(self) -> bool:
-        try:
-            agent_card = self._client.get_agent_card()
-        except Exception:
-            return False
-        return bool(agent_card.name and agent_card.description and self._url)
-
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         return tuple([]), dict(inputs)
 
     def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
-        try:
-            result = self._function(inputs = kwargs)
-        except Exception as e:  # pragma: no cover
-            raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
+        result = self._function(inputs = kwargs)
         return result
 
-    def to_dict(self) -> OrderedDict[str, Any]:
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+    def refresh(self, headers: Any | None = None) -> None:
+        """
+        Re-fetch the agent card and remote schemas, and rebuild the client and
+        function binding. Mirrors the intent of MCPProxyTool.refresh().
+        """
+        self._client = A2AClient(self._url, headers=headers)
+
+        try:
+            agent_card = self._client.get_agent_card()
+        except Exception as e:  # pragma: no cover
+            raise ToolDefinitionError(f"{self.full_name}: failed to fetch A2A agent card: {e}") from e
+
+        # Update exposed identity/metadata
+        name = agent_card.name
+        description = agent_card.description
+        # Rebind callable + rebuild schemas
+        function = functools.partial(a2atomic_host_invoker, client=self._client)
+        super().__init__(
+            name=name,
+            description=description,
+            namespace=self.namespace,
+            function=function,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Serialization
+    # ------------------------------------------------------------------ #
+    def to_dict(self) -> Dict[str, Any]:
         dict_data = super().to_dict()
-        dict_data.update(OrderedDict(url=self._url))
+        dict_data.update({"url": self._url})
         return dict_data

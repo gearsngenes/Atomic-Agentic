@@ -23,7 +23,14 @@ class AdapterTool(Tool):
         super().__init__(component.invoke, component.name, namespace, component.description)
 
     # ------------------------------------------------------------------ #
-    # Properties
+    # Tool Properties
+    # ------------------------------------------------------------------ #
+    @property
+    def function(self) -> Callable:
+        return self._function
+
+    # ------------------------------------------------------------------ #
+    # Adapter-Tool Properties
     # ------------------------------------------------------------------ #
     @property
     def component(self) -> AtomicInvokable:
@@ -40,32 +47,10 @@ class AdapterTool(Tool):
         # Build argument schema and return type from the current function.
         self._arguments_map, self._return_type = self.build_args_returns()
         # Persistibility flag exposed as a public property.
-        self._is_persistible_internal: bool = self._compute_is_persistible()
-    
-    @property
-    def name(self) -> str:
-        return self._name
+        self._is_persistible = self._compute_is_persistible()
 
-    @name.setter
-    def name(self, val: str) -> None:
-        self.component.name = val
-        self._name = f"{self.component.name}_invoke"
-
-    @property
-    def description(self) -> str:
-        return self._description
-
-    @description.setter
-    def description(self, val: str) -> None:
-        self.component.description = val
-        self._description = val
-    
-    @property
-    def function(self) -> Callable:
-        return self._function
-    
     # ------------------------------------------------------------------ #
-    # Helpers
+    # Atomic-Invokable Helpers
     # ------------------------------------------------------------------ #
     def build_args_returns(self) -> tuple[ArgumentMap, str]:
         """Construct ``arguments_map`` and ``return_type`` from the wrapped
@@ -81,11 +66,13 @@ class AdapterTool(Tool):
 
     def _compute_is_persistible(self) -> bool:
         """Default persistibility check for callable-based tools.
-
-        Until we have a better way to do this...
+        Check the component's persistibility
         """
-        return False
+        return self.component.is_persistible
 
+    # ------------------------------------------------------------------ #
+    # Tool Helpers
+    # ------------------------------------------------------------------ #
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         """Default implementation for mapping input dicts to ``(*args, **kwargs)``.
 
@@ -110,18 +97,15 @@ class AdapterTool(Tool):
         example, by making a remote MCP call or invoking an Agent), but should
         not change the high-level semantics.
         """
-        try:
-            result = self._function(kwargs) # function = self.agent.invoke()
-        except Exception as e:  # pragma: no cover - thin wrapper
-            raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
+        result = self._function(inputs = kwargs)
         return result
 
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
-    def to_dict(self)-> OrderedDict[str, Any]:
+    def to_dict(self)-> Dict[str, Any]:
         base = super().to_dict()
-        base.update(OrderedDict(
-            component = self.component.to_dict()
-        ))
+        base.update({
+            "component": self.component.to_dict()
+        })
         return base
