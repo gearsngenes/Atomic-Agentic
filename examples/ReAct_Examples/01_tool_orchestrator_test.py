@@ -2,7 +2,7 @@ import logging
 
 from dotenv import load_dotenv
 
-from atomic_agentic.agents.tool_agents import ReActAgent
+from atomic_agentic.agents import ReActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.tools.Plugins import CONSOLE_TOOLS, MATH_TOOLS  # lists of Tool objects
 

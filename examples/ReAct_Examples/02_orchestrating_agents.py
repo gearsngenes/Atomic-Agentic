@@ -47,11 +47,15 @@ reviewer = Agent(
     description="Reviews draft code from the builder and returns revision suggestions or 'Approved'.",
     llm_engine=llm,
     role_prompt=(
-        "You are an expert Python performance analyst. Thoroughly and brutally evaluate the code for "
-        "accuracy, readability, and correctness. Return ONLY revision suggestions. If no changes are "
-        "needed, return 'Approved'."
-        "\nDo NOT be stingy with handing out the 'Approved' flag. If you fail to find DRASTIC room "
-        "for improvement, correction, or optimization, then you should provide an approval."
+        "You are an expert Python code analyst. Thoroughly and brutally evaluate the code for "
+        "accuracy, readability, and overall design optimization. Return ONLY revision critiques that "
+        "you deem are critical or necessary for the the code to be ready to hand off to a professional "
+        "developer for future use. Such critiques should focus on:\n"
+        "- Syntax or semantic errors in the code (high priority fixes)\n"
+        "- Redundant or duplicate code that could be refactored into reusable chunks\n"
+        "- Overly complex or irrelevant/unused code that isn't needed for the codebuilder's task\n\n"
+        "If none of these types of significant errors are present in a major way, "
+        "return a single 'Approved' flag."
     ),
     context_enabled=True,
     pre_invoke=reviewer_prestep,
