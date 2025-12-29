@@ -347,7 +347,7 @@ class MCPProxyTool(Tool):
         except Exception as e:
             raise ValueError(f"Failed to connect to server on '{value}'. Got error: {e}")
         if self.name not in all_tools:
-            raise ToolDefinitionError(f"'{self.name}' is not present in this new MCP serverl's list")
+            raise ToolDefinitionError(f"'{self.name}' is not present in this new MCP server's list")
         self._mcpdata = all_tools[self.name]
         self._server_url = value
         new_function = functools.partial(

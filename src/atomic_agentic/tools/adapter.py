@@ -82,11 +82,9 @@ class AdapterTool(Tool):
     def _compute_is_persistible(self) -> bool:
         """Default persistibility check for callable-based tools.
 
-        A Tool is considered persistible if its function has both ``__module__``
-        and ``__qualname__`` and does not appear to be a local/helper function.
-        Subclasses can override this with their own criteria.
+        Until we have a better way to do this...
         """
-        return self.component.pre_invoke.is_persistible and self.component.post_invoke.is_persistible
+        return False
 
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         """Default implementation for mapping input dicts to ``(*args, **kwargs)``.
@@ -124,6 +122,6 @@ class AdapterTool(Tool):
     def to_dict(self)-> OrderedDict[str, Any]:
         base = super().to_dict()
         base.update(OrderedDict(
-            agent = self.component.to_dict()
+            component = self.component.to_dict()
         ))
         return base
