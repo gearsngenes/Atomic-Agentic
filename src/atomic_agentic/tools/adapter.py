@@ -40,7 +40,7 @@ class AdapterTool(Tool):
     def component(self, value: AtomicInvokable)-> None:
         self._component = value
         self._function = self._component.invoke
-        self._name = f"{self._component.name}_invoke"
+        self._name = self._component.name
         self._description = value.description
         # Identity in import space (may be overridden by subclasses)
         self._module, self._qualname = self._get_mod_qual(self.function)

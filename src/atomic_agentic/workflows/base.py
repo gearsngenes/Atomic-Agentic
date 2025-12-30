@@ -112,6 +112,9 @@ class Workflow(AtomicInvokable, ABC):
     polymorphism.
     """
 
+    # ------------------------------------------------------------------ #
+    # Construction
+    # ------------------------------------------------------------------ #
     def __init__(
         self,
         name: str,
@@ -126,6 +129,9 @@ class Workflow(AtomicInvokable, ABC):
 
         # initialize name, description, arguments-map, return-type
         super().__init__(name = name, description = description)
+        
+        # return_type is always dict
+        self._return_type = "dict[str, Any]"
 
         # packaging policies
         self._bundling_policy = BundlingPolicy(bundling_policy)
@@ -144,7 +150,7 @@ class Workflow(AtomicInvokable, ABC):
         self._normalize_schemas(self.arguments_map, output_schema)
 
     # ------------------------------------------------------------------ #
-    # Properties
+    # Workflow Properties
     # ------------------------------------------------------------------ #
     @property
     def input_schema(self) -> OrderedDict[str, Any]:
@@ -200,70 +206,23 @@ class Workflow(AtomicInvokable, ABC):
         return self._checkpoints[-1] if self._checkpoints else None
 
     # ------------------------------------------------------------------ #
-    # Public API (Template Method)
+    # Atomic-Invokable Helpers
     # ------------------------------------------------------------------ #
-    def invoke(self, inputs: Mapping[str, Any]) -> OrderedDict[str, Any]:
-        """
-        Run the invoke method
-        """
-        # 1) validate is mapping
-        if not isinstance(inputs, Mapping):
-            raise ValidationError("Workflow.invoke: inputs must be a mapping")
+    def build_args_returns(self) -> Tuple[ArgumentMap, str]:
+        return ArgumentMap(), "dict[str, Any]"
 
-        with self._invoke_lock:
-            started = datetime.now(timezone.utc)
-            run_id = uuid4().hex
+    # ------------------------------------------------------------------ #
+    # Workflow Helpers
+    # ------------------------------------------------------------------ #
 
-            # 2) run _invoke()
-            try:
-                metadata, raw = self._invoke(inputs)
-            except Exception as exc:
-                raise ExecutionError(f"{type(self).__name__}._invoke failed") from exc
-
-            if not isinstance(metadata, Mapping):
-                raise ValidationError("Workflow._invoke: returned metadata must be a mapping")
-
-            metadata = dict(metadata) # snapshot metadata to avoid external mutation
-            
-            # 3) package raw result
-            packaged = self.package(raw)
-
-            # 4) validate that no NO_VAL's are present (drop, fill, or raise)
-            packaged, missing_key_info = self._validate_packaged(packaged)
-
-            # 5) update checkpoints
-            ended = datetime.now(timezone.utc)
-            elapsed = (ended - started).total_seconds()
-            metadata.update(missing_key_info)
-            checkpoint = WorkflowCheckpoint(
-                run_id=run_id,
-                started_at=started,
-                ended_at=ended,
-                elapsed_s=elapsed,
-                inputs=dict(inputs),
-                raw_output=raw,
-                packaged_output=OrderedDict(packaged),
-                metadata=metadata,
-            )
-            self._checkpoints.append(checkpoint)
-
-            # 6) return
-            return packaged
-
+    #       Runtime invoke helper
+    # ------------------------------------------------------------------ #
     @abstractmethod
     def _invoke(self, inputs: Mapping[str, Any]) -> Tuple[Mapping[str, Any], Any]:
         """Subclass-defined execution step; returns (metadata, raw_result)."""
         raise NotImplementedError
 
-    # ------------------------------------------------------------------ #
-    # Memory
-    # ------------------------------------------------------------------ #
-    def clear_memory(self) -> None:
-        """Clear workflow-owned memory (checkpoints). Subclasses may extend."""
-        self._checkpoints.clear()
-
-    # ------------------------------------------------------------------ #
-    # Final validation (kept separate from packaging)
+    #       validating output before returning
     # ------------------------------------------------------------------ #
     def _validate_packaged(self, packaged: Mapping[str, Any]) -> Tuple[Mapping[str, Any], Dict[str, Any]]:
         """
@@ -295,8 +254,8 @@ class Workflow(AtomicInvokable, ABC):
         # Return finalized dictionary
         return new_packaged, meta_data
 
-    # ------------------------------------------------------------------ #
-    # Packaging
+
+    #       Packaging helpers
     # ------------------------------------------------------------------ #
     def package(self, raw: Any) -> OrderedDict[str, Any]:
         """
@@ -470,16 +429,6 @@ class Workflow(AtomicInvokable, ABC):
         template[keys[0]] = value
         return template
 
-    # ------------------------------------------------------------------ #
-    # Schema helpers
-    # ------------------------------------------------------------------ #
-    def build_args_returns(self) -> Tuple[ArgumentMap, str]:
-        return self._get_arguments(), OrderedDict.__name__
-
-    @abstractmethod
-    def _get_arguments(self)-> ArgumentMap:
-        raise NotImplementedError
-
     def _normalize_schemas(self,
                            arguments_map: ArgumentMap,
                            output_schema: Union[List[str], Mapping[str, Any]]) -> None:
@@ -505,6 +454,61 @@ class Workflow(AtomicInvokable, ABC):
         # copy argument map (shallow copy of meta dicts) so schemas stay consistent
         self._input_schema = normalized_input_schema
         self._output_schema = normalized_output_schema
+
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+    def invoke(self, inputs: Mapping[str, Any]) -> OrderedDict[str, Any]:
+        """
+        Run the invoke method
+        """
+        # 1) validate is mapping
+        if not isinstance(inputs, Mapping):
+            raise ValidationError("Workflow.invoke: inputs must be a mapping")
+
+        with self._invoke_lock:
+            started = datetime.now(timezone.utc)
+            run_id = uuid4().hex
+
+            # 2) run _invoke()
+            try:
+                metadata, raw = self._invoke(inputs)
+            except Exception as exc:
+                raise ExecutionError(f"{type(self).__name__}._invoke failed") from exc
+
+            if not isinstance(metadata, Mapping):
+                raise ValidationError("Workflow._invoke: returned metadata must be a mapping")
+
+            metadata = dict(metadata) # snapshot metadata to avoid external mutation
+            
+            # 3) package raw result
+            packaged = self.package(raw)
+
+            # 4) validate that no NO_VAL's are present (drop, fill, or raise)
+            packaged, missing_key_info = self._validate_packaged(packaged)
+
+            # 5) update checkpoints
+            ended = datetime.now(timezone.utc)
+            elapsed = (ended - started).total_seconds()
+            metadata.update(missing_key_info)
+            checkpoint = WorkflowCheckpoint(
+                run_id=run_id,
+                started_at=started,
+                ended_at=ended,
+                elapsed_s=elapsed,
+                inputs=dict(inputs),
+                raw_output=raw,
+                packaged_output=OrderedDict(packaged),
+                metadata=metadata,
+            )
+            self._checkpoints.append(checkpoint)
+
+            # 6) return
+            return packaged
+
+    def clear_memory(self) -> None:
+        """Clear workflow-owned memory (checkpoints). Subclasses may extend."""
+        self._checkpoints.clear()
 
     # ------------------------------------------------------------------ #
     # Serialization

@@ -288,6 +288,7 @@ class Agent(AtomicInvokable):
         self._pre_invoke = pre_tool
         args, ret = self.build_args_returns()
         self._arguments_map, self._return_type = args, ret
+        self._is_persistible = self._compute_is_persistible()
     
     @property
     def post_invoke(self) -> Tool:
@@ -336,6 +337,7 @@ class Agent(AtomicInvokable):
                 raise AgentError(f"Agent.post_invoke must have exactly 1 required argument, got {required}")
         self._post_invoke = post_tool
         self._arguments_map, self._return_type = self.build_args_returns()
+        self._is_persistible = self._compute_is_persistible()
 
     # ------------------------------------------------------------------ #
     # Atomic-Invokable Helpers
