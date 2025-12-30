@@ -112,7 +112,7 @@ class AtomicInvokable(ABC):
 
     Key expectations and invariants
     -------------------------------
-    - ``build_args_returns()`` must return a mapping (``dict``/``OrderedDict``) whose values
+    - ``build_args_returns()`` must return a mapping (``dict``) whose values
       are either :class:`ArgSpec` instances or dict-like metadata that can be coerced into
       an :class:`ArgSpec` (fields: ``index``, ``kind``, ``type``, optional ``default``).
       Indices must be unique integers and define deterministic argument order. Callers that
@@ -148,7 +148,7 @@ class AtomicInvokable(ABC):
         # normalize to dict
         args = dict(args)
 
-        # Accept mapping-like results (OrderedDict or dict) and normalize to ArgumentMap.
+        # Accept mapping-like results (dict) and normalize to ArgumentMap.
         if not isinstance(args, (dict, Mapping)) or any(not isinstance(arg, ArgSpec) for arg in args.values()):
             raise TypeError(
                 f"{type(self).__name__}.build_args_returns must return a mapping of argument metadata"

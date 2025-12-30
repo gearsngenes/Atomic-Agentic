@@ -5,7 +5,6 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Mapping, Optional, Union, Tuple, Sequence
 from typing import Mapping, Optional
 from collections.abc import Sequence as Sequence
-from collections import OrderedDict
 import threading
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
@@ -59,7 +58,7 @@ class WorkflowCheckpoint:
     elapsed_s: float
     inputs: Mapping[str, Any]
     raw_output: Any
-    packaged_output: OrderedDict[str, Any]
+    packaged_output: Dict[str, Any]
     metadata: Dict[str, Any]
 
 DEFAULT_WF_KEY = "result"
@@ -80,7 +79,7 @@ class Workflow(AtomicInvokable, ABC):
     ----------
     - `arguments_map` is REQUIRED at construction time and is the authoritative
       source for `input_schema`.
-    - `input_schema` mirrors `output_schema` format: OrderedDict[str, Any] where
+    - `input_schema` mirrors `output_schema` format: Dict[str, Any] where
       each value is either a default or NO_VAL.
     - Public mutation is disallowed: `arguments_map`, `input_schema`, and
       `output_schema` are read-only properties.
@@ -147,12 +146,12 @@ class Workflow(AtomicInvokable, ABC):
     # Workflow Properties
     # ------------------------------------------------------------------ #
     @property
-    def input_schema(self) -> OrderedDict[str, Any]:
-        return OrderedDict(self._input_schema)
+    def input_schema(self) -> Dict[str, Any]:
+        return dict(self._input_schema)
 
     @property
-    def output_schema(self) -> OrderedDict[str, Any]:
-        return OrderedDict(self._output_schema)
+    def output_schema(self) -> Dict[str, Any]:
+        return dict(self._output_schema)
 
     @output_schema.setter
     def output_schema(self, value: Optional[Union[List[str], Mapping[str, Any]]]) -> None:
@@ -234,7 +233,7 @@ class Workflow(AtomicInvokable, ABC):
         if self._absent_val_policy == AbsentValPolicy.RAISE:
             raise PackagingError(f"Workflow packaging: missing required output fields: {missing}")
 
-        new_packaged = OrderedDict()
+        new_packaged = {}
         # Fill in missing values if policy is FILL
         if missing and self._absent_val_policy == AbsentValPolicy.FILL:
             for k in self.output_schema.keys():
@@ -251,7 +250,7 @@ class Workflow(AtomicInvokable, ABC):
 
     #       Packaging helpers
     # ------------------------------------------------------------------ #
-    def package(self, raw: Any) -> OrderedDict[str, Any]:
+    def package(self, raw: Any) -> Dict[str, Any]:
         """
         Package a raw result into the workflow's output schema.
 
@@ -260,15 +259,15 @@ class Workflow(AtomicInvokable, ABC):
         """
         keys = list(self._output_schema.keys())
         if not keys:
-            return OrderedDict() # If no keys, return an empty OrderedDict
+            return {} # If no keys, return an empty dict
 
         # Bundling is ONLY considered when schema length == 1.
         if self._bundling_policy == BundlingPolicy.BUNDLE and len(keys) == 1:
-            return OrderedDict([(keys[0], raw)])
+            return {keys[0]: raw}
 
         # UNBUNDLE flow (also used when BUNDLE is set but schema length != 1)
         normalized = self._normalize_raw(raw)
-        template = OrderedDict(self._output_schema)
+        template = dict(self._output_schema)
 
         if isinstance(normalized, Mapping):
             return self._package_from_mapping(template, normalized)
@@ -324,9 +323,9 @@ class Workflow(AtomicInvokable, ABC):
 
     def _package_from_mapping(
         self,
-        template: OrderedDict[str, Any],
+        template: Dict[str, Any],
         mapping: Mapping[str, Any],
-    ) -> OrderedDict[str, Any]:
+    ) -> Dict[str, Any]:
         schema_keys = list(template.keys())
 
         if self._mapping_policy == MappingPolicy.STRICT:
@@ -389,9 +388,9 @@ class Workflow(AtomicInvokable, ABC):
 
     def _package_from_sequence(
         self,
-        template: OrderedDict[str, Any],
+        template: Dict[str, Any],
         seq: Sequence[Any],
-    ) -> OrderedDict[str, Any]:
+    ) -> Dict[str, Any]:
         keys = list(template.keys())
         values = list(seq)
 
@@ -416,9 +415,9 @@ class Workflow(AtomicInvokable, ABC):
 
     def _package_from_scalar(
         self,
-        template: OrderedDict[str, Any],
+        template: Dict[str, Any],
         value: Any,
-    ) -> OrderedDict[str, Any]:
+    ) -> Dict[str, Any]:
         keys = list(template.keys())
         template[keys[0]] = value
         return template
@@ -435,15 +434,15 @@ class Workflow(AtomicInvokable, ABC):
         Intentionally protected: callers should be Workflow subclasses.
         """
         # normalize input-schema from an arguments map
-        normalized_input_schema = OrderedDict()
+        normalized_input_schema = {}
         for key, meta in arguments_map.items():
             normalized_input_schema.update({key : meta.get("default", NO_VAL)})
 
         # normalize output-schema from a mapping or list
         if isinstance(output_schema, Mapping):
-            normalized_output_schema = OrderedDict(output_schema)
+            normalized_output_schema = dict(output_schema)
         else:
-            normalized_output_schema = OrderedDict((key, NO_VAL) for key in output_schema)
+            normalized_output_schema = dict((key, NO_VAL) for key in output_schema)
 
         # copy argument map (shallow copy of meta dicts) so schemas stay consistent
         self._input_schema = normalized_input_schema
@@ -452,7 +451,7 @@ class Workflow(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    def invoke(self, inputs: Mapping[str, Any]) -> OrderedDict[str, Any]:
+    def invoke(self, inputs: Mapping[str, Any]) -> Dict[str, Any]:
         """
         Run the invoke method
         """
@@ -492,7 +491,7 @@ class Workflow(AtomicInvokable, ABC):
                 elapsed_s=elapsed,
                 inputs=dict(inputs),
                 raw_output=raw,
-                packaged_output=OrderedDict(packaged),
+                packaged_output=dict(packaged),
                 metadata=metadata,
             )
             self._checkpoints.append(checkpoint)
@@ -509,12 +508,11 @@ class Workflow(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict[str, Any]:
         d = super().to_dict()
-        d.update(OrderedDict(
-            input_schema=self.input_schema,
-            output_schema=self.output_schema,
-            bundling_policy=self._bundling_policy.value,
-            mapping_policy=self._mapping_policy.value,
-            absent_val_policy=self._absent_val_policy.value,
-            default_absent_val=self._default_absent_val,
-        ))
+        d.update({
+            "input_schema" : self.input_schema,
+            "output_schema" : self.output_schema,
+            "bundling_policy": self.bundling_policy.value,
+            "mapping_policy": self.mapping_policy.value,
+            "absent_val_policy": self.absent_val_policy.value,
+            "default_absent_val": self.default_absent_val})
         return d

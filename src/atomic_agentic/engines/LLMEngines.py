@@ -5,7 +5,6 @@ from __future__ import annotations
 # The Agent owns conversation history; engines map messages + attachments
 # to provider-specific requests.
 from abc import ABC, abstractmethod
-from collections import OrderedDict
 import logging
 import os
 import random
@@ -386,17 +385,17 @@ class LLMEngine(ABC):
     # --------------------------------------------------------------------- #
     # Serialization
     # --------------------------------------------------------------------- #
-    def to_dict(self) -> OrderedDict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """
         Shallow, non-secret configuration snapshot for debugging / logging.
         """
-        return OrderedDict({
+        return {
             "name": self._name,
             "timeout_seconds": self._timeout_seconds,
             "max_retries": self._max_retries,
             "attachments": self._attachments,
             "provider": type(self).__name__,
-        })
+        }
 
 
 
@@ -804,20 +803,18 @@ class OpenAIEngine(LLMEngine):
     # Introspection
     # ------------------------------------------------------------------ #
 
-    def to_dict(self) -> OrderedDict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """
         Diagnostic snapshot for OpenAIEngine, without secrets.
 
         Includes model, temperature, and inline cutoff in addition to base engine info.
         """
         base = super().to_dict()
-        base.update(
-            OrderedDict(
-                model=self.model,
-                temperature=self.temperature,
-                inline_cutoff_chars=self.inline_cutoff_chars,
-            )
-        )
+        base.update({
+            "model" : self.model,
+            "temperature" : self.temperature,
+            "inline_cutoff_chars": self.inline_cutoff_chars
+        })
         return base
 
 # ── GEMINI (flat contents: file objects + strings) ─────────────────────────────
@@ -1116,19 +1113,17 @@ class GeminiEngine(LLMEngine):
     # Introspection
     # ------------------------------------------------------------------ #
 
-    def to_dict(self) -> OrderedDict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """
         Diagnostic snapshot for GeminiEngine: provider + model + temperature.
 
         Keeps output minimal to avoid leaking client or API keys.
         """
         base = super().to_dict()
-        base.update(
-            OrderedDict(
-                model=self.model,
-                temperature=self.temperature,
-            )
-        )
+        base.update({
+            "model": self.model,
+            "temperature": self.temperature,
+        })
         return base
 
 # ── MISTRAL ─────────────────────────────
@@ -1515,20 +1510,18 @@ class MistralEngine(LLMEngine):
     # Introspection
     # ------------------------------------------------------------------ #
 
-    def to_dict(self) -> OrderedDict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """
         Diagnostic snapshot for MistralEngine: provider + requested knobs.
 
         Includes non-secret configuration only.
         """
         base = super().to_dict()
-        base.update(
-            OrderedDict(
-                model=self.model,
-                temperature=self.temperature,
-                inline_cutoff_chars=self.inline_cutoff_chars,
-            )
-        )
+        base.update({
+            "model": self.model,
+            "temperature": self.temperature,
+            "inline_cutoff_chars": self.inline_cutoff_chars
+        })
         return base
 
 # ── LLAMA.CPP (local; no remote file store) ────────────────────────────────────
@@ -1696,22 +1689,20 @@ class LlamaCppEngine(LLMEngine):
     # Introspection
     # ------------------------------------------------------------------ #
 
-    def to_dict(self) -> OrderedDict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """
         Diagnostic snapshot for LlamaCppEngine (no secrets).
 
         Includes `n_ctx`, `verbose`, and model loading parameters.
         """
         base = super().to_dict()
-        base.update(
-            OrderedDict(
-                model_path=self.model_path,
-                repo_id=self.repo_id,
-                filename=self.filename,
-                n_ctx=self.n_ctx,
-                verbose=self.verbose,
-            )
-        )
+        base.update({
+            "model_path": self.model_path,
+            "repo_id": self.repo_id,
+            "filename": self.filename,
+            "n_ctx": self.n_ctx,
+            "verbose": self.verbose
+        })
         return base
 
 # ── PLACEHOLDERS (keep the same abstract contract) ─────────────────────────────

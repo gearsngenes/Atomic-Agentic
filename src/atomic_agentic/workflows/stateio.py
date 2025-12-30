@@ -1,5 +1,4 @@
 from __future__ import annotations
-from collections import OrderedDict
 from typing import (
     Any,
     Dict,
@@ -99,7 +98,7 @@ class StateIOFlow(BasicFlow):
 
     @property
     def output_schema(self) -> Mapping[str, Any]:
-        return OrderedDict(self._output_schema)
+        return dict(self._output_schema)
 
     # ------------------------------------------------------------------ #
     # BasicFlow Properties

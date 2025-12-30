@@ -14,5 +14,4 @@ __all__ = ["Workflow",
            "MappingPolicy",
            "BundlingPolicy",
            "AbsentValPolicy",
-           "NO_VAL",
            ]

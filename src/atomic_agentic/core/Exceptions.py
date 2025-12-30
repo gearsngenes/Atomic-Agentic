@@ -49,4 +49,4 @@ class PackagingError(ValidationError):
 
 
 class ExecutionError(WorkflowError, RuntimeError):
-    """Raised when a wrapped component fails during `_process_inputs`."""
+    """Raised when a workflow fails to execute in runtime"""
