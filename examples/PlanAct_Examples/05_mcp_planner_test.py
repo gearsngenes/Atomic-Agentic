@@ -17,7 +17,7 @@ load_dotenv()
 llm_engine = OpenAIEngine(model="gpt-4o-mini")
 
 planner = PlanActAgent(
-    name="MCP Agent",
+    name="MCP_Agent",
     description="Creates plans utilizing our sample MCP server",
     llm_engine=llm_engine,
     run_concurrent=False,

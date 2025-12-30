@@ -18,7 +18,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 my_planner = PlanActAgent(
-    name="Context Enabled Planner",
+    name="Context_Enabled_Planner",
     description="Creates plans utilizing context memory",
     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
     context_enabled=True,
