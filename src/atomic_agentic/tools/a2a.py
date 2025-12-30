@@ -1,6 +1,5 @@
 # Tools.py
 from __future__ import annotations
-from collections import OrderedDict
 import functools
 from typing import (
     Any,
@@ -16,8 +15,8 @@ from python_a2a import (
     FunctionCallContent, FunctionParameter,
 )
 
-from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
-from ..core.Invokable import ArgumentMap, NO_VAL, ArgSpec
+from ..core.Exceptions import ToolDefinitionError
+from ..core.Invokable import ArgumentMap, ArgSpec
 from .base import Tool
 from ..a2a.A2AtomicHost import A2A_RESULT_KEY
 

@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from __future__ import annotations
 from typing import (
     Any,
     Callable,
@@ -20,7 +20,10 @@ class AdapterTool(Tool):
         # set private variable
         self._component = component
         # set core attributes
-        super().__init__(component.invoke, component.name, namespace, component.description)
+        super().__init__(component.invoke,
+                         component.name,
+                         namespace,
+                         component.description)
 
     # ------------------------------------------------------------------ #
     # Tool Properties

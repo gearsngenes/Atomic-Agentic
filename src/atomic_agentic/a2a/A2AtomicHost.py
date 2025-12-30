@@ -88,9 +88,12 @@ class A2AtomicHost:
                             )
 
                         if fn == "invokable_metadata":
+                            args_map = {k:spec.to_dict() 
+                                        for k,spec in outer._component.arguments_map.items()}
+                            ret_type = outer._component.return_type
                             meta = {
-                                "arguments_map": outer._component.arguments_map,
-                                "return_type": outer._component.return_type,
+                                "arguments_map": args_map,
+                                "return_type": ret_type,
                             }
                             return Message(
                                 content=FunctionResponseContent(

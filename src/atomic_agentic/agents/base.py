@@ -1,5 +1,4 @@
 from __future__ import annotations
-from collections import OrderedDict
 from typing import (
     Any,
     Callable,
@@ -24,7 +23,7 @@ from ..tools import Tool, toolify
 logger = logging.getLogger(__name__)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Agent Primitive
+# Agent
 # ───────────────────────────────────────────────────────────────────────────────
 def identity_pre(*, prompt: str) -> str:
     if not isinstance(prompt, str):
@@ -344,7 +343,7 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     def build_args_returns(self) -> tuple[ArgumentMap, str]:
         """Return the Agent's input argument map (mirroring pre_invoke) and the post_invoke return type."""
-        return OrderedDict(self._pre_invoke.arguments_map), str(self._post_invoke.return_type)
+        return self._pre_invoke.arguments_map, str(self._post_invoke.return_type)
 
     def _compute_is_persistible(self):
         return self.pre_invoke.is_persistible and self.post_invoke.is_persistible
@@ -524,15 +523,16 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
-    def to_dict(self) -> OrderedDict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         """A minimal diagnostic snapshot of this agent (safe to log/serialize)."""
-        return OrderedDict(
-            agent_type=type(self).__name__,
-            role_prompt=self._role_prompt,
-            pre_invoke=self._pre_invoke.to_dict(),
-            post_invoke=self._post_invoke.to_dict(),
-            llm=self._llm_engine.to_dict() if self._llm_engine else None,
-            context_enabled=self._context_enabled,
-            history_window=self._history_window,
-            history=self._history,
-        )
+        d = super().to_dict()
+        d.update({
+            "role_prompt": self.role_prompt,
+            "pre_invoke": self.pre_invoke.to_dict(),
+            "post_invoke": self.post_invoke.to_dict(),
+            "llm": self._llm_engine.to_dict(),
+            "context_enabled": self.context_enabled,
+            "history_window": self.history_window,
+            "history": self.history
+        })
+        return d

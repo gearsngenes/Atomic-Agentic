@@ -267,18 +267,12 @@ class AtomicInvokable(ABC):
 
         Does *not* include `signature` by default, per request.
         """
-        def _argspec_to_dict(spec: ArgSpec) -> Dict[str, Any]:
-            d = {"index": spec.index, "kind": spec.kind, "type": spec.type}
-            if spec.default is not NO_VAL:
-                d["default"] = spec.default
-            return d
-
         return {
             "type": type(self).__name__,
             "name": self.name,
             "description": self.description,
             "arguments_map": {
-                name: _argspec_to_dict(spec)
+                name: spec.to_dict()
                 for name, spec in self._arguments_map.items()
                 },
             "return_type": self.return_type,

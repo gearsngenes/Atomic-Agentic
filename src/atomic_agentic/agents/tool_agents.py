@@ -54,7 +54,6 @@ during a run, pass an explicit ``board=`` to :meth:`_call_tool` /
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections import OrderedDict
 import json
 import logging
 import re
@@ -171,7 +170,7 @@ class ToolAgent(Agent, ABC):
             history_window=history_window,
         )
 
-        self._toolbox: OrderedDict[str, Tool] = OrderedDict()
+        self._toolbox: dict[str, Tool] = {}
         self._blackboard: List[BlackboardEntry] = []
 
         # Tool-call budgeting (keep lock to support potential intra-run parallelism)
@@ -516,9 +515,9 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    def list_tools(self) -> OrderedDict[str, Tool]:
+    def list_tools(self) -> Dict[str, Tool]:
         with self._invoke_lock:
-            return OrderedDict(self._toolbox)
+            return dict(self._toolbox)
 
     def has_tool(self, tool_full_name: str) -> bool:
         with self._invoke_lock:
@@ -633,13 +632,13 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
-    def to_dict(self) -> OrderedDict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         d = super().to_dict()
         with self._invoke_lock:
             d["toolbox"] = [t.to_dict() for t in self._toolbox.values()]
             d["blackboard"] = self._blackboard.copy()
             d["tool_calls_limit"] = self._tool_calls_limit
-        return OrderedDict(d)
+        return d
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Plan-first 'PlanActAgent' class
