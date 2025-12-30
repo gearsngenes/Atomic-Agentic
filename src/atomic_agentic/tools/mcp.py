@@ -12,7 +12,6 @@ from typing import (
     Awaitable,
     TypeVar,
 )
-from collections import OrderedDict
 
 import logging
 from mcp import ClientSession
@@ -20,8 +19,9 @@ from mcp.client.streamable_http import streamablehttp_client
 from urllib.parse import urlparse, urlunparse
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
-from .base import Tool, ArgumentMap
-
+from ..core.Invokable import ArgumentMap, ArgSpec
+from ..core.sentinels import NO_VAL
+from .base import Tool
 logger = logging.getLogger(__name__)
 
 
@@ -331,7 +331,7 @@ class MCPProxyTool(Tool):
         self._function = new_function
         self._module, self._qualname = self._get_mod_qual(new_function)
         self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible_internal = self._compute_is_persistible()
+        self._is_persistible = self._compute_is_persistible()
 
     # ------------------------------------------------------------------ #
     # Tool Properties
@@ -367,7 +367,7 @@ class MCPProxyTool(Tool):
         self._function = new_function
         self._module, self._qualname = self._get_mod_qual(new_function)
         self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible_internal = self._compute_is_persistible()
+        self._is_persistible = self._compute_is_persistible()
 
     # ------------------------------------------------------------------ #
     # Atomic-Invokable Helpers
@@ -384,7 +384,7 @@ class MCPProxyTool(Tool):
         - Return type is derived from `output_schema` if provided; otherwise "Any".
         """
 
-        arg_map: ArgumentMap = OrderedDict()
+        arg_map: ArgumentMap = {}
 
         # ----- Inputs: JSON Schema → ArgumentMap -----
         input_schema = self._mcpdata.get("input_schema")
@@ -396,31 +396,21 @@ class MCPProxyTool(Tool):
             required = input_schema.get("required") or []
             if not isinstance(required, (list, tuple)):
                 required = []
-            required_set = {str(name) for name in required}
 
             for index, (raw_name, raw_meta) in enumerate(props.items()):
-                name = str(raw_name)
                 meta_schema = raw_meta or {}
                 if not isinstance(meta_schema, Mapping):
                     meta_schema = {}
-
-                type_str = self._json_schema_type_to_str(meta_schema)
-                param_meta: Dict[str, Any] = {
-                    "index": index,
-                    "kind": "KEYWORD_ONLY",
-                    "type": type_str,
-                }
-
-                if name in required_set:
-                    # Required param: no 'default' key so Tool.to_arg_kwarg treats it as required.
-                    pass
-                else:
-                    # Optional param: mark as having a default so base Tool logic
-                    # doesn't consider it required. If the schema provides a
-                    # default, surface it; otherwise use None as a placeholder.
-                    if "default" in meta_schema:
-                        param_meta["default"] = meta_schema.get("default")
-                arg_map[name] = param_meta
+                _name = str(raw_name)
+                _kind = "KEYWORD_ONLY"
+                _type = self._json_schema_type_to_str(meta_schema)
+                _default = NO_VAL
+                if "default" in meta_schema:
+                    _default = meta_schema.get("default")
+                arg_map[_name] = ArgSpec(index=index,
+                                         kind=_kind,
+                                         type=_type,
+                                         default=_default)
 
         # ----- Output: JSON Schema → return_type string -----
         return_type = "Any"
@@ -599,7 +589,7 @@ class MCPProxyTool(Tool):
         self._function = new_function
         self._module, self._qualname = self._get_mod_qual(new_function)
         self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible_internal = self._compute_is_persistible()
+        self._is_persistible = self._compute_is_persistible()
 
     # ------------------------------------------------------------------ #
     # Serialization

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import inspect
-from collections import OrderedDict
+
 from typing import (
     Any,
     Callable,
@@ -13,7 +13,8 @@ from typing import (
 )
 
 from ..core.Exceptions import *
-from ..core.Invokable import AtomicInvokable, ArgumentMap
+from ..core.Invokable import AtomicInvokable, ArgumentMap, ArgSpec
+from ..core.sentinels import NO_VAL
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -34,15 +35,15 @@ class Tool(AtomicInvokable):
     the :meth:`to_arg_kwarg` / :meth:`execute` methods. The public
     :meth:`invoke` method must not be overridden.
 
-    The argument schema is exposed via :attr:`arguments_map` as an
-    OrderedDict whose values are JSON-serialisable metadata dictionaries with
-    the following keys:
+    The argument schema is exposed via :attr:`arguments_map` as a mapping
+    of argument name -> :class:`ArgSpec` (see :mod:`atomic_agentic.core.Invokable`).
 
-    - ``index``  : ``int`` – the parameter position.
-    - ``kind``   : ``str`` – one of
-      ``{"POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY", "VAR_POSITIONAL", "VAR_KEYWORD"}``.
-    - ``type``   : ``str`` – a human-readable type name, e.g. ``"int"``.
-    - ``default``: optional – present only if the parameter has a default.
+    Each :class:`ArgSpec` contains:
+      - ``index``  : ``int`` – the parameter position.
+      - ``kind``   : ``str`` – one of
+        ``{"POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY", "VAR_POSITIONAL", "VAR_KEYWORD"}``.
+      - ``type``   : ``str`` – a human-readable type name, e.g. ``"int"``.
+      - ``default``: optional – the default value, or the shared sentinel ``NO_VAL`` when no default is present.
 
     ``return_type`` is always stored as a string as well.
     """
@@ -80,12 +81,12 @@ class Tool(AtomicInvokable):
         """Human-readable signature derived from ``arguments_map`` and
         ``return_type``."""
         params: List[str] = []
-        for name, meta in self._arguments_map.items():
-            kind = meta.get("kind", "")
-            type_name = meta.get("type", "Any")
+        for name, spec in sorted(self._arguments_map.items(), key=lambda kv: kv[1].index):
+            kind = spec.kind or ""
+            type_name = spec.type or "Any"
             default_marker = ""
-            if "default" in meta:
-                default = str(meta['default'])
+            if spec.default is not NO_VAL:
+                default = repr(spec.default)
                 default_marker = f" = {default}"
             if kind == "VAR_POSITIONAL":
                 param_str = f"*{name}: {type_name}{default_marker}"
@@ -119,9 +120,25 @@ class Tool(AtomicInvokable):
             raise ToolDefinitionError(f"Tool function must be callable, got {type(func)!r}")
         self._function = func
         self._module, self._qualname = self._get_mod_qual(func)
+
+        # Rebuild and validate the argument map and return type just like
+        # AtomicInvokable.__init__ does so that updating the callable cannot
+        # produce an invalid tool state.
         args, ret = self.build_args_returns()
+        args = dict(args)
+        if not isinstance(args, (dict, Mapping)) or any(not isinstance(arg, ArgSpec) for arg in args.values()):
+            raise TypeError(
+                f"{type(self).__name__}.build_args_returns must return a mapping of argument metadata"
+            )
+        indices = [s.index for s in args.values()]
+        if len(indices) != len(set(indices)):
+            raise TypeError(f"{type(self).__name__}.build_args_returns: duplicate argument indices detected")
+        if not isinstance(ret, str):
+            raise TypeError(
+                f"{type(self).__name__}.build_args_returns must return str for return_type"
+            )
         self._arguments_map, self._return_type = args, ret
-        self._is_persistible_internal = self._compute_is_persistible()
+        self._is_persistible = self._compute_is_persistible()
 
     @property
     def module(self) -> Optional[str]:
@@ -146,7 +163,7 @@ class Tool(AtomicInvokable):
         This is the new canonical hook (replaces ``_build_io_schemas``).
         """
         sig = inspect.signature(self._function)
-        arg_map: ArgumentMap = OrderedDict()
+        arg_map: ArgumentMap = {}
 
         for index, (name, param) in enumerate(sig.parameters.items()):
             kind_name = param.kind.name  # e.g. "POSITIONAL_ONLY"
@@ -166,15 +183,14 @@ class Tool(AtomicInvokable):
 
             type_str = self._format_annotation(raw_type)
 
-            meta: Dict[str, Any] = {
-                "index": index,
-                "kind": kind_name,
-                "type": type_str,
-            }
             if default is not inspect._empty:
-                meta["default"] = default
+                default_val = default
+            else:
+                default_val = NO_VAL
 
-            arg_map[name] = meta
+            spec = ArgSpec(index=index, kind=kind_name, type=type_str, default=default_val)
+
+            arg_map[name] = spec
 
         # Return type: annotation if present, else 'Any'
         ret_ann = sig.return_annotation
@@ -301,13 +317,13 @@ class Tool(AtomicInvokable):
         data: Dict[str, Any] = dict(inputs)
 
         # Compute parameter ordering and kinds
-        param_items = sorted(self._arguments_map.items(), key=lambda kv: kv[1].get("index", 0))
+        param_items = sorted(self._arguments_map.items(), key=lambda kv: kv[1].index)
         param_names = {name for name, _ in param_items}
 
         varpos_name: Optional[str] = None
         varkw_name: Optional[str] = None
-        for name, meta in param_items:
-            kind = meta.get("kind")
+        for name, spec in param_items:
+            kind = spec.kind
             if kind == "VAR_POSITIONAL" and varpos_name is None:
                 varpos_name = name
             elif kind == "VAR_KEYWORD" and varkw_name is None:
@@ -321,9 +337,9 @@ class Tool(AtomicInvokable):
         # Required parameter check (exclude VAR_*)
         required_names = [
             name
-            for name, meta in param_items
-            if meta.get("kind") not in {"VAR_POSITIONAL", "VAR_KEYWORD"}
-            and "default" not in meta
+            for name, spec in param_items
+            if spec.kind not in {"VAR_POSITIONAL", "VAR_KEYWORD"}
+            and spec.default is NO_VAL
         ]
         missing = [name for name in required_names if name not in data]
         if missing:
@@ -333,9 +349,9 @@ class Tool(AtomicInvokable):
         kwargs: Dict[str, Any] = {}
 
         # First, handle named parameters in order
-        for name, meta in param_items:
-            kind = meta.get("kind")
-            has_default = "default" in meta
+        for name, spec in param_items:
+            kind = spec.kind
+            has_default = spec.default is not NO_VAL
             value_provided = name in data
 
             if kind == "VAR_POSITIONAL":
@@ -354,7 +370,7 @@ class Tool(AtomicInvokable):
                 continue
 
             if not value_provided and has_default:
-                val = meta["default"]
+                val = spec.default
             elif value_provided:
                 val = data[name]
             else:

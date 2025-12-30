@@ -17,7 +17,8 @@ from python_a2a import (
 )
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
-from .base import Tool, ArgumentMap
+from ..core.Invokable import ArgumentMap, NO_VAL, ArgSpec
+from .base import Tool
 from ..a2a.A2AtomicHost import A2A_RESULT_KEY
 
 # ---------------------------------------------------------------------------
@@ -114,31 +115,24 @@ class A2AProxyTool(Tool):
         if "arguments_map" not in payload or "return_type" not in payload:
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata response missing required keys")
 
-        # Coerce the remote arguments_map (which may have been JSON-serialized
-        # and thus is a plain dict) into the expected OrderedDict shape and
-        # validate parameter metadata.
+        # Extract components
         raw_args_map = payload["arguments_map"]
+        return_type = payload["return_type"]
+        # Validate types
         if not isinstance(raw_args_map, Mapping):
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.arguments_map must be a mapping")
-
-        args_map: OrderedDict[str, dict] = OrderedDict()
+        if not isinstance(return_type, str):
+            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.return_type must be a str")
+        args_map: ArgumentMap = {}
         for key, meta in raw_args_map.items():
             if not isinstance(key, str):
                 raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.arguments_map keys must be strings")
             if not isinstance(meta, Mapping):
                 raise ToolDefinitionError(f"{self.full_name}: metadata for argument '{key}' must be a mapping")
             meta_dict = dict(meta)
-            # Minimal validation of expected fields
-            if "index" not in meta_dict or "kind" not in meta_dict or "type" not in meta_dict:
-                raise ToolDefinitionError(
-                    f"{self.full_name}: metadata for argument '{key}' missing required keys (index, kind, type)"
-                )
-            args_map[key] = meta_dict
+            args_map[key] = ArgSpec.from_dict(meta_dict)
 
-        return_type = payload["return_type"]
-        if not isinstance(return_type, str):
-            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.return_type must be a str")
-        return OrderedDict(args_map), return_type
+        return args_map, return_type
 
     def _compute_is_persistible(self) -> bool:
         try:

@@ -29,14 +29,8 @@ __all__ = [
 # ───────────────────────────────────────────────────────────────────────────────
 # Workflow primitive
 # ───────────────────────────────────────────────────────────────────────────────
-class _NoValSentinel:
-    """Sentinel used to mark required output fields in an output schema template."""
-    __slots__ = ()
-
-    def __repr__(self) -> str:  # pragma: no cover
-        return "NO_VAL"
-
-NO_VAL: Any = _NoValSentinel()
+# Shared sentinel used to mark required output fields in an output schema template
+from ..core.sentinels import NO_VAL
 
 class BundlingPolicy(str, Enum):
     """Controls whether raw results are bundled into a single output field."""

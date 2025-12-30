@@ -1,4 +1,5 @@
 from .base import(
+    NO_VAL,
     Workflow,
     MappingPolicy,
     BundlingPolicy,
@@ -12,4 +13,6 @@ __all__ = ["Workflow",
            "StateIOFlow",
            "MappingPolicy",
            "BundlingPolicy",
-           "AbsentValPolicy"]
+           "AbsentValPolicy",
+           "NO_VAL",
+           ]
