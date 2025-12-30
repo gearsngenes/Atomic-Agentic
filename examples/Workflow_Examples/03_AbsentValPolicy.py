@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 from atomic_agentic.workflows import AbsentValPolicy
 from atomic_agentic.tools import Tool
-from atomic_agentic.workflows.workflows import BasicFlow, BundlingPolicy, MappingPolicy
+from atomic_agentic.workflows import BasicFlow, BundlingPolicy, MappingPolicy
 
 
 # -----------------------------------------------------------------------------

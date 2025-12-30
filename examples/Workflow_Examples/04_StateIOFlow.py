@@ -33,7 +33,7 @@ except Exception as exc:  # pragma: no cover
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.agents import Agent
 from atomic_agentic.tools import Tool
-from atomic_agentic.workflows.workflows import StateIOFlow
+from atomic_agentic.workflows import StateIOFlow
 
 
 # ---------------------------------------------------------------------

@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.agents.tool_agents import Agent
 from atomic_agentic.tools import Tool
-from atomic_agentic.workflows.workflows import BasicFlow
+from atomic_agentic.workflows import BasicFlow
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)  # or DEBUG

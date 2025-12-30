@@ -6,7 +6,7 @@ from typing import Any
 
 from atomic_agentic.tools import Tool
 from atomic_agentic.workflows import BundlingPolicy, MappingPolicy
-from atomic_agentic.workflows.workflows import BasicFlow
+from atomic_agentic.workflows import BasicFlow
 
 logging.basicConfig(level=logging.INFO)
 print("=== BasicFlow examples (schema-driven dict inputs) ===")

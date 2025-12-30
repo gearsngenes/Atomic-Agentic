@@ -4,10 +4,12 @@ from .base import(
     BundlingPolicy,
     AbsentValPolicy
 )
-from .workflows import BasicFlow
+from .basic import BasicFlow
+from .stateio import StateIOFlow
 
 __all__ = ["Workflow",
            "BasicFlow",
+           "StateIOFlow",
            "MappingPolicy",
            "BundlingPolicy",
            "AbsentValPolicy"]
