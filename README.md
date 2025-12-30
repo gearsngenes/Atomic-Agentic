@@ -29,9 +29,9 @@ pip install ./dist/atomic-agentic-<rest of filename + extension here>
 `PlanActAgent` makes **one** LLM call to generate a JSON plan (list of tool calls), executes the tools, and returns the final result.
 
 ```python
-from atomic_agentic.Agents import PlanActAgent
-from atomic_agentic.LLMEngines import OpenAIEngine
-from atomic_agentic.Plugins import MATH_TOOLS
+from atomic_agentic.agents import PlanActAgent
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.tools.Plugins import MATH_TOOLS
 
 # 1) Create an engine (model is required)
 engine = OpenAIEngine(model="gpt-4.1-mini")  # expects OPENAI_API_KEY env var
@@ -94,7 +94,7 @@ A `Tool` wraps a Python callable and exposes:
 - `invoke(inputs: Mapping[str, Any]) -> Any`: the only public execution entrypoint
 
 ```python
-from atomic_agentic.Tools import Tool
+from atomic_agentic.tools import Tool
 
 def add(a: int, b: int) -> int:
     return a + b
@@ -120,7 +120,7 @@ print(t.invoke({"a": 2, "b": 3}))
 `MCPProxyTool` adapts a single tool from an MCP server into a normal `Tool`.
 
 ```python
-from atomic_agentic.Tools import MCPProxyTool
+from atomic_agentic.tools import MCPProxyTool
 
 tool = MCPProxyTool(
     server_url="http://localhost:8000/mcp",
@@ -145,9 +145,9 @@ print(tool.invoke({"city": "New York"}))
 - return type mirrors the agent’s **post_invoke** return type
 
 ```python
-from atomic_agentic.Tools import AgentTool
-from atomic_agentic.Primitives import Agent
-from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.tools import AdapterTool
+from atomic_agentic.agents import Agent
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 engine = OpenAIEngine(model="gpt-4.1-mini")
 agent = Agent(name="qa", description="Answers questions.", llm_engine=engine)
@@ -171,9 +171,9 @@ print(agent_tool.invoke({"prompt": "What is the capital of France?"}))
 …into a list of `Tool` instances.
 
 ```python
-from atomic_agentic.Toolify import toolify
-from atomic_agentic.Primitives import Agent
-from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.tools import toolify
+from atomic_agentic.agents import Agent
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 def hello(name: str) -> str:
     return f"Hello, {name}!"
@@ -223,8 +223,8 @@ Default behavior:
 - `post_invoke` is an identity Tool for the raw LLM output
 
 ```python
-from atomic_agentic.Primitives import Agent
-from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.agents import Agent
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 engine = OpenAIEngine(model="gpt-4.1-mini")
 agent = Agent(name="helper", description="Helpful assistant.", llm_engine=engine)
@@ -257,9 +257,9 @@ Two built-in strategies:
 Example:
 
 ```python
-from atomic_agentic.Agents import PlanActAgent, ReActAgent
-from atomic_agentic.LLMEngines import OpenAIEngine
-from atomic_agentic.Plugins import MATH_TOOLS
+from atomic_agentic.agents import PlanActAgent, ReActAgent
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.tools.Plugins import MATH_TOOLS
 
 engine = OpenAIEngine(model="gpt-4.1-mini")
 
@@ -286,22 +286,22 @@ print(reactor.invoke({"prompt": "Compute (12*3) - 8 and return the number."}))
 
 ## A2A Interop
 
-### Hosting a local Agent via A2A: `A2AgentHost`
+### Hosting a local Agent via A2A: `A2AtomicHost`
 
-`A2AgentHost` wraps an `Agent` and serves it over the A2A protocol. It supports two function calls:
+`A2AtomicHost` wraps an `Agent` and serves it over the A2A protocol. It supports two function calls:
 
 - `invoke(payload=<mapping>)`
 - `agent_metadata() -> {arguments_map, return_type}`
 
 ```python
-from atomic_agentic.Agents import A2AgentHost
-from atomic_agentic.Primitives import Agent
-from atomic_agentic.LLMEngines import OpenAIEngine
+from atomic_agentic.a2a import A2AtomicHost
+from atomic_agentic.agents import Agent
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 engine = OpenAIEngine(model="gpt-4.1-mini")
 agent = Agent(name="trivia", description="Trivia expert.", llm_engine=engine)
 
-host = A2AgentHost(seed_agent=agent, host="127.0.0.1", port=4242)
+host = A2AtomicHost(seed_agent=agent, host="127.0.0.1", port=4242)
 host.run(debug=True)
 ```
 
@@ -325,10 +325,10 @@ Workflows are deterministic **packaging boundaries**:
 If you don’t provide an output schema, workflows default to a single key:
 
 ```text
-DEFAULT_WF_KEY = "__RESULT__"
+DEFAULT_WF_KEY = "result"
 ```
 
-So “scalar” outputs become `{ "__RESULT__": raw }` under the default policy.
+So “scalar” outputs become `{ "result": raw }` under the default policy.
 
 ### Packaging policies
 
@@ -344,7 +344,7 @@ So “scalar” outputs become `{ "__RESULT__": raw }` under the default policy.
 
 ### Built-in workflow adapters
 
-- `BasicFlow`: wrap a single Tool/Agent/Workflow as a Workflow (replaces `ToolFlow`/`AgentFlow`)
+- `BasicFlow`: wrap a single Tool/Agent/Workflow as a Workflow
 - `StateIOFlow`: graph-node wrapper for stateful orchestration frameworks (e.g., LangGraph)
 
 ---
@@ -369,9 +369,9 @@ from typing import TypedDict
 
 from langgraph.graph import StateGraph, START, END
 
-from atomic_agentic.Primitives import Agent
-from atomic_agentic.LLMEngines import OpenAIEngine
-from atomic_agentic.Workflows import AgentFlow, StateIOFlow
+from atomic_agentic.agents import Agent
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.workflows import StateIOFlow
 
 # 1) Define the LangGraph state schema
 class QAState(TypedDict, total=False):
@@ -421,7 +421,7 @@ vectorize(text: str) -> list[float]
 Example:
 
 ```python
-from atomic_agentic.EmbedEngines import OpenAIEmbedEngine
+from atomic_agentic.engines.EmbedEngines import OpenAIEmbedEngine
 
 engine = OpenAIEmbedEngine(model="text-embedding-3-small")
 vec = engine.vectorize("hello world")
