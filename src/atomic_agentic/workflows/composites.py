@@ -191,3 +191,191 @@ class SequentialFlow(Workflow):
             checkpoint_indices.append(len(step.checkpoints) - 1)
 
         return {"midwork_checkpoints": checkpoint_indices}, running_result
+
+
+class MakerCheckerFlow(Workflow):
+    """
+    A composite Workflow implementing a Maker–Checker (optionally Judge) revision loop.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        *,
+        maker: AtomicInvokable,
+        checker: AtomicInvokable,
+        judge: Optional[AtomicInvokable] = None,
+        max_revisions: int = 1,
+        output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
+        bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
+        mapping_policy: MappingPolicy = MappingPolicy.STRICT,
+        absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
+        default_absent_val: Any = None,
+    ) -> None:
+        # ------------------------------------------------------------
+        # PREPARE attributes needed by build_args_returns()
+        # ------------------------------------------------------------
+        self._maker: BasicFlow = BasicFlow(component=maker)
+        self._checker: BasicFlow = BasicFlow(component=checker)
+        self._judge: Optional[BasicFlow] = (
+            BasicFlow(component=judge) if judge is not None else None
+        )
+        self._max_revisions: int = 0
+
+        # ------------------------------------------------------------
+        # Base Workflow init (will call build_args_returns)
+        # ------------------------------------------------------------
+        super().__init__(
+            name=name,
+            description=description,
+            output_schema=output_schema,
+            bundling_policy=bundling_policy,
+            mapping_policy=mapping_policy,
+            absent_val_policy=absent_val_policy,
+            default_absent_val=default_absent_val,
+        )
+
+        self.max_revisions = max_revisions
+        self._rebuild()
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
+    @property
+    def maker(self) -> BasicFlow:
+        return self._maker
+
+    @maker.setter
+    def maker(self, candidate: AtomicInvokable) -> None:
+        self._maker = BasicFlow(component=candidate)
+        self._rebuild()
+
+    @property
+    def checker(self) -> BasicFlow:
+        return self._checker
+
+    @checker.setter
+    def checker(self, candidate: AtomicInvokable) -> None:
+        self._checker = BasicFlow(component=candidate)
+        self._rebuild()
+
+    @property
+    def judge(self) -> Optional[BasicFlow]:
+        return self._judge
+
+    @judge.setter
+    def judge(self, candidate: Optional[AtomicInvokable]) -> None:
+        self._judge = BasicFlow(component=candidate) if candidate is not None else None
+        self._rebuild()
+
+    @property
+    def max_revisions(self) -> int:
+        return self._max_revisions
+
+    @max_revisions.setter
+    def max_revisions(self, value: int) -> None:
+        if not isinstance(value, int):
+            raise TypeError("max_revisions must be an int")
+        if value < 0:
+            raise ValueError("max_revisions must be >= 0")
+        self._max_revisions = value
+
+    # ------------------------------------------------------------------ #
+    # Wiring / validation
+    # ------------------------------------------------------------------ #
+    def _rebuild(self) -> None:
+        # Wire maker <-> checker
+        self._maker.output_schema = self._checker.input_schema
+        self._checker.output_schema = self._maker.input_schema
+
+        maker_keys = set(self._maker.input_schema.keys())
+        checker_keys = set(self._checker.output_schema.keys())
+
+        if maker_keys != checker_keys:
+            raise ValueError(
+                "MakerCheckerFlow invariant violated: "
+                "checker.output_schema must match maker.input_schema"
+            )
+
+        if self._judge is not None:
+            judge_keys = set(self._judge.input_schema.keys())
+            if judge_keys != maker_keys:
+                raise ValueError(
+                    "MakerCheckerFlow invariant violated: "
+                    "judge.input_schema must match maker.input_schema"
+                )
+
+        self._arguments_map, self._return_type = self.build_args_returns()
+        self._is_persistible = self._compute_is_persistible()
+
+    # ------------------------------------------------------------------ #
+    # Workflow helpers
+    # ------------------------------------------------------------------ #
+    def build_args_returns(self):
+        base_args, base_ret = super().build_args_returns()
+        return self._maker.arguments_map, base_ret
+
+    def _compute_is_persistible(self):
+        if self._judge is None:
+            return self._maker.is_persistible and self._checker.is_persistible
+        return (
+            self._maker.is_persistible
+            and self._checker.is_persistible
+            and self._judge.is_persistible
+        )
+
+    # ------------------------------------------------------------------ #
+    # Invocation
+    # ------------------------------------------------------------------ #
+    def _invoke(self, inputs: Mapping[str, Any]):
+        maker_ckpts: list[int] = []
+        checker_ckpts: list[int] = []
+        judge_ckpts: Optional[list[int]] = [] if self._judge is not None else None
+
+        stopped_early = False
+
+        # Initial draft
+        before = len(self._maker.checkpoints)
+        draft = self._maker.invoke(inputs)
+        maker_ckpts.append(len(self._maker.checkpoints) - 1)
+
+        if self._max_revisions == 0:
+            return {
+                "maker_checkpoints": maker_ckpts,
+                "checker_checkpoints": checker_ckpts,
+                "judge_checkpoints": judge_ckpts,
+                "iterations_run": 0,
+                "stopped_early": False,
+            }, draft
+
+        for _ in range(self._max_revisions):
+            # Checker
+            before = len(self._checker.checkpoints)
+            next_inputs = self._checker.invoke(draft)
+            checker_ckpts.append(len(self._checker.checkpoints) - 1)
+
+            # Judge (optional)
+            if self._judge is not None:
+                judge_out = self._judge.invoke(next_inputs)
+                judge_ckpts.append(len(self._judge.checkpoints) - 1)
+
+                decision = next(iter(judge_out.values()))
+                if not isinstance(decision, bool):
+                    raise TypeError("Judge must return a boolean")
+
+                if decision:
+                    stopped_early = True
+                    break
+
+            # Maker rework
+            draft = self._maker.invoke(next_inputs)
+            maker_ckpts.append(len(self._maker.checkpoints) - 1)
+
+        return {
+            "maker_checkpoints": maker_ckpts,
+            "checker_checkpoints": checker_ckpts,
+            "judge_checkpoints": judge_ckpts,
+            "iterations_run": len(checker_ckpts),
+            "stopped_early": stopped_early,
+        }, draft

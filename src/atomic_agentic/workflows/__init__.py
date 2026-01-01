@@ -7,12 +7,13 @@ from .base import(
 )
 from .basic import BasicFlow
 from .stateio import StateIOFlow
-from .composites import SequentialFlow
+from .composites import SequentialFlow, MakerCheckerFlow
 
 __all__ = ["Workflow",
            "BasicFlow",
            "StateIOFlow",
            "SequentialFlow",
+           "MakerCheckerFlow",
            "MappingPolicy",
            "BundlingPolicy",
            "AbsentValPolicy",
