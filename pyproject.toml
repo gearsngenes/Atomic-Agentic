@@ -22,32 +22,23 @@ classifiers = [
 # Core deps — importable everywhere, with MCP/A2A made mandatory per your request.
 dependencies = [
   "pydantic>=2",
-  "python-dotenv",
   "requests",
   "mcp",             # Model Context Protocol Python SDK
   "python-a2a",      # Agent-to-Agent (A2A) SDK
   "uvicorn",         # ASGI server commonly used to host MCP/A2A endpoints
   "mcpo",            # MCP→OpenAPI proxy utility
-  "uv"               # included as requested; primarily a CLI/tooling package
+  "uv",              # included as requested; primarily a CLI/tooling package
 ]
 
 [project.optional-dependencies]
 # LLM / embedding providers (kept optional)
-openai      = ["openai"]
-gemini      = ["google-genai"]       # official SDK exposes `from google import genai`
-mistral     = ["mistralai"]
 llama       = ["llama-cpp-python", "huggingface-hub"]
-
-# Demo UI
-demo = ["streamlit"]
 
 # Convenience bundle for all optional providers + demo (explicitly expanded for tool compatibility)
 llm-providers = [
   "openai",
   "google-genai",
   "mistralai",
-  "llama-cpp-python",
-  "huggingface-hub",
 ]
 
 [project.urls]
