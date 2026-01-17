@@ -91,7 +91,7 @@ judge = toolify(
     judge_revision,
     name="approval_judge",
     description="Returns True if checker approved the draft",
-)[0]
+)
 
 
 # ─────────────────────────────────────────────────────────────

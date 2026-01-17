@@ -159,16 +159,16 @@ print(agent_tool.invoke({"prompt": "What is the capital of France?"}))
 
 ---
 
-### `toolify(component, **kwargs)`
+### `toolify()`
 
 `toolify()` is a single entrypoint that converts one of:
 
 - `callable`
 - `Tool`
-- `Agent`
-- `str` URL (MCP server URL, or A2A endpoint fallback)
+- `AtomicInvokable` (Agent, etc.)
+- `str` URL (MCP server or A2A endpoint)
 
-…into a list of `Tool` instances.
+…into a single `Tool` instance.
 
 ```python
 from atomic_agentic.tools import toolify
@@ -178,32 +178,40 @@ from atomic_agentic.engines.LLMEngines import OpenAIEngine
 def hello(name: str) -> str:
     return f"Hello, {name}!"
 
-tools = toolify(hello, namespace="default", description="Greets a person.")
-print([t.full_name for t in tools])
+tool = toolify(hello, namespace="default", description="Greets a person.")
+print(tool.full_name)
 
-engine = OpenAIEngine(model="gpt-4.1-mini")
+engine = OpenAIEngine(model="gpt-4o-mini")
 agent = Agent(name="qa", description="Answers questions.", llm_engine=engine)
 
-tools = toolify(agent)
-print([t.full_name for t in tools])  # AgentTool.qa.invoke
+tool = toolify(agent)
+print(tool.full_name)  # qa (AgentTool)
 ```
 
 **String URLs (MCP or A2A):**
 
-- If `component` is a URL string, `toolify()` first tries MCP discovery.
-- If MCP discovery fails, it attempts to construct an **A2A** client tool (`A2AgentTool`).
-
-Important: when toolifying a remote endpoint string, `toolify()` requires you to pass the `headers=` keyword
-(even if the value is `None`).
+- If `component` is a URL string, `toolify()` checks for a `remote_protocol` argument to see if it is `mcp` or `a2a`.
+  - **MCP servers require explicit `name` parameter** to select a specific tool.
+  - If MCP discovery succeeds but no `name` is provided, a `ToolDefinitionError` is raised with a list of available tools.
+- If MCP discovery fails, it attempts to construct an **A2A** client tool (`A2AProxyTool`).
+  - **A2A endpoints auto-discover the tool name** from the remote agent card; `name` parameter is ignored.
 
 ```python
-tools = toolify(
-    "http://localhost:4242",  # A2A or MCP URL
-    headers={},               # must be provided; may be None
+# MCP server with explicit tool name (required)
+tool = toolify(
+    "http://localhost:8000/mcp",
+    name="multiply",  # REQUIRED for MCP
+    headers=None,     # optional auth headers
+)
+
+# A2A endpoint (name auto-discovered)
+tool = toolify(
+    "http://localhost:9000",
+    headers=None,  # optional auth headers
 )
 ```
 
-For MCP servers that expose many tools, `toolify()` can return multiple tools. Use `include=[...]` / `exclude=[...]` to filter.
+For bulk registration of multiple components, use `ToolAgent.batch_register()` which accepts a sequence of callables, agents, tools, or remote URLs.
 
 ---
 
@@ -307,8 +315,8 @@ host.run(debug=True)
 
 ### Calling an A2A agent as a Tool: `A2AgentTool`
 
-`A2AgentTool` is a client-side proxy Tool that forwards dict inputs to a remote A2A agent.
-You’ll usually get it via `toolify("http://host:port", headers=...)` when MCP discovery fails.
+`A2AProxyTool` is a client-side proxy Tool that forwards dict inputs to a remote A2A agent.
+You’ll usually get it via `toolify("http://host:port", remote_protocol = "a2a", headers=...)`.
 
 ---
 

@@ -41,7 +41,7 @@ batch_haiku_planner = PlanActAgent(
     llm_engine=llm_engine,
     run_concurrent=True,
 )
-haiku_tool_id = batch_haiku_planner.register(haiku_agent)[0]
+haiku_tool_id = batch_haiku_planner.register(haiku_agent)
 
 
 def print_haiku(haiku_topic: str, haiku: str) -> None:
@@ -52,7 +52,7 @@ print_haiku_tool_id = batch_haiku_planner.register(
     print_haiku,
     name="print_haiku",
     description="Print a haiku with its topic as the title.",
-)[0]
+)
 
 # ----- Batch Math PlanAct Agent -----
 batch_math_planner = PlanActAgent(
@@ -72,7 +72,7 @@ print_math_tool_id = batch_math_planner.register(
     print_math_solution,
     name="print_math_solution",
     description="Print the math problem and its computed solution.",
-)[0]
+)
 
 # ----- Super Planner (delegates to both planners) -----
 super_planner = PlanActAgent(
@@ -81,8 +81,8 @@ super_planner = PlanActAgent(
     llm_engine=llm_engine,
     run_concurrent=True,
 )
-haiku_planner_tool_id = super_planner.register(batch_haiku_planner)[0]
-math_planner_tool_id = super_planner.register(batch_math_planner)[0]
+haiku_planner_tool_id = super_planner.register(batch_haiku_planner)
+math_planner_tool_id = super_planner.register(batch_math_planner)
 
 # ----- Run Example Batch Tasks -----
 haiku_prompts = [

@@ -129,16 +129,16 @@ class Agent(AtomicInvokable):
 
         # Prepare pre_invoke
         pre_tool = toolify(pre_invoke or identity_pre,
-                           name = "pre_invoke",
-                           namespace = name,
-                           description = f"The tool that preprocesses inputs into a string for Agent {name}")[0]
+                           name="pre_invoke",
+                           namespace=name,
+                           description=f"The tool that preprocesses inputs into a string for Agent {name}")
         if pre_tool.return_type.lower() not in {"any", "str"}:
             raise AgentError("Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke")
         # Prepare post_invoke
         post_tool = toolify(post_invoke or identity_post,
-                           name = "post_invoke",
-                           namespace = name,
-                           description = f"The tool that postprocesses outputs of Agent {name}")[0]
+                           name="post_invoke",
+                           namespace=name,
+                           description=f"The tool that postprocesses outputs of Agent {name}")
         required = 0
         if len(post_tool.arguments_map) == 0:
             raise AgentError("Agent.post_invoke must expect least 1 argument")
@@ -278,9 +278,9 @@ class Agent(AtomicInvokable):
         """
         # Prepare pre_invoke
         pre_tool = toolify(candidate or identity_pre,
-                           name = "pre_invoke",
-                           namespace = self.name,
-                           description = f"The tool that preprocesses inputs into a string for Agent {self.name}")[0]
+                           name="pre_invoke",
+                           namespace=self.name,
+                           description=f"The tool that preprocesses inputs into a string for Agent {self.name}")
         if pre_tool.return_type.lower() not in {"any", "str"}:
             raise AgentError("Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke")
         # Apply the candidate and sync internal schema
@@ -319,9 +319,9 @@ class Agent(AtomicInvokable):
         """
         # Create candidate tool (do not mutate state yet)
         post_tool = toolify(candidate or identity_post,
-                           name = "post_invoke",
-                           namespace = self.name,
-                           description = f"The tool that postprocesses outputs of Agent {self.name}")[0]
+                           name="post_invoke",
+                           namespace=self.name,
+                           description=f"The tool that postprocesses outputs of Agent {self.name}")
         required = 0
         if len(post_tool.arguments_map) == 0:
             raise AgentError("Agent.post_invoke must expect least 1 argument")

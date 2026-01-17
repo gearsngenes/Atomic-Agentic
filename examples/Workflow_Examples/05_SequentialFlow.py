@@ -4,8 +4,8 @@
 SequentialFlow example using tool steps created via `toolify`.
 
 Key point:
-- toolify(...) returns List[Tool], even for a single callable.
-  So we either index [0] or flatten the list.
+- toolify(...) returns a single Tool instance.
+  Append each Tool individually to the tools list.
 """
 
 from __future__ import annotations
@@ -33,11 +33,11 @@ def to_message(value: int) -> Dict[str, str]:
 
 
 def main() -> None:
-    # toolify returns List[Tool] — flatten it.
+    # toolify returns a single Tool — append it individually.
     tools: List[Any] = []
-    tools += toolify(add_and_carry, name="add_and_carry", description="Add x+y and carry factor forward")
-    tools += toolify(multiply, name="multiply", description="Multiply value by factor")
-    tools += toolify(to_message, name="to_message", description="Format value as a message")
+    tools.append(toolify(add_and_carry, name="add_and_carry", description="Add x+y and carry factor forward"))
+    tools.append(toolify(multiply, name="multiply", description="Multiply value by factor"))
+    tools.append(toolify(to_message, name="to_message", description="Format value as a message"))
 
     flow = SequentialFlow(
         name="demo_sequential",

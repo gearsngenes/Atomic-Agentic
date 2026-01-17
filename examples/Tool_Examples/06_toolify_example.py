@@ -1,10 +1,14 @@
 """
-Toolify demo:
-- Agent           -> toolify(agent)                         -> [AgentTool]
-- Callable        -> toolify(callable, ...)                 -> [Tool]
-- Tool (wrapped)  -> toolify(tool)                          -> [Tool]
-- MCP URL (bulk)  -> toolify(url, namespace=..., headers=...) -> [MCPProxyTool, ...]
-- MCP URL (single)-> toolify(url, name=..., namespace=..., headers=...) -> [MCPProxyTool]
+Toolify demo: converting components into single Tool instances.
+
+Toolify patterns:
+- Agent           -> toolify(agent)                      -> AgentTool (single)
+- Callable        -> toolify(callable, ...)              -> Tool (single)
+- Tool (wrapped)  -> toolify(tool)                       -> Tool (single, passthrough)
+- MCP URL        -> toolify(url, name=..., remote_protocol='mcp') -> MCPProxyTool (single)
+- A2A URL        -> toolify(url, remote_protocol='a2a') -> A2AProxyTool (single, auto-discovers)
+
+Note: toolify() returns a SINGLE Tool instance, not a list.
 
 Server for MCP path (run separately):
     # Ensure your sample server is Streamable-HTTP mounted at /mcp
@@ -172,8 +176,7 @@ def synthesize_required_inputs(t: Tool) -> dict:
 def main() -> None:
     # 1) Agent -> AgentTool
     print("\n[1] Agent -> AgentTool via toolify(agent)")
-    agent_tools = toolify(agent)
-    agent_tool = agent_tools[0]
+    agent_tool = toolify(agent)
     show_plan(agent_tool)
     invoke_with_inputs(
         agent_tool,
@@ -182,20 +185,18 @@ def main() -> None:
 
     # 2) Callable -> Tool (requires name & description)
     print("\n[2] Callable -> Tool via toolify(add_scale, ...)")
-    callable_tools = toolify(
+    callable_tool = toolify(
         add_scale,
         name="add_scale",
         description="Compute (a + b) * scale.",
         namespace="local.demo",
     )
-    callable_tool = callable_tools[0]
     show_plan(callable_tool)
     invoke_with_inputs(callable_tool, {"a": 2, "b": 3, "scale": 10})
 
     # 3) Pre-wrapped Tool -> passthrough
     print("\n[3] Pre-wrapped Tool -> passthrough via toolify(pre_wrapped_tool)")
-    passthrough_tools = toolify(pre_wrapped_tool)
-    passthrough_tool = passthrough_tools[0]
+    passthrough_tool = toolify(pre_wrapped_tool)
     show_plan(passthrough_tool)
     invoke_with_inputs(
         passthrough_tool,
@@ -205,18 +206,10 @@ def main() -> None:
         },
     )
 
-    # 4) MCP URL -> list of MCPProxyTools (bulk case)
-    print("\n[4] MCP URL -> bulk MCPProxyTools via toolify(url, namespace=..., headers=...)")
+    # 4) MCP URL + name -> MCPProxyTool (single tool from server)
+    print("\n[4] MCP URL + name -> single MCPProxyTool via toolify(url, name=..., remote_protocol='mcp', ...)")
     print("[MCP] Connecting to:", SERVER_URL)
     try:
-        # NOTE: toolify requires that 'headers' be present (may be None).
-        mcp_tools = toolify(
-            SERVER_URL,
-            namespace=MCP_NAMESPACE,
-            headers=MCP_HEADERS,
-        )
-        print(f"[MCP] Discovered {len(mcp_tools)} tools")
-
         # Provide canned examples for common demo names; synthesize otherwise
         EXAMPLE_INPUTS: dict[str, dict[str, Any]] = {
             "mul": {"a": 3, "b": 4},
@@ -226,32 +219,27 @@ def main() -> None:
             "derivative": {"func": "2.71828**x + 2*x + 1", "x": 3.0},
         }
 
-        for t in mcp_tools:
-            show_plan(t)
-            inputs = EXAMPLE_INPUTS.get(t.name) or synthesize_required_inputs(t)
-            if not inputs:
-                print("(no required params detected; calling with empty inputs)")
-            invoke_with_inputs(t, inputs)
+        # First, discover available tools on the server
+        from atomic_agentic.tools import list_mcp_tools
+        tool_names = list_mcp_tools(SERVER_URL, headers=MCP_HEADERS)
+        print(f"[MCP] Discovered {len(tool_names)} tools: {list(tool_names.keys())}")
 
-        # 5) MCP URL + name -> singular MCPProxyTool
-        if mcp_tools:
-            first_name = mcp_tools[0].name
-            print(
-                "\n[5] MCP URL + name -> single MCPProxyTool via "
-                f"toolify(url, name={first_name!r}, namespace=..., headers=...)"
-            )
-            single_tools = toolify(
+        # Show a single example tool from the server
+        if tool_names:
+            example_name = list(tool_names.keys())[0]
+            print(f"\n[4a] Registering MCP tool '{example_name}'...")
+            mcp_tool = toolify(
                 SERVER_URL,
-                name=first_name,
+                name=example_name,
                 namespace=MCP_NAMESPACE,
+                remote_protocol="mcp",
                 headers=MCP_HEADERS,
             )
-            single_tool = single_tools[0]
-            show_plan(single_tool)
-            inputs = EXAMPLE_INPUTS.get(single_tool.name) or synthesize_required_inputs(
-                single_tool
-            )
-            invoke_with_inputs(single_tool, inputs)
+            show_plan(mcp_tool)
+            inputs = EXAMPLE_INPUTS.get(mcp_tool.name) or synthesize_required_inputs(mcp_tool)
+            if not inputs:
+                print("(no required params detected; calling with empty inputs)")
+            invoke_with_inputs(mcp_tool, inputs)
 
     except Exception as e:
         print("[MCP] Skipping MCP demo due to error:", e)

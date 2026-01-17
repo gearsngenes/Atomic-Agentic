@@ -68,9 +68,9 @@ orch = PlanActAgent(
 )
 
 # Register agents-as-tools and capture their full tool ids for deterministic prompting
-outliner_tool = orch.register(outliner)[0]
-writer_tool = orch.register(writer)[0]
-reviewer_tool = orch.register(reviewer)[0]
+outliner_tool = orch.register(outliner)
+writer_tool = orch.register(writer)
+reviewer_tool = orch.register(reviewer)
 
 if __name__ == "__main__":
     idea = input("\nStory idea: ").strip()

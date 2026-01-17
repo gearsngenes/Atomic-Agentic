@@ -23,8 +23,9 @@ planner = PlanActAgent(
     run_concurrent=False,
 )
 
-# Register MCP endpoint (bulk discover) under a clear namespace.
-planner.register("http://localhost:8000/mcp", namespace="CalculusServer")
+# Register all tools from MCP server (bulk discover).
+# batch_register with mcp_servers parameter auto-discovers and registers all tools.
+planner.batch_register(mcp_servers=[("http://localhost:8000/mcp", None)])
 
 result = planner.invoke(
     {

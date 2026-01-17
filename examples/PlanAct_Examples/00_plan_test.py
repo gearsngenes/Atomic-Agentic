@@ -38,9 +38,9 @@ def tool_3(t2_result: str) -> str:
 
 
 # Register tools (callables are wrapped into Tool instances via toolify)
-t1_full = agent.register(tool_1, namespace="local")[0]
-t2_full = agent.register(tool_2, namespace="local")[0]
-t3_full = agent.register(tool_3, namespace="local")[0]
+t1_full = agent.register(tool_1, namespace="local")
+t2_full = agent.register(tool_2, namespace="local")
+t3_full = agent.register(tool_3, namespace="local")
 
 seed = 32
 

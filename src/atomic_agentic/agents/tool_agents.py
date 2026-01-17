@@ -59,7 +59,7 @@ import logging
 import re
 import string
 import threading
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TypedDict
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, TypedDict, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .base import Agent
@@ -72,8 +72,7 @@ from ..core.Exceptions import (
 from ..core.Prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
 from ..core.Invokable import AtomicInvokable
 from ..engines.LLMEngines import LLMEngine
-from ..tools import Tool
-from ..tools.Toolify import toolify
+from ..tools import Tool, list_mcp_tools, toolify
 
 logger = logging.getLogger(__name__)
 
@@ -545,62 +544,140 @@ class ToolAgent(Agent, ABC):
         name: Optional[str] = None,
         description: Optional[str] = None,
         namespace: Optional[str] = None,
+        remote_protocol: str = "mcp",
         headers: Optional[Mapping[str, str]] = None,
-        include: Optional[Sequence[str]] = None,
-        exclude: Optional[Sequence[str]] = None,
         name_collision_mode: str = "raise",  # raise|skip|replace
-    ) -> List[str]:
+    ) -> str:
         """
         Register a component into the toolbox via :func:`~atomic_agentic.Toolify.toolify`.
 
-        Notes
-        -----
-        - This method is serialized against :meth:`invoke` via `_invoke_lock`.
-        - MCP bulk registration will return multiple full_names.
+        Parameters
+        ----------
+        component : Callable | AtomicInvokable | str
+            A callable, agent, tool, or remote endpoint URL (MCP or A2A).
+        name : Optional[str]
+            For callables: optional tool name (inferred from __name__ if omitted).
+            For MCP URLs: REQUIRED to select a specific tool.
+            For A2A URLs: ignored (auto-discovered from agent metadata).
+        description : Optional[str]
+            Human-readable description.
+        namespace : Optional[str]
+            Logical namespace for the tool.
+        remote_protocol : str (must be "mcp" or "a2a")
+            When `component` is a URL string, specifies which remote protocol to use:
+        headers : Optional[Mapping[str, str]]
+            Transport headers for remote endpoints.
+        name_collision_mode : str
+            One of: 'raise', 'skip', 'replace'. Determines behavior if tool already exists.
+
+        Returns
+        -------
+        str
+            The full_name of the registered tool.
+
+        Raises
+        ------
+        ToolRegistrationError
+            If toolification fails or collision handling triggers an error.
         """
+        # Validate name_collision_mode
         if name_collision_mode not in ("raise", "skip", "replace"):
             raise ToolRegistrationError("name_collision_mode must be one of: 'raise', 'skip', 'replace'.")
 
+        # Toolify the component
         try:
-            tools = toolify(
+            tool = toolify(
                 component,
                 name=name,
                 description=description,
                 namespace=namespace or self.name,
-                headers=headers,  # MCP URL contract: key presence required when component is str
-                include=include,
-                exclude=exclude,
+                remote_protocol=remote_protocol,
+                headers=headers,
             )
         except ToolDefinitionError:
             raise
         except Exception as exc:  # pragma: no cover
             raise ToolRegistrationError(f"toolify failed for {component!r}: {exc}") from exc
 
-        registered: List[str] = []
-        with self._invoke_lock:
-            for tool in tools:
-                key = tool.full_name
-                if key in self._toolbox:
-                    if name_collision_mode == "raise":
-                        raise ToolRegistrationError(
-                            f"{type(self).__name__}.{self.name}: tool already registered: {key}"
-                        )
-                    if name_collision_mode == "skip":
-                        continue
-                # replace or new
-                self._toolbox[key] = tool
-                registered.append(key)
+        key = tool.full_name
+        
+        # Handle name collision
+        if key in self._toolbox:
+            if name_collision_mode == "raise":
+                raise ToolRegistrationError(
+                    f"{type(self).__name__}.{self.name}: tool already registered: {key}"
+                )
+            if name_collision_mode == "skip":
+                return key
 
-        return registered
+        # Add to toolbox
+        self._toolbox[key] = tool
+
+        return key
 
     def batch_register(
         self,
-        tools: Sequence[Callable[..., Any] | AtomicInvokable],
+        tools: Sequence[Callable[..., Any] | AtomicInvokable] = [],
+        mcp_servers: Sequence[Tuple[str, Any]] = [],
+        a2a_servers: Sequence[Tuple[str, Any]] = [],
         *,
         name_collision_mode: str = "raise",
     ) -> List[str]:
-        """Register a batch of components."""
+        """
+        Register a batch of components into the toolbox.
+
+        Parameters
+        ----------
+        tools : Sequence[Callable | AtomicInvokable] | str
+            A sequence of callables, agents, tools, or remote endpoint URLs (MCP or A2A).
+        mcp_servers : Sequence[Tuple[str, Any]]
+            A sequence of (server_url, headers) tuples for MCP tool registration.
+        a2a_servers : Sequence[Tuple[str, Any]]
+            A sequence of (server_url, headers) tuples for A2A component registration.
+        name_collision_mode : str
+            One of: 'raise', 'skip', 'replace'. Determines behavior if tool.fullname already exists
+
+        Returns
+        -------
+        List[str]
+            Full names of all registered tools.
+
+        Raises
+        ------
+        ToolRegistrationError
+            If toolification or collision handling fails.
+        """
         registered: List[str] = []
+        
+        # Register MCP tools from servers
+        for server_url, server_headers in (mcp_servers or []):
+            server_tools = list_mcp_tools(server_url, headers=server_headers)
+            for name in server_tools:
+                full_name = self.register(
+                    component = server_url,
+                    name = name,
+                    description = None,
+                    namespace = self.name,
+                    remote_protocol="mcp",
+                    headers=server_headers,
+                    name_collision_mode=name_collision_mode,
+                )
+                registered.append(full_name)
+        
+        # Register A2A components from servers
+        for server_url, server_headers in (a2a_servers or []):
+            full_name = self.register(
+                component = server_url,
+                name = None,
+                description = None,
+                namespace=self.name,
+                remote_protocol="a2a",
+                headers=server_headers,
+                name_collision_mode=name_collision_mode,
+            )
+            registered.append(full_name)
+
+        # Register individual tools/invokables/callables
         for obj in tools:
             if isinstance(obj, AtomicInvokable):
                 nm, desc = obj.name, obj.description
@@ -608,18 +685,17 @@ class ToolAgent(Agent, ABC):
                 nm, desc = obj.__name__ or "unnamed_callable", obj.__doc__ or f"unnamed_callable registered for {self.name}"
             else:
                 raise ToolRegistrationError(
-                    f"batch_register expected Tool, Agent, or callable; got {type(obj).__name__!r}."
+                    f"batch_register expected an AtomicInvokable or callable; got {type(obj).__name__!r}."
                 )
 
-            registered.extend(
-                self.register(
-                    obj,
-                    name=nm,
-                    description=desc,
-                    namespace=self.name,
-                    name_collision_mode=name_collision_mode,
-                )
+            full_name = self.register(
+                obj,
+                name=nm,
+                description=desc,
+                namespace=self.name,
+                name_collision_mode=name_collision_mode,
             )
+            registered.append(full_name)
 
         return registered
 
