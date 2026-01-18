@@ -1,7 +1,7 @@
 from .base import (
     Tool,
 )
-from .Toolify import toolify
+from .Toolify import toolify, batch_toolify
 from .a2a import A2AProxyTool
 from .mcp import MCPProxyTool, list_mcp_tools
 from .adapter import AdapterTool
@@ -11,4 +11,6 @@ __all__ = ["Tool",
            "AdapterTool",
            "MCPProxyTool",
            "list_mcp_tools",
-           "toolify",]
+           "toolify",
+           "batch_toolify",
+           ]

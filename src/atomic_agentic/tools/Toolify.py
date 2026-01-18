@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, List, Mapping, Union
+from typing import Any, Callable, List, Mapping, Union, Tuple
 
 from ..core.Exceptions import ToolDefinitionError
 from ..core.Invokable import AtomicInvokable
@@ -20,7 +20,7 @@ def toolify(
     name: str | None = None,
     description: str | None = None,
     namespace: str | None = None,
-    remote_protocol: str = "mcp",
+    remote_protocol: str | None = None,
     headers: Mapping[str, str] | None = None,
 ) -> Tool:
     """
@@ -48,7 +48,7 @@ def toolify(
         For MCP tools, the remote description is preferred if available.
     namespace : Optional[str]
         Logical namespace for the Tool.
-    remote_protocol : str (must be "mcp" or "a2a")
+    remote_protocol : Optional[str] (must be "mcp" or "a2a" if toolifying from URL)
         When `component` is a URL string, specifies which remote protocol to use:
     headers : Optional[Mapping[str, str]]
         Transport headers for MCP/A2A requests (auth, etc.).
@@ -133,3 +133,62 @@ def toolify(
     raise ToolDefinitionError(
         "toolify: unsupported input type. Expected AtomicInvokable | Callable | A2A/MCP endpoint URL string."
     )
+
+def batch_toolify(
+    executable_components: List[Union[AtomicInvokable, Callable[..., Any]]] = [],
+    *,
+    a2a_servers: List[Tuple[str, Any]] = [],
+    mcp_servers: List[Tuple[str, Any]] = [],
+    batch_namespace: str = "default",
+) -> List[Tool]:
+    """
+    Normalize a batch of components into Tool instances.
+
+    Parameters
+    ----------
+    executable_components : List[AtomicInvokable | Callable[..., Any]]
+        List of local callables or AtomicInvokable instances to toolify.
+    a2a_servers : List[Tuple[str, Any]]
+        List of (A2A endpoint URL, headers) tuples to toolify all tools from.
+    mcp_servers : List[Tuple[str, Any]]
+        List of (MCP server URL, headers) tuples to toolify all tools from.
+    batch_namespace : str
+        Namespace to assign to all toolified local components.
+
+    Returns
+    -------
+    List[Tool]
+        List of Tool instances derived from the provided components and remote servers.
+    """
+    tools: List[Tool] = []
+
+    # Toolify local components
+    for component in executable_components:
+        tool = toolify(component, namespace=batch_namespace)
+        tools.append(tool)
+
+    # Toolify all tools from A2A servers
+    for url, headers in a2a_servers:
+        a2a_tool = toolify(
+            url,
+            remote_protocol="a2a",
+            headers=headers,
+            namespace=batch_namespace,
+        )
+        tools.append(a2a_tool)
+
+    # Toolify all tools from MCP servers
+    for url, headers in mcp_servers:
+        # Discover available MCP tools
+        mcp_tool_names = list_mcp_tools(url, headers=headers)
+        for tool_name in mcp_tool_names:
+            mcp_tool = toolify(
+                url,
+                name=tool_name,
+                remote_protocol="mcp",
+                headers=headers,
+                namespace=batch_namespace,
+            )
+            tools.append(mcp_tool)
+
+    return tools

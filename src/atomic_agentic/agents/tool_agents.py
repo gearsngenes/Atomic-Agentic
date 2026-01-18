@@ -72,7 +72,7 @@ from ..core.Exceptions import (
 from ..core.Prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
 from ..core.Invokable import AtomicInvokable
 from ..engines.LLMEngines import LLMEngine
-from ..tools import Tool, list_mcp_tools, toolify
+from ..tools import Tool, toolify, batch_toolify
 
 logger = logging.getLogger(__name__)
 
@@ -544,7 +544,7 @@ class ToolAgent(Agent, ABC):
         name: Optional[str] = None,
         description: Optional[str] = None,
         namespace: Optional[str] = None,
-        remote_protocol: str = "mcp",
+        remote_protocol: Optional[str] = None,
         headers: Optional[Mapping[str, str]] = None,
         name_collision_mode: str = "raise",  # raise|skip|replace
     ) -> str:
@@ -649,54 +649,32 @@ class ToolAgent(Agent, ABC):
         """
         registered: List[str] = []
         
-        # Register MCP tools from servers
-        for server_url, server_headers in (mcp_servers or []):
-            server_tools = list_mcp_tools(server_url, headers=server_headers)
-            for name in server_tools:
-                full_name = self.register(
-                    component = server_url,
-                    name = name,
-                    description = None,
-                    namespace = self.name,
-                    remote_protocol="mcp",
-                    headers=server_headers,
-                    name_collision_mode=name_collision_mode,
-                )
-                registered.append(full_name)
+        if name_collision_mode not in ("raise", "skip", "replace"):
+            raise ToolRegistrationError("name_collision_mode must be one of: 'raise', 'skip', 'replace'.")
         
-        # Register A2A components from servers
-        for server_url, server_headers in (a2a_servers or []):
-            full_name = self.register(
-                component = server_url,
-                name = None,
-                description = None,
-                namespace=self.name,
-                remote_protocol="a2a",
-                headers=server_headers,
-                name_collision_mode=name_collision_mode,
+        # Batch register local tools
+        try:
+            tools = batch_toolify(
+                executable_components=tools,
+                a2a_servers=a2a_servers,
+                mcp_servers=mcp_servers,
+                batch_namespace=self.name,
             )
-            registered.append(full_name)
-
-        # Register individual tools/invokables/callables
-        for obj in tools:
-            if isinstance(obj, AtomicInvokable):
-                nm, desc = obj.name, obj.description
-            elif callable(obj):
-                nm, desc = obj.__name__ or "unnamed_callable", obj.__doc__ or f"unnamed_callable registered for {self.name}"
-            else:
-                raise ToolRegistrationError(
-                    f"batch_register expected an AtomicInvokable or callable; got {type(obj).__name__!r}."
-                )
-
-            full_name = self.register(
-                obj,
-                name=nm,
-                description=desc,
-                namespace=self.name,
-                name_collision_mode=name_collision_mode,
-            )
-            registered.append(full_name)
-
+            # Add to toolbox with collision handling
+            for tool in tools:
+                key = tool.full_name
+                if key in self._toolbox:
+                    if name_collision_mode == "raise":
+                        raise ToolRegistrationError(
+                            f"{type(self).__name__}.{self.name}: tool already registered: {key}"
+                        )
+                    if name_collision_mode == "skip":
+                        continue
+                # register/replace
+                self._toolbox[key] = tool
+                registered.append(key)
+        except ToolDefinitionError:
+            raise
         return registered
 
     def clear_memory(self) -> None:
