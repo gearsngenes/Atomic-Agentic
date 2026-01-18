@@ -660,21 +660,21 @@ class ToolAgent(Agent, ABC):
                 mcp_servers=mcp_servers,
                 batch_namespace=self.name,
             )
-            # Add to toolbox with collision handling
-            for tool in tools:
-                key = tool.full_name
-                if key in self._toolbox:
-                    if name_collision_mode == "raise":
-                        raise ToolRegistrationError(
-                            f"{type(self).__name__}.{self.name}: tool already registered: {key}"
-                        )
-                    if name_collision_mode == "skip":
-                        continue
-                # register/replace
-                self._toolbox[key] = tool
-                registered.append(key)
         except ToolDefinitionError:
             raise
+        # Add to toolbox with collision handling
+        for tool in tools:
+            key = tool.full_name
+            if key in self._toolbox:
+                if name_collision_mode == "raise":
+                    raise ToolRegistrationError(
+                        f"{type(self).__name__}.{self.name}: tool already registered: {key}"
+                    )
+                if name_collision_mode == "skip":
+                    continue
+            # register/replace
+            self._toolbox[key] = tool
+            registered.append(key)
         return registered
 
     def clear_memory(self) -> None:
