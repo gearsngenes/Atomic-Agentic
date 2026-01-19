@@ -75,6 +75,7 @@ class SequentialFlow(Workflow):
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
     ) -> None:
+        self._steps: List[BasicFlow] = []
         super().__init__(
             name=name,
             description=description,
@@ -84,7 +85,6 @@ class SequentialFlow(Workflow):
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
         )
-        self._steps: List[BasicFlow] = []
         self.steps = steps
 
     # ------------------------------------------------------------------ #
