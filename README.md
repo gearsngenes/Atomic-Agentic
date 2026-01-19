@@ -1,32 +1,129 @@
 # Atomic-Agentic
 
-Atomic-Agentic is a small, opinionated Python library for building **agentic systems** out of three composable primitives:
+## Introduction
+**Atomic-Agentic** is an agentic AI framework that addresses two structural problems in real-world AI systems:
+* prompts overloaded with deterministic runtime logic
+* heterogeneous interfaces between tools, agents, and workflows that require significant plumbing to scale
 
-- **Tool**: a *dict-first* callable with introspectable schema + metadata.
-- **Agent**: a schema-driven LLM wrapper (**pre_invoke → LLMEngine → post_invoke**).
-- **Workflow**: a deterministic **packaging boundary** for orchestration and IO normalization.
+Atomic-Agentic acts as an **adapter-fist, execution substrate** that moves runtime responsibilities out of natural language and into mandatory, testable code paths and places all executable components behind a single, dictionary-based interface. The result is cleaner composition, less integration friction, and systems that are easier to reason about and extend.
 
-The library is designed so that tools, agents, and workflows can be wrapped, composed, and adapted in a consistent way—without losing inspectability.
+Through Atomic-Agentic, users can build **agentic systems** out of three composable primitives:
 
+- **Tool**: A *dict-first* dapter layer for functions and remote endpoints (like MCP or A2A).
+- **Agent**: An autonomous, LLM-driven component that can orchestrate other tools & agents.
+- **Workflow**: A deterministic **packaging boundary** for tool, agent, and workflow orchestration and IO normalization.
 ---
 
 ## Installation
 
-From a cloned repo:
+To get started with Atomic-Agentic, first clone or download this repository to your prefered location. Then open a terminal and navigate to the repo folder.
+
+From there, activate your preferred python environment. If you don't have the `build` library installed yet, run:
+
+```bash
+pip install --upgrade build
+# or 
+python -m pip install build
+```
+
+Then run:
 
 ```bash
 python -m build
 ```
-From there, a `./dist/` folder will be created, from which a .tgz and .whl file will be generated. Use the latest created of either of these files and run:
+This will create a `./dist/` folder with a generated .tgz and .whl file. Use the latest created of either of these files and run:
 ```bash
 pip install ./dist/atomic-agentic-<rest of filename + extension here>
 ```
 
+Once you've installed Atomic-Agentic, you can explore the [./examples/](./examples/) directory for documented examples and explorations of **Tools, Agents,** and **Workflows**, but for a few quick start examples, continue reading.
+
 ---
+## Quickstart A: Tools
 
-## Quickstart: a plan-and-execute tool agent
+`Tool` wraps a Python callable and exposes a **dict-first** interface. All Tools execute their internal callable via `invoke(inputs: dict)` instead of positional calls, making each argument explicit, but also removes any positional arguments concern, as well.
 
-`PlanActAgent` makes **one** LLM call to generate a JSON plan (list of tool calls), executes the tools, and returns the final result.
+```python
+from atomic_agentic.tools import Tool
+accounts = [
+        {"name": "Alice Johnson", "birthdate": "1985-03-15", "account_balance": 15750.50, "annual_interest_rate": 0.025},
+        {"name": "Bob Smith", "birthdate": "1990-07-22", "account_balance": 42300.75, "annual_interest_rate": 0.030},
+        {"name": "Caleb Donavan", "birthdate": "1974-09-08", "account_balance": 36130.01, "annual_interest_rate": 0.027},
+    ]
+# 1) Define a plain Python function
+def get_account_details(index: int) -> dict:
+    """Retrieve bank account details by index."""
+    return accounts[index]
+
+# 2) Wrap it as a Tool
+tool = Tool(
+    function=get_account_details,
+    name="get_account_details",
+    namespace="banking",
+    description="Retrieve bank account details by index."
+)
+
+# 3) Inspect the Tool
+print(tool.full_name)      # Tool.banking.get_account_details
+print(tool.signature)      # Tool.banking.get_account_details(index: int) -> dict
+print(tool.arguments_map)  # {"index": <int>}
+
+# 4) Invoke with dict input (the dict-first contract)
+result = tool.invoke({"index": 0})
+print(result)  # {"name": "Alice Johnson", ...}
+```
+
+---
+## Quickstart B: Basic Agents
+
+`Agent` is an autonomous unit that uses an LLM to complete tasks given to it. By default, when calling `invoke`, you only need to give an input string formatted like `{'prompt':<input str here>}`, but you can provide it a custom **pre_invoke** function that preprocesses inputs into a prompt string. This minimizes code-integration friction and broadens your potential input shapes. We use a custom pre-invoke in the example below.
+
+```python
+from atomic_agentic.agents import Agent
+from atomic_agentic.engines.LLMEngines import OpenAIEngine
+
+# Hardcoded bank accounts
+accounts = [
+    {"name": "Alice Johnson", "birthdate": "1985-03-15", "account_balance": 15750.50, "annual_interest_rate": 0.025},
+    {"name": "Bob Smith", "birthdate": "1990-07-22", "account_balance": 42300.75, "annual_interest_rate": 0.060},
+    {"name": "Carol Davis", "birthdate": "1988-11-08", "account_balance": 28900.25, "annual_interest_rate": 0.028},
+]
+
+# 1) Define a pre_invoke function with a custom schema (account_index + sector)
+def format_finance_request(account_index: int, sector: str) -> str:
+    """Format account data + sector into a prompt."""
+    account = accounts[account_index]
+    return f"""
+Customer: {account['name']} (DOB: {account['birthdate']})
+Capital: ${account['account_balance']:,.2f}
+Rate: {account['annual_interest_rate']*100:.1f}%
+---
+Desired Sector to invest: {sector.capitalize()}"""
+
+# 2) Create an Agent with custom pre_invoke and role_prompt
+llm = OpenAIEngine(model="gpt-4o-mini")
+advisor = Agent(
+    name="finance_advisor",
+    description="Investment advisor.",
+    llm_engine=llm,
+    role_prompt="""You are an expert financial advisor at a
+    bank. You await requests that provide custormer banking data 
+    and the sector they wish to invest in. When you receive a 
+    request, provide a bulleted list of tickers that fall in 
+    that sector and are within their budge to invest in. Also 
+    consider how aggressive their annual interest rate is.""",
+    pre_invoke=format_finance_request,
+)
+
+# 3) Invoke with dict input matching the pre_invoke schema
+result = advisor.invoke({"account_index": 0, "sector": "technology"})
+print(result)
+```
+
+---
+## Quickstart C: Tool-Calling Agents
+
+In addition to the traditional string-in string-out Agent class, Atomic-Agentic also supports autonomous **tool-calling** agent classes. `PlanActAgent` is a plan-first agent class that decomposes prompts & tasks into a list of steps and executes those steps as a sequence of tool calls, returning the final result of those calls. See the below example, which registers a list of math tools and can now perform mathematics problems and return actual results instead of just LLM text responses. 
 
 ```python
 from atomic_agentic.agents import PlanActAgent
@@ -41,7 +138,6 @@ agent = PlanActAgent(
     name="planner",
     description="Plans and solves simple tasks using tools.",
     llm_engine=engine,
-    tool_calls_limit=6,  # non-return calls only
 )
 
 # 3) Register tools (callables or Tool instances both work)
@@ -49,411 +145,32 @@ agent.batch_register(MATH_TOOLS)
 
 # 4) Invoke (Agent inputs are ALWAYS a mapping)
 result = agent.invoke({"prompt": "Compute (6*7) + 5. Return only the number."})
-print(result)
+print(result, type(result))
 ```
 
 ---
 
-## Core Concepts
-
-### Tool IDs and the dict-first contract
-
-Every tool has a stable identifier:
+## Repository Structure
 
 ```
-<Type>.<namespace>.<name>
+Atomic-Agentic/
+├── examples/
+│   ├── Agent_Examples/
+│   ├── PlanAct_Examples/
+│   ├── ReAct_Examples/
+│   ├── Tool_Examples/
+│   ├── RAG_Examples/
+│   └── Workflow_Examples/
+├── src/
+│   └── atomic_agentic/
+│       ├── a2a/            # A2A hosting support
+│       ├── agents/         # Agents & Tool-Calling Agents
+│       ├── core/           # AtomicInvokable class, Exceptions, Prompts, Sentinels
+│       ├── engines/        # LLM provider classes
+│       ├── tools/          # Tools, and interop support for A2A & MCP
+│       └── workflows/      # Single step & composite classes
+├── images/
+├── README.md
+├── pyproject.toml
+└── requirements.txt # deprecated file now
 ```
-
-Example: `Tool.default.add`
-
-All Tools in Atomic-Agentic are **dict-first**:
-
-```python
-tool.invoke({"a": 2, "b": 3})
-```
-
-No positional calling through `invoke()`. The Tool converts a mapping into `(*args, **kwargs)` internally (based on signature inspection).
-
-This “dict-first” rule is what makes tools:
-- introspectable (schema/arguments are inspectable),
-- safe for LLM tool use (keys are explicit),
-- composable across agent and workflow layers.
-
----
-
-## Tools
-
-### `Tool`
-
-A `Tool` wraps a Python callable and exposes:
-
-- `arguments_map`: an ordered schema derived from the callable signature
-- `return_type`: derived from the return annotation (or best-effort)
-- `signature`: a human-readable string
-- `full_name`: `<Type>.<namespace>.<name>`
-- `invoke(inputs: Mapping[str, Any]) -> Any`: the only public execution entrypoint
-
-```python
-from atomic_agentic.tools import Tool
-
-def add(a: int, b: int) -> int:
-    return a + b
-
-t = Tool(
-    function=add,
-    name="add",
-    namespace="default",
-    description="Add two integers.",
-)
-
-print(t.full_name)      # Tool.default.add
-print(t.signature)      # Tool.default.add(a: int, b: int) -> int
-print(t.invoke({"a": 2, "b": 3}))
-```
-
-**Unknown keys:** by default, inputs must match the callable’s signature. Unknown keys are only accepted if the wrapped callable declares `**kwargs`.
-
----
-
-### MCP tools: `MCPProxyTool`
-
-`MCPProxyTool` adapts a single tool from an MCP server into a normal `Tool`.
-
-```python
-from atomic_agentic.tools import MCPProxyTool
-
-tool = MCPProxyTool(
-    server_url="http://localhost:8000/mcp",
-    tool_name="weather_lookup",
-    namespace="mcp",
-    headers={},  # pass a dict even if empty
-)
-
-print(tool.full_name)
-print(tool.invoke({"city": "New York"}))
-```
-
----
-
-### Wrapping an Agent as a Tool: `AgentTool`
-
-`AgentTool` turns an `Agent` into a `Tool`:
-
-- tool name is always `"invoke"`
-- namespace is `agent.name`
-- arguments schema mirrors the agent’s **pre_invoke** schema
-- return type mirrors the agent’s **post_invoke** return type
-
-```python
-from atomic_agentic.tools import AdapterTool
-from atomic_agentic.agents import Agent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
-
-engine = OpenAIEngine(model="gpt-4.1-mini")
-agent = Agent(name="qa", description="Answers questions.", llm_engine=engine)
-
-agent_tool = AgentTool(agent)
-print(agent_tool.full_name)  # AgentTool.qa.invoke
-print(agent_tool.invoke({"prompt": "What is the capital of France?"}))
-```
-
----
-
-### `toolify()`
-
-`toolify()` is a single entrypoint that converts one of:
-
-- `callable`
-- `Tool`
-- `AtomicInvokable` (Agent, etc.)
-- `str` URL (MCP server or A2A endpoint)
-
-…into a single `Tool` instance.
-
-```python
-from atomic_agentic.tools import toolify
-from atomic_agentic.agents import Agent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
-
-def hello(name: str) -> str:
-    return f"Hello, {name}!"
-
-tool = toolify(hello, namespace="default", description="Greets a person.")
-print(tool.full_name)
-
-engine = OpenAIEngine(model="gpt-4o-mini")
-agent = Agent(name="qa", description="Answers questions.", llm_engine=engine)
-
-tool = toolify(agent)
-print(tool.full_name)  # qa (AgentTool)
-```
-
-**String URLs (MCP or A2A):**
-
-- If `component` is a URL string, `toolify()` checks for a `remote_protocol` argument to see if it is `mcp` or `a2a`.
-  - **MCP servers require explicit `name` parameter** to select a specific tool.
-  - If MCP discovery succeeds but no `name` is provided, a `ToolDefinitionError` is raised with a list of available tools.
-- If MCP discovery fails, it attempts to construct an **A2A** client tool (`A2AProxyTool`).
-  - **A2A endpoints auto-discover the tool name** from the remote agent card; `name` parameter is ignored.
-
-```python
-# MCP server with explicit tool name (required)
-tool = toolify(
-    "http://localhost:8000/mcp",
-    name="multiply",  # REQUIRED for MCP
-    headers=None,     # optional auth headers
-)
-
-# A2A endpoint (name auto-discovered)
-tool = toolify(
-    "http://localhost:9000",
-    headers=None,  # optional auth headers
-)
-```
-
-For bulk registration of multiple components, use `ToolAgent.batch_register()` which accepts a sequence of callables, agents, tools, or remote URLs.
-
----
-
-## Agents
-
-### Base `Agent` (schema-driven LLM agent)
-
-`Agent` is a stateful LLM wrapper:
-
-1) **pre_invoke** Tool turns `inputs: Mapping[str, Any]` into a **prompt string**  
-2) `LLMEngine.invoke(messages)` produces raw text  
-3) **post_invoke** Tool converts raw output into the final return value  
-4) if `context_enabled=True`, the conversation turn is stored
-
-Default behavior:
-- `pre_invoke` is a strict identity Tool requiring `{"prompt": str}`
-- `post_invoke` is an identity Tool for the raw LLM output
-
-```python
-from atomic_agentic.agents import Agent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
-
-engine = OpenAIEngine(model="gpt-4.1-mini")
-agent = Agent(name="helper", description="Helpful assistant.", llm_engine=engine)
-
-print(agent.invoke({"prompt": "Write a haiku about snow."}))
-```
-
----
-
-### Tool-using agents: `ToolAgent`, `PlanActAgent`, `ReActAgent`
-
-Atomic-Agentic provides a base `ToolAgent` (inherits `Agent`) that adds:
-
-- a **toolbox** (`register`, `batch_register`)
-- a **blackboard** of executed steps (for tool-call traceability)
-- canonical placeholder syntax: `<<__step__N>>` to reference prior results
-- a **tool call limit** (non-return calls only)
-
-Two built-in strategies:
-
-#### `PlanActAgent` (plan-first; one LLM call)
-- LLM produces a JSON array of steps: `[{ "tool": "...", "args": {...} }, ...]`
-- Steps execute sequentially or in dependency “waves” (`run_concurrent=True`)
-- Enforces the final canonical return tool: `Tool.ToolAgents.return`
-
-#### `ReActAgent` (step-by-step orchestrator)
-- Repeatedly chooses **one** next tool call as a JSON object
-- Stops when it calls `Tool.ToolAgents.return`
-
-Example:
-
-```python
-from atomic_agentic.agents import PlanActAgent, ReActAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.tools.Plugins import MATH_TOOLS
-
-engine = OpenAIEngine(model="gpt-4.1-mini")
-
-planner = PlanActAgent(
-    name="planner",
-    description="Plans tool usage in one shot.",
-    llm_engine=engine,
-    tool_calls_limit=6,
-)
-planner.batch_register(MATH_TOOLS)
-print(planner.invoke({"prompt": "Compute (12*3) - 8 and return the number."}))
-
-reactor = ReActAgent(
-    name="reactor",
-    description="Chooses one tool call at a time.",
-    llm_engine=engine,
-    tool_calls_limit=6,
-)
-reactor.batch_register(MATH_TOOLS)
-print(reactor.invoke({"prompt": "Compute (12*3) - 8 and return the number."}))
-```
-
----
-
-## A2A Interop
-
-### Hosting a local Agent via A2A: `A2AtomicHost`
-
-`A2AtomicHost` wraps an `Agent` and serves it over the A2A protocol. It supports two function calls:
-
-- `invoke(payload=<mapping>)`
-- `agent_metadata() -> {arguments_map, return_type}`
-
-```python
-from atomic_agentic.a2a import A2AtomicHost
-from atomic_agentic.agents import Agent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
-
-engine = OpenAIEngine(model="gpt-4.1-mini")
-agent = Agent(name="trivia", description="Trivia expert.", llm_engine=engine)
-
-host = A2AtomicHost(seed_agent=agent, host="127.0.0.1", port=4242)
-host.run(debug=True)
-```
-
-### Calling an A2A agent as a Tool: `A2AgentTool`
-
-`A2AProxyTool` is a client-side proxy Tool that forwards dict inputs to a remote A2A agent.
-You’ll usually get it via `toolify("http://host:port", remote_protocol = "a2a", headers=...)`.
-
----
-
-## Workflows
-
-Workflows are deterministic **packaging boundaries**:
-
-- Inputs are always `Mapping[str, Any]`
-- Subclasses implement `_invoke(inputs) -> (metadata: Mapping[str, Any], raw: Any)`
-- The base `Workflow.invoke()` packages `raw` into an ordered `output_schema`
-
-### Output schemas and defaults
-
-If you don’t provide an output schema, workflows default to a single key:
-
-```text
-DEFAULT_WF_KEY = "result"
-```
-
-So “scalar” outputs become `{ "result": raw }` under the default policy.
-
-### Packaging policies
-
-- **BundlingPolicy**
-  - `BUNDLE`: if `output_schema` length is 1, bundle raw into that key
-  - `UNBUNDLE`: try to interpret raw as mapping/sequence/scalar and map it into schema
-- **MappingPolicy** (when raw is mapping-shaped)
-  - `STRICT`, `IGNORE_EXTRA`, `MATCH_FIRST_STRICT`, `MATCH_FIRST_LENIENT`
-- **AbsentValPolicy** (final completeness handling)
-  - `RAISE`, `DROP`, `FILL`
-
----
-
-### Built-in workflow adapters
-
-- `BasicFlow`: wrap a single Tool/Agent/Workflow as a Workflow
-- `StateIOFlow`: graph-node wrapper for stateful orchestration frameworks (e.g., LangGraph)
-
----
-
-### Example: `StateIOFlow` inside a mini LangGraph graph
-
-`StateIOFlow` is designed for “node functions” that:
-- accept a **state dict**,
-- read only the keys they declare,
-- return a **partial state update** dict (subset of the state).
-
-That makes it easy to plug Atomic-Agentic components into orchestration frameworks like LangGraph
-without hand-writing input filtering / output shaping for every node.
-
-> Optional dependency:
-> ```bash
-> pip install -U langgraph
-> ```
-
-```python
-from typing import TypedDict
-
-from langgraph.graph import StateGraph, START, END
-
-from atomic_agentic.agents import Agent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.workflows import StateIOFlow
-
-# 1) Define the LangGraph state schema
-class QAState(TypedDict, total=False):
-    question: str
-    answer: str
-
-# 2) Build an Agent that consumes `{"question": ...}` instead of `{"prompt": ...}`
-def question_to_prompt(question: str) -> str:
-    return f"Answer clearly and concisely:\n\nQuestion: {question}"
-
-engine = OpenAIEngine(model="gpt-4.1-mini")
-qa_agent = Agent(
-    name="qa",
-    description="Answers a question.",
-    llm_engine=engine,
-    pre_invoke=question_to_prompt,  # maps {"question": ...} -> prompt string
-)
-
-# 3) Wrap the agent as a stateful node adapter:
-#    - validates the component's declared inputs are a subset of QAState keys
-#    - filters the incoming state down to only the needed keys (here: {"question"})
-#    - returns a partial update compatible with LangGraph
-qa_node = StateIOFlow(qa_agent, state_schema=QAState)
-
-# 4) Build and run a tiny graph
-graph = StateGraph(QAState)
-graph.add_node("answer", qa_node.invoke)
-graph.add_edge(START, "answer")
-graph.add_edge("answer", END)
-
-app = graph.compile()
-final_state = app.invoke({"question": "What is the capital of France?"})
-
-print(final_state["answer"])
-```
-
----
-
-## Embeddings
-
-Embedding engines live in `EmbedEngines.py` and implement:
-
-```python
-vectorize(text: str) -> list[float]
-```
-
-Example:
-
-```python
-from atomic_agentic.engines.EmbedEngines import OpenAIEmbedEngine
-
-engine = OpenAIEmbedEngine(model="text-embedding-3-small")
-vec = engine.vectorize("hello world")
-print(len(vec), vec[:5])
-```
-
----
-
-## Plugins
-
-`Plugins.py` provides ready-made tool bundles, e.g.:
-
-- `MATH_TOOLS`
-- `CONSOLE_TOOLS`
-- `PARSER_TOOLS`
-
-These are intended to be registered into a `ToolAgent` quickly.
-
----
-
-## Serialization notes
-
-Most primitives implement `to_dict()` for **diagnostic snapshots** (safe to log / inspect).
-Rehydration helpers in `Factory.py` are currently in flux and may lag behind recent class changes.
-For now, treat `to_dict()` as introspection rather than a stable persistence format.
-
----
