@@ -103,7 +103,7 @@ class A2AProxyTool(Tool):
         """Build signature from remote A2A agent metadata.
         
         Fetches invokable_metadata from the remote agent and converts the
-        arguments_map (dict format) to a list of ParamSpec objects.
+        parameters list to ParamSpec objects.
         """
         call = FunctionCallContent(name="invokable_metadata", parameters=[])
         msg = Message(content=call, role=MessageRole.USER)
@@ -116,34 +116,25 @@ class A2AProxyTool(Tool):
         if not isinstance(payload, Mapping):
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata response must be a mapping")
 
-        if "arguments_map" not in payload or "return_type" not in payload:
+        if "parameters" not in payload or "return_type" not in payload:
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata response missing required keys")
 
         # Extract components
-        raw_args_map = payload["arguments_map"]
+        raw_params_list = payload["parameters"]
         return_type = payload["return_type"]
         # Validate types
-        if not isinstance(raw_args_map, Mapping):
-            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.arguments_map must be a mapping")
+        if not isinstance(raw_params_list, list):
+            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.parameters must be a list")
         if not isinstance(return_type, str):
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.return_type must be a str")
         
-        # Convert dict of ParamSpec (from metadata) to list of ParamSpec
+        # Convert list of dicts to list of ParamSpec objects
         parameters: list[ParamSpec] = []
-        for key, meta in raw_args_map.items():
-            if not isinstance(key, str):
-                raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.arguments_map keys must be strings")
+        for i, meta in enumerate(raw_params_list):
             if not isinstance(meta, Mapping):
-                raise ToolDefinitionError(f"{self.full_name}: metadata for argument '{key}' must be a mapping")
-            meta_dict = dict(meta)
-            # ParamSpec.from_dict() expects 'name' to be in the dict
-            if 'name' not in meta_dict:
-                meta_dict['name'] = key
-            parameters.append(ParamSpec.from_dict(meta_dict))
+                raise ToolDefinitionError(f"{self.full_name}: parameters[{i}] must be a mapping")
+            parameters.append(ParamSpec.from_dict(dict(meta)))
         
-        # Sort by index to maintain correct order
-        parameters.sort(key=lambda p: p.index)
-
         return parameters, return_type
 
     def _compute_is_persistible(self) -> bool:
