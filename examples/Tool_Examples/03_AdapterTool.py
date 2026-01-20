@@ -42,7 +42,10 @@ def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
     print(f"\n-- {tool.full_name} call plan --")
     print("signature:", tool.signature)
-    print("argument map:", json.dumps(tool.arguments_map, indent = 2))
+    print("parameters:")
+    for param in tool.parameters:
+        default_str = "(no default)" if param.default.__class__.__name__ == "NO_VAL" else f"default={param.default}"
+        print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}")
 
 def run_case(label: str, tool: Tool, inputs: dict) -> None:
     print(f"\n=== {label} ===")

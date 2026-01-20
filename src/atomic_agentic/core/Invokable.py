@@ -142,6 +142,11 @@ class AtomicInvokable(ABC):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("description must be a non-empty string")
         self._description = value.strip()
+
+    @property
+    def full_name(self) -> str:
+        """Fully-qualified name (for logging)."""
+        return f"{type(self).__name__}.{self.name}"
     
     # ---------------------------------------------------------------- #
     # Parameters and return type (primary API)
@@ -202,7 +207,7 @@ class AtomicInvokable(ABC):
                 params.append(f"{spec.name}: {ptype}{default_marker}")
         
         params_str = ", ".join(params)
-        return f"{type(self).__name__}.{self.name}({params_str}) -> {self.return_type}"
+        return f"{self.full_name}({params_str}) -> {self.return_type}"
 
     # ---------------------------------------------------------------- #
     # Abstract contract
