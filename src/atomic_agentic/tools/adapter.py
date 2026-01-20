@@ -4,8 +4,9 @@ from typing import (
     Callable,
     Dict,
     Mapping)
-from .base import Tool, ArgumentMap
+from .base import Tool
 from ..core.Invokable import AtomicInvokable
+from ..core.Parameters import ParamSpec, extract_io
 from ..core.Exceptions import ToolInvocationError
 
 
@@ -47,61 +48,40 @@ class AdapterTool(Tool):
         self._description = value.description
         # Identity in import space (may be overridden by subclasses)
         self._module, self._qualname = self._get_mod_qual(self.function)
-        # Build argument schema and return type from the current function.
-        self._arguments_map, self._return_type = self.build_args_returns()
-        # Persistibility flag exposed as a public property.
-        self._is_persistible = self._compute_is_persistible()
+        # Rebuild signature from the component
+        parameters, return_type = self._build_tool_signature()
+        self._parameters = parameters
+        self._return_type = return_type
 
     # ------------------------------------------------------------------ #
-    # Atomic-Invokable Helpers
+    # Signature Building (Template Method)
     # ------------------------------------------------------------------ #
-    def build_args_returns(self) -> tuple[ArgumentMap, str]:
-        """Construct ``arguments_map`` and ``return_type`` from the wrapped
-        callable's signature.
+    def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
+        """Extract signature from the wrapped component.
 
-        Rules:
-        - If an annotation is present, it *always* defines the type string.
-        - If no annotation but a default value exists, the type string is
-          derived from ``type(default)``.
-        - If neither is present, the type string is 'Any'.
+        For AdapterTool, the signature comes from the component's parameters and return type.
+        This allows AdapterTool to expose the wrapped component's interface.
         """
-        return self.component.arguments_map, self.component.return_type
-
-    def _compute_is_persistible(self) -> bool:
-        """Default persistibility check for callable-based tools.
-        Check the component's persistibility
-        """
-        return self.component.is_persistible
+        return self.component.parameters, self.component.return_type
 
     # ------------------------------------------------------------------ #
     # Tool Helpers
     # ------------------------------------------------------------------ #
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
-        """Default implementation for mapping input dicts to ``(*args, **kwargs)``.
+        """Map input dict to args/kwargs for the wrapped component.
 
-        The base policy is:
-
-        - Required parameters (those without ``default`` and not VAR_*) must be present.
-        - Unknown keys raise if there is no VAR_KEYWORD parameter; otherwise they
-          are accepted and passed through in ``**kwargs``.
-        - POSITIONAL_ONLY parameters are always passed positionally.
-        - POSITIONAL_OR_KEYWORD and KEYWORD_ONLY parameters are passed as
-          keywords (Python accepts this for both kinds).
-        - VAR_POSITIONAL expects the mapping to contain the parameter name with
-          a sequence value; these are appended to ``*args``.
-        - VAR_KEYWORD collects all remaining unknown keys into ``**kwargs``.
+        For AdapterTool, we only ever pass dictionary inputs to the `.invoke`
+        method so we return an empty tuple & the original inputs.
         """
         return tuple([]), dict(inputs)
 
     def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
-        """Execute the underlying callable.
+        """Execute the wrapped component.
 
-        Subclasses may override this to change *how* a tool is executed (for
-        example, by making a remote MCP call or invoking an Agent), but should
-        not change the high-level semantics.
+        The component is invoked via its invoke() method with the kwargs dict.
+        The args tuple is ignored since components expect dict-based inputs.
         """
-        result = self._function(inputs = kwargs)
-        return result
+        return self._function(inputs=kwargs)
 
     # ------------------------------------------------------------------ #
     # Serialization

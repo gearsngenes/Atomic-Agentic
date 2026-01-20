@@ -16,7 +16,8 @@ from python_a2a import (
 )
 
 from ..core.Exceptions import ToolDefinitionError
-from ..core.Invokable import ArgumentMap, ArgSpec
+from ..core.Invokable import ArgumentMap
+from ..core.Parameters import ParamSpec
 from .base import Tool
 from ..a2a.A2AtomicHost import A2A_RESULT_KEY
 
@@ -96,10 +97,14 @@ class A2AProxyTool(Tool):
         return self._url
 
     # ------------------------------------------------------------------ #
-    # Atomic-Invokable Helpers
+    # Signature Building (Template Method)
     # ------------------------------------------------------------------ #
-    def build_args_returns(self) -> tuple[ArgumentMap, str]:
-        """Construct ``arguments_map`` and ``return_type`` from remote "agent_metadata"."""
+    def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
+        """Build signature from remote A2A agent metadata.
+        
+        Fetches invokable_metadata from the remote agent and converts the
+        arguments_map (dict format) to a list of ParamSpec objects.
+        """
         call = FunctionCallContent(name="invokable_metadata", parameters=[])
         msg = Message(content=call, role=MessageRole.USER)
 
@@ -122,16 +127,24 @@ class A2AProxyTool(Tool):
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.arguments_map must be a mapping")
         if not isinstance(return_type, str):
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.return_type must be a str")
-        args_map: ArgumentMap = {}
+        
+        # Convert dict of ParamSpec (from metadata) to list of ParamSpec
+        parameters: list[ParamSpec] = []
         for key, meta in raw_args_map.items():
             if not isinstance(key, str):
                 raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.arguments_map keys must be strings")
             if not isinstance(meta, Mapping):
                 raise ToolDefinitionError(f"{self.full_name}: metadata for argument '{key}' must be a mapping")
             meta_dict = dict(meta)
-            args_map[key] = ArgSpec.from_dict(meta_dict)
+            # ParamSpec.from_dict() expects 'name' to be in the dict
+            if 'name' not in meta_dict:
+                meta_dict['name'] = key
+            parameters.append(ParamSpec.from_dict(meta_dict))
+        
+        # Sort by index to maintain correct order
+        parameters.sort(key=lambda p: p.index)
 
-        return args_map, return_type
+        return parameters, return_type
 
     def _compute_is_persistible(self) -> bool:
         try:

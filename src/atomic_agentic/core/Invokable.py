@@ -5,92 +5,7 @@ from typing import Any, Mapping, Dict
 import re
 
 from .sentinels import NO_VAL
-
-class ParamSpec(dict):
-    """Typed parameter specification for callable parameters.
-
-    Behaves like a read-only mapping and a self-contained typed container. This design
-    makes ``ParamSpec`` instances JSON-serializable by default (they are dicts),
-    while also exposing convenient attribute access for internal code.
-
-    Each ParamSpec is a complete, self-sufficient atom of information containing:
-      - name: str (parameter name)
-      - index: int (parameter position in signature order)
-      - kind: str (parameter kind, e.g. POSITIONAL_ONLY, KEYWORD_ONLY)
-      - type: str (human-readable type name)
-      - default: Any or ``NO_VAL`` sentinel when no default is present
-
-    Notes:
-      - Instances are intentionally immutable (attempts to set items will raise).
-      - Use :meth:`to_dict()` for an explicit dict representation.
-    """
-
-    __slots__ = ("_name", "_index", "_kind", "_type", "_default")
-
-    def __init__(self, name: str, index: int, kind: str, type: str, default: Any = NO_VAL) -> None:
-        # Initialize both mapping contents and attribute storage
-        dict.__init__(self, name=name, index=index, kind=kind, type=type)
-        if default is not NO_VAL:
-            dict.__setitem__(self, "default", default)
-        self._name = name
-        self._index = index
-        self._kind = kind
-        self._type = type
-        self._default = default
-
-    # Attribute accessors
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def index(self) -> int:
-        return self._index
-
-    @property
-    def kind(self) -> str:
-        return self._kind
-
-    @property
-    def type(self) -> str:
-        return self._type
-
-    @property
-    def default(self) -> Any:
-        return self._default
-
-    # Read-only mapping (prevent mutation)
-    def __setitem__(self, key, value):  # pragma: no cover - trivial immutability
-        raise TypeError("ParamSpec is immutable")
-
-    def __delitem__(self, key):  # pragma: no cover - trivial immutability
-        raise TypeError("ParamSpec is immutable")
-
-    # Convenience
-    def to_dict(self) -> dict:
-        """Return a JSON-serializable dict representation of this ParamSpec."""
-        d = {"name": self._name, "index": self._index, "kind": self._kind, "type": self._type}
-        if self._default is not NO_VAL:
-            d["default"] = self._default
-        return d
-
-    @classmethod
-    def from_dict(cls, d: Mapping[str, Any]) -> "ParamSpec":
-        """Create a ParamSpec from a mapping produced by :meth:`to_dict()`.
-
-        The mapping must contain ``name`` (str), ``index`` (int), ``kind`` (str), and ``type`` (str).
-        ``default`` is optional and treated as an explicit default when present.
-        """
-        if not isinstance(d, Mapping):
-            raise TypeError("ParamSpec.from_dict expects a mapping")
-        name = d.get("name")
-        idx = d.get("index")
-        kind = d.get("kind")
-        type_str = d.get("type")
-        if not all(isinstance(v, t) for v, t in [(name, str), (idx, int), (kind, str), (type_str, str)]):
-            raise TypeError("ParamSpec.from_dict expects 'name' (str), 'index' (int), 'kind' (str), and 'type' (str)")
-        default = d.get("default", NO_VAL)
-        return cls(name=name, index=idx, kind=kind, type=type_str, default=default)
+from .Parameters import ParamSpec
 
 # Canonical mapping of parameter name -> ParamSpec (legacy, for backward compat)
 ParameterMap = dict[str, ParamSpec]
@@ -116,9 +31,8 @@ class AtomicInvokable(ABC):
     - **interface**: a single execution entrypoint ``invoke(inputs: Mapping[str, Any])``.
     - **parameters & return type**: declared at construction time as concrete
       `parameters: list[ParamSpec]` and `return_type: str`.
-    - **persistibility**: a small overrideable heuristic ``_compute_is_persistible()`` that
-      indicates whether the instance can be reliably rehydrated from metadata.
-
+    - **metadata serialization**: default ``to_dict()`` implementation for
+      persisting metadata.
     Parameters and schema
     ---------------------
     Parameters are passed as a list of ``ParamSpec`` objects at construction time.
@@ -137,11 +51,6 @@ class AtomicInvokable(ABC):
     ---------------------
     ``invoke(inputs)`` accepts a ``Mapping[str, Any]`` where keys correspond to
     parameter names. Implementations should raise clear, typed exceptions on invalid inputs.
-
-    Persistibility
-    ---------------
-    Subclasses override ``_compute_is_persistible()`` to indicate whether instances
-    can be reliably rehydrated from their metadata (name, description, parameters, return_type).
 
     Notes
     -----
@@ -204,7 +113,6 @@ class AtomicInvokable(ABC):
 
         self._parameters: list[ParamSpec] = parameters
         self._return_type: str = return_type
-        self._is_persistible: bool = self._compute_is_persistible()
 
     # ---------------------------------------------------------------- #
     # Name + description with validation
@@ -234,10 +142,6 @@ class AtomicInvokable(ABC):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("description must be a non-empty string")
         self._description = value.strip()
-
-    @property
-    def is_persistible(self) -> bool:
-        return self._is_persistible
     
     # ---------------------------------------------------------------- #
     # Parameters and return type (primary API)
@@ -303,10 +207,6 @@ class AtomicInvokable(ABC):
     # ---------------------------------------------------------------- #
     # Abstract contract
     # ---------------------------------------------------------------- #
-    @abstractmethod
-    def _compute_is_persistible(self) -> bool:
-        raise NotImplementedError
-
     @abstractmethod
     def invoke(self, inputs: Mapping[str, Any]) -> Any:
         """Perform work."""

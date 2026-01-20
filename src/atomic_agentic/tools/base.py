@@ -8,12 +8,11 @@ from typing import (
     List,
     Mapping,
     Optional,
-    get_args,
-    get_origin,
 )
 
 from ..core.Exceptions import *
-from ..core.Invokable import AtomicInvokable, ArgumentMap, ArgSpec
+from ..core.Invokable import AtomicInvokable, ParameterMap
+from ..core.Parameters import ParamSpec, extract_io
 from ..core.sentinels import NO_VAL
 
 
@@ -28,24 +27,26 @@ class Tool(AtomicInvokable):
 
         invoke(inputs) -> to_arg_kwarg(inputs) -> execute(args, kwargs)
 
-    Subclasses such as MCPProxyTool and AgentTool are expected to override only
-    the helper hooks used at construction time (``_get_mod_qual``,
-    ``_build_args_returns`` (preferred) or ``_build_io_schemas`` for compatibility,
-    ``_compute_is_persistible``) and, where necessary,
-    the :meth:`to_arg_kwarg` / :meth:`execute` methods. The public
-    :meth:`invoke` method must not be overridden.
+    Subclasses may override the helper hook ``_build_tool_signature()`` to customize
+    how parameter and return type schemas are built (e.g., from MCP metadata or remote
+    agent specifications). They may also override ``to_arg_kwarg()`` and ``execute()``
+    to customize invocation semantics. The public ``invoke()`` method must not be overridden.
 
-    The argument schema is exposed via :attr:`arguments_map` as a mapping
-    of argument name -> :class:`ArgSpec` (see :mod:`atomic_agentic.core.Invokable`).
+    Schema
+    ------
+    The parameter schema is exposed via :attr:`parameters` as an ordered list of
+    :class:`ParamSpec` objects (see :mod:`atomic_agentic.core.Parameters`).
 
-    Each :class:`ArgSpec` contains:
-      - ``index``  : ``int`` – the parameter position.
-      - ``kind``   : ``str`` – one of
-        ``{"POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY", "VAR_POSITIONAL", "VAR_KEYWORD"}``.
-      - ``type``   : ``str`` – a human-readable type name, e.g. ``"int"``.
-      - ``default``: optional – the default value, or the shared sentinel ``NO_VAL`` when no default is present.
+    Each :class:`ParamSpec` is self-sufficient, containing:
+      - ``name``    : ``str`` – the parameter name
+      - ``index``   : ``int`` – the parameter position.
+      - ``kind``    : ``str`` – one of ``POSITIONAL_ONLY``, ``POSITIONAL_OR_KEYWORD``,
+        ``KEYWORD_ONLY``, ``VAR_POSITIONAL``, ``VAR_KEYWORD``.
+      - ``type``    : ``str`` – a human-readable type name, e.g. ``"int"``.
+      - ``default`` : optional – the default value, or the shared sentinel ``NO_VAL``
+        when no default is present.
 
-    ``return_type`` is always stored as a string as well.
+    ``return_type`` is always stored as a string.
     """
 
     # ------------------------------------------------------------------ #
@@ -70,33 +71,16 @@ class Tool(AtomicInvokable):
         inferred_name = name or getattr(function, "__name__", "unnamed_callable") or "unnamed_callable"
         inferred_description = (description or getattr(function, "__doc__", "") or "undescribed").strip() or "undescribed"
 
-        # Delegate name/description validation and arguments/return type setup
-        super().__init__(name=inferred_name, description=inferred_description)
+        # Build tool signature (template method)
+        parameters, return_type = self._build_tool_signature()
 
-    # ------------------------------------------------------------------ #
-    # Atomic-Invokable Properties
-    # ------------------------------------------------------------------ #
-    @property
-    def signature(self) -> str:
-        """Human-readable signature derived from ``arguments_map`` and
-        ``return_type``."""
-        params: List[str] = []
-        for name, spec in sorted(self._arguments_map.items(), key=lambda kv: kv[1].index):
-            kind = spec.kind or ""
-            type_name = spec.type or "Any"
-            default_marker = ""
-            if spec.default is not NO_VAL:
-                default = repr(spec.default)
-                default_marker = f" = {default}"
-            if kind == "VAR_POSITIONAL":
-                param_str = f"*{name}: {type_name}{default_marker}"
-            elif kind == "VAR_KEYWORD":
-                param_str = f"**{name}: {type_name}{default_marker}"
-            else:
-                param_str = f"{name}: {type_name}{default_marker}"
-            params.append(param_str)
-        params_str = ", ".join(params)
-        return f"{self.full_name}({params_str}) -> {self._return_type}"
+        # Delegate name/description validation and schema setup to parent
+        super().__init__(
+            name=inferred_name,
+            description=inferred_description,
+            parameters=parameters,
+            return_type=return_type,
+        )
 
     # ------------------------------------------------------------------ #
     # Tool Properties
@@ -121,24 +105,17 @@ class Tool(AtomicInvokable):
         self._function = func
         self._module, self._qualname = self._get_mod_qual(func)
 
-        # Rebuild and validate the argument map and return type just like
-        # AtomicInvokable.__init__ does so that updating the callable cannot
-        # produce an invalid tool state.
-        args, ret = self.build_args_returns()
-        args = dict(args)
-        if not isinstance(args, (dict, Mapping)) or any(not isinstance(arg, ArgSpec) for arg in args.values()):
+        # Rebuild and validate the parameter schema
+        parameters, return_type = self._build_tool_signature()
+        
+        if not isinstance(return_type, str):
             raise TypeError(
-                f"{type(self).__name__}.build_args_returns must return a mapping of argument metadata"
+                f"{type(self).__name__}.return_type must be str, got {type(return_type)!r}"
             )
-        indices = [s.index for s in args.values()]
-        if len(indices) != len(set(indices)):
-            raise TypeError(f"{type(self).__name__}.build_args_returns: duplicate argument indices detected")
-        if not isinstance(ret, str):
-            raise TypeError(
-                f"{type(self).__name__}.build_args_returns must return str for return_type"
-            )
-        self._arguments_map, self._return_type = args, ret
-        self._is_persistible = self._compute_is_persistible()
+
+        # Update internal state
+        self._parameters = parameters
+        self._return_type = return_type
 
     @property
     def module(self) -> Optional[str]:
@@ -154,63 +131,22 @@ class Tool(AtomicInvokable):
         return f"{type(self).__name__}.{self._namespace}.{self._name}"
 
     # ------------------------------------------------------------------ #
-    # Atomic-Invokable Helpers
+    # Signature Building (Template Method)
     # ------------------------------------------------------------------ #
-    def build_args_returns(self) -> tuple[ArgumentMap, str]:
-        """Construct ``arguments_map`` and ``return_type`` from the wrapped
-        callable's signature.
+    def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
+        """Build tool signature from underlying callable.
 
-        This is the new canonical hook (replaces ``_build_io_schemas``).
+        This is the template method that subclasses can override to build
+        signatures from alternative sources (e.g., MCP schemas, remote agents).
+
+        Base implementation extracts schema from self._function using extract_io().
+
+        Returns
+        -------
+        tuple[list[ParamSpec], str]
+            (parameters list, return_type string)
         """
-        sig = inspect.signature(self._function)
-        arg_map: ArgumentMap = {}
-
-        for index, (name, param) in enumerate(sig.parameters.items()):
-            kind_name = param.kind.name  # e.g. "POSITIONAL_ONLY"
-            ann = param.annotation
-            default = param.default
-
-            # Decide the source of the type information:
-            # 1) annotation if present,
-            # 2) otherwise the default's type if present,
-            # 3) otherwise "Any".
-            if ann is not inspect._empty:
-                raw_type = ann
-            elif default is not inspect._empty:
-                raw_type = type(default)
-            else:
-                raw_type = inspect._empty
-
-            type_str = self._format_annotation(raw_type)
-
-            if default is not inspect._empty:
-                default_val = default
-            else:
-                default_val = NO_VAL
-
-            spec = ArgSpec(index=index, kind=kind_name, type=type_str, default=default_val)
-
-            arg_map[name] = spec
-
-        # Return type: annotation if present, else 'Any'
-        ret_ann = sig.return_annotation
-        return_type = self._format_annotation(ret_ann)
-
-        return arg_map, return_type
-
-    def _compute_is_persistible(self) -> bool:
-        """Default persistibility check for callable-based tools.
-
-        A Tool is considered persistible if its function has both ``__module__``
-        and ``__qualname__`` and does not appear to be a local/helper function.
-        Subclasses can override this with their own criteria.
-        """
-        if not self._module or not self._qualname:
-            return False
-        # Heuristic: local/helper functions usually contain '<locals>' in qualname.
-        if "<locals>" in self._qualname:
-            return False
-        return True
+        return extract_io(self._function)
 
     # ------------------------------------------------------------------ #
     # Tool Helpers
@@ -224,50 +160,6 @@ class Tool(AtomicInvokable):
         module = getattr(function, "__module__", None)
         qualname = getattr(function, "__qualname__", None)
         return module, qualname
-
-    def _format_annotation(self, ann: Any) -> str:
-        """Convert a type annotation into a readable string.
-
-        Behaviour:
-        - If missing/empty → 'Any'.
-        - If already a string → returned as-is.
-        - If a parameterized / generic type (e.g. List[Dict[str, int]] or dict[str, int]):
-          builds the full nested structure string.
-        - If a plain class → its name (e.g. 'int', 'MyModel').
-        - Otherwise → best-effort str(ann).
-        """
-
-        # Missing / unknown annotation
-        if ann is inspect._empty or ann is None:
-            return "Any"
-
-        # Forward reference or explicit string annotation
-        if isinstance(ann, str):
-            return ann
-
-        # typing / generic / PEP 585 parameterized types
-        origin = get_origin(ann)
-        if origin is not None:
-            # Recursively format origin and args
-            origin_str = self._format_annotation(origin)
-            args = get_args(ann)
-            if not args:
-                return origin_str
-            args_str = ", ".join(self._format_annotation(a) for a in args)
-            return f"{origin_str}[{args_str}]"
-
-        # Plain classes / types
-        module = getattr(ann, "__module__", None)
-        name = getattr(ann, "__name__", None)
-        if module == "builtins" and name:
-            # int, str, dict, list, etc.
-            return name
-        if name:
-            # Custom or library class
-            return name
-
-        # Fallback: best-effort string representation
-        return str(ann)
 
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         """
@@ -311,23 +203,18 @@ class Tool(AtomicInvokable):
             parameter's own name, it is merged with unknown keys (unknown keys
             take precedence if duplicate names appear).
 
-        This docstring documents behaviour only; the implementation is intentionally
-        left as-is to preserve existing semantics and tests.
+        This method iterates parameters in list order with no sorting required.
         """
         data: Dict[str, Any] = dict(inputs)
 
-        # Compute parameter ordering and kinds
-        param_items = sorted(self._arguments_map.items(), key=lambda kv: kv[1].index)
-        param_names = {name for name, _ in param_items}
+        # Build param names set
+        param_names = {spec.name for spec in self._parameters}
 
-        varpos_name: Optional[str] = None
-        varkw_name: Optional[str] = None
-        for name, spec in param_items:
-            kind = spec.kind
-            if kind == "VAR_POSITIONAL" and varpos_name is None:
-                varpos_name = name
-            elif kind == "VAR_KEYWORD" and varkw_name is None:
-                varkw_name = name
+        # Find VAR_* specs
+        varpos_spec = next((s for s in self._parameters if s.kind == "VAR_POSITIONAL"), None)
+        varkw_spec = next((s for s in self._parameters if s.kind == "VAR_KEYWORD"), None)
+        varpos_name = varpos_spec.name if varpos_spec else None
+        varkw_name = varkw_spec.name if varkw_spec else None
 
         # Unknown key handling
         unknown_keys = set(data.keys()) - param_names
@@ -336,8 +223,8 @@ class Tool(AtomicInvokable):
 
         # Required parameter check (exclude VAR_*)
         required_names = [
-            name
-            for name, spec in param_items
+            spec.name
+            for spec in self._parameters
             if spec.kind not in {"VAR_POSITIONAL", "VAR_KEYWORD"}
             and spec.default is NO_VAL
         ]
@@ -348,8 +235,9 @@ class Tool(AtomicInvokable):
         args: List[Any] = []
         kwargs: Dict[str, Any] = {}
 
-        # First, handle named parameters in order
-        for name, spec in param_items:
+        # Process parameters IN LIST ORDER (no sorting!)
+        for spec in self._parameters:
+            name = spec.name
             kind = spec.kind
             has_default = spec.default is not NO_VAL
             value_provided = name in data
@@ -449,6 +337,5 @@ class Tool(AtomicInvokable):
             "namespace": self.namespace,
             "module": self.module,
             "qualname": self.qualname,
-            "is_persistible": self.is_persistible
         })
         return d
