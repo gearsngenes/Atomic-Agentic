@@ -18,9 +18,11 @@ from typing import (
     Mapping,
     Optional,
     Union,
+    List,
 )
 
 from ..core.Invokable import AtomicInvokable
+from ..core.Parameters import ParamSpec
 from .base import (
     Workflow,
     BundlingPolicy,
@@ -47,18 +49,20 @@ class BasicFlow(Workflow):
         self,
         component: AtomicInvokable,
         *,
-        output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
+        output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
         bundling_policy: Optional[BundlingPolicy] = BundlingPolicy.BUNDLE,
         mapping_policy: Optional[MappingPolicy] = MappingPolicy.STRICT,
         absent_val_policy: Optional[AbsentValPolicy] = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
     ) -> None:
-        # Store component before calling super so build_args_returns can access it
+        # Store component before calling super
         self._component = component
-        # arguments_map is always taken directly from the normalized component.
+        # Pass component parameters and return_type to parent for eager initialization and validation
         super().__init__(
             name=component.name,
             description=component.description,
+            parameters=component.parameters,
+            return_type=component.return_type,
             output_schema=output_schema,
             bundling_policy=bundling_policy,
             mapping_policy=mapping_policy,
@@ -75,18 +79,8 @@ class BasicFlow(Workflow):
     @component.setter
     def component(self, candidate: AtomicInvokable) -> None:
         self._component = candidate
-        self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible = self._compute_is_persistible()
-
-    # ------------------------------------------------------------------ #
-    # Atomic-Invokable Helpers
-    # ------------------------------------------------------------------ #
-    def build_args_returns(self):
-        _, ret = super().build_args_returns()
-        return self.component.arguments_map, ret
-
-    def _compute_is_persistible(self):
-        return self.component.is_persistible
+        self._parameters = candidate.parameters
+        self._return_type = candidate.return_type
 
     # ------------------------------------------------------------------ #
     # BasicFlow Helpers
@@ -96,7 +90,7 @@ class BasicFlow(Workflow):
         raw = self._component.invoke(inputs)
         meta = {
             "type_executed":type(self._component).__name__,
-            "component_executed":self._component.name
+            "component_executed":self._component.full_name,
         }
         return meta, raw
 

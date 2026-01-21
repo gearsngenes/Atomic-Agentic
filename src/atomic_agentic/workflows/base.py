@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Mapping, Optional, Union, Tuple, Sequence
-from typing import Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Union, Tuple, Sequence, get_type_hints
 from collections.abc import Sequence as Sequence
 import threading
 from dataclasses import asdict, dataclass, is_dataclass
@@ -11,7 +10,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from uuid import uuid4
 from ..core.Exceptions import *
-from ..core.Invokable import ArgumentMap, AtomicInvokable
+from ..core.Invokable import AtomicInvokable
+from ..core.Parameters import ParamSpec
+from ..core.sentinels import NO_VAL
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +27,95 @@ __all__ = [
 ]
 
 # ───────────────────────────────────────────────────────────────────────────────
+# Output Schema Normalization
+# ───────────────────────────────────────────────────────────────────────────────
+def _is_typed_dict_class(obj: Any) -> bool:
+    """
+    Runtime check for TypedDict classes.
+    TypedDict classes have .__annotations__ and .__total__ attributes.
+    """
+    return isinstance(obj, type) and issubclass(obj, dict) and hasattr(obj, "__annotations__") and hasattr(obj, "__total__")
+
+
+def _normalize_output_schema(
+    schema: Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]],
+) -> list[ParamSpec]:
+    """
+    Normalize output schema to list[ParamSpec].
+    
+    Accepts:
+    - TypedDict class: extract field names from __annotations__, create POSITIONAL_OR_KEYWORD ParamSpec
+    - List[str]: convert each string to ParamSpec with NO_VAL default
+    - List[ParamSpec]: validate and return as-is
+    - List[Union[str, ParamSpec]]: mix of above, normalize all
+    - Mapping[str, Any]: old dict format, convert keys to ParamSpec list
+    
+    Does NOT validate ordering (delegated to AtomicInvokable).
+    
+    Raises
+    ------
+    SchemaError
+        If schema format is unsupported.
+    """
+    
+    # TypedDict class: extract __annotations__
+    if _is_typed_dict_class(schema):
+        field_names = list(get_type_hints(schema).keys())
+        result = []
+        for index, name in enumerate(field_names):
+            result.append(ParamSpec(
+                name=name,
+                index=index,
+                kind="POSITIONAL_OR_KEYWORD",
+                type="Any",
+                default=NO_VAL
+            ))
+        return result
+    
+    # List variant: str, ParamSpec, or mixed
+    if isinstance(schema, list):
+        result = []
+        for index, item in enumerate(schema):
+            if isinstance(item, str):
+                # Convert string to ParamSpec
+                result.append(ParamSpec(
+                    name=item,
+                    index=index,
+                    kind="POSITIONAL_OR_KEYWORD",
+                    type="Any",
+                    default=NO_VAL
+                ))
+            elif isinstance(item, ParamSpec):
+                result.append(item)
+            else:
+                raise SchemaError(
+                    f"Schema list items must be str or ParamSpec, got {type(item).__name__} at index {index}"
+                )
+        return result
+    
+    # Dict variant: convert keys to list
+    if isinstance(schema, Mapping):
+        result = []
+        for index, (name, default) in enumerate(schema.items()):
+            if not isinstance(name, str):
+                raise SchemaError(f"Schema dict keys must be strings, got {type(name).__name__}")
+            result.append(ParamSpec(
+                name=name,
+                index=index,
+                kind="POSITIONAL_OR_KEYWORD",
+                type="Any",
+                default=default
+            ))
+        return result
+    
+    raise SchemaError(
+        f"output_schema must be TypedDict class, list[str|ParamSpec], or Mapping; got {type(schema).__name__}"
+    )
+
+
+# ───────────────────────────────────────────────────────────────────────────────
 # Workflow primitive
 # ───────────────────────────────────────────────────────────────────────────────
-# Shared sentinel used to mark required output fields in an output schema template
-from ..core.sentinels import NO_VAL
 
 class BundlingPolicy(str, Enum):
     """Controls whether raw results are bundled into a single output field."""
@@ -112,51 +198,54 @@ class Workflow(AtomicInvokable, ABC):
         self,
         name: str,
         description: str,
+        parameters: list[ParamSpec],
+        return_type: str,
         *,
-        output_schema: Optional[Union[List[str], Mapping[str, Any]]] = None,
+        output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
     ) -> None:
-
-        # initialize name, description, arguments-map, return-type
-        super().__init__(name = name, description = description)
+        # Pass parameters and return_type to parent (AtomicInvokable)
+        # Parent will validate parameter ordering and structure
+        super().__init__(
+            name=name,
+            description=description,
+            parameters=parameters,
+            return_type=return_type
+        )
         
-        # return_type is always dict
-        self._return_type = "dict[str, Any]"
+        # Normalize output schema to list[ParamSpec] (primary storage)
+        if output_schema is None:
+            output_schema = [DEFAULT_WF_KEY]
+        self._output_schema: list[ParamSpec] = _normalize_output_schema(output_schema)
 
-        # packaging policies
+        # Packaging policies
         self._bundling_policy = BundlingPolicy(bundling_policy)
         self._mapping_policy = MappingPolicy(mapping_policy)
         self._absent_val_policy = AbsentValPolicy(absent_val_policy)
         self._default_absent_val = default_absent_val
 
-        # invoke thread lock
+        # Invoke thread lock
         self._invoke_lock = threading.RLock()
         
-        # checkpoints
+        # Checkpoints
         self._checkpoints: List[WorkflowCheckpoint] = []
-
-        # initialize input/output schemas
-        if output_schema is None: output_schema = [DEFAULT_WF_KEY]
-        self._normalize_schemas(self.arguments_map, output_schema)
 
     # ------------------------------------------------------------------ #
     # Workflow Properties
     # ------------------------------------------------------------------ #
     @property
-    def input_schema(self) -> Dict[str, Any]:
-        return dict(self._input_schema)
-
-    @property
-    def output_schema(self) -> Dict[str, Any]:
-        return dict(self._output_schema)
+    def output_schema(self) -> list[ParamSpec]:
+        """Output schema as list of ParamSpec (primary API)."""
+        return list(self._output_schema)
 
     @output_schema.setter
-    def output_schema(self, value: Optional[Union[List[str], Mapping[str, Any]]]) -> None:
-        if value is None: value = [DEFAULT_WF_KEY]
-        self._normalize_schemas(self.arguments_map, value)
+    def output_schema(self, value: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]]) -> None:
+        if value is None:
+            value = [DEFAULT_WF_KEY]
+        self._output_schema = _normalize_output_schema(value)
 
     @property
     def bundling_policy(self) -> BundlingPolicy:
@@ -199,12 +288,6 @@ class Workflow(AtomicInvokable, ABC):
         return self._checkpoints[-1] if self._checkpoints else None
 
     # ------------------------------------------------------------------ #
-    # Atomic-Invokable Helpers
-    # ------------------------------------------------------------------ #
-    def build_args_returns(self) -> Tuple[ArgumentMap, str]:
-        return ArgumentMap(), "dict[str, Any]"
-
-    # ------------------------------------------------------------------ #
     # Workflow Helpers
     # ------------------------------------------------------------------ #
 
@@ -236,8 +319,8 @@ class Workflow(AtomicInvokable, ABC):
         new_packaged = {}
         # Fill in missing values if policy is FILL
         if missing and self._absent_val_policy == AbsentValPolicy.FILL:
-            for k in self.output_schema.keys():
-                new_packaged[k] = packaged.get(k) if packaged.get(k) is not NO_VAL else self._default_absent_val
+            for k in self.output_schema:
+                new_packaged[k.name] = packaged.get(k.name) if packaged.get(k.name) is not NO_VAL else self._default_absent_val
         # Drop missing values if policy is DROP
         elif missing and self._absent_val_policy == AbsentValPolicy.DROP:
             for k,v in packaged.items():
@@ -257,17 +340,19 @@ class Workflow(AtomicInvokable, ABC):
         IMPORTANT: This method does not perform final NO_VAL validation.
         That validation is performed by `invoke()` via `_validate_packaged()`.
         """
-        keys = list(self._output_schema.keys())
-        if not keys:
-            return {} # If no keys, return an empty dict
+        # Get list of output field names from ParamSpec
+        field_names = [spec.name for spec in self._output_schema]
+        if not field_names:
+            return {}  # If no fields, return empty dict
 
-        # Bundling is ONLY considered when schema length == 1.
-        if self._bundling_policy == BundlingPolicy.BUNDLE and len(keys) == 1:
-            return {keys[0]: raw}
+        # Bundling is ONLY considered when schema length == 1
+        if self._bundling_policy == BundlingPolicy.BUNDLE and len(field_names) == 1:
+            return {field_names[0]: raw}
 
         # UNBUNDLE flow (also used when BUNDLE is set but schema length != 1)
         normalized = self._normalize_raw(raw)
-        template = dict(self._output_schema)
+        # Create template dict from output schema (field_name -> default value)
+        template = {spec.name: spec.default for spec in self._output_schema}
 
         if isinstance(normalized, Mapping):
             return self._package_from_mapping(template, normalized)
@@ -344,13 +429,7 @@ class Workflow(AtomicInvokable, ABC):
             return template
 
         if self._mapping_policy in (MappingPolicy.MATCH_FIRST_STRICT, MappingPolicy.MATCH_FIRST_LENIENT):
-            if self._mapping_policy == MappingPolicy.MATCH_FIRST_STRICT:
-                if len(mapping) > len(schema_keys):
-                    raise PackagingError(
-                        "Workflow packaging (MATCH_FIRST_STRICT): mapping has more keys "
-                        f"({len(mapping)}) than output_schema ({len(schema_keys)})"
-                    )
-
+            # Phase 1: Match by key name - fill template keys that exist in mapping
             extras_values: List[Any] = []
             for k, v in mapping.items():
                 if k in template:
@@ -358,9 +437,10 @@ class Workflow(AtomicInvokable, ABC):
                 else:
                     extras_values.append(v)
 
+            # Phase 2: Identify remaining missing keys (unfilled schema slots)
             missing_keys = [k for k in schema_keys if template[k] is NO_VAL]
 
-            # If already filled, strict rejects any extra values; lenient ignores them.
+            # Phase 3: If all schema keys are filled, check overflow handling
             if not missing_keys:
                 if extras_values and self._mapping_policy == MappingPolicy.MATCH_FIRST_STRICT:
                     raise PackagingError(
@@ -369,13 +449,14 @@ class Workflow(AtomicInvokable, ABC):
                     )
                 return template
 
-            # Too many extras: strict errors; lenient truncates.
+            # Phase 4: Fill remaining schema slots positionally from extras
+            # If too many extras: STRICT errors, LENIENT truncates
             if len(extras_values) > len(missing_keys):
                 if self._mapping_policy == MappingPolicy.MATCH_FIRST_LENIENT:
                     extras_values = extras_values[: len(missing_keys)]
                 else:
                     raise PackagingError(
-                        "Workflow packaging (MATCH_FIRST_*): too many extra values "
+                        "Workflow packaging (MATCH_FIRST_STRICT): too many extra values "
                         f"({len(extras_values)}) for remaining schema slots ({len(missing_keys)})"
                     )
 
@@ -421,32 +502,6 @@ class Workflow(AtomicInvokable, ABC):
         keys = list(template.keys())
         template[keys[0]] = value
         return template
-
-    def _normalize_schemas(self,
-                           arguments_map: ArgumentMap,
-                           output_schema: Union[List[str], Mapping[str, Any]]) -> None:
-        """
-        Normalize and set:
-          - _arguments_map (ordered, meta dicts copied)
-          - _input_schema  (defaults from arguments_map else NO_VAL)
-          - _output_schema (normalized output template)
-
-        Intentionally protected: callers should be Workflow subclasses.
-        """
-        # normalize input-schema from an arguments map
-        normalized_input_schema = {}
-        for key, meta in arguments_map.items():
-            normalized_input_schema.update({key : meta.get("default", NO_VAL)})
-
-        # normalize output-schema from a mapping or list
-        if isinstance(output_schema, Mapping):
-            normalized_output_schema = dict(output_schema)
-        else:
-            normalized_output_schema = dict((key, NO_VAL) for key in output_schema)
-
-        # copy argument map (shallow copy of meta dicts) so schemas stay consistent
-        self._input_schema = normalized_input_schema
-        self._output_schema = normalized_output_schema
 
     # ------------------------------------------------------------------ #
     # Public API

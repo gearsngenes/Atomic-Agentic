@@ -11,6 +11,7 @@ import inspect
 from typing import Any, Callable, Mapping, get_args, get_origin
 
 from .sentinels import NO_VAL
+from .Exceptions import SchemaError
 
 
 class ParamSpec(dict):
@@ -211,3 +212,67 @@ def extract_io(function: Callable) -> tuple[list[ParamSpec], str]:
     return_type = _format_annotation(ret_ann)
 
     return parameters, return_type
+
+
+def is_valid_parameter_order(parameters: list[ParamSpec]) -> bool:
+    """
+    Validate that parameters follow the correct signature order.
+    
+    Python parameter order rules:
+    1. POSITIONAL_ONLY (/)
+    2. POSITIONAL_OR_KEYWORD
+    3. VAR_POSITIONAL (*args)
+    4. KEYWORD_ONLY
+    5. VAR_KEYWORD (**kwargs)
+    
+    Parameters
+    ----------
+    parameters : list[ParamSpec]
+        List of parameter specifications to validate.
+    
+    Returns
+    -------
+    bool
+        True if valid ordering. Raises SchemaError if invalid.
+    
+    Raises
+    ------
+    SchemaError
+        If parameters are out of order or contain duplicates.
+    """    
+    # Check for duplicate names
+    names = [p.name for p in parameters]
+    if len(names) != len(set(names)):
+        duplicates = [n for n in names if names.count(n) > 1]
+        raise SchemaError(f"Duplicate parameter names: {duplicates}")
+    
+    # Define ordering: kind name to priority
+    kind_order = {
+        "POSITIONAL_ONLY": 0,
+        "POSITIONAL_OR_KEYWORD": 1,
+        "VAR_POSITIONAL": 2,
+        "KEYWORD_ONLY": 3,
+        "VAR_KEYWORD": 4,
+    }
+    
+    last_priority = -1
+    last_kind = None
+    
+    for i, spec in enumerate(parameters):
+        kind = spec.kind
+        if kind not in kind_order:
+            raise SchemaError(f"Unknown parameter kind: {kind!r} at index {i}")
+        
+        priority = kind_order[kind]
+        
+        # Check ordering: priority must not decrease
+        if priority < last_priority:
+            raise SchemaError(
+                f"Invalid parameter order at index {i}: "
+                f"{kind} (priority {priority}) comes after {last_kind} (priority {last_priority})"
+            )
+        
+        last_priority = priority
+        last_kind = kind
+    
+    return True

@@ -5,7 +5,7 @@ from typing import Any, Mapping, Dict
 import re
 
 from .sentinels import NO_VAL
-from .Parameters import ParamSpec
+from .Parameters import ParamSpec, is_valid_parameter_order
 
 # Canonical mapping of parameter name -> ParamSpec (legacy, for backward compat)
 ParameterMap = dict[str, ParamSpec]
@@ -104,6 +104,9 @@ class AtomicInvokable(ABC):
                 raise TypeError(
                     f"{type(self).__name__}: parameter at position {i} has mismatched index {p.index}"
                 )
+
+        # Validate parameter ordering (will raise SchemaError if invalid)
+        is_valid_parameter_order(parameters)
 
         # Validate return type
         if not isinstance(return_type, str):
