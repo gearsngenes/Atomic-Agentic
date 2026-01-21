@@ -88,6 +88,7 @@ class SequentialFlow(Workflow):
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
         )
+        self._rewire_steps()
 
     # ------------------------------------------------------------------ #
     # Steps Properties
@@ -99,53 +100,38 @@ class SequentialFlow(Workflow):
 
     @steps.setter
     def steps(self, steps: Optional[list[AtomicInvokable]]) -> None:
-        prepared_steps: list[BasicFlow] = []
-
-        # Empty steps => no-op sequential flow
         if not steps:
-            self._steps = prepared_steps
-            self._parameters = []
-            return
-
-        # Normalize everything into BasicFlow wrappers.
-        prepared_steps = [BasicFlow(component=step) for step in steps]
-
-        # Wire output->input schema between adjacent wrappers.
-        for i in range(len(prepared_steps) - 1):
-            prepared_steps[i].output_schema = prepared_steps[i + 1].parameters
-
-        self._steps = prepared_steps
-        self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible = self._compute_is_persistible()
+            self._steps = []
+        else:
+            self._steps = [BasicFlow(component=step) for step in steps]
+        self._rewire_steps()
 
     # ------------------------------------------------------------------ #
     # Step management APIs
     # ------------------------------------------------------------------ #
     def append_step(self, step: AtomicInvokable) -> None:
         """Append a new step to the end of the sequence."""
-        steps = [_.component for _ in self.steps] + [step]
-        self.steps = steps
+        self._steps.append(BasicFlow(component=step))
+        self._rewire_steps()
 
     def extend(self, steps: Sequence[AtomicInvokable]) -> None:
         """Append multiple steps to the end of the sequence."""
-        components = [_.component for _ in self.steps] + list(steps)
-        self.steps = components
+        self._steps.extend(BasicFlow(component=step) for step in steps)
+        self._rewire_steps()
 
     def insert(self, index: int, step: AtomicInvokable) -> None:
         """Insert a step at the given index (supports negative indices like list.insert)."""
-        components = [_.component for _ in self.steps]
-        components.insert(index, step)
-        self.steps = components
+        self._steps.insert(index, BasicFlow(component=step))
+        self._rewire_steps()
 
     def replace(self, index: int, step: AtomicInvokable) -> AtomicInvokable:
         """
         Replace the step at `index` and return the removed component.
         Raises IndexError if index is out of range.
         """
-        components = [_.component for _ in self.steps]
-        removed = components[index]  # may raise IndexError
-        components[index] = step
-        self.steps = components
+        removed = self._steps[index].component
+        self._steps[index].component = step
+        self._rewire_steps()
         return removed
 
     def pop(self, index: int = -1) -> AtomicInvokable:
@@ -153,9 +139,8 @@ class SequentialFlow(Workflow):
         Remove and return the component at `index` (default last).
         Raises IndexError if index is out of range.
         """
-        components = [_.component for _ in self.steps]
-        removed = components.pop(index)  # may raise IndexError
-        self.steps = components if components else None
+        removed = self._steps.pop(index)
+        self._rewire_steps()
         return removed
 
     def clear_steps(self) -> None:
@@ -165,20 +150,21 @@ class SequentialFlow(Workflow):
     # ------------------------------------------------------------------ #
     # Workflow Helpers
     # ------------------------------------------------------------------ #
-    def build_args_returns(self):
-        base_args, base_ret = super().build_args_returns()
-
-        # If we don't have steps (or haven't been initialized yet), fall back to base.
-        if not self._steps:
-            return base_args, base_ret
-
-        # Expose the first step wrapper's arguments_map as this SequentialFlow's inputs.
-        return self._steps[0].arguments_map, base_ret
-
-    def _compute_is_persistible(self):
-        if not self._steps:
-            return True
-        return all(step.is_persistible for step in self._steps)
+    def _rewire_steps(self) -> None:
+        """Re-apply output->input schema wiring between adjacent wrappers."""
+        for i in range(len(self._steps)-1):
+            self._steps[i].output_schema = self._steps[i+1].parameters
+        for i in range(len(self._steps)):
+            # Configure step policies to fixed values
+            self._steps[i].mapping_policy = MappingPolicy.STRICT
+            self._steps[i].bundling_policy = BundlingPolicy.BUNDLE
+            self._steps[i].absent_val_policy = AbsentValPolicy.RAISE
+            self._steps[i].default_absent_val = None
+        # Remove output schema from last step
+        if self._steps:
+            self._steps[-1].output_schema = None
+        # Update SequentialFlow parameters to match first step
+        self._parameters = self._steps[0] if self._steps else []
 
     def _invoke(self, inputs: Mapping[str, Any]):
         if not self._steps:

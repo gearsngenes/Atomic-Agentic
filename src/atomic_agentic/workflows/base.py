@@ -147,7 +147,7 @@ class WorkflowCheckpoint:
     packaged_output: Dict[str, Any]
     metadata: Dict[str, Any]
 
-DEFAULT_WF_KEY = "result"
+DEFAULT_WF_KEY = "<<result>>"
 
 class Workflow(AtomicInvokable, ABC):
     """
@@ -339,28 +339,37 @@ class Workflow(AtomicInvokable, ABC):
         IMPORTANT: This method does not perform final NO_VAL validation.
         That validation is performed by `invoke()` via `_validate_packaged()`.
         """
-        # Get list of output field names from ParamSpec
-        field_names = [spec.name for spec in self._output_schema]
-        if not field_names:
+        # Retrun empty dict if no output schema
+        if not len(self._output_schema):
             return {}  # If no fields, return empty dict
 
-        # Bundling is ONLY considered when schema length == 1
-        if self._bundling_policy == BundlingPolicy.BUNDLE and len(field_names) == 1:
-            return {field_names[0]: raw}
+        # Unwrap single-key dicts with DEFAULT_WF_KEY
+        unwrapped = raw
+        while (
+            isinstance(unwrapped, Mapping) 
+            and len(unwrapped) == 1 
+            and list(unwrapped.keys())[0] == [DEFAULT_WF_KEY]
+        ):
+            unwrapped = unwrapped[DEFAULT_WF_KEY]
 
-        # UNBUNDLE flow (also used when BUNDLE is set but schema length != 1)
-        normalized = self._normalize_raw(raw)
+        # Bundle if policy set to bundle and schema length == 1
+        if self._bundling_policy == BundlingPolicy.BUNDLE and len(self._output_schema) == 1:
+            return {self._output_schema[0].name: unwrapped}
+
+        # Normalize raw output to sequence, mapping, or scalar
+        normalized = self._normalize_raw(unwrapped)
+
         # Create template dict from output schema (field_name -> default value)
         template = {spec.name: spec.default for spec in self._output_schema}
 
         if isinstance(normalized, Mapping):
             return self._package_from_mapping(template, normalized)
-        if self._is_non_text_sequence(normalized):
+        if isinstance(normalized, Sequence) and not isinstance(normalized, (str, bytes, bytearray)):
             return self._package_from_sequence(template, normalized)  # type: ignore[arg-type]
         return self._package_from_scalar(template, normalized)
 
     def _normalize_raw(self, raw: Any) -> Any:
-        if isinstance(raw, Mapping) or self._is_non_text_sequence(raw):
+        if isinstance(raw, Mapping) or isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
             return raw
 
         # Pydantic v2 models: model_dump()
@@ -401,9 +410,6 @@ class Workflow(AtomicInvokable, ABC):
             pass
 
         return raw
-
-    def _is_non_text_sequence(self, x: Any) -> bool:
-        return isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray))
 
     def _package_from_mapping(
         self,
