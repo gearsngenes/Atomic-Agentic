@@ -62,7 +62,6 @@ class BasicFlow(Workflow):
             name=component.name,
             description=component.description,
             parameters=component.parameters,
-            return_type=component.return_type,
             output_schema=output_schema,
             bundling_policy=bundling_policy,
             mapping_policy=mapping_policy,

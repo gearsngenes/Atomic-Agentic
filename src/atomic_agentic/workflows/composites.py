@@ -5,6 +5,7 @@ from typing import Any, Mapping, Optional, Sequence, Union, List
 from ..core.Invokable import AtomicInvokable
 from .base import Workflow, BundlingPolicy, MappingPolicy, AbsentValPolicy
 from .basic import BasicFlow
+from ..core.Parameters import ParamSpec
 
 
 class SequentialFlow(Workflow):
@@ -68,24 +69,25 @@ class SequentialFlow(Workflow):
         name: str,
         description: str,
         *,
-        output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
+        output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
         steps: Optional[list[AtomicInvokable]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
     ) -> None:
-        self._steps: List[BasicFlow] = []
+        steps = steps or []
+        self._steps: List[BasicFlow] = [BasicFlow(component=step) for step in steps]
         super().__init__(
             name=name,
             description=description,
+            parameters=steps[0].parameters if steps else [],
             output_schema=output_schema,
             bundling_policy=bundling_policy,
             mapping_policy=mapping_policy,
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
         )
-        self.steps = steps
 
     # ------------------------------------------------------------------ #
     # Steps Properties
@@ -102,8 +104,7 @@ class SequentialFlow(Workflow):
         # Empty steps => no-op sequential flow
         if not steps:
             self._steps = prepared_steps
-            self._arguments_map, self._return_type = self.build_args_returns()
-            self._is_persistible = self._compute_is_persistible()
+            self._parameters = []
             return
 
         # Normalize everything into BasicFlow wrappers.
@@ -111,7 +112,7 @@ class SequentialFlow(Workflow):
 
         # Wire output->input schema between adjacent wrappers.
         for i in range(len(prepared_steps) - 1):
-            prepared_steps[i].output_schema = prepared_steps[i + 1].input_schema
+            prepared_steps[i].output_schema = prepared_steps[i + 1].parameters
 
         self._steps = prepared_steps
         self._arguments_map, self._return_type = self.build_args_returns()

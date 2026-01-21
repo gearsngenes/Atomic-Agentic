@@ -199,7 +199,6 @@ class Workflow(AtomicInvokable, ABC):
         name: str,
         description: str,
         parameters: list[ParamSpec],
-        return_type: str,
         *,
         output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
@@ -213,7 +212,7 @@ class Workflow(AtomicInvokable, ABC):
             name=name,
             description=description,
             parameters=parameters,
-            return_type=return_type
+            return_type="Dict[str, Any]",  # Workflows always return mappings
         )
         
         # Normalize output schema to list[ParamSpec] (primary storage)

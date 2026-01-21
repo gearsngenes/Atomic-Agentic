@@ -137,12 +137,7 @@ class StateIOFlow(BasicFlow):
         """
         Filter the incoming state down to the component's declared non-var inputs,
         then invoke the wrapped component.
-        """
-        # Validate input keys are subset of state_schema
-        if any(key not in self.state_schema for key in inputs):
-            raise ValueError(f"Expected input keys to be a subset of {self.state_schema}, but got "
-                             f"the following keys, instead: {inputs.keys()}")
-        
+        """        
         # If component has *args or **kwargs, accept whole state; otherwise filter
         has_var_params = any(spec.kind in {"VAR_POSITIONAL", "VAR_KEYWORD"} for spec in self.parameters)
         if has_var_params:
