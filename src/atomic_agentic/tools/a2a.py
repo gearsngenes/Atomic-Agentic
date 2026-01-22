@@ -63,9 +63,9 @@ class A2AProxyTool(Tool):
     Metadata / schema
     -----------------
     On construction and on :meth:`refresh`, the tool calls the remote function
-    "agent_metadata" to populate:
+    "invokable_metadata" to populate:
 
-      - arguments_map (remote agent's declared input schema)
+      - parameters (remote agent's declared input schema)
       - return_type   (remote agent's declared output type)
 
     Changing :attr:`url` or :attr:`headers` triggers a full :meth:`refresh`,

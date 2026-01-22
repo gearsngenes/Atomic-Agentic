@@ -22,8 +22,8 @@ class A2AtomicHost:
     using the message-level function-calling pattern.
 
     Exposed function names:
-      - "invoke":          payload: Mapping[str, Any] -> {__py_A2A_result__: <agent.invoke(payload)>}
-      - "agent_metadata":  no params                  -> {arguments_map: <agent.arguments_map>, return_type: <agent.post_invoke.return_type>}
+      - "invoke":          payload: Mapping[str, Any] -> {__py_A2A_result__: <component.invoke(payload)>}
+      - "invokable_metadata":  no params                  -> {parameters: <component.parameters>, return_type: <component.return_type>}
     """
 
     def __init__(

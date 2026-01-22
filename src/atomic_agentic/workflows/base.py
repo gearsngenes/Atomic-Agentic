@@ -163,14 +163,11 @@ class Workflow(AtomicInvokable, ABC):
 
     IO schemas
     ----------
-    - `arguments_map` is REQUIRED at construction time and is the authoritative
+    - `parameters` is REQUIRED at construction time and is the authoritative
       source for `input_schema`.
     - `input_schema` mirrors `output_schema` format: Dict[str, Any] where
       each value is either a default or NO_VAL.
-    - Public mutation is disallowed: `arguments_map`, `input_schema`, and
-      `output_schema` are read-only properties.
-    - Subclasses may refresh schemas via `_set_io_schemas(arguments_map=..., output_schema=...)`
-      when internal components change.
+    - Public mutation is disallowed: `parameters` and `return_type` are read-only properties.
 
     Packaging policies
     ------------------
