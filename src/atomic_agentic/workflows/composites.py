@@ -68,9 +68,9 @@ class SequentialFlow(Workflow):
         self,
         name: str,
         description: str,
+        steps: Optional[list[AtomicInvokable]] = None,
         *,
         output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
-        steps: Optional[list[AtomicInvokable]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
@@ -189,11 +189,11 @@ class MakerCheckerFlow(Workflow):
         self,
         name: str,
         description: str,
-        *,
         maker: AtomicInvokable,
         checker: AtomicInvokable,
         judge: Optional[AtomicInvokable] = None,
         max_revisions: int = 1,
+        *,
         output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
@@ -205,10 +205,8 @@ class MakerCheckerFlow(Workflow):
         # ------------------------------------------------------------
         self._maker: BasicFlow = BasicFlow(component=maker)
         self._checker: BasicFlow = BasicFlow(component=checker)
-        self._judge: Optional[BasicFlow] = (
-            BasicFlow(component=judge) if judge is not None else None
-        )
-        self._max_revisions: int = 0
+        self._judge: Optional[BasicFlow] = BasicFlow(component=judge) if judge is not None else None
+        self._max_revisions: int = max_revisions
 
         # ------------------------------------------------------------
         # Base Workflow init (will call build_args_returns)
@@ -216,14 +214,13 @@ class MakerCheckerFlow(Workflow):
         super().__init__(
             name=name,
             description=description,
+            parameters=self._maker.parameters,
             output_schema=output_schema,
             bundling_policy=bundling_policy,
             mapping_policy=mapping_policy,
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
         )
-
-        self.max_revisions = max_revisions
         self._rebuild()
 
     # ------------------------------------------------------------------ #
@@ -272,45 +269,21 @@ class MakerCheckerFlow(Workflow):
     # Wiring / validation
     # ------------------------------------------------------------------ #
     def _rebuild(self) -> None:
+        """Re-apply wiring and re-compute args/returns."""
         # Wire maker <-> checker
-        self._maker.output_schema = self._checker.input_schema
-        self._checker.output_schema = self._maker.input_schema
-
-        maker_keys = set(self._maker.input_schema.keys())
-        checker_keys = set(self._checker.output_schema.keys())
-
-        if maker_keys != checker_keys:
-            raise ValueError(
-                "MakerCheckerFlow invariant violated: "
-                "checker.output_schema must match maker.input_schema"
-            )
+        self._maker.output_schema = self._checker.parameters
+        self._checker.output_schema = self._maker.parameters
 
         if self._judge is not None:
-            judge_keys = set(self._judge.input_schema.keys())
+            judge_keys = set(k.name for k in self._judge.parameters)
+            maker_keys = set(k.name for k in self._maker.parameters)
             if judge_keys != maker_keys:
                 raise ValueError(
                     "MakerCheckerFlow invariant violated: "
                     "judge.input_schema must match maker.input_schema"
                 )
 
-        self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible = self._compute_is_persistible()
-
-    # ------------------------------------------------------------------ #
-    # Workflow helpers
-    # ------------------------------------------------------------------ #
-    def build_args_returns(self):
-        base_args, base_ret = super().build_args_returns()
-        return self._maker.arguments_map, base_ret
-
-    def _compute_is_persistible(self):
-        if self._judge is None:
-            return self._maker.is_persistible and self._checker.is_persistible
-        return (
-            self._maker.is_persistible
-            and self._checker.is_persistible
-            and self._judge.is_persistible
-        )
+        self._parameters = self._maker.parameters
 
     # ------------------------------------------------------------------ #
     # Invocation
@@ -323,7 +296,6 @@ class MakerCheckerFlow(Workflow):
         stopped_early = False
 
         # Initial draft
-        before = len(self._maker.checkpoints)
         draft = self._maker.invoke(inputs)
         maker_ckpts.append(len(self._maker.checkpoints) - 1)
 
@@ -338,7 +310,6 @@ class MakerCheckerFlow(Workflow):
 
         for _ in range(self._max_revisions):
             # Checker
-            before = len(self._checker.checkpoints)
             next_inputs = self._checker.invoke(draft)
             checker_ckpts.append(len(self._checker.checkpoints) - 1)
 

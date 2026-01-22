@@ -11,6 +11,7 @@ from atomic_agentic.agents import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.workflows.composites import MakerCheckerFlow
 from atomic_agentic.tools import toolify
+from atomic_agentic.workflows import BundlingPolicy, MappingPolicy
 
 load_dotenv()
 
@@ -56,9 +57,6 @@ def checker_pre(*, draft: str) -> str:
     return (
         "Review the following draft.\n\n"
         f"{draft}\n\n"
-        "If the draft is excellent, reply ONLY with:\n"
-        "<<Approved>>\n\n"
-        "Otherwise, give clear revision instructions."
     )
 
 
@@ -70,7 +68,11 @@ checker = Agent(
     name="checker",
     description="Reviews drafts and suggests improvements or approves.",
     llm_engine=engine,
-    role_prompt="You are a strict but fair editor.",
+    role_prompt=(
+        "You are a strict but fair editor. You inspect drafts by a writer.\n\n"
+        "If the draft given is excellent, reply ONLY with:\n"
+        "<<Approved>>\n\n"
+        "Otherwise, give clear revision instructions."),
     pre_invoke=checker_pre,
     post_invoke=checker_post,
 )
@@ -105,6 +107,9 @@ flow = MakerCheckerFlow(
     checker=checker,
     judge=judge,
     max_revisions=5,
+    output_schema=["final_draft"],
+    mapping_policy=MappingPolicy.MATCH_FIRST_LENIENT,
+    bundling_policy=BundlingPolicy.UNBUNDLE,
 )
 
 
@@ -112,10 +117,7 @@ flow = MakerCheckerFlow(
 # Run
 # ─────────────────────────────────────────────────────────────
 
-inputs = {
-    "prompt": "Explain Atomic-Agentic in simple terms.",
-    "revision_notes": "",
-}
+inputs = {"prompt": "Write a short story about a robot learning to feel pride."}
 
 final = flow.invoke(inputs)
 
@@ -123,7 +125,7 @@ ckpt = flow.checkpoints[-1]
 meta = ckpt.metadata
 
 print("\n=== FINAL DRAFT ===\n")
-print(final)
+print(final["final_draft"])
 
 print("\n=== METADATA ===")
 for k, v in meta.items():
