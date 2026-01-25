@@ -16,7 +16,8 @@ from python_a2a import (
 )
 
 from ..core.Exceptions import ToolDefinitionError
-from ..core.Invokable import ArgumentMap, ArgSpec
+from ..core.Invokable import ArgumentMap
+from ..core.Parameters import ParamSpec
 from .base import Tool
 from ..a2a.A2AtomicHost import A2A_RESULT_KEY
 
@@ -62,9 +63,9 @@ class A2AProxyTool(Tool):
     Metadata / schema
     -----------------
     On construction and on :meth:`refresh`, the tool calls the remote function
-    "agent_metadata" to populate:
+    "invokable_metadata" to populate:
 
-      - arguments_map (remote agent's declared input schema)
+      - parameters (remote agent's declared input schema)
       - return_type   (remote agent's declared output type)
 
     Changing :attr:`url` or :attr:`headers` triggers a full :meth:`refresh`,
@@ -96,10 +97,14 @@ class A2AProxyTool(Tool):
         return self._url
 
     # ------------------------------------------------------------------ #
-    # Atomic-Invokable Helpers
+    # Signature Building (Template Method)
     # ------------------------------------------------------------------ #
-    def build_args_returns(self) -> tuple[ArgumentMap, str]:
-        """Construct ``arguments_map`` and ``return_type`` from remote "agent_metadata"."""
+    def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
+        """Build signature from remote A2A agent metadata.
+        
+        Fetches invokable_metadata from the remote agent and converts the
+        parameters list to ParamSpec objects.
+        """
         call = FunctionCallContent(name="invokable_metadata", parameters=[])
         msg = Message(content=call, role=MessageRole.USER)
 
@@ -111,27 +116,26 @@ class A2AProxyTool(Tool):
         if not isinstance(payload, Mapping):
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata response must be a mapping")
 
-        if "arguments_map" not in payload or "return_type" not in payload:
+        if "parameters" not in payload or "return_type" not in payload:
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata response missing required keys")
 
         # Extract components
-        raw_args_map = payload["arguments_map"]
+        raw_params_list = payload["parameters"]
         return_type = payload["return_type"]
         # Validate types
-        if not isinstance(raw_args_map, Mapping):
-            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.arguments_map must be a mapping")
+        if not isinstance(raw_params_list, list):
+            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.parameters must be a list")
         if not isinstance(return_type, str):
             raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.return_type must be a str")
-        args_map: ArgumentMap = {}
-        for key, meta in raw_args_map.items():
-            if not isinstance(key, str):
-                raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.arguments_map keys must be strings")
+        
+        # Convert list of dicts to list of ParamSpec objects
+        parameters: list[ParamSpec] = []
+        for i, meta in enumerate(raw_params_list):
             if not isinstance(meta, Mapping):
-                raise ToolDefinitionError(f"{self.full_name}: metadata for argument '{key}' must be a mapping")
-            meta_dict = dict(meta)
-            args_map[key] = ArgSpec.from_dict(meta_dict)
-
-        return args_map, return_type
+                raise ToolDefinitionError(f"{self.full_name}: parameters[{i}] must be a mapping")
+            parameters.append(ParamSpec.from_dict(dict(meta)))
+        
+        return parameters, return_type
 
     def _compute_is_persistible(self) -> bool:
         try:

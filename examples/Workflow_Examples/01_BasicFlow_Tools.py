@@ -39,10 +39,10 @@ print("\n-- tool --")
 print("name:", my_tool.name)
 print("full_name:", my_tool.full_name)
 print("signature:", my_tool.signature)
-print("arguments_map:", my_tool.arguments_map)
+print("parameters:", my_tool.parameters)
 
 print("\n-- workflow --")
-print("arguments_map (proxied from tool):", tf.arguments_map)
+print("parameters (proxied from tool):", tf.parameters)
 print("output_schema:", tf.output_schema)
 
 inputs = {"text": "ab", "n": 3}

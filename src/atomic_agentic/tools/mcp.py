@@ -19,7 +19,8 @@ from mcp.client.streamable_http import streamablehttp_client
 from urllib.parse import urlparse, urlunparse
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
-from ..core.Invokable import ArgumentMap, ArgSpec
+from ..core.Invokable import ArgumentMap
+from ..core.Parameters import ParamSpec
 from ..core.sentinels import NO_VAL
 from .base import Tool
 logger = logging.getLogger(__name__)
@@ -330,8 +331,11 @@ class MCPProxyTool(Tool):
         )
         self._function = new_function
         self._module, self._qualname = self._get_mod_qual(new_function)
-        self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible = self._compute_is_persistible()
+        
+        # Rebuild schema using template method
+        parameters, return_type = self._build_tool_signature()
+        self._parameters = parameters
+        self._return_type = return_type
 
     # ------------------------------------------------------------------ #
     # Tool Properties
@@ -366,16 +370,17 @@ class MCPProxyTool(Tool):
         )
         self._function = new_function
         self._module, self._qualname = self._get_mod_qual(new_function)
-        self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible = self._compute_is_persistible()
+        
+        # Rebuild schema using template method
+        parameters, return_type = self._build_tool_signature()
+        self._parameters = parameters
+        self._return_type = return_type
 
     # ------------------------------------------------------------------ #
-    # Atomic-Invokable Helpers
+    # Signature Building (Template Method)
     # ------------------------------------------------------------------ #
-    def build_args_returns(self) -> tuple[ArgumentMap, str]:
-        """
-        Construct `arguments_map` and `return_type` from MCP `input_schema`
-        and `output_schema`.
+    def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
+        """Build tool signature from MCP `input_schema` and `output_schema`.
 
         - All parameters are KEYWORD_ONLY (MCP sends a single JSON object).
         - Required parameters come from `input_schema["required"]`.
@@ -383,10 +388,9 @@ class MCPProxyTool(Tool):
           the schema; otherwise we give them a placeholder default of None).
         - Return type is derived from `output_schema` if provided; otherwise "Any".
         """
+        parameters: list[ParamSpec] = []
 
-        arg_map: ArgumentMap = {}
-
-        # ----- Inputs: JSON Schema → ArgumentMap -----
+        # ----- Inputs: JSON Schema → list[ParamSpec] -----
         input_schema = self._mcpdata.get("input_schema")
         if isinstance(input_schema, Mapping):
             props = input_schema.get("properties") or {}
@@ -401,16 +405,20 @@ class MCPProxyTool(Tool):
                 meta_schema = raw_meta or {}
                 if not isinstance(meta_schema, Mapping):
                     meta_schema = {}
-                _name = str(raw_name)
-                _kind = "KEYWORD_ONLY"
-                _type = self._json_schema_type_to_str(meta_schema)
-                _default = NO_VAL
+                name = str(raw_name)
+                kind = "KEYWORD_ONLY"
+                type_str = self._json_schema_type_to_str(meta_schema)
+                default = NO_VAL
                 if "default" in meta_schema:
-                    _default = meta_schema.get("default")
-                arg_map[_name] = ArgSpec(index=index,
-                                         kind=_kind,
-                                         type=_type,
-                                         default=_default)
+                    default = meta_schema.get("default")
+                
+                parameters.append(ParamSpec(
+                    name=name,
+                    index=index,
+                    kind=kind,
+                    type=type_str,
+                    default=default
+                ))
 
         # ----- Output: JSON Schema → return_type string -----
         return_type = "Any"
@@ -418,22 +426,7 @@ class MCPProxyTool(Tool):
         if isinstance(output_schema, Mapping):
             return_type = self._json_schema_type_to_str(output_schema)
 
-        return arg_map, return_type
-
-    def _compute_is_persistible(self) -> bool:
-        """
-        Consider an MCPProxyTool persistible if:
-        - it has a server URL, namespace, and tool name,
-        - and the named tool still exists on the server.
-
-        Network errors are treated as non-persistible.
-        """
-        try:
-            tools = list_mcp_tools(self._server_url, self._headers)
-        except Exception:
-            return False
-
-        return self._name in tools
+        return parameters, return_type
 
     # ------------------------------------------------------------------ #
     # Tool Helpers
@@ -588,8 +581,11 @@ class MCPProxyTool(Tool):
         # This will rebuild argument map, return type, and persistibility flag.
         self._function = new_function
         self._module, self._qualname = self._get_mod_qual(new_function)
-        self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible = self._compute_is_persistible()
+        
+        # Rebuild schema using template method
+        parameters, return_type = self._build_tool_signature()
+        self._parameters = parameters
+        self._return_type = return_type
 
     # ------------------------------------------------------------------ #
     # Serialization

@@ -5,6 +5,7 @@ from typing import Any, Mapping, Optional, Sequence, Union, List
 from ..core.Invokable import AtomicInvokable
 from .base import Workflow, BundlingPolicy, MappingPolicy, AbsentValPolicy
 from .basic import BasicFlow
+from ..core.Parameters import ParamSpec
 
 
 class SequentialFlow(Workflow):
@@ -67,25 +68,27 @@ class SequentialFlow(Workflow):
         self,
         name: str,
         description: str,
-        *,
-        output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
         steps: Optional[list[AtomicInvokable]] = None,
+        *,
+        output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
     ) -> None:
-        self._steps: List[BasicFlow] = []
+        steps = steps or []
+        self._steps: List[BasicFlow] = [BasicFlow(component=step) for step in steps]
         super().__init__(
             name=name,
             description=description,
+            parameters=steps[0].parameters if steps else [],
             output_schema=output_schema,
             bundling_policy=bundling_policy,
             mapping_policy=mapping_policy,
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
         )
-        self.steps = steps
+        self._rewire_steps()
 
     # ------------------------------------------------------------------ #
     # Steps Properties
@@ -97,54 +100,38 @@ class SequentialFlow(Workflow):
 
     @steps.setter
     def steps(self, steps: Optional[list[AtomicInvokable]]) -> None:
-        prepared_steps: list[BasicFlow] = []
-
-        # Empty steps => no-op sequential flow
         if not steps:
-            self._steps = prepared_steps
-            self._arguments_map, self._return_type = self.build_args_returns()
-            self._is_persistible = self._compute_is_persistible()
-            return
-
-        # Normalize everything into BasicFlow wrappers.
-        prepared_steps = [BasicFlow(component=step) for step in steps]
-
-        # Wire output->input schema between adjacent wrappers.
-        for i in range(len(prepared_steps) - 1):
-            prepared_steps[i].output_schema = prepared_steps[i + 1].input_schema
-
-        self._steps = prepared_steps
-        self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible = self._compute_is_persistible()
+            self._steps = []
+        else:
+            self._steps = [BasicFlow(component=step) for step in steps]
+        self._rewire_steps()
 
     # ------------------------------------------------------------------ #
     # Step management APIs
     # ------------------------------------------------------------------ #
     def append_step(self, step: AtomicInvokable) -> None:
         """Append a new step to the end of the sequence."""
-        steps = [_.component for _ in self.steps] + [step]
-        self.steps = steps
+        self._steps.append(BasicFlow(component=step))
+        self._rewire_steps()
 
     def extend(self, steps: Sequence[AtomicInvokable]) -> None:
         """Append multiple steps to the end of the sequence."""
-        components = [_.component for _ in self.steps] + list(steps)
-        self.steps = components
+        self._steps.extend(BasicFlow(component=step) for step in steps)
+        self._rewire_steps()
 
     def insert(self, index: int, step: AtomicInvokable) -> None:
         """Insert a step at the given index (supports negative indices like list.insert)."""
-        components = [_.component for _ in self.steps]
-        components.insert(index, step)
-        self.steps = components
+        self._steps.insert(index, BasicFlow(component=step))
+        self._rewire_steps()
 
     def replace(self, index: int, step: AtomicInvokable) -> AtomicInvokable:
         """
         Replace the step at `index` and return the removed component.
         Raises IndexError if index is out of range.
         """
-        components = [_.component for _ in self.steps]
-        removed = components[index]  # may raise IndexError
-        components[index] = step
-        self.steps = components
+        removed = self._steps[index].component
+        self._steps[index].component = step
+        self._rewire_steps()
         return removed
 
     def pop(self, index: int = -1) -> AtomicInvokable:
@@ -152,9 +139,8 @@ class SequentialFlow(Workflow):
         Remove and return the component at `index` (default last).
         Raises IndexError if index is out of range.
         """
-        components = [_.component for _ in self.steps]
-        removed = components.pop(index)  # may raise IndexError
-        self.steps = components if components else None
+        removed = self._steps.pop(index)
+        self._rewire_steps()
         return removed
 
     def clear_steps(self) -> None:
@@ -164,20 +150,21 @@ class SequentialFlow(Workflow):
     # ------------------------------------------------------------------ #
     # Workflow Helpers
     # ------------------------------------------------------------------ #
-    def build_args_returns(self):
-        base_args, base_ret = super().build_args_returns()
-
-        # If we don't have steps (or haven't been initialized yet), fall back to base.
-        if not self._steps:
-            return base_args, base_ret
-
-        # Expose the first step wrapper's arguments_map as this SequentialFlow's inputs.
-        return self._steps[0].arguments_map, base_ret
-
-    def _compute_is_persistible(self):
-        if not self._steps:
-            return True
-        return all(step.is_persistible for step in self._steps)
+    def _rewire_steps(self) -> None:
+        """Re-apply output->input schema wiring between adjacent wrappers."""
+        for i in range(len(self._steps)-1):
+            self._steps[i].output_schema = self._steps[i+1].parameters
+        for i in range(len(self._steps)):
+            # Configure step policies to fixed values
+            self._steps[i].mapping_policy = MappingPolicy.STRICT
+            self._steps[i].bundling_policy = BundlingPolicy.BUNDLE
+            self._steps[i].absent_val_policy = AbsentValPolicy.RAISE
+            self._steps[i].default_absent_val = None
+        # Remove output schema from last step
+        if self._steps:
+            self._steps[-1].output_schema = None
+        # Update SequentialFlow parameters to match first step
+        self._parameters = self._steps[0] if self._steps else []
 
     def _invoke(self, inputs: Mapping[str, Any]):
         if not self._steps:
@@ -202,11 +189,11 @@ class MakerCheckerFlow(Workflow):
         self,
         name: str,
         description: str,
-        *,
         maker: AtomicInvokable,
         checker: AtomicInvokable,
         judge: Optional[AtomicInvokable] = None,
         max_revisions: int = 1,
+        *,
         output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
@@ -218,10 +205,8 @@ class MakerCheckerFlow(Workflow):
         # ------------------------------------------------------------
         self._maker: BasicFlow = BasicFlow(component=maker)
         self._checker: BasicFlow = BasicFlow(component=checker)
-        self._judge: Optional[BasicFlow] = (
-            BasicFlow(component=judge) if judge is not None else None
-        )
-        self._max_revisions: int = 0
+        self._judge: Optional[BasicFlow] = BasicFlow(component=judge) if judge is not None else None
+        self._max_revisions: int = max_revisions
 
         # ------------------------------------------------------------
         # Base Workflow init (will call build_args_returns)
@@ -229,14 +214,13 @@ class MakerCheckerFlow(Workflow):
         super().__init__(
             name=name,
             description=description,
+            parameters=self._maker.parameters,
             output_schema=output_schema,
             bundling_policy=bundling_policy,
             mapping_policy=mapping_policy,
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
         )
-
-        self.max_revisions = max_revisions
         self._rebuild()
 
     # ------------------------------------------------------------------ #
@@ -285,45 +269,21 @@ class MakerCheckerFlow(Workflow):
     # Wiring / validation
     # ------------------------------------------------------------------ #
     def _rebuild(self) -> None:
+        """Re-apply wiring and re-compute args/returns."""
         # Wire maker <-> checker
-        self._maker.output_schema = self._checker.input_schema
-        self._checker.output_schema = self._maker.input_schema
-
-        maker_keys = set(self._maker.input_schema.keys())
-        checker_keys = set(self._checker.output_schema.keys())
-
-        if maker_keys != checker_keys:
-            raise ValueError(
-                "MakerCheckerFlow invariant violated: "
-                "checker.output_schema must match maker.input_schema"
-            )
+        self._maker.output_schema = self._checker.parameters
+        self._checker.output_schema = self._maker.parameters
 
         if self._judge is not None:
-            judge_keys = set(self._judge.input_schema.keys())
+            judge_keys = set(k.name for k in self._judge.parameters)
+            maker_keys = set(k.name for k in self._maker.parameters)
             if judge_keys != maker_keys:
                 raise ValueError(
                     "MakerCheckerFlow invariant violated: "
                     "judge.input_schema must match maker.input_schema"
                 )
 
-        self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible = self._compute_is_persistible()
-
-    # ------------------------------------------------------------------ #
-    # Workflow helpers
-    # ------------------------------------------------------------------ #
-    def build_args_returns(self):
-        base_args, base_ret = super().build_args_returns()
-        return self._maker.arguments_map, base_ret
-
-    def _compute_is_persistible(self):
-        if self._judge is None:
-            return self._maker.is_persistible and self._checker.is_persistible
-        return (
-            self._maker.is_persistible
-            and self._checker.is_persistible
-            and self._judge.is_persistible
-        )
+        self._parameters = self._maker.parameters
 
     # ------------------------------------------------------------------ #
     # Invocation
@@ -336,7 +296,6 @@ class MakerCheckerFlow(Workflow):
         stopped_early = False
 
         # Initial draft
-        before = len(self._maker.checkpoints)
         draft = self._maker.invoke(inputs)
         maker_ckpts.append(len(self._maker.checkpoints) - 1)
 
@@ -351,7 +310,6 @@ class MakerCheckerFlow(Workflow):
 
         for _ in range(self._max_revisions):
             # Checker
-            before = len(self._checker.checkpoints)
             next_inputs = self._checker.invoke(draft)
             checker_ckpts.append(len(self._checker.checkpoints) - 1)
 

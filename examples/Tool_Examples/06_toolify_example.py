@@ -21,6 +21,7 @@ from typing import Any, Mapping, MutableMapping
 from dotenv import load_dotenv
 
 from atomic_agentic.tools.Toolify import toolify
+from atomic_agentic import NO_VAL
 from atomic_agentic.tools import Tool
 from atomic_agentic.agents import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
@@ -82,7 +83,7 @@ agent = Agent(
 # ---------- MCP server URL (normalized to /mcp if path is empty) ----------
 
 SERVER_URL = "http://127.0.0.1:8000"  # we'll normalize to /mcp if needed
-MCP_NAMESPACE = "demo.mcp"
+MCP_NAMESPACE = "demo_mcp"
 MCP_HEADERS: MutableMapping[str, str] | None = None  # presence of 'headers' is required
 
 # ---------- Helpers ----------
@@ -90,45 +91,19 @@ MCP_HEADERS: MutableMapping[str, str] | None = None  # presence of 'headers' is 
 
 def show_plan(t: Tool) -> None:
     """Pretty-print a human-readable overview of a Tool."""
-    meta = t.to_dict()
-
     print("\n" + "=" * 72)
-    print(f"Tool       : {getattr(t, 'full_name', t.name)}  ({type(t).__name__})")
-    ns = getattr(t, "namespace", None) or meta.get("namespace", "<none>")
+    print(f"Tool       : {t.full_name}")
+    ns = t.namespace
     print(f"Namespace  : {ns}")
 
-    desc = getattr(t, "description", None) or meta.get("description", "") or ""
+    desc = t.description
     desc = desc.strip()
     print(f"Description: {desc or '<no description>'}")
 
-    signature = meta.get("signature", "<unknown>")
+    signature = t.signature
     print(f"Signature  : {signature}")
-
-    arg_map = meta.get("arguments_map", {}) or {}
-    if not arg_map:
-        print("Parameters : (none)")
-    else:
-        print("Parameters :")
-        for pname, pmeta in arg_map.items():
-            # pmeta is expected to be a dict-like mapping
-            kind = pmeta.get("kind", "")
-            ann = pmeta.get("ann", "")
-            required = pmeta.get("required", False)
-            has_default = pmeta.get("has_default", "default" in pmeta)
-            default_val = pmeta.get("default") if has_default else None
-
-            bits: list[str] = []
-            if ann:
-                bits.append(str(ann))
-            bits.append("required" if required else "optional")
-            if has_default:
-                bits.append(f"default={default_val!r}")
-            if kind:
-                bits.append(kind)
-
-            summary = ", ".join(bits) if bits else "parameter"
-            print(f"  - {pname}: {summary}")
-
+    import json
+    print("Parameters :", json.dumps(t.parameters, indent=2))
 
 def invoke_with_inputs(t: Tool, inputs: Mapping[str, Any]) -> None:
     """Invoke a Tool with given inputs and show a readable result."""
@@ -143,31 +118,6 @@ def invoke_with_inputs(t: Tool, inputs: Mapping[str, Any]) -> None:
     except ToolInvocationError as e:
         print("Invocation error:")
         print(f"  {e}")
-
-
-def synthesize_required_inputs(t: Tool) -> dict:
-    """Create minimal inputs for required params using annotations."""
-    meta = t.to_dict()
-    required = set(meta.get("required_names", []))
-    out: dict[str, Any] = {}
-
-    # Use Tool.arguments_map so we can inspect annotations directly.
-    arg_map = getattr(t, "arguments_map", {})
-    for p in meta.get("p_or_kw_names", []):
-        if p in required:
-            ann = arg_map[p]["ann"]
-            # very lightweight defaults just for demo
-            if ann is float:
-                out[p] = 0.0
-            elif ann is int:
-                out[p] = 0
-            elif ann is bool:
-                out[p] = False
-            elif ann is list or getattr(getattr(ann, "__origin__", None), "__name__", "") == "list":
-                out[p] = []
-            else:
-                out[p] = ""
-    return out
 
 
 # ---------- Demo flow ----------
@@ -236,7 +186,7 @@ def main() -> None:
                 headers=MCP_HEADERS,
             )
             show_plan(mcp_tool)
-            inputs = EXAMPLE_INPUTS.get(mcp_tool.name) or synthesize_required_inputs(mcp_tool)
+            inputs = EXAMPLE_INPUTS.get(mcp_tool.name)
             if not inputs:
                 print("(no required params detected; calling with empty inputs)")
             invoke_with_inputs(mcp_tool, inputs)

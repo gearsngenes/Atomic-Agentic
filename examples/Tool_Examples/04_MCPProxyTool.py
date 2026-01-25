@@ -28,7 +28,10 @@ def _show_plan(proxy: MCPProxyTool) -> None:
     print(f"\n-- {proxy.full_name} --")
     print("from:", proxy.namespace)
     print("signature:", proxy.signature)
-    print("argument map:", json.dumps(proxy.arguments_map, indent = 2))
+    print("parameters:")
+    for param in proxy.parameters:
+        default_str = "(no default)" if param.default.__class__.__name__ == "NO_VAL" else f"default={param.default}"
+        print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}")
 
 def _invoke(proxy: MCPProxyTool, inputs: Mapping[str, Any]) -> None:
     print("inputs:", inputs)

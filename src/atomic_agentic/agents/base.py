@@ -16,7 +16,9 @@ from ..core.Exceptions import (
     AgentInvocationError,
     ToolInvocationError,
 )
-from ..core.Invokable import AtomicInvokable, ArgumentMap
+from ..core.Invokable import AtomicInvokable
+from ..core.Parameters import ParamSpec
+from ..core.sentinels import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool, toolify
 
@@ -139,18 +141,20 @@ class Agent(AtomicInvokable):
                            name="post_invoke",
                            namespace=name,
                            description=f"The tool that postprocesses outputs of Agent {name}")
-        required = 0
-        if len(post_tool.arguments_map) == 0:
-            raise AgentError("Agent.post_invoke must expect least 1 argument")
-        if len(post_tool.arguments_map) == 1:
-            self._post_param_name = list(post_tool.arguments_map.keys())[0]
+        # Validate post_invoke has exactly 1 required parameter
+        post_params = post_tool.parameters
+        if len(post_params) == 0:
+            raise AgentError("Agent.post_invoke must expect at least 1 argument")
+        if len(post_params) == 1:
+            self._post_param_name = post_params[0].name
         else:
-            for arg in post_tool.arguments_map:
-                if "default" not in post_tool.arguments_map[arg]:
-                    required += 1
-                    self._post_param_name = arg
-            if required != 1:
-                raise AgentError(f"Agent.post_invoke must have exactly 1 required argument, got {required}")
+            required_count = 0
+            for param in post_params:
+                if param.default is NO_VAL:
+                    required_count += 1
+                    self._post_param_name = param.name
+            if required_count != 1:
+                raise AgentError(f"Agent.post_invoke must have exactly 1 required argument, got {required_count}")
         # Set Pre/Post invoke
         self._pre_invoke = pre_tool
         self._post_invoke = post_tool
@@ -176,8 +180,10 @@ class Agent(AtomicInvokable):
         # invoke lock
         self._invoke_lock = threading.RLock()
 
-        # set the core AtomicInvokable attributes
-        super().__init__(name=name, description=description)
+        # Build schema directly from pre_invoke and post_invoke, then delegate to parent
+        super().__init__(name=name, description=description, 
+                        parameters=self._pre_invoke.parameters, 
+                        return_type=self._post_invoke.return_type)
 
     # ------------------------------------------------------------------ #
     # Agent Properties
@@ -272,9 +278,8 @@ class Agent(AtomicInvokable):
 
         Behaviour:
         - Use the centralized helper to create/validate the candidate Tool.
-        - Compute the new (arguments_map, return_type) based on the candidate
-          and the current `post_invoke` before mutating internal state.
-        - If the build would not result in the required types, raise `AgentError`.
+        - Rebuild the Agent's schema based on the candidate pre_invoke Tool.
+        - If the Tool does not return 'str' or 'any', raise `AgentError`.
         """
         # Prepare pre_invoke
         pre_tool = toolify(candidate or identity_pre,
@@ -283,11 +288,9 @@ class Agent(AtomicInvokable):
                            description=f"The tool that preprocesses inputs into a string for Agent {self.name}")
         if pre_tool.return_type.lower() not in {"any", "str"}:
             raise AgentError("Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke")
-        # Apply the candidate and sync internal schema
+        # Apply the candidate and rebuild schema from components
         self._pre_invoke = pre_tool
-        args, ret = self.build_args_returns()
-        self._arguments_map, self._return_type = args, ret
-        self._is_persistible = self._compute_is_persistible()
+        self._parameters = self._pre_invoke.parameters
     
     @property
     def post_invoke(self) -> Tool:
@@ -313,40 +316,31 @@ class Agent(AtomicInvokable):
 
         Behaviour:
         - Use the centralized helper to create the candidate Tool.
-        - Compute the new (arguments_map, return_type) based on the candidate
-          and the current `pre_invoke` before mutating internal state.
-        - If the build would not result in the required types, raise `AgentError`.
+        - Rebuild the Agent's schema based on the candidate post_invoke Tool.
+        - The Tool must accept exactly one required parameter.
+        - If validation fails, raise `AgentError`.
         """
-        # Create candidate tool (do not mutate state yet)
+        # Create candidate tool and validate it has exactly 1 required parameter
         post_tool = toolify(candidate or identity_post,
                            name="post_invoke",
                            namespace=self.name,
                            description=f"The tool that postprocesses outputs of Agent {self.name}")
-        required = 0
-        if len(post_tool.arguments_map) == 0:
-            raise AgentError("Agent.post_invoke must expect least 1 argument")
-        if len(post_tool.arguments_map) == 1:
-            self._post_param_name = list(post_tool.arguments_map.keys())[0]
+        post_params = post_tool.parameters
+        if len(post_params) == 0:
+            raise AgentError("Agent.post_invoke must expect at least 1 argument")
+        if len(post_params) == 1:
+            self._post_param_name = post_params[0].name
         else:
-            for arg in post_tool.arguments_map:
-                if "default" not in post_tool.arguments_map[arg]:
-                    required += 1
-                    self._post_param_name = arg
-            if required != 1:
-                raise AgentError(f"Agent.post_invoke must have exactly 1 required argument, got {required}")
+            required_count = 0
+            for param in post_params:
+                if param.default is NO_VAL:
+                    required_count += 1
+                    self._post_param_name = param.name
+            if required_count != 1:
+                raise AgentError(f"Agent.post_invoke must have exactly 1 required argument, got {required_count}")
+        # Apply the candidate and rebuild schema from components
         self._post_invoke = post_tool
-        self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible = self._compute_is_persistible()
-
-    # ------------------------------------------------------------------ #
-    # Atomic-Invokable Helpers
-    # ------------------------------------------------------------------ #
-    def build_args_returns(self) -> tuple[ArgumentMap, str]:
-        """Return the Agent's input argument map (mirroring pre_invoke) and the post_invoke return type."""
-        return self._pre_invoke.arguments_map, str(self._post_invoke.return_type)
-
-    def _compute_is_persistible(self):
-        return self.pre_invoke.is_persistible and self.post_invoke.is_persistible
+        self._return_type = self._post_invoke.return_type
 
     # ------------------------------------------------------------------ #
     # Agent Helpers

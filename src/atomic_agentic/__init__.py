@@ -5,10 +5,14 @@ try:  # populated when installed or when a wheel is built
 except PackageNotFoundError:  # pragma: no cover
     __version__ = "0.0.0"
 
-from .core.Invokable import AtomicInvokable, NO_VAL, ArgSpec, ArgumentMap
+from .core.Invokable import AtomicInvokable, NO_VAL, ParamSpec, ParameterMap, ArgumentMap, ArgSpec
 
 __all__ = [
     "NO_VAL",
     "AtomicInvokable",
-    "ArgSpec",
+    "ParamSpec",
+    "ParameterMap",
+    # Legacy aliases for backward compatibility
+    "ArgSpec",  # Deprecated: use ParamSpec instead
+    "ArgumentMap",  # Deprecated: use ParameterMap instead
     ]

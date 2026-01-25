@@ -36,6 +36,16 @@ DEFAULT_TARGETS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def show_plan(tool: A2AProxyTool) -> None:
+    print(f"\n-- {tool.full_name} call plan --")
+    print("signature:", tool.signature)
+    print("return_type:", tool.return_type)
+    print("parameters:")
+    for param in tool.parameters:
+        default_str = "(no default)" if param.default.__class__.__name__ == "NO_VAL" else f"default={param.default}"
+        print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}")
+
+
 def main() -> None:
     target = "math"
     url = DEFAULT_TARGETS[target]["url"]
@@ -43,10 +53,7 @@ def main() -> None:
 
     tool = A2AProxyTool(url=url)
 
-    print("\n=== A2A TOOL METADATA ===")
-    print("full_name :", tool.full_name)
-    print("return_type:", tool.return_type)
-    print("arguments_map:", tool.arguments_map)
+    show_plan(tool)
 
     print("\n=== INVOKE ===")
     result = tool.invoke(inputs)

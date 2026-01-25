@@ -66,7 +66,7 @@ tool = Tool(
 # 3) Inspect the Tool
 print(tool.full_name)      # Tool.banking.get_account_details
 print(tool.signature)      # Tool.banking.get_account_details(index: int) -> dict
-print(tool.arguments_map)  # {"index": <int>}
+print(tool.parameters)     # [{"name": "index", "index":0, "type":"int", "kind":"POSITIONAL_OR_KEYWORD"}]
 
 # 4) Invoke with dict input (the dict-first contract)
 result = tool.invoke({"index": 0})

@@ -40,7 +40,7 @@ print("2)", res2)
 
 # -------------------------------------------------------------------
 # Custom pre-invoke Tool: accept {'question': str} -> returns a prompt string.
-# Demonstrates schema flexibility (Agent.arguments_map mirrors pre_invoke).
+# Demonstrates schema flexibility (Agent.parameters mirrors pre_invoke).
 # -------------------------------------------------------------------
 def question_to_prompt(*, question: str) -> str:
     return f"Answer in one sentence: {question}"

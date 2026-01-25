@@ -12,6 +12,7 @@ from typing import (
 
 from ..core.Exceptions import SchemaError
 from ..core.Invokable import AtomicInvokable
+from ..core.Parameters import ParamSpec
 from .base import (
     BundlingPolicy,
     MappingPolicy,
@@ -69,18 +70,22 @@ class StateIOFlow(BasicFlow):
         self,
         component: AtomicInvokable,
         *,
-        state_schema: Union[Type[Any], List[str]],
+        state_schema: Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]],
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
         bundling_policy: BundlingPolicy = BundlingPolicy.UNBUNDLE,
     ):
         # Standardize the expected in/out state schema
-        self._state_schema:List[str] = _extract_state_keys(state_schema)
+        self._state_schema: List[str] = _extract_state_keys(state_schema)
         
-        # Check component
-        # Compute "real" input keys from arguments_map (exclude VAR_* parameters)
-        self.component = component
-
-        # fill in a basic state schema
+        # Validate component parameters against state_schema
+        # Non-VAR parameters must be subset of state keys
+        unknown_params = set(spec.name for spec in component.parameters if spec.kind not in {"VAR_POSITIONAL", "VAR_KEYWORD"}).difference(self._state_schema)
+        if unknown_params:
+            raise SchemaError(
+                f"Component {component.name} has parameters {unknown_params} not in state_schema {self._state_schema}")
+        
+        # Store component and pass to parent with state_schema as output
+        self._component = component
         super().__init__(
             component=component,
             output_schema=self._state_schema,
@@ -109,15 +114,14 @@ class StateIOFlow(BasicFlow):
     
     @component.setter
     def component(self, candidate: AtomicInvokable) -> None:
-        unknown_inputs = set(candidate.arguments_map.keys()).difference(self.state_schema)
-        for unknown in unknown_inputs:
-            if candidate.arguments_map[unknown].get("kind") not in {"VAR_POSITIONAL", "VAR_KEYWORD"}:
-                raise SchemaError(
-                    f"A non-arg/kwarg variable was detected in {self.name}'s component that "
-                    f"doesn't exist in the expected schema {self._state_schema}: {unknown}")
+        # Validate component parameters against state_schema
+        unknown_params = set(spec.name for spec in candidate.parameters if spec.kind not in {"VAR_POSITIONAL", "VAR_KEYWORD"}).difference(self._state_schema)
+        if unknown_params:
+            raise SchemaError(
+                f"Component {candidate.name} has parameters {unknown_params} not in state_schema {self._state_schema}")
         self._component = candidate
-        self._arguments_map, self._return_type = self.build_args_returns()
-        self._is_persistible = self._compute_is_persistible()
+        self._parameters = candidate.parameters
+        self._return_type = candidate.return_type
 
     # ------------------------------------------------------------------ #
     # StateIOFlow Properties
@@ -133,19 +137,18 @@ class StateIOFlow(BasicFlow):
         """
         Filter the incoming state down to the component's declared non-var inputs,
         then invoke the wrapped component.
-        """
-        # if has *args, **kwargs, then accept whole state
-        if any(key not in self.state_schema for key in inputs):
-            raise ValueError(f"Expected input keys to be a subset of {self.state_schema}, but got "
-                             f"the following keys, instead: {inputs.keys()}")
-        if any(meta["kind"] in {"VAR_POSITIONAL", "VAR_KEYWORD"} for meta in self.arguments_map.values()):
+        """        
+        # If component has *args or **kwargs, accept whole state; otherwise filter
+        has_var_params = any(spec.kind in {"VAR_POSITIONAL", "VAR_KEYWORD"} for spec in self.parameters)
+        if has_var_params:
             raw = self.component.invoke(inputs)
             unused_inputs = {}
-        #otherwise filtered
         else:
-            filtered_inputs = {k: inputs[k] for k in self.arguments_map.keys() if k in inputs}
-            unused_keys = set(filtered_inputs.keys()).difference(self.state_schema)
-            unused_inputs = {k:inputs[k] for k in unused_keys}
+            # Filter to component's declared parameter names
+            param_names = {spec.name for spec in self.parameters}
+            filtered_inputs = {k: inputs[k] for k in param_names if k in inputs}
+            unused_keys = set(inputs.keys()).difference(param_names)
+            unused_inputs = {k: inputs[k] for k in unused_keys}
             raw = self.component.invoke(filtered_inputs)
         return {"unused_inputs": unused_inputs}, raw
     # ------------------------------------------------------------------ #
