@@ -7,6 +7,7 @@ from typing import (
     Mapping,
     Optional,
     Union,
+    Tuple,
 )
 import logging
 import threading
@@ -161,7 +162,9 @@ class Agent(AtomicInvokable):
 
         # Set the agent-specific attributes
         self._llm_engine: LLMEngine = llm_engine
-        self._role_prompt: str = role_prompt.strip() or "You are a helpful AI assistant"
+        self._role_prompt: str = "You are a helpful AI assistant"
+        if (role_prompt is not None or role_prompt.strip()):
+            self._role_prompt = role_prompt.strip()
         self._context_enabled: bool = context_enabled
 
         # history_window: strict int semantics (>= 0). 'None' means (send-all) mode.
@@ -172,10 +175,6 @@ class Agent(AtomicInvokable):
         # Stored message history (flat list of role/content dicts).
         # We never trim storage; we only limit what we *send* to the engine.
         self._history: List[Dict[str, str]] = []
-
-        # Per-invoke buffer for the newest run. This is populated inside `_invoke`
-        # and committed to `_history` by `_update_history` if `context_enabled` is True.
-        self._newest_history: List[Dict[str, str]] = []
         
         # invoke lock
         self._invoke_lock = threading.RLock()
@@ -345,20 +344,19 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
-    def _invoke(self, messages: List[Dict[str, str]]) -> Any:
+    def _invoke(self, messages: List[Dict[str, str]]) -> Tuple[List[Dict[str,str]], Any]:
         """Internal call path used by :meth:`invoke`.
 
         This base implementation:
         - Invokes the configured LLM engine with the provided ``messages``.
-        - Populates ``_newest_history`` with the *current turn only*
+        - Populates ``newest_history`` with the *current turn only*
           (user + assistant messages).
 
         Subclasses may override this method to implement more complex behavior,
         but **must not** mutate ``self._history`` directly. Instead, they should
-        either:
-        - append messages to ``self._newest_history``, or
-        - store richer run data on ``self`` for :meth:`_update_history` to
-          summarize and commit.
+        return:
+        - a ``newest_history`` list
+        - a final raw return result
         """
         # 1) Call engine (attachments are managed by the engine itself)
         try:
@@ -377,10 +375,9 @@ class Agent(AtomicInvokable):
         # The base Agent simply stores the user prompt and raw assistant text.
         user_msg = messages[-1]
         
-        self._newest_history.append(user_msg)
-        self._newest_history.append({"role": "assistant", "content": text})
+        newest_history = [user_msg, {"role": "assistant", "content": text}]
 
-        return text
+        return newest_history, text
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -413,7 +410,6 @@ class Agent(AtomicInvokable):
     def clear_memory(self) -> None:
         """Clear the stored message history."""
         self._history.clear()
-        self._newest_history.clear()
     
     def invoke(self, inputs: Mapping[str, Any]) -> Any:
         """Invoke the Agent with a single **input mapping**.
@@ -427,8 +423,8 @@ class Agent(AtomicInvokable):
         3) Build the messages list from the optional role prompt, the windowed
            history, and the current user ``prompt``.
         4) Delegate to :meth:`_invoke`, which performs the actual engine call and
-           populates ``_newest_history`` for this run.
-        5) If ``context_enabled`` is True, call update history with the _newest_history to commit
+           returns ``newest_history`` and the raw result for this run.
+        5) If ``context_enabled`` is True, call update history with the newest_history to commit
            the newest turn(s) into persistent history.
         6) Run ``post_invoke`` on the raw result to obtain the final output and
            return it.
@@ -472,8 +468,6 @@ class Agent(AtomicInvokable):
                 raise AgentInvocationError(
                     f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
                 )
-            # Empty any prior history buffer
-            self._newest_history.clear()
 
             # Build messages
             logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
@@ -482,10 +476,9 @@ class Agent(AtomicInvokable):
             if self._context_enabled and self._history:
                 if self._history_window is None:
                     prior = self._history
-                elif self._history_window > 0:
-                    prior = self._history[-(self._history_window * 2):]
                 else:
-                    prior = self._history
+                    window = min(self._history_window * 2, len(self._history))
+                    prior = self._history[-(window):]
                 messages.extend(prior)
 
             user_msg = {"role": "user", "content": prompt}
@@ -493,13 +486,12 @@ class Agent(AtomicInvokable):
 
             # Invoke core logic
             logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
-            raw_result = self._invoke(messages=messages)
+            new_history, raw_result = self._invoke(messages=messages)
 
             # Update history if enabled
             if self._context_enabled:
                 logger.debug(f"Agent.{self.name} updating history")
-                self._history.extend(self._newest_history)
-            self._newest_history.clear()
+                self._history.extend(new_history)
 
             # Postprocess raw result
             try:

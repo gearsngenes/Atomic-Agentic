@@ -15,7 +15,6 @@ agent = PlanActAgent(
     description="Testing one-shot planning + execution over local python tools.",
     llm_engine=llm_engine,
     context_enabled=True,    # True => persists blackboard across runs
-    run_concurrent=False,     # True => run dependency waves concurrently
 )
 
 # Simple local tools (docstrings become tool descriptions if you omit description=...)
@@ -54,4 +53,4 @@ final = agent.invoke({"prompt": task_prompt})
 print("\nFinal Result:\n", final)
 
 # Optional: inspect executed steps (even if context_enabled=False, the view is useful for debugging)
-print("\nBlackboard (resolved args):\n", agent.blackboard_dumps(raw_results=False))
+print("\nBlackboard (resolved args):\n", agent.blackboard_dumps(peek=False))

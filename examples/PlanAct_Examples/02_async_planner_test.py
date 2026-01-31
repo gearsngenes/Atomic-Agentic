@@ -20,7 +20,6 @@ async_tester = PlanActAgent(
     name="Async_Delay_Tester",
     description="Tests the ability to run independent steps concurrently.",
     llm_engine=llm_engine,
-    run_concurrent=True,     # when True: executes all ready/independent steps simultaneously
     context_enabled=False,
     tool_calls_limit=5,      # doesn't count the final return step
 )
@@ -34,9 +33,9 @@ tool_id = async_tester.register(
 )[0]
 
 if __name__ == "__main__":
+    sequentially = False
     prompt = (
-        f"Call {tool_id} five times.\n"
-        "These calls are independent (no dependencies).\n"
+        f"Call {tool_id} five times, {"SEQUENTIALLY" if sequentially else "AT ONCE"}.\n"
         "Return None."
     )
 
