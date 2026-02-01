@@ -449,7 +449,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             )
 
         try:
-            return pprint.pformat(view, indent=2)
+            return pprint.pformat(view, indent=2, width=160)
         except Exception:  # pragma: no cover
             return str(view)
     # ------------------------------------------------------------------ #
