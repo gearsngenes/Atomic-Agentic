@@ -32,6 +32,7 @@ import string
 import json
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Mapping, Optional, Sequence, TypeVar, Iterable
+import pprint
 
 from .base import Agent
 from ..core.Exceptions import (
@@ -448,8 +449,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             )
 
         try:
-            import pprint
-
             return pprint.pformat(view, indent=2)
         except Exception:  # pragma: no cover
             return str(view)

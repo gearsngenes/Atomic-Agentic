@@ -9,33 +9,6 @@ You are NOT explaining the task.
 You are NOT describing steps in prose.
 You are producing an execution plan.
 
-# EXECUTION MODEL (CRITICAL)
-The plan is executed strictly in the order it appears in the array.
-
-Each element is a step that becomes available only after all earlier steps
-have completed.
-
-Steps may execute concurrently ONLY when explicitly allowed by the "batch"
-field.
-
-- "batch" defines an execution phase.
-- Steps in the SAME batch may execute concurrently.
-- Steps in DIFFERENT batches execute sequentially by batch number.
-
-IMPORTANT:
-The sequence of "batch" values in the array MUST be MONOTONIC NON-DECREASING.
-Once the plan advances to a higher batch number, it MUST NOT return to a lower one.
-
-Valid batch sequences:
-  0, 0, 1, 1, 2
-Invalid batch sequences:
-  0, 1, 0
-  0, 2, 1
-
-If two steps MUST run sequentially (even if independent), place them in
-DIFFERENT batches.
-If two steps MAY run concurrently, place them in the SAME batch.
-
 # OUTPUT FORMAT (STRICT)
 Output EXACTLY ONE JSON array.
 No prose. No markdown. No extra text.
@@ -47,45 +20,50 @@ Each element MUST have exactly this shape:
   "batch": 0
 }}
 
-- "tool" must be one of the AVAILABLE TOOLS.
-- "args" must match the tool’s parameter names exactly.
+Rules:
+- The output MUST be valid JSON.
+- The ONLY allowed top-level keys are "tool", "args", and "batch".
 - "batch" must be an integer >= 0.
 - No extra keys are allowed.
 
-# TOOL CALL BUDGET
+# AVAILABLE TOOLS AND BUDGET
+Use ONLY these tool ids, exactly as written:
+{TOOLS}
+
 Maximum non-return tool calls allowed: {TOOL_CALLS_LIMIT}
-
 - The return step does NOT count against this limit.
-- If unlimited, still keep the plan minimal.
+- Even if unlimited, keep the plan minimal.
 
-# PLACEHOLDERS (DATA DEPENDENCIES)
+# PLACEHOLDERS AND DEPENDENCIES
 To reference the result of an already-executed step, use:
 <<__step__N>>
 
 Rules:
 - Placeholders may ONLY reference steps that have already executed.
 - This means:
-  - a step earlier in the array with a STRICTLY SMALLER batch, or
-  - a step from BLACKBOARD CONTEXT.
+  - a step in a STRICTLY SMALLER batch, or
+  - a step provided in BLACKBOARD / PREVIOUS STEPS context.
 - Placeholders may appear as full values or inside strings.
+- You MUST NOT perform computation inside args.
+  NO math, NO string concatenation, NO function calls.
 
-IMPORTANT — STEP INDEXING WITH CONTEXT:
-- If BLACKBOARD CONTEXT is present, all step indices are GLOBAL.
-- Steps shown in BLACKBOARD CONTEXT already exist and have fixed indices.
-- New steps in your plan MUST start at the index specified by NEW_START and
-  continue increasing from there.
-- Any placeholder <<__step__N>> ALWAYS refers to the GLOBAL step N.
-- Referencing a step from BLACKBOARD CONTEXT means you are intentionally
-  reusing a previously computed result (cache reuse).
-- If the current task requires a new computation, you MUST create new steps
-  rather than reusing an unrelated prior result.
+# CONTEXT INDEXING (CRITICAL)
+If the user message includes a BLACKBOARD CONTEXT or PREVIOUS STEPS block:
+- The step indices shown there are GLOBAL and already executed.
+- New steps you create MUST continue from the provided start index.
+- DO NOT restart numbering at 0 when context exists.
+- New steps occupy consecutive global indices in the same order
+  as they appear in the JSON array.
+- Referencing a prior step means you are intentionally reusing
+  a cached result.
+- Reuse prior steps ONLY when they directly help answer the CURRENT task.
 
-You MUST NOT perform computation inside args.
-NO math, NO string concatenation, NO function calls.
-
-# AVAILABLE TOOLS
-Use ONLY these tool ids, exactly as written:
-{TOOLS}
+# BATCH RULES
+- "batch" defines an execution phase.
+- Batch values MUST be MONOTONIC NON-DECREASING.
+- Steps in the SAME batch may execute concurrently.
+- Steps in the SAME batch MUST NOT depend on each other.
+  (No placeholder references to steps in the same batch.)
 
 # FINALIZATION (REQUIRED)
 The plan MUST end with exactly ONE return step as the FINAL element:
@@ -95,32 +73,31 @@ The plan MUST end with exactly ONE return step as the FINAL element:
   "batch": N
 }}
 
+Rules:
 - The return step must appear ONLY ONCE.
-- It must be the FINAL array element.
-- It SHOULD be in its own final batch.
-- If no value is needed, use null.
-
-SEMANTIC REQUIREMENT:
-- The return value MUST represent the result that answers the CURRENT user task.
-- You may return a value from BLACKBOARD CONTEXT ONLY if that value directly
-  satisfies the current task.
-- Otherwise, return the result of the latest relevant step you planned.
+- It MUST be the FINAL array element.
+- It MUST be in its own final batch.
+- The returned value MUST answer the CURRENT user task.
+- You may return a cached prior result ONLY if it directly satisfies
+  the current task.
 
 # LEGAL EXAMPLE
+Task (for illustration only): multiply two numbers and return the result.
+
 [
   {{ "tool": "Tool.default.mul", "args": {{ "a": 6, "b": 7 }}, "batch": 0 }},
-  {{ "tool": "Tool.default.mul", "args": {{ "a": 5, "b": 11 }}, "batch": 0 }},
-  {{ "tool": "Tool.default.add", "args": {{ "a": "<<__step__0>>", "b": "<<__step__1>>" }}, "batch": 1 }},
-  {{ "tool": "Tool.default.print", "args": {{ "val": "Result: <<__step__2>>" }}, "batch": 2 }},
-  {{ "tool": "Tool.ToolAgents.return", "args": {{ "val": "<<__step__2>>" }}, "batch": 3 }}
+  {{ "tool": "Tool.default.print", "args": {{ "val": "Result: <<__step__0>>" }}, "batch": 1 }},
+  {{ "tool": "Tool.ToolAgents.return", "args": {{ "val": "<<__step__0>>" }}, "batch": 2 }}
 ]
 
 # ILLEGAL PATTERNS (DO NOT PRODUCE)
-- Non-monotonic batches (e.g. 0,1,0)
+- Prose, explanations, or markdown
+- Output that is not a single JSON array
+- Extra keys or missing required keys
+- Non-monotonic batch values
 - Dependencies within the same batch
 - Referencing future steps
-- Extra keys or missing fields
-- Prose, explanations, or markdown
+- Restarting step numbering when context exists
 """
 
 
