@@ -105,7 +105,6 @@ def main() -> None:
         description="One-shot planner/executor that can call PydanticAI-backed wrapper tools.",
         llm_engine=llm_engine,
         context_enabled=False,
-        run_concurrent=False,
     )
 
     # Register console tools so the agent can print labeled results (like your plugins example).

@@ -21,22 +21,20 @@ async_tester = PlanActAgent(
     description="Tests the ability to run independent steps concurrently.",
     llm_engine=llm_engine,
     context_enabled=False,
-    tool_calls_limit=5,      # doesn't count the final return step
 )
 
 # Register the callable (capture the fully-qualified tool id)
 tool_id = async_tester.register(
     testDelayPrint,
-    name="testDelayPrint",
-    description="Print, then delay for 10 seconds.",
+    name="DelayPrint",
+    description="delay for 10 seconds.",
     namespace="local",
 )[0]
 
 if __name__ == "__main__":
-    sequentially = False
+    sequentially = True
     prompt = (
-        f"Call {tool_id} five times, {"SEQUENTIALLY" if sequentially else "AT ONCE"}.\n"
-        "Return None."
+        f"Delay for 10 seconds EXACTLY FIVE times {"SEQUENTIALLY" if sequentially else "CONCURRENTLY"} seconds to run.\n"
     )
 
     start = time.time()

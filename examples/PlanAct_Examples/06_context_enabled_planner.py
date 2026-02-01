@@ -22,7 +22,6 @@ my_planner = PlanActAgent(
     description="Creates plans utilizing context memory",
     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
     context_enabled=True,
-    run_concurrent=False,
 )
 
 my_planner.batch_register(MATH_TOOLS)
@@ -34,5 +33,5 @@ while True:
 
     result = my_planner.invoke({"prompt": query})
     print(f"Result: {result}\n")
-    print(f"Blackboard:\n{my_planner.blackboard_dumps(peek=True, indent=2)}")
+    print(f"Blackboard:\n{my_planner.blackboard_dumps(peek=False)}")
     print("-" * 40 + "\n")

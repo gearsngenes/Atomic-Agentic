@@ -20,7 +20,6 @@ planner = PlanActAgent(
     name="MCP_Agent",
     description="Creates plans utilizing our sample MCP server",
     llm_engine=llm_engine,
-    run_concurrent=False,
 )
 
 # Register all tools from MCP server (bulk discover).

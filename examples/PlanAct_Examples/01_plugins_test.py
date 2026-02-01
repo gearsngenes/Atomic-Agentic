@@ -12,12 +12,12 @@ print("\n───────────────────────�
 print("Testing Task Decomposition and Printing capabilities")
 
 # ──────────────────────────  SET-UP  ───────────────────────────
-llm_engine = OpenAIEngine(model="gpt-4o-mini")
+llm_engine = OpenAIEngine(model="gpt-5-mini")
 agent = PlanActAgent(
     name="Test_PlanAct",
     description="Testing the prebuilt plugins with one-shot planning + execution.",
     llm_engine=llm_engine,
-    context_enabled=False,
+    context_enabled=True,
 )
 
 # Register tool lists
@@ -30,10 +30,8 @@ task_prompt = """
 Assume pi = 3.14159265358979323846 when needed.
 
 Perform the following two tasks:
-TASK 1:
 • Compute the area of a circle with a radius of 5.
 
-TASK 2:
 • You have two legs of a right triangle: a=3, b=4.
   Compute the length of the hypotenuse c.
 
@@ -44,18 +42,23 @@ AFTERWARDS:
 
 print("\n⇢ Executing math demo …")
 agent.invoke({"prompt": task_prompt})
+print("BLACKBOARD AFTER MATH DEMO:", agent.blackboard_dumps())
+agent.clear_memory()
 
 print("\n───────────────────────────────\n")
 print("Now testing math and parsing capabilities…")
 task_prompt = """
 TASK
-Given the string "[23.4, 25.1, 22.8]"
-1. Extract the JSON string, then parse it into a list of numbers.
-2. Print the list.
-3. Calculate the average temperature of the list.
-4. Print BOTH the extracted list's max value and its mean (each labeled).
-• Return None as the end result.
+Given the string "<TAG>[23.4, 25.1, 22.8]<TAG>"
+1. Extract the json string from the above input.
+2. Load the resulting string into a list of numbers.
+3. Print the list.
+4. Calculate the average temperature of the list.
+5. Print BOTH the extracted list's max value and its mean (each labeled).
 """
 
 print("\n⇢ Executing parser+math demo …")
 agent.invoke({"prompt": task_prompt})
+print("BLACKBOARD AFTER PARSER DEMO:", agent.blackboard_dumps())
+agent.clear_memory()
+

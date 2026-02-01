@@ -39,7 +39,6 @@ batch_haiku_planner = PlanActAgent(
     name="BatchHaikuPlanner",
     description="Orchestrates calls to the Haiku Writer Agent and prints outputs",
     llm_engine=llm_engine,
-    run_concurrent=True,
 )
 haiku_tool_id = batch_haiku_planner.register(haiku_agent)
 
@@ -59,7 +58,6 @@ batch_math_planner = PlanActAgent(
     name="BatchMathPlanner",
     description="Handles tasks involving math problems and printing solutions",
     llm_engine=llm_engine,
-    run_concurrent=False,
 )
 batch_math_planner.batch_register(MATH_TOOLS)
 
@@ -79,7 +77,6 @@ super_planner = PlanActAgent(
     name="SuperPlanner",
     description="Planner that decomposes and delegates tasks to sub-planners",
     llm_engine=llm_engine,
-    run_concurrent=True,
 )
 haiku_planner_tool_id = super_planner.register(batch_haiku_planner)
 math_planner_tool_id = super_planner.register(batch_math_planner)

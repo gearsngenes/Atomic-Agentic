@@ -63,8 +63,8 @@ orch = PlanActAgent(
     name="StoryPlanner",
     description="Plan-once agent that orchestrates outliner/writer/reviewer.",
     llm_engine=llm_engine,
-    run_concurrent=False,   # dependencies dominate here; sequential is clearer
     context_enabled=False,
+    tool_calls_limit=None,
 )
 
 # Register agents-as-tools and capture their full tool ids for deterministic prompting
@@ -80,20 +80,16 @@ if __name__ == "__main__":
         raise ValueError("loops must be >= 0")
 
     # Enforce a tight tool-call budget for this run:
-    # outliner (1) + writer draft (1) + loops*(reviewer+writer) (2*loops)
+    # outliner (1) + loops * (writer + reviewer)(2 * loops) + return (1)
     orch.tool_calls_limit = 2 * loops + 2
 
     task_prompt = (
-        "Follow the below instructions to create a story.\n\n"
-        f"1) Call {outliner_tool} with a prompt that includes this user idea:\n"
-        f"   {idea!r}\n"
-        "   (This should return outline JSON.)\n\n"
-        f"2) Call {writer_tool} with a prompt that includes the outline JSON from step 0.\n"
-        "   (This should return a first-draft markdown story.)\n\n"
-        f"3) For {loops} cycle(s):\n"
-        f"   - Call {reviewer_tool} with a prompt that includes the latest draft markdown.\n"
-        f"   - Call {writer_tool} with a prompt that includes the reviewer critique and asks for a revised draft.\n\n"
-        "Return the final draft markdown."
+        "Do the following task:\n\n"
+        f"1) Create an outline of a story with the outliner, given the following idea: {idea!r}\n"
+        "2) Using the outline created, write a full draft of the story with the writer.\n"
+        "3) Review the story and provide feedback with the reviewer\n\n"
+        f"4) Repeat 2) and 3) EXACTLY {loops-1} times\n"
+        "5) Return the final draft markdown."
     )
 
     print("\n⇢ Planning + execution …")

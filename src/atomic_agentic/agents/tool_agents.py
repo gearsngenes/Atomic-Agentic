@@ -1,77 +1,37 @@
-"""Agents
-
-This module contains agent implementations built on top of the core
-:class:`~atomic_agentic.Primitives.Agent` primitive.
-
-The current focus is the refactored :class:`ToolAgent`, an abstract base class
-for *tool-using* agents (e.g. Planner/Orchestrator) that:
-
-- owns a toolbox of :class:`~atomic_agentic.Tools.Tool` instances
-- executes tools via a single gateway (:meth:`ToolAgent._call_tool`)
-- records executed steps in a blackboard (a list of minimal step dicts)
-
-ToolAgent uses a Template Method pattern:
-
-* The base :meth:`ToolAgent._invoke` is **final** and implements the common
-  lifecycle (reset counters, manage blackboard context, commit history).
-* Subclasses implement :meth:`ToolAgent._run` to decide what tools to call and
-  what value to return.
-
-Concurrency / thread-safety
----------------------------
-ToolAgent serializes *external* concurrent calls to :meth:`invoke` (and other
-public mutators like :meth:`register`) via a single per-instance lock
-(``self._invoke_lock``). This keeps the external API simple while still allowing
-a subclass to run *intra-invoke* tool calls concurrently (e.g. via threads)
-because tool execution does **not** require holding ``self._invoke_lock``.
-
-If a subclass does parallelize tool calls within a single run, the tool-call
-budget remains correct because it is enforced by ``self._tool_calls_lock``.
-
-Blackboard rules
-----------------
-- ``self._blackboard`` is *persisted* across runs only when ``context_enabled``
-  is True.
-- Subclasses **must not** mutate ``self._blackboard`` inside :meth:`_run`.
-  Instead, they should build/execute NEW steps and return them from :meth:`_run`.
-- The base class commits the returned steps to ``self._blackboard`` *after*
-  :meth:`_run` completes.
-
-Step placeholders
-----------------
-The canonical placeholder format is ``<<__step__N>>`` where N is a 0-based step
-index into the relevant board. Resolution rules:
-
-- Full-string ``<<__step__N>>`` returns the referenced result as-is (preserves type)
-- Inline occurrences inside larger strings are replaced with ``repr(result)``
-
-By default, placeholders are resolved against the persisted blackboard from
-prior runs. If you need resolution against “persisted steps + new-steps-so-far”
-during a run, pass an explicit ``board=`` to :meth:`_call_tool` /
-:meth:`_resolve_step_refs`.
 """
+ToolAgents
+
+This module defines the abstract base ToolAgent.
+
+ToolAgent is a template-method runtime that:
+- owns a toolbox of Tool instances
+- runs an iterative "prepare -> execute" loop against a per-invoke RunState
+- supports global blackboard placeholder references: <<__step__N>>
+- enforces a resolvable cutoff: placeholders must satisfy N <= resolvable_cutoff
+- executes one prepared batch per loop iteration (A1)
+- resolves placeholders at prepare time and stores resolved_args in the blackboard slots
+- executes concurrently, fail-fast, recording results into the same indexed slots
+- terminates when the canonical return tool executes, storing return_value on state
+- optionally persists the trimmed (no empty tail) run blackboard back onto the agent blackboard
+
+Subclasses must implement:
+- _initialize_run_state(...)
+- _prepare_next_batch(...)
+
+The run state is extensible: subclasses may return a dataclass inheriting from ToolAgentRunState.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-import ast
-from dataclasses import dataclass
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
-    TypedDict,
-    Iterable,)
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass, field
 import logging
 import re
-import json
-import pprint
 import string
+import json
+from dataclasses import dataclass
+from typing import Any, Callable, Generic, Mapping, Optional, Sequence, TypeVar, Iterable
 
 from .base import Agent
 from ..core.Exceptions import (
@@ -81,40 +41,17 @@ from ..core.Exceptions import (
     ToolRegistrationError,
 )
 from ..core.Invokable import AtomicInvokable
+from ..core.sentinels import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool, toolify, batch_toolify
-from ..core.Prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
+from ..core.Prompts import PLANNER_PROMPT
+from ..core.Exceptions import ToolAgentError
+
 
 logger = logging.getLogger(__name__)
 
-# Canonical step placeholder: <<__step__N>> where N is a 0-based step index.
+# Canonical step placeholder: <<__step__N>> where N is a 0-based index.
 _STEP_TOKEN: re.Pattern[str] = re.compile(r"<<__step__(\d+)>>")
-
-
-class BlackboardEntry(TypedDict):
-    """Minimal required blackboard entry for ToolAgent."""
-    tool: str
-    args: Any
-    resolved_args: Any
-    completed: bool
-    result: Any
-
-
-@dataclass(frozen=True, slots=True)
-class StepCall:
-    """Planned step call emitted by a planner/orchestrator (may include placeholders)."""
-    index: int
-    tool_name: str
-    args: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class ResolvedStepCall:
-    """Execution-ready step call (placeholders resolved into raw_args)."""
-    index: int
-    tool_name: str
-    args: Any          # placeholder-view
-    resolved_args: Any      # resolved
 
 
 # --------------------------------------------------------------------------- #
@@ -129,36 +66,111 @@ return_tool = Tool(
     name="return",
     namespace="ToolAgents",
     description=(
-        "Returns the passed-in value. This method should ONLY OCCUR ONCE as the "
-        "FINAL STEP of any plan."
+        "Returns the passed-in value. Tool agents should use this to signal completion."
     ),
 )
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Base 'ToolAgent' class
-# ───────────────────────────────────────────────────────────────────────────────
-class ToolAgent(Agent, ABC):
+
+# --------------------------------------------------------------------------- #
+# Support classes / types
+# --------------------------------------------------------------------------- #
+@dataclass(slots=True)
+class BlackboardSlot:
+    """
+    One indexed slot in the run blackboard.
+
+    Lifecycle (sentinel-driven):
+      - Empty: tool is NO_VAL
+      - Prepared: tool != NO_VAL and resolved_args != NO_VAL and result is NO_VAL
+      - Executed: result != NO_VAL
+
+    Note: error is optional for debugging; execution is fail-fast.
+    """
+    tool: str | Any = NO_VAL
+    args: Any = NO_VAL
+    resolved_args: Any = NO_VAL
+    result: Any = NO_VAL
+    error: Any = NO_VAL
+
+    def is_empty(self) -> bool:
+        return self.tool is NO_VAL and self.result is NO_VAL and self.resolved_args is NO_VAL
+
+    def is_prepared(self) -> bool:
+        return self.tool is not NO_VAL and self.resolved_args is not NO_VAL and self.result is NO_VAL
+
+    def is_executed(self) -> bool:
+        return self.result is not NO_VAL
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Serialization-friendly view.
+        - Keeps sentinel NO_VAL values as-is (caller can post-process if desired).
+        """
+        return {
+            "tool": self.tool,
+            "args": self.args,
+            "resolved_args": self.resolved_args,
+            "result": self.result,
+            "error": self.error,
+            "completed": bool(self.is_executed()),
+        }
+
+
+@dataclass(slots=True)
+class ToolAgentRunState:
+    """
+    Base run state contract required by ToolAgent.
+
+    Subclasses may extend this dataclass (inherit) to add fields.
+    """
+    messages: list[dict[str, str]]
+    blackboard: list[BlackboardSlot]
+
+    # Inclusive cutoffs:
+    # - resolvable_cutoff: max index whose result is available and legal to reference
+    # - planned_cutoff: max index that has been planned (prepared) into blackboard
+    resolvable_cutoff: int
+    planned_cutoff: int
+
+    # Optional but useful bookkeeping:
+    tool_calls_used: int = 0  # non-return calls executed in this run
+    return_value: Any = NO_VAL  # set once return tool executes
+
+
+RS = TypeVar("RS", bound=ToolAgentRunState)
+
+
+@dataclass(frozen=True, slots=True)
+class StepCall:
+    """
+    Optional structured representation of a planned step (tool + args),
+    if a subclass prefers to build these before writing into the blackboard.
+    """
+    batch: int
+    tool_name: str
+    args: Any
+
+
+# --------------------------------------------------------------------------- #
+# Base ToolAgent
+# --------------------------------------------------------------------------- #
+class ToolAgent(Agent, ABC, Generic[RS]):
     """
     Abstract base class for tool-using agents.
 
     The base class owns the invariant runtime loop in `_invoke(messages=...)`:
 
-    - per-run mutable run-state (dict) with copies of messages + blackboard
-    - iterative planning (subclass hook) -> batch of StepCall
-    - base validation + placeholder resolution -> list[ResolvedStepCall]
-    - base budget enforcement (non-return only)
-    - base concurrent execution (fail-fast) -> list[BlackboardEntry]
-    - commit blackboard entries to the run-state blackboard in batch list order
-    - terminate when return tool executes; persist compact history + blackboard
+      initialize state -> repeat:
+        prepare one batch (subclass) [must resolve placeholders + update planned_cutoff]
+        execute prepared batch (base) [concurrent, fail-fast]
+        completion check (base) [return_value set]
+      finalize (base) [trim tail + optional persistence]
 
-    Subclasses implement only:
-    - `_initialize_run_state(...) -> dict`
-    - `_prepare_next_steps_batch(state) -> (state, list[StepCall])`
+    Subclasses implement:
+      - _initialize_run_state(...) -> RS
+      - _prepare_next_batch(state: RS) -> RS
     """
 
-    # ------------------------------------------------------------------ #
-    # Construction
-    # ------------------------------------------------------------------ #
     def __init__(
         self,
         name: str,
@@ -168,8 +180,8 @@ class ToolAgent(Agent, ABC):
         context_enabled: bool = False,
         *,
         tool_calls_limit: Optional[int] = None,
-        pre_invoke: Optional[AtomicInvokable | Callable] = None,
-        post_invoke: Optional[AtomicInvokable | Callable] = None,
+        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         history_window: Optional[int] = None,
     ) -> None:
         template = self._validate_role_prompt_template(role_prompt)
@@ -186,12 +198,12 @@ class ToolAgent(Agent, ABC):
         )
 
         self._toolbox: dict[str, Tool] = {}
-        self._blackboard: List[BlackboardEntry] = []
+        self._blackboard: list[BlackboardSlot] = []
 
         self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
 
-        # Always include the canonical return tool (avoid collisions by skipping).
+        # Always include canonical return tool (avoid collisions by skipping).
         self.register(return_tool, name_collision_mode="skip")
 
     # ------------------------------------------------------------------ #
@@ -205,11 +217,11 @@ class ToolAgent(Agent, ABC):
           - {TOOL_CALLS_LIMIT}
         """
         template = self._role_prompt
-        tool_calls_limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
         try:
             return template.format(
                 TOOLS=self.actions_context(),
-                TOOL_CALLS_LIMIT=tool_calls_limit_text,
+                TOOL_CALLS_LIMIT=limit_text,
             )
         except Exception as exc:  # pragma: no cover
             raise ToolAgentError(f"Failed to format ToolAgent role_prompt template: {exc}") from exc
@@ -232,11 +244,19 @@ class ToolAgent(Agent, ABC):
         self._tool_calls_limit = value
 
     @property
-    def blackboard(self) -> List[BlackboardEntry]:
-        """Read-only view (shallow copy) of the persisted blackboard."""
-        with self._invoke_lock:
-            return list(self._blackboard)
+    def blackboard(self) -> list[dict[str, Any]]:
+        """
+        Read-only serialized view of the persisted blackboard.
+        (Keeps backward-friendly dict shape.)
+        """
+        return [slot.to_dict() for slot in self._blackboard]
 
+    # ------------------------------------------------------------------ #
+    # Memory management
+    # ------------------------------------------------------------------ #
+    def clear_memory(self):
+        super().clear_memory()
+        self._blackboard.clear()
     # ------------------------------------------------------------------ #
     # Prompt Helpers
     # ------------------------------------------------------------------ #
@@ -299,7 +319,7 @@ class ToolAgent(Agent, ABC):
         tools = list(self._toolbox.values())
         return "\n".join(f"-- {t}" for t in tools)
 
-    def list_tools(self) -> Dict[str, Tool]:
+    def list_tools(self) -> dict[str, Tool]:
         return dict(self._toolbox)
 
     def has_tool(self, tool_full_name: str) -> bool:
@@ -354,17 +374,16 @@ class ToolAgent(Agent, ABC):
             if name_collision_mode == "skip":
                 return key
         self._toolbox[key] = tool
-
         return key
 
     def batch_register(
         self,
         tools: Sequence[Any] = (),
-        mcp_servers: Sequence[Tuple[str, Any]] = (),
-        a2a_servers: Sequence[Tuple[str, Any]] = (),
+        mcp_servers: Sequence[tuple[str, Any]] = (),
+        a2a_servers: Sequence[tuple[str, Any]] = (),
         *,
         name_collision_mode: str = "raise",
-    ) -> List[str]:
+    ) -> list[str]:
         if name_collision_mode not in ("raise", "skip", "replace"):
             raise ToolRegistrationError("name_collision_mode must be one of: 'raise', 'skip', 'replace'.")
 
@@ -378,7 +397,7 @@ class ToolAgent(Agent, ABC):
         except ToolDefinitionError:
             raise
 
-        registered: List[str] = []
+        registered: list[str] = []
         for tool in tool_list:
             key = tool.full_name
             if key in self._toolbox:
@@ -390,65 +409,69 @@ class ToolAgent(Agent, ABC):
                     continue
             self._toolbox[key] = tool
             registered.append(key)
-
         return registered
 
     # ------------------------------------------------------------------ #
     # Blackboard formatting
     # ------------------------------------------------------------------ #
-    def blackboard_dumps(
-        self,
-        obj: Optional[List[BlackboardEntry]] = None,
-        *,
-        peek: bool = False,
-    ) -> str:
-        if obj is None:
-            obj = self.blackboard
+    def blackboard_dumps(self, *, peek: bool = False) -> str:
+        """
+        Pretty representation of the persisted blackboard.
 
-        args_key = "resolved_args" if peek else "args"
-        view = [{"tool": step.get("tool"), "args": step.get(args_key, None)} for step in obj]
-
+        peek=False -> placeholder-view (args)
+        peek=True  -> resolved-view (resolved_args)
+        """
+        key = "resolved_args" if peek else "args"
+        view: list[dict[str, Any]] = []
+        for slot in self._blackboard:
+            d = slot.to_dict()
+            view.append({"tool": d.get("tool"), "args": d.get(key)})
         try:
-            return pprint.pformat(view, indent=2) #json.dumps(view, indent=indent, default=str)
+            import pprint
+            return pprint.pformat(view, indent=2)
         except Exception:  # pragma: no cover
             return str(view)
 
     # ------------------------------------------------------------------ #
-    # Placeholder resolution (supports literal-eval types)
+    # Placeholder resolution helpers (prepare-time)
     # ------------------------------------------------------------------ #
-    def _step_result_by_index(self, idx: int, *, board: Sequence[BlackboardEntry]) -> Any:
+    def _step_result_by_index(self, idx: int, *, board: Sequence[BlackboardSlot], resolvable_cutoff: int) -> Any:
         if not isinstance(idx, int):
             raise ToolAgentError(f"Step reference must be an int; got {type(idx).__name__!r}.")
         if idx < 0:
             raise ToolAgentError(f"Step reference must be >= 0; got {idx}.")
+        if idx > resolvable_cutoff:
+            raise ToolAgentError(
+                f"Step reference {idx} exceeds resolvable_cutoff={resolvable_cutoff}."
+            )
         if idx >= len(board):
-            raise ToolAgentError(f"Step reference {idx} out of range (blackboard length={len(board)}).")
+            raise ToolAgentError(
+                f"Step reference {idx} out of range (blackboard length={len(board)})."
+            )
+        slot = board[idx]
+        if not slot.is_executed():
+            # With the cutoff contract this should be unreachable, but keep it explicit.
+            raise ToolAgentError(f"Referenced step {idx} has no executed result.")
+        return slot.result
 
-        step = board[idx]
-        if not bool(step.get("completed", False)):
-            raise ToolAgentError(f"Referenced step {idx} has not been completed yet.")
-        if "result" not in step:
-            raise ToolAgentError("Blackboard entry missing 'result'.")
-        return step["result"]
-
-    def _resolve_step_refs(self, obj: Any, *, board: Sequence[BlackboardEntry]) -> Any:
+    def _resolve_placeholders(self, obj: Any, *, state: ToolAgentRunState) -> Any:
         """
-        Resolve `<<__step__N>>` placeholders recursively.
+        Resolve <<__step__N>> placeholders recursively.
 
-        Important semantics:
-        - If the entire string is exactly `<<__step__N>>`, return the referenced
-          result **as-is**, preserving its Python type (even if not a builtin).
-        - If the placeholder appears inside a larger string, substitute it with
-          `repr(result)` (fallback to `str(result)`).
+        Semantics (as agreed):
+        - Full-string "<<__step__N>>" returns the referenced result as-is (preserves type)
+        - Inline occurrences inside larger strings are replaced with repr(result)
         """
-        # Strings: full-token returns object as-is, inline gets repr-substitution.
+        board = state.blackboard
+        cutoff = state.resolvable_cutoff
+
         if isinstance(obj, str):
             m = _STEP_TOKEN.fullmatch(obj)
             if m:
-                return self._step_result_by_index(int(m.group(1)), board=board)
+                return self._step_result_by_index(int(m.group(1)), board=board, resolvable_cutoff=cutoff)
 
             def repl(match: re.Match[str]) -> str:
-                result = self._step_result_by_index(int(match.group(1)), board=board)
+                result = self._step_result_by_index(int(match.group(1)), board=board, resolvable_cutoff=cutoff)
                 try:
                     return repr(result)
                 except Exception:
@@ -456,423 +479,258 @@ class ToolAgent(Agent, ABC):
 
             return _STEP_TOKEN.sub(repl, obj)
 
-        # Containers (ast.literal_eval compatible)
         if isinstance(obj, list):
-            return [self._resolve_step_refs(v, board=board) for v in obj]
-
+            return [self._resolve_placeholders(v, state=state) for v in obj]
         if isinstance(obj, tuple):
-            return tuple(self._resolve_step_refs(v, board=board) for v in obj)
-
+            return tuple(self._resolve_placeholders(v, state=state) for v in obj)
         if isinstance(obj, set):
-            return {self._resolve_step_refs(v, board=board) for v in obj}
-
+            return {self._resolve_placeholders(v, state=state) for v in obj}
         if isinstance(obj, dict):
-            return {k: self._resolve_step_refs(v, board=board) for k, v in obj.items()}
+            return {k: self._resolve_placeholders(v, state=state) for k, v in obj.items()}
 
-        # Scalars / other: bool, None, numbers, bytes, etc. (return as-is)
+        # Scalars / unknown objects pass through unchanged.
         return obj
 
     # ------------------------------------------------------------------ #
-    # Base invariant resolve/validate/execute
+    # Execution (base-owned)
     # ------------------------------------------------------------------ #
-    def _resolve_steps_batch_args(
-        self,
-        *,
-        state: Dict[str, Any],
-        batch: List[StepCall],
-    ) -> List[ResolvedStepCall]:
+    def _execute_prepared_batch(self, state: RS) -> RS:
         """
-        Base-owned phase: validate + resolve planned StepCalls into ResolvedStepCalls.
+        Execute the currently prepared (planned-but-not-executed) slice:
 
-        Enforced here:
-        - StepCall structural correctness
-        - Tool existence
-        - Return-step constraints (<= 1 return per batch)
-        - Placeholder legality: ALL refs must be to already executed steps
-          (i.e., indices < len(pre_batch_blackboard))
-        - Placeholder resolution (snapshot-based) into raw_args
+          start = resolvable_cutoff + 1
+          end   = planned_cutoff
+
+        Concurrency: thread pool; fail-fast.
+        On success: resolvable_cutoff is advanced to planned_cutoff.
+        On tool error: sets slot.error and raises including failing index.
         """
-        if not isinstance(state, dict):
-            raise ToolAgentError("run-state must be a dict.")
-        if "blackboard" not in state:
-            raise ToolAgentError("run-state missing required key 'blackboard'.")
-        board_snapshot = state["blackboard"]
+        start = state.resolvable_cutoff + 1
+        end = state.planned_cutoff
 
-        # Tool existence + structure checks + return constraint.
-        return_count = 0
-
-        resolved: List[ResolvedStepCall] = []
-
-        for i, step in enumerate(batch):
-            if not isinstance(step, StepCall):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: batch item {i} is not a StepCall "
-                    f"(got {type(step).__name__!r})."
-                )
-
-            if not isinstance(step.index, int) or step.index < 0:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: step.index must be int >= 0; got {step.index!r}."
-                )
-            if not isinstance(step.tool_name, str) or not step.tool_name.strip():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: step.tool_name must be a non-empty str; got {step.tool_name!r}."
-                )
-
-            # Validate tool exists.
-            self.get_tool(step.tool_name)
-
-            if step.tool_name == return_tool.full_name:
-                return_count += 1
-                if return_count > 1:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: a batch may contain at most one return step."
-                    )
-
-            # Placeholder legality: all refs must be to already executed steps.
-            # Resolve placeholders into execution args (may return non-dict args; tool decides).
-            raw_args = self._resolve_step_refs(step.args, board=board_snapshot)
-
-            resolved.append(
-                ResolvedStepCall(
-                    index=step.index,
-                    tool_name=step.tool_name,
-                    args=step.args,
-                    resolved_args=raw_args,
-                )
-            )
-
-        return resolved
-
-    def _execute_steps_batch(self, *, resolved_batch: List[ResolvedStepCall]) -> List[BlackboardEntry]:
-        """
-        Base-owned phase: execute tools concurrently (fail-fast) and return blackboard entries
-        in *step-index order* (ascending by `ResolvedStepCall.index`).
-
-        Key invariants enforced here (to keep blackboard/placeholder semantics sane):
-        - Each step.index in the batch must be unique.
-        - The returned list is ordered by step.index (NOT by completion order, and not necessarily
-        by the incoming `resolved_batch` order if a planner emits them out of order).
-        - This method does NOT mutate the run-state blackboard; `_invoke` appends entries.
-
-        Notes:
-        - We intentionally do not “fill gaps” for missing indices; if a batch contains
-        {index: 10, index: 12} we return two entries ordered [10, 12]. If your runtime
-        requires contiguous indices, enforce that earlier (e.g., in batch validation).
-        """
-        if not resolved_batch:
-            raise ToolAgentError("resolved_batch must be non-empty.")
-
-        # ---- Enforce and prepare index ordering ----
-        indices: List[int] = [step.index for step in resolved_batch]
-        if any((not isinstance(i, int)) for i in indices):
-            raise ToolAgentError("All resolved step indices must be ints.")
-        if any(i < 0 for i in indices):
-            raise ToolAgentError("All resolved step indices must be >= 0.")
-
-        # Uniqueness is critical: duplicate indices would make ordering ambiguous and
-        # would corrupt placeholder semantics (which rely on stable step positions).
-        if len(set(indices)) != len(indices):
-            # Keep a helpful error message that pinpoints duplicates.
-            seen: set[int] = set()
-            dups: List[int] = []
-            for i in indices:
-                if i in seen and i not in dups:
-                    dups.append(i)
-                seen.add(i)
+        if end < start:
             raise ToolAgentError(
-                f"resolved_batch contains duplicate step index/indices: {sorted(dups)}. "
-                "Each step in a batch must have a unique index."
+                f"{type(self).__name__}.{self.name}: no prepared steps to execute "
+                f"(resolvable_cutoff={state.resolvable_cutoff}, planned_cutoff={state.planned_cutoff})."
             )
 
-        # We'll execute in the provided order, but we will *emit* results in index order.
-        # Sorting here gives us a deterministic final order and a deterministic mapping
-        # from step.index -> output position.
-        steps_sorted: List[ResolvedStepCall] = sorted(resolved_batch, key=lambda s: s.index)
+        if end >= len(state.blackboard):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: planned_cutoff={end} out of range for blackboard length={len(state.blackboard)}."
+            )
 
-        # Preallocate by sorted position so we can fill from futures without re-sorting entries.
-        results_by_sorted_pos: List[Optional[BlackboardEntry]] = [None] * len(steps_sorted)
+        steps_to_run = list(range(start, end + 1))
 
-        def run_one(step: ResolvedStepCall) -> Tuple[int, BlackboardEntry]:
-            """
-            Execute a single tool call and return (step.index, entry).
-            Returning the index lets the caller place results deterministically regardless
-            of completion order.
-            """
-            tool = self.get_tool(step.tool_name)
+        # Budget enforcement (non-return only).
+        if self._tool_calls_limit is not None:
+            non_return_planned = 0
+            for idx in steps_to_run:
+                tool_name = state.blackboard[idx].tool
+                if tool_name is NO_VAL:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: slot {idx} is not prepared (tool is NO_VAL)."
+                    )
+                if tool_name != return_tool.full_name:
+                    non_return_planned += 1
+            if state.tool_calls_used + non_return_planned > self._tool_calls_limit:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: tool_calls_limit exceeded "
+                    f"(limit={self._tool_calls_limit}, used={state.tool_calls_used}, planned={non_return_planned})."
+                )
+
+        def run_one(idx: int) -> tuple[int, Any]:
+            slot = state.blackboard[idx]
+            if not slot.is_prepared():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: slot {idx} is not prepared for execution."
+                )
+            tool_name = slot.tool
+            tool = self.get_tool(tool_name)
+
             try:
-                # Tools generally expect Mapping[str, Any], but we allow richer literal types
-                # as args; a tool may normalize/validate internally.
-                result = tool.invoke(step.resolved_args)
+                result = tool.invoke(slot.resolved_args)
             except ToolInvocationError:
                 raise
             except Exception as exc:  # pragma: no cover
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed for {step.tool_name!r}: {exc}"
+                    f"{type(self).__name__}.{self.name}: tool call failed at index {idx} for {tool_name!r}: {exc}"
                 ) from exc
+            return idx, result
 
-            entry: BlackboardEntry = {
-                "tool": step.tool_name,
-                "raw_args": step.args,
-                "resolved_args": step.resolved_args,
-                "completed": True,
-                "result": result,
-            }
-            return step.index, entry
+        if len(steps_to_run) == 1:
+            idx = steps_to_run[0]
+            try:
+                _idx, result = run_one(idx)
+            except Exception as exc:
+                state.blackboard[idx].error = exc
+                raise
+            state.blackboard[idx].result = result
+        else:
+            executor = ThreadPoolExecutor()
+            try:
+                futures = {executor.submit(run_one, idx): idx for idx in steps_to_run}
+                for fut in as_completed(futures):
+                    idx = futures[fut]
+                    try:
+                        _idx, result = fut.result()
+                    except Exception as exc:
+                        state.blackboard[idx].error = exc
+                        # Fail-fast: raise immediately. Outstanding futures are canceled on shutdown.
+                        raise
+                    state.blackboard[idx].result = result
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
 
-        # Fast path for single-step batches.
-        if len(steps_sorted) == 1:
-            _idx, entry = run_one(steps_sorted[0])
-            return [entry]
+        # Post-execution bookkeeping (fail-fast means we only reach here if all succeeded)
+        state.tool_calls_used += sum(
+            1 for sc in steps_to_run if state.blackboard[sc].tool != return_tool.full_name)
+        for idx in steps_to_run[::-1]:
+            tool_name = state.blackboard[idx].tool
+            if tool_name == return_tool.full_name:
+                # Return tracking: only one return allowed per run.
+                state.return_value = state.blackboard[idx].result
+                break
+        state.resolvable_cutoff = state.planned_cutoff
+        return state
 
-        # Map index -> sorted position for O(1) placement.
-        index_to_sorted_pos: Dict[int, int] = {step.index: pos for pos, step in enumerate(steps_sorted)}
-
-        # Execute concurrently, fail-fast on the first exception.
-        # (The executor is shut down in a finally-block below; futures may still run briefly,
-        # but we stop collecting results as soon as an exception is raised.)
-        executor = ThreadPoolExecutor()
-        try:
-            future_to_index = {executor.submit(run_one, step): step.index for step in steps_sorted}
-            for fut in as_completed(future_to_index):
-                idx = future_to_index[fut]
-                # fut.result() raises if the tool call raised -> fail-fast
-                _idx, entry = fut.result()
-                pos = index_to_sorted_pos[idx]
-                results_by_sorted_pos[pos] = entry
-        finally:
-            executor.shutdown(wait=True, cancel_futures=True)
-
-        # Guarantee all entries produced and return in ascending step.index order.
-        out: List[BlackboardEntry] = []
-        for pos, entry in enumerate(results_by_sorted_pos):
-            if entry is None:  # pragma: no cover
-                # If this happens, something went wrong in internal accounting.
-                missing_step = steps_sorted[pos]
-                raise ToolAgentError(
-                    f"Internal error: missing executed entry for step index {missing_step.index}."
-                )
-            out.append(entry)
-
-        return out
+    # ------------------------------------------------------------------ #
+    # Finalization helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _trim_empty_tail(board: list[BlackboardSlot]) -> list[BlackboardSlot]:
+        """
+        Drop trailing empty/unplanned slots to avoid memory bloat.
+        """
+        if not board:
+            return []
+        last = len(board) - 1
+        while last >= 0 and board[last].is_empty():
+            last -= 1
+        return board[: last + 1]
 
     # ------------------------------------------------------------------ #
     # Template Method (FINAL)
     # ------------------------------------------------------------------ #
-    def _invoke(self, *, messages: List[Dict[str, str]]) -> Tuple[List[Dict[str,str]], Any]:
+    def _invoke(self, *, messages: list[dict[str, str]]) -> tuple[list[dict[str, str]], Any]:
         """
         FINAL template method (do not override in subclasses).
 
-        Subclasses provide planning hooks:
+        Requires subclasses to implement:
           - _initialize_run_state(...)
-          - _prepare_next_steps_batch(...)
+          - _prepare_next_batch(...)
         """
         if not messages:
             raise ToolAgentError("ToolAgent._invoke requires a non-empty messages list.")
 
-        # Preserve the original user message for persistence (pre-mutation).
+        # Snapshot original user message for history preservation.
         original_user_msg = dict(messages[-1])
 
-        # Runtime-only counter (non-return calls only).
-        non_return_tool_call_count = 0
-        tool_calls_limit = self.tool_calls_limit  # None => unlimited
+        state = self._initialize_run_state(messages=messages)
 
-        # Initialize per-run mutable state.
-        saved_blackboard = self.blackboard  # persisted board snapshot
-        state = self._initialize_run_state(messages=list(messages), saved_blackboard=saved_blackboard)
-        if not isinstance(state, dict):
-            raise ToolAgentError("_initialize_run_state must return a dict run-state.")
-        if "messages" not in state or "blackboard" not in state:
-            raise ToolAgentError("run-state must include 'messages' and 'blackboard' keys.")
+        # Base invariants: state must satisfy required fields.
+        if not isinstance(state, ToolAgentRunState):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: _initialize_run_state must return a ToolAgentRunState (or subclass)."
+            )
 
         while True:
-            # 1) Plan next batch (planning only; StepCalls: index, tool_name, args)
-            state, batch = self._prepare_next_steps_batch(state=state)
-            if not isinstance(state, dict):
-                raise ToolAgentError("_prepare_next_steps_batch must return a dict run-state.")
-            if not batch:
+            # A1 invariant: before preparing a new batch, there must be no pending planned steps.
+            if state.planned_cutoff != state.resolvable_cutoff:
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: planned an empty batch; "
-                    "each iteration must invoke at least one tool."
+                    f"{type(self).__name__}.{self.name}: violation: planned_cutoff={state.planned_cutoff} "
+                    f"!= resolvable_cutoff={state.resolvable_cutoff}. Prepare must be followed by execute before next prepare."
                 )
 
-            # 2) Resolve + validate batch (base-owned)
-            resolved_batch = self._resolve_steps_batch_args(state=state, batch=batch)
+            state = self._prepare_next_batch(state)
 
-            # Return constraints already enforced in resolve; compute budget inline.
-            return_in_batch = sum(1 for s in resolved_batch if s.tool_name == return_tool.full_name)
-            non_return_in_batch = len(resolved_batch) - return_in_batch
-
-            if tool_calls_limit is not None and (non_return_tool_call_count + non_return_in_batch) > tool_calls_limit:
+            if state.planned_cutoff == state.resolvable_cutoff:
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call limit exceeded "
-                    f"({non_return_tool_call_count}+{non_return_in_batch} > {tool_calls_limit})."
+                    f"{type(self).__name__}.{self.name}: prepare produced an empty batch (planned_cutoff did not advance)."
                 )
-            non_return_tool_call_count += non_return_in_batch
 
-            # 3) Execute concurrently (fail-fast) -> blackboard entries (base-owned)
-            entries = self._execute_steps_batch(resolved_batch=resolved_batch)
+            state = self._execute_prepared_batch(state)
 
-            # 4) Commit results to the running blackboard in batch order.
-            run_board = state.get("blackboard")
-            if not isinstance(run_board, list):
-                raise ToolAgentError("run-state['blackboard'] must be a list.")
-            run_board.extend(entries)
-
-            # 5) Termination: if return step executed, return its value.
-            if return_in_batch == 1:
-                # Find the return entry (should exist exactly once).
-                for entry in entries:
-                    if entry.get("tool") == return_tool.full_name:
-                        return_value = entry.get("result")
-                        break
-                else:  # pragma: no cover
-                    raise ToolAgentError("Internal error: return step executed but no return entry found.")
-
-                # Persist context only after final result is established.
+            # Completion check: return_value set iff return executed.
+            if state.return_value is not NO_VAL:
+                # Persist only meaningful blackboard entries if context is enabled.
                 if self.context_enabled:
-                    self._blackboard.clear()
-                    self._blackboard.extend(run_board)
-
-                # Persist compact history: [latest original user msg] + [assistant(final result)]
+                    trimmed = self._trim_empty_tail(state.blackboard)
+                    self._blackboard = trimmed
                 try:
-                    assistant_text = repr(return_value)
+                    assistant = repr(state.return_value)
                 except Exception:  # pragma: no cover
-                    assistant_text = str(return_value)
+                    assistant = str(state.return_value)
+                newest_history = [original_user_msg, {"role": "assistant", "content": assistant}]
 
-                newest_history = [original_user_msg, {"role": "assistant", "content": assistant_text}]
-                return newest_history, return_value
+                return newest_history, state.return_value
 
     # ------------------------------------------------------------------ #
-    # Required planning hooks
+    # Subclass Hooks
     # ------------------------------------------------------------------ #
     @abstractmethod
-    def _initialize_run_state(
-        self,
-        *,
-        messages: List[Dict[str, str]],
-        saved_blackboard: List[BlackboardEntry],
-    ) -> Dict[str, Any]:
+    def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> RS:
         """
-        Create a per-run mutable dict run-state.
-
-        Must include:
-          - state["messages"]: mutable list[dict[str,str]] copy
-          - state["blackboard"]: mutable list[BlackboardEntry] copy
+        Must:
+          - snapshot messages and any persisted blackboard prefix (if context enabled)
+          - append (tool_calls_limit + 1) empty slots, or a fixed cap if unlimited
+          - set resolvable_cutoff = prefix_len - 1
+          - set planned_cutoff = resolvable_cutoff
         """
         raise NotImplementedError
 
     @abstractmethod
-    def _prepare_next_steps_batch(
-        self,
-        *,
-        state: Dict[str, Any],
-    ) -> Tuple[Dict[str, Any], List[StepCall]]:
+    def _prepare_next_batch(self, state: RS) -> RS:
         """
-        Planning hook: produce the next batch of StepCall objects.
-
-        StepCall is minimal:
-          - index
-          - tool_name (full Tool.full_name)
-          - args (placeholder-view, literal-eval compatible)
-
-        Returns (state, batch). Batch must be non-empty.
+        Must:
+          - plan exactly one batch per loop iteration
+          - validate placeholders against state.resolvable_cutoff (raise on violation)
+          - fill slots [planned_cutoff+1 .. new_planned_cutoff] contiguously:
+              slot.tool, slot.args, slot.resolved_args
+            where slot.resolved_args is produced by resolving placeholders now
+            (use self._resolve_placeholders(obj, state=state))
+          - advance state.planned_cutoff
+          - may plan a return tool call; base will detect it after execution
         """
         raise NotImplementedError
 
-    # ------------------------------------------------------------------ #
-    # Memory + Serialization
-    # ------------------------------------------------------------------ #
-    def clear_memory(self) -> None:
-        super().clear_memory()
-        self._blackboard.clear()
 
-    def to_dict(self) -> Dict[str, Any]:
-        d = super().to_dict()
-        d["toolbox"] = [t.to_dict() for t in self._toolbox.values()]
-        d["blackboard"] = self._blackboard.copy()
-        d["tool_calls_limit"] = self._tool_calls_limit
-        return d
-
-
-def _strip_code_fences(text: str) -> str:
-    """Strip a single pair of markdown code fences if present."""
-    s = text.strip()
-    s = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", s)
-    s = re.sub(r"\s*```\s*$", "", s)
-    return s.strip()
-
-
-def _extract_outermost_list_literal(text: str) -> str:
+@dataclass(slots=True)
+class PlanActRunState(ToolAgentRunState):
     """
-    Extract the outermost list literal using a simple heuristic:
-    - If the cleaned text starts with '[' and ends with ']', return it.
-    - Otherwise slice from first '[' to last ']' and return that.
+    PlanAct extends the base run state with:
+      - plan_batches: the entire plan, grouped into executable concurrent batches
+      - batch_index: which batch to load next during prepare
+
+    All other loop mechanics (cutoffs, execution, fail-fast, return_value) are handled by ToolAgent.
     """
-    s = text.strip()
-    if s.startswith("[") and s.endswith("]"):
-        return s
-
-    start = s.find("[")
-    end = s.rfind("]")
-    if start == -1 or end == -1 or end <= start:
-        raise ToolAgentError("Planner output did not contain a bracketed list literal.")
-    return s[start : end + 1].strip()
+    plan_batches: list[list[StepCall]] = field(default_factory=list)
+    batch_index: int = 0
 
 
-def _collect_step_refs(value: Any) -> List[int]:
-    """
-    Collect all <<__step__N>> references found anywhere inside a Python-literal structure.
-    We scan strings (including embedded placeholders) and recurse through containers.
-    """
-    out: List[int] = []
+BLACKBOARD_INJECTION_TEMPLATE = """\
+# BLACKBOARD CONTEXT (READ-ONLY)
+The following blackboard shows the arguments and tool calls made for the
+completed steps 0 to {RESOLVABLE_CUTOFF}.
 
-    if isinstance(value, str):
-        for m in _STEP_TOKEN.finditer(value):
-            out.append(int(m.group(1)))
-        return out
+Note that the NEW plan you are making is starting at step {NEW_START}.
+Refer to the below steps to reuse any results needed for your current
+or future tasks.
 
-    if isinstance(value, dict):
-        for k, v in value.items():
-            out.extend(_collect_step_refs(k))
-            out.extend(_collect_step_refs(v))
-        return out
+{BLACKBOARD_CONTEXT}
+"""
 
-    if isinstance(value, (list, tuple, set)):
-        for item in value:
-            out.extend(_collect_step_refs(item))
-        return out
-
-    return out
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Plan-first 'PlanActAgent' class
-# ───────────────────────────────────────────────────────────────────────────────
-class PlanActAgent(ToolAgent):
-    """
-    Plan-first-then-execute ToolAgent.
-
-    Contract:
-    - `_initialize_run_state` performs the one-shot planner LLM call and parses a single
-      Python literal: List[List[{"tool": str, "args": dict}]].
-    - Each inner list is a batch; steps within a batch must be independent (no intra-batch refs).
-    - `_prepare_next_steps_batch` yields the next batch by cursor (O(1)).
-    - ToolAgent owns placeholder resolution, budgeting during execution, tool execution,
-      blackboard mutation, and termination (return tool).
-    """
-
+class PlanActAgent(ToolAgent[PlanActRunState]):
     def __init__(
         self,
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        context_enabled: bool = False,
         *,
-        tool_calls_limit: Optional[int] = None,
-        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        history_window: Optional[int] = None,
+        context_enabled: bool = False,
+        tool_calls_limit: int | None = None,
+        pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
+        post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
+        history_window: int | None = None,
     ) -> None:
         super().__init__(
             name=name,
@@ -886,154 +744,232 @@ class PlanActAgent(ToolAgent):
             history_window=history_window,
         )
 
-    def _initialize_run_state(
-        self,
-        *,
-        messages: List[Dict[str, str]],
-        saved_blackboard: List[BlackboardEntry],
-    ) -> Dict[str, Any]:
+    # ------------------------------------------------------------------ #
+    # Hook: initialize (one-shot planning)
+    # ------------------------------------------------------------------ #
+    def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> PlanActRunState:
         if not messages:
-            raise ToolAgentError("PlanActAgent requires a non-empty messages list.")
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
 
-        # Copy inputs (do not mutate caller messages).
-        working_messages: List[Dict[str, str]] = [dict(m) for m in messages]
-        run_board: List[BlackboardEntry] = list(saved_blackboard)
+        prefix: list[BlackboardSlot] = list(self._blackboard) if self.context_enabled else []
+        prefix_len = len(prefix)
 
-        # Inject blackboard into the latest message string if context enabled and blackboard present.
-        if self.context_enabled and run_board:
-            last = dict(working_messages[-1])
-            content = last.get("content")
-            if not isinstance(content, str):
-                raise ToolAgentError(
-                    "Last message must include a string 'content' field for blackboard injection."
-                )
-            injection = "\n\n---\nBLACKBOARD OF PRIOR STEPS\n" + self.blackboard_dumps(run_board, peek=True)
-            last["content"] = content + injection
-            working_messages[-1] = last
+        working_messages = messages
+        if self.context_enabled and len(self._blackboard)>0:
+            working_messages = self.inject_blackboard(working_messages)
+        raw = self._llm_engine.invoke(working_messages)
 
-        # One-shot plan call (must emit one Python literal).
-        plan_text = self._llm_engine.invoke(working_messages)
-        if not isinstance(plan_text, str):
-            plan_text = str(plan_text)
+        plan = self._parse_plan_json(raw)
+        stepcalls = self._to_stepcalls(plan)
 
-        plan_text = _strip_code_fences(plan_text)
-        plan_literal = _extract_outermost_list_literal(plan_text)
+        self._validate_return_is_final(stepcalls)
+        self._enforce_budget(stepcalls)
+
+        # Validate intra-batch dependency constraints (prefix refs allowed).
+        self._validate_intra_batch_deps(stepcalls, prefix_len=prefix_len)
+
+        plan_batches = self._group_by_batch(stepcalls)
+
+        resolvable_cutoff = prefix_len - 1
+        planned_cutoff = resolvable_cutoff
+
+        reserve = (len(stepcalls) if self._tool_calls_limit is None else self._tool_calls_limit + 1)
+        blackboard = prefix + [BlackboardSlot() for _ in range(reserve)]
+
+        return PlanActRunState(
+            messages=working_messages,
+            blackboard=blackboard,
+            resolvable_cutoff=resolvable_cutoff,
+            planned_cutoff=planned_cutoff,
+            tool_calls_used=0,
+            return_value=NO_VAL,
+            plan_batches=plan_batches,
+            batch_index=0,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Hook: prepare (load next batch)
+    # ------------------------------------------------------------------ #
+    def _prepare_next_batch(self, state: PlanActRunState) -> PlanActRunState:
+        if state.batch_index >= len(state.plan_batches):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: no remaining batches "
+                f"(batch_index={state.batch_index}, total={len(state.plan_batches)})."
+            )
+
+        batch = state.plan_batches[state.batch_index]
+        if not batch:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: empty batch at index {state.batch_index}.")
+
+        start = state.planned_cutoff + 1
+        end = start + len(batch) - 1
+        if end >= len(state.blackboard):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: insufficient blackboard capacity for batch {state.batch_index} "
+                f"(need end={end}, len={len(state.blackboard)})."
+            )
+
+        for offset, step in enumerate(batch):
+            idx = start + offset
+            slot = state.blackboard[idx]
+            slot.tool = step.tool_name
+            slot.args = step.args
+            slot.resolved_args = self._resolve_placeholders(step.args, state=state)
+
+        state.planned_cutoff = end
+        state.batch_index += 1
+        return state
+
+    # ------------------------------------------------------------------ #
+    # Planning helpers
+    # ------------------------------------------------------------------ #
+    def inject_blackboard(
+        self,
+        messages: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+
+        out = [dict(m) for m in messages]
+        prefix_len = len(self._blackboard)
+        blackboard_context = self.blackboard_dumps(peek=False)
+        hint = BLACKBOARD_INJECTION_TEMPLATE.format(RESOLVABLE_CUTOFF=prefix_len -1,
+                                                    NEW_START=prefix_len,
+                                                    BLACKBOARD_CONTEXT=blackboard_context)
+        msg, out = out[-1], out[:-1]
+        msg["content"] += "\n\n" + hint
+        out += [msg]
+        return out
+
+    @staticmethod
+    def _strip_json_fences(text: str) -> str:
+        s = (text or "").strip()
+        if s.startswith("```"):
+            s = s.split("\n", 1)[1] if "\n" in s else ""
+            if s.rstrip().endswith("```"):
+                s = s.rstrip()[:-3]
+        return s.strip()
+
+    def _parse_plan_json(self, raw: Any) -> list[dict[str, Any]]:
+        text = raw if isinstance(raw, str) else str(raw)
+        cleaned = self._strip_json_fences(text)
+        if not cleaned:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: planner returned empty output.")
 
         try:
-            parsed = ast.literal_eval(plan_literal)
+            parsed = json.loads(cleaned)
         except Exception as exc:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: failed to parse planner output via ast.literal_eval: {exc}"
-            ) from exc
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: planner output is not valid JSON: {exc}") from exc
 
-        # Validate top-level structure: List[List[dict]]
         if not isinstance(parsed, list) or not parsed:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: plan must be a non-empty list of batches.")
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: planner output must be a non-empty JSON array.")
 
-        return_name = return_tool.full_name
-        last_batch_idx = len(parsed) - 1
-
-        return_count = 0
-        return_pos: Optional[Tuple[int, int]] = None
-        non_return_count = 0
-
-        # Validate each batch and each step (shape + tool existence + args dict).
-        for bi, batch in enumerate(parsed):
-            if not isinstance(batch, list) or not batch:
+        for i, item in enumerate(parsed):
+            if not isinstance(item, dict):
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: plan element {i} must be an object.")
+            if set(item.keys()) != {"tool", "args", "batch"}:
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: batch {bi} must be a non-empty list of step dicts."
+                    f"{type(self).__name__}.{self.name}: plan element {i} must have exactly keys "
+                    f"{{'tool','args','batch'}} (got {sorted(item.keys())})."
                 )
+        return parsed  # type: ignore[return-value]
 
-            for si, step in enumerate(batch):
-                if not isinstance(step, dict):
-                    raise ToolAgentError(f"{type(self).__name__}.{self.name}: step ({bi},{si}) must be a dict.")
+    def _to_stepcalls(self, plan: list[dict[str, Any]]) -> list[StepCall]:
+        out: list[StepCall] = []
+        for i, step in enumerate(plan):
+            tool_name = step.get("tool")
+            args = step.get("args")
+            batch = step.get("batch")
 
-                if set(step.keys()) != {"tool", "args"}:
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: step {i} has invalid 'tool'.")
+            if not isinstance(args, dict):
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: step {i} 'args' must be an object/dict.")
+            if not isinstance(batch, int) or batch < 0:
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: step {i} 'batch' must be int >= 0.")
+            if not self.has_tool(tool_name):
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool {tool_name!r} in step {i}.")
+
+            out.append(StepCall(batch=batch, tool_name=tool_name, args=dict(args)))
+        return out
+
+    def _validate_return_is_final(self, stepcalls: list[StepCall]) -> None:
+        ret_name = return_tool.full_name
+        ret_positions = [i for i, sc in enumerate(stepcalls) if sc.tool_name == ret_name]
+        if len(ret_positions) != 1:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan must contain exactly one return step; found {len(ret_positions)}."
+            )
+        if ret_positions[0] != len(stepcalls) - 1:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return step must be the final step "
+                f"(found at index {ret_positions[0]} of {len(stepcalls) - 1})."
+            )
+
+    def _enforce_budget(self, stepcalls: list[StepCall]) -> None:
+        if self._tool_calls_limit is None:
+            return
+        non_return = sum(1 for sc in stepcalls if sc.tool_name != return_tool.full_name)
+        if non_return > self._tool_calls_limit:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan exceeds tool_calls_limit "
+                f"(limit={self._tool_calls_limit}, non_return_steps={non_return})."
+            )
+
+    @staticmethod
+    def _group_by_batch(stepcalls: list[StepCall]) -> list[list[StepCall]]:
+        buckets: dict[int, list[StepCall]] = {}
+        for sc in stepcalls:
+            buckets.setdefault(sc.batch, []).append(sc)
+        return [buckets[b] for b in sorted(buckets)]
+
+    def _validate_intra_batch_deps(self, stepcalls: list[StepCall], *, prefix_len: int) -> None:
+        """
+        Enforce: if a placeholder references a NEW step in this plan, the referenced step must be
+        in a strictly smaller batch. Prefix references are always allowed.
+        """
+        n = len(stepcalls)
+        # New steps occupy global indices [prefix_len .. prefix_len+n-1] in plan order.
+        batch_by_global: dict[int, int] = {prefix_len + i: stepcalls[i].batch for i in range(n)}
+
+        for i, sc in enumerate(stepcalls):
+            cur_global = prefix_len + i
+            cur_batch = sc.batch
+            for ref in self._extract_step_refs_json(sc.args):
+                if ref < 0:
+                    raise ToolAgentError(f"{type(self).__name__}.{self.name}: negative step reference {ref}.")
+                if ref < prefix_len:
+                    continue  # prefix always allowed
+                if ref >= prefix_len + n:
                     raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: step ({bi},{si}) must have exactly keys "
-                        f"{{'tool','args'}} (got {sorted(step.keys())})."
+                        f"{type(self).__name__}.{self.name}: step {cur_global} references out-of-range step {ref} "
+                        f"(prefix_len={prefix_len}, plan_steps={n})."
+                    )
+                dep_batch = batch_by_global[ref]
+                if dep_batch >= cur_batch:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: invalid dependency by batch: "
+                        f"step {cur_global} (batch={cur_batch}) references step {ref} (batch={dep_batch})."
                     )
 
-                tool_name = step.get("tool")
-                if not isinstance(tool_name, str) or not tool_name.strip():
-                    raise ToolAgentError(f"{type(self).__name__}.{self.name}: step ({bi},{si}) has invalid 'tool'.")
+    @staticmethod
+    def _extract_step_refs_json(obj: Any) -> set[int]:
+        refs: set[int] = set()
 
-                if not self.has_tool(tool_name):
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: unknown tool {tool_name!r} in step ({bi},{si})."
-                    )
+        def walk(v: Any) -> None:
+            if isinstance(v, dict):
+                for vv in v.values():
+                    walk(vv)
+                return
+            if isinstance(v, list):
+                for vv in v:
+                    walk(vv)
+                return
+            if isinstance(v, str):
+                for m in _STEP_TOKEN.finditer(v):
+                    refs.add(int(m.group(1)))
+                return
 
-                args = step.get("args")
-                if not isinstance(args, dict):
-                    raise ToolAgentError(f"{type(self).__name__}.{self.name}: step ({bi},{si}) 'args' must be a dict.")
-
-                if tool_name == return_name:
-                    return_count += 1
-                    return_pos = (bi, si)
-                else:
-                    non_return_count += 1
-
-        # Return must occur exactly once.
-        if return_count != 1 or return_pos is None:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan must contain exactly one return step; found {return_count}."
-            )
-
-        # Return must be only in last batch and last step of that batch.
-        ret_bi, ret_si = return_pos
-        if ret_bi != last_batch_idx:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return step must occur only in the last batch "
-                f"(found in batch {ret_bi}, last batch is {last_batch_idx})."
-            )
-        if ret_si != (len(parsed[ret_bi]) - 1):
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: return step must be the last step in the plan.")
-
-        # Early tool-call budget check (return does not count).
-        if self.tool_calls_limit is not None and non_return_count > self.tool_calls_limit:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan requires {non_return_count} non-return tool calls "
-                f"but tool_calls_limit={self.tool_calls_limit}."
-            )
-
-        # Normalize into StepCalls with deterministic global indices (PlanAct owns indices).
-        base_len = len(run_board)
-        global_counter = 0
-        plan_batches: List[List[StepCall]] = []
-
-        for batch in parsed:
-            batch_calls: List[StepCall] = []
-            for step in batch:
-                idx = base_len + global_counter
-                global_counter += 1
-                batch_calls.append(StepCall(index=idx, tool_name=step["tool"], args=step["args"]))
-            plan_batches.append(batch_calls)
-
-        return {
-            "messages": working_messages,
-            "blackboard": run_board,
-            "plan_batches": plan_batches,
-            "next_batch_pos": 0,
-        }
-
-    def _prepare_next_steps_batch(self, *, state: Dict[str, Any]) -> Tuple[Dict[str, Any], List[StepCall]]:
-        plan_batches = state.get("plan_batches")
-        if not isinstance(plan_batches, list):
-            raise ToolAgentError("run-state missing 'plan_batches' (internal error).")
-
-        pos = state.get("next_batch_pos", 0)
-        if not isinstance(pos, int) or pos < 0:
-            raise ToolAgentError("run-state['next_batch_pos'] must be an int >= 0 (internal error).")
-
-        if pos >= len(plan_batches):
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: plan exhausted (no remaining batches).")
-
-        batch = plan_batches[pos]
-        if not isinstance(batch, list) or not batch:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: planned batch at position {pos} is invalid/empty.")
-
-        state["next_batch_pos"] = pos + 1
-        return state, batch
+        walk(obj)
+        return refs
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Iterative Plan 'ReActAgent' class
