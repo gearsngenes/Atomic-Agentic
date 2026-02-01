@@ -85,7 +85,12 @@ class BlackboardSlot:
       - Executed: result != NO_VAL
 
     Note: error is optional for debugging; execution is fail-fast.
+
+    `step`:
+      - If left as NO_VAL, callers may compute an index from list position.
     """
+    step: int | Any = NO_VAL
+
     tool: str | Any = NO_VAL
     args: Any = NO_VAL
     resolved_args: Any = NO_VAL
@@ -107,6 +112,7 @@ class BlackboardSlot:
         - Keeps sentinel NO_VAL values as-is (caller can post-process if desired).
         """
         return {
+            "step": self.step,
             "tool": self.tool,
             "args": self.args,
             "resolved_args": self.resolved_args,
@@ -114,7 +120,6 @@ class BlackboardSlot:
             "error": self.error,
             "completed": bool(self.is_executed()),
         }
-
 
 @dataclass(slots=True)
 class ToolAgentRunState:
@@ -420,18 +425,34 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         peek=False -> placeholder-view (args)
         peek=True  -> resolved-view (resolved_args)
+
+        Includes explicit `step` numbering to make global indexing unambiguous.
+        If a slot's `step` is NO_VAL, the list position is used.
         """
         key = "resolved_args" if peek else "args"
         view: list[dict[str, Any]] = []
-        for slot in self._blackboard:
+
+        for i, slot in enumerate(self._blackboard):
             d = slot.to_dict()
-            view.append({"tool": d.get("tool"), "args": d.get(key)})
+
+            step_val = d.get("step", i)
+            if step_val is NO_VAL:
+                step_val = i
+
+            view.append(
+                {
+                    "step": step_val,
+                    "tool": d.get("tool"),
+                    "args": d.get(key),
+                }
+            )
+
         try:
             import pprint
+
             return pprint.pformat(view, indent=2)
         except Exception:  # pragma: no cover
             return str(view)
-
     # ------------------------------------------------------------------ #
     # Placeholder resolution helpers (prepare-time)
     # ------------------------------------------------------------------ #
@@ -754,9 +775,15 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         prefix: list[BlackboardSlot] = list(self._blackboard) if self.context_enabled else []
         prefix_len = len(prefix)
 
+        # NEW: ensure persisted prefix slots carry explicit global indices.
+        # This is safe even though prefix is a shallow copy (it updates the persisted slots too).
+        for i, slot in enumerate(prefix):
+            slot.step = i
+
         working_messages = messages
-        if self.context_enabled and len(self._blackboard)>0:
+        if self.context_enabled and len(self._blackboard) > 0:
             working_messages = self.inject_blackboard(working_messages)
+
         raw = self._llm_engine.invoke(working_messages)
 
         plan = self._parse_plan_json(raw)
@@ -774,7 +801,9 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         planned_cutoff = resolvable_cutoff
 
         reserve = (len(stepcalls) if self._tool_calls_limit is None else self._tool_calls_limit + 1)
-        blackboard = prefix + [BlackboardSlot() for _ in range(reserve)]
+
+        # NEW: allocate reserve slots with explicit global step indices.
+        blackboard = prefix + [BlackboardSlot(step=prefix_len + i) for i in range(reserve)]
 
         return PlanActRunState(
             messages=working_messages,
@@ -786,6 +815,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             plan_batches=plan_batches,
             batch_index=0,
         )
+
 
     # ------------------------------------------------------------------ #
     # Hook: prepare (load next batch)
@@ -812,6 +842,11 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         for offset, step in enumerate(batch):
             idx = start + offset
             slot = state.blackboard[idx]
+
+            # NEW: defensive step index assignment (should already be set by _initialize_run_state()).
+            if slot.step is NO_VAL:
+                slot.step = idx
+
             slot.tool = step.tool_name
             slot.args = step.args
             slot.resolved_args = self._resolve_placeholders(step.args, state=state)

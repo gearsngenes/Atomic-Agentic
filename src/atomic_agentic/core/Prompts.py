@@ -69,6 +69,17 @@ Rules:
   - a step from BLACKBOARD CONTEXT.
 - Placeholders may appear as full values or inside strings.
 
+IMPORTANT — STEP INDEXING WITH CONTEXT:
+- If BLACKBOARD CONTEXT is present, all step indices are GLOBAL.
+- Steps shown in BLACKBOARD CONTEXT already exist and have fixed indices.
+- New steps in your plan MUST start at the index specified by NEW_START and
+  continue increasing from there.
+- Any placeholder <<__step__N>> ALWAYS refers to the GLOBAL step N.
+- Referencing a step from BLACKBOARD CONTEXT means you are intentionally
+  reusing a previously computed result (cache reuse).
+- If the current task requires a new computation, you MUST create new steps
+  rather than reusing an unrelated prior result.
+
 You MUST NOT perform computation inside args.
 NO math, NO string concatenation, NO function calls.
 
@@ -88,6 +99,12 @@ The plan MUST end with exactly ONE return step as the FINAL element:
 - It must be the FINAL array element.
 - It SHOULD be in its own final batch.
 - If no value is needed, use null.
+
+SEMANTIC REQUIREMENT:
+- The return value MUST represent the result that answers the CURRENT user task.
+- You may return a value from BLACKBOARD CONTEXT ONLY if that value directly
+  satisfies the current task.
+- Otherwise, return the result of the latest relevant step you planned.
 
 # LEGAL EXAMPLE
 [
