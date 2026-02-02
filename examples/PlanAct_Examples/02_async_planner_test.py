@@ -34,7 +34,7 @@ tool_id = async_tester.register(
 if __name__ == "__main__":
     sequentially = True
     prompt = (
-        f"Delay for 10 seconds EXACTLY FIVE times {"SEQUENTIALLY" if sequentially else "CONCURRENTLY"} seconds to run.\n"
+        f"Call 'DelayPrint' EXACTLY FIVE TIMES, but call them {"SEQUENTIALLY" if sequentially else "CONCURRENTLY"}.\n"
     )
 
     start = time.time()
