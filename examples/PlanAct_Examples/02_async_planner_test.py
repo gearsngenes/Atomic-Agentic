@@ -24,12 +24,12 @@ async_tester = PlanActAgent(
 )
 
 # Register the callable (capture the fully-qualified tool id)
-tool_id = async_tester.register(
+async_tester.register(
     testDelayPrint,
     name="DelayPrint",
     description="delay for 10 seconds.",
     namespace="local",
-)[0]
+)
 
 if __name__ == "__main__":
     sequentially = True

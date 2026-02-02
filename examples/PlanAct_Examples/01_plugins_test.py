@@ -32,7 +32,7 @@ Assuming pi = 3.14159265358979323846 when needed.
 2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
 3) Compute the volume of a cylinder with radius=2 and height=10.
 
-Print each answer with a Question # label indicating which task it is answering.
+Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN ORDER ABOVE.
 """
 
 print("\n⇢ Executing math demo …")
