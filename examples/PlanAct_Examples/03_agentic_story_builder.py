@@ -87,9 +87,10 @@ if __name__ == "__main__":
         "Do the following task:\n\n"
         f"1) Create an outline of a story with the outliner, given the following idea: {idea!r}\n"
         "2) Using the outline created, write a full draft of the story with the writer.\n"
-        "3) Review the story and provide feedback with the reviewer\n\n"
-        f"4) Repeat 2) and 3) EXACTLY {loops-1} times\n"
-        "5) Return the final draft markdown."
+        "3) Review the story and provide feedback with the reviewer\n"
+        "4) Rewrite the draft by providing the writer with the reviewer feedback.\n"
+        f"5) Repeat steps 3-4 EXACTLY {loops - 1} times more"
+        "6) Return the writer's final draft markdown."
     )
 
     print("\n⇢ Planning + execution …")

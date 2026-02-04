@@ -110,16 +110,17 @@ math_task = (
     f"Use any of the available math tools to compute the answer, then call {print_math_tool_id} to print it."
 )
 
-super_task = (
-    "You have two sub-tasks.\n\n"
-    f"TASK 1 (haiku): Call the following planner tool ONCE: {haiku_planner_tool_id}\n"
-    "with args {'prompt': <task_string>} where task_string is:\n"
-    f"<task_string>\n{haiku_task}\n</task_string>\n\n"
-    f"TASK 2 (math): Call the following planner tool ONCE: {math_planner_tool_id}\n"
-    "with args {'prompt': <task_string>} where task_string is:\n"
-    f"<task_string>\n{math_task}\n</task_string>\n\n"
-    "Send each task_string EXACTLY as written to the appropriate planner tool."
-)
+super_task = f"""
+    Send the following tasks to appropriate planners:
+    
+    To {haiku_planner_tool_id}, give the following task verbatim:
+    {haiku_task}
+    
+    To {math_planner_tool_id}, give the following task verbatim:
+    {math_task}
+    
+    You don't need to print or return anything, let the planners handle that.
+    """
 
 start = time.time()
 super_result = super_planner.invoke({"prompt": super_task})

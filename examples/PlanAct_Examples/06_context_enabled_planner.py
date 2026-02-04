@@ -31,6 +31,7 @@ while True:
     if query.lower() in ("exit", 'q'):
         break
 
+    query = f"Use all available context to answer the query/task by the user: {query}"
     result = my_planner.invoke({"prompt": query})
     print(f"Result: {result}\n")
     print(f"Blackboard:\n{my_planner.blackboard_dumps(peek=False)}")
