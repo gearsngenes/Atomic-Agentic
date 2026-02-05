@@ -39,12 +39,12 @@ Each element MUST be a JSON object of one of these forms:
 
 # PLACEHOLDERS
 To reference results, use ONLY these canonical placeholders:
-- <<__step_i__>>   : output of step i in THIS NEW PLAN (local indices starting at 0)
-- <<__cache_i__>>  : RESULT of cache entry i (prior step-call result; read-only)
+- <<__si__>>   : output of step i in THIS NEW PLAN (local indices starting at 0)
+- <<__ci__>>  : RESULT of cache entry i (prior step-call result; read-only)
 
 Rules:
-1) <<__step_i__>> may only reference steps in this plan (no forward references).
-2) <<__cache_i__>> may only reference CACHE entries.
+1) <<__si__>> may only reference steps in this plan (no forward references).
+2) <<__ci__>> may only reference CACHE entries.
 3) Placeholders may appear as full values or embedded inside strings.
 4) Prefer step placeholders for newly computed values; use cache placeholders only when
    intentionally reusing prior results.
@@ -56,7 +56,7 @@ Rules:
 
 For a step at index i:
 1) await < i
-2) If the step references <<__step_j__>> in args, then await >= max(j)
+2) If the step references <<__sj__>> in args, then await >= max(j)
 3) "await" ONLY refers to step indices in THIS NEW PLAN (never CACHE).
 
 "await" is used to force sequencing even when steps do not depend on each other by data.
@@ -69,8 +69,8 @@ Rules:
 - The return step must appear EXACTLY ONCE and must be LAST.
 - The return step must NOT include "await".
 - The return value may be:
-  - a <<__step_i__>> placeholder,
-  - a <<__cache_i__>> placeholder (only when retrieving prior results),
+  - a <<__si__>> placeholder,
+  - a <<__ci__>> placeholder (only when retrieving prior results),
   - a JSON literal (string/number/boolean/object/array),
   - or null if no value is required.
 
@@ -89,10 +89,10 @@ User asks: "Compute the sum of 2 and 3 squared. Then wait 5 seconds, print 'comp
 Your returned plan:
 [
   {{ "tool": "Tool.Math.power", "args": {{ "a": 3, "b": 2 }} }},
-  {{ "tool": "Tool.Math.add", "args": {{ "a": 2, "b": "<<__step_0__>>" }} }},
+  {{ "tool": "Tool.Math.add", "args": {{ "a": 2, "b": "<<__s0__>>" }} }},
   {{ "tool": "Tool.Time.sleep", "args": {{ "seconds": 5 }}, "await": 1 }},
   {{ "tool": "Tool.Console.print", "args": {{ "value": "completed" }}, "await": 2 }},
-  {{ "tool": "Tool.ToolAgents.return", "args": {{ "val": "<<__step_1__>>" }} }}
+  {{ "tool": "Tool.ToolAgents.return", "args": {{ "val": "<<__s1__>>" }} }}
 ]
 
 Example 2 TASK (redo / update using CACHE):
@@ -101,19 +101,19 @@ User asks: "I meant the sum of their squares."
 Hypothetical supplied CACHE (prior tool-call steps):
 [
   {{ "tool": "Tool.Math.power", "args": {{ "a": 3, "b": 2 }}, "step": 0 }},
-  {{ "tool": "Tool.Math.add", "args": {{ "a": 2, "b": "<<__cache_0__>>" }}, "step": 1 }},
+  {{ "tool": "Tool.Math.add", "args": {{ "a": 2, "b": "<<__c0__>>" }}, "step": 1 }},
   {{ "tool": "Tool.Time.sleep", "args": {{ "seconds": 5 }}, "step": 2 }},
   {{ "tool": "Tool.Console.print", "args": {{ "value": "completed" }}, "step": 3 }},
-  {{ "tool": "Tool.ToolAgents.return", "args": {{ "val": "<<__cache_1__>>" }}, "step": 4 }}
+  {{ "tool": "Tool.ToolAgents.return", "args": {{ "val": "<<__c1__>>" }}, "step": 4 }}
 ]
 
 Your returned plan:
 [
   {{ "tool": "Tool.Math.power", "args": {{ "a": 2, "b": 2 }} }},
-  {{ "tool": "Tool.Math.add", "args": {{ "a": "<<__step_0__>>", "b": "<<__cache_0__>>" }} }},
+  {{ "tool": "Tool.Math.add", "args": {{ "a": "<<__s0__>>", "b": "<<__c0__>>" }} }},
   {{ "tool": "Tool.Time.sleep", "args": {{ "seconds": 5 }}, "await": 1 }},
   {{ "tool": "Tool.Console.print", "args": {{ "value": "completed" }}, "await": 2 }},
-  {{ "tool": "Tool.ToolAgents.return", "args": {{ "val": "<<__step_1__>>" }} }}
+  {{ "tool": "Tool.ToolAgents.return", "args": {{ "val": "<<__s1__>>" }} }}
 ]
 """
 
@@ -154,13 +154,13 @@ Rules:
 
 # PLACEHOLDERS
 To reference the result of a completed prior step, use the canonical placeholder format:
-- <<__step__0>>, <<__step__1>>, <<__step__2>>, ...
+- <<__s_0>>, <<__s_1>>, <<__s_2>>, ...
 
 Rules:
 1) Placeholders MUST reference an already-completed step result (no forward references).
 2) Placeholders may appear as full values or inside strings, e.g.:
-   - {{ "val": "<<__step__0>>" }}
-   - {{ "val": "Result was: <<__step__0>>" }}
+   - {{ "val": "<<__s_0>>" }}
+   - {{ "val": "Result was: <<__s_0>>" }}
 3) Prefer placeholders over copying values.
 
 IMPORTANT ABOUT STEP INDEXING WITH CONTEXT:
@@ -176,5 +176,5 @@ When the overall task is complete (or no tools are needed), emit the return tool
 }}
 
 # ONE-SHOT EXAMPLE (A SINGLE MID-PLAN STEP)
-{{ "tool": "Tool.default.mul", "args": {{ "a": "<<__step__4>>", "b": 7 }} }}
+{{ "tool": "Tool.default.mul", "args": {{ "a": "<<__s_4>>", "b": 7 }} }}
 """

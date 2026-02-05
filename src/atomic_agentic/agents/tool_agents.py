@@ -6,7 +6,7 @@ This module defines the abstract base ToolAgent.
 ToolAgent is a template-method runtime that:
 - owns a toolbox of Tool instances
 - runs an iterative "prepare -> execute" loop against a per-invoke RunState
-- supports global blackboard placeholder references: <<__step__N>>
+- supports global blackboard placeholder references: <<__sN__>>
 - enforces a resolvable cutoff: placeholders must satisfy N <= resolvable_cutoff
 - executes one prepared batch per loop iteration (A1)
 - resolves placeholders at prepare time and stores resolved_args in the blackboard slots
@@ -45,19 +45,45 @@ from ..core.Invokable import AtomicInvokable
 from ..core.sentinels import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool, toolify, batch_toolify
-from ..core.Prompts import PLANNER_PROMPT
+from ..core.Prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
 from ..core.Exceptions import ToolAgentError
 
 
 logger = logging.getLogger(__name__)
 
 # Canonical placeholders:
-#   <<__step_i__>>  : result of plan-local step i (0-based within the running plan)
-#   <<__cache_i__>> : result of cache entry i (0-based within persisted cache)
-_STEP_TOKEN: re.Pattern[str] = re.compile(r"<<__step_(\d+)__>>")
-_CACHE_TOKEN: re.Pattern[str] = re.compile(r"<<__cache_(\d+)__>>")
+#   <<__si__>>  : result of plan-local step i (0-based within the running plan)
+#   <<__ci__>> : result of cache entry i (0-based within persisted cache)
+_STEP_TOKEN: re.Pattern[str] = re.compile(r"<<__s(\d+)__>>")
+_CACHE_TOKEN: re.Pattern[str] = re.compile(r"<<__c(\d+)__>>")
 
+def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:
+        """
+        Return the set of step/cache indices referenced by placeholder_pattern anywhere in obj.
 
+        placeholder_pattern: <<__ci__>> or <<__si__>>
+        
+        This does NOT validate readiness; purely structural.
+        """
+        deps: set[int] = set()
+
+        def walk(x: Any) -> None:
+            if isinstance(x, str):
+                for m in placeholder_pattern.finditer(x):
+                    deps.add(int(m.group(1)))
+                return
+            if isinstance(x, dict):
+                for k, v in x.items():
+                    walk(k)
+                    walk(v)
+                return
+            if isinstance(x, (list, tuple, set)):
+                for v in x:
+                    walk(v)
+                return
+
+        walk(obj)
+        return deps
 
 # --------------------------------------------------------------------------- #
 # Canonical final-return tool (shared common resource)
@@ -129,11 +155,11 @@ class ToolAgentRunState:
 
     Placeholder resolvability:
 
-      <<__cache_i__>> is resolvable iff:
+      <<__ci__>> is resolvable iff:
         - 0 <= i < len(cache_blackboard)
         - cache_blackboard[i].result is not NO_VAL
 
-      <<__step_i__>> is resolvable iff:
+      <<__si__>> is resolvable iff:
         - 0 <= i < len(running_blackboard)
         - running_blackboard[i].result is not NO_VAL
     """
@@ -157,6 +183,21 @@ class ToolAgentRunState:
 
 
 RS = TypeVar("RS", bound=ToolAgentRunState)
+
+
+CACHE_INJECTION_TEMPLATE = """\
+# CACHE (READ-ONLY)
+You may reuse results from the following CACHE entries using ONLY these placeholders:
+- <<__ci__>> : result of cache entry i (0-based)
+
+For the NEW plan you are about to create:
+- Step indices start at 0 and use <<__si__>>.
+- <<__si__>> may ONLY reference earlier steps in THIS plan (no forward refs).
+- <<__ci__>> may ONLY reference CACHE entries.
+
+CACHE:
+{CACHE_CONTEXT}
+"""
 
 # --------------------------------------------------------------------------- #
 # Base ToolAgent
@@ -251,12 +292,21 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         self._tool_calls_limit = value
 
     @property
-    def blackboard(self) -> list[dict[str, Any]]:
+    def blackboard_serialized(self) -> list[dict[str, Any]]:
         """
         Read-only serialized view of the persisted blackboard.
         (Keeps backward-friendly dict shape.)
         """
         return [slot.to_dict() for slot in self._blackboard]
+    
+    @property
+    def blackboard(self) -> list[BlackboardSlot]:
+        return [BlackboardSlot(step = slot.step,
+                               tool = slot.tool,
+                               args = slot.args,
+                               resolved_args = slot.resolved_args,
+                               result = slot.result,
+                               error = slot.error) for slot in self._blackboard]
 
     # ------------------------------------------------------------------ #
     # Memory management
@@ -421,7 +471,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     # ------------------------------------------------------------------ #
     # Blackboard formatting
     # ------------------------------------------------------------------ #
-    def blackboard_dumps(self, *, peek: bool = False) -> str:
+    def blackboard_dumps(self, *, peek: bool = False, indent = 2, width = 160) -> str:
         """
         Pretty representation of the persisted blackboard.
 
@@ -434,25 +484,51 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         key = "resolved_args" if peek else "args"
         view: list[dict[str, Any]] = []
 
-        for i, slot in enumerate(self._blackboard):
-            d = slot.to_dict()
-
-            step_val = d.get("step", i)
-            if step_val is NO_VAL:
-                step_val = i
-
-            view.append(
-                {
-                    "step": step_val,
-                    "tool": d.get("tool"),
-                    "args": d.get(key),
-                }
-            )
+        for i, d in enumerate(self.blackboard_serialized):
+            d["step"] = i
+            d.pop("resolved_args")
+            if d["error"] is NO_VAL:
+                d.pop("error")
+            if not peek:
+                d.pop("result")
+            view.append(d)
 
         try:
-            return pprint.pformat(view, indent=2, width=160)
+            return pprint.pformat(view, indent=indent, width=width)
         except Exception:  # pragma: no cover
             return str(view)
+
+    def inject_blackboard(self, messages: list[dict[str, str]], peek = False) -> list[dict[str, str]]:
+        """
+        Inject persisted CACHE context into messages.
+
+        Cache indices are 0-based and correspond to <<__ci__>>.
+        Does not mutate the input list in-place.
+        """
+        if not self.context_enabled or not self._blackboard:
+            return list(messages)
+
+        out = [dict(m) for m in messages]
+
+        # Ensure cache slot indices are coherent with list positions.
+        # (Base resolver uses list indices, so we normalize here for clarity.)
+        for i, slot in enumerate(self._blackboard):
+            slot.step = i
+
+        cache_ctx = self.blackboard_dumps(peek=peek)
+        injection = CACHE_INJECTION_TEMPLATE.format(CACHE_CONTEXT=cache_ctx)
+
+        # Prefer augmenting the last user message; otherwise append a new user message.
+        for i in range(len(out) - 1, -1, -1):
+            if out[i].get("role") == "user":
+                out[i] = {
+                    "role": "user",
+                    "content": f"{out[i].get('content','')}\n\n{injection}",
+                }
+                return out
+
+        out.append({"role": "user", "content": injection})
+        return out
 
     # ------------------------------------------------------------------ #
     # Placeholder resolution helpers (prepare-time)
@@ -462,8 +538,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Resolve placeholders recursively.
 
         Supported:
-        - <<__step_i__>>  : plan-local running step i
-        - <<__cache_i__>> : cache entry i
+        - <<__si__>>  : plan-local running step i
+        - <<__ci__>> : cache entry i
 
         Readiness rules:
         - referenced slot must exist
@@ -476,31 +552,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         cache = state.cache_blackboard
         running = state.running_blackboard
 
-        needed_cache: set[int] = set()
-        needed_steps: set[int] = set()
-
-        # ----------------------------
-        # 1) Collect all dependencies.
-        # ----------------------------
-        def collect(x: Any) -> None:
-            if isinstance(x, str):
-                for m in _CACHE_TOKEN.finditer(x):
-                    needed_cache.add(int(m.group(1)))
-                for m in _STEP_TOKEN.finditer(x):
-                    needed_steps.add(int(m.group(1)))
-                return
-            if isinstance(x, dict):
-                for k, v in x.items():
-                    collect(k)
-                    collect(v)
-                return
-            if isinstance(x, (list, tuple, set)):
-                for v in x:
-                    collect(v)
-                return
-            # scalars / unknown objects: no dependencies
-
-        collect(obj)
+        needed_cache: set[int] = set(extract_dependencies(obj, placeholder_pattern=_CACHE_TOKEN))
+        needed_steps: set[int] = set(extract_dependencies(obj, placeholder_pattern=_STEP_TOKEN))
 
         # ----------------------------
         # 2) Validate readiness.
@@ -518,7 +571,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 raise ToolAgentError(
                     f"Step reference {idx} out of range (running plan length={len(running)})."
                 )
-            if running[idx].result is NO_VAL:
+            if not running[idx].is_executed():
                 raise ToolAgentError(f"Referenced step {idx} is not executed (result is NO_VAL).")
 
         # ----------------------------
@@ -569,58 +622,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             return x
 
         return resolve(obj)
-
-    def extract_step_dependencies(self, obj: Any) -> set[int]:
-        """
-        Return the set of plan-local step indices referenced by <<__step_i__>> anywhere in obj.
-
-        This does NOT validate readiness; purely structural.
-        """
-        deps: set[int] = set()
-
-        def walk(x: Any) -> None:
-            if isinstance(x, str):
-                for m in _STEP_TOKEN.finditer(x):
-                    deps.add(int(m.group(1)))
-                return
-            if isinstance(x, dict):
-                for k, v in x.items():
-                    walk(k)
-                    walk(v)
-                return
-            if isinstance(x, (list, tuple, set)):
-                for v in x:
-                    walk(v)
-                return
-
-        walk(obj)
-        return deps
-
-    def extract_cache_dependencies(self, obj: Any) -> set[int]:
-        """
-        Return the set of cache indices referenced by <<__cache_i__>> anywhere in obj.
-
-        This does NOT validate readiness; purely structural.
-        """
-        deps: set[int] = set()
-
-        def walk(x: Any) -> None:
-            if isinstance(x, str):
-                for m in _CACHE_TOKEN.finditer(x):
-                    deps.add(int(m.group(1)))
-                return
-            if isinstance(x, dict):
-                for k, v in x.items():
-                    walk(k)
-                    walk(v)
-                return
-            if isinstance(x, (list, tuple, set)):
-                for v in x:
-                    walk(v)
-                return
-
-        walk(obj)
-        return deps
 
     # ------------------------------------------------------------------ #
     # Execution (base-owned)
@@ -752,7 +753,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         return state
 
-
     # ------------------------------------------------------------------ #
     # Finalization helpers
     # ------------------------------------------------------------------ #
@@ -763,8 +763,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Policy:
         - Cache is state.cache_blackboard (snapshot of self._blackboard at invoke start)
         - Append executed running plan slots (trim empty/unplanned tail first)
-        - Rewrite any <<__step_j__>> placeholders inside appended slot.args into
-        <<__cache_{base_len + j}__>> so cached args never contain step-local placeholders.
+        - Rewrite any <<__sj__>> placeholders inside appended slot.args into
+        <<__c{base_len + j}__>> so cached args never contain step-local placeholders.
 
         Also trims any empty tail slots from the final persisted cache.
         """
@@ -781,15 +781,15 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         def rewrite_step_to_cache_placeholders(obj: Any) -> Any:
             """
-            Rewrite <<__step_j__>> -> <<__cache_{base_len + j}__>> recursively.
-            Leaves <<__cache_k__>> unchanged.
+            Rewrite <<__sj__>> -> <<__c{base_len + j}__>> recursively.
+            Leaves <<__ck__>> unchanged.
             """
             if isinstance(obj, str):
                 # exact placeholder: still rewrite as a string placeholder (we are rewriting args,
                 # not resolving)
                 def repl(m: re.Match[str]) -> str:
                     j = int(m.group(1))
-                    return f"<<__cache_{base_len + j}__>>"
+                    return f"<<__c{base_len + j}__>>"
 
                 return _STEP_TOKEN.sub(repl, obj)
 
@@ -916,44 +916,16 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         raise NotImplementedError
 
 
-BLACKBOARD_INJECTION_TEMPLATE = """\
-# BLACKBOARD CONTEXT (READ-ONLY)
-The following blackboard shows the arguments and tool calls made for the
-completed steps 0 to {RESOLVABLE_CUTOFF}.
-
-Note that the NEW plan you are making is starting at step {NEW_START}.
-Refer to the below steps to reuse any results needed for your current
-or future tasks.
-
-{BLACKBOARD_CONTEXT}
-"""
-
 # --------------------------------------------------------------------------- #
-# PlanAct: cache injection + planned-step normalization
+# PlanAct Agent
 # --------------------------------------------------------------------------- #
-
-CACHE_INJECTION_TEMPLATE = """\
-# CACHE (READ-ONLY)
-You may reuse results from the following CACHE entries using ONLY these placeholders:
-- <<__cache_i__>> : result of cache entry i (0-based)
-
-For the NEW plan you are about to create:
-- Step indices start at 0 and use <<__step_i__>>.
-- <<__step_i__>> may ONLY reference earlier steps in THIS plan (no forward refs).
-- <<__cache_i__>> may ONLY reference CACHE entries.
-
-CACHE:
-{CACHE_CONTEXT}
-"""
-
-
 @dataclass(frozen=True, slots=True)
 class PlannedStep:
     """
     Minimal, normalized plan-step representation.
 
     - tool: Tool.full_name (must exist in toolbox)
-    - args: raw/unresolved args (may contain <<__step_i__>> / <<__cache_i__>> placeholders)
+    - args: raw/unresolved args (may contain <<__si__>> / <<__ci__>> placeholders)
     - deps: plan-local prerequisite indices (includes placeholder step deps + await barrier if provided)
     - is_return: whether this is the canonical return tool step
     """
@@ -967,11 +939,7 @@ class PlannedStep:
         return {"tool": self.tool, "args": self.args}
 
     @staticmethod
-    def from_dict(
-        data: Mapping[str, Any],
-        *,
-        extract_step_deps: Callable[[Any], set[int]],
-    ) -> "PlannedStep":
+    def from_dict(data: Mapping[str, Any]) -> PlannedStep:
         if not isinstance(data, Mapping):
             raise ToolAgentError(
                 f"PlannedStep.from_dict requires a mapping; got {type(data).__name__!r}."
@@ -994,7 +962,7 @@ class PlannedStep:
         args = data["args"]
         is_return = tool == return_tool.full_name
 
-        deps: set[int] = set(extract_step_deps(args))
+        deps: set[int] = set(extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN))
 
         # Treat await as a dependency barrier if present.
         await_val = data.get("await", None)
@@ -1045,41 +1013,6 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         )
 
     # ------------------------------------------------------------------ #
-    # Cache injection
-    # ------------------------------------------------------------------ #
-    def inject_blackboard(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
-        """
-        Inject persisted CACHE context into messages.
-
-        Cache indices are 0-based and correspond to <<__cache_i__>>.
-        Does not mutate the input list in-place.
-        """
-        if not self.context_enabled or not self._blackboard:
-            return list(messages)
-
-        out = [dict(m) for m in messages]
-
-        # Ensure cache slot indices are coherent with list positions.
-        # (Base resolver uses list indices, so we normalize here for clarity.)
-        for i, slot in enumerate(self._blackboard):
-            slot.step = i
-
-        cache_ctx = self.blackboard_dumps(peek=False)
-        injection = CACHE_INJECTION_TEMPLATE.format(CACHE_CONTEXT=cache_ctx)
-
-        # Prefer augmenting the last user message; otherwise append a new user message.
-        for i in range(len(out) - 1, -1, -1):
-            if out[i].get("role") == "user":
-                out[i] = {
-                    "role": "user",
-                    "content": f"{out[i].get('content','')}\n\n{injection}",
-                }
-                return out
-
-        out.append({"role": "user", "content": injection})
-        return out
-
-    # ------------------------------------------------------------------ #
     # Planning + initialization
     # ------------------------------------------------------------------ #
     def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> PlanActRunState:
@@ -1111,7 +1044,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             slot.step = i
 
         if self.context_enabled and cache_blackboard:
-            working_messages = self.inject_blackboard(working_messages)
+            working_messages = self.inject_blackboard(working_messages, peek = False)
 
         raw_plan = self._llm_engine.invoke(working_messages)
         plan_dicts = self._parse_plan_json(raw_plan)
@@ -1139,15 +1072,15 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         # ---- Convert to PlannedStep and validate tool existence early. ----
         planned: list[PlannedStep] = []
         for i, d in enumerate(plan_dicts):
-            ps = PlannedStep.from_dict(
-                d,
-                extract_step_deps=self.extract_step_dependencies,
-            )
-
+            # Convert to PlannedStep object
+            ps = PlannedStep.from_dict(d)
+            # Validate tool's existence
             if not self.has_tool(ps.tool):
                 raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool in plan: {ps.tool!r}.")
+            # Add to planned steps
             planned.append(ps)
 
+        # Validate that return is the final step in the plan
         plan_len = len(planned)
         return_idx = plan_len - 1
         if not planned[return_idx].is_return:
@@ -1170,7 +1103,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 
         for i, ps in enumerate(planned):
             # Validate cache references in args
-            cache_refs = self.extract_cache_dependencies(ps.args)
+            cache_refs = extract_dependencies(ps.args, placeholder_pattern=_CACHE_TOKEN)
             bad_cache = [k for k in cache_refs if k < 0 or k >= cache_len]
             if bad_cache:
                 raise ToolAgentError(
@@ -1178,7 +1111,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                     f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
                 )
 
-            # Validate plan-local deps range (deps were derived from <<__step_j__>> and await)
+            # Validate plan-local deps range (deps were derived from <<__sj__>> and await)
             # Return is special-cased below.
             if not ps.is_return:
                 bad = [d for d in ps.deps if d < 0 or d >= i]
@@ -1188,8 +1121,8 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                         f"deps must be < {i}."
                     )
             else:
-                # Return args may contain <<__step_j__>>; they must be < return_idx.
-                step_refs = self.extract_step_dependencies(ps.args)
+                # Return args may contain <<__sj__>>; they must be < return_idx.
+                step_refs = extract_dependencies(ps.args, placeholder_pattern=_STEP_TOKEN)
                 bad_refs = [d for d in step_refs if d < 0 or d >= return_idx]
                 if bad_refs:
                     raise ToolAgentError(
@@ -1412,32 +1345,30 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 # ───────────────────────────────────────────────────────────────────────────────
 # Iterative Plan 'ReActAgent' class
 # ───────────────────────────────────────────────────────────────────────────────
-class ReActAgent(ToolAgent):
+@dataclass(slots=True)
+class ReActRunState(ToolAgentRunState):
     """
-    Dynamic, step-by-step tool-using agent (ReAct-style).
+    ReAct run state extends ToolAgentRunState with:
+      - latest_batch_indices: plan-local indices for the most recently prepared batch.
+        This is used to accumulate "latest executed batch + results" messages across the run.
+    """
+    latest_batch_indices: list[int] = field(default_factory=list)
 
-    Message choreography (per-loop):
-      1) call LLM on messages_snapshot -> step_text
-      2) parse a SINGLE step object -> (tool_name, raw_args)
-      3) append that step as an assistant message (canonical JSON)
-      4) execute tool, record completed blackboard entry, update running_result
-      5) append a user message containing:
-           - NEW STEPS THIS RUN (only new_steps)
-           - OBSERVATION (running_result preview)
-           - request for the next single-step dict
+class ReActAgent(ToolAgent[ReActRunState]):
     """
-    # ------------------------------------------------------------------ #
-    # Construction
-    # ------------------------------------------------------------------ #
+    Dynamic, iterative tool-using agent (ReAct-style), but with v3 semantics:
+    each LLM turn will produce the NEXT CONCURRENT BATCH (list of steps),
+    and the base ToolAgent owns the prepare->execute loop.
+    """
+
     def __init__(
         self,
         name: str,
         description: str,
         llm_engine: LLMEngine,
-        context_enabled: bool = False,
         *,
+        context_enabled: bool = False,
         tool_calls_limit: Optional[int] = 25,
-        preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         history_window: Optional[int] = None,
@@ -1454,12 +1385,9 @@ class ReActAgent(ToolAgent):
             history_window=history_window,
         )
 
-        self._preview_limit: Optional[int] = None
-        self.preview_limit = preview_limit
-
     # ------------------------------------------------------------------ #
     # Tool-Agent Properties
-    # ------------------------------------------------------------------ #    
+    # ------------------------------------------------------------------ #
     @property
     def tool_calls_limit(self) -> Optional[int]:
         """Max allowed tool calls per invoke() run. None means unlimited."""
@@ -1472,239 +1400,35 @@ class ReActAgent(ToolAgent):
         self._tool_calls_limit = value
 
     # ------------------------------------------------------------------ #
-    # ReAct-Agent Properties
+    # Tool-Agent Helpers
     # ------------------------------------------------------------------ #
-    @property
-    def preview_limit(self) -> Optional[int]:
+    def _initialize_run_state(self, *, messages):
+        working_messages = self.inject_blackboard(messages=messages, peek = False)
+        cache = list(self._blackboard)
+        running_blackboard = [BlackboardSlot(step = i) for i in range(self._tool_calls_limit) + 1]
+        return ReActRunState(messages=working_messages,
+                      cache_blackboard=cache,
+                      running_blackboard=running_blackboard,
+                      executed_steps=[],
+                      prepared_steps=[],
+                      tool_calls_used=0,
+                      is_done=False,
+                      return_value= NO_VAL,
+                      latest_batch_indices=[]) # To track which steps to inject into messages next
+
+    def _prepare_next_batch(self, state):
         """
-        Max characters allowed in the observation preview of `running_result`.
-
-        - None: no truncation (entire stringified result is shown)
-        - positive int: truncate to at most that many characters
+        Algorithm for preparing the next batch:
+        
+        1. Update the messages:
+            - If latest batch of indices not empty, inject their running blackboard into messages as assistant message
+            - If not empty, add a subsequent user message "Given the results of the most recently executed steps, emit the next steps"
+            - If empty, inject nothing
+        2. Call the llm on the messages
+        3. Parse/clean the output string -> list of planned steps
+        4. Check for and move return to the end of the batch if present
+        5. Resolve placeholders/Validate dependency rules (raise if fail)
+        6. Load validated planned into blackboard
+        7. Set prepared steps/ latest batch indices = indices
+        8. Return updated state
         """
-        return self._preview_limit
-
-    @preview_limit.setter
-    def preview_limit(self, value: Optional[int]) -> None:
-        if value is None:
-            self._preview_limit = None
-            return
-        if not isinstance(value, int) or value <= 0:
-            raise ToolAgentError("preview_limit must be None or a positive int.")
-        self._preview_limit = value
-
-    # ------------------------------------------------------------------ #
-    # ReAct-Agent Helpers
-    # ------------------------------------------------------------------ #
-    def _tool_calls_made_snapshot(self) -> int:
-        with self._tool_calls_lock:
-            return int(self._tool_calls_made)
-
-    @staticmethod
-    def _strip_markdown_fences(text: str) -> str:
-        cleaned = text.strip()
-        cleaned = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
-        return cleaned.strip()
-
-    @staticmethod
-    def _safe_stringify(value: Any) -> str:
-        try:
-            return repr(value)
-        except Exception:
-            return str(value)
-
-    def _truncate_preview(self, text: str) -> str:
-        limit = self._preview_limit
-        if limit is None:
-            return text
-        if len(text) <= limit:
-            return text
-        return text[:limit] + "… [truncated]"
-
-    def _parse_single_step(self, text: str) -> tuple[str, Dict[str, Any]]:
-        """
-        Parse exactly one step dict from the LLM output.
-
-        Expected schema:
-            {"tool": "<Tool.full_name>", "args": {...}}
-
-        Robustness:
-        - Strips markdown fences.
-        - If extra text exists, extracts the LAST JSON object matching the schema.
-        """
-        cleaned = self._strip_markdown_fences(text).strip()
-        logger.debug("%s.%s: LLM raw step output (preview): %r", type(self).__name__, self.name, cleaned[:1500])
-
-        if not cleaned:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: LLM returned empty step output.")
-
-        if cleaned.lstrip().startswith("["):
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: expected a single JSON object, got an array.")
-
-        def validate(obj: Any) -> tuple[str, Dict[str, Any]] | None:
-            if not isinstance(obj, dict):
-                return None
-            if set(obj.keys()) != {"tool", "args"}:
-                return None
-            tool_name = obj.get("tool")
-            args = obj.get("args")
-            if not isinstance(tool_name, str) or not tool_name.strip():
-                raise ToolAgentError(f"{type(self).__name__}.{self.name}: 'tool' must be a non-empty string.")
-            if not isinstance(args, dict):
-                raise ToolAgentError(f"{type(self).__name__}.{self.name}: 'args' must be a JSON object/dict.")
-            return tool_name, args
-
-        # Fast path: pure JSON object
-        if cleaned.lstrip().startswith("{"):
-            try:
-                obj = json.loads(cleaned)
-                out = validate(obj)
-                if out is not None:
-                    return out
-            except Exception:
-                pass
-
-        # Tolerant path: scan for step-like JSON objects and pick the last one.
-        decoder = json.JSONDecoder()
-        candidates: list[tuple[int, str, Dict[str, Any]]] = []
-
-        for m in re.finditer(r"{", cleaned):
-            start = m.start()
-            try:
-                parsed, _end = decoder.raw_decode(cleaned, start)
-            except Exception:
-                continue
-            out = validate(parsed)
-            if out is None:
-                continue
-            tool_name, args = out
-            candidates.append((start, tool_name, dict(args)))
-
-        if not candidates:
-            preview = cleaned if len(cleaned) <= 800 else cleaned[:800] + "…"
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: could not find a valid step object in LLM output. "
-                f"Output preview: {preview!r}"
-            )
-
-        _, tool_name, args = max(candidates, key=lambda t: t[0])
-        if len(candidates) > 1:
-            logger.warning(
-                "%s.%s: multiple step-like JSON objects found; using the last one.",
-                type(self).__name__,
-                self.name,
-            )
-        return tool_name, args
-
-    def _run(
-        self,
-        *,
-        messages: List[Dict[str, str]],
-    ) -> tuple[List[BlackboardEntry], Any]:
-        persisted: List[BlackboardEntry] = self.blackboard
-        base_len = len(persisted)
-
-        new_steps: List[BlackboardEntry] = []
-        running_result: Any = "No intermediate results produced yet"
-        last_tool_called: str = ""
-
-        messages_snapshot: List[Dict[str, str]] = list(messages)
-
-        while True:
-            # If return already executed, we're done.
-            if last_tool_called == return_tool.full_name:
-                return new_steps, running_result
-
-            # Auto-return if the (non-return) budget is exhausted.
-            limit = self.tool_calls_limit
-            made = self._tool_calls_made_snapshot()
-            if limit is not None and made >= limit:
-                last_non_return_local_idx: Optional[int] = None
-                for i in range(len(new_steps) - 1, -1, -1):
-                    if new_steps[i].get("tool") != return_tool.full_name and bool(new_steps[i].get("completed", False)):
-                        last_non_return_local_idx = i
-                        break
-
-                if last_non_return_local_idx is None:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: tool usage limit reached ({made}/{limit}) "
-                        "but no completed non-return step exists to return."
-                    )
-
-                last_global_idx = base_len + last_non_return_local_idx
-                raw_args = {"val": f"<<__step__{last_global_idx}>>"}
-
-                board = list(persisted) + list(new_steps)
-                result = self._call_tool(return_tool.full_name, raw_args, board=board)
-
-                resolved_any = self._resolve_step_refs(dict(raw_args), board=board)
-                if not isinstance(resolved_any, dict):
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: resolved args must be a dict; got {type(resolved_any).__name__!r}."
-                    )
-
-                new_steps.append(
-                    {
-                        "tool": return_tool.full_name,
-                        "args": dict(raw_args),
-                        "resolved_args": dict(resolved_any),
-                        "completed": True,
-                        "result": result,
-                    }
-                )
-                return new_steps, result
-
-            # 1) Ask LLM for next step (based on current snapshot).
-            step_text = self._llm_engine.invoke(messages_snapshot)
-            tool_name, raw_args_any = self._parse_single_step(step_text)
-
-            # 2) Save the step as an assistant message (canonical JSON).
-            canonical_step = json.dumps({"tool": tool_name, "args": raw_args_any}, indent=2)
-            messages_snapshot.append({"role": "assistant", "content": canonical_step})
-
-            # 3) Execute and record.
-            
-            # 3.a) Validate tool exists.
-            if not self.has_tool(tool_name):
-                raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool {tool_name!r}.")
-
-            raw_args: Dict[str, Any] = dict(raw_args_any)
-            board_for_step = list(persisted) + list(new_steps)
-
-            # 3.b) Call tool via ToolAgent gateway.
-            result = self._call_tool(tool_name, raw_args, board=board_for_step)
-
-            # 3.c) Record completed step with resolved args.
-            resolved_any = self._resolve_step_refs(dict(raw_args), board=board_for_step)
-            if not isinstance(resolved_any, dict):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: resolved args must be a dict; got {type(resolved_any).__name__!r}."
-                )
-
-            new_steps.append(
-                {
-                    "tool": tool_name,
-                    "raw_args": dict(raw_args),
-                    "resolved_args": dict(resolved_any),
-                    "completed": True,
-                    "result": result,
-                }
-            )
-
-            running_result = result
-            last_tool_called = tool_name
-
-            # If return tool executed, stop immediately.
-            if last_tool_called == return_tool.full_name:
-                return new_steps, running_result
-
-            # 4) Append observation + request as the next user message.
-            global_idx = base_len + len(new_steps) - 1
-            preview_text = self._truncate_preview(self._safe_stringify(running_result))
-            new_user_msg = (
-                f"STEP {global_idx} EXECUTED TOOL {tool_name!r}.\n"
-                f"OBSERVED RESULT: {preview_text}\n\n"
-                "Now emit EXACTLY ONE JSON object for the next step and no other object."
-            )
-            messages_snapshot.append({"role": "user", "content": new_user_msg})
