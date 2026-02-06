@@ -190,8 +190,9 @@ CACHE_INJECTION_TEMPLATE = """\
 You may reuse results from the following CACHE entries using ONLY these placeholders:
 - <<__ci__>> : result of cache entry i (0-based)
 
-For the NEW plan you are about to create:
-- Step indices start at 0 and use <<__si__>>.
+For the NEW LIST OF STEPS you are about to create:
+- If you are starting a NEW TASK, step indices start at 0
+- If you are continuing an ONGOING TASK with N existing steps (i = 0 to N - 1), continue from step N 
 - <<__si__>> may ONLY reference earlier steps in THIS plan (no forward refs).
 - <<__ci__>> may ONLY reference CACHE entries.
 
@@ -1343,16 +1344,37 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 class ReActRunState(ToolAgentRunState):
     """
     ReAct run state extends ToolAgentRunState with:
-      - latest_batch_indices: plan-local indices for the most recently prepared batch.
-        This is used to accumulate "latest executed batch + results" messages across the run.
+
+    - next_step_index:
+        The next plan-local running_blackboard index to fill during preparation.
+        This is also the "prefix length" cutoff for dependency legality: any <<__sN__>>
+        placeholder in a newly prepared batch must satisfy N < next_step_index.
+
+    - latest_executed:
+        Plan-local indices for the most recently *prepared* batch. This value is used
+        at the start of the next prepare() call to inject "Most recently executed steps
+        and results" into the LLM messages. It is overwritten at the end of every
+        prepare() call with the newly emitted indices.
     """
-    latest_batch_indices: list[int] = field(default_factory=list)
+    next_step_index: int = 0
+    latest_executed: list[int] = field(default_factory=list)
+
 
 class ReActAgent(ToolAgent[ReActRunState]):
     """
     Dynamic, iterative tool-using agent (ReAct-style), but with v3 semantics:
-    each LLM turn will produce the NEXT CONCURRENT BATCH (list of steps),
-    and the base ToolAgent owns the prepare->execute loop.
+
+    - Each LLM turn emits the NEXT CONCURRENT BATCH as a JSON array of steps.
+    - Each step must be a dict with:
+        {"tool": "<Tool.full_name>", "args": { ... } }
+
+    The base ToolAgent owns the invariant prepare -> execute loop. This subclass only:
+    - initializes a fixed-size run blackboard (tool_calls_limit + 1, including return)
+    - prepares the next batch by:
+        * injecting the most recently executed steps/results (if available)
+        * asking for the next executable steps
+        * parsing + validating
+        * filling the next contiguous segment of the run blackboard
     """
 
     def __init__(
@@ -1362,10 +1384,10 @@ class ReActAgent(ToolAgent[ReActRunState]):
         llm_engine: LLMEngine,
         *,
         context_enabled: bool = False,
-        tool_calls_limit: Optional[int] = 25,
-        pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
-        history_window: Optional[int] = None,
+        tool_calls_limit: int = 25,
+        pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
+        post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
+        history_window: int | None = None,
     ) -> None:
         super().__init__(
             name=name,
@@ -1379,50 +1401,214 @@ class ReActAgent(ToolAgent[ReActRunState]):
             history_window=history_window,
         )
 
+        # ReAct requires a concrete integer tool_calls_limit so that we can preallocate
+        # a fixed-size running blackboard.
+        if not isinstance(tool_calls_limit, int) or tool_calls_limit < 0:
+            raise ToolAgentError("ReActAgent requires tool_calls_limit to be an int >= 0.")
+
     # ------------------------------------------------------------------ #
-    # Tool-Agent Properties
+    # Tool-Agent Hooks
     # ------------------------------------------------------------------ #
     @property
-    def tool_calls_limit(self) -> Optional[int]:
-        """Max allowed tool calls per invoke() run. None means unlimited."""
+    def tool_calls_limit(self) -> int:
+        """Max allowed non-return tool calls per invoke() run. None means unlimited."""
         return self._tool_calls_limit
 
     @tool_calls_limit.setter
-    def tool_calls_limit(self, value: Optional[int]) -> None:
-        if value is None or not isinstance(value, int) or value <= 0:
-            raise ToolAgentError("ReActAgent requires a tool_calls_limit >= 0.")
+    def tool_calls_limit(self, value: int) -> None:
+        if not isinstance(value, int) or value < 0:
+            raise ToolAgentError("tool_calls_limit must be None or an int >= 0.")
         self._tool_calls_limit = value
 
     # ------------------------------------------------------------------ #
-    # Tool-Agent Helpers
+    # Tool-Agent Hooks
     # ------------------------------------------------------------------ #
-    def _initialize_run_state(self, *, messages):
-        working_messages = self.inject_blackboard(messages=messages, peek = False)
-        cache = list(self._blackboard)
-        running_blackboard = [BlackboardSlot(step = i) for i in range(self._tool_calls_limit) + 1]
-        return ReActRunState(messages=working_messages,
-                      cache_blackboard=cache,
-                      running_blackboard=running_blackboard,
-                      executed_steps=[],
-                      prepared_steps=[],
-                      tool_calls_used=0,
-                      is_done=False,
-                      return_value= NO_VAL,
-                      latest_batch_indices=[]) # To track which steps to inject into messages next
+    def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> ReActRunState:
+        if not messages:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
 
-    def _prepare_next_batch(self, state):
+        if self._tool_calls_limit is None or not isinstance(self._tool_calls_limit, int) or self._tool_calls_limit < 0:
+            raise ToolAgentError("ReActAgent requires tool_calls_limit to be an int >= 0.")
+
+        cache_blackboard = list(self._blackboard)
+
+        working_messages = list(messages)
+        if self.context_enabled and cache_blackboard:
+            working_messages = self.inject_blackboard(messages=working_messages, peek=False)
+
+        # Preallocate fixed-size run blackboard: non-return calls + 1 return call.
+        running_blackboard = [BlackboardSlot(step=i) for i in range(self._tool_calls_limit + 1)]
+
+        return ReActRunState(
+            messages=working_messages,
+            cache_blackboard=cache_blackboard,
+            running_blackboard=running_blackboard,
+            executed_steps=set(),
+            prepared_steps=[],
+            tool_calls_used=0,
+            is_done=False,
+            return_value=NO_VAL,
+            next_step_index=0,
+            latest_executed=[],
+        )
+
+    def _prepare_next_batch(self, state: ReActRunState) -> ReActRunState:
         """
-        Algorithm for preparing the next batch:
-        
-        1. Update the messages:
-            - If latest batch of indices not empty, inject their running blackboard into messages as assistant message
-            - If not empty, add a subsequent user message "Given the results of the most recently executed steps, emit the next steps"
-            - If empty, inject nothing
-        2. Call the llm on the messages
-        3. Parse/clean the output string -> list of planned steps
-        4. Check for and move return to the end of the batch if present
-        5. Resolve placeholders/Validate dependency rules (raise if fail)
-        6. Load validated planned into blackboard
-        7. Set prepared steps/ latest batch indices = indices
-        8. Return updated state
+        Prepare the next concurrent batch.
+
+        Uses the run state's message history, optionally injecting a single assistant
+        message describing the most recently executed steps/results, followed by a
+        simple user request for the next executable steps.
+
+        Then:
+          - parses the JSON array of steps (tool + args dict)
+          - moves return to the end if present (at most one)
+          - validates no intra-batch dependencies via <<__sN__>> where N >= next_step_index
+          - fills the next contiguous segment of the preallocated running_blackboard
+          - sets prepared_steps and overwrites latest_executed to those indices
         """
+        if not isinstance(state, ReActRunState):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: _prepare_next_batch requires a ReActRunState."
+            )
+
+        # ------------------------------------------------------------------ #
+        # 1) Build messages for this LLM turn
+        # ------------------------------------------------------------------ #
+        working_messages: list[dict[str, str]] = list(state.messages)
+
+        if state.latest_executed:
+            obs_payload: list[dict[str, Any]] = []
+            for idx in state.latest_executed:
+                if idx < 0 or idx >= len(state.running_blackboard):
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: latest_executed contains out-of-range index {idx}."
+                    )
+                slot = state.running_blackboard[idx]
+                obs_payload.append(
+                    {
+                        "step": slot.step,
+                        "tool": slot.tool,
+                        "args": slot.args,
+                        "result": slot.result,
+                    }
+                )
+
+            obs_text = "Most recently executed steps and results:\n" + pprint.pformat(
+                obs_payload, indent=2, sort_dicts=False
+            )
+            working_messages.append({"role": "assistant", "content": obs_text})
+
+            working_messages.append(
+                {
+                    "role": "user",
+                    "content": "Given the most recently executed steps and available CACHE (if provided) above, "
+                            "strategize and produce the next set of executable steps as a single JSON array of "
+                            "step dicts.",
+                }
+            )
+
+        # Persist the augmented message history for subsequent turns.
+        state.messages = working_messages
+
+        # ------------------------------------------------------------------ #
+        # 2) Call LLM and parse steps
+        # ------------------------------------------------------------------ #
+        raw_text = self._llm_engine.invoke(working_messages)
+        step_dicts = self._str_to_steps(raw_text)
+
+        # Strict: tool + args only; args must be a dict.
+        planned_steps: list[PlannedStep] = []
+        for d in step_dicts:
+            if not isinstance(d, dict):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: each step must be an object; got {type(d).__name__!r}."
+                )
+            tool = d.get("tool", None)
+            args = d.get("args", None)
+            if not isinstance(tool, str) or not tool.strip():
+                raise ToolAgentError(f"{type(self).__name__}.{self.name}: step 'tool' must be a non-empty string.")
+            if not isinstance(args, dict):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: step 'args' must be a dict; got {type(args).__name__!r}."
+                )
+
+            # Enforce no extra keys early (PlannedStep.from_dict also validates).
+            allowed = {"tool", "args"}
+            extra = set(d.keys()) - allowed
+            if extra:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: step contains unsupported keys: {sorted(extra)!r}."
+                )
+
+            planned_steps.append(PlannedStep.from_dict({"tool": tool, "args": args}))
+
+        if not planned_steps:
+            # Base loop will also reject empty prepared_steps, but this gives clearer context.
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: LLM produced an empty batch.")
+
+        # ------------------------------------------------------------------ #
+        # 3) Normalize return placement (at most one; move to end if misplaced)
+        # ------------------------------------------------------------------ #
+        return_name = return_tool.full_name
+        return_positions = [i for i, ps in enumerate(planned_steps) if ps.tool == return_name]
+        if len(return_positions) > 1:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: batch contains multiple return steps.")
+        if return_positions:
+            rpos = return_positions[0]
+            if rpos != len(planned_steps) - 1:
+                ret = planned_steps.pop(rpos)
+                planned_steps.append(ret)
+
+        # ------------------------------------------------------------------ #
+        # 4) Validate single-batch dependency legality
+        # ------------------------------------------------------------------ #
+        prefix_len = state.next_step_index
+        for ps in planned_steps:
+            for dep in extract_dependencies(obj=ps.args, placeholder_pattern=_STEP_TOKEN):
+                if dep >= prefix_len:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: illegal intra-batch dependency: "
+                        f"step args reference <<__s{dep}__>> but prefix cutoff is {prefix_len}."
+                    )
+
+        # ------------------------------------------------------------------ #
+        # 5) Fill the next contiguous segment of the preallocated running blackboard
+        # ------------------------------------------------------------------ #
+        end = prefix_len + len(planned_steps)
+        if end > len(state.running_blackboard):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: batch would exceed run blackboard capacity "
+                f"({end} > {len(state.running_blackboard)})."
+            )
+
+        new_indices: list[int] = []
+        for i, ps in enumerate(planned_steps):
+            idx = prefix_len + i
+            slot = state.running_blackboard[idx]
+            if not slot.is_empty():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: attempted to prepare into non-empty slot {idx}."
+                )
+
+            # Validate tool exists before we stamp it into the slot.
+            self.get_tool(ps.tool)
+
+            slot.tool = ps.tool
+            slot.args = ps.args
+            slot.resolved_args = self._resolve_placeholders(ps.args, state=state)
+            slot.result = NO_VAL
+            slot.error = NO_VAL
+            new_indices.append(idx)
+
+        # prepared_steps is what the base execute() will run next.
+        state.prepared_steps = list(new_indices)
+
+        # Advance cursor.
+        state.next_step_index = end
+
+        # Per approved semantics: overwrite latest_executed with the newly emitted indices.
+        # This will be used for injection at the start of the next prepare() call.
+        state.latest_executed = list(new_indices)
+
+        return state

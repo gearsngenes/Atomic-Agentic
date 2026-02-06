@@ -21,7 +21,6 @@ orchestrator = ReActAgent(
     history_window=20,    # send-window (turns) to the model
     tool_calls_limit=15,  # max *non-return* tool calls per run
     context_enabled=False,
-    preview_limit=1_500,  # None = full observation; positive int truncates LLM observation text
 )
 
 # 3) Register tool lists
