@@ -887,6 +887,64 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         return newest_history, state.return_value
 
     # ------------------------------------------------------------------ #
+    # String to List of Objects helper
+    # ------------------------------------------------------------------ #
+    def _str_to_steps(self, raw_text: str) -> list[dict[str, Any]]:
+        """
+        Parse LLM plan output into a list[dict].
+
+        Robustness:
+        - Strips common markdown fences (``` / ```json).
+        - Scans for JSON arrays using `re` to find candidate '[' starts.
+        - Uses JSON decoding (nesting-aware) to select the *largest* decodable JSON array
+        that is a non-empty list of dicts.
+        - Raises ToolAgentError on failure.
+        """
+        if not isinstance(raw_text, str) or not raw_text.strip():
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: LLM returned empty plan output.")
+
+        text = raw_text.strip()
+
+        # Strip a single fenced block wrapper if present
+        # Examples:
+        # ```json
+        # [...]
+        # ```
+        text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", text)
+        text = re.sub(r"\s*```\s*$", "", text).strip()
+
+        decoder = json.JSONDecoder()
+
+        best_val: list[dict[str, Any]] | None = None
+        best_span_len: int = -1
+
+        # Candidate starts: every '[' in the text (cheap via regex)
+        for m in re.finditer(r"\[", text):
+            start = m.start()
+            try:
+                val, end_rel = decoder.raw_decode(text[start:])  # nesting-aware decode
+            except json.JSONDecodeError:
+                continue
+
+            # Must be a non-empty list of dicts
+            if not isinstance(val, list) or not val:
+                continue
+            if not all(isinstance(x, dict) for x in val):
+                continue
+
+            if end_rel > best_span_len:
+                best_span_len = end_rel
+                # Snapshot as plain dicts to ensure downstream mutation safety
+                best_val = [dict(x) for x in val]
+
+        if best_val is None:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: failed to find a valid JSON array of dicts in plan output."
+            )
+
+        return best_val
+
+    # ------------------------------------------------------------------ #
     # Subclass Hooks
     # ------------------------------------------------------------------ #
     @abstractmethod
@@ -1047,7 +1105,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             working_messages = self.inject_blackboard(working_messages, peek = False)
 
         raw_plan = self._llm_engine.invoke(working_messages)
-        plan_dicts = self._parse_plan_json(raw_plan)
+        plan_dicts = self._str_to_steps(raw_plan)
 
         # ---- Normalize return: ensure exactly one return step and it is last. ----
         return_name = return_tool.full_name
@@ -1201,70 +1259,6 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 
         batches.append([return_idx])
         return batches
-
-    def _parse_plan_json(self, raw_text: str) -> list[dict[str, Any]]:
-        """
-        Parse LLM plan output into a list of dicts.
-
-        Expected canonical schema per element:
-            {"tool": "<Tool.full_name>", "args": <any JSON value>, "await": <int|null>}
-
-        Robustness:
-        - Strips markdown fences.
-        - Accepts either a JSON array directly, or extracts the first JSON array found.
-        - Raises ToolAgentError on failure.
-        """
-        if not isinstance(raw_text, str) or not raw_text.strip():
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: LLM returned empty plan output.")
-
-        text = raw_text.strip()
-
-        # Strip markdown fences if present.
-        text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", text)
-        text = re.sub(r"\s*```\s*$", "", text).strip()
-
-        # Fast path: direct JSON array.
-        if text.lstrip().startswith("["):
-            try:
-                parsed = json.loads(text)
-            except Exception as exc:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: failed to parse plan JSON array: {exc}"
-                ) from exc
-        else:
-            # Tolerant path: find the first JSON array in the text.
-            decoder = json.JSONDecoder()
-            parsed = None
-            for m in re.finditer(r"\[", text):
-                start = m.start()
-                try:
-                    obj, _end = decoder.raw_decode(text, start)
-                except Exception:
-                    continue
-                if isinstance(obj, list):
-                    parsed = obj
-                    break
-            if parsed is None:
-                preview = text if len(text) <= 1200 else text[:1200] + "…"
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: could not locate a JSON array plan in LLM output. "
-                    f"Output preview: {preview!r}"
-                )
-
-        if not isinstance(parsed, list):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan must be a JSON array; got {type(parsed).__name__!r}."
-            )
-
-        plan: list[dict[str, Any]] = []
-        for i, item in enumerate(parsed):
-            if not isinstance(item, dict):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: plan element {i} must be an object; got {type(item).__name__!r}."
-                )
-            plan.append(dict(item))
-
-        return plan
 
     # ------------------------------------------------------------------ #
     # Prepare next batch
