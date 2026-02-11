@@ -757,7 +757,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     # ------------------------------------------------------------------ #
     # Finalization helpers
     # ------------------------------------------------------------------ #
-    def update_blackboard(self, state: ToolAgentRunState) -> None:
+    def update_blackboard(self, state: ToolAgentRunState) -> ToolAgentRunState:
         """
         Persist this run into the agent's cache blackboard (self._blackboard).
 
@@ -825,6 +825,11 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         combined = base_cache + appended
 
+        extracted = [{"step":slot.step, "tool":slot.tool, "args": slot.args} for slot in appended]
+        newest_dump = ",".join([f"\n  {str(step)}" for step in extracted])
+        newest_dump = f"CACHE STEPS #{appended[0].step}-{appended[-1].step} PRODUCED:\n\n[{newest_dump}\n]"
+        state.messages.append({"role":"assistant", "content": newest_dump})
+
         # 3) Trim empty tail from combined cache.
         if combined:
             last2 = len(combined) - 1
@@ -833,6 +838,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             combined = combined[: last2 + 1]
 
         self._blackboard = combined
+        return state
 
     # ------------------------------------------------------------------ #
     # Template Method (FINAL)
@@ -877,14 +883,9 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         # Persist run outputs into cache if context is enabled.
         if self.context_enabled:
-            self.update_blackboard(state)
+            state = self.update_blackboard(state)
 
-        try:
-            assistant = repr(state.return_value)
-        except Exception:  # pragma: no cover
-            assistant = str(state.return_value)
-
-        newest_history = [original_user_msg, {"role": "assistant", "content": assistant}]
+        newest_history = [original_user_msg, state.messages[-1]]
         return newest_history, state.return_value
 
     # ------------------------------------------------------------------ #
@@ -1101,9 +1102,6 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         cache_blackboard: list[BlackboardSlot] = list(self._blackboard) if self.context_enabled else []
         for i, slot in enumerate(cache_blackboard):
             slot.step = i
-
-        if self.context_enabled and cache_blackboard:
-            working_messages = self.inject_blackboard(working_messages, peek = False)
 
         raw_plan = self._llm_engine.invoke(working_messages)
         plan_dicts = self._str_to_steps(raw_plan)
