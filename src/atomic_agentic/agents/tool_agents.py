@@ -1081,25 +1081,22 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 
         Algorithm:
           1) snapshot cache_blackboard (if context enabled)
-          2) inject cache context into messages (if enabled)
-          3) call LLM to produce plan JSON array
-          4) parse JSON -> list[dict]
-          5) normalize return: ensure exactly one return dict and it is last
+          2) call LLM to produce plan JSON array
+          3) normalize return: ensure exactly one return dict and it is last
+             - always position return at end
              - if missing, append return(None)
-             - if misplaced, move to end
-             - if return has 'await', ignore it (allowed)
-          6) dict -> PlannedStep (deps = placeholder deps + await barrier)
-          7) validate tools, deps ranges, cache placeholder ranges, budget
-             - return deps: force deps = {0..return_idx-1} (ignore await)
-          8) compile batches from deps (return isolated final batch)
-          9) allocate running_blackboard plan-locally and pre-fill tool+args
+          4) dict -> PlannedStep
+          5) force return deps to all prior steps
+          6) validate remaining deps, cache placeholder ranges, budget
+          7) compile batches
+          8) allocate running_blackboard plan-locally and pre-fill tool+args
         """
         if not messages:
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
 
         working_messages = [dict(m) for m in messages]
 
-        cache_blackboard: list[BlackboardSlot] = list(self._blackboard) if self.context_enabled else []
+        cache_blackboard: list[BlackboardSlot] = list(self._blackboard) if self._blackboard else []
         for i, slot in enumerate(cache_blackboard):
             slot.step = i
 
@@ -1116,10 +1113,10 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             )
 
         if len(return_positions) == 1:
+            # ALWAYS remove return and append at the end (even if already last)
             pos = return_positions[0]
-            if pos != len(plan_dicts) - 1:
-                ret = plan_dicts.pop(pos)
-                plan_dicts.append(ret)
+            ret = plan_dicts.pop(pos)
+            plan_dicts.append(ret)
         else:
             plan_dicts.append({"tool": return_name, "args": {"val": None}})
 
@@ -1129,21 +1126,19 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         # ---- Convert to PlannedStep and validate tool existence early. ----
         planned: list[PlannedStep] = []
         for i, d in enumerate(plan_dicts):
-            # Convert to PlannedStep object
             ps = PlannedStep.from_dict(d)
-            # Validate tool's existence
             if not self.has_tool(ps.tool):
                 raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool in plan: {ps.tool!r}.")
-            # Add to planned steps
             planned.append(ps)
 
-        # Validate that return is the final step in the plan
-        plan_len = len(planned)
-        return_idx = plan_len - 1
-        if not planned[return_idx].is_return:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: last step is not return after normalization."
-            )
+        # NEW: Force return to be final step with deps = all prior steps
+        return_idx = len(planned) - 1
+        planned[return_idx] = PlannedStep(
+            tool=planned[return_idx].tool,
+            args=planned[return_idx].args,
+            deps=frozenset(range(return_idx)),
+            is_return=True,
+        )
 
         # ---- Enforce budget (non-return only). ----
         limit = self.tool_calls_limit
@@ -1168,39 +1163,18 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                     f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
                 )
 
-            # Validate plan-local deps range (deps were derived from <<__sj__>> and await)
-            # Return is special-cased below.
-            if not ps.is_return:
-                bad = [d for d in ps.deps if d < 0 or d >= i]
-                if bad:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: plan step {i} has illegal deps {sorted(set(bad))!r}; "
-                        f"deps must be < {i}."
-                    )
-            else:
-                # Return args may contain <<__sj__>>; they must be < return_idx.
-                step_refs = extract_dependencies(ps.args, placeholder_pattern=_STEP_TOKEN)
-                bad_refs = [d for d in step_refs if d < 0 or d >= return_idx]
-                if bad_refs:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: return step references out-of-range plan steps "
-                        f"{sorted(set(bad_refs))!r} (return index={return_idx})."
-                    )
-
-        # ---- Force return deps to be all prior steps (ignore await entirely). ----
-        forced_return_deps = frozenset(range(return_idx))
-        planned[return_idx] = PlannedStep(
-            tool=planned[return_idx].tool,
-            args=planned[return_idx].args,
-            deps=forced_return_deps,
-            is_return=True,
-        )
+            bad = [d for d in ps.deps if d < 0 or d >= i]
+            if bad:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: plan step {i} has illegal deps {sorted(set(bad))!r}; "
+                    f"deps must be < {i}."
+                )
 
         # ---- Compile batches from deps; isolate return as final batch. ----
         batches = self._compile_batches_from_deps(planned_steps=planned, return_idx=return_idx)
 
         # ---- Allocate running blackboard plan-locally and prefill tool+args. ----
-        running_blackboard = [BlackboardSlot(step=i) for i in range(plan_len)]
+        running_blackboard = [BlackboardSlot(step=i) for i in range(len(planned))]
         for i, ps in enumerate(planned):
             running_blackboard[i].tool = ps.tool
             running_blackboard[i].args = ps.args
