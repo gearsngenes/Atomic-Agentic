@@ -826,7 +826,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         combined = base_cache + appended
 
         extracted = [{"step":slot.step, "tool":slot.tool, "args": slot.args} for slot in appended]
-        newest_dump = ",".join([f"\n  {str(step)}" for step in extracted])
+        newest_dump = ",".join([f"\n  {json.dumps(step)}" for step in extracted])
         newest_dump = f"CACHE STEPS #{appended[0].step}-{appended[-1].step} PRODUCED:\n\n[{newest_dump}\n]"
         state.messages.append({"role":"assistant", "content": newest_dump})
 
@@ -1005,7 +1005,7 @@ class PlannedStep:
                 f"PlannedStep.from_dict requires a mapping; got {type(data).__name__!r}."
             )
 
-        allowed = {"tool", "args", "await"}
+        allowed = {"tool", "args", "await", "step"}
         extra = set(data.keys()) - allowed
         if extra:
             raise ToolAgentError(f"Plan step contains unsupported keys: {sorted(extra)!r}.")
