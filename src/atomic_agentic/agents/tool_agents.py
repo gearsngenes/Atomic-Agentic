@@ -1431,8 +1431,6 @@ class ReActAgent(ToolAgent[ReActRunState]):
         cache_blackboard = list(self._blackboard)
 
         working_messages = list(messages)
-        if self.context_enabled and cache_blackboard:
-            working_messages = self.inject_blackboard(messages=working_messages, peek=False)
 
         # Preallocate fixed-size run blackboard: non-return calls + 1 return call.
         running_blackboard = [BlackboardSlot(step=i) for i in range(self._tool_calls_limit + 1)]
