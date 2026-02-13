@@ -32,7 +32,7 @@ task = (
     "Calculate the sum of 42 and 58, multiply it by three, take the square root, "
     "then divide by four. Print the intermediate result to console as: "
     "PARTIAL RESULT: <value>. "
-    "Finally, return three times that result."
+    "Finally, return three times that partial result."
 )
 
 final_result = orchestrator.invoke({"prompt": task})

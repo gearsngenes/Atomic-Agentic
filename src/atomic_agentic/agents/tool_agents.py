@@ -899,6 +899,57 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         return best_val
 
+    def _str_to_dict(self, raw_text: str) -> dict[str, Any]:
+        """
+        Parse LLM output into a single dict[str, Any].
+
+        Robustness:
+        - Strips common markdown fences (``` / ```json).
+        - Scans for JSON objects using `re` to find candidate '{' starts.
+        - Uses JSON decoding (nesting-aware) to select the *largest* decodable JSON object
+        that is a dict.
+        - Raises ToolAgentError on failure.
+        """
+        if not isinstance(raw_text, str) or not raw_text.strip():
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: LLM returned empty output.")
+
+        text = raw_text.strip()
+
+        # Strip a single fenced block wrapper if present
+        # Examples:
+        # ```json
+        # {...}
+        # ```
+        text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", text)
+        text = re.sub(r"\s*```\s*$", "", text).strip()
+
+        decoder = json.JSONDecoder()
+
+        best_val: dict[str, Any] | None = None
+        best_span_len: int = -1
+
+        # Candidate starts: every '{' in the text (cheap via regex)
+        for m in re.finditer(r"\{", text):
+            start = m.start()
+            try:
+                val, end_rel = decoder.raw_decode(text[start:])  # nesting-aware decode
+            except json.JSONDecodeError:
+                continue
+
+            if not isinstance(val, dict):
+                continue
+
+            if end_rel > best_span_len:
+                best_span_len = end_rel
+                best_val = dict(val)  # snapshot for downstream mutation safety
+
+        if best_val is None:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: failed to find a valid JSON object in LLM output."
+            )
+
+        return best_val
+
     # ------------------------------------------------------------------ #
     # Subclass Hooks
     # ------------------------------------------------------------------ #
@@ -1377,18 +1428,21 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
     def _prepare_next_batch(self, state: ReActRunState) -> ReActRunState:
         """
-        Prepare the next concurrent batch.
+        Prepare the next single-step batch.
 
-        Uses the run state's message history, optionally injecting a single assistant
-        message describing the most recently executed steps/results, followed by a
-        simple user request for the next executable steps.
-
-        Then:
-          - parses the JSON array of steps (tool + args dict)
-          - moves return to the end if present (at most one)
-          - validates no intra-batch dependencies via <<__sN__>> where N >= next_step_index
-          - fills the next contiguous segment of the preallocated running_blackboard
-          - sets prepared_steps and overwrites latest_executed to those indices
+        Semantics (single-step ReAct):
+        - If state.latest_executed is non-empty, inject an assistant observation message
+            describing the most recently executed step(s) including results, followed by a
+            small user request for the next step.
+        - Call the LLM orchestrator, which must emit exactly ONE JSON object:
+            {"step": <int>, "tool": "<Tool.full_name>", "args": {...}}
+        - Validate strict schema + step index correctness.
+        - Validate placeholder dependencies: any <<__sN__>> must satisfy N < step.
+        - Fill exactly one slot in the running_blackboard.
+        - prepared_steps is a list of exactly one index.
+        - next_step_index advances by 1.
+        - latest_executed is overwritten with the newly prepared index (it will be
+            completed by the base execute loop before the next prepare call).
         """
         if not isinstance(state, ReActRunState):
             raise ToolAgentError(
@@ -1401,33 +1455,24 @@ class ReActAgent(ToolAgent[ReActRunState]):
         working_messages: list[dict[str, str]] = list(state.messages)
 
         if state.latest_executed:
-            obs_payload: list[dict[str, Any]] = []
-            for idx in state.latest_executed:
-                if idx < 0 or idx >= len(state.running_blackboard):
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: latest_executed contains out-of-range index {idx}."
-                    )
-                slot = state.running_blackboard[idx]
-                obs_payload.append(
-                    {
-                        "step": slot.step,
-                        "tool": slot.tool,
-                        "args": slot.args,
-                        "result": slot.result,
-                    }
-                )
-
+            slot = state.running_blackboard[state.latest_executed[0]]
+            obs_payload = {
+                "step": slot.step,
+                "tool": slot.tool,
+                "args": slot.args,
+                "result": slot.result,
+            }
             obs_text = "Most recently executed steps and results:\n" + pprint.pformat(
                 obs_payload, indent=2, sort_dicts=False
             )
             working_messages.append({"role": "assistant", "content": obs_text})
 
+            # Phase B: ONLY when latest_executed is non-empty
             working_messages.append(
                 {
                     "role": "user",
                     "content": "Given the most recently executed steps and available CACHE (if provided) above, "
-                            "strategize and produce the next set of executable steps as a single JSON array of "
-                            "step dicts.",
+                            "produce the NEXT single step as ONE JSON object with keys {step, tool, args}.",
                 }
             )
 
@@ -1435,103 +1480,87 @@ class ReActAgent(ToolAgent[ReActRunState]):
         state.messages = working_messages
 
         # ------------------------------------------------------------------ #
-        # 2) Call LLM and parse steps
+        # 2) Call LLM and parse a single step object
         # ------------------------------------------------------------------ #
         raw_text = self._llm_engine.invoke(working_messages)
-        step_dicts = self._str_to_steps(raw_text)
+        step_obj = self._str_to_dict(raw_text)
 
-        # Strict: tool + args only; args must be a dict.
-        planned_steps: list[PlannedStep] = []
-        for d in step_dicts:
-            if not isinstance(d, dict):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: each step must be an object; got {type(d).__name__!r}."
-                )
-            tool = d.get("tool", None)
-            args = d.get("args", None)
-            if not isinstance(tool, str) or not tool.strip():
-                raise ToolAgentError(f"{type(self).__name__}.{self.name}: step 'tool' must be a non-empty string.")
-            if not isinstance(args, dict):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: step 'args' must be a dict; got {type(args).__name__!r}."
-                )
-
-            # Enforce no extra keys early (PlannedStep.from_dict also validates).
-            allowed = {"tool", "args"}
-            extra = set(d.keys()) - allowed
-            if extra:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: step contains unsupported keys: {sorted(extra)!r}."
-                )
-
-            planned_steps.append(PlannedStep.from_dict({"tool": tool, "args": args}))
-
-        if not planned_steps:
-            # Base loop will also reject empty prepared_steps, but this gives clearer context.
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: LLM produced an empty batch.")
-
-        # ------------------------------------------------------------------ #
-        # 3) Normalize return placement (at most one; move to end if misplaced)
-        # ------------------------------------------------------------------ #
-        return_name = return_tool.full_name
-        return_positions = [i for i, ps in enumerate(planned_steps) if ps.tool == return_name]
-        if len(return_positions) > 1:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: batch contains multiple return steps.")
-        if return_positions:
-            rpos = return_positions[0]
-            if rpos != len(planned_steps) - 1:
-                ret = planned_steps.pop(rpos)
-                planned_steps.append(ret)
-
-        # ------------------------------------------------------------------ #
-        # 4) Validate single-batch dependency legality
-        # ------------------------------------------------------------------ #
-        prefix_len = state.next_step_index
-        for ps in planned_steps:
-            for dep in extract_dependencies(obj=ps.args, placeholder_pattern=_STEP_TOKEN):
-                if dep >= prefix_len:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: illegal intra-batch dependency: "
-                        f"step args reference <<__s{dep}__>> but prefix cutoff is {prefix_len}."
-                    )
-
-        # ------------------------------------------------------------------ #
-        # 5) Fill the next contiguous segment of the preallocated running blackboard
-        # ------------------------------------------------------------------ #
-        end = prefix_len + len(planned_steps)
-        if end > len(state.running_blackboard):
+        # Strict schema: exactly step/tool/args
+        allowed = {"step", "tool", "args"}
+        extra = set(step_obj.keys()) - allowed
+        missing = allowed - set(step_obj.keys())
+        if missing:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: batch would exceed run blackboard capacity "
-                f"({end} > {len(state.running_blackboard)})."
+                f"{type(self).__name__}.{self.name}: step object missing required keys: {sorted(missing)!r}."
+            )
+        if extra:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: step object contains unsupported keys: {sorted(extra)!r}."
             )
 
-        new_indices: list[int] = []
-        for i, ps in enumerate(planned_steps):
-            idx = prefix_len + i
-            slot = state.running_blackboard[idx]
-            if not slot.is_empty():
+        step_index = step_obj.get("step")
+        tool = step_obj.get("tool")
+        args = step_obj.get("args")
+
+        if not isinstance(step_index, int) or step_index < 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: 'step' must be an int >= 0; got {step_index!r}."
+            )
+        if not isinstance(tool, str) or not tool.strip():
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: 'tool' must be a non-empty string.")
+        if not isinstance(args, dict):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: 'args' must be a dict; got {type(args).__name__!r}."
+            )
+
+        # Enforce step index matches the run cursor exactly
+        prefix_len = state.next_step_index
+        if step_index != prefix_len:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: illegal step index: got {step_index}, expected {prefix_len}."
+            )
+
+        # ------------------------------------------------------------------ #
+        # 3) Validate dependency legality for this single step
+        # ------------------------------------------------------------------ #
+        for dep in extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN):
+            if dep >= step_index:
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: attempted to prepare into non-empty slot {idx}."
+                    f"{type(self).__name__}.{self.name}: illegal dependency: "
+                    f"step args reference <<__s{dep}__>> but current step is {step_index}."
                 )
 
-            # Validate tool exists before we stamp it into the slot.
-            self.get_tool(ps.tool)
+        # ------------------------------------------------------------------ #
+        # 4) Fill the next slot of the preallocated running blackboard
+        # ------------------------------------------------------------------ #
+        if prefix_len >= len(state.running_blackboard):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next_step_index exceeds run blackboard capacity "
+                f"({prefix_len} >= {len(state.running_blackboard)})."
+            )
 
-            slot.tool = ps.tool
-            slot.args = ps.args
-            slot.resolved_args = self._resolve_placeholders(ps.args, state=state)
-            slot.result = NO_VAL
-            slot.error = NO_VAL
-            new_indices.append(idx)
+        slot = state.running_blackboard[prefix_len]
+        if not slot.is_empty():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: attempted to prepare into non-empty slot {prefix_len}."
+            )
 
-        # prepared_steps is what the base execute() will run next.
-        state.prepared_steps = list(new_indices)
+        # Validate tool exists before stamping it into the slot.
+        self.get_tool(tool)
+
+        slot.tool = tool
+        slot.args = args
+        slot.resolved_args = self._resolve_placeholders(args, state=state)
+        slot.result = NO_VAL
+        slot.error = NO_VAL
+
+        # prepared_steps is what the base execute() will run next (list-of-one).
+        state.prepared_steps = [prefix_len]
+
+        # Used for injection at the start of the next prepare() call.
+        state.latest_executed = [prefix_len]
 
         # Advance cursor.
-        state.next_step_index = end
-
-        # Per approved semantics: overwrite latest_executed with the newly emitted indices.
-        # This will be used for injection at the start of the next prepare() call.
-        state.latest_executed = list(new_indices)
+        state.next_step_index = prefix_len + 1
 
         return state
