@@ -185,21 +185,6 @@ class ToolAgentRunState:
 RS = TypeVar("RS", bound=ToolAgentRunState)
 
 
-CACHE_INJECTION_TEMPLATE = """\
-# CACHE (READ-ONLY)
-You may reuse results from the following CACHE entries using ONLY these placeholders:
-- <<__ci__>> : result of cache entry i (0-based)
-
-For the NEW LIST OF STEPS you are about to create:
-- If you are starting a NEW TASK, step indices start at 0
-- If you are continuing an ONGOING TASK with N existing steps (i = 0 to N - 1), continue from step N 
-- <<__si__>> may ONLY reference earlier steps in THIS plan (no forward refs).
-- <<__ci__>> may ONLY reference CACHE entries.
-
-CACHE:
-{CACHE_CONTEXT}
-"""
-
 # --------------------------------------------------------------------------- #
 # Base ToolAgent
 # --------------------------------------------------------------------------- #
@@ -498,38 +483,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             return pprint.pformat(view, indent=indent, width=width)
         except Exception:  # pragma: no cover
             return str(view)
-
-    def inject_blackboard(self, messages: list[dict[str, str]], peek = False) -> list[dict[str, str]]:
-        """
-        Inject persisted CACHE context into messages.
-
-        Cache indices are 0-based and correspond to <<__ci__>>.
-        Does not mutate the input list in-place.
-        """
-        if not self.context_enabled or not self._blackboard:
-            return list(messages)
-
-        out = [dict(m) for m in messages]
-
-        # Ensure cache slot indices are coherent with list positions.
-        # (Base resolver uses list indices, so we normalize here for clarity.)
-        for i, slot in enumerate(self._blackboard):
-            slot.step = i
-
-        cache_ctx = self.blackboard_dumps(peek=peek)
-        injection = CACHE_INJECTION_TEMPLATE.format(CACHE_CONTEXT=cache_ctx)
-
-        # Prefer augmenting the last user message; otherwise append a new user message.
-        for i in range(len(out) - 1, -1, -1):
-            if out[i].get("role") == "user":
-                out[i] = {
-                    "role": "user",
-                    "content": f"{out[i].get('content','')}\n\n{injection}",
-                }
-                return out
-
-        out.append({"role": "user", "content": injection})
-        return out
 
     # ------------------------------------------------------------------ #
     # Placeholder resolution helpers (prepare-time)
