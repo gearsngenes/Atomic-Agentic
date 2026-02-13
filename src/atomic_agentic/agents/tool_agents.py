@@ -659,6 +659,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             slot = board[idx]
             tool_name = slot.tool
             tool = self.get_tool(tool_name)
+            logger.debug(f"{type(self).__name__}.{self.name}:\nTool: {tool_name}\nArgs: {slot.args}\n\n")
             try:
                 result = tool.invoke(slot.resolved_args)
             except ToolInvocationError:
@@ -817,6 +818,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             )
 
         while not state.is_done:
+            logger.debug(f"{type(self).__name__}.{self.name} has made {state.tool_calls_used} this run")
             # Invariant: prepare must not be called with a pending prepared batch.
             if state.prepared_steps:
                 raise ToolAgentError(

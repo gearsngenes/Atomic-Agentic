@@ -512,6 +512,7 @@ class Workflow(AtomicInvokable, ABC):
         """
         Run the invoke method
         """
+        logger.info(f"[{type(self).__name__}.{self.name}.invoke started]")
         # 1) validate is mapping
         if not isinstance(inputs, Mapping):
             raise ValidationError("Workflow.invoke: inputs must be a mapping")
@@ -552,6 +553,8 @@ class Workflow(AtomicInvokable, ABC):
                 metadata=metadata,
             )
             self._checkpoints.append(checkpoint)
+
+            logger.info(f"[{type(self).__name__}.{self.name}.invoke started]")
 
             # 6) return
             return packaged
