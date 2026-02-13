@@ -214,6 +214,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         context_enabled: bool = False,
         *,
         tool_calls_limit: Optional[int] = None,
+        peek_at_cache: bool = False,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         history_window: Optional[int] = None,
@@ -233,6 +234,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         self._toolbox: dict[str, Tool] = {}
         self._blackboard: list[BlackboardSlot] = []
+        self._peek_at_cache = peek_at_cache
 
         self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
@@ -293,6 +295,16 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                                resolved_args = slot.resolved_args,
                                result = slot.result,
                                error = slot.error) for slot in self._blackboard]
+    
+    @property
+    def peek_at_cache(self) -> bool:
+        return self._peek_at_cache
+    
+    @peek_at_cache.setter
+    def peek_at_cache(self, val: bool) -> None:
+        if not isinstance(val, bool):
+            raise ToolAgentError("peek_at_cache must be a boolean.")
+        self._peek_at_cache = val
 
     # ------------------------------------------------------------------ #
     # Memory management
@@ -780,7 +792,10 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         combined = base_cache + appended
 
         extracted = [{"step":slot.step, "tool":slot.tool, "args": slot.args} for slot in appended]
-        newest_dump = ",".join([f"\n  {json.dumps(step)}" for step in extracted])
+        if self.peek_at_cache:
+            for i, d in enumerate(extracted):
+                d.update({"result":appended[i].result})
+        newest_dump = ",".join([f"\n  {step}" for step in extracted])
         newest_dump = f"CACHE STEPS #{appended[0].step}-{appended[-1].step} PRODUCED:\n\n[{newest_dump}\n]"
         state.messages.append({"role":"assistant", "content": newest_dump})
 
@@ -1062,6 +1077,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         *,
         context_enabled: bool = False,
         tool_calls_limit: int | None = None,
+        peek_at_cache: bool = False,
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         history_window: int | None = None,
@@ -1073,6 +1089,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             role_prompt=PLANNER_PROMPT,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
+            peek_at_cache=peek_at_cache,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             history_window=history_window,
@@ -1363,6 +1380,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         *,
         context_enabled: bool = False,
         tool_calls_limit: int = 25,
+        peek_at_cache: bool = False,
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         history_window: int | None = None,
@@ -1374,6 +1392,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
             role_prompt=ORCHESTRATOR_PROMPT,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
+            peek_at_cache=peek_at_cache,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             history_window=history_window,

@@ -319,12 +319,12 @@ class Tool(AtomicInvokable):
         override this method; instead they can customise :meth:`to_arg_kwarg`
         and :meth:`execute`.
         """
-        logger.info(f"[{type(self).__name__}.{self.namespace}.{self.name}.invoke started]")
+        logger.info(f"[{type(self).__name__}.{self.namespace}.{self.name} started]")
         if not isinstance(inputs, Mapping):
             raise ToolInvocationError(f"{self._name}: inputs must be a mapping")
         args, kwargs = self.to_arg_kwarg(inputs)
         result = self.execute(args, kwargs)
-        logger.info(f"[{type(self).__name__}.{self.namespace}.{self.name}.invoke started]")
+        logger.info(f"[{type(self).__name__}.{self.namespace}.{self.name} finished]")
         return result
 
     # ------------------------------------------------------------------ #

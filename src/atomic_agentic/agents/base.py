@@ -452,7 +452,7 @@ class Agent(AtomicInvokable):
         
         # main invoke lock        
         with self._invoke_lock:
-            logger.info(f"[{type(self).__name__}.{self.name}.invoke started]")
+            logger.info(f"[{type(self).__name__}.{self.name} started]")
             if not isinstance(inputs, Mapping):
                 raise TypeError("Agent.invoke expects a Mapping[str, Any].")
             # Preprocess inputs to prompt string
@@ -503,7 +503,7 @@ class Agent(AtomicInvokable):
                 raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
 
             # Final logging and return
-            logger.info(f"[{type(self).__name__}.{self.name}.invoke finished]")
+            logger.info(f"[{type(self).__name__}.{self.name} finished]")
             return result
 
     # ------------------------------------------------------------------ #

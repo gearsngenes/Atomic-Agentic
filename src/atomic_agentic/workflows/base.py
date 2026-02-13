@@ -554,7 +554,7 @@ class Workflow(AtomicInvokable, ABC):
             )
             self._checkpoints.append(checkpoint)
 
-            logger.info(f"[{type(self).__name__}.{self.name}.invoke started]")
+            logger.info(f"[{type(self).__name__}.{self.name} finished]")
 
             # 6) return
             return packaged
