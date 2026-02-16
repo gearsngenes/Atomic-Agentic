@@ -22,6 +22,7 @@ my_planner = PlanActAgent(
     description="Creates plans utilizing context memory",
     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
     context_enabled=True,
+    peek_at_cache=True,
 )
 
 my_planner.batch_register(MATH_TOOLS)

@@ -130,6 +130,101 @@ logger = logging.getLogger(__name__)
 _STEP_TOKEN: re.Pattern[str] = re.compile(r"<<__s(\d+)__>>")
 _CACHE_TOKEN: re.Pattern[str] = re.compile(r"<<__c(\d+)__>>")
 
+def truncate_for_preview(obj: Any, limit: Optional[int]) -> Any:
+    """
+    Truncate an object's representation for display in preview messages.
+    
+    If limit is None, returns obj unchanged.
+    If repr(obj) length <= limit, returns obj unchanged.
+    Otherwise, intelligently truncates at collection boundaries and returns
+    a formatted string: "(type_name)truncated_repr..." where the type prefix
+    and ellipsis do not count toward the character limit.
+    
+    For collections (list, dict, set, tuple), truncation attempts to include
+    complete items/pairs and ends with the appropriate closing bracket.
+    
+    Parameters
+    ----------
+    obj : Any
+        Object to potentially truncate
+    limit : Optional[int]
+        Character limit for the representation. If None, no truncation.
+        If a positive integer, truncation occurs only if repr exceeds this limit.
+    
+    Returns
+    -------
+    Any
+        Either the original object unchanged, or a truncated string representation.
+    """
+    if limit is None:
+        return obj
+    
+    try:
+        repr_str = repr(obj)
+    except Exception:
+        repr_str = str(obj)
+    
+    if len(repr_str) <= limit:
+        return obj
+    
+    # Need to truncate
+    type_name = type(obj).__name__
+    
+    # Try intelligent truncation for collections
+    if isinstance(obj, (list, tuple, set, dict)):
+        # Choose bracket characters
+        if isinstance(obj, list):
+            open_br, close_br = "[", "]"
+        elif isinstance(obj, tuple):
+            open_br, close_br = "(", ")"
+        elif isinstance(obj, set):
+            open_br, close_br = "{", "}"
+        else:
+            open_br, close_br = "{", "}"
+
+        # Build inner content up to the limit (limit counts ONLY inner characters)
+        inner = ""
+        if isinstance(obj, dict):
+            iterator = obj.items()
+            for i, (k, v) in enumerate(iterator):
+                kv_repr = f"{repr(k)}: {repr(v)}"
+                sep = ", " if i > 0 else ""
+                if len(inner) + len(sep) + len(kv_repr) > limit:
+                    break
+                inner += sep + kv_repr
+        else:
+            iterator = obj
+            for i, item in enumerate(iterator):
+                item_repr = repr(item)
+                sep = ", " if i > 0 else ""
+                if len(inner) + len(sep) + len(item_repr) > limit:
+                    break
+                inner += sep + item_repr
+
+        # If everything fit, return full representation without ellipsis
+        full_inner = None
+        try:
+            full_inner = repr(obj)[len(open_br):-len(close_br)] if repr_str.startswith(open_br) and repr_str.endswith(close_br) else None
+        except Exception:
+            full_inner = None
+
+        if inner and (len(inner) < len(repr_str) or full_inner is None and len(repr_str) > limit):
+            # Truncated: place ellipsis INSIDE the brackets
+            return f"({type_name}){open_br}{inner}...{close_br}"
+
+        # If inner is empty but repr_str was longer than limit, fall back to simple truncation
+        if not inner and len(repr_str) > limit:
+            truncated = repr_str[:limit]
+            return f"({type_name}){truncated}..."
+
+        # Not truncated — return original representation (as string) to preserve formatting
+        return f"({type_name}){repr_str}"
+
+    else:
+        # For other types, just truncate the repr directly
+        truncated = repr_str[:limit]
+        return f"({type_name}){truncated}..."
+
 def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:
         """
         Recursively extract all placeholder references from an object.
@@ -448,6 +543,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         *,
         tool_calls_limit: Optional[int] = None,
         peek_at_cache: bool = False,
+        preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         history_window: Optional[int] = None,
@@ -468,6 +564,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         self._toolbox: dict[str, Tool] = {}
         self._blackboard: list[BlackboardSlot] = []
         self._peek_at_cache = peek_at_cache
+        self._preview_limit: Optional[int] = preview_limit
 
         self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
@@ -538,6 +635,20 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         if not isinstance(val, bool):
             raise ToolAgentError("peek_at_cache must be a boolean.")
         self._peek_at_cache = val
+    
+    @property
+    def preview_limit(self) -> Optional[int]:
+        """Character limit for result preview in messages. None means no truncation."""
+        return self._preview_limit
+    
+    @preview_limit.setter
+    def preview_limit(self, value: Optional[int]) -> None:
+        if value is None:
+            self._preview_limit = None
+            return
+        if not isinstance(value, int) or value <= 0:
+            raise ToolAgentError("preview_limit must be None or a positive integer > 0.")
+        self._preview_limit = value
 
     # ------------------------------------------------------------------ #
     # Memory management
@@ -1180,9 +1291,11 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         extracted = [{"step":slot.step, "tool":slot.tool, "args": slot.args} for slot in appended]
         if self.peek_at_cache:
             for i, d in enumerate(extracted):
-                d.update({"result":appended[i].result})
+                result = appended[i].result
+                result = truncate_for_preview(result, self._preview_limit)
+                d.update({"result": result})
         newest_dump = ",".join([f"\n  {step}" for step in extracted])
-        newest_dump = f"CACHE STEPS #{appended[0].step}-{appended[-1].step} PRODUCED:\n\n[{newest_dump}\n]"
+        newest_dump = f"CACHED STEPS & RESULTS #{appended[0].step}-{appended[-1].step} PRODUCED:\n\n[{newest_dump}\n]"
         state.messages.append({"role":"assistant", "content": newest_dump})
 
         # 3) Trim empty tail from combined cache.
@@ -1570,6 +1683,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         context_enabled: bool = False,
         tool_calls_limit: int | None = None,
         peek_at_cache: bool = False,
+        preview_limit: Optional[int] = None,
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         history_window: int | None = None,
@@ -1582,6 +1696,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
+            preview_limit=preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             history_window=history_window,
@@ -2030,6 +2145,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         context_enabled: bool = False,
         tool_calls_limit: int = 25,
         peek_at_cache: bool = False,
+        preview_limit: Optional[int] = None,
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         history_window: int | None = None,
@@ -2042,6 +2158,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
+            preview_limit=preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             history_window=history_window,
@@ -2130,7 +2247,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 "step": slot.step,
                 "tool": slot.tool,
                 "args": slot.args,
-                "result": slot.result,
+                "result": truncate_for_preview(slot.result, self._preview_limit),
             }
             obs_text = "Most recently executed steps and results:\n" + pprint.pformat(
                 obs_payload, indent=2, sort_dicts=False

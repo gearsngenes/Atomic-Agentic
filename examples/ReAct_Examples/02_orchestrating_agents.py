@@ -69,6 +69,7 @@ orchestrator = ReActAgent(
     history_window=10,
     tool_calls_limit=10,
     context_enabled=False,
+    preview_limit=100,
 )
 
 # Register both agents as tools.
