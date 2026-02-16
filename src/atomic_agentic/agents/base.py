@@ -384,27 +384,65 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     def attach(self, path: str) -> Mapping[str, Any]:
         """
-        Add a file path to attachments via the underlying engine.
-
+        Attach a file to this Agent via the underlying LLM engine.
+        
+        This method delegates to the engine's attachment system, which validates
+        paths, extracts metadata, and prepares provider-specific structures.
+        Each engine has its own supported formats, policies, and size limits.
+        
+        Parameters
+        ----------
+        path : str
+            Local filesystem path to the file. Must be a non-empty string.
+            
         Returns
         -------
         Mapping[str, Any]
-            The attachment path and metadata.
+            Provider-specific attachment metadata. The structure depends on the
+            engine; see the engine class documentation for details.
+            
+        Raises
+        ------
+        LLMEngineError
+            If the path is invalid, the engine does not support the file format,
+            or the file is too large for the provider.
+            
+        Notes
+        -----
+        - Not all engines support file attachments. Check your engine's
+          documentation (e.g., ``OpenAIEngine``, ``AnthropicEngine``).
+        - Some engines may have format or size restrictions.
+        - Multiple calls with the same path are idempotent if the file hasn't changed.
         """
         return self._llm_engine.attach(path)
 
     def detach(self, path: str) -> bool:
         """
-        Remove a file path from attachments via the underlying engine.
-
+        Detach a previously attached file from this Agent.
+        
+        Delegates to the underlying engine's detach logic, which performs
+        provider-specific cleanup if needed.
+        
+        Parameters
+        ----------
+        path : str
+            The local filesystem path to detach.
+            
         Returns
         -------
         bool
-            True if removed, False if it was not present.
+            ``True`` if the path was attached and has been removed;
+            ``False`` if the path was not in the attachments.
         """
         return self._llm_engine.detach(path)
 
     def clear_attachments(self) -> None:
+        """
+        Remove all currently attached files from this Agent.
+        
+        Delegates to the underlying engine to detach all paths and perform
+        any necessary provider-specific cleanup.
+        """
         return self.llm_engine.clear_attachments()
 
     def clear_memory(self) -> None:
@@ -452,7 +490,7 @@ class Agent(AtomicInvokable):
         
         # main invoke lock        
         with self._invoke_lock:
-            logger.info(f"[{type(self).__name__}.{self.name} started]")
+            logger.info(f"[{self.full_name} started]")
             if not isinstance(inputs, Mapping):
                 raise TypeError("Agent.invoke expects a Mapping[str, Any].")
             # Preprocess inputs to prompt string
@@ -503,7 +541,7 @@ class Agent(AtomicInvokable):
                 raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
 
             # Final logging and return
-            logger.info(f"[{type(self).__name__}.{self.name} finished]")
+            logger.info(f"[{self.full_name} finished]")
             return result
 
     # ------------------------------------------------------------------ #

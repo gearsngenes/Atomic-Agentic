@@ -102,15 +102,39 @@ class ParamSpec(dict):
 
 
 def _format_annotation(ann: Any) -> str:
-    """Convert a type annotation into a readable string.
-
-    Behaviour:
-    - If missing/empty → 'Any'.
-    - If already a string → returned as-is.
-    - If a parameterized / generic type (e.g. List[Dict[str, int]] or dict[str, int]):
-      builds the full nested structure string.
-    - If a plain class → its name (e.g. 'int', 'MyModel').
-    - Otherwise → best-effort str(ann).
+    """Convert a type annotation into a readable string representation.
+    
+    This internal helper normalizes type annotations from function signatures
+    into human-readable strings suitable for serialization and display.
+    
+    Handles all annotation styles including plain types, forward references,
+    PEP 585 generic types (e.g. ``dict[str, int]``), and ``typing`` module types
+    (e.g. ``List[Dict[str, int]]``).
+    
+    Parameters
+    ----------
+    ann : Any
+        A type annotation object (from inspect.signature or typing module).
+    
+    Returns
+    -------
+    str
+        Human-readable type string. Behavior:
+        
+        - ``'Any'`` – if annotation is missing or empty (``inspect._empty`` or None)
+        - string as-is – if annotation is already a string (forward reference)
+        - nested structure – for parameterized types (e.g. ``List[str]`` → ``\"list[str]\"``)
+        - class name – for plain classes (e.g. ``int`` → ``\"int\"``, ``MyClass`` → ``\"MyClass\"``)
+        - best-effort ``str(ann)`` – fallback for unknown types
+    
+    Examples
+    --------
+    >>> _format_annotation(str)
+    'str'
+    >>> _format_annotation(dict[str, int])
+    'dict[str, int]'
+    >>> _format_annotation(inspect._empty)
+    'Any'
     """
 
     # Missing / unknown annotation

@@ -118,19 +118,71 @@ def _normalize_output_schema(
 # ───────────────────────────────────────────────────────────────────────────────
 
 class BundlingPolicy(str, Enum):
-    """Controls whether raw results are bundled into a single output field."""
+    """
+    Controls whether raw results are bundled into a single output field.
+    
+    Bundling is *only* applied when ``output_schema`` has exactly one field.
+    If output_schema has more than one field, bundling is ignored.
+    
+    Values
+    ------
+    - ``BUNDLE``: If ``len(output_schema) == 1``, wrap the raw result under
+      the single output field name. E.g., if schema is ``["result"]`` and raw
+      is ``"foo"``, packaged output is ``{"result": "foo"}``.
+      
+    - ``UNBUNDLE``: Attempt to destructure raw result as a mapping or non-text
+      sequence and distribute values across schema fields. If raw is not
+      destructurable, apply scalar packaging rules instead.
+    """
     BUNDLE = "BUNDLE"
     UNBUNDLE = "UNBUNDLE"
 
 class MappingPolicy(str, Enum):
-    """Controls how mapping-shaped raw outputs are interpreted."""
+    """
+    Controls how mapping-shaped raw outputs are interpreted and packaged.
+    
+    Applied when raw result is a ``Mapping`` or is destructured into one.
+    
+    Values
+    ------
+    - ``STRICT``: Require exact field match—packaged output keys must be a subset
+      of raw keys, and all schema fields must be present. Missing or extra keys
+      raise ``PackagingError``.
+      
+    - ``IGNORE_EXTRA``: Allow raw to have extra fields; only extract schema fields.
+      Missing schema fields remain ``NO_VAL`` (validated later by AbsentValPolicy).
+      
+    - ``MATCH_FIRST_STRICT``: Extract data from raw using schema field names in order,
+      stopping at the first missing field and raising ``PackagingError`` if found.
+      
+    - ``MATCH_FIRST_LENIENT``: Extract schema fields greedily from raw in order;
+      missing fields are set to ``NO_VAL`` (validated later by AbsentValPolicy).
+      Do not raise on missing fields.
+    """
     STRICT = "STRICT"
     IGNORE_EXTRA = "IGNORE_EXTRA"
     MATCH_FIRST_STRICT = "MATCH_FIRST_STRICT"
     MATCH_FIRST_LENIENT = "MATCH_FIRST_LENIENT"
 
 class AbsentValPolicy(str, Enum):
-    """Controls how missing output fields are handled."""
+    """
+    Controls how missing or ``NO_VAL`` output fields are handled after packaging.
+    
+    Applied *after* packaging to any fields that remain ``NO_VAL``.
+    This is the final validation/remediation step in ``invoke()``.
+    
+    Values
+    ------
+    - ``RAISE``: Raise ``PackagingError`` if any output field is ``NO_VAL``.
+      This enforces that all declared output fields are populated. (DEFAULT)
+      
+    - ``DROP``: Silently remove any ``NO_VAL`` fields from the final output.
+      Results in a potentially sparse dictionary.
+      
+    - ``FILL``: Replace ``NO_VAL`` fields with ``default_absent_val``
+      (provided at Workflow construction). Ensures all schema fields appear
+      in the output, even if filled with a default.
+    """
     RAISE = "RAISE"
     DROP = "DROP"
     FILL = "FILL"
@@ -298,10 +350,30 @@ class Workflow(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     def _validate_packaged(self, packaged: Mapping[str, Any]) -> Tuple[Mapping[str, Any], Dict[str, Any]]:
         """
-        Raise if any output fields remain NO_VAL after packaging.
-
-        This method is intentionally called by `invoke()` and not by `package()`
-        to keep packaging responsibilities separate from final contract validation.
+        Validate and remediate packaged output according to AbsentValPolicy.
+        
+        Inspects all output fields for ``NO_VAL`` sentinel and applies the
+        ``absent_val_policy`` to decide whether to raise, drop, or fill those fields.
+        
+        This method is intentionally called by ``invoke()`` and not by ``package()``
+        to keep packaging logic (dict construction) separate from final contract
+        validation (NO_VAL checking and remediation).
+        
+        Parameters
+        ----------
+        packaged : Mapping[str, Any]
+            The result of ``package(raw)``; may contain ``NO_VAL`` sentinel values.
+        
+        Returns
+        -------
+        tuple[Mapping[str, Any], Dict[str, Any]]
+            (final_output, metadata_dict) where metadata_dict contains info on
+            fields that were filled (if FILL) or dropped (if DROP).
+        
+        Raises
+        ------
+        PackagingError
+            If ``absent_val_policy == RAISE`` and any field is ``NO_VAL``.
         """
         # Find any missing keys
         missing = [k for k, v in packaged.items() if v is NO_VAL]
@@ -512,7 +584,7 @@ class Workflow(AtomicInvokable, ABC):
         """
         Run the invoke method
         """
-        logger.info(f"[{type(self).__name__}.{self.name}.invoke started]")
+        logger.info(f"[{self.full_name}.invoke started]")
         # 1) validate is mapping
         if not isinstance(inputs, Mapping):
             raise ValidationError("Workflow.invoke: inputs must be a mapping")
@@ -554,7 +626,7 @@ class Workflow(AtomicInvokable, ABC):
             )
             self._checkpoints.append(checkpoint)
 
-            logger.info(f"[{type(self).__name__}.{self.name} finished]")
+            logger.info(f"[{self.full_name} finished]")
 
             # 6) return
             return packaged

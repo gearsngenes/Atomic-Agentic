@@ -183,6 +183,51 @@ class SequentialFlow(Workflow):
 class MakerCheckerFlow(Workflow):
     """
     A composite Workflow implementing a Maker–Checker (optionally Judge) revision loop.
+    
+    Overview
+    --------
+    The Maker–Checker–Judge pattern implements iterative refinement where:
+    
+    1. **Maker** produces an initial draft from inputs
+    2. **Checker** reviews/validates the draft and provides feedback
+    3. **Judge** (optional) decides if the draft is acceptable; if not, loop continues
+    4. **Maker** revises using checker feedback; process repeats up to ``max_revisions``
+    
+    Loop Semantics
+    --------------
+    - **Initialization**: Maker produces initial draft from ``inputs``
+    - **Iteration**: For each revision round (up to ``max_revisions``):
+      
+      1. Checker reviews current draft; outputs become next revision inputs for Maker
+      2. If Judge is present:
+         
+         - Judge examines checker output
+         - Judge must return a **boolean** (True = accept, False = continue)
+         - If True, loop terminates early; final draft is returned
+      
+      3. Maker produces revised draft from checker feedback
+    
+    - **Completion**: After ``max_revisions`` iterations or early judge acceptance,
+      the final draft (`~Any`) is returned
+    
+    Checkpoints & Metadata
+    ----------------------
+    Metadata dict contains:
+    
+    - ``maker_checkpoints`` (list[int]): checkpoint indices from each Maker invocation
+      (length is ``num_revisions + 1``: initial + revisions)
+    - ``checker_checkpoints`` (list[int]): checkpoint indices from each Checker run
+    - ``judge_checkpoints`` (list[int] or None): checkpoint indices from Judge runs;
+      None if no Judge was configured
+    - ``iterations_run`` (int): actual number of revision rounds executed
+    - ``stopped_early`` (bool): True if Judge accepted before ``max_revisions``
+    
+    Design Notes
+    ~~~~~~~~~~~~
+    - If ``max_revisions=0``, only Maker runs; Checker and Judge are skipped
+    - Judge output is treated as a single boolean value (first value from output dict)
+    - All steps (Maker, Checker, Judge) are wrapped as ``BasicFlow`` internally
+    - Input schema comes from Maker; output schema is configurable
     """
 
     def __init__(

@@ -1,24 +1,97 @@
 """
-ToolAgents
+ToolAgents: LLM-Driven Iterative Tool Calling with Persistent Memory
 
-This module defines the abstract base ToolAgent.
+This module provides an extensible framework for building intelligent agents that leverage
+**Large Language Models (LLMs)** to iteratively decide which tools to invoke, observe
+results, and react or plan accordingly. All tool calls and LLM messages are **saved together**
+in a persistent execution trace, enabling agents to learn from prior interactions and
+efficiently reuse results across multiple invocations.
 
-ToolAgent is a template-method runtime that:
-- owns a toolbox of Tool instances
-- runs an iterative "prepare -> execute" loop against a per-invoke RunState
-- supports global blackboard placeholder references: <<__sN__>>
-- enforces a resolvable cutoff: placeholders must satisfy N <= resolvable_cutoff
-- executes one prepared batch per loop iteration (A1)
-- resolves placeholders at prepare time and stores resolved_args in the blackboard slots
-- executes concurrently, fail-fast, recording results into the same indexed slots
-- terminates when the canonical return tool executes, storing return_value on state
-- optionally persists the trimmed (no empty tail) run blackboard back onto the agent blackboard
+Core Concept
+------------
+Rather than executing a fixed sequence of operations, ToolAgents maintain an interactive loop:
 
-Subclasses must implement:
-- _initialize_run_state(...)
-- _prepare_next_batch(...)
+1. **LLM decides**: The LLM examines the current state and decides which tools to invoke
+2. **Tools execute**: Selected tools run (concurrently or sequentially) and produce results
+3. **State persists**: Both the LLM messages AND the tool call results are saved in an
+   execution journal (the "blackboard")
+4. **Loop continues**: The LLM observes results and decides next steps (or terminates)
+5. **Future reuse**: In subsequent invocations, the agent can reference and reuse
+   previously computed results via placeholder syntax (``<<__cN__>>``), avoiding recomputation
 
-The run state is extensible: subclasses may return a dataclass inheriting from ToolAgentRunState.
+This design enables stateful, multi-turn tool orchestration where the LLM maintains
+full context of the execution trace and can reference historical results.
+
+Execution Persistence
+---------------------
+All tool invocations are tracked in an **execution blackboard** (a journal of steps):
+
+- Each step records: **tool name**, **arguments** (possibly containing placeholders),
+  **resolved arguments**, and **execution result** (or error)
+- **LLM messages** are preserved alongside tool calls, creating a unified conversation history
+- If ``context_enabled=True``, the blackboard is **persisted** between invoke() calls,
+  allowing new runs to reference prior results
+
+Blackboard Architecture
+~~~~~~~~~~~~~~~~~~~~~~~
+The **blackboard pattern** is used internally to store and manage this execution trace:
+
+- **Running blackboard**: Current invocation's tool calls (ephemeral, local to this run)
+- **Cached blackboard**: Prior invocation results persisted from previous runs
+- **Placeholders**: Tool arguments can reference results from:
+  
+  - ``<<__sN__>>`` – result from running step N (current invoke, 0-based index)
+  - ``<<__cN__>>`` – result from cache entry N (prior invokes, 0-based index)
+
+Placeholders are resolved at execution time to their concrete values, enabling dynamic
+data flow and automatic dependency management.
+
+Intelligent Iteration Strategies
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Subclasses implement different iteration approaches:
+
+- **PlanActAgent**: LLM generates a **complete plan upfront** (all tool calls),
+  then the system executes them in **topologically-sorted concurrent batches** for speed.
+- **ReActAgent**: LLM **emits one tool call per turn**, observes the result,
+  then decides the next step (ReAct-style reasoning with full visibility).
+
+Execution Model
+~~~~~~~~~~~~~~~
+**Template-Method Pattern**: ``ToolAgent`` owns the invariant iteration loop; subclasses
+provide domain-specific planning/iteration logic via abstract hooks.
+
+**Concurrent Execution**: Batches of independent tool calls execute concurrently
+(thread pool) with fail-fast semantics: first error aborts the batch.
+
+**Termination**: Agents invoke the canonical ``return`` tool to signal completion and
+return a final value.
+
+Subclass Responsibilities
+--------------------------
+Subclasses must implement two abstract methods:
+
+**_initialize_run_state(messages)** → ``RS``
+  Initialize and snapshot the execution state for this invoke:
+  - Snapshot prior cached results (if context enabled)
+  - Allocate slots for upcoming tool calls
+  - Store the LLM messages for context
+
+**_prepare_next_batch(state)** → ``RS``
+  Generate the next batch of tool calls by querying the LLM:
+  - Decide which tools to invoke based on current state
+  - Resolve placeholders to concrete values
+  - Return the list of prepared steps ready for execution
+
+The run state is extensible: ``RS`` is a TypeVar bound to ``ToolAgentRunState``,
+allowing subclasses to carry domain-specific fields (e.g., ``batches``, ``batch_index``,
+planning metadata).
+
+Concrete Subclasses
+-------------------
+- **PlanActAgent**: One-shot planner; queries LLM once to generate entire plan,
+  then executes in concurrent batches. Fast, deterministic, no replanning.
+- **ReActAgent**: Iterative actor; queries LLM once per turn, reacts to each result.
+  Fully adaptive, but requires more LLM turns and sequential execution.
 """
 
 from __future__ import annotations
@@ -59,11 +132,46 @@ _CACHE_TOKEN: re.Pattern[str] = re.compile(r"<<__c(\d+)__>>")
 
 def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:
         """
-        Return the set of step/cache indices referenced by placeholder_pattern anywhere in obj.
+        Recursively extract all placeholder references from an object.
 
-        placeholder_pattern: <<__ci__>> or <<__si__>>
-        
-        This does NOT validate readiness; purely structural.
+        Scans the object for occurrences of a given placeholder pattern (e.g., ``<<__sN__>>``)
+        and returns the set of all referenced indices. Used during planning to extract
+        dependencies between steps.
+
+        Parameters
+        ----------
+        obj : Any
+            Object to scan. Typically a dict (tool args) but can be any nested structure
+            (lists, tuples, dicts, sets, scalars).
+        placeholder_pattern : re.Pattern[str]
+            Compiled regex pattern matching placeholders. Usually:
+            - ``_STEP_TOKEN`` for step refs (``<<__sN__>>``)
+            - ``_CACHE_TOKEN`` for cache refs (``<<__cN__>>``)
+
+        Returns
+        -------
+        set[int]
+            Set of all indices found (0-based). Empty set if no placeholders found.
+
+        Validation
+        ~~~~~~~~~~
+        This method performs **NO validation** of the found indices:
+        - Does NOT check bounds (N might be >= blackboard length)
+        - Does NOT check execution status (referenced slot might not be executed yet)
+        - Purely structural scanning
+
+        Validation happens later in ``_resolve_placeholders()`` at prepare time.
+
+        Examples
+        --------
+        >>> pattern = _STEP_TOKEN  # Matches <<__sN__>>
+        >>> obj = {\"query\": \"<<__s0__>>\", \"context\": [\"<<__s1__>>\", \"<<__s0__>>\"]}
+        >>> extract_dependencies(obj, pattern)
+        {0, 1}
+
+        >>> obj = {\"static\": \"no placeholders here\"}
+        >>> extract_dependencies(obj, pattern)
+        set()
         """
         deps: set[int] = set()
 
@@ -108,14 +216,50 @@ return_tool = Tool(
 @dataclass(slots=True)
 class BlackboardSlot:
     """
-    One indexed slot in the run blackboard.
+    One indexed slot in the run blackboard, representing a single tool invocation.
 
-    Lifecycle (sentinel-driven):
-      - Empty: tool is NO_VAL
-      - Prepared: tool != NO_VAL and resolved_args != NO_VAL and result is NO_VAL
-      - Executed: result != NO_VAL
+    Each slot tracks the complete lifecycle of a tool call from planning through execution.
+    State transitions are **sentinel-driven** using the ``NO_VAL`` marker:
 
-    `step` is always the global blackboard index for this slot (0-based).
+    State Lifecycle
+    ~~~~~~~~~~~~~~~
+    1. **Empty** (initial): ``tool=NO_VAL, resolved_args=NO_VAL, result=NO_VAL``
+       - Slot allocated but not yet planned
+
+    2. **Prepared**: ``tool≠NO_VAL, resolved_args≠NO_VAL, result=NO_VAL``
+       - Slot assigned a tool and resolved arguments; ready for execution
+       - Placeholder dependencies have been resolved to concrete values
+
+    3. **Executed**: ``result≠NO_VAL`` (or ``error≠NO_VAL`` on failure)
+       - Tool has been invoked; result (or exception) stored
+       - Slot is now available for subsequent steps' placeholder resolution
+
+    Fields
+    ------
+    step : int
+        Global blackboard index (0-based). Always matches the slot's position in the
+        containing blackboard list during planning. After persistence to cache, this
+        index becomes globally unique (incremented from previous cache length).
+
+    tool : str | NO_VAL
+        Tool name (``Tool.full_name``). Set at prepare time; must reference a
+        registered tool or invoke will raise.
+
+    args : Any (typically dict)
+        Raw, unresolved arguments. May contain placeholders (``<<__sN__>>``,
+        ``<<__cN__>>``). Immutable after prepare time.
+
+    resolved_args : Any (typically dict) | NO_VAL
+        Arguments after placeholder resolution. Created at prepare time by
+        ``_resolve_placeholders(args, state=...)``. Passed to ``tool.invoke()``.
+
+    result : Any | NO_VAL
+        Tool execution result. Set by ``_execute_prepared_batch()`` on success.
+        Used for placeholder resolution in dependent steps.
+
+    error : Any | NO_VAL
+        Exception captured during execution (if any). Set only on failure.
+        Result remains ``NO_VAL`` if error is set.
     """
     step: int
 
@@ -148,20 +292,56 @@ class BlackboardSlot:
 @dataclass(slots=True)
 class ToolAgentRunState:
     """
-    Base run state contract required by ToolAgent.
+    Base run state contract for ``ToolAgent`` invocations.
 
-    - cache_blackboard: snapshot of persisted cache (read-only for this run)
-    - running_blackboard: plan-local slots (0..N-1), populated/prepared/executed during this run
+    This dataclass encapsulates all mutable state during a single ``invoke()`` call,
+    enabling subclasses to extend it with domain-specific planning/execution fields.
 
-    Placeholder resolvability:
+    Blackboard Architecture
+    -----------------------
+    **cache_blackboard** : list[BlackboardSlot] (read-only)
+        Snapshot of the persisted ``self._blackboard`` at invoke start. Previous
+        invocation results are available here and can be referenced via
+        ``<<__cN__>>`` placeholders in the running plan.
 
-      <<__ci__>> is resolvable iff:
-        - 0 <= i < len(cache_blackboard)
-        - cache_blackboard[i].result is not NO_VAL
+    **running_blackboard** : list[BlackboardSlot]
+        Plan-local slots (0-based indices) created during this invoke. Populated by
+        ``_initialize_run_state()``, planned by ``_prepare_next_batch()``, and
+        executed by ``_execute_prepared_batch()``.\n        If ``context_enabled=True``, this is persisted and merged into
+        ``self._blackboard`` after ``invoke()`` completes.
 
-      <<__si__>> is resolvable iff:
-        - 0 <= i < len(running_blackboard)
-        - running_blackboard[i].result is not NO_VAL
+    Placeholder Semantics & Resolvability
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    **Cached Placeholder** (``<<__cN__>>``)\n        Resolvable iff ``0 <= N < len(cache_blackboard)`` AND
+        ``cache_blackboard[N].result is not NO_VAL`` (i.e., previously executed).
+
+    **Step Placeholder** (``<<__sN__>>``)\n        Resolvable iff ``0 <= N < len(running_blackboard)`` AND
+        ``running_blackboard[N].is_executed()`` (i.e., result set in this run).
+
+    Execution State Machine
+    -----------------------
+    **messages** : list[dict[str, str]]
+        LLM conversation history (messages exchanged so far).
+        Augmented during iteration by prepare/execute steps for context.
+
+    **executed_steps** : set[int]
+        Running plan indices that have been executed (result != NO_VAL).
+        Used for fast-path integrity checking.
+
+    **prepared_steps** : list[int]
+        Running plan indices ready for concurrent execution in the *next*
+        ``_execute_prepared_batch()`` call. Must be set by ``_prepare_next_batch()``.
+        Must be non-empty; cleared after execution.
+
+    **tool_calls_used** : int
+        Count of non-return tool calls executed so far (for budget tracking).
+
+    **is_done** : bool
+        Loop termination flag. Set to True when the ``return`` tool executes.
+
+    **return_value** : Any | NO_VAL
+        Agent's final output. Set by ``_execute_prepared_batch()`` when the return
+        tool executes. Returned from ``invoke()`` (post-processed via ``post_invoke``).
     """
     messages: list[dict[str, str]]
 
@@ -190,19 +370,72 @@ RS = TypeVar("RS", bound=ToolAgentRunState)
 # --------------------------------------------------------------------------- #
 class ToolAgent(Agent, ABC, Generic[RS]):
     """
-    Abstract base class for tool-using agents.
+    Abstract base class implementing the template-method pattern for tool-using agents.
 
-    The base class owns the invariant runtime loop in `_invoke(messages=...)`:
+    This class owns the invariant iteration loop; subclasses provide domain-specific
+    planning and batch preparation strategies. The architecture leverages a blackboard
+    slot system with sentinel-driven state and placeholder-based dependency management.
 
-      initialize state -> repeat:
-        prepare one batch (subclass) [must resolve placeholders + update planned_cutoff]
-        execute prepared batch (base) [concurrent, fail-fast]
-        completion check (base) [return_value set]
-      finalize (base) [trim tail + optional persistence]
+    Template-Method Loop
+    --------------------
+    The ``_invoke(messages)`` method (FINAL; do not override) orchestrates::
 
-    Subclasses implement:
-      - _initialize_run_state(...) -> RS
-      - _prepare_next_batch(state: RS) -> RS
+      1. state = _initialize_run_state(messages)  [subclass hook]
+      2. while not state.is_done:
+           state = _prepare_next_batch(state)      [subclass hook]
+           state = _execute_prepared_batch(state)  [base implementation]
+           [completion check: if return tool executed, is_done=True]
+      3. if context_enabled: state = update_blackboard(state)  [base implementation]
+      4. return newest_history, state.return_value
+
+    Subclass Responsibilities
+    -------------------------
+    Subclasses must implement two abstract methods:
+
+    **_initialize_run_state(messages)** → ``RS`` (TypeVar[ToolAgentRunState])
+        Initialize and return a run state for this invoke. Must:
+        - Snapshot ``self._blackboard`` as ``state.cache_blackboard``
+        - Create appropriate ``state.running_blackboard`` (may be fixed-size or dynamic)
+        - Store ``messages`` for LLM context
+        - Initialize ``executed_steps=set()``, ``prepared_steps=[]``, etc.
+
+    **_prepare_next_batch(state)** → ``RS``
+        Prepare exactly one executable batch per loop iteration:
+        - Generate next tool calls (via LLM, pre-computed plan, heuristic, etc.)
+        - Validate tool names, placeholder dependencies, and budget
+        - Fill ``state.prepared_steps`` with indices of slots ready to execute
+        - Call ``self._resolve_placeholders(args, state=state)`` to populate
+          ``slot.resolved_args`` for each prepared step
+        - Return the updated state
+        Raise on any validation failure; raising exits the loop with error.
+
+    Key Features
+    ~~~~~~~~~~~~
+    **Concurrent Execution**: Each batch runs concurrently (thread pool) with fail-fast
+    semantics. First error aborts; remaining futures are cancelled.
+
+    **Placeholder Resolution**: Supported syntaxes:
+        - ``<<__sN__>>`` – reference to running step N (resolved after N executes)
+        - ``<<__cN__>>`` – reference to cache entry N (must exist and be executed)
+        Placeholders are resolved at prepare time; inline refs in strings use ``repr()``;
+        full-string placeholders preserve types.
+
+    **Return Semantics**: The canonical ``return_tool`` is registered automatically.
+        When return executes, ``state.return_value`` is set and loop exits.
+        Only one return per run is allowed; multiple raises.
+
+    **Budget Enforcement**: If ``tool_calls_limit`` is set, non-return tool calls
+        (across all iterations) are tracked; exceeding the limit raises.
+
+    **Context Persistence**: If ``context_enabled=True``, the trimmed run blackboard
+        is merged into ``self._blackboard`` after invoke completes, with step placeholders
+        rewritten to cache placeholders for future invokes' reference.
+
+    Generic Type Parameter
+    ~~~~~~~~~~~~~~~~~~~~~~
+    ``RS`` is a TypeVar bound to ``ToolAgentRunState``. Subclasses provide a concrete
+    runtime-specific state class (e.g., ``PlanActRunState``, ``ReActRunState``) that
+    may carry additional fields for planning/execution state.
     """
 
     def __init__(
@@ -501,19 +734,67 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     # ------------------------------------------------------------------ #
     def _resolve_placeholders(self, obj: Any, *, state: ToolAgentRunState) -> Any:
         """
-        Resolve placeholders recursively.
+        Resolve all placeholders in an object to their concrete values.
 
-        Supported:
-        - <<__si__>>  : plan-local running step i
-        - <<__ci__>> : cache entry i
+        This method recursively traverses the object structure and replaces placeholder
+        references with their concrete results. Placeholders are references to previously
+        executed steps (``<<__sN__>>``) or cached prior results (``<<__cN__>>``).
 
-        Readiness rules:
-        - referenced slot must exist
-        - referenced slot must be executed (result != NO_VAL)
+        Supported Placeholder Formats
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        - ``<<__sN__>>`` – Result from running step N (0-based, plan-local to this invoke)
+        - ``<<__cN__>>`` – Result from cache entry N (0-based, from persisted blackboard)
 
-        Semantics:
-        - Full-string placeholder returns referenced result as-is (preserves type)
-        - Inline occurrences inside larger strings are replaced with repr(result) (fallback to str)
+        Two resolution modes apply depending on placeholder position:
+
+        1. **Full-String Placeholder** (e.g., entire value is ``\"<<__s0__>>\"``):
+           - Returns the referenced result as-is, **preserving its type**
+           - Example: if ref is ``[1, 2, 3]``, returns the list, not ``\"[1, 2, 3]\"``
+
+        2. **Inline Placeholder** (e.g., within ``\"prefix <<__s0__>> suffix\"``):
+           - Replaces placeholder with ``repr(result)``, then returns the string
+           - Fallback to ``str(result)`` if ``repr()`` fails
+           - Example: if ref is ``[1, 2, 3]``, inline becomes ``\"prefix [1, 2, 3] suffix\"``
+
+        Readiness Validation
+        ~~~~~~~~~~~~~~~~~~~~
+        Before resolution, validates that all referenced slots are **executed** (result set):
+
+        - Referenced slot must exist (index within bounds)
+        - Referenced slot must have ``result != NO_VAL``
+
+        Raises ``ToolAgentError`` if any reference is invalid or unexecuted.
+
+        Parameters
+        ----------
+        obj : Any
+            Object to resolve (typically a dict of args). Can be nested (lists, tuples,
+            dicts, sets, or scalars).
+        state : ToolAgentRunState
+            Execution state containing cache_blackboard and running_blackboard.
+
+        Returns
+        -------
+        Any
+            Resolved object with all placeholders replaced. Structure is preserved;
+            only placeholder tokens are replaced.
+
+        Raises
+        ------
+        ToolAgentError
+            If a referenced placeholder is out of bounds or not executed.
+
+        Examples
+        --------
+        >>> # Full-string placeholder (preserves type)
+        >>> obj = {\"result\": \"<<__s0__>>\"}
+        >>> # If step 0 result is [1, 2, 3]:
+        >>> resolved[\"result\"]  # → [1, 2, 3] (list, not string)
+
+        >>> # Inline placeholder (coerced to string)
+        >>> obj = {\"message\": \"Step 0 returned: <<__s0__>>\"}
+        >>> # If step 0 result is [1, 2, 3]:
+        >>> resolved[\"message\"]  # → \"Step 0 returned: [1, 2, 3]\" (string)
         """
         cache = state.cache_blackboard
         running = state.running_blackboard
@@ -594,9 +875,69 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     # ------------------------------------------------------------------ #
     def _execute_prepared_batch(self, state: RS) -> RS:
         """
-        Execute the currently prepared batch described by state.prepared_steps (plan-local indices).
+        Execute all steps in the currently prepared batch concurrently.
 
-        Records results into state.running_blackboard.
+        This is a core base-owned method (do not override). It executes all steps in
+        ``state.prepared_steps`` using a thread pool, records results in the running
+        blackboard, and handles termination if the return tool is executed.
+
+        Batch Semantics
+        ~~~~~~~~~~~~~~~
+        - All steps in ``prepared_steps`` are **concurrent** (map to thread pool)
+        - **Fail-fast**: If any step raises, the batch aborts; remaining futures are cancelled
+        - **Atomicity**: Either all steps complete successfully or none do (via exception)
+        - **Ordering**: Results are stored in the blackboard; order is immaterial
+
+        Validation & Safety Checks
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+        Before execution, validates:
+
+        1. **prepared_steps is non-empty**: Raises ToolAgentError if empty
+        2. **No duplicates**: Raises if any index appears twice
+        3. **Bounds**: Each index must be 0 <= idx < len(running_blackboard)
+        4. **Not already executed**: Raises if slot already has result set
+        5. **Is prepared**: Slot must have tool ≠ NO_VAL, resolved_args ≠ NO_VAL
+        6. **Tool exists**: Tool name must be registered in toolbox
+        7. **Budget enforcement**: Non-return calls don't exceed tool_calls_limit
+
+        Execution Flow
+        ~~~~~~~~~~~~~~
+        1. Validate all preconditions (as above)
+        2. Count non-return vs. return tool calls
+        3. If tool_calls_limit set, check budget
+        4. Execute concurrently:
+           - Single-step batch: run synchronously
+           - Multi-step batch: use ThreadPoolExecutor with fail-fast on first error
+        5. Store results in ``slot.result`` or ``slot.error``
+        6. If return tool executed: set ``state.return_value`` and ``state.is_done = True``
+        7. Update ``state.executed_steps``, ``state.tool_calls_used``
+        8. Clear ``prepared_steps`` (consumed)
+
+        Parameters
+        ----------
+        state : RS
+            Run state with prepared_steps populated. After execution, updated with
+            results and completion flags.
+
+        Returns
+        -------
+        RS
+            Updated state with results recorded and completion status set.
+
+        Raises
+        ------
+        ToolAgentError
+            On any validation failure (preconditions, budget, tool not found, etc.)
+            or if any tool invocation raises (first error aborts batch).
+
+        Side Effects
+        ~~~~~~~~~~~~
+        - ``state.running_blackboard[idx].result`` is set for executed steps
+        - ``state.running_blackboard[idx].error`` is set on failure
+        - ``state.executed_steps`` is updated with executed indices
+        - ``state.tool_calls_used`` incremented by non-return call count
+        - ``state.prepared_steps`` is cleared
+        - ``state.is_done`` and ``state.return_value`` set if return tool executed
         """
         indices = list(state.prepared_steps)
         if not indices:
@@ -725,15 +1066,60 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     # ------------------------------------------------------------------ #
     def update_blackboard(self, state: ToolAgentRunState) -> ToolAgentRunState:
         """
-        Persist this run into the agent's cache blackboard (self._blackboard).
+        Persist executed run steps into the agent's persisted blackboard cache.
 
-        Policy:
-        - Cache is state.cache_blackboard (snapshot of self._blackboard at invoke start)
-        - Append executed running plan slots (trim empty/unplanned tail first)
-        - Rewrite any <<__sj__>> placeholders inside appended slot.args into
-        <<__c{base_len + j}__>> so cached args never contain step-local placeholders.
+        This method is called at the end of ``invoke()`` if ``context_enabled=True``.
+        It merges the current run's executed steps into the persistent blackboard,
+        enabling future invokes to reference results via cached placeholders.
 
-        Also trims any empty tail slots from the final persisted cache.
+        Persistence Policy
+        ~~~~~~~~~~~~~~~~~~
+        1. **Trim empty/unplanned tail**: Remove trailing empty slots from running blackboard
+           (slots with no tool assigned)
+        2. **Rewrite placeholders**: All ``<<__sN__>>`` step references in appended slots'
+           args are rewritten to ``<<__c{new_global_index}__>>`` cache references.
+           This ensures cached args never contain step-local placeholders.
+        3. **Merge into cache**: Append rewritten slots to persist them
+        4. **Trim cache tail**: Remove trailing empty slots from final cache
+
+        Placeholder Rewriting Example
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        Initial state:
+        - cache_blackboard has 5 entries (indices 0-4)
+        - running_blackboard has 3 executed entries (indices 0-2)
+
+        Rewriting in appended slots:
+        - Step 0's args contain ``<<__s1__>>`` → rewritten to ``<<__c6__>>`` (5 + 1)
+        - Step 1's args contain ``<<__s0__>>`` → rewritten to ``<<__c5__>>`` (5 + 0)
+        - Step 2's args contain ``<<__s1__>>`` → rewritten to ``<<__c6__>>`` (5 + 1)
+
+        After persistence:
+        - cache_blackboard now has 8 entries
+        - Future invokes can use ``<<__c5__>>``, ``<<__c6__>>``, ``<<__c7__>>``
+          to reference steps 0, 1, 2 respectively
+
+        Metadata Augmentation
+        ~~~~~~~~~~~~~~~~~~~~
+        If ``peek_at_cache=True``, results are also included in the assistant message
+        appended to ``state.messages``. This allows the LLM to \"see\" cached results
+        for reflection or planning in future invokes.
+
+        Parameters
+        ----------
+        state : ToolAgentRunState
+            Run state with executed steps in running_blackboard and cache snapshot.
+
+        Returns
+        -------
+        ToolAgentRunState
+            Updated state with messages augmented (side effect only; state object
+            itself is returned unchanged).
+
+        Side Effects
+        ~~~~~~~~~~~~
+        - ``self._blackboard`` is replaced with merged cache + appended slots
+        - ``state.messages`` is augmented with an assistant message describing
+          newly cached steps (for context in future LLM turns)
         """
         base_cache: list[BlackboardSlot] = list(state.cache_blackboard)
         base_len = len(base_cache)
@@ -1003,12 +1389,51 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 @dataclass(frozen=True, slots=True)
 class PlannedStep:
     """
-    Minimal, normalized plan-step representation.
+    Normalized, immutable representation of a planned tool invocation.
 
-    - tool: Tool.full_name (must exist in toolbox)
-    - args: raw/unresolved args (may contain <<__si__>> / <<__ci__>> placeholders)
-    - deps: plan-local prerequisite indices (includes placeholder step deps + await barrier if provided)
-    - is_return: whether this is the canonical return tool step
+    Created from LLM plan output (JSON dict) and used internally during planning.
+    Frozen dataclass ensures immutability; external API uses running blackboard slots.
+
+    Dependency Extraction
+    ~~~~~~~~~~~~~~~~~~~~~
+    Dependencies are automatically extracted from args during construction:
+    - Scans args for ``<<__sN__>>`` placeholders; extracts all referenced step indices
+    - If \"await\" field is provided, adds it as an explicit dependency barrier
+
+    This enables automatic topological sorting and concurrent batch compilation.
+
+    Fields
+    ------
+    tool : str
+        Tool name (``Tool.full_name``). Must exist in agent's toolbox when executed.
+
+    args : Any (typically dict)
+        Raw, unresolved tool arguments. May contain ``<<__sN__>>`` or ``<<__cN__>>``
+        placeholders. Immutable; resolution happens at execution time.
+
+    deps : frozenset[int]
+        Plan-local dependencies (step indices this step waits for). Extracted from args
+        and optionally from \"await\" field. Empty if no dependencies.
+        Used for topological sorting into concurrent batches.
+
+    is_return : bool
+        ``True`` iff tool is the canonical ``return_tool``. Return steps always have
+        special semantics (wait for all prior steps, trigger loop exit when executed).
+
+    Construction Methods
+    ~~~~~~~~~~~~~~~~~~~~
+    **from_dict(data)** (classmethod):
+        Parse LLM plan step output. Accepts keys: \"tool\", \"args\", \"await\" (optional),
+        \"step\" (optional, ignored).
+
+        Example:
+        >>> step_dict = {\"tool\": \"search\", \"args\": {\"q\": \"<<__s0__>>\"}, \"await\": 0}
+        >>> ps = PlannedStep.from_dict(step_dict)
+        >>> ps.deps  # frozenset({0})
+
+    **to_dict()** (instance):
+        Returns minimal dict: {\"tool\", \"args\"}. Deps and is_return are not preserved
+        (they are computed at serialization time).
     """
     tool: str
     args: Any
@@ -1060,15 +1485,82 @@ class PlannedStep:
 @dataclass(slots=True)
 class PlanActRunState(ToolAgentRunState):
     """
-    PlanAct run state extends ToolAgentRunState with:
-      - batches: compiled executable batches as plan-local indices
-      - batch_index: next batch to prepare
+    PlanActAgent-specific run state extending ToolAgentRunState.
+
+    Adds planning-specific fields for managing pre-compiled concurrent batches.
+
+    Fields
+    ------
+    batches : list[list[int]]
+        Pre-compiled topologically-sorted batches. Each batch is a list of plan-local
+        indices that can execute concurrently. Created during ``_initialize_run_state()``
+        via ``_compile_batches_from_deps()``.
+
+        Example: ``[[0, 1], [2, 3], [4]]`` means:
+        - Batch 0: steps 0 and 1 execute together
+        - Batch 1: steps 2 and 3 execute together (after batch 0)
+        - Batch 2: step 4 executes (after batch 1; typically the return step)
+
+    batch_index : int
+        Cursor pointing to the next batch to prepare. Starts at 0 during initialization;
+        incremented after each batch is prepared. Loop exits when batch_index >= len(batches).
+
+    Workflow
+    ~~~~~~~~
+    1. ``_initialize_run_state()`` creates batches and sets batch_index=0
+    2. Each iteration of the base loop:
+       - ``_prepare_next_batch()`` reads batches[batch_index]
+       - Resolves placeholders for that batch
+       - Base ``_execute_prepared_batch()`` runs the batch concurrently
+       - batch_index incremented for next iteration
+    3. When batch_index >= len(batches), _prepare_next_batch() raises (loop exits)
     """
     batches: list[list[int]] = field(default_factory=list)
     batch_index: int = 0
 
 
 class PlanActAgent(ToolAgent[PlanActRunState]):
+    """
+    One-shot planner agent: generates entire plan upfront, executes in batches.
+
+    **Design**: PlanActAgent implements a **static planning** strategy:
+
+    1. **Initialization** (``_initialize_run_state``)
+       - LLM generates complete plan as a JSON array of steps (one-shot)
+       - Each step: ``{"tool": "<name>", "args": {...}}``, optionally with "await"
+       - Plan is normalized (return moved to end, added if missing)
+       - Compiled into topologically-sorted batches using dependency analysis
+       - Running blackboard allocated with slots for all planned steps
+
+    2. **Compilation**
+       - Each step's args are scanned for ``<<__sN__>>`` placeholders to extract
+         plan-local dependencies
+       - Topological sort produces concurrent batches (steps with identical dependency
+         level execute together)
+       - Return step is always isolated as the final batch
+
+    3. **Execution**
+       - ``_prepare_next_batch()`` reads next batch from ``state.batches[state.batch_index]``
+       - Resolves placeholders in parallel-executable steps
+       - Increments batch_index; loop continues until all batches consumed
+
+    Advantages
+    ~~~~~~~~~~
+    - **No replanning**: Full plan is known upfront; no latency per iteration
+    - **Concurrency-friendly**: Topological compilation enables maximal parallelism
+    - **Deterministic**: Same inputs produce identical execution plan every time
+
+    Limitations
+    ~~~~~~~~~~~
+    - **No adaptivity**: Cannot branch based on intermediate results
+    - **Plan quality**: Entirely dependent on LLM's single planning turn
+    - **Error recovery**: If a step fails, entire plan fails (no dynamic replanning)
+
+    Parameters (construction)
+    ~~~~~~~~~~~~~~~~~~~~~~~~
+    Same as ToolAgent, with ``tool_calls_limit`` being the max non-return steps
+    in any single plan.
+    """
     def __init__(
         self,
         name: str,
@@ -1100,19 +1592,71 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
     # ------------------------------------------------------------------ #
     def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> PlanActRunState:
         """
-        One-shot plan generation + compilation into executable batches.
+        One-shot plan generation and compilation into concurrent batches.
 
-        Algorithm:
-          1) snapshot cache_blackboard (if context enabled)
-          2) call LLM to produce plan JSON array
-          3) normalize return: ensure exactly one return dict and it is last
-             - always position return at end
-             - if missing, append return(None)
-          4) dict -> PlannedStep
-          5) force return deps to all prior steps
-          6) validate remaining deps, cache placeholder ranges, budget
-          7) compile batches
-          8) allocate running_blackboard plan-locally and pre-fill tool+args
+        This PlanActAgent-specific initialization method performs a complete planning
+        cycle upfront, generating the entire execution plan from the LLM in a single
+        turn, validating it, and pre-compiling it into topologically-sorted concurrent batches.
+
+        Execution Steps
+        ~~~~~~~~~~~~~~~
+        1. **Snapshot cache** from ``self._blackboard`` (persisted results from prior invokes)
+
+        2. **LLM plan generation** (via PLANNER_PROMPT):
+           - LLM receives the conversation messages
+           - Expected to emit a JSON array of step objects: ``[{\"tool\": \"...\", \"args\": {...}}, ...]``
+           - Optionally, each step can include an \"await\" field (dependency barrier)
+
+        3. **Return normalization**:
+           - Validates at most one return step; if multiple, raises
+           - Always moves return to the END of the plan (even if already last)
+           - If no return step, auto-appends one calling ``return(None)``
+
+        4. **Conversion to PlannedStep**:
+           - Each dict is converted to a ``PlannedStep`` (normalized representation)
+           - Tool name is validated to exist in toolbox (early error detection)
+
+        5. **Return dependency forcing**:
+           - The return step's deps are set to ``frozenset(range(return_idx))``
+           - This ensures return always waits for all prior steps to complete
+
+        6. **Validation**:
+           - Budget check: Non-return steps don't exceed ``tool_calls_limit``
+           - Cache placeholder ranges: All ``<<__cN__>>`` must reference existing cache
+           - Plan-local dependency ranges: All ``<<__sN__>>`` refs must be to prior steps
+
+        7. **Batch compilation**:
+           - Topologically sorts steps by dependency level (see ``_compile_batches_from_deps``)
+           - Returns list of batches: each batch indices execute concurrently
+           - Returns always in its own final batch
+
+        8. **Blackboard pre-allocation**:
+           - Creates running blackboard with exactly ``len(planned)`` slots
+           - Pre-fills tool and args; result/resolved_args left as NO_VAL
+
+        Parameters
+        ----------
+        messages : list[dict[str, str]]
+            LLM conversation history to pass to the planner
+
+        Returns
+        -------
+        PlanActRunState
+            Initialized state ready for the base template-method loop:
+            - cache_blackboard populated with prior results
+            - running_blackboard pre-allocated and pre-filled with tools+args
+            - batches list with topologically-sorted concurrent batches
+            - batch_index=0 (first batch)
+
+        Raises
+        ------
+        ToolAgentError
+            On any of:
+            - Empty or invalid plan from LLM
+            - Multiple return steps
+            - Unknown tool references
+            - Out-of-range placeholder references
+            - Budget exceeded
         """
         if not messages:
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
@@ -1261,11 +1805,49 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
     # ------------------------------------------------------------------ #
     def _prepare_next_batch(self, state: PlanActRunState) -> PlanActRunState:
         """
-        Prepare exactly one batch:
-          - reads next batch indices from state.batches[state.batch_index]
-          - resolves args for those indices (writes slot.resolved_args)
-          - sets state.prepared_steps
-          - increments batch_index
+        Prepare the next pre-compiled batch for execution.
+
+        PlanActAgent uses pre-compiled batches (created during initialization). This method
+        simply reads the next batch indices, resolves placeholders, and populates the
+        prepared_steps list.
+
+        Execution
+        ~~~~~~~~~
+        1. **Validate state**: prepared_steps must be empty (batch fully executed already)
+        2. **Read next batch**: Get batch indices from ``state.batches[state.batch_index]``
+        3. **Validate non-empty**: Batch must have at least one step (internal check)
+        4. **For each step in batch**:
+           - Validate bounds: index must be within running_blackboard
+           - Validate not already executed or prepared
+           - Validate tool name is set
+           - Call ``_resolve_placeholders(slot.args, state=state)``
+           - Store resolved args in ``slot.resolved_args``
+        5. **Set prepared_steps**: List of all indices in this batch (ready for execution)
+        6. **Advance cursor**: Increment ``state.batch_index`` for next iteration
+
+        Concurrency
+        ~~~~~~~~~~~
+        All steps in the batch can execute concurrently since the topological sort
+        guarantee ensures no step in a batch depends on another step in the same batch.
+
+        Parameters
+        ----------
+        state : PlanActRunState
+            Current run state with initialized batches and batch_index cursor
+
+        Returns
+        -------
+        PlanActRunState
+            Updated state with prepared_steps populated, batch_index incremented
+
+        Raises
+        ------
+        ToolAgentError
+            On any of:
+            - prepared_steps not empty (previous batch not executed)
+            - batch_index out of bounds
+            - Batch validation failure (bounds, prep state, tool name)
+            - Placeholder resolution failure (out-of-range or unexecuted refs)
         """
         if state.prepared_steps:
             raise ToolAgentError(
@@ -1338,18 +1920,54 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 @dataclass(slots=True)
 class ReActRunState(ToolAgentRunState):
     """
-    ReAct run state extends ToolAgentRunState with:
+    ReActAgent-specific run state extending ToolAgentRunState.
 
-    - next_step_index:
-        The next plan-local running_blackboard index to fill during preparation.
-        This is also the "prefix length" cutoff for dependency legality: any <<__sN__>>
-        placeholder in a newly prepared batch must satisfy N < next_step_index.
+    Tracks iteration-specific state for step-by-step reactive planning.
 
-    - latest_executed:
-        Plan-local indices for the most recently *prepared* batch. This value is used
-        at the start of the next prepare() call to inject "Most recently executed steps
-        and results" into the LLM messages. It is overwritten at the end of every
-        prepare() call with the newly emitted indices.
+    Fields
+    ------
+    next_step_index : int
+        Cursor for the next plan-local running_blackboard slot to fill. Starts at 0;
+        incremented after each step is prepared.
+
+        Dual role:
+        1. **Allocation cursor**: Determines which slot index gets the next prepared step
+        2. **Dependency cutoff**: Any <<__sN__>> placeholder in newly prepared args
+           must satisfy N < next_step_index (cannot reference future steps)
+
+        Example: If next_step_index=3, step being prepared cannot use <<__s3__>> or higher.
+
+    latest_executed : list[int]
+        Plan-local indices of the most recently *prepared* batch (always length 1 for
+        ReAct). Used at the start of the next prepare() call to inject observation
+        message into LLM context.
+
+        Workflow:
+        - After step N prepared: latest_executed = [N]
+        - After step N executed: next iteration calls prepare() with latest_executed=[N]
+        - prepare() injects \"Most recently executed: step N result=...\" into messages
+        - LLM sees this observation and emits next step
+
+        Enables reactive feedback loop: see result → emit next step.
+
+    Workflow
+    ~~~~~~~~
+    Iteration k (k=1,2,...):
+
+    1. prepare():
+       - If latest_executed non-empty: inject observation into messages
+       - Request next step from LLM (fresh turn)
+       - Parse step object: {\"step\": idx, \"tool\": ..., \"args\": {...}}
+       - Validate: idx == next_step_index (cursor enforcement)
+       - Fill running_blackboard[idx]
+       - Set prepared_steps=[idx], latest_executed=[idx]
+       - Increment next_step_index
+
+    2. execute():
+       - Run step concurrently (trivial: length 1 batch)
+       - Store result in running_blackboard[idx]
+
+    3. emit control back to loop → goto iteration k+1
     """
     next_step_index: int = 0
     latest_executed: list[int] = field(default_factory=list)
@@ -1357,19 +1975,50 @@ class ReActRunState(ToolAgentRunState):
 
 class ReActAgent(ToolAgent[ReActRunState]):
     """
-    Dynamic, iterative tool-using agent (ReAct-style), but with v3 semantics:
+    Iterative agent with reactive step-by-step planning (ReAct-style architecture).
 
-    - Each LLM turn emits the NEXT CONCURRENT BATCH as a JSON array of steps.
-    - Each step must be a dict with:
-        {"tool": "<Tool.full_name>", "args": { ... } }
+    **Design**: ReActAgent implements **dynamic iteration**: one step is emitted per LLM
+    turn, with full visibility into prior results.
 
-    The base ToolAgent owns the invariant prepare -> execute loop. This subclass only:
-    - initializes a fixed-size run blackboard (tool_calls_limit + 1, including return)
-    - prepares the next batch by:
-        * injecting the most recently executed steps/results (if available)
-        * asking for the next executable steps
-        * parsing + validating
-        * filling the next contiguous segment of the run blackboard
+    1. **Initialization** (``_initialize_run_state``)
+       - Pre-allocates a fixed-size running blackboard: ``tool_calls_limit + 1`` slots
+         (to accommodate non-return tool calls + one return call)
+       - Requires ``tool_calls_limit`` to be a concrete integer (not None)
+
+    2. **Preparation** (``_prepare_next_batch`` – single step per turn)
+       - **First turn**: LLM receives the original user query; emits first step as JSON
+       - **Subsequent turns**: Injects \"most recently executed step and result\" into
+         messages, then asks for the next step
+       - Step must be a JSON object: ``{"step": <int>, "tool": "<name>", "args": {...}}``
+       - Validates step index matches expected position (cursor enforcement)
+       - Validates placeholder dependencies forward (step N can only ref steps < N)
+       - Resolves placeholders; stores in ``running_blackboard[step_index]``
+       - Sets ``prepared_steps = [step_index]`` (always length 1)
+
+    3. **Execution**
+       - Base loop executes the single step (trivial with thread pool)
+       - Result is stored; loop returns to prepare next step
+
+    4. **Termination**
+       - When return tool is emitted and executed, loop exits
+       - Running blackboard is persisted if ``context_enabled=True``
+
+    Advantages
+    ~~~~~~~~~~
+    - **Fully adaptive**: Each step reacts to prior results; LLM can adjust dynamically
+    - **Error recovery**: Failed steps don't invalidate entire plan; agent can replan
+    - **Interpretability**: Clear step-by-step execution trace for auditing
+
+    Limitations
+    ~~~~~~~~~~~
+    - **Higher latency**: One LLM call per step (vs. entire plan upfront)
+    - **No concurrency**: Only one step executes per iteration
+    - **Harder to optimize**: Difficult to parallelize cross-invocation
+
+    Parameters (construction)
+    ~~~~~~~~~~~~~~~~~~~~~~~~
+    ``tool_calls_limit`` (int, REQUIRED): Must be a concrete integer >= 0.
+    Determines pre-allocated blackboard size. Cannot be ``None``.
     """
 
     def __init__(

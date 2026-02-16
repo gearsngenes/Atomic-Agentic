@@ -33,31 +33,48 @@ class AtomicInvokable(ABC):
       `parameters: list[ParamSpec]` and `return_type: str`.
     - **metadata serialization**: default ``to_dict()`` implementation for
       persisting metadata.
-    Parameters and schema
+    
+    Parameters and Schema
     ---------------------
-    Parameters are passed as a list of ``ParamSpec`` objects at construction time.
-    Each ``ParamSpec`` contains complete information:
-      - ``name``: parameter name
-      - ``index``: position in signature order
-      - ``kind``: one of ``POSITIONAL_ONLY``, ``POSITIONAL_OR_KEYWORD``, ``KEYWORD_ONLY``,
-        ``VAR_POSITIONAL``, ``VAR_KEYWORD``
-      - ``type``: human-readable type string
-      - ``default``: default value, or ``NO_VAL`` if not present
+    Parameters are declared as a list of ``ParamSpec`` objects at construction time.
+    Each ``ParamSpec`` is self-sufficient and contains:
+    
+      - ``name`` (str): parameter name; must be a valid Python identifier
+      - ``index`` (int): position in the parameter sequence (0-based)
+      - ``kind`` (str): parameter classification—one of:
+        
+        - ``POSITIONAL_ONLY``: cannot be passed by name (``/``-style)
+        - ``POSITIONAL_OR_KEYWORD``: may be passed by name or position
+        - ``KEYWORD_ONLY``: must be passed by name (``*``-style)
+        - ``VAR_POSITIONAL``: accepts ``*args`` (unnamed)
+        - ``VAR_KEYWORD``: accepts ``**kwargs`` (named)
+      
+      - ``type`` (str): human-readable type annotation, e.g. ``"int"`` or ``"List[str]"``
+      - ``default`` (Any): default value if parameter is optional; ``NO_VAL`` if required
 
-    The list order defines the parameter sequence. ``index`` is stored for redundancy
-    (self-sufficiency) and should match list position.
+    The list order is canonical and defines parameter sequence. ``index`` is stored for
+    redundancy (enabling self-sufficiency) and should match list position.
 
-    Invocation and inputs
-    ---------------------
+    Dict-First Invocation Contract
+    -------------------------------
     ``invoke(inputs)`` accepts a ``Mapping[str, Any]`` where keys correspond to
-    parameter names. Implementations should raise clear, typed exceptions on invalid inputs.
+    parameter names. The contract is "dict-first": callers provide a mapping, not
+    ``(*args, **kwargs)``. Implementations (subclasses) are responsible for:
+    
+      - Validating required parameters are present
+      - Handling default values
+      - Converting the dict to appropriate ``(*args, **kwargs)`` for execution
+      - Raising clear, typed exceptions on invalid inputs (use
+        ``ToolInvocationError``, ``AgentInvocationError``, etc.)
 
-    Notes
-    -----
-    - The class intentionally does not expose a human-readable ``signature`` inside
-      ``to_dict()`` to reduce churn when persisting metadata; ``signature`` remains
-      available as a convenience property for logging and UIs.
-    - Legacy ``arguments_map`` property is available for backward compatibility.
+    Architecture Notes
+    -------------------
+    - The class intentionally does not expose a human-readable ``signature`` string
+      inside ``to_dict()`` to minimize churn when persisting metadata; use the
+      ``signature`` property for logging and UIs.
+    - **Backward Compatibility**: Legacy aliases ``ArgumentMap`` and ``ArgSpec`` are
+      defined module-level but **DEPRECATED**. Use ``ParameterMap`` and ``ParamSpec``
+      in new code.
     """
 
     def __init__(
