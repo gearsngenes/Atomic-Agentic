@@ -4,10 +4,6 @@ This module contains Workflow adapters and decorators around Tools, Agents, and 
 
 - `BasicFlow` is the thin adapter that normalizes a Tool/Agent/Workflow
   into the Workflow execution + packaging boundary (replaces ToolFlow/AgentFlow).
-- AdapterFlow is an adapter Workflow wrapper designed to generalize/normalize any
-  Tool, Agent, or Workflow (composition or otherwise) into a single Workflow Node.
-- StateIOFlow is a specialized AdapterFlow for specialized use-cases (like in LanGraph)
-  that requires the output schema to align with the input schema.
 """
 
 from __future__ import annotations
@@ -35,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "BasicFlow",
-    "StateIOFlow",
     "DEFAULT_WF_KEY",
 ]
 

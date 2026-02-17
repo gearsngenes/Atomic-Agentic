@@ -1,9 +1,9 @@
 """
-StateIOFlow + LangGraph demo: Minimal Ticket Triage (with Human-in-the-Loop)
+BasicFlow + LangGraph demo: Minimal Ticket Triage (with Human-in-the-Loop)
 
 What this shows:
 - A *single shared state schema* across all nodes.
-- Each LangGraph node is a StateIOFlow wrapping either an Agent or a Tool.
+- Each LangGraph node is a BasicFlow wrapping either an Agent or a Tool.
 - Conditional routing:
     - If we need more info -> ask a question -> get user input -> merge -> draft answer
     - Else -> draft answer directly
@@ -33,7 +33,12 @@ except Exception as exc:  # pragma: no cover
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.agents import Agent
 from atomic_agentic.tools import Tool
-from atomic_agentic.workflows import StateIOFlow
+from atomic_agentic.workflows import (
+    BasicFlow,
+    BundlingPolicy,
+    MappingPolicy,
+    AbsentValPolicy,
+)
 
 
 # ---------------------------------------------------------------------
@@ -78,12 +83,11 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------
 # 3) Agent builders
 #
-# IMPORTANT: These Agents will be invoked via StateIOFlow, which passes
-# the *entire state mapping* as inputs. Therefore, all pre_invoke tools
-# accept **_ to tolerate extra keys.
+# ---------------------------------------------------------------------
+# 3) Agent builders
 # ---------------------------------------------------------------------
 def make_categorize_agent(engine: OpenAIEngine) -> Agent:
-    def pre(ticket: str, **_: Any) -> str:
+    def pre(ticket: str) -> str:
         return (
             "You are a ticket triage assistant.\n"
             "Classify the ticket into one category:\n"
@@ -116,7 +120,7 @@ def make_categorize_agent(engine: OpenAIEngine) -> Agent:
 
 
 def make_check_missing_info_agent(engine: OpenAIEngine) -> Agent:
-    def pre(ticket: str, category: str, **_: Any) -> str:
+    def pre(ticket: str, category: str) -> str:
         return (
             "You are a ticket triage assistant.\n"
             "Decide if we have enough info to respond immediately.\n\n"
@@ -160,7 +164,7 @@ def make_check_missing_info_agent(engine: OpenAIEngine) -> Agent:
 
 
 def make_ask_question_agent(engine: OpenAIEngine) -> Agent:
-    def pre(ticket: str, category: str, **_: Any) -> str:
+    def pre(ticket: str, category: str) -> str:
         return (
             "You are a ticket triage assistant.\n"
             "We need ONE follow-up question to proceed.\n"
@@ -194,7 +198,7 @@ def make_ask_question_agent(engine: OpenAIEngine) -> Agent:
 
 
 def make_draft_answer_agent(engine: OpenAIEngine) -> Agent:
-    def pre(ticket: str, category: str, **_: Any) -> str:
+    def pre(ticket: str, category: str) -> str:
         return (
             "You are a helpful support agent.\n"
             "Draft a short response based on the ticket.\n"
@@ -228,12 +232,9 @@ def make_draft_answer_agent(engine: OpenAIEngine) -> Agent:
 
 # ---------------------------------------------------------------------
 # 4) Deterministic tool nodes (user input + merge)
-#
-# IMPORTANT: These tools are invoked via StateIOFlow which passes the entire
-# state mapping. Therefore, accept **_ to tolerate extra keys.
 # ---------------------------------------------------------------------
 def make_get_user_input_tool() -> Tool:
-    def get_user_input(question: str, **_: Any) -> dict[str, Any]:
+    def get_user_input(question: str) -> dict[str, Any]:
         print("\n=== NEED USER INPUT ===")
         print(f"Q: {question}")
         reply = input("Your reply: ").strip()
@@ -243,7 +244,7 @@ def make_get_user_input_tool() -> Tool:
 
 
 def make_merge_user_reply_tool() -> Tool:
-    def merge_user_reply(ticket: str, question: str, user_reply: str, **_: Any) -> dict[str, Any]:
+    def merge_user_reply(ticket: str, question: str, user_reply: str) -> dict[str, Any]:
         enriched = (
             ticket.rstrip()
             + "\n\nFOLLOW-UP QUESTION:\n"
@@ -261,7 +262,7 @@ def make_merge_user_reply_tool() -> Tool:
 
 
 # ---------------------------------------------------------------------
-# 5) LangGraph wiring (each node is a StateIOFlow)
+# 5) LangGraph wiring (each node is a BasicFlow)
 # ---------------------------------------------------------------------
 def main() -> None:
     load_dotenv()
@@ -277,13 +278,22 @@ def main() -> None:
     get_user_input_tool = make_get_user_input_tool()
     merge_reply_tool = make_merge_user_reply_tool()
 
-    # Wrap every component as StateIOFlow (LangGraph-compatible)
-    n_categorize = StateIOFlow(categorize_agent, state_schema=TicketState)
-    n_missing = StateIOFlow(missing_agent, state_schema=TicketState)
-    n_ask = StateIOFlow(ask_agent, state_schema=TicketState)
-    n_get_user = StateIOFlow(get_user_input_tool, state_schema=TicketState)
-    n_merge = StateIOFlow(merge_reply_tool, state_schema=TicketState)
-    n_answer = StateIOFlow(answer_agent, state_schema=TicketState)
+    # Wrap every component as BasicFlow (LangGraph-compatible)
+    # Configure for stateful graph node behavior: drop sparse outputs, filter extraneous inputs
+    state_flow_config = {
+        "output_schema": TicketState,
+        "bundling_policy": BundlingPolicy.UNBUNDLE,
+        "mapping_policy": MappingPolicy.IGNORE_EXTRA,
+        "absent_val_policy": AbsentValPolicy.DROP,
+        "filter_extraneous_inputs": True,
+    }
+    
+    n_categorize = BasicFlow(categorize_agent, **state_flow_config)
+    n_missing = BasicFlow(missing_agent, **state_flow_config)
+    n_ask = BasicFlow(ask_agent, **state_flow_config)
+    n_get_user = BasicFlow(get_user_input_tool, **state_flow_config)
+    n_merge = BasicFlow(merge_reply_tool, **state_flow_config)
+    n_answer = BasicFlow(answer_agent, **state_flow_config)
 
     graph = StateGraph(TicketState)
 
