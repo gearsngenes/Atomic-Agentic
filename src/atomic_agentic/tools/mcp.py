@@ -255,6 +255,7 @@ class MCPProxyTool(Tool):
         tool_name: str,
         namespace: str = None,
         description: str = "",
+        filter_extraneous_inputs: bool = False,
         headers: Optional[Dict[str, str]] = None,
     ) -> None:
         self._server_url = _normalize_mcp_url(str(server_url))
@@ -292,6 +293,7 @@ class MCPProxyTool(Tool):
             name=name,
             namespace=namespace or "mcp",
             description=effective_description,
+            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     # ------------------------------------------------------------------ #

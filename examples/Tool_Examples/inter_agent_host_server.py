@@ -36,7 +36,6 @@ def main() -> None:
         description="Planner that orchestrates other agents via A2A proxy tools.",
         llm_engine=llm,
         context_enabled=False,
-        run_concurrent=True,
         tool_calls_limit=16,
     )
 

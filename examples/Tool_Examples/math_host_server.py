@@ -30,7 +30,6 @@ def main() -> None:
         description="Planner that solves problems by calling math tools.",
         llm_engine=llm,
         context_enabled=False,
-        run_concurrent=False,
         tool_calls_limit=12,
     )
     

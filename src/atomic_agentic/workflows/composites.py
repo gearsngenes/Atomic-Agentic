@@ -68,6 +68,7 @@ class SequentialFlow(Workflow):
         self,
         name: str,
         description: str,
+        filter_extraneous_inputs: Optional[bool] = None,
         steps: Optional[list[AtomicInvokable]] = None,
         *,
         output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
@@ -76,8 +77,10 @@ class SequentialFlow(Workflow):
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
     ) -> None:
-        steps = steps or []
+        steps: List[AtomicInvokable] = steps or []
         self._steps: List[BasicFlow] = [BasicFlow(component=step) for step in steps]
+        filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else (
+            self._steps[0].filter_extraneous_inputs if steps else False)
         super().__init__(
             name=name,
             description=description,
@@ -87,6 +90,7 @@ class SequentialFlow(Workflow):
             mapping_policy=mapping_policy,
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
+            filter_extraneous_inputs=filter,
         )
         self._rewire_steps()
 
@@ -116,7 +120,7 @@ class SequentialFlow(Workflow):
 
     def extend(self, steps: Sequence[AtomicInvokable]) -> None:
         """Append multiple steps to the end of the sequence."""
-        self._steps.extend(BasicFlow(component=step) for step in steps)
+        self._steps.extend([BasicFlow(component=step) for step in steps])
         self._rewire_steps()
 
     def insert(self, index: int, step: AtomicInvokable) -> None:
@@ -164,7 +168,7 @@ class SequentialFlow(Workflow):
         if self._steps:
             self._steps[-1].output_schema = None
         # Update SequentialFlow parameters to match first step
-        self._parameters = self._steps[0] if self._steps else []
+        self._parameters = self._steps[0].parameters if self._steps else []
 
     def _invoke(self, inputs: Mapping[str, Any]):
         if not self._steps:
@@ -236,6 +240,7 @@ class MakerCheckerFlow(Workflow):
         description: str,
         maker: AtomicInvokable,
         checker: AtomicInvokable,
+        filter_extraneous_inputs: Optional[bool] = None,
         judge: Optional[AtomicInvokable] = None,
         max_revisions: int = 1,
         *,
@@ -252,7 +257,7 @@ class MakerCheckerFlow(Workflow):
         self._checker: BasicFlow = BasicFlow(component=checker)
         self._judge: Optional[BasicFlow] = BasicFlow(component=judge) if judge is not None else None
         self._max_revisions: int = max_revisions
-
+        filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else self._maker.filter_extraneous_inputs
         # ------------------------------------------------------------
         # Base Workflow init (will call build_args_returns)
         # ------------------------------------------------------------
@@ -265,6 +270,7 @@ class MakerCheckerFlow(Workflow):
             mapping_policy=mapping_policy,
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
+            filter_extraneous_inputs=filter,
         )
         self._rebuild()
 
@@ -322,13 +328,13 @@ class MakerCheckerFlow(Workflow):
         if self._judge is not None:
             judge_keys = set(k.name for k in self._judge.parameters)
             maker_keys = set(k.name for k in self._maker.parameters)
-            if judge_keys != maker_keys:
+            if judge_keys != maker_keys and not self._judge.filter_extraneous_inputs:
                 raise ValueError(
                     "MakerCheckerFlow invariant violated: "
-                    "judge.input_schema must match maker.input_schema"
+                    "judge.input_schema must match maker.input_schema or judge must filter extraneous inputs"
                 )
 
-        self._parameters = self._maker.parameters
+        self._parameters = list(self._maker.parameters)
 
     # ------------------------------------------------------------------ #
     # Invocation

@@ -3,7 +3,8 @@ from typing import (
     Any,
     Callable,
     Dict,
-    Mapping)
+    Mapping,
+    Optional,)
 from .base import Tool
 from ..core.Invokable import AtomicInvokable
 from ..core.Parameters import ParamSpec, extract_io
@@ -17,14 +18,18 @@ class AdapterTool(Tool):
     # ------------------------------------------------------------------ #
     # Construction
     # ------------------------------------------------------------------ #
-    def __init__(self, component: AtomicInvokable, namespace: str|None = None):
+    def __init__(self, component: AtomicInvokable,
+                 namespace: str|None = None,
+                 filter_extraneous_inputs: Optional[bool] = None):
         # set private variable
         self._component = component
+        filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else component.filter_extraneous_inputs
         # set core attributes
         super().__init__(component.invoke,
                          component.name,
                          namespace,
-                         component.description)
+                         component.description,
+                         filter,)
 
     # ------------------------------------------------------------------ #
     # Tool Properties

@@ -54,10 +54,12 @@ class BasicFlow(Workflow):
         mapping_policy: Optional[MappingPolicy] = MappingPolicy.STRICT,
         absent_val_policy: Optional[AbsentValPolicy] = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
+        filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         # Store component before calling super
         self._component = component
         # Pass component parameters and return_type to parent for eager initialization and validation
+        filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else component.filter_extraneous_inputs
         super().__init__(
             name=component.name,
             description=component.description,
@@ -66,7 +68,8 @@ class BasicFlow(Workflow):
             bundling_policy=bundling_policy,
             mapping_policy=mapping_policy,
             absent_val_policy=absent_val_policy,
-            default_absent_val=default_absent_val
+            default_absent_val=default_absent_val,
+            filter_extraneous_inputs=filter,
         )
 
     # ------------------------------------------------------------------ #

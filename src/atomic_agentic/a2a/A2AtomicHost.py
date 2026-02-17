@@ -93,6 +93,7 @@ class A2AtomicHost:
                             meta = {
                                 "parameters": params_list,
                                 "return_type": ret_type,
+                                "filter_extraneous_inputs": outer._component.filter_extraneous_inputs,
                             }
                             return Message(
                                 content=FunctionResponseContent(

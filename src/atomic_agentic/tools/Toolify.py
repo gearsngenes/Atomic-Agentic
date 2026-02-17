@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, List, Mapping, Union, Tuple
+from typing import Any, Callable, List, Mapping, Optional, Union, Tuple
 
 from ..core.Exceptions import ToolDefinitionError
 from ..core.Invokable import AtomicInvokable
@@ -20,6 +20,7 @@ def toolify(
     name: str | None = None,
     description: str | None = None,
     namespace: str | None = None,
+    filter_extraneous_inputs: Optional[bool] = None,
     remote_protocol: str | None = None,
     headers: Mapping[str, str] | None = None,
 ) -> Tool:
@@ -70,7 +71,19 @@ def toolify(
 
     # 2) AtomicInvokable → AdapterTool
     if isinstance(component, AtomicInvokable):
-        return AdapterTool(component, namespace=namespace)
+        filter_extraneous_flag = (
+            filter_extraneous_inputs
+            if filter_extraneous_inputs is not None
+            else component.filter_extraneous_inputs
+        )
+        return AdapterTool(
+            component,
+            namespace=namespace,
+            filter_extraneous_inputs=filter_extraneous_flag,
+        )
+
+    # default filter field value for non-Atomic components (callable or remote)
+    filter_extraneous_flag = filter_extraneous_inputs if filter_extraneous_inputs is not None else False
 
     # 3) String → MCP (strict, requires name) or A2A (lenient, auto-discovers)
     if isinstance(component, str):
@@ -94,10 +107,14 @@ def toolify(
                 tool_name=name,
                 namespace=namespace,
                 description=description,
+                filter_extraneous_inputs=filter_extraneous_flag,
                 headers=headers,
             )
         else:
-            return A2AProxyTool(url=url, headers=headers)
+            return A2AProxyTool(url=url,
+                                namespace=namespace,
+                                headers=headers,
+                                filter_extraneous_inputs=filter_extraneous_flag)
 
     # 4) Raw callable → Tool
     if callable(component):
@@ -127,6 +144,7 @@ def toolify(
             name=name,
             namespace=namespace,
             description=effective_description,
+            filter_extraneous_inputs=filter_extraneous_flag,
         )
 
     # 5) Unsupported type
@@ -140,6 +158,7 @@ def batch_toolify(
     a2a_servers: List[Tuple[str, Any]] = [],
     mcp_servers: List[Tuple[str, Any]] = [],
     batch_namespace: str = "default",
+    batch_filter_inputs: bool = False,
 ) -> List[Tool]:
     """
     Normalize a batch of components into Tool instances.
@@ -164,7 +183,10 @@ def batch_toolify(
 
     # Toolify local components
     for component in executable_components:
-        tool = toolify(component, namespace=batch_namespace)
+        tool = toolify(component,
+                       namespace=batch_namespace,
+                       filter_extraneous_inputs=batch_filter_inputs,
+                       )
         tools.append(tool)
 
     # Toolify all tools from A2A servers
@@ -174,6 +196,7 @@ def batch_toolify(
             remote_protocol="a2a",
             headers=headers,
             namespace=batch_namespace,
+            filter_extraneous_inputs=batch_filter_inputs,
         )
         tools.append(a2a_tool)
 
@@ -188,6 +211,7 @@ def batch_toolify(
                 remote_protocol="mcp",
                 headers=headers,
                 namespace=batch_namespace,
+                filter_extraneous_inputs=batch_filter_inputs,
             )
             tools.append(mcp_tool)
 

@@ -61,6 +61,7 @@ class Tool(AtomicInvokable):
         name: Optional[str] = None,
         namespace: Optional[str] = None,
         description: Optional[str] = None,
+        filter_extraneous_inputs: bool = False,
     ) -> None:
         if not callable(function):
             raise ToolDefinitionError(f"Tool function must be callable, got {type(function)!r}")
@@ -83,6 +84,7 @@ class Tool(AtomicInvokable):
             description=inferred_description,
             parameters=parameters,
             return_type=return_type,
+            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     # ------------------------------------------------------------------ #
@@ -319,13 +321,16 @@ class Tool(AtomicInvokable):
         override this method; instead they can customise :meth:`to_arg_kwarg`
         and :meth:`execute`.
         """
-        logger.info(f"[{self.full_name} started]")
-        if not isinstance(inputs, Mapping):
-            raise ToolInvocationError(f"{self._name}: inputs must be a mapping")
-        args, kwargs = self.to_arg_kwarg(inputs)
-        result = self.execute(args, kwargs)
-        logger.info(f"[{self.full_name} finished]")
-        return result
+        with self._invoke_lock:
+            logger.info(f"[{self.full_name} started]")
+            # Filter inputs
+            inputs = self.filter_inputs(inputs)
+            # Separate positional and keyword arguments according to the tool's parameter schema
+            args, kwargs = self.to_arg_kwarg(inputs)
+            # Execute and return result
+            result = self.execute(args, kwargs)
+            logger.info(f"[{self.full_name} finished]")
+            return result
 
     # ------------------------------------------------------------------ #
     # Serialization

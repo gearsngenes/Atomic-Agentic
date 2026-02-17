@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Mapping, Dict
 import re
+import threading
 
 from .sentinels import NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order
@@ -84,6 +85,7 @@ class AtomicInvokable(ABC):
         description: str,
         parameters: list[ParamSpec],
         return_type: str,
+        filter_extraneous_inputs: bool = False,
     ) -> None:
         # setters include validation
         self.name = name
@@ -133,6 +135,9 @@ class AtomicInvokable(ABC):
 
         self._parameters: list[ParamSpec] = parameters
         self._return_type: str = return_type
+        self._filter_extraneous_inputs = filter_extraneous_inputs
+        # invoke lock
+        self._invoke_lock = threading.RLock()
 
     # ---------------------------------------------------------------- #
     # Name + description with validation
@@ -184,6 +189,15 @@ class AtomicInvokable(ABC):
     def return_type(self) -> str:
         """Return type (string) of this invokable."""
         return self._return_type
+
+    @property
+    def filter_extraneous_inputs(self) -> bool:
+        """Whether to filter extraneous inputs not used by the component's parameters."""
+        return self._filter_extraneous_inputs
+    
+    @filter_extraneous_inputs.setter
+    def filter_extraneous_inputs(self, value: bool) -> None:
+        self._filter_extraneous_inputs = value
 
     # ---------------------------------------------------------------- #
     # Legacy backward compatibility properties
@@ -238,6 +252,32 @@ class AtomicInvokable(ABC):
         raise NotImplementedError
 
     # ---------------------------------------------------------------- #
+    # Input Filtering and Validation
+    # ---------------------------------------------------------------- #
+    def filter_inputs(self, inputs: Mapping[str, Any]) -> Dict[str, Any]:
+        """
+        The standardized superclass self.invoke that enforces the dict-first contract and handles extraneous input filtering.
+        """
+        if not isinstance(inputs, Mapping):
+            raise TypeError(f"{type(self).__name__}.invoke: inputs must be a mapping, got {type(inputs)!r}")
+        # Check if the component has varargs or kwargs parameters
+        has_varparams = any(p.kind in ("VAR_POSITIONAL", "VAR_KEYWORD") for p in self.parameters)
+        params = [p.name for p in self.parameters]
+
+        # If filter_extraneous_inputs is True and the component does not have varargs/kwargs, filter out extraneous inputs
+        if self._filter_extraneous_inputs:
+            if not has_varparams:
+                # Filter out extraneous inputs not in the component's parameters
+                inputs = {k: v for k, v in inputs.items() if k in params}
+        elif not has_varparams:
+            # If not filtering and component doesn't have varargs/kwargs, check for extraneous inputs and raise error
+            extraneous = [k for k in inputs.keys() if k not in params]
+            if extraneous:
+                raise ValueError(f"Extraneous input keys not in component parameters: {extraneous}")
+            pass # No extraneous inputs, proceed as normal
+        return inputs
+
+    # ---------------------------------------------------------------- #
     # Default metadata serialization
     # ---------------------------------------------------------------- #
     def to_dict(self) -> Dict[str, Any]:
@@ -252,6 +292,7 @@ class AtomicInvokable(ABC):
             "description": self.description,
             "parameters": [spec.to_dict() for spec in self._parameters],
             "return_type": self.return_type,
+            "filter_extraneous_inputs": self._filter_extraneous_inputs,
         }
 
     # ---------------------------------------------------------------- #

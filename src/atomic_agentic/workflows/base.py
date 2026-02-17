@@ -215,10 +215,7 @@ class Workflow(AtomicInvokable, ABC):
 
     IO schemas
     ----------
-    - `parameters` is REQUIRED at construction time and is the authoritative
-      source for `input_schema`.
-    - `input_schema` mirrors `output_schema` format: Dict[str, Any] where
-      each value is either a default or NO_VAL.
+    - `parameters` is REQUIRED at construction time.
     - Public mutation is disallowed: `parameters` and `return_type` are read-only properties.
 
     Packaging policies
@@ -254,6 +251,7 @@ class Workflow(AtomicInvokable, ABC):
         mapping_policy: MappingPolicy = MappingPolicy.STRICT,
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
+        filter_extraneous_inputs: bool = False,
     ) -> None:
         # Pass parameters and return_type to parent (AtomicInvokable)
         # Parent will validate parameter ordering and structure
@@ -274,6 +272,7 @@ class Workflow(AtomicInvokable, ABC):
         self._mapping_policy = MappingPolicy(mapping_policy)
         self._absent_val_policy = AbsentValPolicy(absent_val_policy)
         self._default_absent_val = default_absent_val
+        self._filter_extraneous_inputs = filter_extraneous_inputs
 
         # Invoke thread lock
         self._invoke_lock = threading.RLock()
@@ -584,12 +583,11 @@ class Workflow(AtomicInvokable, ABC):
         """
         Run the invoke method
         """
-        logger.info(f"[{self.full_name}.invoke started]")
-        # 1) validate is mapping
-        if not isinstance(inputs, Mapping):
-            raise ValidationError("Workflow.invoke: inputs must be a mapping")
-
         with self._invoke_lock:
+            logger.info(f"[{self.full_name}.invoke started]")
+            # 1) filter the inputs
+            inputs = self.filter_inputs(inputs)
+
             started = datetime.now(timezone.utc)
             run_id = uuid4().hex
 
@@ -641,7 +639,6 @@ class Workflow(AtomicInvokable, ABC):
     def to_dict(self) -> dict[str, Any]:
         d = super().to_dict()
         d.update({
-            "input_schema" : self.input_schema,
             "output_schema" : self.output_schema,
             "bundling_policy": self.bundling_policy.value,
             "mapping_policy": self.mapping_policy.value,

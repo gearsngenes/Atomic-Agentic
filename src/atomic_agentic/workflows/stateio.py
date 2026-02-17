@@ -92,6 +92,7 @@ class StateIOFlow(BasicFlow):
             mapping_policy=mapping_policy,
             bundling_policy=bundling_policy,
             absent_val_policy=AbsentValPolicy.DROP,
+            filter_extraneous_inputs=getattr(component, "filter_extraneous_inputs", False),
         )
 
     # ------------------------------------------------------------------ #

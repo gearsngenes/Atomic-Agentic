@@ -25,13 +25,17 @@ from ..tools import Tool, toolify
 
 logger = logging.getLogger(__name__)
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Agent
-# ───────────────────────────────────────────────────────────────────────────────
 def identity_pre(*, prompt: str) -> str:
     if not isinstance(prompt, str):
         raise ValueError("prompt must be a string")
     return prompt
+
+identity_pre_tool = Tool(
+    function = identity_pre,
+    name="identity_pre",
+    namespace="base_agent",
+    description="Default pre-invoke identity function that requires {'prompt': str} and returns the prompt string.",
+    filter_extraneous_inputs=False,)
 
 def identity_post(*, result: Any) -> Any:
     """
@@ -43,7 +47,16 @@ def identity_post(*, result: Any) -> Any:
     """
     return result
 
+identity_post_tool = Tool(
+    function = identity_post,
+    name="identity_post",
+    namespace="base_agent",
+    description="Default post-invoke identity function that accepts a single argument 'result' and returns it unchanged.",
+    filter_extraneous_inputs=False,)
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Agent
+# ───────────────────────────────────────────────────────────────────────────────
 class Agent(AtomicInvokable):
     """
     Schema-driven LLM Agent.
@@ -122,6 +135,7 @@ class Agent(AtomicInvokable):
         name: str,
         description: str,
         llm_engine: LLMEngine,
+        filter_extraneous_inputs: Optional[bool] = None,
         role_prompt: Optional[str] = None,
         context_enabled: bool = True,
         *,
@@ -131,17 +145,24 @@ class Agent(AtomicInvokable):
     ) -> None:
 
         # Prepare pre_invoke
-        pre_tool = toolify(pre_invoke or identity_pre,
-                           name="pre_invoke",
-                           namespace=name,
-                           description=f"The tool that preprocesses inputs into a string for Agent {name}")
+        if not pre_invoke:
+            pre_tool = identity_pre_tool
+        else:
+            pre_tool = toolify(pre_invoke,
+                            name="pre_invoke",
+                            namespace=name,
+                            description=f"The tool that preprocesses inputs into a string for Agent {name}")
         if pre_tool.return_type.lower() not in {"any", "str"}:
             raise AgentError("Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke")
+
         # Prepare post_invoke
-        post_tool = toolify(post_invoke or identity_post,
-                           name="post_invoke",
-                           namespace=name,
-                           description=f"The tool that postprocesses outputs of Agent {name}")
+        if not post_invoke:
+            post_tool = identity_post_tool
+        else:
+            post_tool = toolify(post_invoke,
+                                name="post_invoke",
+                                namespace=name,
+                                description=f"The tool that postprocesses outputs of Agent {name}")
         # Validate post_invoke has exactly 1 required parameter
         post_params = post_tool.parameters
         if len(post_params) == 0:
@@ -175,14 +196,14 @@ class Agent(AtomicInvokable):
         # Stored message history (flat list of role/content dicts).
         # We never trim storage; we only limit what we *send* to the engine.
         self._history: List[Dict[str, str]] = []
-        
-        # invoke lock
-        self._invoke_lock = threading.RLock()
 
+        filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else pre_tool.filter_extraneous_inputs
         # Build schema directly from pre_invoke and post_invoke, then delegate to parent
-        super().__init__(name=name, description=description, 
-                        parameters=self._pre_invoke.parameters, 
-                        return_type=self._post_invoke.return_type)
+        super().__init__(name=name,
+                         description=description, 
+                         parameters=self._pre_invoke.parameters, 
+                         return_type=self._post_invoke.return_type,
+                         filter_extraneous_inputs=filter,)
 
     # ------------------------------------------------------------------ #
     # Agent Properties
@@ -491,8 +512,8 @@ class Agent(AtomicInvokable):
         # main invoke lock        
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
-            if not isinstance(inputs, Mapping):
-                raise TypeError("Agent.invoke expects a Mapping[str, Any].")
+            # Filter inputs
+            inputs = self.filter_inputs(inputs)
             # Preprocess inputs to prompt string
             try:
                 logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")

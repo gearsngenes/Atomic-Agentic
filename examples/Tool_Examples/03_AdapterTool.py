@@ -53,7 +53,7 @@ def run_case(label: str, tool: Tool, inputs: dict) -> None:
     try:
         result = tool.invoke(inputs)
         print("OK:", result)
-    except ToolInvocationError as e:
+    except (ToolInvocationError, ValueError) as e:
         print("ERR:", e)
 
 

@@ -77,7 +77,8 @@ class A2AProxyTool(Tool):
     def __init__(self,
                  url: str,
                  namespace: str | None = None,
-                 headers: Any | None = None) -> None:
+                 headers: Any | None = None,
+                 filter_extraneous_inputs: bool = False) -> None:
         self._url = url
         self._client = A2AClient(url, headers=headers)
 
@@ -87,6 +88,7 @@ class A2AProxyTool(Tool):
             description=agent_card.description,
             namespace=namespace,
             function=functools.partial(a2atomic_host_invoker, client=self._client),
+            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     # ------------------------------------------------------------------ #
@@ -186,6 +188,7 @@ class A2AProxyTool(Tool):
             description=description,
             namespace=self.namespace,
             function=function,
+            filter_extraneous_inputs=self.filter_extraneous_inputs,
         )
 
     # ------------------------------------------------------------------ #

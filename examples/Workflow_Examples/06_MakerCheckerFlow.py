@@ -84,7 +84,7 @@ checker = Agent(
 # Output: bool
 # ─────────────────────────────────────────────────────────────
 
-def judge_revision(*, prompt: str, revision_notes: str) -> bool:
+def judge_revision(*, revision_notes: str) -> bool:
     # prompt is intentionally unused; included to satisfy schema invariant
     return "<<Approved>>" in revision_notes
 
@@ -93,6 +93,7 @@ judge = toolify(
     judge_revision,
     name="approval_judge",
     description="Returns True if checker approved the draft",
+    filter_extraneous_inputs=True,  # critical for schema invariance in this flow
 )
 
 
@@ -117,7 +118,7 @@ flow = MakerCheckerFlow(
 # Run
 # ─────────────────────────────────────────────────────────────
 
-inputs = {"prompt": "Write a short story about a robot learning to feel pride."}
+inputs = {"prompt": "Write a short story about Robin Hood... IIIINNN SPAAAAACE!!!!."}
 
 final = flow.invoke(inputs)
 

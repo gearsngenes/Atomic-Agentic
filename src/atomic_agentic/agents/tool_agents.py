@@ -539,6 +539,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         description: str,
         llm_engine: LLMEngine,
         role_prompt: str,
+        filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = False,
         *,
         tool_calls_limit: Optional[int] = None,
@@ -554,6 +555,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             name=name,
             description=description,
             llm_engine=llm_engine,
+            filter_extraneous_inputs=filter_extraneous_inputs,
             role_prompt=template,
             context_enabled=context_enabled,
             pre_invoke=pre_invoke,
@@ -745,6 +747,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         namespace: Optional[str] = None,
         remote_protocol: Optional[str] = None,
         headers: Optional[Mapping[str, str]] = None,
+        filter_extraneous_inputs: Optional[bool] = None,
         name_collision_mode: str = "raise",  # raise|skip|replace
     ) -> str:
         if name_collision_mode not in ("raise", "skip", "replace"):
@@ -758,6 +761,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 namespace=namespace or self.name,
                 remote_protocol=remote_protocol,
                 headers=headers,
+                filter_extraneous_inputs=filter_extraneous_inputs,
             )
         except ToolDefinitionError:
             raise
@@ -781,6 +785,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         mcp_servers: Sequence[tuple[str, Any]] = (),
         a2a_servers: Sequence[tuple[str, Any]] = (),
         *,
+        batch_filter_inputs: bool = False,
         name_collision_mode: str = "raise",
     ) -> list[str]:
         if name_collision_mode not in ("raise", "skip", "replace"):
@@ -792,6 +797,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 a2a_servers=list(a2a_servers),
                 mcp_servers=list(mcp_servers),
                 batch_namespace=self.name,
+                batch_filter_inputs=batch_filter_inputs,
             )
         except ToolDefinitionError:
             raise
@@ -1679,6 +1685,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         name: str,
         description: str,
         llm_engine: LLMEngine,
+        filter_extraneous_inputs: Optional[bool] = None,
         *,
         context_enabled: bool = False,
         tool_calls_limit: int | None = None,
@@ -1692,6 +1699,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             name=name,
             description=description,
             llm_engine=llm_engine,
+            filter_extraneous_inputs=filter_extraneous_inputs,
             role_prompt=PLANNER_PROMPT,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
@@ -2141,6 +2149,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         name: str,
         description: str,
         llm_engine: LLMEngine,
+        filter_extraneous_inputs: Optional[bool] = None,
         *,
         context_enabled: bool = False,
         tool_calls_limit: int = 25,
@@ -2154,6 +2163,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
             name=name,
             description=description,
             llm_engine=llm_engine,
+            filter_extraneous_inputs=filter_extraneous_inputs,
             role_prompt=ORCHESTRATOR_PROMPT,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
