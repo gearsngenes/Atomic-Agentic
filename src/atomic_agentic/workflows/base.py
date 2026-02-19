@@ -592,10 +592,7 @@ class Workflow(AtomicInvokable, ABC):
             run_id = uuid4().hex
 
             # 2) run _invoke()
-            try:
-                metadata, raw = self._invoke(inputs)
-            except Exception as exc:
-                raise ExecutionError(f"{type(self).__name__}._invoke failed") from exc
+            metadata, raw = self._invoke(inputs)
 
             if not isinstance(metadata, Mapping):
                 raise ValidationError("Workflow._invoke: returned metadata must be a mapping")
