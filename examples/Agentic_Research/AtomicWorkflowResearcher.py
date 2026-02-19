@@ -37,21 +37,12 @@ maker_checker = MakerCheckerFlow(
 
 
 def main() -> None:
-    flow = SequentialFlow(
-        name="research_report_builder_atomic_only",
-        description="Research with Tavily, then draft+refine an APA report via MakerCheckerFlow.",
-        steps=[research_tool, maker_checker],
-        output_schema=["final_draft"],
-        bundling_policy=BundlingPolicy.UNBUNDLE,
-        mapping_policy=MappingPolicy.MATCH_FIRST_LENIENT,
-    )
-
     inputs = {"query": "What are the main benefits and risks of CRISPR gene editing in medicine?"}
-    final = flow.invoke(inputs)
+    research = research_tool.invoke(inputs)
+    final = maker_checker.invoke(research)
 
     print("\n================ FINAL DRAFT (ATOMIC ONLY) ================\n")
-    import json
-    print(json.dumps(final, indent=2))
+    print(final["final_draft"])
 
 
 if __name__ == "__main__":

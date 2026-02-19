@@ -584,7 +584,7 @@ class Workflow(AtomicInvokable, ABC):
         Run the invoke method
         """
         with self._invoke_lock:
-            logger.info(f"[{self.full_name}.invoke started]")
+            logger.info(f"[{self.full_name} started]")
             # 1) filter the inputs
             inputs = self.filter_inputs(inputs)
 
