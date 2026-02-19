@@ -269,12 +269,8 @@ class AtomicInvokable(ABC):
             if not has_varparams:
                 # Filter out extraneous inputs not in the component's parameters
                 inputs = {k: v for k, v in inputs.items() if k in params}
-        elif not has_varparams:
-            # If not filtering and component doesn't have varargs/kwargs, check for extraneous inputs and raise error
-            extraneous = [k for k in inputs.keys() if k not in params]
-            if extraneous:
-                raise ValueError(f"Extraneous input keys not in component parameters: {extraneous}")
-            pass # No extraneous inputs, proceed as normal
+        # otherwise, pass all inputs through (including extraneous ones)
+        # and let the component handle them (e.g. by raising an error if unexpected)
         return inputs
 
     # ---------------------------------------------------------------- #
