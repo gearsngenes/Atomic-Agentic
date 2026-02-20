@@ -335,9 +335,6 @@ class Workflow(AtomicInvokable, ABC):
         return self._checkpoints[-1] if self._checkpoints else None
 
     # ------------------------------------------------------------------ #
-    # Workflow Helpers
-    # ------------------------------------------------------------------ #
-
     #       Runtime invoke helper
     # ------------------------------------------------------------------ #
     @abstractmethod
@@ -345,6 +342,7 @@ class Workflow(AtomicInvokable, ABC):
         """Subclass-defined execution step; returns (metadata, raw_result)."""
         raise NotImplementedError
 
+    # ------------------------------------------------------------------ #
     #       validating output before returning
     # ------------------------------------------------------------------ #
     def _validate_packaged(self, packaged: Mapping[str, Any]) -> Tuple[Mapping[str, Any], Dict[str, Any]]:
@@ -397,7 +395,7 @@ class Workflow(AtomicInvokable, ABC):
         # Return finalized dictionary
         return new_packaged, meta_data
 
-
+    # ------------------------------------------------------------------ #
     #       Packaging helpers
     # ------------------------------------------------------------------ #
     def package(self, raw: Any) -> Dict[str, Any]:
@@ -407,29 +405,35 @@ class Workflow(AtomicInvokable, ABC):
         IMPORTANT: This method does not perform final NO_VAL validation.
         That validation is performed by `invoke()` via `_validate_packaged()`.
         """
-        # Retrun empty dict if no output schema
+        # 1) Return empty dict if no output schema
         if not len(self._output_schema):
             return {}  # If no fields, return empty dict
 
-        # Unwrap single-key dicts with DEFAULT_WF_KEY
+        # 2) Unwrap single-key dicts with DEFAULT_WF_KEY
         unwrapped = raw
         while (
-            isinstance(unwrapped, Mapping) 
-            and len(unwrapped) == 1 
-            and list(unwrapped.keys())[0] == [DEFAULT_WF_KEY]
+            isinstance(unwrapped, Mapping)
+            and DEFAULT_WF_KEY in unwrapped.keys()
         ):
             unwrapped = unwrapped[DEFAULT_WF_KEY]
 
-        # Bundle if policy set to bundle and schema length == 1
+        # 3.a) If unwrapped is a mapping
+        if isinstance(unwrapped, Mapping):
+            # If unwrapped keys exactly match schema keys, return as-is (no packaging needed)
+            if set(unwrapped.keys()) == set(spec.name for spec in self._output_schema):
+                return dict(unwrapped)
+
+        # 3.b) Bundle and return if policy set to bundle and schema length == 1
         if self._bundling_policy == BundlingPolicy.BUNDLE and len(self._output_schema) == 1:
             return {self._output_schema[0].name: unwrapped}
 
-        # Normalize raw output to sequence, mapping, or scalar
+        # 4) Normalize raw output to sequence, mapping, or scalar
         normalized = self._normalize_raw(unwrapped)
 
-        # Create template dict from output schema (field_name -> default value)
+        # 5) Create template dict from output schema (field_name -> default value)
         template = {spec.name: spec.default for spec in self._output_schema}
 
+        # 6) Package according to the shape of normalized output and policies
         if isinstance(normalized, Mapping):
             return self._package_from_mapping(template, normalized)
         if isinstance(normalized, Sequence) and not isinstance(normalized, (str, bytes, bytearray)):
@@ -437,10 +441,11 @@ class Workflow(AtomicInvokable, ABC):
         return self._package_from_scalar(template, normalized)
 
     def _normalize_raw(self, raw: Any) -> Any:
+        # If a mapping or non-string-ish sequence, return as is
         if isinstance(raw, Mapping) or isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
             return raw
 
-        # Pydantic v2 models: model_dump()
+        # If Pydantic v2 models: model_dump()
         md = getattr(raw, "model_dump", None)
         if callable(md):
             try:
@@ -450,7 +455,7 @@ class Workflow(AtomicInvokable, ABC):
             except Exception:
                 pass
 
-        # NamedTuple: _asdict()
+        # If NamedTuple: _asdict()
         ad = getattr(raw, "_asdict", None)
         if callable(ad):
             try:
@@ -460,7 +465,7 @@ class Workflow(AtomicInvokable, ABC):
             except Exception:
                 pass
 
-        # Dataclass
+        # If Dataclass: asdict()
         if is_dataclass(raw):
             try:
                 dumped = asdict(raw)
@@ -469,7 +474,7 @@ class Workflow(AtomicInvokable, ABC):
             except Exception:
                 pass
 
-        # Plain object with __dict__
+        # Fallback: Plain object with __dict__
         try:
             dumped = vars(raw)
             if isinstance(dumped, Mapping):
@@ -477,6 +482,7 @@ class Workflow(AtomicInvokable, ABC):
         except Exception:
             pass
 
+        # Final fallback: return raw as-is (scalar)
         return raw
 
     def _package_from_mapping(
@@ -485,60 +491,27 @@ class Workflow(AtomicInvokable, ABC):
         mapping: Mapping[str, Any],
     ) -> Dict[str, Any]:
         schema_keys = list(template.keys())
-
-        if self._mapping_policy == MappingPolicy.STRICT:
-            for k in mapping.keys():
-                if k not in template:
-                    raise PackagingError(f"Workflow packaging (STRICT): unexpected key {k!r}")
-            for k in schema_keys:
-                if k in mapping:
-                    template[k] = mapping[k]
+        found = set()
+        # 1) Match as many keys from the template as possible
+        for key in schema_keys:
+            if key in mapping:
+                template[key] = mapping[key]
+                found.add(key)
+        # 2) Get the missing and extra keys after the initial matching
+        missing = set(schema_keys) - found
+        extra = set(mapping.keys()) - set(schema_keys)
+        # 3) If there are as many or fewer remaining keys in the mapping as there
+        # are missing schema fields, fill them positionally in order.
+        if len(extra) <= len(missing):
+            for m_k, e_k in zip(missing, extra):
+                template[m_k] = mapping[e_k]
             return template
-
-        if self._mapping_policy == MappingPolicy.IGNORE_EXTRA:
-            for k, v in mapping.items():
-                if k in template:
-                    template[k] = v
-            return template
-
-        if self._mapping_policy in (MappingPolicy.MATCH_FIRST_STRICT, MappingPolicy.MATCH_FIRST_LENIENT):
-            # Phase 1: Match by key name - fill template keys that exist in mapping
-            extras_values: List[Any] = []
-            for k, v in mapping.items():
-                if k in template:
-                    template[k] = v
-                else:
-                    extras_values.append(v)
-
-            # Phase 2: Identify remaining missing keys (unfilled schema slots)
-            missing_keys = [k for k in schema_keys if template[k] is NO_VAL]
-
-            # Phase 3: If all schema keys are filled, check overflow handling
-            if not missing_keys:
-                if extras_values and self._mapping_policy == MappingPolicy.MATCH_FIRST_STRICT:
-                    raise PackagingError(
-                        "Workflow packaging (MATCH_FIRST_STRICT): output_schema already filled "
-                        f"but received {len(extras_values)} extra values"
-                    )
-                return template
-
-            # Phase 4: Fill remaining schema slots positionally from extras
-            # If too many extras: STRICT errors, LENIENT truncates
-            if len(extras_values) > len(missing_keys):
-                if self._mapping_policy == MappingPolicy.MATCH_FIRST_LENIENT:
-                    extras_values = extras_values[: len(missing_keys)]
-                else:
-                    raise PackagingError(
-                        "Workflow packaging (MATCH_FIRST_STRICT): too many extra values "
-                        f"({len(extras_values)}) for remaining schema slots ({len(missing_keys)})"
-                    )
-
-            for idx, v in enumerate(extras_values):
-                template[missing_keys[idx]] = v
-
-            return template
-
-        raise PackagingError(f"Unknown mapping policy: {self._mapping_policy!r}")
+        else:
+            # 4) Otherwise, raise an error
+            raise PackagingError(
+                f"Workflow packaging (mapping): too many extra keys ({len(extra)}) "
+                f"compared to the number of missing schema fields ({len(missing)})."
+            )
 
     def _package_from_sequence(
         self,
@@ -548,23 +521,16 @@ class Workflow(AtomicInvokable, ABC):
         keys = list(template.keys())
         values = list(seq)
 
-        # If the sequence fits, positional-fill and return.
+        # If the sequence is less than or equal to the schema length, positional-fill and return.
         if len(values) <= len(keys):
             for i, v in enumerate(values):
                 template[keys[i]] = v
             return template
 
-        # Overflow: policy decides whether we truncate or raise.
-        if self._mapping_policy in (MappingPolicy.IGNORE_EXTRA, MappingPolicy.MATCH_FIRST_LENIENT):
-            # Ignore extras by truncating to schema length.
-            for i, k in enumerate(keys):
-                template[k] = values[i]
-            return template
-
-        # STRICT and MATCH_FIRST_STRICT both reject overflow for sequences.
+        # Otherwise, raise an error (too many values to confidently fill into schema)
         raise PackagingError(
             "Workflow packaging (SEQUENCE): too many values "
-            f"({len(values)}) for output_schema ({len(keys)}) under policy {self._mapping_policy.value}"
+            f"({len(values)}) for output_schema ({len(keys)})"
         )
 
     def _package_from_scalar(
@@ -572,8 +538,10 @@ class Workflow(AtomicInvokable, ABC):
         template: Dict[str, Any],
         value: Any,
     ) -> Dict[str, Any]:
-        keys = list(template.keys())
-        template[keys[0]] = value
+        # Get the first schema key
+        key = list(template.keys())[0]
+        # Map the scalar value to that key in the template
+        template[key] = value
         return template
 
     # ------------------------------------------------------------------ #
@@ -588,10 +556,11 @@ class Workflow(AtomicInvokable, ABC):
             # 1) filter the inputs
             inputs = self.filter_inputs(inputs)
 
+            # 2) record start time and generate run_id
             started = datetime.now(timezone.utc)
             run_id = uuid4().hex
 
-            # 2) run _invoke()
+            # 3) run _invoke()
             metadata, raw = self._invoke(inputs)
 
             if not isinstance(metadata, Mapping):
@@ -599,13 +568,13 @@ class Workflow(AtomicInvokable, ABC):
 
             metadata = dict(metadata) # snapshot metadata to avoid external mutation
             
-            # 3) package raw result
+            # 4) package raw result
             packaged = self.package(raw)
 
-            # 4) validate that no NO_VAL's are present (drop, fill, or raise)
+            # 5) validate that no NO_VAL's are present (drop, fill, or raise)
             packaged, missing_key_info = self._validate_packaged(packaged)
 
-            # 5) update checkpoints
+            # 6) update checkpoints
             ended = datetime.now(timezone.utc)
             elapsed = (ended - started).total_seconds()
             metadata.update(missing_key_info)
@@ -623,7 +592,7 @@ class Workflow(AtomicInvokable, ABC):
 
             logger.info(f"[{self.full_name} finished]")
 
-            # 6) return
+            # 7) return
             return packaged
 
     def clear_memory(self) -> None:

@@ -30,19 +30,25 @@ maker_checker = MakerCheckerFlow(
     checker=critic,
     judge=judge,
     max_revisions=MAX_REVISIONS,
-    output_schema=["final_draft"],
-    mapping_policy=MappingPolicy.MATCH_FIRST_LENIENT,
-    bundling_policy=BundlingPolicy.UNBUNDLE,
+    output_schema=["draft"],
 )
 
+# ------------------------------------------------------
+# SequentialFlow to chain research -> makerchecker
+# ------------------------------------------------------
+flow = SequentialFlow(
+    name="atomic_researcher_flow",
+    description="Atomic workflow chaining Tavily research with iterative maker-checker refinement.",
+    steps=[research_tool, maker_checker],
+    output_schema=["draft"],
+)
 
 def main() -> None:
     inputs = {"query": "What are the main benefits and risks of CRISPR gene editing in medicine?"}
-    research = research_tool.invoke(inputs)
-    final = maker_checker.invoke(research)
+    final = flow.invoke(inputs)
 
     print("\n================ FINAL DRAFT (ATOMIC ONLY) ================\n")
-    print(final["final_draft"])
+    print(final["draft"])
 
 
 if __name__ == "__main__":

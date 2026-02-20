@@ -102,7 +102,7 @@ iterator_tool = Tool(
 # ------------------------------------------------------
 def judge_approved(*, revision_notes: str) -> bool:
     # query/sources intentionally unused; kept for schema compatibility with maker inputs
-    return "<<APROVED>>" in (revision_notes or "")
+    return "<<APPROVED>>" in (revision_notes or "")
 
 judge = Tool(
     judge_approved,

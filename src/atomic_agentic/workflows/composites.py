@@ -162,11 +162,13 @@ class SequentialFlow(Workflow):
             # Configure step policies to fixed values
             self._steps[i].mapping_policy = MappingPolicy.STRICT
             self._steps[i].bundling_policy = BundlingPolicy.BUNDLE
-            self._steps[i].absent_val_policy = AbsentValPolicy.RAISE
+            self._steps[i].absent_val_policy = AbsentValPolicy.DROP
             self._steps[i].default_absent_val = None
         # Remove output schema from last step
         if self._steps:
-            self._steps[-1].output_schema = None
+            self._steps[-1].output_schema = self.output_schema
+            self._steps[-1].absent_val_policy = self.absent_val_policy
+            self._steps[-1].default_absent_val = self.default_absent_val
         # Update SequentialFlow parameters to match first step
         self._parameters = self._steps[0].parameters if self._steps else []
 
@@ -283,7 +285,8 @@ class MakerCheckerFlow(Workflow):
 
     @maker.setter
     def maker(self, candidate: AtomicInvokable) -> None:
-        self._maker = BasicFlow(component=candidate)
+        self._maker = BasicFlow(component=candidate,
+                                absent_val_policy=AbsentValPolicy.DROP)
         self._rebuild()
 
     @property
@@ -292,7 +295,8 @@ class MakerCheckerFlow(Workflow):
 
     @checker.setter
     def checker(self, candidate: AtomicInvokable) -> None:
-        self._checker = BasicFlow(component=candidate)
+        self._checker = BasicFlow(component=candidate,
+                                  absent_val_policy=AbsentValPolicy.DROP)
         self._rebuild()
 
     @property
@@ -301,7 +305,9 @@ class MakerCheckerFlow(Workflow):
 
     @judge.setter
     def judge(self, candidate: Optional[AtomicInvokable]) -> None:
-        self._judge = BasicFlow(component=candidate) if candidate is not None else None
+        self._judge = BasicFlow(component=candidate,
+                                absent_val_policy=AbsentValPolicy.DROP,
+                                filter_extraneous_inputs=True) if candidate is not None else None
         self._rebuild()
 
     @property
@@ -322,18 +328,8 @@ class MakerCheckerFlow(Workflow):
     def _rebuild(self) -> None:
         """Re-apply wiring and re-compute args/returns."""
         # Wire maker <-> checker
-        self._maker.output_schema = self._checker.parameters
         self._checker.output_schema = self._maker.parameters
-
-        if self._judge is not None:
-            judge_keys = set(k.name for k in self._judge.parameters)
-            maker_keys = set(k.name for k in self._maker.parameters)
-            if judge_keys != maker_keys and not self._judge.filter_extraneous_inputs:
-                raise ValueError(
-                    "MakerCheckerFlow invariant violated: "
-                    "judge.input_schema must match maker.input_schema or judge must filter extraneous inputs"
-                )
-
+        self._maker.output_schema = self._checker.parameters
         self._parameters = list(self._maker.parameters)
 
     # ------------------------------------------------------------------ #
