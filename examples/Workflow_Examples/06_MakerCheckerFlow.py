@@ -11,7 +11,7 @@ from atomic_agentic.agents import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.workflows.composites import MakerCheckerFlow
 from atomic_agentic.tools import toolify
-from atomic_agentic.workflows import BundlingPolicy, MappingPolicy
+from atomic_agentic.workflows import BundlingPolicy
 
 load_dotenv()
 
@@ -109,7 +109,6 @@ flow = MakerCheckerFlow(
     judge=judge,
     max_revisions=5,
     output_schema=["final_draft"],
-    mapping_policy=MappingPolicy.MATCH_FIRST_LENIENT,
     bundling_policy=BundlingPolicy.UNBUNDLE,
 )
 

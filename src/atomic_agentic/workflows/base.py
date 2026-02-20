@@ -248,7 +248,6 @@ class Workflow(AtomicInvokable, ABC):
         *,
         output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
-        mapping_policy: MappingPolicy = MappingPolicy.STRICT,
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
         filter_extraneous_inputs: bool = False,
@@ -269,7 +268,6 @@ class Workflow(AtomicInvokable, ABC):
 
         # Packaging policies
         self._bundling_policy = BundlingPolicy(bundling_policy)
-        self._mapping_policy = MappingPolicy(mapping_policy)
         self._absent_val_policy = AbsentValPolicy(absent_val_policy)
         self._default_absent_val = default_absent_val
         self._filter_extraneous_inputs = filter_extraneous_inputs
@@ -301,14 +299,6 @@ class Workflow(AtomicInvokable, ABC):
     @bundling_policy.setter
     def bundling_policy(self, value: BundlingPolicy) -> None:
         self._bundling_policy = BundlingPolicy(value)
-
-    @property
-    def mapping_policy(self) -> MappingPolicy:
-        return self._mapping_policy
-
-    @mapping_policy.setter
-    def mapping_policy(self, value: MappingPolicy) -> None:
-        self._mapping_policy = MappingPolicy(value)
 
     @property
     def absent_val_policy(self) -> AbsentValPolicy:

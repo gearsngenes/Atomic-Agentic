@@ -22,7 +22,6 @@ from ..core.Parameters import ParamSpec
 from .base import (
     Workflow,
     BundlingPolicy,
-    MappingPolicy,
     AbsentValPolicy,
     DEFAULT_WF_KEY,
 )
@@ -46,7 +45,6 @@ class BasicFlow(Workflow):
         *,
         output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
         bundling_policy: Optional[BundlingPolicy] = BundlingPolicy.BUNDLE,
-        mapping_policy: Optional[MappingPolicy] = MappingPolicy.STRICT,
         absent_val_policy: Optional[AbsentValPolicy] = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
         filter_extraneous_inputs: Optional[bool] = None,
@@ -61,7 +59,6 @@ class BasicFlow(Workflow):
             parameters=component.parameters,
             output_schema=output_schema,
             bundling_policy=bundling_policy,
-            mapping_policy=mapping_policy,
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
             filter_extraneous_inputs=filter,

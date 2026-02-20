@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from atomic_agentic.tools import Tool
-from atomic_agentic.workflows import BundlingPolicy, MappingPolicy
+from atomic_agentic.workflows import BundlingPolicy
 from atomic_agentic.workflows import BasicFlow
 
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +32,6 @@ tf = BasicFlow(
     output_schema=["x", "n"],
     # BundlingPolicy is ignored when schema length != 1; UNBUNDLE behavior applies.
     bundling_policy=BundlingPolicy.BUNDLE,
-    mapping_policy=MappingPolicy.STRICT,
 )
 
 print("\n-- tool --")
@@ -117,7 +116,6 @@ wf_list_zip = BasicFlow(
     component=pos_tool,
     output_schema=["name", "age", "state"],
     bundling_policy=BundlingPolicy.UNBUNDLE,  # activates sequence->schema packaging
-    mapping_policy=MappingPolicy.STRICT,
 )
 
 print("\n-- list return -> unbundle + zip to schema --")
@@ -125,7 +123,7 @@ print("invoke:", wf_list_zip.invoke({"raw": "Ada,37,CA"}))
 
 
 # -------------------------------------------------------------------
-# Sequence overflow -> IGNORE_EXTRA truncation (policy-dependent)
+# Sequence overflow -> Too Many Output Fields error (schema len < sequence length)
 # -------------------------------------------------------------------
 def four_numbers(*, x: int) -> list[int]:
     return [x, x + 1, x + 2, x + 3]
@@ -136,18 +134,20 @@ overflow_tool = Tool(
     name="four_numbers",
     namespace="examples",
     description="Return four ints for overflow packaging demo.",
+    filter_extraneous_inputs=True,  # critical to prevent error on extra schema keys
 )
 
-wf_overflow_truncate = BasicFlow(
+wf_output_overflow = BasicFlow(
     component=overflow_tool,
-    output_schema=["a", "b", "c"],  # only 3 schema keys
+    output_schema=["a", "b", "c"],  # expects only 3 output fields
     bundling_policy=BundlingPolicy.UNBUNDLE,
-    mapping_policy=MappingPolicy.IGNORE_EXTRA,  # truncates extra sequence items
 )
 
-print("\n-- sequence overflow -> IGNORE_EXTRA truncation --")
-print("invoke:", wf_overflow_truncate.invoke({"x": 10}))
-
+print("\n-- sequence overflow -> Too Many Output Fields --")
+try:
+    print("invoke:", wf_output_overflow.invoke({"x": 10}))
+except Exception as e:
+    print("ERR:", e)
 
 # -------------------------------------------------------------------
 # Set return -> single-key bundling (schema len == 1)

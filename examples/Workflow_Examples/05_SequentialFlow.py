@@ -35,9 +35,15 @@ def to_message(value: int) -> Dict[str, str]:
 def main() -> None:
     # toolify returns a single Tool — append it individually.
     tools: List[Any] = []
-    tools.append(toolify(add_and_carry, name="add_and_carry", description="Add x+y and carry factor forward"))
-    tools.append(toolify(multiply, name="multiply", description="Multiply value by factor"))
-    tools.append(toolify(to_message, name="to_message", description="Format value as a message"))
+    tools.append(toolify(add_and_carry,
+                         name="add_and_carry",
+                         description="Add x+y and carry factor forward"))
+    tools.append(toolify(multiply,
+                         name="multiply",
+                         description="Multiply value by factor"))
+    tools.append(toolify(to_message,
+                         name="to_message",
+                         description="Format value as a message"))
 
     flow = SequentialFlow(
         name="demo_sequential",

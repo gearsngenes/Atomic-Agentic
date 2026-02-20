@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Optional, Sequence, Union, List
 
 from ..core.Invokable import AtomicInvokable
-from .base import Workflow, BundlingPolicy, MappingPolicy, AbsentValPolicy
+from .base import Workflow, BundlingPolicy, AbsentValPolicy
 from .basic import BasicFlow
 from ..core.Parameters import ParamSpec
 
@@ -73,7 +73,6 @@ class SequentialFlow(Workflow):
         *,
         output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
-        mapping_policy: MappingPolicy = MappingPolicy.STRICT,
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
     ) -> None:
@@ -87,7 +86,6 @@ class SequentialFlow(Workflow):
             parameters=steps[0].parameters if steps else [],
             output_schema=output_schema,
             bundling_policy=bundling_policy,
-            mapping_policy=mapping_policy,
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
             filter_extraneous_inputs=filter,
@@ -248,7 +246,6 @@ class MakerCheckerFlow(Workflow):
         *,
         output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
-        mapping_policy: MappingPolicy = MappingPolicy.STRICT,
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
     ) -> None:
@@ -269,7 +266,6 @@ class MakerCheckerFlow(Workflow):
             parameters=self._maker.parameters,
             output_schema=output_schema,
             bundling_policy=bundling_policy,
-            mapping_policy=mapping_policy,
             absent_val_policy=absent_val_policy,
             default_absent_val=default_absent_val,
             filter_extraneous_inputs=filter,
