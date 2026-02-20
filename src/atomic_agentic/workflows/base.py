@@ -403,6 +403,7 @@ class Workflow(AtomicInvokable, ABC):
         unwrapped = raw
         while (
             isinstance(unwrapped, Mapping)
+            and len(unwrapped) == 1
             and DEFAULT_WF_KEY in unwrapped.keys()
         ):
             unwrapped = unwrapped[DEFAULT_WF_KEY]
