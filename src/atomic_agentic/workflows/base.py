@@ -597,7 +597,6 @@ class Workflow(AtomicInvokable, ABC):
         d.update({
             "output_schema" : self.output_schema,
             "bundling_policy": self.bundling_policy.value,
-            "mapping_policy": self.mapping_policy.value,
             "absent_val_policy": self.absent_val_policy.value,
             "default_absent_val": self.default_absent_val})
         return d

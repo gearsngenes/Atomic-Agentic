@@ -72,7 +72,6 @@ def exercise_tool(tool_label: str, tool: Tool) -> None:
             component=tool,
             output_schema=OUTPUT_SCHEMA,
             bundling_policy=BundlingPolicy.UNBUNDLE,
-            mapping_policy=MappingPolicy.STRICT,
             absent_val_policy=policy,
         )
 

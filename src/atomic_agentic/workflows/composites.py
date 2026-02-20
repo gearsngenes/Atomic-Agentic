@@ -50,7 +50,7 @@ class SequentialFlow(Workflow):
     output_schema:
         Optional workflow output schema for the SequentialFlow itself. This does not
         override per-step wiring. If omitted, defaults to the base Workflow default.
-    bundling_policy, mapping_policy, absent_val_policy, default_absent_val:
+    bundling_policy, absent_val_policy, default_absent_val:
         Packaging/validation policies for the SequentialFlow's *own* packaging boundary.
         Step wrapper policies currently use BasicFlow defaults (to be refined separately).
 
@@ -158,7 +158,6 @@ class SequentialFlow(Workflow):
             self._steps[i].output_schema = self._steps[i+1].parameters
         for i in range(len(self._steps)):
             # Configure step policies to fixed values
-            self._steps[i].mapping_policy = MappingPolicy.STRICT
             self._steps[i].bundling_policy = BundlingPolicy.BUNDLE
             self._steps[i].absent_val_policy = AbsentValPolicy.DROP
             self._steps[i].default_absent_val = None

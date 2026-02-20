@@ -283,7 +283,6 @@ def main() -> None:
     state_flow_config = {
         "output_schema": TicketState,
         "bundling_policy": BundlingPolicy.UNBUNDLE,
-        "mapping_policy": MappingPolicy.IGNORE_EXTRA,
         "absent_val_policy": AbsentValPolicy.DROP,
         "filter_extraneous_inputs": True,
     }
