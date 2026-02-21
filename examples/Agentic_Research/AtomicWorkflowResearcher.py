@@ -44,7 +44,7 @@ flow = SequentialFlow(
 )
 
 def main() -> None:
-    inputs = {"query": "What are the main benefits and risks of CRISPR gene editing in medicine?"}
+    inputs = {"query": "What is the latest discovery/news regarding mosasaurs, and their placement within the clade toxicofera?"}
     final = flow.invoke(inputs)
 
     print("\n================ FINAL DRAFT (ATOMIC ONLY) ================\n")

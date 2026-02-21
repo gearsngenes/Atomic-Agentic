@@ -75,7 +75,7 @@ def tavily_research(*, query: str, max_results: int = 5) -> Mapping[str, list[st
                 f"SOURCE {i}\nTITLE: {title or '(no title)'}\nURL: {url}\nEXCERPT:\n{snippet}\n"
             )
 
-    return {"sources": extracted_items}
+    return {"query": query, "sources": extracted_items}
 
 research_tool = Tool(
     function=tavily_research,

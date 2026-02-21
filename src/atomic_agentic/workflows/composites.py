@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Sequence, Union, List
+import logging
 
 from ..core.Invokable import AtomicInvokable
 from .base import Workflow, BundlingPolicy, AbsentValPolicy
 from .basic import BasicFlow
 from ..core.Parameters import ParamSpec
 
+logger = logging.getLogger(__name__)
 
 class SequentialFlow(Workflow):
     """
@@ -176,7 +178,8 @@ class SequentialFlow(Workflow):
         checkpoint_indices: list[int] = []
         running_result: Mapping[str, Any] = inputs
 
-        for step in self._steps:
+        for i, step in enumerate(self._steps):
+            logger.info(f"{self.full_name}: invoking step {i}")
             running_result = step.invoke(running_result)
             checkpoint_indices.append(len(step.checkpoints) - 1)
 
@@ -338,6 +341,7 @@ class MakerCheckerFlow(Workflow):
         stopped_early = False
 
         # Initial draft
+        logger.info(f"{self.full_name}: invoking self.maker for initial draft")
         draft = self._maker.invoke(inputs)
         maker_ckpts.append(len(self._maker.checkpoints) - 1)
 
@@ -352,11 +356,13 @@ class MakerCheckerFlow(Workflow):
 
         for _ in range(self._max_revisions):
             # Checker
+            logger.info(f"{self.full_name}: invoking self.checker for revision {_+1}")
             next_inputs = self._checker.invoke(draft)
             checker_ckpts.append(len(self._checker.checkpoints) - 1)
 
             # Judge (optional)
             if self._judge is not None:
+                logger.info(f"{self.full_name}: self.judge inspecting revision {_+1}")
                 judge_out = self._judge.invoke(next_inputs)
                 judge_ckpts.append(len(self._judge.checkpoints) - 1)
 
@@ -365,10 +371,12 @@ class MakerCheckerFlow(Workflow):
                     raise TypeError("Judge must return a boolean")
 
                 if decision:
+                    logger.info(f"{self.full_name}: judge accepted revision {_+1}, stopping early")
                     stopped_early = True
                     break
 
             # Maker rework
+            logger.info(f"{self.full_name}: applying feedback from revision {_+1} for draft {_+2}")
             draft = self._maker.invoke(next_inputs)
             maker_ckpts.append(len(self._maker.checkpoints) - 1)
 
