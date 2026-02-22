@@ -256,7 +256,7 @@ class MakerCheckerFlow(Workflow):
         # ------------------------------------------------------------
         self._maker: BasicFlow = BasicFlow(component=maker)
         self._checker: BasicFlow = BasicFlow(component=checker)
-        self._judge: Optional[BasicFlow] = BasicFlow(component=judge) if judge is not None else None
+        self._judge: Optional[BasicFlow] = BasicFlow(component=judge, bundling_policy=BundlingPolicy.UNBUNDLE) if judge is not None else None
         self._max_revisions: int = max_revisions
         filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else self._maker.filter_extraneous_inputs
         # ------------------------------------------------------------
@@ -305,6 +305,7 @@ class MakerCheckerFlow(Workflow):
     def judge(self, candidate: Optional[AtomicInvokable]) -> None:
         self._judge = BasicFlow(component=candidate,
                                 absent_val_policy=AbsentValPolicy.DROP,
+                                bundling_policy=BundlingPolicy.UNBUNDLE,
                                 filter_extraneous_inputs=True) if candidate is not None else None
         self._rebuild()
 

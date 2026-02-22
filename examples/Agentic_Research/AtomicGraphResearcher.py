@@ -14,7 +14,7 @@ except Exception as exc:  # pragma: no cover
     raise RuntimeError("This example requires 'langgraph'. Install with: pip install langgraph") from exc
 
 from researcher_agents import writer, critic
-from researcher_tools import research_tool, iterator_tool
+from researcher_tools import research_tool, iterator_tool, judge
 
 load_dotenv()
 
@@ -30,6 +30,7 @@ class ResearchState(TypedDict, total=False):
     sources: list[str]
     draft: str
     revision_notes: str
+    approved: bool
     iteration: int
 
 # ---------------------------------------------------------------------
@@ -43,20 +44,19 @@ def build_graph():
     graph.add_node("research", research_tool.invoke)
     graph.add_node("writer", writer.invoke)
     graph.add_node("critic", critic.invoke)
+    graph.add_node("judge", judge.invoke)
     graph.add_node("iterate", iterator_tool.invoke)
 
     # add edges (define flow)
     graph.set_entry_point("research")
     graph.add_edge("research", "writer")
     graph.add_edge("writer", "critic")
-    graph.add_edge("critic", "iterate")
+    graph.add_edge("critic", "judge")
+    graph.add_edge("judge", "iterate")
 
     # Define conditional routing after iteration based on approval flag or max iterations
     def route_after_iter(state: ResearchState) -> Any:
-        it = int(state.get("iteration", 0) or 0)
-        notes = str(state.get("revision_notes", "") or "")
-        approved = APPROVAL_FLAG in notes
-        if approved or it >= MAX_ITERS:
+        if state.get("approved") or state.get("iteration") >= MAX_ITERS:
             return END
         return "writer"
 

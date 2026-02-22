@@ -10,9 +10,6 @@ from atomic_agentic.tools import Tool
 # Load TAVILY_API_KEY from environment or .env file
 load_dotenv()
 
-# Instantiate a Tavily client (will use TAVILY_API_KEY from env by default)
-client = TavilyClient(api_key=None)
-
 # ------------------------------------------------------
 # Research Tool using Tavily SDK
 # ------------------------------------------------------
@@ -23,10 +20,13 @@ def tavily_research(*, query: str, max_results: int = 5) -> Mapping[str, list[st
 
     This function uses the Tavily SDK to perform a search based on
     the input query and then extracts relevant information from 
-    the search results. It returns a mapping containing a list of
-    sources, where each source includes the title, URL, and an 
-    excerpt of the content.
+    the search results. It returns a mapping containing the original
+    query and a list of sources, where each source includes the title,
+    URL, and an excerpt of the content.
     """
+    # Instantiate a Tavily client (will use TAVILY_API_KEY from env by default)
+    client = TavilyClient(api_key=None)
+    # Perform the search with the specified query and parameters
     search = client.search(
         query=query,
         search_depth="advanced",
@@ -35,11 +35,13 @@ def tavily_research(*, query: str, max_results: int = 5) -> Mapping[str, list[st
         include_raw_content=False,
     )
 
+    # Process search results
     results = list(search.get("results", []) or [])
     urls = [str(r.get("url", "")).strip() for r in results if str(r.get("url", "")).strip()]
 
     extracted_items: list[str] = []
 
+    # Extract content for each available URL
     if urls:
         extract = client.extract(urls=urls)
         extract_results = list(extract.get("results", []) or [])
@@ -64,16 +66,7 @@ def tavily_research(*, query: str, max_results: int = 5) -> Mapping[str, list[st
             extracted_items.append(
                 f"SOURCE {i}\nTITLE: {title or '(no title)'}\nURL: {url}\nEXCERPT:\n{body if body else '(no excerpt returned)'}\n"
             )
-    else:
-        for i, r in enumerate(results, start=1):
-            url = str(r.get("url", "")).strip()
-            title = str(r.get("title", "")).strip()
-            snippet = str(r.get("content", "")).strip()
-            if not url:
-                continue
-            extracted_items.append(
-                f"SOURCE {i}\nTITLE: {title or '(no title)'}\nURL: {url}\nEXCERPT:\n{snippet}\n"
-            )
+    print(f"Extracted {len(extracted_items)} sources from Tavily search for query: {query}")
 
     return {"query": query, "sources": extracted_items}
 
@@ -100,12 +93,12 @@ iterator_tool = Tool(
 # ------------------------------------------------------
 # Judge tool for MakerChecker approval
 # ------------------------------------------------------
-def judge_approved(*, revision_notes: str) -> bool:
+def judge_approved(*, revision_notes: str) -> Mapping[str, bool]:
     # query/sources intentionally unused; kept for schema compatibility with maker inputs
-    return "<<APPROVED>>" in (revision_notes or "")
+    return {"approved": "<<APPROVED>>" in (revision_notes or "")}
 
 judge = Tool(
-    judge_approved,
+    function=judge_approved,
     name="approval_judge",
     description=f"Return True iff critic feedback contains <<APPROVED>>.",
     filter_extraneous_inputs=True,
