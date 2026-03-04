@@ -85,7 +85,7 @@ class AtomicInvokable(ABC):
         description: str,
         parameters: list[ParamSpec],
         return_type: str,
-        filter_extraneous_inputs: bool = False,
+        filter_extraneous_inputs: bool = True,
     ) -> None:
         # setters include validation
         self.name = name

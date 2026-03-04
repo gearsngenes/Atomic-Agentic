@@ -35,7 +35,7 @@ identity_pre_tool = Tool(
     name="identity_pre",
     namespace="base_agent",
     description="Default pre-invoke identity function that requires {'prompt': str} and returns the prompt string.",
-    filter_extraneous_inputs=False,)
+    filter_extraneous_inputs=True,)
 
 def identity_post(*, result: Any) -> Any:
     """
@@ -52,7 +52,7 @@ identity_post_tool = Tool(
     name="identity_post",
     namespace="base_agent",
     description="Default post-invoke identity function that accepts a single argument 'result' and returns it unchanged.",
-    filter_extraneous_inputs=False,)
+    filter_extraneous_inputs=True,)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent

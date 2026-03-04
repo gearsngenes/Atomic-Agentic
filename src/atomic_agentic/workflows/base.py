@@ -250,7 +250,7 @@ class Workflow(AtomicInvokable, ABC):
         bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
         absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
         default_absent_val: Any = None,
-        filter_extraneous_inputs: bool = False,
+        filter_extraneous_inputs: bool = True,
     ) -> None:
         # Pass parameters and return_type to parent (AtomicInvokable)
         # Parent will validate parameter ordering and structure

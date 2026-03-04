@@ -35,6 +35,7 @@ t_add = Tool(
     name="add",
     description="Add two integers. Args: a:int (required), b:int=0. Returns: int.",
     namespace="local",
+    filter_extraneous_inputs=False,
 )
 
 t_greet = Tool(

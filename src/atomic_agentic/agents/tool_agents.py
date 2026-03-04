@@ -747,7 +747,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         namespace: Optional[str] = None,
         remote_protocol: Optional[str] = None,
         headers: Optional[Mapping[str, str]] = None,
-        filter_extraneous_inputs: Optional[bool] = None,
         name_collision_mode: str = "raise",  # raise|skip|replace
     ) -> str:
         if name_collision_mode not in ("raise", "skip", "replace"):
@@ -761,7 +760,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 namespace=namespace or self.name,
                 remote_protocol=remote_protocol,
                 headers=headers,
-                filter_extraneous_inputs=filter_extraneous_inputs,
             )
         except ToolDefinitionError:
             raise
@@ -785,7 +783,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         mcp_servers: Sequence[tuple[str, Any]] = (),
         a2a_servers: Sequence[tuple[str, Any]] = (),
         *,
-        batch_filter_inputs: bool = False,
         name_collision_mode: str = "raise",
     ) -> list[str]:
         if name_collision_mode not in ("raise", "skip", "replace"):
@@ -797,7 +794,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 a2a_servers=list(a2a_servers),
                 mcp_servers=list(mcp_servers),
                 batch_namespace=self.name,
-                batch_filter_inputs=batch_filter_inputs,
             )
         except ToolDefinitionError:
             raise

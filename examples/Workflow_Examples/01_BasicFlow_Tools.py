@@ -134,7 +134,6 @@ overflow_tool = Tool(
     name="four_numbers",
     namespace="examples",
     description="Return four ints for overflow packaging demo.",
-    filter_extraneous_inputs=True,  # critical to prevent error on extra schema keys
 )
 
 wf_output_overflow = BasicFlow(

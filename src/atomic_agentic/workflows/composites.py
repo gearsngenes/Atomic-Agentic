@@ -81,7 +81,7 @@ class SequentialFlow(Workflow):
         steps: List[AtomicInvokable] = steps or []
         self._steps: List[BasicFlow] = [BasicFlow(component=step) for step in steps]
         filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else (
-            self._steps[0].filter_extraneous_inputs if steps else False)
+            self._steps[0].filter_extraneous_inputs if steps else True)
         super().__init__(
             name=name,
             description=description,

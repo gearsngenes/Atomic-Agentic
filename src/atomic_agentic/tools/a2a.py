@@ -78,7 +78,7 @@ class A2AProxyTool(Tool):
                  url: str,
                  namespace: str | None = None,
                  headers: Any | None = None,
-                 filter_extraneous_inputs: bool = False) -> None:
+                 filter_extraneous_inputs: bool = True) -> None:
         self._url = url
         self._client = A2AClient(url, headers=headers)
 

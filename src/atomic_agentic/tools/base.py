@@ -61,7 +61,7 @@ class Tool(AtomicInvokable):
         name: Optional[str] = None,
         namespace: Optional[str] = None,
         description: Optional[str] = None,
-        filter_extraneous_inputs: bool = False,
+        filter_extraneous_inputs: bool = True,
     ) -> None:
         if not callable(function):
             raise ToolDefinitionError(f"Tool function must be callable, got {type(function)!r}")
