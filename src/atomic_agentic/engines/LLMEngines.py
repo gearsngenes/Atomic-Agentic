@@ -35,6 +35,9 @@ try: from llama_cpp import Llama
 except: Llama = None
 
 # Import Exceptions
+from ..core.Invokable import AtomicInvokable
+from ..core.sentinels import NO_VAL
+from ..core.Parameters import ParamSpec
 from ..core.Exceptions import LLMEngineError
 
 __all__ = [
@@ -50,7 +53,7 @@ logger = logging.getLogger(__name__)
 # ───────────────────────────────────────────────────────────────────────────────
 # LLMEngine primitive
 # ───────────────────────────────────────────────────────────────────────────────
-class LLMEngine(ABC):
+class LLMEngine(AtomicInvokable, ABC):
     """
     Base template-method primitive for LLM provider adapters.
 
@@ -83,6 +86,8 @@ class LLMEngine(ABC):
         self,
         *,
         name: Optional[str] = None,
+        description: str = "",
+        filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 30.0,
         max_retries: int = 2,
         retry_backoff_base: float = 0.5,
@@ -104,7 +109,20 @@ class LLMEngine(ABC):
         retry_backoff_max:
             Upper bound in seconds for backoff delay.
         """
-        self._name = name or type(self).__name__
+        # Pass the provided name (or the class name) directly to AtomicInvokable.
+        AtomicInvokable.__init__(
+            self,
+            name=name or type(self).__name__,
+            description=description or "LLM Engine",
+            parameters=[ParamSpec(name ="messages",
+                                  index = 0,
+                                  kind = "POSITIONAL_OR_KEYWORD",
+                                  type="List[Dict[str, str]]",
+                                  default = NO_VAL)],
+            return_type="str",
+            filter_extraneous_inputs=filter_extraneous_inputs,
+        )
+
         self._timeout_seconds = float(timeout_seconds)
         self._max_retries = int(max_retries)
         self._retry_backoff_base = float(retry_backoff_base)
@@ -115,11 +133,6 @@ class LLMEngine(ABC):
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
-    @property
-    def name(self) -> str:
-        """Human-friendly identifier for this engine instance."""
-        return self._name
-
     @property
     def attachments(self) -> Mapping[str, Mapping[str, Any]]:
         """
@@ -159,7 +172,7 @@ class LLMEngine(ABC):
             )
 
         self._attachments[path] = meta
-        logger.debug("LLMEngine %s attached %s", self._name, path)
+        logger.debug("LLMEngine %s attached %s", self.name, path)
         return meta
 
     def detach(self, path: str) -> bool:
@@ -178,11 +191,11 @@ class LLMEngine(ABC):
         except Exception as exc:  # pragma: no cover - best-effort cleanup
             logger.debug(
                 "LLMEngine %s._on_detach raised %r for %s; ignoring",
-                self._name,
+                self.name,
                 exc,
                 path,
             )
-        logger.debug("LLMEngine %s detached %s", self._name, path)
+        logger.debug("LLMEngine %s detached %s", self.name, path)
         return True
 
     def clear_attachments(self) -> None:
@@ -190,7 +203,7 @@ class LLMEngine(ABC):
         for path in list(self._attachments.keys()):
             self.detach(path)
 
-    def invoke(self, messages: List[Dict[str, str]]) -> str:
+    def invoke_messages(self, messages: List[Dict[str, str]]) -> str:
         """
         Template method that defines the engine invocation lifecycle.
 
@@ -221,8 +234,17 @@ class LLMEngine(ABC):
             # Already normalized; bubble up unchanged.
             raise
         except Exception as exc:
-            raise LLMEngineError(f"{self._name}.invoke failed") from exc
-
+            raise LLMEngineError(f"{self.name}.invoke failed") from exc
+    
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        with self._invoke_lock:
+            logger.info(f"[{self.full_name} started]")
+            inputs = self.filter_inputs(inputs)
+            messages = inputs.get("messages")
+            if not isinstance(messages, list):
+                raise LLMEngineError("LLMEngine.invoke: 'messages' input must be a list")
+            logger.info(f"[{self.full_name} finished]")
+            return self.invoke_messages(messages)
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -280,7 +302,7 @@ class LLMEngine(ABC):
         allowed_exts = self.allowed_attachment_exts
         if allowed_exts is not None and ext not in allowed_exts:
             raise LLMEngineError(
-                f"LLMEngine.attach: extension {ext!r} is not supported by {self._name}"
+                f"LLMEngine.attach: extension {ext!r} is not supported by {self.name}"
             )
 
     def _call_with_retries(self, payload: Any) -> Any:
@@ -309,7 +331,7 @@ class LLMEngine(ABC):
                 sleep *= random.uniform(0.8, 1.2)
                 logger.debug(
                     "LLMEngine %s attempt %d failed with %r; retrying in %.2fs",
-                    self._name,
+                    self.name,
                     attempt,
                     exc,
                     sleep,
@@ -389,13 +411,16 @@ class LLMEngine(ABC):
         """
         Shallow, non-secret configuration snapshot for debugging / logging.
         """
-        return {
-            "name": self._name,
+        d = super().to_dict()
+        d.update({
+            "type": type(self).__name__,
             "timeout_seconds": self._timeout_seconds,
             "max_retries": self._max_retries,
+            "retry_backoff_base": self._retry_backoff_base,
+            "retry_backoff_max": self._retry_backoff_max,
             "attachments": self._attachments,
-            "provider": type(self).__name__,
-        }
+        })
+        return d
 
 
 
@@ -459,6 +484,8 @@ class OpenAIEngine(LLMEngine):
         extra_illegal_exts: Optional[set[str]] = None,
         *,
         name: Optional[str] = None,
+        description: str = "OpenAI LLM Engine",
+        filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
         max_retries: int = 2,
         retry_backoff_base: float = 0.5,
@@ -477,11 +504,14 @@ class OpenAIEngine(LLMEngine):
             Maximum number of characters to inline from text/code attachments.
         extra_illegal_exts:
             Optional set of additional extensions to reject at `attach` time.
-        name, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
+        name, description, filter_extraneous_inputs, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
             Template-method engine configuration (see `_primitives.LLMEngine`).
         """
+        sanitized_name = (name or f"openai_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_").replace(".", "_")
         super().__init__(
-            name=name or f"openai:{model}",
+            name=sanitized_name,
+            description=description or "OpenAI LLM Engine",
+            filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,
@@ -860,6 +890,8 @@ class GeminiEngine(LLMEngine):
         extra_illegal_exts: Optional[set[str]] = None,
         *,
         name: Optional[str] = None,
+        description: str = "Gemini LLM Engine",
+        filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
         max_retries: int = 2,
         retry_backoff_base: float = 0.5,
@@ -877,11 +909,14 @@ class GeminiEngine(LLMEngine):
             Sampling temperature for text generation.
         extra_illegal_exts:
             Optional set of additional extensions to reject at `attach` time.
-        name, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
+        name, description, filter_extraneous_inputs, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
             Template-method engine configuration (see `_primitives.LLMEngine`).
         """
+        sanitized_name = (name or f"gemini_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
         super().__init__(
-            name=name or f"gemini:{model}",
+            name=sanitized_name,
+            description=description or "Gemini LLM Engine",
+            filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,
@@ -1172,6 +1207,8 @@ class MistralEngine(LLMEngine):
         extra_illegal_exts: Optional[set[str]] = None,
         *,
         name: Optional[str] = None,
+        description: str = "Mistral LLM Engine",
+        filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
         max_retries: int = 2,
         retry_backoff_base: float = 0.5,
@@ -1195,6 +1232,10 @@ class MistralEngine(LLMEngine):
         name:
             Optional human-friendly name for this engine instance. Defaults to
             `"mistral:{model}"`.
+        description:
+            Human-friendly description for this engine instance.
+        filter_extraneous_inputs:
+            Whether to filter extraneous inputs.
         timeout_seconds:
             Suggested timeout per completion call. Used to configure the underlying
             `httpx.Client` passed into the Mistral SDK.
@@ -1206,8 +1247,11 @@ class MistralEngine(LLMEngine):
                 "MistralEngine requires the `mistralai` package to be installed."
             )
 
+        sanitized_name = (name or f"mistral_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
         super().__init__(
-            name=name or f"mistral:{model}",
+            name=sanitized_name,
+            description=description or "Mistral LLM Engine",
+            filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,
@@ -1552,6 +1596,8 @@ class LlamaCppEngine(LLMEngine):
         verbose: bool = False,
         *,
         name: Optional[str] = None,
+        description: str = "Llama.cpp LLM Engine",
+        filter_extraneous_inputs: bool = True,
         max_retries = 2,
         retry_backoff_base = 0.5,
         retry_backoff_max = 8
@@ -1577,9 +1623,16 @@ class LlamaCppEngine(LLMEngine):
             If True, enable verbose logging from the underlying llama.cpp runtime.
         name:
             Optional human-friendly engine name; defaults to `"llama_cpp"`.
+        description:
+            Human-friendly description for this engine instance.
+        filter_extraneous_inputs:
+            Whether to filter extraneous inputs.
         """
+        sanitized_name = (name or "llama_cpp").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
         super().__init__(
-            name=name or "llama_cpp",
+            name=sanitized_name,
+            description=description or "Llama.cpp LLM Engine",
+            filter_extraneous_inputs=filter_extraneous_inputs,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,
             retry_backoff_max=retry_backoff_max)

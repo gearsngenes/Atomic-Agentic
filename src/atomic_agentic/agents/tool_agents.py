@@ -1786,7 +1786,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         for i, slot in enumerate(cache_blackboard):
             slot.step = i
 
-        raw_plan = self._llm_engine.invoke(working_messages)
+        raw_plan = self._llm_engine.invoke({"messages": working_messages})
         plan_dicts = self._str_to_steps(raw_plan)
 
         # ---- Normalize return: ensure exactly one return step and it is last. ----
@@ -2275,7 +2275,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         # ------------------------------------------------------------------ #
         # 2) Call LLM and parse a single step object
         # ------------------------------------------------------------------ #
-        raw_text = self._llm_engine.invoke(working_messages)
+        raw_text = self._llm_engine.invoke({"messages": working_messages})
         step_obj = self._str_to_dict(raw_text)
 
         # Strict schema: exactly step/tool/args

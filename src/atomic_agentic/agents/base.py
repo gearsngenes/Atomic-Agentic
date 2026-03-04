@@ -382,7 +382,7 @@ class Agent(AtomicInvokable):
         # 1) Call engine (attachments are managed by the engine itself)
         try:
             logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
-            text = self._llm_engine.invoke(messages)
+            text = self._llm_engine.invoke({"messages": messages})
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine invocation failed: {e}") from e
 
