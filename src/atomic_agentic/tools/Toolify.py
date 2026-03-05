@@ -20,6 +20,7 @@ def toolify(
     name: str | None = None,
     description: str | None = None,
     namespace: str | None = None,
+    filter_extraneous_inputs: Optional[bool] = None,
     remote_protocol: str | None = None,
     headers: Mapping[str, str] | None = None,
 ) -> Tool:
@@ -81,7 +82,7 @@ def toolify(
 
     # default filter field value for non-Atomic components (callable or remote)
     # Default to filtering extraneous inputs when no explicit component exists.
-    filter_extraneous_flag = True
+    filter_extraneous_flag = filter_extraneous_inputs if filter_extraneous_inputs is not None else True
 
     # 3) String → MCP (strict, requires name) or A2A (lenient, auto-discovers)
     if isinstance(component, str):
@@ -156,6 +157,7 @@ def batch_toolify(
     a2a_servers: List[Tuple[str, Any]] = [],
     mcp_servers: List[Tuple[str, Any]] = [],
     batch_namespace: str = "default",
+    batch_filter: Optional[bool] = None,
 ) -> List[Tool]:
     """
     Normalize a batch of components into Tool instances.
@@ -170,22 +172,23 @@ def batch_toolify(
         List of (MCP server URL, headers) tuples to toolify all tools from.
     batch_namespace : str
         Namespace to assign to all toolified local components.
-
+    batch_filter : Optional[bool]
     Returns
     -------
     List[Tool]
         List of Tool instances derived from the provided components and remote servers.
     """
+    flag = batch_filter if batch_filter is not None else True
     tools: List[Tool] = []
 
     # Toolify local components
     for component in executable_components:
-        tool = toolify(component, namespace=batch_namespace)
+        tool = toolify(component, namespace=batch_namespace, filter_extraneous_inputs=flag)
         tools.append(tool)
 
     # Toolify all tools from A2A servers
     for url, headers in a2a_servers:
-        a2a_tool = toolify(url, remote_protocol="a2a", headers=headers, namespace=batch_namespace)
+        a2a_tool = toolify(url, remote_protocol="a2a", headers=headers, namespace=batch_namespace, filter_extraneous_inputs=flag)
         tools.append(a2a_tool)
 
     # Toolify all tools from MCP servers
@@ -199,6 +202,7 @@ def batch_toolify(
                 remote_protocol="mcp",
                 headers=headers,
                 namespace=batch_namespace,
+                filter_extraneous_inputs=flag,
             )
             tools.append(mcp_tool)
 
