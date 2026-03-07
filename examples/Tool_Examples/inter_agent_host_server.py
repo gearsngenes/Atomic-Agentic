@@ -2,7 +2,7 @@
 """
 Inter-Agent Communicator A2A Host Server
 ---------------------------------------
-A tool-using planning agent that communicates with OTHER agents via A2AgentTool
+A tool-using planning agent that communicates with OTHER agents via A2AdapterTool
 proxies (remote A2A tools).
 
 This registers:

@@ -1,7 +1,7 @@
 """
 A2A Proxy Client
 ----------------
-One script to test ANY running A2A-hosted agent/tool-agent via A2AgentTool.
+One script to test ANY running A2A-hosted agent/tool-agent via A2AdapterTool.
 
 Usage examples:
   python a2a_proxy_client.py trivia

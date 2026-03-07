@@ -2,7 +2,7 @@
 Toolify demo: converting components into single Tool instances.
 
 Toolify patterns:
-- Agent           -> toolify(agent)                      -> AgentTool (single)
+- Agent           -> toolify(agent)                      -> AdapterTool (single)
 - Callable        -> toolify(callable, ...)              -> Tool (single)
 - Tool (wrapped)  -> toolify(tool)                       -> Tool (single, passthrough)
 - MCP URL        -> toolify(url, name=..., remote_protocol='mcp') -> MCPProxyTool (single)
@@ -56,7 +56,7 @@ pre_wrapped_tool = Tool(
 )
 
 
-# ---------- Agent that uses a pre_invoke Tool (drives AgentTool schema) ----------
+# ---------- Agent that uses a pre_invoke Tool (drives AdapterTool schema) ----------
 
 
 def to_prompt(topic: str, style: str, *, audience: str = "general") -> str:
@@ -124,8 +124,8 @@ def invoke_with_inputs(t: Tool, inputs: Mapping[str, Any]) -> None:
 
 
 def main() -> None:
-    # 1) Agent -> AgentTool
-    print("\n[1] Agent -> AgentTool via toolify(agent)")
+    # 1) Agent -> AdapterTool
+    print("\n[1] Agent -> AdapterTool via toolify(agent)")
     agent_tool = toolify(agent)
     show_plan(agent_tool)
     invoke_with_inputs(

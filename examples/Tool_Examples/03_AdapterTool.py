@@ -23,14 +23,14 @@ def to_prompt(topic: str, style: str, *, audience: str = "general") -> str:
     """Compose a natural-language prompt from structured inputs."""
     return f"Write about '{topic}' in a {style} style for {audience} readers."
 
-# --- 3) Build the Agent and wrap it as an AgentTool ---
+# --- 3) Build the Agent and wrap it as an AdapterTool ---
 
 agent = Agent(
     name="Writer",
     description="Helpful writing assistant.",
     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
     role_prompt="You are a concise writing assistant.",
-    pre_invoke=to_prompt,  # <-- schema source for AgentTool
+    pre_invoke=to_prompt,  # <-- schema source for AdapterTool
 )
 
 agent_tool = AdapterTool(agent)  # type="agent", source=agent.name, name="invoke"
