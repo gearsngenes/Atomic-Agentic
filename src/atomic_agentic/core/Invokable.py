@@ -186,6 +186,16 @@ class AtomicInvokable(ABC):
         return list(self._parameters)
 
     @property
+    def has_varargs(self) -> bool:
+        """Whether this invokable accepts variable positional arguments (*args)."""
+        return any(p.kind == "VAR_POSITIONAL" for p in self._parameters)
+
+    @property
+    def has_varkwargs(self) -> bool:
+        """Whether this invokable accepts variable keyword arguments (**kwargs)."""
+        return any(p.kind == "VAR_KEYWORD" for p in self._parameters)
+
+    @property
     def return_type(self) -> str:
         """Return type (string) of this invokable."""
         return self._return_type
@@ -261,7 +271,7 @@ class AtomicInvokable(ABC):
         if not isinstance(inputs, Mapping):
             raise TypeError(f"{type(self).__name__}.invoke: inputs must be a mapping, got {type(inputs)!r}")
         # Check if the component has varargs or kwargs parameters
-        has_varparams = any(p.kind in ("VAR_POSITIONAL", "VAR_KEYWORD") for p in self.parameters)
+        has_varparams = self.has_varkwargs or self.has_varargs
         params = [p.name for p in self.parameters]
 
         # If filter_extraneous_inputs is True and the component does not have varargs/kwargs, filter out extraneous inputs
@@ -299,3 +309,47 @@ class AtomicInvokable(ABC):
 
     def __repr__(self) -> str:
         return f"{self.signature}: {self.description}"
+
+    # ---------------------------------------------------------------- #
+    # callable contract
+    # ---------------------------------------------------------------- #
+    def __call__(self, *args, **kwargs)-> Any:
+        """
+        Allows the invokable to be called like a regular function
+        Check for varargs/kwargs parameters and construct the inputs dict accordingly before invoking.
+        """
+        # ensure we have mutable copies
+        args, kwargs = list(args), dict(kwargs)
+        # initialize inputs dict
+        inputs = {}
+        # Set var arg param name and index if they exist
+        arg_param = None if not self.has_varargs else next(
+            (p for p in self.parameters if p.kind == "VAR_POSITIONAL"))
+        arg_param_idx = arg_param.index if arg_param else None
+        # Set var kwarg param name and index if they exist
+        kwarg_param = None if not self.has_varkwargs else next(
+            (p for p in self.parameters if p.kind == "VAR_KEYWORD"))
+        kwarg_param_idx = kwarg_param.index if kwarg_param else None
+        # Iterate through the positional inputs and assign them to the correct parameters
+        for i, arg in enumerate(args):
+            # if we reach the var arg parameter, consume all remaining positional
+            # arguments into a tuple and assign to the var arg param
+            if arg_param is not None and i >= arg_param_idx:
+                inputs[arg_param.name] = tuple(args[i:])
+                break
+            else:
+                # Otherwise, assign the argument to the corresponding parameter based on index
+                inputs[self.parameters[i].name] = arg
+        # Iterate through the keyword inputs and assign them to the correct parameters
+        for i, (k, v) in enumerate(kwargs.items()):
+            # if we reach the var kwarg parameter, consume all remaining keyword
+            # arguments into a dict and assign to the var kwarg param
+            if kwarg_param is not None and i >= kwarg_param_idx:
+                inputs[kwarg_param.name] = {k: v for (k, v) in kwargs.items()[i:]}
+                break
+            else:
+                # Otherwise, assign the keyword argument to the corresponding parameter based on name
+                inputs[k] = v
+        # pass the constructed inputs dict to self.invoke()
+        result = self.invoke(inputs)
+        return result
