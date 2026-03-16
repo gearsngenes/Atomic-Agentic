@@ -320,36 +320,41 @@ class AtomicInvokable(ABC):
         """
         # ensure we have mutable copies
         args, kwargs = list(args), dict(kwargs)
+        # number of variable types
+        num_pos = sum(1 for p in self.parameters if p.kind in ("POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD"))
         # initialize inputs dict
         inputs = {}
-        # Set var arg param name and index if they exist
-        arg_param = None if not self.has_varargs else next(
-            (p for p in self.parameters if p.kind == "VAR_POSITIONAL"))
-        arg_param_idx = arg_param.index if arg_param else None
-        # Set var kwarg param name and index if they exist
-        kwarg_param = None if not self.has_varkwargs else next(
-            (p for p in self.parameters if p.kind == "VAR_KEYWORD"))
-        kwarg_param_idx = kwarg_param.index if kwarg_param else None
-        # Iterate through the positional inputs and assign them to the correct parameters
-        for i, arg in enumerate(args):
-            # if we reach the var arg parameter, consume all remaining positional
-            # arguments into a tuple and assign to the var arg param
-            if arg_param is not None and i >= arg_param_idx:
-                inputs[arg_param.name] = tuple(args[i:])
-                break
+        # Handle positional arguments
+        cutoff = min(len(args), num_pos)
+        # Raise if too many positional inputs
+        if len(args) > num_pos and not self.has_varargs:
+            raise TypeError(f"{self.full_name} takes at most {num_pos} positional arguments but {len(args)} were given")
+        # Map positional inputs to parameters
+        for i in range(cutoff):
+            inputs[self.parameters[i].name] = args[i]
+        # Handle variable positional arguments (*args)
+        if self.has_varargs and args[cutoff:]:
+            var_arg = next((p for p in self.parameters if p.kind == "VAR_POSITIONAL"), None)
+            inputs[var_arg.name] = tuple(args[cutoff:])  # consume remaining positional args as a tuple
+        # Handle keyword arguments
+        key_param_names = {p.name for p in self.parameters if p.kind in ("POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY")}
+        extra_keys = {}
+        for key, value in kwargs.items():
+            # Add to inputs if key in parameters
+            if key in key_param_names:
+                inputs[key] = value
+            # Otherwise track as extras
             else:
-                # Otherwise, assign the argument to the corresponding parameter based on index
-                inputs[self.parameters[i].name] = arg
-        # Iterate through the keyword inputs and assign them to the correct parameters
-        for i, (k, v) in enumerate(kwargs.items()):
-            # if we reach the var kwarg parameter, consume all remaining keyword
-            # arguments into a dict and assign to the var kwarg param
-            if kwarg_param is not None and i >= kwarg_param_idx:
-                inputs[kwarg_param.name] = {k: v for (k, v) in kwargs.items()[i:]}
-                break
+                extra_keys[key] = value
+                
+        if extra_keys:
+            # Raise if extraneous keys can't be handled by a VAR_KEYWORD parameter
+            if not self.has_varkwargs:
+                raise TypeError(f"{self.full_name} got unexpected keyword arguments: {', '.join(extra_keys.keys())}")
+            # Otherwise map them to the VAR_KEYWORD parameter as a dict
             else:
-                # Otherwise, assign the keyword argument to the corresponding parameter based on name
-                inputs[k] = v
-        # pass the constructed inputs dict to self.invoke()
+                var_kwarg = next((p for p in self.parameters if p.kind == "VAR_KEYWORD"), None)
+                inputs[var_kwarg.name] = extra_keys  # pass extraneous kwargs as a dict 
+        # Execute the invoke method with the constructed inputs dict
         result = self.invoke(inputs)
         return result
