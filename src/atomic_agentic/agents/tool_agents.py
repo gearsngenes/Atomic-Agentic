@@ -740,35 +740,35 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
     def register(
         self,
-        component: Any,
-        *,
-        name: Optional[str] = None,
+        component: AtomicInvokable | Callable,
         description: Optional[str] = None,
         namespace: Optional[str] = None,
+        *,
         filter_extraneous_inputs: Optional[bool] = None,
-        remote_protocol: Optional[str] = None,
-        headers: Optional[Mapping[str, str]] = None,
         name_collision_mode: str = "raise",  # raise|skip|replace
     ) -> str:
+        # Validate collision policy
         if name_collision_mode not in ("raise", "skip", "replace"):
-            raise ToolRegistrationError("name_collision_mode must be one of: 'raise', 'skip', 'replace'.")
+            raise ToolRegistrationError(
+                "name_collision_mode must be one of: 'raise', 'skip', 'replace'."
+            )
 
+        # Normalize via toolify (single source of truth)
         try:
             tool = toolify(
-                component,
-                name=name,
+                component=component,
                 description=description,
                 namespace=namespace or self.name,
-                remote_protocol=remote_protocol,
-                headers=headers,
                 filter_extraneous_inputs=filter_extraneous_inputs,
             )
-        except ToolDefinitionError:
-            raise
-        except Exception as exc:  # pragma: no cover
-            raise ToolRegistrationError(f"toolify failed for {component!r}: {exc}") from exc
+        except Exception as e:
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: failed to toolify component: {e}"
+            ) from e
 
+        # Collision handling
         key = tool.full_name
+
         if key in self._toolbox:
             if name_collision_mode == "raise":
                 raise ToolRegistrationError(
@@ -776,6 +776,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 )
             if name_collision_mode == "skip":
                 return key
+            # replace → fall through
+
         self._toolbox[key] = tool
         return key
 
