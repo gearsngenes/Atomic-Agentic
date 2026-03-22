@@ -7,7 +7,7 @@ from ..core.Invokable import AtomicInvokable
 from .base import Tool
 from .a2a import A2AProxyTool
 from .adapter import AdapterTool
-from .mcp import MCPProxyTool, list_mcp_tools
+from .mcp import MCPProxyTool
 
 __all__ = ["toolify"]
 
@@ -194,7 +194,7 @@ def batch_toolify(
     # Toolify all tools from MCP servers
     for url, headers in mcp_servers:
         # Discover available MCP tools
-        mcp_tool_names = list_mcp_tools(url, headers=headers)
+        mcp_tool_names = {}#list_mcp_tools(url, headers=headers)
         for tool_name in mcp_tool_names:
             mcp_tool = toolify(
                 url,
