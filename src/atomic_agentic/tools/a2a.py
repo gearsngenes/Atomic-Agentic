@@ -184,7 +184,8 @@ class A2AProxyTool(Tool):
             raise ToolDefinitionError(f"{self.full_name}: failed to fetch A2A agent card: {e}") from e
 
         # Update exposed description
-        description = str(agent_card.description or "").strip() or self._description
+        if override_description:
+            description = str(agent_card.description or "").strip() or self._description
         # Rebind callable + rebuild schemas
         function = functools.partial(a2atomic_host_invoker, client=self._client)
         super().__init__(
