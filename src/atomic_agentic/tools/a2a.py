@@ -76,16 +76,26 @@ class A2AProxyTool(Tool):
     # ------------------------------------------------------------------ #
     def __init__(self,
                  url: str,
+                 name: str | None = None,
                  namespace: str | None = None,
+                 description: str | None = None,
                  headers: Any | None = None,
                  filter_extraneous_inputs: bool = True) -> None:
         self._url = url
         self._client = A2AClient(url, headers=headers)
 
         agent_card = self._client.get_agent_card()
+        resolved_name = str(name or "").strip() or agent_card.name
+        explicit_description = str(description or "").strip()
+        remote_description = str(agent_card.description).strip()
+        resolved_description = (
+            explicit_description
+            or remote_description
+            or f"A2A proxy tool '{resolved_name}'"
+        )
         super().__init__(
-            name=agent_card.name,
-            description=agent_card.description,
+            name=resolved_name,
+            description=resolved_description,
             namespace=namespace,
             function=functools.partial(a2atomic_host_invoker, client=self._client),
             filter_extraneous_inputs=filter_extraneous_inputs,
@@ -139,13 +149,6 @@ class A2AProxyTool(Tool):
         
         return parameters, return_type
 
-    def _compute_is_persistible(self) -> bool:
-        try:
-            agent_card = self._client.get_agent_card()
-        except Exception:
-            return False
-        return agent_card.name == self.name
-
     # ------------------------------------------------------------------ #
     # Tool Helpers
     # ------------------------------------------------------------------ #
@@ -166,25 +169,26 @@ class A2AProxyTool(Tool):
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    def refresh(self, headers: Any | None = None) -> None:
+    def refresh(self, headers: Any | None = None, override_description: bool = False) -> None:
         """
         Re-fetch the agent card and remote schemas, and rebuild the client and
-        function binding. Mirrors the intent of MCPProxyTool.refresh().
+        function binding.
+        If override_meta == True, then mirrors the remote description.
+        Otherwise, keep local description
         """
-        self._client = A2AClient(self._url, headers=headers)
+        client = A2AClient(self._url, headers=headers)
 
         try:
-            agent_card = self._client.get_agent_card()
+            agent_card = client.get_agent_card()
         except Exception as e:  # pragma: no cover
             raise ToolDefinitionError(f"{self.full_name}: failed to fetch A2A agent card: {e}") from e
 
-        # Update exposed identity/metadata
-        name = agent_card.name
-        description = agent_card.description
+        # Update exposed description
+        description = str(agent_card.description or "").strip() or self._description
         # Rebind callable + rebuild schemas
         function = functools.partial(a2atomic_host_invoker, client=self._client)
         super().__init__(
-            name=name,
+            name=self.name,
             description=description,
             namespace=self.namespace,
             function=function,

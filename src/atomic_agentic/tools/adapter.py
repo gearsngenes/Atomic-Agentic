@@ -19,17 +19,24 @@ class AdapterTool(Tool):
     # Construction
     # ------------------------------------------------------------------ #
     def __init__(self, component: AtomicInvokable,
+                 name: str|None = None,
                  namespace: str|None = None,
+                 description: str|None = None,
                  filter_extraneous_inputs: Optional[bool] = None):
         # set private variable
         self._component = component
-        filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else component.filter_extraneous_inputs
+        resolved_filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else component.filter_extraneous_inputs
+        resolved_name = name if name else component.name
+        resolved_description = description if description else component.description
+        resolved_namespace = namespace
+        if isinstance(component, Tool):
+            resolved_namespace = f"wrapped_{component.namespace}"
         # set core attributes
         super().__init__(component.invoke,
-                         component.name,
-                         namespace,
-                         component.description,
-                         filter,)
+                         resolved_name,
+                         resolved_namespace,
+                         resolved_description,
+                         resolved_filter,)
 
     # ------------------------------------------------------------------ #
     # Tool Properties
