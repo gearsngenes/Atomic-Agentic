@@ -572,7 +572,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         self.tool_calls_limit = tool_calls_limit
 
         # Always include canonical return tool (avoid collisions by skipping).
-        self.register(return_tool, name_collision_mode="skip")
+        self.register(return_tool, namespace="ToolAgents", name_collision_mode="skip")
 
     # ------------------------------------------------------------------ #
     # Agent Properties
