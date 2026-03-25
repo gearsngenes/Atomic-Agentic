@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, List, Mapping, Optional, Union, Tuple
+from typing import Any, Callable, Mapping, Optional
 
 from ..core.Exceptions import ToolDefinitionError
 from ..core.Invokable import AtomicInvokable
@@ -10,7 +10,7 @@ from .adapter import AdapterTool
 from .mcp import MCPProxyTool
 from ..mcp import MCPClientHub
 
-__all__ = ["toolify"]
+__all__ = ["toolify", "batch_toolify"]
 
 # ───────────────────────────────────────────────────────────────────────────────
 # toolify
@@ -161,59 +161,65 @@ def toolify(
         "or use `a2a_endpoint` for A2A proxy construction."
     )
 
+
 def batch_toolify(
-    executable_components: List[Union[AtomicInvokable, Callable[..., Any]]] = [],
+    sources: list[AtomicInvokable | Callable[..., Any] | MCPClientHub] | None = None,
     *,
-    a2a_servers: List[Tuple[str, Any]] = [],
-    mcp_servers: List[Tuple[str, Any]] = [],
-    batch_namespace: str = "default",
-    batch_filter: Optional[bool] = None,
-) -> List[Tool]:
+    batch_namespace: str | None = None,
+    batch_filter_inputs: Optional[bool] = None,
+) -> list[Tool]:
     """
-    Normalize a batch of components into Tool instances.
+    Toolify every provided source into Tool objects.
+
+    Behavior
+    --------
+    - Local AtomicInvokables and callables are each toolified into one Tool.
+    - Each MCPClientHub is expanded by listing all remote tools and toolifying
+      each one into its own MCPProxyTool.
+    - No include/exclude filtering is applied here.
+    - No name-collision handling is applied here.
 
     Parameters
     ----------
-    executable_components : List[AtomicInvokable | Callable[..., Any]]
-        List of local callables or AtomicInvokable instances to toolify.
-    a2a_servers : List[Tuple[str, Any]]
-        List of (A2A endpoint URL, headers) tuples to toolify all tools from.
-    mcp_servers : List[Tuple[str, Any]]
-        List of (MCP server URL, headers) tuples to toolify all tools from.
-    batch_namespace : str
-        Namespace to assign to all toolified local components.
-    batch_filter : Optional[bool]
+    sources : list[AtomicInvokable | Callable[..., Any] | MCPClientHub] | None
+        Mixed list of local invokables, callables, and/or MCP client hubs.
+    batch_namespace : str | None
+        Namespace override passed to each produced tool.
+    batch_filter_inputs : Optional[bool]
+        Filter flag override passed to each produced tool.
+
     Returns
     -------
-    List[Tool]
-        List of Tool instances derived from the provided components and remote servers.
+    list[Tool]
+        Flat list of all produced tools, in source order, with MCP hubs expanded
+        in the order returned by each hub's list_tools().
     """
-    flag = batch_filter if batch_filter is not None else True
-    tools: List[Tool] = []
+    tools: list[Tool] = []
 
-    # Toolify local components
-    for component in executable_components:
-        tool = toolify(component, namespace=batch_namespace, filter_extraneous_inputs=flag)
-        tools.append(tool)
+    for source in sources or []:
+        if isinstance(source, MCPClientHub):
+            remote_tools = source.list_tools()
+            hub_tools: list[Tool] = []
 
-    # Toolify all tools from A2A servers
-    for url, headers in a2a_servers:
-        a2a_tool = toolify(url, remote_protocol="a2a", headers=headers, namespace=batch_namespace, filter_extraneous_inputs=flag)
-        tools.append(a2a_tool)
+            for remote_name in remote_tools:
+                hub_tools.append(
+                    toolify(
+                        source,
+                        remote_name=remote_name,
+                        namespace=batch_namespace,
+                        filter_extraneous_inputs=batch_filter_inputs,
+                    )
+                )
 
-    # Toolify all tools from MCP servers
-    for url, headers in mcp_servers:
-        # Discover available MCP tools
-        mcp_tool_names = {}#list_mcp_tools(url, headers=headers)
-        for tool_name in mcp_tool_names:
-            mcp_tool = toolify(
-                url,
-                name=tool_name,
-                remote_protocol="mcp",
-                headers=headers,
+            tools.extend(hub_tools)
+            continue
+
+        tools.append(
+            toolify(
+                source,
                 namespace=batch_namespace,
-                filter_extraneous_inputs=flag,
+                filter_extraneous_inputs=batch_filter_inputs,
             )
-            tools.append(mcp_tool)
+        )
 
     return tools

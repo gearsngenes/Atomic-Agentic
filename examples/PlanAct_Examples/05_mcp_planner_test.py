@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.mcp import MCPClientHub
 
 load_dotenv()
 
@@ -24,7 +25,7 @@ planner = PlanActAgent(
 
 # Register all tools from MCP server (bulk discover).
 # batch_register with mcp_servers parameter auto-discovers and registers all tools.
-planner.batch_register(mcp_servers=[("http://localhost:8000/mcp", None)])
+planner.batch_register([MCPClientHub("streamable_http", endpoint="http://localhost:8000/mcp")])
 
 result = planner.invoke(
     {
