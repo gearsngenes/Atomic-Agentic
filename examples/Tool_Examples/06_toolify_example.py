@@ -72,7 +72,7 @@ MCP_ENDPOINT = "http://127.0.0.1:8000/mcp"
 MCP_NAMESPACE = "demo_mcp"
 MCP_HEADERS: Mapping[str, str] | None = None
 
-A2A_TRIVIA_ENDPOINT = "http://localhost:6000"
+A2A_MATH_ENDPOINT = "http://localhost:7000"
 A2A_HEADERS: Mapping[str, str] | None = None
 
 
@@ -217,13 +217,13 @@ def main() -> None:
 
     # 5) A2A endpoint -> A2AProxyTool (Trivia host)
     print("\n[5] A2A endpoint -> A2AProxyTool via toolify(component=None, a2a_endpoint=...)")
-    print("[A2A] Start trivia_host_server.py first. Connecting to:", A2A_TRIVIA_ENDPOINT)
+    print("[A2A] Start trivia_host_server.py first. Connecting to:", A2A_MATH_ENDPOINT)
 
     try:
         a2a_tool = toolify(
             None,
             namespace="demo_a2a",
-            a2a_endpoint=A2A_TRIVIA_ENDPOINT,
+            a2a_endpoint=A2A_MATH_ENDPOINT,
             a2a_headers=A2A_HEADERS,
         )
         show_plan(a2a_tool)
@@ -231,7 +231,7 @@ def main() -> None:
             a2a_tool,
             {
                 "prompt": (
-                    "Give me two concise trivia facts about Saturn."
+                    "Give the sum of 20 and negative six all divided by seven."
                 )
             },
         )

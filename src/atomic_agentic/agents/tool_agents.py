@@ -741,6 +741,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     def register(
         self,
         component: AtomicInvokable | Callable,
+        name: Optional[str] = None,
         description: Optional[str] = None,
         namespace: Optional[str] = None,
         *,
@@ -757,6 +758,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         try:
             tool = toolify(
                 component=component,
+                name=name,
                 description=description,
                 namespace=namespace or self.name,
                 filter_extraneous_inputs=filter_extraneous_inputs,
