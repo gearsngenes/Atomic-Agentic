@@ -120,6 +120,7 @@ from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool, toolify, batch_toolify
 from ..core.Prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
 from ..core.Exceptions import ToolAgentError
+from ..mcp import MCPClientHub
 
 
 logger = logging.getLogger(__name__)
@@ -740,35 +741,37 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
     def register(
         self,
-        component: Any,
-        *,
+        component: AtomicInvokable | Callable,
         name: Optional[str] = None,
         description: Optional[str] = None,
         namespace: Optional[str] = None,
+        *,
         filter_extraneous_inputs: Optional[bool] = None,
-        remote_protocol: Optional[str] = None,
-        headers: Optional[Mapping[str, str]] = None,
         name_collision_mode: str = "raise",  # raise|skip|replace
     ) -> str:
+        # Validate collision policy
         if name_collision_mode not in ("raise", "skip", "replace"):
-            raise ToolRegistrationError("name_collision_mode must be one of: 'raise', 'skip', 'replace'.")
+            raise ToolRegistrationError(
+                "name_collision_mode must be one of: 'raise', 'skip', 'replace'."
+            )
 
+        # Normalize via toolify (single source of truth)
         try:
             tool = toolify(
-                component,
+                component=component,
                 name=name,
                 description=description,
-                namespace=namespace or self.name,
-                remote_protocol=remote_protocol,
-                headers=headers,
+                namespace=namespace,
                 filter_extraneous_inputs=filter_extraneous_inputs,
             )
-        except ToolDefinitionError:
-            raise
-        except Exception as exc:  # pragma: no cover
-            raise ToolRegistrationError(f"toolify failed for {component!r}: {exc}") from exc
+        except Exception as e:
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: failed to toolify component: {e}"
+            ) from e
 
+        # Collision handling
         key = tool.full_name
+
         if key in self._toolbox:
             if name_collision_mode == "raise":
                 raise ToolRegistrationError(
@@ -776,31 +779,36 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 )
             if name_collision_mode == "skip":
                 return key
+            # replace → fall through
+
         self._toolbox[key] = tool
         return key
 
     def batch_register(
         self,
-        tools: Sequence[Any] = (),
-        mcp_servers: Sequence[tuple[str, Any]] = (),
-        a2a_servers: Sequence[tuple[str, Any]] = (),
+        sources: List[AtomicInvokable | Callable | MCPClientHub],
         *,
         name_collision_mode: str = "raise",
         batch_filter_inputs: Optional[bool] = None,
+        batch_namespace: Optional[str] = None,
     ) -> list[str]:
         if name_collision_mode not in ("raise", "skip", "replace"):
-            raise ToolRegistrationError("name_collision_mode must be one of: 'raise', 'skip', 'replace'.")
+            raise ToolRegistrationError(
+                "name_collision_mode must be one of: 'raise', 'skip', 'replace'."
+            )
 
+        if not sources:
+            raise ValueError("ToolAgents.batch_register() expects a non-empty list of callables, AtomicInvokables, or MCPClientHubs")
         try:
             tool_list = batch_toolify(
-                executable_components=list(tools),
-                a2a_servers=list(a2a_servers),
-                mcp_servers=list(mcp_servers),
-                batch_namespace=self.name,
-                batch_filter=batch_filter_inputs
+                sources=list(sources),
+                batch_namespace=batch_namespace,
+                batch_filter_inputs=batch_filter_inputs,
             )
         except ToolDefinitionError:
             raise
+        except Exception as exc:  # pragma: no cover
+            raise ToolRegistrationError(f"batch_toolify failed: {exc}") from exc
 
         registered: list[str] = []
         for tool in tool_list:
@@ -812,8 +820,10 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                     )
                 if name_collision_mode == "skip":
                     continue
+
             self._toolbox[key] = tool
             registered.append(key)
+
         return registered
 
     # ------------------------------------------------------------------ #
