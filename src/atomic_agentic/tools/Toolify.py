@@ -5,7 +5,7 @@ from typing import Any, Callable, Mapping, Optional
 from ..core.Exceptions import ToolDefinitionError
 from ..core.Invokable import AtomicInvokable
 from .base import Tool
-from .a2a import A2AProxyTool
+from .a2a import PyA2AtomicTool
 from .adapter import AdapterTool
 from .mcp import MCPProxyTool
 from ..mcp import MCPClientHub
@@ -69,7 +69,7 @@ def toolify(
             raise ToolDefinitionError(
                 "toolify: `component` must be None when a non-empty `a2a_endpoint` is provided."
             )
-        return A2AProxyTool(
+        return PyA2AtomicTool(
             url=a2a_url,
             name=name,
             namespace=namespace,

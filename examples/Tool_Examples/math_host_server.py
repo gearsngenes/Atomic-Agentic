@@ -15,7 +15,7 @@ from __future__ import annotations
 from dotenv import load_dotenv
 
 from atomic_agentic.agents.tool_agents import PlanActAgent
-from atomic_agentic.a2a import A2AtomicHost
+from atomic_agentic.a2a import PyA2AtomicHost
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.tools.Plugins import MATH_TOOLS
 
@@ -36,7 +36,7 @@ def main() -> None:
     # Register only plugin tools (math)
     seed.batch_register(MATH_TOOLS, name_collision_mode="raise")
 
-    host = A2AtomicHost(component=seed, host="localhost", port=7000, version="1.0.0")
+    host = PyA2AtomicHost(component=seed, host="localhost", port=7000, version="1.0.0")
     host.run(debug=True)
 
 

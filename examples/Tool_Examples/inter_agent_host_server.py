@@ -21,9 +21,9 @@ Then test:
 from dotenv import load_dotenv
 
 from atomic_agentic.agents.tool_agents import PlanActAgent
-from atomic_agentic.a2a import A2AtomicHost
+from atomic_agentic.a2a import PyA2AtomicHost
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.tools import A2AProxyTool
+from atomic_agentic.tools import PyA2AtomicTool
 
 
 load_dotenv()
@@ -40,13 +40,13 @@ def main() -> None:
     )
 
     # Register each sub-server as an A2AProxyTool
-    trivia_tool = A2AProxyTool("http://localhost:6000")
-    math_expert_tool = A2AProxyTool("http://localhost:7000")
+    trivia_tool = PyA2AtomicTool("http://localhost:6000")
+    math_expert_tool = PyA2AtomicTool("http://localhost:7000")
     
     seed.register(trivia_tool)
     seed.register(math_expert_tool)
 
-    host = A2AtomicHost(component=seed, host="localhost", port=8000, version="1.0.0")
+    host = PyA2AtomicHost(component=seed, host="localhost", port=8000, version="1.0.0")
     host.run(debug=True)
 
 

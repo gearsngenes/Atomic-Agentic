@@ -12,7 +12,7 @@ Usage examples:
 
 from typing import Any, Dict
 
-from atomic_agentic.tools import A2AProxyTool
+from atomic_agentic.tools import PyA2AtomicTool
 
 
 DEFAULT_TARGETS: Dict[str, Dict[str, Any]] = {
@@ -36,7 +36,7 @@ DEFAULT_TARGETS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def show_plan(tool: A2AProxyTool) -> None:
+def show_plan(tool: PyA2AtomicTool) -> None:
     print(f"\n-- {tool.full_name} call plan --")
     print("signature:", tool.signature)
     print("return_type:", tool.return_type)
@@ -51,7 +51,7 @@ def main() -> None:
     url = DEFAULT_TARGETS[target]["url"]
     inputs = DEFAULT_TARGETS[target]["inputs"]
 
-    tool = A2AProxyTool(url=url)
+    tool = PyA2AtomicTool(url=url)
 
     show_plan(tool)
 
