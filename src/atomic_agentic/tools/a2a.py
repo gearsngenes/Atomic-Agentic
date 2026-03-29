@@ -1,205 +1,218 @@
-# Tools.py
 from __future__ import annotations
-import functools
-from typing import (
-    Any,
-    Mapping,
-    Callable,
-    Optional,
-    Dict,
-)
-# python-a2a imports
-from python_a2a import (
-    A2AClient,
-    Message, MessageRole,
-    FunctionCallContent, FunctionParameter,
-)
 
-from ..core.Exceptions import ToolDefinitionError
-from ..core.Invokable import ArgumentMap
+from typing import Any, Callable, Dict, Mapping, Optional
+
+from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Parameters import ParamSpec
+from ..core.sentinels import NO_VAL
 from .base import Tool
-from ..a2a.A2AtomicHost import A2A_RESULT_KEY
+from ..a2a.PyA2AtomicClient import PyA2AtomicClient
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _ensure_mapping(name: str, obj: Any) -> Mapping[str, Any]:
-    if not isinstance(obj, Mapping):
-        raise TypeError(f"{name} expects a Mapping[str, Any]")
-    return obj  # type: ignore[return-value]
 
-def a2atomic_host_invoker(client, inputs: Mapping[str, Any]) -> Any:  # type: ignore[override]
-    _ensure_mapping("A2AProxyAgent.invoke", inputs)
+__all__ = ["PyA2AtomicTool"]
 
-    # Typed FunctionParameter avoids `'dict' object has no attribute 'name'`.
-    call = FunctionCallContent(
-        name="invoke",
-        parameters=[FunctionParameter(name="payload", value=dict(inputs))]
-    )
-    msg = Message(content=call, role=MessageRole.USER)
-    resp = client.send_message(msg).content.response
-    result = resp
-    if isinstance(resp, Mapping):
-        result = resp.get(A2A_RESULT_KEY, result)
-    return result
 
-# ───────────────────────────────────────────────────────────────────────────────
-# A2A-Proxy Tool
-# ───────────────────────────────────────────────────────────────────────────────
-class A2AProxyTool(Tool):
+class PyA2AtomicTool(Tool):
     """
-    A2AProxyTool
-    -----------
-    Client-side proxy Tool that forwards a single JSON object (a mapping of
-    inputs) to a remote A2A agent via a single function call:
+    Proxy one remote PyA2AtomicHost invokable as a normal AA Tool.
 
-      - name="invoke", parameters=[("payload", <dict(inputs)>)]
+    Construction paths
+    ------------------
+    1) Pass an existing PyA2AtomicClient plus a required remote_name.
+    2) Pass raw transport config (url, optional headers) plus a required remote_name.
 
-    This class intentionally overrides :meth:`to_arg_kwarg` and :meth:`execute`
-    to support the transport semantics of A2A-backed tools, while keeping
-    :meth:`Tool.invoke` as the single public entrypoint.
+    Local AA-facing identity
+    ------------------------
+    - name: user-supplied name, otherwise remote_name
+    - namespace: user-supplied namespace, otherwise remote agent card name, otherwise "pya2a"
+    - description: user-supplied description, otherwise remote metadata description,
+      otherwise remote agent card description, otherwise a stub
 
-    Metadata / schema
+    Refresh semantics
     -----------------
-    On construction and on :meth:`refresh`, the tool calls the remote function
-    "invokable_metadata" to populate:
-
-      - parameters (remote agent's declared input schema)
-      - return_type   (remote agent's declared output type)
-
-    Changing :attr:`url` or :attr:`headers` triggers a full :meth:`refresh`,
-    rebinding the underlying client and rebuilding schemas.
+    Refresh only re-fetches remote metadata, updates the call binding, and rebuilds
+    the schema. It does NOT automatically mutate the local AA-facing name, namespace,
+    or description after construction.
     """
-    # ------------------------------------------------------------------ #
-    # Construction
-    # ------------------------------------------------------------------ #
-    def __init__(self,
-                 url: str,
-                 name: str | None = None,
-                 namespace: str | None = None,
-                 description: str | None = None,
-                 headers: Any | None = None,
-                 filter_extraneous_inputs: bool = True) -> None:
-        self._url = url
-        self._client = A2AClient(url, headers=headers)
 
-        agent_card = self._client.get_agent_card()
-        resolved_name = str(name or "").strip() or agent_card.name
+    def __init__(
+        self,
+        remote_name: str,
+        name: str | None = None,
+        namespace: str | None = None,
+        description: str | None = None,
+        *,
+        client: PyA2AtomicClient | None = None,
+        url: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        filter_extraneous_inputs: bool = True,
+    ) -> None:
+        resolved_remote_name = str(remote_name).strip()
+        if not resolved_remote_name:
+            raise ToolDefinitionError("remote_name must be a non-empty string.")
+
+        if client is not None:
+            if not isinstance(client, PyA2AtomicClient):
+                raise TypeError(
+                    f"client must be a PyA2AtomicClient, got {type(client)!r}."
+                )
+            if url is not None or headers is not None:
+                raise ValueError(
+                    "Pass either client or raw transport settings (url/headers), not both."
+                )
+            resolved_client = client
+        else:
+            if not isinstance(url, str) or not url.strip():
+                raise ValueError(
+                    "url is required when client is not provided and must be a non-empty string."
+                )
+            resolved_client = PyA2AtomicClient(url=url, headers=headers)
+
+        self._client: PyA2AtomicClient = resolved_client
+        self._remote_name: str = resolved_remote_name
+        self._remote_metadata: dict[str, Any] = self._client.get_invokable_metadata(
+            self._remote_name
+        )
+
+        agent_card = self._client.agent_card
+
+        resolved_name = str(name or "").strip() or self._remote_name
+
+        resolved_namespace = str(namespace or "").strip()
+        if not resolved_namespace:
+            resolved_namespace = str(getattr(agent_card, "name", "") or "").strip() or "pya2a"
+
         explicit_description = str(description or "").strip()
-        remote_description = str(agent_card.description).strip()
+        remote_description = str(self._remote_metadata.get("description") or "").strip()
+        host_description = str(getattr(agent_card, "description", "") or "").strip()
         resolved_description = (
             explicit_description
             or remote_description
-            or f"A2A proxy tool '{resolved_name}'"
+            or host_description
+            or f"PyA2Atomic tool '{resolved_name}'"
         )
+
+        function = self._client.call_invokable
+
         super().__init__(
+            function=function,
             name=resolved_name,
+            namespace=resolved_namespace,
             description=resolved_description,
-            namespace=namespace,
-            function=functools.partial(a2atomic_host_invoker, client=self._client),
             filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     # ------------------------------------------------------------------ #
-    # A2A-Proxy-Tool Properties
+    # Proxy properties
     # ------------------------------------------------------------------ #
     @property
+    def client(self) -> PyA2AtomicClient:
+        return self._client
+
+    @property
+    def remote_name(self) -> str:
+        return self._remote_name
+
+    @property
     def url(self) -> str:
-        return self._url
+        return self._client.url
+
+    @property
+    def headers(self) -> Mapping[str, str] | None:
+        return self._client.headers
+
+    @headers.setter
+    def headers(self, value: Mapping[str, str] | None) -> None:
+        self._client.headers = value
+        self.refresh()
+
+    @property
+    def agent_card(self) -> Any:
+        return self._client.agent_card
+
+    @property
+    def remote_metadata(self) -> dict[str, Any]:
+        return dict(self._remote_metadata)
 
     # ------------------------------------------------------------------ #
     # Signature Building (Template Method)
     # ------------------------------------------------------------------ #
     def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
-        """Build signature from remote A2A agent metadata.
-        
-        Fetches invokable_metadata from the remote agent and converts the
-        parameters list to ParamSpec objects.
-        """
-        call = FunctionCallContent(name="invokable_metadata", parameters=[])
-        msg = Message(content=call, role=MessageRole.USER)
+        parameters_raw = self._remote_metadata.get("parameters")
+        return_type = self._remote_metadata.get("return_type")
 
-        resp = self._client.send_message(msg)
-        if getattr(resp.content, "type", None) != "function_response":
-            raise ToolDefinitionError(f"{self.full_name}: failed to fetch invokable_metadata from A2A agent")
-
-        payload = resp.content.response
-        if not isinstance(payload, Mapping):
-            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata response must be a mapping")
-
-        if "parameters" not in payload or "return_type" not in payload:
-            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata response missing required keys")
-
-        # Extract components
-        raw_params_list = payload["parameters"]
-        return_type = payload["return_type"]
-        # Validate types
-        if not isinstance(raw_params_list, list):
-            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.parameters must be a list")
+        if not isinstance(parameters_raw, list):
+            raise ToolDefinitionError(
+                f"{self.full_name}: remote metadata 'parameters' must be a list."
+            )
         if not isinstance(return_type, str):
-            raise ToolDefinitionError(f"{self.full_name}: invokable_metadata.return_type must be a str")
-        
-        # Convert list of dicts to list of ParamSpec objects
+            raise ToolDefinitionError(
+                f"{self.full_name}: remote metadata 'return_type' must be a str."
+            )
+
         parameters: list[ParamSpec] = []
-        for i, meta in enumerate(raw_params_list):
-            if not isinstance(meta, Mapping):
-                raise ToolDefinitionError(f"{self.full_name}: parameters[{i}] must be a mapping")
-            parameters.append(ParamSpec.from_dict(dict(meta)))
-        
+        for index, item in enumerate(parameters_raw):
+            if not isinstance(item, Mapping):
+                raise ToolDefinitionError(
+                    f"{self.full_name}: parameters[{index}] must be a mapping."
+                )
+            parameters.append(ParamSpec.from_dict(dict(item)))
+
         return parameters, return_type
 
     # ------------------------------------------------------------------ #
-    # Tool Helpers
+    # Tool helpers
     # ------------------------------------------------------------------ #
     def _get_mod_qual(
         self,
         function: Callable[..., Any],
     ) -> tuple[Optional[str], Optional[str]]:
-        """A2A-backed tools don't map to a stable Python import path."""
-        return a2atomic_host_invoker.__module__, a2atomic_host_invoker.__qualname__
+        return PyA2AtomicClient.call_invokable.__module__, PyA2AtomicClient.call_invokable.__qualname__
 
-    def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
-        return tuple([]), dict(inputs)
+    def to_arg_kwarg(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[tuple[Any, ...], Dict[str, Any]]:
+        return tuple(), dict(inputs)
 
     def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
-        result = self._function(inputs = kwargs)
-        return result
+        if args:
+            raise ToolInvocationError(
+                f"{self.full_name}: PyA2Atomic tools do not accept positional arguments; got {args!r}."
+            )
+        return self._function(self._remote_name, inputs=kwargs)
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    def refresh(self, headers: Any | None = None, override_description: bool = False) -> None:
+    def refresh(self, headers: Any = NO_VAL) -> None:
         """
-        Re-fetch the agent card and remote schemas, and rebuild the client and
-        function binding.
-        If override_meta == True, then mirrors the remote description.
-        Otherwise, keep local description
+        Re-fetch remote metadata and rebuild the local binding.
+
+        Refresh does not rewrite the Tool's local name, namespace, or description.
+        It only updates remote metadata, callable binding, parameters, and return type.
         """
-        client = A2AClient(self._url, headers=headers)
+        if headers is not NO_VAL:
+            self._client.headers = headers
 
-        try:
-            agent_card = client.get_agent_card()
-        except Exception as e:  # pragma: no cover
-            raise ToolDefinitionError(f"{self.full_name}: failed to fetch A2A agent card: {e}") from e
+        self._remote_metadata = self._client.get_invokable_metadata(self._remote_name)
 
-        # Update exposed description
-        if override_description:
-            description = str(agent_card.description or "").strip() or self._description
-        # Rebind callable + rebuild schemas
-        function = functools.partial(a2atomic_host_invoker, client=self._client)
-        super().__init__(
-            name=self.name,
-            description=description,
-            namespace=self.namespace,
-            function=function,
-            filter_extraneous_inputs=self.filter_extraneous_inputs,
-        )
+        self._function = self._client.call_invokable
+        self._module, self._qualname = self._get_mod_qual(self._function)
+
+        parameters, return_type = self._build_tool_signature()
+        self._parameters = parameters
+        self._return_type = return_type
 
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> Dict[str, Any]:
-        dict_data = super().to_dict()
-        dict_data.update({"url": self._url})
-        return dict_data
+        data = super().to_dict()
+        data.update(
+            {
+                "remote_name": self._remote_name,
+                "client": self._client.to_dict(),
+            }
+        )
+        return data

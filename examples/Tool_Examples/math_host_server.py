@@ -1,21 +1,11 @@
-# math_planner_host_server.py
-"""
-Math Tool-Agent A2A Host Server
--------------------------------
-A tool-using planning agent (PlanActAgent) that uses the Math plugin tools.
-
-Run:
-  python math_planner_host_server.py
-Then test:
-  python a2a_proxy_client.py math
-"""
-
 from __future__ import annotations
+
+import logging
 
 from dotenv import load_dotenv
 
+from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
 from atomic_agentic.agents.tool_agents import PlanActAgent
-from atomic_agentic.a2a import A2AtomicHost
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.tools.Plugins import MATH_TOOLS
 
@@ -23,21 +13,28 @@ load_dotenv()
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+
     llm = OpenAIEngine(model="gpt-4o-mini")
 
-    seed = PlanActAgent(
+    math_agent = PlanActAgent(
         name="MathPlannerAgent",
-        description="Planner that solves problems by calling math tools.",
+        description="A tool-using planner that solves problems with the local math tools.",
         llm_engine=llm,
         context_enabled=False,
         tool_calls_limit=12,
     )
-    
-    # Register only plugin tools (math)
-    seed.batch_register(MATH_TOOLS, name_collision_mode="raise")
+    math_agent.batch_register(MATH_TOOLS, name_collision_mode="raise")
 
-    host = A2AtomicHost(component=seed, host="localhost", port=7000, version="1.0.0")
-    host.run(debug=True)
+    host = PyA2AtomicHost(
+        invokables=[math_agent],
+        name="math_host",
+        description="PyA2AtomicHost exposing the MathPlannerAgent invokable.",
+        version="1.0.0",
+        host="localhost",
+        port=7000,
+    )
+    host.run_server(debug=True)
 
 
 if __name__ == "__main__":

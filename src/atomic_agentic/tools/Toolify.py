@@ -4,11 +4,12 @@ from typing import Any, Callable, Mapping, Optional
 
 from ..core.Exceptions import ToolDefinitionError
 from ..core.Invokable import AtomicInvokable
+from ..mcp import MCPClientHub
+from ..a2a import PyA2AtomicClient
 from .base import Tool
-from .a2a import A2AProxyTool
+from .a2a import PyA2AtomicTool
 from .adapter import AdapterTool
 from .mcp import MCPProxyTool
-from ..mcp import MCPClientHub
 
 __all__ = ["toolify", "batch_toolify"]
 
@@ -16,36 +17,33 @@ __all__ = ["toolify", "batch_toolify"]
 # toolify
 # ───────────────────────────────────────────────────────────────────────────────
 def toolify(
-    component: AtomicInvokable | Callable[..., Any] | MCPClientHub | None,
+    component: AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient,
     *,
     name: str | None = None,
     namespace: str | None = None,
     description: str | None = None,
     filter_extraneous_inputs: bool | None = None,
     remote_name: str | None = None,
-    a2a_endpoint: str | None = None,
-    a2a_headers: Mapping[str, str] | None = None,
 ) -> Tool:
     """
     Normalize a single component into a single Tool instance.
 
     Routing rules
     -------------
-    1) If a non-empty ``a2a_endpoint`` is provided:
-       - ``component`` must be ``None``.
-       - construct and return ``A2AProxyTool``.
-
-    2) If ``component`` is already a ``Tool``:
+    1) If ``component`` is already a ``Tool``:
        - mutate only the explicitly provided fields
          (``name``, ``namespace``, ``description``, ``filter_extraneous_inputs``)
        - return the same instance.
 
-    3) If ``component`` is a non-tool ``AtomicInvokable``:
+    2) If ``component`` is a non-tool ``AtomicInvokable``:
        - wrap it in ``AdapterTool`` using wrapper-layer overrides.
 
-    4) If ``component`` is an ``MCPClientHub``:
+    3) If ``component`` is an ``MCPClientHub``:
        - ``remote_name`` is required
        - construct and return ``MCPProxyTool``.
+
+    4) If ``component`` is a ``PyA2AtomicClient``:
+       - construct and return ``PyA2AtomicTool``.
 
     5) If ``component`` is a plain callable:
        - construct and return a plain ``Tool``.
@@ -56,35 +54,18 @@ def toolify(
         For invalid routing combinations, missing required metadata, or
         unsupported component types.
     """
-    a2a_url = str(a2a_endpoint or "").strip()
     filter_flag = (
         filter_extraneous_inputs
         if filter_extraneous_inputs is not None
         else True
     )
 
-    # 1) A2A branch
-    if a2a_url:
-        if component is not None:
-            raise ToolDefinitionError(
-                "toolify: `component` must be None when a non-empty `a2a_endpoint` is provided."
-            )
-        return A2AProxyTool(
-            url=a2a_url,
-            name=name,
-            namespace=namespace,
-            description=description,
-            headers=a2a_headers,
-            filter_extraneous_inputs=filter_flag,
-        )
-
-    # If no A2A endpoint is being used, a component is required.
     if component is None:
         raise ToolDefinitionError(
             "toolify: expected either a local `component` or a non-empty `a2a_endpoint`."
         )
 
-    # 2) Existing Tool -> mutate in place and return same instance
+    # 1) Existing Tool -> mutate in place and return same instance
     if isinstance(component, Tool):
         if name is not None:
             component.name = name
@@ -96,7 +77,7 @@ def toolify(
             component.filter_extraneous_inputs = filter_extraneous_inputs
         return component
 
-    # 3) AtomicInvokable -> AdapterTool
+    # 2) AtomicInvokable -> AdapterTool
     if isinstance(component, AtomicInvokable):
         return AdapterTool(
             component,
@@ -106,7 +87,7 @@ def toolify(
             filter_extraneous_inputs=filter_flag,
         )
 
-    # 4) MCP client hub -> MCPProxyTool
+    # 3) MCP client hub -> MCPProxyTool
     if isinstance(component, MCPClientHub):
         resolved_remote_name = str(remote_name or "").strip()
         if not resolved_remote_name:
@@ -120,6 +101,23 @@ def toolify(
             namespace=namespace,
             description=description or "",
             client_hub=component,
+            filter_extraneous_inputs=filter_flag,
+        )
+
+    # 4) PyA2AtomicClient -> PyA2AtomicTool
+    if isinstance(component, PyA2AtomicClient):
+        resolved_remote_name = str(remote_name or "").strip()
+        if not resolved_remote_name:
+            raise ToolDefinitionError(
+                "toolify: `remote_name` is required when `component` is an PyA2AtomicClient."
+            )
+
+        return PyA2AtomicTool(
+            remote_name=resolved_remote_name,
+            name=name,
+            namespace=namespace,
+            description=description,
+            client=component,
             filter_extraneous_inputs=filter_flag,
         )
 
@@ -163,7 +161,7 @@ def toolify(
 
 
 def batch_toolify(
-    sources: list[AtomicInvokable | Callable[..., Any] | MCPClientHub] | None = None,
+    sources: list[AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient] | None = None,
     *,
     batch_namespace: str | None = None,
     batch_filter_inputs: Optional[bool] = None,
@@ -176,12 +174,11 @@ def batch_toolify(
     - Local AtomicInvokables and callables are each toolified into one Tool.
     - Each MCPClientHub is expanded by listing all remote tools and toolifying
       each one into its own MCPProxyTool.
-    - No include/exclude filtering is applied here.
-    - No name-collision handling is applied here.
+    - Each PyA2AtomicClient is toolified into one PyA2AtomicTool, which introspects
 
     Parameters
     ----------
-    sources : list[AtomicInvokable | Callable[..., Any] | MCPClientHub] | None
+    sources : list[AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient]
         Mixed list of local invokables, callables, and/or MCP client hubs.
     batch_namespace : str | None
         Namespace override passed to each produced tool.
@@ -212,6 +209,20 @@ def batch_toolify(
                 )
 
             tools.extend(hub_tools)
+            continue
+
+        if isinstance(source, PyA2AtomicClient):
+            client_tools = []
+            for remote_name in source.list_invokables():
+                client_tools.append(
+                    toolify(
+                        source,
+                        remote_name=remote_name,
+                        namespace=batch_namespace,
+                        filter_extraneous_inputs=batch_filter_inputs,
+                    )
+                )
+            tools.extend(client_tools)
             continue
 
         tools.append(

@@ -112,22 +112,6 @@ class MCPProxyTool(Tool):
     def remote_name(self) -> str:
         return self._remote_name
 
-    @remote_name.setter
-    def remote_name(self, value: str) -> None:
-        new_remote_name = str(value).strip()
-        if not new_remote_name:
-            raise ToolDefinitionError("remote_name must be a non-empty string.")
-        if new_remote_name == self._remote_name:
-            return
-
-        prior_remote_name = self._remote_name
-        self._remote_name = new_remote_name
-        try:
-            self.refresh()
-        except Exception:
-            self._remote_name = prior_remote_name
-            raise
-
     @property
     def transport_mode(self) -> Literal["stdio", "sse", "streamable_http"]:
         return self.client_hub.transport_mode

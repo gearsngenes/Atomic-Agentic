@@ -1,53 +1,56 @@
-# inter_agent_planner_host_server.py
-"""
-Inter-Agent Communicator A2A Host Server
----------------------------------------
-A tool-using planning agent that communicates with OTHER agents via A2AdapterTool
-proxies (remote A2A tools).
+from __future__ import annotations
 
-This registers:
-  - TriviaAgent (http://localhost:6000) as a tool
-  - MathPlannerAgent (http://localhost:7000) as a tool
-
-Run (after starting the two servers above):
-  python trivia_host_server.py
-  python math_planner_host_server.py
-  python inter_agent_planner_host_server.py
-
-Then test:
-  python a2a_proxy_client.py inter
-"""
+import logging
 
 from dotenv import load_dotenv
 
+from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
+from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
 from atomic_agentic.agents.tool_agents import PlanActAgent
-from atomic_agentic.a2a import A2AtomicHost
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.tools import A2AProxyTool
-
+from atomic_agentic.tools.Toolify import toolify
 
 load_dotenv()
 
+TRIVIA_URL = "http://localhost:6000"
+TRIVIA_REMOTE_NAME = "TriviaAgent"
+
+MATH_URL = "http://localhost:7000"
+MATH_REMOTE_NAME = "MathPlannerAgent"
+
+
 def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+
     llm = OpenAIEngine(model="gpt-4o-mini")
 
-    seed = PlanActAgent(
+    planner = PlanActAgent(
         name="InterAgentPlanner",
-        description="Planner that orchestrates other agents via A2A proxy tools.",
+        description="A planner that orchestrates remote trivia and math agents through PyA2AtomicTool proxies.",
         llm_engine=llm,
         context_enabled=False,
         tool_calls_limit=16,
     )
 
-    # Register each sub-server as an A2AProxyTool
-    trivia_tool = A2AProxyTool("http://localhost:6000")
-    math_expert_tool = A2AProxyTool("http://localhost:7000")
-    
-    seed.register(trivia_tool)
-    seed.register(math_expert_tool)
+    trivia_client = PyA2AtomicClient(url=TRIVIA_URL)
+    math_client = PyA2AtomicClient(url=MATH_URL)
 
-    host = A2AtomicHost(component=seed, host="localhost", port=8000, version="1.0.0")
-    host.run(debug=True)
+    planner.register(trivia_client,
+                      remote_name=TRIVIA_REMOTE_NAME,
+                      name_collision_mode="raise")
+    planner.register(math_client,
+                     remote_name=MATH_REMOTE_NAME,
+                     name_collision_mode="raise")
+
+    host = PyA2AtomicHost(
+        invokables=[planner],
+        name="inter_agent_host",
+        description="PyA2AtomicHost exposing the InterAgentPlanner invokable.",
+        version="1.0.0",
+        host="localhost",
+        port=8000,
+    )
+    host.run_server(debug=True)
 
 
 if __name__ == "__main__":

@@ -121,6 +121,7 @@ from ..tools import Tool, toolify, batch_toolify
 from ..core.Prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
 from ..core.Exceptions import ToolAgentError
 from ..mcp import MCPClientHub
+from ..a2a import PyA2AtomicClient
 
 
 logger = logging.getLogger(__name__)
@@ -741,11 +742,12 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
     def register(
         self,
-        component: AtomicInvokable | Callable,
+        component: AtomicInvokable | Callable | MCPClientHub | PyA2AtomicClient,
         name: Optional[str] = None,
         description: Optional[str] = None,
         namespace: Optional[str] = None,
         *,
+        remote_name: Optional[str] = None,
         filter_extraneous_inputs: Optional[bool] = None,
         name_collision_mode: str = "raise",  # raise|skip|replace
     ) -> str:
@@ -763,6 +765,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 description=description,
                 namespace=namespace,
                 filter_extraneous_inputs=filter_extraneous_inputs,
+                remote_name=remote_name,
             )
         except Exception as e:
             raise ToolRegistrationError(
@@ -786,7 +789,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
     def batch_register(
         self,
-        sources: List[AtomicInvokable | Callable | MCPClientHub],
+        sources: List[AtomicInvokable | Callable | MCPClientHub | PyA2AtomicClient],
         *,
         name_collision_mode: str = "raise",
         batch_filter_inputs: Optional[bool] = None,
