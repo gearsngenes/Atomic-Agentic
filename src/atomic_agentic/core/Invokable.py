@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Mapping, Dict
 import re
 import threading
+import asyncio
 
 from .sentinels import NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order
@@ -261,6 +262,15 @@ class AtomicInvokable(ABC):
         """Perform work."""
         raise NotImplementedError
 
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """
+        Default async compatibility wrapper.
+
+        This preserves the current sync-first implementation by running
+        `invoke(inputs)` in a worker thread.
+        """
+        return await asyncio.to_thread(self.invoke, inputs)
+
     # ---------------------------------------------------------------- #
     # Input Filtering and Validation
     # ---------------------------------------------------------------- #
@@ -318,6 +328,20 @@ class AtomicInvokable(ABC):
         Allows the invokable to be called like a regular function
         Check for varargs/kwargs parameters and construct the inputs dict accordingly before invoking.
         """
+        inputs = self._to_dict_input_conversion(*args, **kwargs)
+        return self.invoke(inputs)
+    
+    async def async_call(self, *args: Any, **kwargs: Any) -> Any:
+        """
+        Async analog of __call__:
+        bind normal call-style args/kwargs into the dict-first inputs shape,
+        then delegate to async_invoke().
+        """
+        inputs = self._to_dict_input_conversion(*args, **kwargs)
+
+        return await self.async_invoke(inputs)
+    
+    def _to_dict_input_conversion(self, *args, **kwargs) -> dict[str, Any]:
         # ensure we have mutable copies
         args, kwargs = list(args), dict(kwargs)
         # number of variable types
@@ -355,6 +379,4 @@ class AtomicInvokable(ABC):
             else:
                 var_kwarg = next((p for p in self.parameters if p.kind == "VAR_KEYWORD"), None)
                 inputs[var_kwarg.name] = extra_keys  # pass extraneous kwargs as a dict 
-        # Execute the invoke method with the constructed inputs dict
-        result = self.invoke(inputs)
-        return result
+        return inputs
