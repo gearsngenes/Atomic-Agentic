@@ -95,6 +95,14 @@ class AdapterTool(Tool):
         """
         return self._function(inputs=kwargs)
 
+    async def async_execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
+        """Asynchronously execute the wrapped component.
+
+        The component is invoked via its async_invoke() method with the kwargs dict.
+        The args tuple is ignored since components expect dict-based inputs.
+        """
+        return await self.component.async_invoke(inputs=kwargs)
+
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
