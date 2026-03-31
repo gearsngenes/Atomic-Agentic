@@ -243,8 +243,9 @@ class LLMEngine(AtomicInvokable, ABC):
             messages = inputs.get("messages")
             if not isinstance(messages, list):
                 raise LLMEngineError("LLMEngine.invoke: 'messages' input must be a list")
+            result = self.invoke_messages(messages)
             logger.info(f"[{self.full_name} finished]")
-            return self.invoke_messages(messages)
+            return result
 
     # ------------------------------------------------------------------ #
     # Helpers
