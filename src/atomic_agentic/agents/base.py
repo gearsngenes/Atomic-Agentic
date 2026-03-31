@@ -365,6 +365,27 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
+    async def _ainvoke(self, messages: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], Any]:
+        """Async internal call path used by :meth:`async_invoke`.
+
+        Default implementation mirrors `_invoke(...)`, but delegates to the engine's
+        async interface so future native-async engines are picked up automatically.
+        """
+        try:
+            logger.debug(f"[Agent - {self.name}]._ainvoke: Invoking LLM asynchronously")
+            text = await self._llm_engine.async_invoke({"messages": messages})
+        except Exception as e:  # pragma: no cover - engine-specific failures
+            raise AgentInvocationError(f"engine async invocation failed: {e}") from e
+
+        if not isinstance(text, str):
+            raise AgentInvocationError(
+                f"engine returned non-string (type={type(text)!r}); a string is required"
+            )
+
+        user_msg = messages[-1]
+        newest_history = [user_msg, {"role": "assistant", "content": text}]
+        return newest_history, text
+
     def _invoke(self, messages: List[Dict[str, str]]) -> Tuple[List[Dict[str,str]], Any]:
         """Internal call path used by :meth:`invoke`.
 
@@ -469,7 +490,63 @@ class Agent(AtomicInvokable):
     def clear_memory(self) -> None:
         """Clear the stored message history."""
         self._history.clear()
-    
+
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """Async analog of Agent.invoke.
+
+        This version actually awaits async-capable pre/post tools and the engine,
+        rather than pushing the whole sync invoke path into a worker thread.
+        """
+        logger.info(f"[Async {self.full_name} started]")
+
+        inputs = self.filter_inputs(inputs)
+
+        try:
+            logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
+            prompt = await self._pre_invoke.async_invoke(inputs)
+        except ToolInvocationError:
+            raise
+        except Exception as e:  # pragma: no cover
+            raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
+
+        if not isinstance(prompt, str):
+            raise AgentInvocationError(
+                f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
+            )
+
+        logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
+        messages: List[Dict[str, str]] = [{"role": "system", "content": self.role_prompt}]
+
+        if self._context_enabled and self._history:
+            if self._history_window is None:
+                prior = self._history
+            else:
+                window = min(self._history_window * 2, len(self._history))
+                prior = self._history[-window:]
+            messages.extend(prior)
+
+        user_msg = {"role": "user", "content": prompt}
+        messages.append(user_msg)
+
+        logger.debug(f"Agent.{self.name} performing async logic for class '{type(self).__name__}'")
+        new_history, raw_result = await self._ainvoke(messages=messages)
+
+        if self._context_enabled:
+            logger.debug(f"Agent.{self.name} updating history")
+            self._history.extend(new_history)
+
+        try:
+            logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
+            result = await self._post_invoke.async_invoke({self._post_param_name: raw_result})
+        except ToolInvocationError:
+            raise
+        except Exception as e:  # pragma: no cover
+            raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
+
+        logger.info(f"[Async {self.full_name} finished]")
+
+        return result
+
     def invoke(self, inputs: Mapping[str, Any]) -> Any:
         """Invoke the Agent with a single **input mapping**.
 

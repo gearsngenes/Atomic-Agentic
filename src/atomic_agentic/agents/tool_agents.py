@@ -97,7 +97,7 @@ Concrete Subclasses
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 from dataclasses import asdict, dataclass, field
 import logging
 import re
@@ -1008,14 +1008,15 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Execute all steps in the currently prepared batch concurrently.
 
         This is a core base-owned method (do not override). It executes all steps in
-        ``state.prepared_steps`` using a thread pool, records results in the running
-        blackboard, and handles termination if the return tool is executed.
+        ``state.prepared_steps`` using the tool async-invoke path, records results in
+        the running blackboard, and handles termination if the return tool is executed.
 
         Batch Semantics
         ~~~~~~~~~~~~~~~
-        - All steps in ``prepared_steps`` are **concurrent** (map to thread pool)
-        - **Fail-fast**: If any step raises, the batch aborts; remaining futures are cancelled
-        - **Atomicity**: Either all steps complete successfully or none do (via exception)
+        - All steps in ``prepared_steps`` are **concurrent**
+        - Multi-step batches use ``asyncio.gather(..., return_exceptions=True)``
+        under a single ``asyncio.run(...)``
+        - This version favors compactness over strict fail-fast cancellation
         - **Ordering**: Results are stored in the blackboard; order is immaterial
 
         Validation & Safety Checks
@@ -1035,13 +1036,13 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         1. Validate all preconditions (as above)
         2. Count non-return vs. return tool calls
         3. If tool_calls_limit set, check budget
-        4. Execute concurrently:
-           - Single-step batch: run synchronously
-           - Multi-step batch: use ThreadPoolExecutor with fail-fast on first error
-        5. Store results in ``slot.result`` or ``slot.error``
-        6. If return tool executed: set ``state.return_value`` and ``state.is_done = True``
-        7. Update ``state.executed_steps``, ``state.tool_calls_used``
-        8. Clear ``prepared_steps`` (consumed)
+        4. Execute concurrently via ``asyncio.gather(..., return_exceptions=True)``
+        5. If any gathered result is an exception, identify the first such step,
+        store the error on that slot, and raise
+        6. Otherwise, store results in ``slot.result``
+        7. If return tool executed: set ``state.return_value`` and ``state.is_done = True``
+        8. Update ``state.executed_steps``, ``state.tool_calls_used``
+        9. Clear ``prepared_steps`` (consumed)
 
         Parameters
         ----------
@@ -1058,7 +1059,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         ------
         ToolAgentError
             On any validation failure (preconditions, budget, tool not found, etc.)
-            or if any tool invocation raises (first error aborts batch).
+            or if any tool invocation raises.
 
         Side Effects
         ~~~~~~~~~~~~
@@ -1138,44 +1139,50 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                     f"(limit={self._tool_calls_limit}, used={state.tool_calls_used}, planned={non_return_planned})."
                 )
 
-        def run_one(idx: int) -> tuple[int, Any]:
-            slot = board[idx]
-            tool_name = slot.tool
-            tool = self.get_tool(tool_name)
-            logger.debug(f"{type(self).__name__}.{self.name}:\nTool: {tool_name}\nArgs: {slot.args}\n\n")
-            try:
-                result = tool.invoke(slot.resolved_args)
-            except ToolInvocationError:
-                raise
-            except Exception as exc:  # pragma: no cover
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} for {tool_name!r}: {exc}"
-                ) from exc
-            return idx, result
+        async def run_batch() -> list[tuple[int, Any]]:
+            coros: list[Any] = []
 
-        # Execute concurrently (fail-fast).
-        if len(indices) == 1:
-            idx = indices[0]
-            try:
-                _idx, result = run_one(idx)
-            except Exception as exc:
-                board[idx].error = exc
-                raise
+            for idx in indices:
+                slot = board[idx]
+                tool_name = slot.tool
+                tool = self.get_tool(tool_name)
+
+                logger.debug(
+                    f"{type(self).__name__}.{self.name}:\nTool: {tool_name}\nArgs: {slot.args}\n\n"
+                )
+
+                coros.append(tool.async_invoke(slot.resolved_args))
+
+            raw_results = await asyncio.gather(*coros, return_exceptions=True)
+
+            first_error = next(
+                (
+                    (idx, raw)
+                    for idx, raw in zip(indices, raw_results)
+                    if isinstance(raw, BaseException)
+                ),
+                None,
+            )
+
+            if first_error is not None:
+                idx, raw_error = first_error
+
+                if isinstance(raw_error, ToolInvocationError):
+                    board[idx].error = raw_error
+                    raise raw_error
+
+                wrapped = ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} for {board[idx].tool!r}: {raw_error}"
+                )
+                board[idx].error = wrapped
+                raise wrapped from raw_error
+
+            return [(idx, result) for idx, result in zip(indices, raw_results)]
+
+        results = asyncio.run(run_batch())
+
+        for idx, result in results:
             board[idx].result = result
-        else:
-            executor = ThreadPoolExecutor()
-            try:
-                futures = {executor.submit(run_one, idx): idx for idx in indices}
-                for fut in as_completed(futures):
-                    idx = futures[fut]
-                    try:
-                        _idx, result = fut.result()
-                    except Exception as exc:
-                        board[idx].error = exc
-                        raise
-                    board[idx].result = result
-            finally:
-                executor.shutdown(wait=True, cancel_futures=True)
 
         # Post-execution bookkeeping
         for idx in indices:
@@ -1188,6 +1195,155 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             ret_idx = return_indices[0]
             state.return_value = board[ret_idx].result
             state.is_done = True
+
+        return state
+
+    async def _async_execute_prepared_batch(self, state: RS) -> RS:
+        """
+        Async analog of ``_execute_prepared_batch(...)``.
+
+        Executes all currently prepared steps concurrently using each tool's
+        ``async_invoke(...)`` path, records results into the running blackboard,
+        and updates return/completion bookkeeping.
+
+        This method intentionally preserves the current compact gather-based
+        semantics rather than introducing stricter cancellation machinery.
+        """
+        indices = list(state.prepared_steps)
+        if not indices:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: no prepared steps to execute "
+                "(prepared_steps is empty)."
+            )
+
+        if len(indices) != len(set(indices)):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: prepared_steps contains duplicates: "
+                f"{indices!r}."
+            )
+
+        board = state.running_blackboard
+        board_len = len(board)
+
+        non_return_planned = 0
+        return_indices: list[int] = []
+
+        for idx in indices:
+            if not isinstance(idx, int):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: prepared step index must be int; "
+                    f"got {type(idx).__name__!r}."
+                )
+            if idx < 0 or idx >= board_len:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: prepared step index {idx} out of range "
+                    f"(running plan length={board_len})."
+                )
+
+            slot = board[idx]
+
+            # During a run, slot.step should remain plan-local and match its position.
+            if isinstance(slot.step, int) and slot.step != idx:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: running slot step mismatch at index {idx}: "
+                    f"slot.step={slot.step}."
+                )
+
+            if slot.is_executed() or idx in state.executed_steps:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: prepared step {idx} is already executed."
+                )
+
+            if not slot.is_prepared():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: slot {idx} is not prepared for execution."
+                )
+
+            tool_name = slot.tool
+            if tool_name is NO_VAL or not isinstance(tool_name, str) or not tool_name.strip():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: slot {idx} has invalid tool name: "
+                    f"{tool_name!r}."
+                )
+
+            # Validate existence early so failures happen before gather starts.
+            self.get_tool(tool_name)
+
+            if tool_name == return_tool.full_name:
+                return_indices.append(idx)
+            else:
+                non_return_planned += 1
+
+        if len(return_indices) > 1:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: multiple return tool calls in one batch: "
+                f"{return_indices!r}."
+            )
+
+        if self._tool_calls_limit is not None:
+            if state.tool_calls_used + non_return_planned > self._tool_calls_limit:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: tool_calls_limit exceeded "
+                    f"(limit={self._tool_calls_limit}, used={state.tool_calls_used}, "
+                    f"planned={non_return_planned})."
+                )
+
+        coros: list[Any] = []
+        for idx in indices:
+            slot = board[idx]
+            tool_name = slot.tool
+            tool = self.get_tool(tool_name)
+
+            logger.debug(
+                f"{type(self).__name__}.{self.name}:\n"
+                f"Tool: {tool_name}\n"
+                f"Args: {slot.args}\n\n"
+            )
+
+            coros.append(tool.async_invoke(slot.resolved_args))
+
+        raw_results = await asyncio.gather(*coros, return_exceptions=True)
+
+        first_error = next(
+            (
+                (idx, raw)
+                for idx, raw in zip(indices, raw_results)
+                if isinstance(raw, BaseException)
+            ),
+            None,
+        )
+
+        if first_error is not None:
+            idx, raw_error = first_error
+
+            if isinstance(raw_error, ToolInvocationError):
+                board[idx].error = raw_error
+                raise raw_error
+
+            wrapped = ToolAgentError(
+                f"{type(self).__name__}.{self.name}: tool call failed at index {idx} "
+                f"for {board[idx].tool!r}: {raw_error}"
+            )
+            board[idx].error = wrapped
+            raise wrapped from raw_error
+
+        for idx, result in zip(indices, raw_results):
+            board[idx].result = result
+            board[idx].error = NO_VAL
+            state.executed_steps.add(idx)
+
+        state.tool_calls_used += non_return_planned
+        state.prepared_steps = []
+
+        for idx in reversed(indices):
+            if board[idx].tool == return_tool.full_name:
+                if state.return_value is not NO_VAL:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: return tool executed more than once."
+                    )
+                state.return_value = board[idx].result
+                state.is_done = True
+                break
 
         return state
 
@@ -1370,6 +1526,65 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             state = self._execute_prepared_batch(state)
 
         # Persist run outputs into cache if context is enabled.
+        if self.context_enabled:
+            state = self.update_blackboard(state)
+
+        newest_history = [original_user_msg, state.messages[-1]]
+        return newest_history, state.return_value
+
+    async def _ainvoke(
+        self,
+        *,
+        messages: list[dict[str, str]],
+    ) -> tuple[list[dict[str, str]], Any]:
+        """
+        Async ToolAgent template method.
+
+        Mirrors the existing sync ``_invoke(...)`` loop, but:
+        - offloads the current sync planning hooks to worker threads, and
+        - awaits the async batch executor for tool execution.
+
+        This keeps the subclass contract minimal:
+        - _initialize_run_state(...) stays sync
+        - _prepare_next_batch(...) stays sync
+        - only the execution phase becomes natively async
+        """
+        if not messages:
+            raise ToolAgentError("ToolAgent._ainvoke requires a non-empty messages list.")
+
+        original_user_msg = dict(messages[-1])
+
+        state = await asyncio.to_thread(self._initialize_run_state, messages=messages)
+
+        if not isinstance(state, ToolAgentRunState):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: _initialize_run_state must return "
+                "a ToolAgentRunState (or subclass)."
+            )
+
+        while not state.is_done:
+            logger.debug(
+                f"{type(self).__name__}.{self.name} has made {state.tool_calls_used} this run"
+            )
+
+            # Invariant: prepare must not be called with a pending prepared batch.
+            if state.prepared_steps:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: violation: prepared_steps is non-empty "
+                    "before prepare. Execute must follow prepare before preparing again."
+                )
+
+            state = await asyncio.to_thread(self._prepare_next_batch, state)
+
+            # Keep the same empty-batch guard as the sync path.
+            if not state.prepared_steps:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: prepare produced an empty batch "
+                    "(prepared_steps is empty)."
+                )
+
+            state = await self._async_execute_prepared_batch(state)
+
         if self.context_enabled:
             state = self.update_blackboard(state)
 
