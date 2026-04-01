@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 
+import inspect
 from typing import (
     Any,
     Callable,
@@ -319,9 +320,44 @@ class Tool(AtomicInvokable):
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
         return result
 
+    async def async_execute(
+        self,
+        args: tuple[Any, ...],
+        kwargs: Dict[str, Any],
+    ) -> Any:
+        """
+        Async execution hook for the underlying callable.
+
+        - If the callable returns an awaitable, await it.
+        - Otherwise, return the plain result directly.
+        """
+        try:
+            result = self._function(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as e:  # pragma: no cover - thin wrapper
+            raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
+        return result
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """
+        Async analog of invoke() for tools.
+
+        Mirrors the current sync Tool.invoke flow:
+        - filter inputs
+        - bind to args/kwargs
+        - execute
+        """
+        logger.info(f"[Async {self.full_name} started]")
+        inputs = self.filter_inputs(inputs)
+        args, kwargs = self.to_arg_kwarg(inputs)
+        result = await self.async_execute(args, kwargs)
+        logger.info(f"[Async {self.full_name} finished]")
+        return result
+
     def invoke(self, inputs: Mapping[str, Any]) -> Any:
         """Invoke the tool using a dict-like mapping of inputs.
 

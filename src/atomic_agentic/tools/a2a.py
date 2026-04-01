@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
@@ -181,6 +182,27 @@ class PyA2AtomicTool(Tool):
                 f"{self.full_name}: PyA2Atomic tools do not accept positional arguments; got {args!r}."
             )
         return self._function(self._remote_name, inputs=kwargs)
+
+    async def async_execute(
+        self,
+        args: tuple[Any, ...],
+        kwargs: Dict[str, Any],
+    ) -> Any:
+        if args:
+            raise ToolInvocationError(
+                f"{self.full_name}: PyA2Atomic tools do not accept positional arguments; got {args!r}."
+            )
+
+        try:
+            return await asyncio.to_thread(
+                self._function,
+                self._remote_name,
+                inputs=kwargs,
+            )
+        except Exception as exc:
+            raise ToolInvocationError(
+                f"{self.full_name}: async invocation failed: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------ #
     # Public API
