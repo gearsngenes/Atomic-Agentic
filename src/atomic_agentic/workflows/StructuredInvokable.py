@@ -11,7 +11,21 @@ from ..core.sentinels import NO_VAL
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["StructuredInvokable"]
+__all__ = ["StructuredInvokable", "StructuredResultDict"]
+
+
+class StructuredResultDict(dict[str, Any]):
+    """Dict-like packaged result with a non-item ``raw_result`` attribute."""
+
+    __slots__ = ("raw_result",)
+
+    def __init__(self, *args: Any, raw_result: Any = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.raw_result = raw_result
+
+    def copy(self) -> StructuredResultDict:
+        """Return a shallow copy preserving ``raw_result``."""
+        return type(self)(self, raw_result=self.raw_result)
 
 
 class StructuredInvokable(AtomicInvokable):
@@ -57,7 +71,7 @@ class StructuredInvokable(AtomicInvokable):
             name=name or component.name,
             description=description or component.description,
             parameters=component.parameters,
-            return_type="Dict[str, Any]",
+            return_type="StructuredResultDict[str, Any]",
             filter_extraneous_inputs=resolved_filter,
         )
 
@@ -260,44 +274,17 @@ class StructuredInvokable(AtomicInvokable):
             )
         self._ignore_unhandled = value
 
-    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        """Synchronously invoke the wrapped component and return a packaged mapping.
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """Synchronously invoke the wrapped component and return a structured result.
 
-        This method is the sync execution boundary for ``StructuredInvokable``.
-        It preserves the standard dict-first invocation contract inherited from
-        :class:`AtomicInvokable` by first normalizing/filtering the provided
-        ``inputs`` through :meth:`filter_inputs`. The filtered mapping is then
-        passed unchanged to the wrapped component's synchronous
-        :meth:`component.invoke` method.
+        The wrapped component is invoked with filtered dict-first inputs. Its raw
+        output is then packaged into a mapping according to this wrapper's output
+        schema and packaging policies. Missing-value handling is applied before the
+        final result is returned.
 
-        After the wrapped component returns a raw result, this method delegates
-        all output-shaping concerns to the structured packaging pipeline:
-        :meth:`package` is responsible for turning the raw value into a
-        dictionary-shaped handoff aligned with the current normalized
-        ``output_schema``, and :meth:`handle_missing_values` applies the final
-        missing-value remediation policy (for example raise, drop, or fill).
-
-        The public sync path is intentionally thin. It does not implement any
-        packaging rules itself, and it does not special-case particular raw
-        result shapes. Those responsibilities belong exclusively to the
-        downstream packaging helpers so that sync and async invocation paths
-        remain behaviorally identical apart from how the wrapped component is
-        executed.
-
-        This method acquires ``self._invoke_lock`` for the duration of the sync
-        call, matching the library's existing sync invocation pattern for other
-        invokable primitives.
-
-        Parameters
-        ----------
-        inputs : Mapping[str, Any]
-            Dict-first input payload for the wrapped component.
-
-        Returns
-        -------
-        dict[str, Any]
-            Final packaged output after schema-driven packaging and missing-value
-            handling have both been applied.
+        The returned object is a ``StructuredResult``: its mapping items are the
+        final packaged output, while its non-item ``raw_result`` attribute preserves
+        the wrapped component's original raw return value.
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
@@ -308,39 +295,18 @@ class StructuredInvokable(AtomicInvokable):
             final_output = self.handle_missing_values(packaged)
 
             logger.info(f"[{self.full_name} finished]")
-            return final_output
+            return StructuredResultDict(final_output, raw_result=raw_result)
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        """Asynchronously invoke the wrapped component and return a packaged mapping.
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """Asynchronously invoke the wrapped component and return a structured result.
 
-        This method is the async analog of :meth:`invoke`. It preserves the same
-        dict-first contract and the same packaging semantics while changing only
-        the execution path used to obtain the wrapped component's raw result.
-        Inputs are first normalized and filtered through :meth:`filter_inputs`,
-        then passed to :meth:`component.async_invoke`.
+        This is the async analog of :meth:`invoke`. The wrapped component is awaited
+        through its async invocation path, then the raw result is packaged and
+        missing-value handling is applied exactly as in the sync path.
 
-        Once the awaited raw result is available, packaging remains fully
-        synchronous: :meth:`package` converts the raw value into the normalized
-        mapping handoff defined by the current ``output_schema``, and
-        :meth:`handle_missing_values` applies the configured final missing-value
-        policy. This keeps the async path behaviorally aligned with the sync path
-        and ensures that output-structuring logic lives in one place only.
-
-        The method intentionally delegates all result-shaping behavior to the
-        packaging helpers rather than duplicating policy logic inline. The only
-        semantic difference from the sync path is that wrapped component
-        execution occurs through ``await self.component.async_invoke(...)``.
-
-        Parameters
-        ----------
-        inputs : Mapping[str, Any]
-            Dict-first input payload for the wrapped component.
-
-        Returns
-        -------
-        dict[str, Any]
-            Final packaged output after schema-driven packaging and missing-value
-            handling have both been applied.
+        The returned object is a ``StructuredResult``: its mapping items are the
+        final packaged output, while its non-item ``raw_result`` attribute preserves
+        the wrapped component's original raw return value.
         """
         logger.info(f"[Async {self.full_name} started]")
 
@@ -350,7 +316,7 @@ class StructuredInvokable(AtomicInvokable):
         final_output = self.handle_missing_values(packaged)
 
         logger.info(f"[Async {self.full_name} finished]")
-        return final_output
+        return StructuredResultDict(final_output, raw_result=raw_result)
 
     def package(self, raw: Any) -> dict[str, Any]:
         """Package a raw result into the normalized mapping output.
