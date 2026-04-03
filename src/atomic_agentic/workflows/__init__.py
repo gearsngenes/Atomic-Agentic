@@ -7,6 +7,7 @@ from .base import(
 )
 from .basic import BasicFlow
 from .composites import SequentialFlow, MakerCheckerFlow
+from .StructuredInvokable import StructuredInvokable
 
 __all__ = ["Workflow",
            "BasicFlow",
@@ -15,4 +16,5 @@ __all__ = ["Workflow",
            "MappingPolicy",
            "BundlingPolicy",
            "AbsentValPolicy",
+           "StructuredInvokable",
            ]

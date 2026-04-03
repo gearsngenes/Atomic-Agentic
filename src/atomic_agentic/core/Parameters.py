@@ -8,7 +8,7 @@ This module provides:
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Mapping, get_args, get_origin
+from typing import Any, Callable, Mapping, Optional, get_args, get_origin, get_type_hints
 
 from .sentinels import NO_VAL
 from .Exceptions import SchemaError
@@ -32,6 +32,12 @@ class ParamSpec(dict):
       - Instances are intentionally immutable (attempts to set items will raise).
       - Use :meth:`to_dict()` for an explicit dict representation.
     """
+    
+    POSITIONAL_ONLY = "POSITIONAL_ONLY"
+    POSITIONAL_OR_KEYWORD = "POSITIONAL_OR_KEYWORD"
+    VAR_POSITIONAL = "VAR_POSITIONAL"
+    KEYWORD_ONLY = "KEYWORD_ONLY"
+    VAR_KEYWORD = "VAR_KEYWORD"
 
     __slots__ = ("_name", "_index", "_kind", "_type", "_default")
 
@@ -300,3 +306,117 @@ def is_valid_parameter_order(parameters: list[ParamSpec]) -> bool:
         last_kind = kind
     
     return True
+
+
+def _is_typed_dict_class(obj: Any) -> bool:
+    """Return whether ``obj`` appears to be a TypedDict class."""
+    return (
+        isinstance(obj, type)
+        and issubclass(obj, dict)
+        and hasattr(obj, "__annotations__")
+        and hasattr(obj, "__total__")
+    )
+
+
+def to_paramspec_list(
+    schema: Optional[type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec]],
+) -> list[ParamSpec]:
+    """Normalize supported schema inputs into a fresh canonical ``list[ParamSpec]``.
+
+    Accepted inputs
+    ---------------
+    - ``None`` -> empty list
+    - ``TypedDict`` class
+    - ``list[str]``
+    - ``tuple[str, ...]``
+    - ``set[str]`` using snapshot iteration order
+    - ``list[ParamSpec]``
+
+    Returns
+    -------
+    list[ParamSpec]
+        Fresh ParamSpec objects with canonical sequential indices.
+
+    Raises
+    ------
+    SchemaError
+        If the schema input is unsupported or invalid.
+    """
+    # ------------------------------------------------------------------
+    # None -> empty schema
+    # ------------------------------------------------------------------
+    if schema is None:
+        normalized: list[ParamSpec] = []
+        is_valid_parameter_order(normalized)
+        return normalized
+
+    # ------------------------------------------------------------------
+    # TypedDict class -> use field annotations as ParamSpec.type
+    # ------------------------------------------------------------------
+    if _is_typed_dict_class(schema):
+        hints = get_type_hints(schema)
+        normalized = [
+            ParamSpec(
+                name=name,
+                index=index,
+                kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                type=_format_annotation(annotation),
+                default=NO_VAL,
+            )
+            for index, (name, annotation) in enumerate(hints.items())
+        ]
+        is_valid_parameter_order(normalized)
+        return normalized
+
+    # ------------------------------------------------------------------
+    # list[str] / tuple[str, ...] / set[str]
+    # Snapshot current iteration order for tuples/sets as provided.
+    # ------------------------------------------------------------------
+    if isinstance(schema, (list, tuple, set)):
+        items = list(schema)
+
+        if not items:
+            normalized = []
+            is_valid_parameter_order(normalized)
+            return normalized
+
+        if all(isinstance(item, str) for item in items):
+            normalized = [
+                ParamSpec(
+                    name=item,
+                    index=index,
+                    kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                    type="Any",
+                    default=NO_VAL,
+                )
+                for index, item in enumerate(items)
+            ]
+            is_valid_parameter_order(normalized)
+            return normalized
+
+        if isinstance(schema, list) and all(isinstance(item, ParamSpec) for item in items):
+            normalized = [
+                ParamSpec(
+                    name=item.name,
+                    index=index,
+                    kind=item.kind,
+                    type=item.type,
+                    default=item.default,
+                )
+                for index, item in enumerate(items)
+            ]
+            is_valid_parameter_order(normalized)
+            return normalized
+
+        raise SchemaError(
+            "Schema sequences must be one of: list[str], tuple[str, ...], "
+            "set[str], or list[ParamSpec]."
+        )
+
+    # ------------------------------------------------------------------
+    # Unsupported input
+    # ------------------------------------------------------------------
+    raise SchemaError(
+        "Unsupported schema type. Expected one of: None, TypedDict class, "
+        "list[str], tuple[str, ...], set[str], or list[ParamSpec]."
+    )
