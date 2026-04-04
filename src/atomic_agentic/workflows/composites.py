@@ -1,390 +1,709 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence, Union, List
 import logging
+from collections.abc import Mapping
+from typing import Any, Optional
 
+from .StructuredInvokable import StructuredInvokable
+from ..core.Exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
-from .base import Workflow, BundlingPolicy, AbsentValPolicy
+from ..core.sentinels import NO_VAL
+from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
-from ..core.Parameters import ParamSpec
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["SequentialFlow", "IterativeFlow"]
+
+
 class SequentialFlow(Workflow):
-    """
-    A composite Workflow that executes a sequence of steps deterministically.
+    """Execute an ordered sequence of workflow-shaped steps.
 
-    Design goals / semantics
-    ------------------------
-    - **Normalization boundary:** every configured step is wrapped into a `BasicFlow`,
-      even if the original component is already a `Workflow`. This guarantees a
-      consistent packaging boundary across heterogeneous components (Tools, Agents,
-      Workflows).
-    - **Schema handoff wiring:** for i in [0..n-2], the upstream wrapper's
-      `output_schema` is set to the downstream wrapper's `input_schema`.
-      This makes each step package its output into exactly the mapping shape the
-      next step expects as inputs.
-    - **No compatibility enforcement:** this class does *not* validate that step i
-      can satisfy step i+1. Any incompatibilities are surfaced naturally at runtime
-      through the invoked wrapper's packaging/validation rules.
+    Step normalization
+    ------------------
+    - Existing ``Workflow`` instances are kept as-is.
+    - ``StructuredInvokable`` instances are wrapped once in ``BasicFlow``.
 
-    Invocation contract
-    -------------------
-    `_invoke(inputs)` runs each step with the prior step's packaged output as the
-    next step's inputs. The raw result returned by `_invoke` is the final step's
-    packaged output mapping.
+    Runtime contract
+    ----------------
+    - Inputs are passed to the first step.
+    - Each step's mapping result is passed directly to the next step.
+    - The final step result is returned unchanged to the workflow base, which
+      then wraps it in the outer ``FlowResultDict`` and records the sequential
+      checkpoint.
 
     Metadata
     --------
-    The metadata returned by `_invoke` contains:
+    Per-run metadata contains:
 
-    - `midwork_checkpoints`: a list of integer indices, one per executed step, where
-      each index refers to the checkpoint created inside that step wrapper during
-      this run (i.e., `len(step.checkpoints) - 1` right after invocation).
+    - ``step_records``: list[dict[str, Any]]
+        One record per executed step, each containing:
+        - ``step``: zero-based step index for that run
+        - ``instance_id``: executed step instance id
+        - ``full_name``: executed step full name
+        - ``run_id``: that step's workflow run id
 
-    Parameters
-    ----------
-    name, description:
-        Standard workflow identity fields.
-    steps:
-        Optional list of AtomicInvokable components (Tool/Agent/Workflow). Each is
-        wrapped into a `BasicFlow` internally.
-    output_schema:
-        Optional workflow output schema for the SequentialFlow itself. This does not
-        override per-step wiring. If omitted, defaults to the base Workflow default.
-    bundling_policy, absent_val_policy, default_absent_val:
-        Packaging/validation policies for the SequentialFlow's *own* packaging boundary.
-        Step wrapper policies currently use BasicFlow defaults (to be refined separately).
-
-    Step management
-    ---------------
-    This class provides small, explicit mutation helpers (append/extend/insert/pop/remove/
-    replace/clear). These methods rebuild the internal wrapper list and re-apply schema
-    handoff wiring each time (still no compatibility enforcement).
-    """
-
-    # ------------------------------------------------------------------ #
-    # Construction
-    # ------------------------------------------------------------------ #
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        filter_extraneous_inputs: Optional[bool] = None,
-        steps: Optional[list[AtomicInvokable]] = None,
-        *,
-        output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
-        bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
-        absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
-        default_absent_val: Any = None,
-    ) -> None:
-        steps: List[AtomicInvokable] = steps or []
-        self._steps: List[BasicFlow] = [BasicFlow(component=step) for step in steps]
-        filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else (
-            self._steps[0].filter_extraneous_inputs if steps else True)
-        super().__init__(
-            name=name,
-            description=description,
-            parameters=steps[0].parameters if steps else [],
-            output_schema=output_schema,
-            bundling_policy=bundling_policy,
-            absent_val_policy=absent_val_policy,
-            default_absent_val=default_absent_val,
-            filter_extraneous_inputs=filter,
-        )
-        self._rewire_steps()
-
-    # ------------------------------------------------------------------ #
-    # Steps Properties
-    # ------------------------------------------------------------------ #
-    @property
-    def steps(self) -> list[BasicFlow]:
-        """The normalized list of step wrappers (always `BasicFlow`)."""
-        return list(self._steps)
-
-    @steps.setter
-    def steps(self, steps: Optional[list[AtomicInvokable]]) -> None:
-        if not steps:
-            self._steps = []
-        else:
-            self._steps = [BasicFlow(component=step) for step in steps]
-        self._rewire_steps()
-
-    # ------------------------------------------------------------------ #
-    # Step management APIs
-    # ------------------------------------------------------------------ #
-    def append_step(self, step: AtomicInvokable) -> None:
-        """Append a new step to the end of the sequence."""
-        self._steps.append(BasicFlow(component=step))
-        self._rewire_steps()
-
-    def extend(self, steps: Sequence[AtomicInvokable]) -> None:
-        """Append multiple steps to the end of the sequence."""
-        self._steps.extend([BasicFlow(component=step) for step in steps])
-        self._rewire_steps()
-
-    def insert(self, index: int, step: AtomicInvokable) -> None:
-        """Insert a step at the given index (supports negative indices like list.insert)."""
-        self._steps.insert(index, BasicFlow(component=step))
-        self._rewire_steps()
-
-    def replace(self, index: int, step: AtomicInvokable) -> AtomicInvokable:
-        """
-        Replace the step at `index` and return the removed component.
-        Raises IndexError if index is out of range.
-        """
-        removed = self._steps[index].component
-        self._steps[index].component = step
-        self._rewire_steps()
-        return removed
-
-    def pop(self, index: int = -1) -> AtomicInvokable:
-        """
-        Remove and return the component at `index` (default last).
-        Raises IndexError if index is out of range.
-        """
-        removed = self._steps.pop(index)
-        self._rewire_steps()
-        return removed
-
-    def clear_steps(self) -> None:
-        """Remove all steps (becomes an identity/no-op sequential flow)."""
-        self.steps = None
-
-    # ------------------------------------------------------------------ #
-    # Workflow Helpers
-    # ------------------------------------------------------------------ #
-    def _rewire_steps(self) -> None:
-        """Re-apply output->input schema wiring between adjacent wrappers."""
-        for i in range(len(self._steps)-1):
-            self._steps[i].output_schema = self._steps[i+1].parameters
-        for i in range(len(self._steps)):
-            # Configure step policies to fixed values
-            self._steps[i].bundling_policy = BundlingPolicy.BUNDLE
-            self._steps[i].absent_val_policy = AbsentValPolicy.DROP
-            self._steps[i].default_absent_val = None
-        # Remove output schema from last step
-        if self._steps:
-            self._steps[-1].output_schema = self.output_schema
-            self._steps[-1].absent_val_policy = self.absent_val_policy
-            self._steps[-1].default_absent_val = self.default_absent_val
-        # Update SequentialFlow parameters to match first step
-        self._parameters = self._steps[0].parameters if self._steps else []
-
-    def _invoke(self, inputs: Mapping[str, Any]):
-        if not self._steps:
-            return {"midwork_checkpoints": []}, inputs
-
-        checkpoint_indices: list[int] = []
-        running_result: Mapping[str, Any] = inputs
-
-        for i, step in enumerate(self._steps):
-            logger.info(f"{self.full_name}: invoking step {i}")
-            running_result = step.invoke(running_result)
-            checkpoint_indices.append(len(step.checkpoints) - 1)
-
-        return {"midwork_checkpoints": checkpoint_indices}, running_result
-
-
-class MakerCheckerFlow(Workflow):
-    """
-    A composite Workflow implementing a Maker–Checker (optionally Judge) revision loop.
-    
-    Overview
-    --------
-    The Maker–Checker–Judge pattern implements iterative refinement where:
-    
-    1. **Maker** produces an initial draft from inputs
-    2. **Checker** reviews/validates the draft and provides feedback
-    3. **Judge** (optional) decides if the draft is acceptable; if not, loop continues
-    4. **Maker** revises using checker feedback; process repeats up to ``max_revisions``
-    
-    Loop Semantics
-    --------------
-    - **Initialization**: Maker produces initial draft from ``inputs``
-    - **Iteration**: For each revision round (up to ``max_revisions``):
-      
-      1. Checker reviews current draft; outputs become next revision inputs for Maker
-      2. If Judge is present:
-         
-         - Judge examines checker output
-         - Judge must return a **boolean** (True = accept, False = continue)
-         - If True, loop terminates early; final draft is returned
-      
-      3. Maker produces revised draft from checker feedback
-    
-    - **Completion**: After ``max_revisions`` iterations or early judge acceptance,
-      the final draft (`~Any`) is returned
-    
-    Checkpoints & Metadata
-    ----------------------
-    Metadata dict contains:
-    
-    - ``maker_checkpoints`` (list[int]): checkpoint indices from each Maker invocation
-      (length is ``num_revisions + 1``: initial + revisions)
-    - ``checker_checkpoints`` (list[int]): checkpoint indices from each Checker run
-    - ``judge_checkpoints`` (list[int] or None): checkpoint indices from Judge runs;
-      None if no Judge was configured
-    - ``iterations_run`` (int): actual number of revision rounds executed
-    - ``stopped_early`` (bool): True if Judge accepted before ``max_revisions``
-    
-    Design Notes
-    ~~~~~~~~~~~~
-    - If ``max_revisions=0``, only Maker runs; Checker and Judge are skipped
-    - Judge output is treated as a single boolean value (first value from output dict)
-    - All steps (Maker, Checker, Judge) are wrapped as ``BasicFlow`` internally
-    - Input schema comes from Maker; output schema is configurable
+    Notes
+    -----
+    - No packaging or handoff-schema rewiring is performed here.
+    - No removed-step archive is maintained; displaced steps are returned
+      directly by mutation methods, and sequential checkpoints preserve
+      historical ``step_records`` for interpretation later.
     """
 
     def __init__(
         self,
         name: str,
         description: str,
-        maker: AtomicInvokable,
-        checker: AtomicInvokable,
-        filter_extraneous_inputs: Optional[bool] = None,
-        judge: Optional[AtomicInvokable] = None,
-        max_revisions: int = 1,
+        steps: Optional[list[Workflow | StructuredInvokable]] = None,
         *,
-        output_schema: Optional[Union[list[str], Mapping[str, Any]]] = None,
-        bundling_policy: BundlingPolicy = BundlingPolicy.BUNDLE,
-        absent_val_policy: AbsentValPolicy = AbsentValPolicy.RAISE,
-        default_absent_val: Any = None,
+        filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
-        # ------------------------------------------------------------
-        # PREPARE attributes needed by build_args_returns()
-        # ------------------------------------------------------------
-        self._maker: BasicFlow = BasicFlow(component=maker)
-        self._checker: BasicFlow = BasicFlow(component=checker)
-        self._judge: Optional[BasicFlow] = BasicFlow(component=judge, bundling_policy=BundlingPolicy.UNBUNDLE) if judge is not None else None
-        self._max_revisions: int = max_revisions
-        filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else self._maker.filter_extraneous_inputs
-        # ------------------------------------------------------------
-        # Base Workflow init (will call build_args_returns)
-        # ------------------------------------------------------------
+        normalized_steps = [
+            self._normalize_step(step) for step in (steps or [])
+        ]
+
+        self._steps: list[Workflow] = normalized_steps
+
+        resolved_filter = (
+            filter_extraneous_inputs
+            if filter_extraneous_inputs is not None
+            else (
+                normalized_steps[0].filter_extraneous_inputs
+                if normalized_steps
+                else True
+            )
+        )
+
         super().__init__(
             name=name,
             description=description,
-            parameters=self._maker.parameters,
-            output_schema=output_schema,
-            bundling_policy=bundling_policy,
-            absent_val_policy=absent_val_policy,
-            default_absent_val=default_absent_val,
-            filter_extraneous_inputs=filter,
+            parameters=normalized_steps[0].parameters if normalized_steps else [],
+            filter_extraneous_inputs=resolved_filter,
         )
-        self._rebuild()
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
     @property
-    def maker(self) -> BasicFlow:
-        return self._maker
+    def steps(self) -> list[Workflow]:
+        """Return a shallow copy of the active steps."""
+        return list(self._steps)
 
-    @maker.setter
-    def maker(self, candidate: AtomicInvokable) -> None:
-        self._maker = BasicFlow(component=candidate,
-                                absent_val_policy=AbsentValPolicy.DROP)
-        self._rebuild()
+    # ------------------------------------------------------------------ #
+    # Internal helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _normalize_step(step: Workflow | StructuredInvokable) -> Workflow:
+        """Normalize one configured step into a workflow-shaped step."""
+        if isinstance(step, Workflow):
+            return step
+        if isinstance(step, StructuredInvokable):
+            return BasicFlow(component=step)
+        raise TypeError(
+            "SequentialFlow steps must be Workflow or StructuredInvokable, "
+            f"got {type(step)!r}"
+        )
 
+    def _refresh_parameters(self) -> None:
+        """Refresh the sequential input contract from the first active step."""
+        self._parameters = self._steps[0].parameters if self._steps else []
+
+    def _resolve_existing_index(self, index: int) -> int:
+        """Resolve a list-style index for an existing step."""
+        if not isinstance(index, int):
+            raise TypeError(f"step index must be an int, got {type(index)!r}")
+
+        length = len(self._steps)
+        resolved = index if index >= 0 else length + index
+        if resolved < 0 or resolved >= length:
+            raise IndexError(
+                f"step index {index} out of range for {length} configured steps"
+            )
+        return resolved
+
+    def _find_index_by_full_name(self, full_name: str) -> int:
+        """Find exactly one active step by full name."""
+        if not isinstance(full_name, str) or not full_name.strip():
+            raise ValueError("full_name must be a non-empty string")
+
+        matches = [
+            index
+            for index, step in enumerate(self._steps)
+            if step.full_name == full_name
+        ]
+
+        if not matches:
+            raise ValueError(f"no step found with full_name {full_name!r}")
+        if len(matches) > 1:
+            raise ValueError(
+                f"multiple steps found with full_name {full_name!r}; remove by index instead"
+            )
+        return matches[0]
+
+    # ------------------------------------------------------------------ #
+    # Mutation API
+    # ------------------------------------------------------------------ #
+    def add_step(self, step: Workflow | StructuredInvokable) -> None:
+        """Append one normalized step to the end of the sequence."""
+        self._steps.append(self._normalize_step(step))
+        self._refresh_parameters()
+
+    def insert_step(self, index: int, step: Workflow | StructuredInvokable) -> None:
+        """Insert one normalized step using standard list.insert semantics."""
+        if not isinstance(index, int):
+            raise TypeError(f"step index must be an int, got {type(index)!r}")
+        self._steps.insert(index, self._normalize_step(step))
+        self._refresh_parameters()
+
+    def pop_step(self, index: int = -1) -> Workflow:
+        """Remove and return the step at ``index``."""
+        resolved = self._resolve_existing_index(index)
+        removed = self._steps.pop(resolved)
+        self._refresh_parameters()
+        return removed
+
+    def remove_step(self, target: int | str) -> Workflow:
+        """Remove and return a step by index or full name."""
+        if isinstance(target, int):
+            resolved = self._resolve_existing_index(target)
+        elif isinstance(target, str):
+            resolved = self._find_index_by_full_name(target)
+        else:
+            raise TypeError(
+                "remove_step target must be an int index or str full_name, "
+                f"got {type(target)!r}"
+            )
+
+        removed = self._steps.pop(resolved)
+        self._refresh_parameters()
+        return removed
+
+    def replace_step(
+        self,
+        index: int,
+        step: Workflow | StructuredInvokable,
+    ) -> Workflow:
+        """Replace one step by index and return the displaced step."""
+        resolved = self._resolve_existing_index(index)
+        replacement = self._normalize_step(step)
+        displaced = self._steps[resolved]
+        self._steps[resolved] = replacement
+        self._refresh_parameters()
+        return displaced
+
+    # ------------------------------------------------------------------ #
+    # Workflow run hooks
+    # ------------------------------------------------------------------ #
+    def _run(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        """Synchronously execute each configured step in order."""
+        if not self._steps:
+            raise ValidationError(
+                f"{self.full_name}: cannot execute an empty SequentialFlow"
+            )
+
+        running_result: Mapping[str, Any] = inputs
+        step_records: list[dict[str, Any]] = []
+
+        for index, step in enumerate(self._steps):
+            logger.info("%s: invoking step %d (%s)", self.full_name, index, step.full_name)
+            result = step.invoke(running_result)
+
+            if not isinstance(result, FlowResultDict):
+                raise ValidationError(
+                    f"{self.full_name}: step {index} ({step.full_name}) returned "
+                    f"{type(result)!r}, expected FlowResultDict"
+                )
+
+            step_records.append(
+                {
+                    "step": index,
+                    "instance_id": step.instance_id,
+                    "full_name": step.full_name,
+                    "run_id": result.run_id,
+                }
+            )
+            running_result = result
+
+        return {"step_records": step_records}, running_result
+
+    async def _async_run(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        """Asynchronously execute each configured step in order."""
+        if not self._steps:
+            raise ValidationError(
+                f"{self.full_name}: cannot execute an empty SequentialFlow"
+            )
+
+        running_result: Mapping[str, Any] = inputs
+        step_records: list[dict[str, Any]] = []
+
+        for index, step in enumerate(self._steps):
+            logger.info(
+                "[Async %s]: invoking step %d (%s)",
+                self.full_name,
+                index,
+                step.full_name,
+            )
+            result = await step.async_invoke(running_result)
+
+            if not isinstance(result, FlowResultDict):
+                raise ValidationError(
+                    f"{self.full_name}: async step {index} ({step.full_name}) returned "
+                    f"{type(result)!r}, expected FlowResultDict"
+                )
+
+            step_records.append(
+                {
+                    "step": index,
+                    "instance_id": step.instance_id,
+                    "full_name": step.full_name,
+                    "run_id": result.run_id,
+                }
+            )
+            running_result = result
+
+        return {"step_records": step_records}, running_result
+
+    # ------------------------------------------------------------------ #
+    # Serialization
+    # ------------------------------------------------------------------ #
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the sequence and its active step snapshots."""
+        data = super().to_dict()
+        data.update(
+            {
+                "steps": [step.to_dict() for step in self._steps],
+                "step_count": len(self._steps),
+            }
+        )
+        return data
+
+class IterativeFlow(Workflow):
+    """Repeat a fixed sequential body up to ``max_iterations``.
+
+    Overview
+    --------
+    ``IterativeFlow`` is a composite workflow that repeatedly invokes a
+    normalized sequential body. After each completed body run, an optional
+    judge may inspect that iteration's body result and decide whether the
+    loop should stop early.
+
+    Construction contract
+    ---------------------
+    - ``body_steps`` must be a non-empty ``list[Workflow | StructuredInvokable]``.
+    - The body is always normalized inline into a private ``SequentialFlow``.
+    - The normalized loop body is exposed read-only via :attr:`loop_body`.
+    - The judge is optional and may be any ``AtomicInvokable``.
+      Internally, non-``StructuredInvokable`` judges are wrapped in a
+      ``StructuredInvokable(output_schema=[])`` and then in a ``BasicFlow``.
+
+    Judge contract
+    --------------
+    The judge is intentionally accepted as a broad ``AtomicInvokable``. At
+    runtime, however, the *normalized* judge path must yield a raw boolean
+    decision discoverable through the judge checkpoint metadata under
+    ``"run_raw_result"``. If it does not, invocation raises ``ValidationError``.
+
+    Loop semantics
+    --------------
+    - Iteration 0 receives the outer workflow inputs.
+    - Each completed body result becomes the next iteration's inputs.
+    - If a judge is present, it is invoked after each body run.
+    - The loop stops early only when the judge decision is ``True``.
+    - Otherwise it continues until ``max_iterations`` is exhausted.
+
+    Metadata
+    --------
+    Per-run metadata contains:
+
+    - ``body_instance_id``:
+      The normalized sequential body instance id.
+    - ``body_full_name``:
+      The normalized sequential body full name.
+    - ``iterations_completed``:
+      Number of completed body iterations.
+    - ``max_iterations``:
+      Maximum number of iterations permitted for this run.
+    - ``stopped_early``:
+      Whether a judge approved early termination.
+    - ``iteration_records``:
+      ``list[dict[str, Any]]`` where each record contains:
+        - ``iteration``: zero-based iteration index
+        - ``body_run_id``: body workflow run id for that iteration
+        - ``body_result``: body workflow result mapping snapshot
+        - ``judge_instance_id``: judge instance id, or ``None`` when absent
+        - ``judge_run_id``: judge workflow run id, or ``None`` when absent
+        - ``judge_decision``: boolean decision, or ``None`` when no judge ran
+    """
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        body_steps: list[Workflow | StructuredInvokable],
+        judge: AtomicInvokable | None = None,
+        max_iterations: int = 1,
+        *,
+        filter_extraneous_inputs: Optional[bool] = None,
+    ) -> None:
+        """Initialize the iterative workflow.
+
+        Parameters
+        ----------
+        name:
+            Workflow name.
+        description:
+            Human-readable workflow description.
+        body_steps:
+            Non-empty list of workflow-shaped or structured steps that will be
+            normalized into the private sequential loop body.
+        judge:
+            Optional judge invokable. The runtime contract requires that the
+            normalized judge path ultimately yields a raw boolean decision.
+        max_iterations:
+            Maximum number of body iterations to execute per run. Must be > 0.
+        filter_extraneous_inputs:
+            Optional outer workflow input-filter flag. When omitted, inherits
+            from the normalized loop body.
+        """
+        if not isinstance(body_steps, list):
+            raise TypeError(
+                f"body_steps must be a list[Workflow | StructuredInvokable], got {type(body_steps)!r}"
+            )
+        if not body_steps:
+            raise ValueError("body_steps must not be empty")
+
+        for index, step in enumerate(body_steps):
+            if not isinstance(step, (Workflow, StructuredInvokable)):
+                raise TypeError(
+                    "body_steps items must be Workflow or StructuredInvokable, "
+                    f"got {type(step)!r} at index {index}"
+                )
+
+        self._loop_body = SequentialFlow(
+            name=f"{name}_loop_body",
+            description=f"Normalized body for iterative workflow {name}",
+            steps=body_steps,
+        )
+
+        self._judge: Optional[BasicFlow] = None
+        self.judge = judge
+        self.max_iterations = max_iterations
+
+        resolved_filter = (
+            filter_extraneous_inputs
+            if filter_extraneous_inputs is not None
+            else self._loop_body.filter_extraneous_inputs
+        )
+
+        super().__init__(
+            name=name,
+            description=description,
+            parameters=self._loop_body.parameters,
+            filter_extraneous_inputs=resolved_filter,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
     @property
-    def checker(self) -> BasicFlow:
-        return self._checker
-
-    @checker.setter
-    def checker(self, candidate: AtomicInvokable) -> None:
-        self._checker = BasicFlow(component=candidate,
-                                  absent_val_policy=AbsentValPolicy.DROP)
-        self._rebuild()
+    def loop_body(self) -> SequentialFlow:
+        """The normalized sequential loop body."""
+        return self._loop_body
 
     @property
     def judge(self) -> Optional[BasicFlow]:
+        """The optional normalized judge wrapper."""
         return self._judge
 
     @judge.setter
-    def judge(self, candidate: Optional[AtomicInvokable]) -> None:
-        self._judge = BasicFlow(component=candidate,
-                                absent_val_policy=AbsentValPolicy.DROP,
-                                bundling_policy=BundlingPolicy.UNBUNDLE,
-                                filter_extraneous_inputs=True) if candidate is not None else None
-        self._rebuild()
+    def judge(self, candidate: AtomicInvokable | None) -> None:
+        """Set or clear the optional judge.
+
+        Notes
+        -----
+        This setter intentionally accepts any ``AtomicInvokable``. It does not
+        attempt to prove at assignment time that the candidate can satisfy the
+        runtime boolean-decision contract; that validation occurs during
+        invocation when the judge result is interpreted.
+        """
+        if candidate is None:
+            self._judge = None
+            return
+
+        if not isinstance(candidate, AtomicInvokable):
+            raise TypeError(
+                f"judge must be an AtomicInvokable or None, got {type(candidate)!r}"
+            )
+
+        resolved_component = (
+            candidate
+            if isinstance(candidate, StructuredInvokable)
+            else StructuredInvokable(component=candidate, output_schema=[])
+        )
+
+        if self._judge is not None:
+            self._judge.component = resolved_component
+        else:
+            self._judge = BasicFlow(component=resolved_component)
 
     @property
-    def max_revisions(self) -> int:
-        return self._max_revisions
+    def max_iterations(self) -> int:
+        """Maximum number of body iterations per run."""
+        return self._max_iterations
 
-    @max_revisions.setter
-    def max_revisions(self, value: int) -> None:
+    @max_iterations.setter
+    def max_iterations(self, value: int) -> None:
+        """Validate and set the iteration bound."""
         if not isinstance(value, int):
-            raise TypeError("max_revisions must be an int")
-        if value < 0:
-            raise ValueError("max_revisions must be >= 0")
-        self._max_revisions = value
+            raise TypeError(f"max_iterations must be an int, got {type(value)!r}")
+        if value <= 0:
+            raise ValueError("max_iterations must be > 0")
+        self._max_iterations = value
 
     # ------------------------------------------------------------------ #
-    # Wiring / validation
+    # Helpers
     # ------------------------------------------------------------------ #
-    def _rebuild(self) -> None:
-        """Re-apply wiring and re-compute args/returns."""
-        # Wire maker <-> checker
-        self._checker.output_schema = self._maker.parameters
-        self._maker.output_schema = self._checker.parameters
-        self._parameters = list(self._maker.parameters)
+    def _extract_judge_decision(
+        self,
+        judge_flow: Workflow,
+        judge_result: FlowResultDict,
+    ) -> bool:
+        """Extract and validate the raw boolean decision for one judge run.
+
+        The decision is read from the normalized judge checkpoint metadata under
+        ``"run_raw_result"``. ``NO_VAL`` is used as the fallback sentinel so the
+        implementation can distinguish a missing key from a present-but-invalid
+        non-boolean value.
+        """
+        checkpoint = judge_flow.get_checkpoint(judge_result.run_id)
+        if checkpoint is None:
+            raise ValidationError(
+                f"{self.full_name}: judge checkpoint not found for run_id {judge_result.run_id!r}"
+            )
+
+        raw_decision = checkpoint.metadata.get("run_raw_result", NO_VAL)
+        if raw_decision is NO_VAL:
+            raise ValidationError(
+                f"{self.full_name}: judge metadata did not contain 'run_raw_result'"
+            )
+        if not isinstance(raw_decision, bool):
+            raise ValidationError(
+                f"{self.full_name}: judge raw result must be bool, got {type(raw_decision)!r}"
+            )
+
+        return raw_decision
 
     # ------------------------------------------------------------------ #
-    # Invocation
+    # Body augmentation passthrough
     # ------------------------------------------------------------------ #
-    def _invoke(self, inputs: Mapping[str, Any]):
-        maker_ckpts: list[int] = []
-        checker_ckpts: list[int] = []
-        judge_ckpts: Optional[list[int]] = [] if self._judge is not None else None
+    @property
+    def body_steps(self) -> list[Workflow]:
+        """Return the current normalized body step list."""
+        return self._loop_body.steps
 
+    def add_step(self, step: Workflow | StructuredInvokable) -> None:
+        """Append one normalized step to the loop body."""
+        self._loop_body.add_step(step)
+        self._parameters = self._loop_body.parameters
+
+    def insert_step(self, index: int, step: Workflow | StructuredInvokable) -> None:
+        """Insert one normalized step into the loop body."""
+        self._loop_body.insert_step(index, step)
+        self._parameters = self._loop_body.parameters
+
+    def pop_step(self, index: int = -1) -> Workflow:
+        """Remove and return the loop body step at ``index``."""
+        removed = self._loop_body.pop_step(index)
+        self._parameters = self._loop_body.parameters
+        return removed
+
+    def remove_step(self, target: int | str) -> Workflow:
+        """Remove and return a loop body step by index or full name."""
+        removed = self._loop_body.remove_step(target)
+        self._parameters = self._loop_body.parameters
+        return removed
+
+    def replace_step(
+        self,
+        index: int,
+        step: Workflow | StructuredInvokable,
+    ) -> Workflow:
+        """Replace one loop body step and return the displaced step."""
+        displaced = self._loop_body.replace_step(index, step)
+        self._parameters = self._loop_body.parameters
+        return displaced
+
+    # ------------------------------------------------------------------ #
+    # Workflow run hooks
+    # ------------------------------------------------------------------ #
+    def _run(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        """Synchronously execute the iterative loop."""
+        current_inputs: Mapping[str, Any] = inputs
+        final_result: Mapping[str, Any] = dict(inputs)
+        iteration_records: list[dict[str, Any]] = []
+        iterations_completed = 0
         stopped_early = False
 
-        # Initial draft
-        logger.info(f"{self.full_name}: invoking self.maker for initial draft")
-        draft = self._maker.invoke(inputs)
-        maker_ckpts.append(len(self._maker.checkpoints) - 1)
+        for iteration in range(self.max_iterations):
+            logger.info("%s: iteration %d", self.full_name, iteration)
+            body_result = self._loop_body.invoke(current_inputs)
 
-        if self._max_revisions == 0:
-            return {
-                "maker_checkpoints": maker_ckpts,
-                "checker_checkpoints": checker_ckpts,
-                "judge_checkpoints": judge_ckpts,
-                "iterations_run": 0,
-                "stopped_early": False,
-            }, draft
+            if not isinstance(body_result, FlowResultDict):
+                raise ValidationError(
+                    f"{self.full_name}: body returned {type(body_result)!r}, expected FlowResultDict"
+                )
 
-        for _ in range(self._max_revisions):
-            # Checker
-            logger.info(f"{self.full_name}: invoking self.checker for revision {_+1}")
-            next_inputs = self._checker.invoke(draft)
-            checker_ckpts.append(len(self._checker.checkpoints) - 1)
+            judge_run_id: str | None = None
+            judge_decision: bool | None = None
 
-            # Judge (optional)
+            final_result = body_result
+            current_inputs = body_result
+
             if self._judge is not None:
-                logger.info(f"{self.full_name}: self.judge inspecting revision {_+1}")
-                judge_out = self._judge.invoke(next_inputs)
-                judge_ckpts.append(len(self._judge.checkpoints) - 1)
+                logger.info(
+                    "%s: invoking judge for iteration %d",
+                    self.full_name,
+                    iteration,
+                )
+                judge_result = self._judge.invoke(body_result)
 
-                decision = next(iter(judge_out.values()))
-                if not isinstance(decision, bool):
-                    raise TypeError("Judge must return a boolean")
+                if not isinstance(judge_result, FlowResultDict):
+                    raise ValidationError(
+                        f"{self.full_name}: judge returned {type(judge_result)!r}, expected FlowResultDict"
+                    )
 
-                if decision:
-                    logger.info(f"{self.full_name}: judge accepted revision {_+1}, stopping early")
-                    stopped_early = True
-                    break
+                judge_run_id = judge_result.run_id
+                judge_decision = self._extract_judge_decision(
+                    self._judge,
+                    judge_result,
+                )
 
-            # Maker rework
-            logger.info(f"{self.full_name}: applying feedback from revision {_+1} for draft {_+2}")
-            draft = self._maker.invoke(next_inputs)
-            maker_ckpts.append(len(self._maker.checkpoints) - 1)
+            iteration_records.append(
+                {
+                    "iteration": iteration,
+                    "body_run_id": body_result.run_id,
+                    "body_result": dict(body_result),
+                    "judge_instance_id": (
+                        self._judge.instance_id if self._judge is not None else None
+                    ),
+                    "judge_run_id": judge_run_id,
+                    "judge_decision": judge_decision,
+                }
+            )
+            iterations_completed += 1
 
-        return {
-            "maker_checkpoints": maker_ckpts,
-            "checker_checkpoints": checker_ckpts,
-            "judge_checkpoints": judge_ckpts,
-            "iterations_run": len(checker_ckpts),
+            if judge_decision is True:
+                stopped_early = True
+                break
+
+        metadata = {
+            "body_instance_id": self._loop_body.instance_id,
+            "body_full_name": self._loop_body.full_name,
+            "iterations_completed": iterations_completed,
+            "max_iterations": self._max_iterations,
             "stopped_early": stopped_early,
-        }, draft
+            "iteration_records": iteration_records,
+        }
+        return metadata, final_result
+
+    async def _async_run(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        """Asynchronously execute the iterative loop."""
+        current_inputs: Mapping[str, Any] = inputs
+        final_result: Mapping[str, Any] = dict(inputs)
+        iteration_records: list[dict[str, Any]] = []
+        iterations_completed = 0
+        stopped_early = False
+
+        for iteration in range(self._max_iterations):
+            logger.info(
+                "[Async %s]: invoking body iteration %d",
+                self.full_name,
+                iteration,
+            )
+            body_result = await self._loop_body.async_invoke(current_inputs)
+
+            if not isinstance(body_result, FlowResultDict):
+                raise ValidationError(
+                    f"{self.full_name}: async body returned {type(body_result)!r}, expected FlowResultDict"
+                )
+
+            judge_run_id: str | None = None
+            judge_decision: bool | None = None
+
+            final_result = body_result
+            current_inputs = body_result
+
+            if self._judge is not None:
+                logger.info(
+                    "[Async %s]: invoking judge for iteration %d",
+                    self.full_name,
+                    iteration,
+                )
+                judge_result = await self._judge.async_invoke(body_result)
+
+                if not isinstance(judge_result, FlowResultDict):
+                    raise ValidationError(
+                        f"{self.full_name}: async judge returned {type(judge_result)!r}, expected FlowResultDict"
+                    )
+
+                judge_run_id = judge_result.run_id
+                judge_decision = self._extract_judge_decision(
+                    self._judge,
+                    judge_result,
+                )
+
+            iteration_records.append(
+                {
+                    "iteration": iteration,
+                    "body_run_id": body_result.run_id,
+                    "body_result": dict(body_result),
+                    "judge_instance_id": (
+                        self._judge.instance_id if self._judge is not None else None
+                    ),
+                    "judge_run_id": judge_run_id,
+                    "judge_decision": judge_decision,
+                }
+            )
+            iterations_completed += 1
+
+            if judge_decision is True:
+                stopped_early = True
+                break
+
+        metadata = {
+            "body_instance_id": self._loop_body.instance_id,
+            "body_full_name": self._loop_body.full_name,
+            "iterations_completed": iterations_completed,
+            "max_iterations": self._max_iterations,
+            "stopped_early": stopped_early,
+            "iteration_records": iteration_records,
+        }
+        return metadata, final_result
+
+    # ------------------------------------------------------------------ #
+    # Serialization
+    # ------------------------------------------------------------------ #
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the iterative workflow and its normalized children."""
+        data = super().to_dict()
+        data.update(
+            {
+                "loop_body": self.loop_body.to_dict(),
+                "judge": self._judge.to_dict() if self._judge is not None else None,
+                "max_iterations": self._max_iterations,
+            }
+        )
+        return data

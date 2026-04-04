@@ -5,6 +5,7 @@ from typing import Any, Mapping, Dict
 import re
 import threading
 import asyncio
+from uuid import uuid4
 
 from .sentinels import NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order
@@ -139,6 +140,8 @@ class AtomicInvokable(ABC):
         self._filter_extraneous_inputs = filter_extraneous_inputs
         # invoke lock
         self._invoke_lock = threading.RLock()
+        # unique identifier for this invokable instance
+        self._instance_id = str(uuid4())
 
     # ---------------------------------------------------------------- #
     # Name + description with validation
@@ -173,6 +176,11 @@ class AtomicInvokable(ABC):
     def full_name(self) -> str:
         """Fully-qualified name (for logging)."""
         return f"{type(self).__name__}.{self.name}"
+    
+    @property
+    def instance_id(self) -> str:
+        """Unique identifier for this invokable instance."""
+        return self._instance_id
     
     # ---------------------------------------------------------------- #
     # Parameters and return type (primary API)
@@ -335,6 +343,7 @@ class AtomicInvokable(ABC):
         """
         return {
             "type": type(self).__name__,
+            "id": self.instance_id,
             "name": self.name,
             "description": self.description,
             "parameters": [spec.to_dict() for spec in self._parameters],

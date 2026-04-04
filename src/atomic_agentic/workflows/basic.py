@@ -1,99 +1,155 @@
 """Workflow wrappers.
 
-This module contains Workflow adapters and decorators around Tools, Agents, and Workflows.
+This module contains thin workflow adapters around already-structured nodes.
 
-- `BasicFlow` is the thin adapter that normalizes a Tool/Agent/Workflow
-  into the Workflow execution + packaging boundary (replaces ToolFlow/AgentFlow).
+`BasicFlow` wraps either:
+- a `StructuredInvokable`, or
+- another `Workflow`
+
+and exposes it as a workflow node whose responsibilities are limited to:
+- delegating sync/async execution,
+- preserving the wrapped component's input parameters,
+- emitting lightweight metadata for checkpointing.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import (
-    Any,
-    Mapping,
-    Optional,
-    Union,
-    List,
-)
+from collections.abc import Mapping
+from typing import Any, Optional
 
-from ..core.Invokable import AtomicInvokable
-from ..core.Parameters import ParamSpec
-from .base import (
-    Workflow,
-    BundlingPolicy,
-    AbsentValPolicy,
-    DEFAULT_WF_KEY,
-)
+from ..core.Exceptions import ValidationError
+from .StructuredInvokable import StructuredInvokable, StructuredResultDict
+from .base import FlowResultDict, Workflow
 
 logger = logging.getLogger(__name__)
 
-__all__ = [
-    "BasicFlow",
-    "DEFAULT_WF_KEY",
-]
+__all__ = ["BasicFlow"]
+
 
 class BasicFlow(Workflow):
-    """A concrete, generic Workflow wrapper for Tools, Agents, and Workflows.
+    """Thin workflow adapter for structured invokables and workflows.
 
-    BasicFlow wraps a single AtomicInvokable component into a WorkFlow:
+    `BasicFlow` does not perform any output packaging of its own. The wrapped
+    component is expected to already return a mapping-shaped result:
+
+    - `StructuredInvokable` -> `StructuredResultDict`
+    - `Workflow` -> `FlowResultDict`
+
+    The outer workflow layer then records its own checkpoint and wraps the final
+    mapping in a fresh outer `FlowResultDict`.
     """
 
     def __init__(
         self,
-        component: AtomicInvokable,
+        component: StructuredInvokable | Workflow,
         *,
-        output_schema: Optional[Union[type, List[Union[str, ParamSpec]], Mapping[str, Any]]] = None,
-        bundling_policy: Optional[BundlingPolicy] = BundlingPolicy.BUNDLE,
-        absent_val_policy: Optional[AbsentValPolicy] = AbsentValPolicy.RAISE,
-        default_absent_val: Any = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
-        # Store component before calling super
+        if not isinstance(component, (StructuredInvokable, Workflow)):
+            raise TypeError(
+                "BasicFlow.component must be a StructuredInvokable or Workflow, "
+                f"got {type(component)!r}"
+            )
+
         self._component = component
-        # Pass component parameters and return_type to parent for eager initialization and validation
-        filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else component.filter_extraneous_inputs
+
+        resolved_filter = (
+            filter_extraneous_inputs
+            if filter_extraneous_inputs is not None
+            else component.filter_extraneous_inputs
+        )
+
         super().__init__(
-            name=component.name,
-            description=component.description,
+            name=name or component.name,
+            description=description or component.description,
             parameters=component.parameters,
-            output_schema=output_schema,
-            bundling_policy=bundling_policy,
-            absent_val_policy=absent_val_policy,
-            default_absent_val=default_absent_val,
-            filter_extraneous_inputs=filter,
+            filter_extraneous_inputs=resolved_filter,
         )
 
     # ------------------------------------------------------------------ #
-    # BasicFlow Properties
+    # BasicFlow properties
     # ------------------------------------------------------------------ #
     @property
-    def component(self) -> AtomicInvokable:
+    def component(self) -> StructuredInvokable | Workflow:
+        """The wrapped structured component."""
         return self._component
+
     @component.setter
-    def component(self, candidate: AtomicInvokable) -> None:
+    def component(self, candidate: StructuredInvokable | Workflow) -> None:
+        """Swap the wrapped component and refresh only the mirrored parameters."""
+        if not isinstance(candidate, (StructuredInvokable, Workflow)):
+            raise TypeError(
+                "BasicFlow.component must be a StructuredInvokable or Workflow, "
+                f"got {type(candidate)!r}"
+            )
+
         self._component = candidate
         self._parameters = candidate.parameters
-        self._return_type = candidate.return_type
 
     # ------------------------------------------------------------------ #
-    # BasicFlow Helpers
+    # Metadata helpers
     # ------------------------------------------------------------------ #
-    def _invoke(self, inputs: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any]:
-        # Run the component as a workflow, yielding a mapping result.
-        raw = self._component.invoke(inputs)
-        meta = {
-            "type_executed":type(self._component).__name__,
-            "component_executed":self._component.full_name,
+    def _build_metadata(self, result: Mapping[str, Any]) -> dict[str, Any]:
+        """Build checkpoint metadata from the wrapped component and result carrier."""
+        metadata: dict[str, Any] = {
+            "component_type": type(self.component).__name__,
+            "component_id": self.component.instance_id,
+            "component_full_name": self.component.full_name,
+            "result_type": type(result).__name__,
         }
-        return meta, raw
+
+        if isinstance(result, FlowResultDict):
+            metadata["run_id"] = result.run_id
+        elif isinstance(result, StructuredResultDict):
+            metadata["run_raw_result"] = result.raw_result
+
+        return metadata
+
+    # ------------------------------------------------------------------ #
+    # Workflow run hooks
+    # ------------------------------------------------------------------ #
+    def _run(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        """Synchronously delegate to the wrapped component."""
+        result = self.component.invoke(inputs)
+
+        if not isinstance(result, Mapping):
+            raise ValidationError(
+                f"{type(self).__name__}.{self.name}: wrapped component returned "
+                f"a non-mapping result: {type(result)!r}"
+            )
+
+        return self._build_metadata(result), result
+
+    async def _async_run(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        """Asynchronously delegate to the wrapped component's native async path."""
+        result = await self.component.async_invoke(inputs)
+
+        if not isinstance(result, Mapping):
+            raise ValidationError(
+                f"{type(self).__name__}.{self.name}: wrapped component returned "
+                f"a non-mapping async result: {type(result)!r}"
+            )
+
+        return self._build_metadata(result), result
 
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict[str, Any]:
-        d = super().to_dict()
-        d.update({
-            "component": self.component.to_dict()
-        })
-        return d
+        """Serialize the workflow wrapper plus its wrapped component snapshot."""
+        data = super().to_dict()
+        data.update(
+            {
+                "component": self.component.to_dict(),
+            }
+        )
+        return data
