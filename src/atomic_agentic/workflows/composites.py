@@ -17,12 +17,19 @@ __all__ = ["SequentialFlow", "IterativeFlow"]
 
 
 class SequentialFlow(Workflow):
-    """Execute an ordered sequence of workflow-shaped steps.
+    """Execute a fixed ordered sequence of workflow-shaped steps.
 
     Step normalization
     ------------------
     - Existing ``Workflow`` instances are kept as-is.
     - ``StructuredInvokable`` instances are wrapped once in ``BasicFlow``.
+
+    Construction contract
+    ---------------------
+    - ``steps`` must be a non-empty ``list[Workflow | StructuredInvokable]``.
+    - The topology is fixed at construction.
+    - The configured step instances are fixed at construction.
+    - No post-construction step mutation API is provided.
 
     Runtime contract
     ----------------
@@ -43,52 +50,62 @@ class SequentialFlow(Workflow):
         - ``full_name``: executed step full name
         - ``run_id``: that step's workflow run id
 
+    Retrieval helpers
+    -----------------
+    - ``get_step_records(run_id)`` returns the stored step records for a parent
+      sequential run, or ``None`` if the parent run is not found.
+    - ``get_step_results(run_id)`` resolves those records back into child step
+      checkpoint results and returns ``list[result | None]``. ``None`` is used
+      when the child run id no longer resolves to a retained child checkpoint.
+    - ``get_step_result(run_id, step_index)`` is a convenience wrapper over
+      ``get_step_results(run_id)``.
+
     Notes
     -----
-    - No packaging or handoff-schema rewiring is performed here.
-    - No removed-step archive is maintained; displaced steps are returned
-      directly by mutation methods, and sequential checkpoints preserve
-      historical ``step_records`` for interpretation later.
+    This class now enforces *fixed sequence topology*, but this is still only
+    shallow graph immutability. Nested step objects may retain their own broader
+    AA mutability elsewhere.
     """
 
     def __init__(
         self,
         name: str,
         description: str,
-        steps: Optional[list[Workflow | StructuredInvokable]] = None,
+        steps: list[Workflow | StructuredInvokable],
         *,
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
-        normalized_steps = [
-            self._normalize_step(step) for step in (steps or [])
-        ]
+        if not isinstance(steps, list):
+            raise TypeError(
+                f"steps must be a non-empty list[Workflow | StructuredInvokable], got {type(steps)!r}"
+            )
+        if not steps:
+            raise ValueError("steps must not be empty")
 
-        self._steps: list[Workflow] = normalized_steps
+        normalized_steps = tuple(self._normalize_step(step) for step in steps)
 
         resolved_filter = (
             filter_extraneous_inputs
             if filter_extraneous_inputs is not None
-            else (
-                normalized_steps[0].filter_extraneous_inputs
-                if normalized_steps
-                else True
-            )
+            else normalized_steps[0].filter_extraneous_inputs
         )
 
         super().__init__(
             name=name,
             description=description,
-            parameters=normalized_steps[0].parameters if normalized_steps else [],
+            parameters=normalized_steps[0].parameters,
             filter_extraneous_inputs=resolved_filter,
         )
+
+        self._steps: tuple[Workflow, ...] = normalized_steps
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
     @property
-    def steps(self) -> list[Workflow]:
-        """Return a shallow copy of the active steps."""
-        return list(self._steps)
+    def steps(self) -> tuple[Workflow, ...]:
+        """Return the fixed normalized step tuple."""
+        return self._steps
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -105,92 +122,152 @@ class SequentialFlow(Workflow):
             f"got {type(step)!r}"
         )
 
-    def _refresh_parameters(self) -> None:
-        """Refresh the sequential input contract from the first active step."""
-        self._parameters = self._steps[0].parameters if self._steps else []
-
-    def _resolve_existing_index(self, index: int) -> int:
-        """Resolve a list-style index for an existing step."""
-        if not isinstance(index, int):
-            raise TypeError(f"step index must be an int, got {type(index)!r}")
-
-        length = len(self._steps)
-        resolved = index if index >= 0 else length + index
-        if resolved < 0 or resolved >= length:
-            raise IndexError(
-                f"step index {index} out of range for {length} configured steps"
-            )
-        return resolved
-
-    def _find_index_by_full_name(self, full_name: str) -> int:
-        """Find exactly one active step by full name."""
-        if not isinstance(full_name, str) or not full_name.strip():
-            raise ValueError("full_name must be a non-empty string")
-
-        matches = [
-            index
-            for index, step in enumerate(self._steps)
-            if step.full_name == full_name
-        ]
-
-        if not matches:
-            raise ValueError(f"no step found with full_name {full_name!r}")
-        if len(matches) > 1:
-            raise ValueError(
-                f"multiple steps found with full_name {full_name!r}; remove by index instead"
-            )
-        return matches[0]
-
     # ------------------------------------------------------------------ #
-    # Mutation API
+    # Run-oriented retrieval
     # ------------------------------------------------------------------ #
-    def add_step(self, step: Workflow | StructuredInvokable) -> None:
-        """Append one normalized step to the end of the sequence."""
-        self._steps.append(self._normalize_step(step))
-        self._refresh_parameters()
+    def get_step_records(self, run_id: str) -> Optional[list[dict[str, Any]]]:
+        """Return the stored step records for one sequential run.
 
-    def insert_step(self, index: int, step: Workflow | StructuredInvokable) -> None:
-        """Insert one normalized step using standard list.insert semantics."""
-        if not isinstance(index, int):
-            raise TypeError(f"step index must be an int, got {type(index)!r}")
-        self._steps.insert(index, self._normalize_step(step))
-        self._refresh_parameters()
+        Returns ``None`` when the parent sequential checkpoint is not found.
 
-    def pop_step(self, index: int = -1) -> Workflow:
-        """Remove and return the step at ``index``."""
-        resolved = self._resolve_existing_index(index)
-        removed = self._steps.pop(resolved)
-        self._refresh_parameters()
-        return removed
+        The returned list is a shallow-copied snapshot of the stored metadata
+        records. Each record is validated to contain the current required fields.
+        """
+        checkpoint = self.get_checkpoint(run_id)
+        if checkpoint is None:
+            return None
 
-    def remove_step(self, target: int | str) -> Workflow:
-        """Remove and return a step by index or full name."""
-        if isinstance(target, int):
-            resolved = self._resolve_existing_index(target)
-        elif isinstance(target, str):
-            resolved = self._find_index_by_full_name(target)
-        else:
-            raise TypeError(
-                "remove_step target must be an int index or str full_name, "
-                f"got {type(target)!r}"
+        raw_records = checkpoint.metadata.get("step_records")
+        if not isinstance(raw_records, list):
+            raise ValidationError(
+                f"{self.full_name}: checkpoint metadata missing valid 'step_records' list "
+                f"for run_id {run_id!r}"
             )
 
-        removed = self._steps.pop(resolved)
-        self._refresh_parameters()
-        return removed
+        validated_records: list[dict[str, Any]] = []
 
-    def replace_step(
+        for record_index, record in enumerate(raw_records):
+            if not isinstance(record, Mapping):
+                raise ValidationError(
+                    f"{self.full_name}: step_records[{record_index}] must be a mapping, "
+                    f"got {type(record)!r}"
+                )
+
+            step_index = record.get("step")
+            instance_id = record.get("instance_id")
+            full_name = record.get("full_name")
+            child_run_id = record.get("run_id")
+
+            if not isinstance(step_index, int) or step_index < 0:
+                raise ValidationError(
+                    f"{self.full_name}: step_records[{record_index}]['step'] must be an int >= 0, "
+                    f"got {step_index!r}"
+                )
+            if not isinstance(instance_id, str) or not instance_id.strip():
+                raise ValidationError(
+                    f"{self.full_name}: step_records[{record_index}]['instance_id'] must be a "
+                    f"non-empty string, got {instance_id!r}"
+                )
+            if not isinstance(full_name, str) or not full_name.strip():
+                raise ValidationError(
+                    f"{self.full_name}: step_records[{record_index}]['full_name'] must be a "
+                    f"non-empty string, got {full_name!r}"
+                )
+            if not isinstance(child_run_id, str) or not child_run_id.strip():
+                raise ValidationError(
+                    f"{self.full_name}: step_records[{record_index}]['run_id'] must be a "
+                    f"non-empty string, got {child_run_id!r}"
+                )
+
+            validated_records.append(dict(record))
+
+        return validated_records
+
+    def get_step_results(
         self,
-        index: int,
-        step: Workflow | StructuredInvokable,
-    ) -> Workflow:
-        """Replace one step by index and return the displaced step."""
-        resolved = self._resolve_existing_index(index)
-        replacement = self._normalize_step(step)
-        displaced = self._steps[resolved]
-        self._steps[resolved] = replacement
-        self._refresh_parameters()
-        return displaced
+        run_id: str,
+    ) -> Optional[list[dict[str, Any] | None]]:
+        """Return child step results for one sequential run.
+
+        This method uses :meth:`get_step_records` as the source of truth.
+
+        Returns
+        -------
+        Optional[list[dict[str, Any] | None]]
+            - ``None`` if the parent sequential run is not found
+            - otherwise, one entry per stored step record
+            - each entry is the child step checkpoint result dict, or ``None`` if
+              that child run id no longer resolves to a retained child checkpoint
+        """
+        step_records = self.get_step_records(run_id)
+        if step_records is None:
+            return None
+
+        step_results: list[dict[str, Any] | None] = []
+
+        for record_index, record in enumerate(step_records):
+            step_index = record["step"]
+            if step_index >= len(self._steps):
+                raise ValidationError(
+                    f"{self.full_name}: step_records[{record_index}] references step index "
+                    f"{step_index}, but only {len(self._steps)} configured steps exist"
+                )
+
+            step:Workflow = self._steps[step_index]
+
+            recorded_instance_id = record["instance_id"]
+            if step.instance_id != recorded_instance_id:
+                raise ValidationError(
+                    f"{self.full_name}: step_records[{record_index}] instance_id mismatch for "
+                    f"step {step_index}: recorded {recorded_instance_id!r}, current {step.instance_id!r}"
+                )
+
+            child_checkpoint = step.get_checkpoint(record["run_id"])
+            if child_checkpoint is None:
+                step_results.append(None)
+            else:
+                step_results.append(dict(child_checkpoint.result))
+
+        return step_results
+
+    def get_step_result(
+        self,
+        run_id: str,
+        step_index: int,
+    ) -> Optional[dict[str, Any]]:
+        """Return one child step result for one sequential run.
+
+        This method uses :meth:`get_step_results` as its source of truth.
+
+        Returns
+        -------
+        Optional[dict[str, Any]]
+            - ``None`` if the parent sequential run is not found
+            - the resolved child result dict for the requested step
+            - ``None`` if the child checkpoint for that recorded step run id is
+              no longer available
+
+        Raises
+        ------
+        TypeError
+            If ``step_index`` is not an int.
+        IndexError
+            If ``step_index`` is out of range for the stored step results.
+        """
+        if not isinstance(step_index, int):
+            raise TypeError(f"step_index must be an int, got {type(step_index)!r}")
+
+        step_results = self.get_step_results(run_id)
+        if step_results is None:
+            return None
+
+        resolved_index = step_index if step_index >= 0 else len(step_results) + step_index
+        if resolved_index < 0 or resolved_index >= len(step_results):
+            raise IndexError(
+                f"step_index {step_index} out of range for {len(step_results)} stored step result(s)"
+            )
+
+        return step_results[resolved_index]
 
     # ------------------------------------------------------------------ #
     # Workflow run hooks
@@ -274,7 +351,7 @@ class SequentialFlow(Workflow):
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the sequence and its active step snapshots."""
+        """Serialize the fixed sequence and its configured step snapshots."""
         data = super().to_dict()
         data.update(
             {
@@ -283,6 +360,7 @@ class SequentialFlow(Workflow):
             }
         )
         return data
+
 
 class IterativeFlow(Workflow):
     """Repeat a fixed sequential body up to ``max_iterations``.
@@ -298,7 +376,9 @@ class IterativeFlow(Workflow):
     ---------------------
     - ``body_steps`` must be a non-empty ``list[Workflow | StructuredInvokable]``.
     - The body is always normalized inline into a private ``SequentialFlow``.
-    - The normalized loop body is exposed read-only via :attr:`loop_body`.
+    - The normalized loop body topology is fixed at construction.
+    - The normalized loop body is exposed read-only via :attr:`loop_body` and
+      :attr:`body_steps`.
     - The judge is optional and may be any ``AtomicInvokable``.
       Internally, non-``StructuredInvokable`` judges are wrapped in a
       ``StructuredInvokable(output_schema=[])`` and then in a ``BasicFlow``.
@@ -317,6 +397,12 @@ class IterativeFlow(Workflow):
     - If a judge is present, it is invoked after each body run.
     - The loop stops early only when the judge decision is ``True``.
     - Otherwise it continues until ``max_iterations`` is exhausted.
+
+    Mutability notes
+    ----------------
+    - The loop body topology is fixed after construction.
+    - This class no longer re-exposes any loop-body step mutation API.
+    - The optional judge remains separately settable/clearable.
 
     Metadata
     --------
@@ -360,9 +446,6 @@ class IterativeFlow(Workflow):
             Workflow name.
         description:
             Human-readable workflow description.
-        body_steps:
-            Non-empty list of workflow-shaped or structured steps that will be
-            normalized into the private sequential loop body.
         judge:
             Optional judge invokable. The runtime contract requires that the
             normalized judge path ultimately yields a raw boolean decision.
@@ -414,7 +497,7 @@ class IterativeFlow(Workflow):
     # ------------------------------------------------------------------ #
     @property
     def loop_body(self) -> SequentialFlow:
-        """The normalized sequential loop body."""
+        """The fixed normalized sequential loop body."""
         return self._loop_body
 
     @property
@@ -499,46 +582,6 @@ class IterativeFlow(Workflow):
             )
 
         return raw_decision
-
-    # ------------------------------------------------------------------ #
-    # Body augmentation passthrough
-    # ------------------------------------------------------------------ #
-    @property
-    def body_steps(self) -> list[Workflow]:
-        """Return the current normalized body step list."""
-        return self._loop_body.steps
-
-    def add_step(self, step: Workflow | StructuredInvokable) -> None:
-        """Append one normalized step to the loop body."""
-        self._loop_body.add_step(step)
-        self._parameters = self._loop_body.parameters
-
-    def insert_step(self, index: int, step: Workflow | StructuredInvokable) -> None:
-        """Insert one normalized step into the loop body."""
-        self._loop_body.insert_step(index, step)
-        self._parameters = self._loop_body.parameters
-
-    def pop_step(self, index: int = -1) -> Workflow:
-        """Remove and return the loop body step at ``index``."""
-        removed = self._loop_body.pop_step(index)
-        self._parameters = self._loop_body.parameters
-        return removed
-
-    def remove_step(self, target: int | str) -> Workflow:
-        """Remove and return a loop body step by index or full name."""
-        removed = self._loop_body.remove_step(target)
-        self._parameters = self._loop_body.parameters
-        return removed
-
-    def replace_step(
-        self,
-        index: int,
-        step: Workflow | StructuredInvokable,
-    ) -> Workflow:
-        """Replace one loop body step and return the displaced step."""
-        displaced = self._loop_body.replace_step(index, step)
-        self._parameters = self._loop_body.parameters
-        return displaced
 
     # ------------------------------------------------------------------ #
     # Workflow run hooks
