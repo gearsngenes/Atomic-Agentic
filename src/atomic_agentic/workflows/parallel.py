@@ -145,7 +145,6 @@ class ParallelFlow(Workflow):
         self._output_shape: str = self.ENVELOPED
         self._output_names: tuple[str, ...] | None = None
 
-        self._duplicate_key_policy: str = "raise"
         self.duplicate_key_policy = duplicate_key_policy
 
         self.configure_output(
@@ -194,7 +193,7 @@ class ParallelFlow(Workflow):
     @duplicate_key_policy.setter
     def duplicate_key_policy(self, value: str) -> None:
         normalized = str(value).strip().lower()
-        if normalized not in {"raise", "skip", "update"}:
+        if normalized not in {self.RAISE, self.SKIP, self.UPDATE}:
             raise ValueError(
                 "duplicate_key_policy must be one of: 'raise', 'skip', 'update'"
             )

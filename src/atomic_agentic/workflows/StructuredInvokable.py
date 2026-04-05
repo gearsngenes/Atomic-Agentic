@@ -31,6 +31,10 @@ class StructuredResultDict(dict[str, Any]):
 class StructuredInvokable(AtomicInvokable):
     """Wrap an invokable and package its raw output into a mapping."""
 
+    RAISE = "raise"
+    DROP = "drop"
+    FILL = "fill"
+
     def __init__(
         self,
         component: AtomicInvokable,
@@ -43,7 +47,7 @@ class StructuredInvokable(AtomicInvokable):
         map_single_fields: bool = True,
         map_extras: bool = True,
         ignore_unhandled: bool = False,
-        absent_value_mode: str = "RAISE",
+        absent_value_mode: str = RAISE,
         default_absent_value: Any = None,
         none_is_absent: bool = False,
         coerce_to_collection: bool = False,
