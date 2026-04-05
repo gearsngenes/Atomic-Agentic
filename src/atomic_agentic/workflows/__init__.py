@@ -2,7 +2,8 @@ from .base import(
     Workflow,
 )
 from .basic import BasicFlow
-from .composites import SequentialFlow, IterativeFlow
+from .sequential import SequentialFlow
+from .iterative import IterativeFlow
 from .StructuredInvokable import StructuredInvokable
 
 __all__ = ["Workflow",
