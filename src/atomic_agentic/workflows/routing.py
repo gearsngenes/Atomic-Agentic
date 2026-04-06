@@ -22,9 +22,10 @@ class RoutingFlow(Workflow):
     Overview
     --------
     ``RoutingFlow`` is a composite workflow that first invokes a fixed normalized
-    router path on the outer workflow inputs. The router's *raw* result is then
-    interpreted as a strict zero-based branch index selecting one configured
-    branch to invoke.
+    router path on the outer workflow inputs. The router then returns a
+    mapping-shaped result containing the single key ``"branch_selection"``,
+    whose value is interpreted as a strict zero-based branch index selecting one
+    configured branch to invoke.
 
     Construction contract
     ---------------------
@@ -32,6 +33,9 @@ class RoutingFlow(Workflow):
     - Branch topology is fixed at construction and exposed read-only via
       :attr:`branches`.
     - ``router`` is required and must be an ``AtomicInvokable``.
+    - Internally, the router is always normalized into a ``BasicFlow`` whose
+      wrapped component is a fresh ``StructuredInvokable`` exposing the single
+      output key ``"branch_selection"``.
     - The router is normalized once at construction and exposed read-only via
       :attr:`router`.
     - The outer workflow input contract mirrors the normalized router path.
@@ -39,9 +43,9 @@ class RoutingFlow(Workflow):
 
     Routing contract
     ----------------
-    At runtime, the normalized router path must yield a raw result discoverable
-    through its checkpoint metadata under ``"run_raw_result"``. That raw result
-    must satisfy all of the following:
+    At runtime, the normalized router path must yield a mapping-shaped result
+    containing the single key ``"branch_selection"`` whose value must satisfy
+    all of the following:
 
     - be present,
     - be an ``int``,
@@ -90,7 +94,28 @@ class RoutingFlow(Workflow):
             raise ValueError("branches must not be empty")
 
         normalized_branches = tuple(self._normalize_branch(branch) for branch in branches)
-        normalized_router = self._normalize_router(router)
+
+        if not isinstance(router, AtomicInvokable):
+            raise TypeError(
+                f"router must be an AtomicInvokable, got {type(router)!r}"
+            )
+
+        structured_router = StructuredInvokable(
+            component=router,
+            output_schema=["branch_selection"],
+            map_single_fields=True,
+            map_extras=True,
+            ignore_unhandled=True,
+            absent_value_mode=StructuredInvokable.RAISE,
+            none_is_absent=True,
+            coerce_to_collection=True,
+        )
+
+        normalized_router = BasicFlow(
+            component=structured_router,
+            name=f"{name}_router",
+            description=f"Normalized router for routing workflow {name}",
+        )
 
         resolved_filter = (
             filter_extraneous_inputs
@@ -106,7 +131,7 @@ class RoutingFlow(Workflow):
         )
 
         self._branches: tuple[Workflow, ...] = normalized_branches
-        self._router: Workflow = normalized_router
+        self._router: BasicFlow = normalized_router
 
     # ------------------------------------------------------------------ #
     # Read-only properties
@@ -117,8 +142,8 @@ class RoutingFlow(Workflow):
         return self._branches
 
     @property
-    def router(self) -> Workflow:
-        """Return the fixed normalized router workflow."""
+    def router(self) -> BasicFlow:
+        """Return the fixed normalized router wrapper."""
         return self._router
 
     # ------------------------------------------------------------------ #
@@ -176,58 +201,33 @@ class RoutingFlow(Workflow):
             f"got {type(branch)!r}"
         )
 
-    @staticmethod
-    def _normalize_router(router: AtomicInvokable) -> Workflow:
-        """Normalize a router candidate into a fixed workflow-shaped node."""
-        if router is None:
-            raise TypeError("router must be an AtomicInvokable, got None")
-
-        if not isinstance(router, AtomicInvokable):
-            raise TypeError(
-                f"router must be an AtomicInvokable, got {type(router)!r}"
-            )
-
-        if isinstance(router, Workflow):
-            return router
-
-        if isinstance(router, StructuredInvokable):
-            return BasicFlow(component=router)
-
-        return BasicFlow(component=StructuredInvokable(component=router, output_schema=[]))
-
     # ------------------------------------------------------------------ #
     # Internal validation / metadata helpers
     # ------------------------------------------------------------------ #
     def _extract_selected_index(
         self,
-        router_flow: Workflow,
         router_result: FlowResultDict,
     ) -> int:
-        """Extract and validate the raw routing decision for one router run."""
-        checkpoint = router_flow.get_checkpoint(router_result.run_id)
-        if checkpoint is None:
+        """Extract and validate the routing decision from a router result."""
+        selected_index = router_result.get("branch_selection", NO_VAL)
+        if selected_index is NO_VAL:
             raise ValidationError(
-                f"{self.full_name}: router checkpoint not found for run_id {router_result.run_id!r}"
+                f"{self.full_name}: router result did not contain 'branch_selection'"
             )
 
-        raw_decision = checkpoint.metadata.get("run_raw_result", NO_VAL)
-        if raw_decision is NO_VAL:
+        if not isinstance(selected_index, int) or isinstance(selected_index, bool):
             raise ValidationError(
-                f"{self.full_name}: router metadata did not contain 'run_raw_result'"
+                f"{self.full_name}: branch_selection must be a non-bool int, "
+                f"got {type(selected_index)!r}"
             )
 
-        if isinstance(raw_decision, bool) or not isinstance(raw_decision, int):
+        if selected_index < 0 or selected_index >= len(self._branches):
             raise ValidationError(
-                f"{self.full_name}: router raw result must be a non-bool int, got {type(raw_decision)!r}"
-            )
-
-        if raw_decision < 0 or raw_decision >= len(self._branches):
-            raise ValidationError(
-                f"{self.full_name}: router selected index {raw_decision} out of range "
+                f"{self.full_name}: router selected index {selected_index} out of range "
                 f"for {len(self._branches)} configured branch(es)"
             )
 
-        return raw_decision
+        return selected_index
 
     @staticmethod
     def _build_metadata(
@@ -262,7 +262,7 @@ class RoutingFlow(Workflow):
                 f"{self.full_name}: router returned {type(router_result)!r}, expected FlowResultDict"
             )
 
-        selected_index = self._extract_selected_index(self._router, router_result)
+        selected_index = self._extract_selected_index(router_result)
         selected_branch = self._branches[selected_index]
 
         logger.info(
@@ -304,7 +304,7 @@ class RoutingFlow(Workflow):
                 f"{self.full_name}: async router returned {type(router_result)!r}, expected FlowResultDict"
             )
 
-        selected_index = self._extract_selected_index(self._router, router_result)
+        selected_index = self._extract_selected_index(router_result)
         selected_branch = self._branches[selected_index]
 
         logger.info(

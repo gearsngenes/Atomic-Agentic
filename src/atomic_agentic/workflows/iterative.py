@@ -15,6 +15,7 @@ from .basic import BasicFlow
 
 logger = logging.getLogger(__name__)
 
+
 def _always_false() -> bool:
     """Fallback iterative judge implementation."""
     return False
@@ -25,13 +26,6 @@ _fallback_judge_tool = Tool(
     name="always_false_judge",
     namespace="workflow",
     description="Fallback iterative judge that always returns False.",
-)
-
-_fallback_judge_component = StructuredInvokable(
-    component=_fallback_judge_tool,
-    name="fallback_judge_component",
-    description="Fallback iterative judge component that always returns False.",
-    output_schema=[],
 )
 
 
@@ -50,12 +44,11 @@ class IterativeFlow(Workflow):
     - ``body_steps`` must be a non-empty ``list[Workflow | StructuredInvokable]``.
     - The body is always normalized inline into a private ``SequentialFlow``.
     - The normalized loop body topology is fixed at construction.
-    - The normalized loop body is exposed read-only via :attr:`loop_body` and
-      :attr:`body_steps`.
-    - The judge setter accepts any ``AtomicInvokable`` or ``None``.
-    - Internally, the judge wrapper is always present as a normalized ``BasicFlow``.
-    - The judge wrapper itself stays stable across the object's lifecycle; only
-      its wrapped component may change.
+    - The normalized loop body is exposed read-only via :attr:`loop_body`.
+    - ``judge`` accepts any ``AtomicInvokable`` or ``None`` at construction.
+    - Internally, the judge is always a normalized ``BasicFlow`` whose wrapped
+      component is a fresh ``StructuredInvokable`` exposing a single output key
+      named ``"judge_decision"``.
     - Passing ``None`` installs a shared fallback always-false structured judge.
     - ``return_index`` is proxied onto the loop body and controls which body
       step result becomes the body workflow's outer result.
@@ -65,10 +58,9 @@ class IterativeFlow(Workflow):
 
     Judge contract
     --------------
-    The judge is intentionally accepted as a broad ``AtomicInvokable``. At
-    runtime, however, the *normalized* judge path must yield a raw boolean
-    decision discoverable through the judge checkpoint metadata under
-    ``"run_raw_result"``. If it does not, invocation raises ``ValidationError``.
+    At runtime, the normalized judge path must yield a mapping-shaped result
+    containing the single key ``"judge_decision"`` whose value must be a
+    ``bool``. If it does not, invocation raises ``ValidationError``.
 
     Loop semantics
     --------------
@@ -84,9 +76,10 @@ class IterativeFlow(Workflow):
     Mutability notes
     ----------------
     - The loop body topology is fixed after construction.
+    - The judge is fixed after construction.
     - This class does not re-expose any loop-body step mutation API.
     - Only selection policy is mutable post-construction:
-      ``return_index``, ``handoff_index``, ``evaluate_index``, and ``judge``.
+      ``return_index``, ``handoff_index``, ``evaluate_index``, and ``max_iterations``.
 
     Metadata
     --------
@@ -100,11 +93,11 @@ class IterativeFlow(Workflow):
       String reason for loop termination. Currently one of:
         - ``"judge_approved"``
         - ``"max_iterations_exhausted"``
-    - ``resolved_return_step``:
+    - ``return_step_index``:
       Resolved absolute body-step index selected for the body return value.
-    - ``resolved_handoff_step``:
+    - ``handoff_step_index``:
       Resolved absolute body-step index selected for next-iteration inputs.
-    - ``resolved_evaluate_step``:
+    - ``evaluate_step_index``:
       Resolved absolute body-step index selected for judge evaluation.
     - ``judge_component_instance_id``:
       Instance id of the normalized judge component active for this run.
@@ -141,9 +134,8 @@ class IterativeFlow(Workflow):
             normalized into the private sequential loop body.
         judge:
             Optional judge invokable. Passing ``None`` installs the shared
-            fallback always-false judge. The runtime contract still requires
-            that the normalized judge path ultimately yields a raw boolean
-            decision.
+            fallback always-false judge, causing the loop to continue until
+            ``max_iterations`` is exhausted unless another failure occurs.
         max_iterations:
             Maximum number of body iterations to execute per run. Must be > 0.
         return_index:
@@ -193,13 +185,29 @@ class IterativeFlow(Workflow):
             parameters=self._loop_body.parameters,
             filter_extraneous_inputs=resolved_filter,
         )
+        resolved_judge = judge if judge is not None else _fallback_judge_tool
+
+        if not isinstance(resolved_judge, AtomicInvokable):
+            raise TypeError(
+                f"judge must be an AtomicInvokable or None, got {type(resolved_judge)!r}"
+            )
+
+        structured_judge = StructuredInvokable(
+            component=resolved_judge,
+            output_schema=["judge_decision"],
+            map_single_fields=True,
+            map_extras=True,
+            ignore_unhandled=True,
+            absent_value_mode=StructuredInvokable.RAISE,
+            none_is_absent=True,
+            coerce_to_collection=True,
+        )
 
         self._judge = BasicFlow(
-            component=_fallback_judge_component,
+            component=structured_judge,
             name=f"{name}_judge",
             description=f"Normalized judge for iterative workflow {name}",
         )
-        self.judge = judge
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -211,23 +219,8 @@ class IterativeFlow(Workflow):
 
     @property
     def judge(self) -> BasicFlow:
-        """The always-installed normalized judge wrapper."""
+        """The fixed normalized judge wrapper."""
         return self._judge
-
-    @judge.setter
-    def judge(self, candidate: AtomicInvokable | None) -> None:
-        """Set the judge or reset it to the shared fallback always-false judge.
-
-        Notes
-        -----
-        This setter intentionally accepts any ``AtomicInvokable`` or ``None``.
-        It does not attempt to prove at assignment time that a non-fallback
-        candidate can satisfy the runtime boolean-decision contract; that
-        validation still occurs during invocation when the judge result is
-        interpreted.
-        """
-        normalized_component = self._normalize_judge_component(candidate)
-        self._judge.component = normalized_component
 
     @property
     def return_index(self) -> int:
@@ -282,53 +275,22 @@ class IterativeFlow(Workflow):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
-    def _normalize_judge_component(
-        self,
-        candidate: AtomicInvokable | None,
-    ) -> StructuredInvokable:
-        """Normalize a user-supplied judge or fallback into a structured component."""
-        if candidate is None:
-            return _fallback_judge_component
-
-        if not isinstance(candidate, AtomicInvokable):
-            raise TypeError(
-                f"judge must be an AtomicInvokable or None, got {type(candidate)!r}"
-            )
-
-        if isinstance(candidate, StructuredInvokable):
-            return candidate
-
-        return StructuredInvokable(component=candidate, output_schema=[])
-
     def _extract_judge_decision(
         self,
-        judge_flow: Workflow,
         judge_result: FlowResultDict,
     ) -> bool:
-        """Extract and validate the raw boolean decision for one judge run.
-
-        The decision is read from the normalized judge checkpoint metadata under
-        ``"run_raw_result"``. ``NO_VAL`` is used as the fallback sentinel so the
-        implementation can distinguish a missing key from a present-but-invalid
-        non-boolean value.
-        """
-        checkpoint = judge_flow.get_checkpoint(judge_result.run_id)
-        if checkpoint is None:
+        """Extract and validate the boolean decision from a judge result."""
+        decision = judge_result.get("judge_decision", NO_VAL)
+        if decision is NO_VAL:
             raise ValidationError(
-                f"{self.full_name}: judge checkpoint not found for run_id {judge_result.run_id!r}"
+                f"{self.full_name}: judge result did not contain 'judge_decision'"
+            )
+        if not isinstance(decision, bool):
+            raise ValidationError(
+                f"{self.full_name}: judge_decision must be bool, got {type(decision)!r}"
             )
 
-        raw_decision = checkpoint.metadata.get("run_raw_result", NO_VAL)
-        if raw_decision is NO_VAL:
-            raise ValidationError(
-                f"{self.full_name}: judge metadata did not contain 'run_raw_result'"
-            )
-        if not isinstance(raw_decision, bool):
-            raise ValidationError(
-                f"{self.full_name}: judge raw result must be bool, got {type(raw_decision)!r}"
-            )
-
-        return raw_decision
+        return decision
 
     def _require_body_step_result(
         self,
@@ -427,17 +389,16 @@ class IterativeFlow(Workflow):
                     f"{self.full_name}: judge returned {type(judge_result)!r}, expected FlowResultDict"
                 )
 
-            judge_decision = self._extract_judge_decision(
-                self._judge,
-                judge_result,
-            )
+            judge_decision = self._extract_judge_decision(judge_result)
 
-            iteration_records.append({
-                "iteration": iteration,
-                "body_run_id": body_run_id,
-                "judge_run_id": judge_result.run_id,
-                "judge_decision": judge_decision,
-            })
+            iteration_records.append(
+                {
+                    "iteration": iteration,
+                    "body_run_id": body_run_id,
+                    "judge_run_id": judge_result.run_id,
+                    "judge_decision": judge_decision,
+                }
+            )
             iterations_completed += 1
 
             final_result = body_result
@@ -515,17 +476,16 @@ class IterativeFlow(Workflow):
                     f"{self.full_name}: async judge returned {type(judge_result)!r}, expected FlowResultDict"
                 )
 
-            judge_decision = self._extract_judge_decision(
-                self._judge,
-                judge_result,
-            )
+            judge_decision = self._extract_judge_decision(judge_result)
 
-            iteration_records.append({
-                "iteration": iteration,
-                "body_run_id": body_run_id,
-                "judge_run_id": judge_result.run_id,
-                "judge_decision": judge_decision,
-            })
+            iteration_records.append(
+                {
+                    "iteration": iteration,
+                    "body_run_id": body_run_id,
+                    "judge_run_id": judge_result.run_id,
+                    "judge_decision": judge_decision,
+                }
+            )
 
             iterations_completed += 1
 
