@@ -247,65 +247,138 @@ def extract_io(function: Callable) -> tuple[list[ParamSpec], str]:
 
 def is_valid_parameter_order(parameters: list[ParamSpec]) -> bool:
     """
-    Validate that parameters follow the correct signature order.
-    
-    Python parameter order rules:
-    1. POSITIONAL_ONLY (/)
-    2. POSITIONAL_OR_KEYWORD
-    3. VAR_POSITIONAL (*args)
-    4. KEYWORD_ONLY
-    5. VAR_KEYWORD (**kwargs)
-    
+    Validate that parameters follow Python-compatible signature rules.
+
+    Validates:
+    1. No duplicate parameter names.
+    2. Parameter kinds appear in valid order:
+       POSITIONAL_ONLY -> POSITIONAL_OR_KEYWORD -> VAR_POSITIONAL
+       -> KEYWORD_ONLY -> VAR_KEYWORD
+    3. VAR_POSITIONAL and VAR_KEYWORD appear at most once.
+    4. Defaults in the positional-capable section follow Python's trailing-default rule:
+       once a POSITIONAL_ONLY or POSITIONAL_OR_KEYWORD parameter has a default,
+       all later parameters in that same section must also have defaults.
+    5. KEYWORD_ONLY parameters may be mixed required/optional in any order.
+    6. VAR_POSITIONAL / VAR_KEYWORD must not declare defaults.
+
     Parameters
     ----------
     parameters : list[ParamSpec]
         List of parameter specifications to validate.
-    
+
     Returns
     -------
     bool
         True if valid ordering. Raises SchemaError if invalid.
-    
+
     Raises
     ------
     SchemaError
-        If parameters are out of order or contain duplicates.
-    """    
-    # Check for duplicate names
-    names = [p.name for p in parameters]
-    if len(names) != len(set(names)):
-        duplicates = [n for n in names if names.count(n) > 1]
-        raise SchemaError(f"Duplicate parameter names: {duplicates}")
-    
-    # Define ordering: kind name to priority
+        If parameters are malformed, out of order, duplicated, or violate
+        default-placement rules.
+    """
+    if not isinstance(parameters, list):
+        raise TypeError(
+            f"is_valid_parameter_order expects list[ParamSpec], got {type(parameters)!r}"
+        )
+
+    if not all(isinstance(spec, ParamSpec) for spec in parameters):
+        raise TypeError("All items in parameters must be ParamSpec instances")
+
+    # ------------------------------------------------------------------
+    # Duplicate names
+    # ------------------------------------------------------------------
+    seen_names: set[str] = set()
+    duplicate_names: list[str] = []
+
+    for spec in parameters:
+        if spec.name in seen_names and spec.name not in duplicate_names:
+            duplicate_names.append(spec.name)
+        seen_names.add(spec.name)
+
+    if duplicate_names:
+        raise SchemaError(f"Duplicate parameter names: {duplicate_names}")
+
+    # ------------------------------------------------------------------
+    # Kind ordering
+    # ------------------------------------------------------------------
     kind_order = {
-        "POSITIONAL_ONLY": 0,
-        "POSITIONAL_OR_KEYWORD": 1,
-        "VAR_POSITIONAL": 2,
-        "KEYWORD_ONLY": 3,
-        "VAR_KEYWORD": 4,
+        ParamSpec.POSITIONAL_ONLY: 0,
+        ParamSpec.POSITIONAL_OR_KEYWORD: 1,
+        ParamSpec.VAR_POSITIONAL: 2,
+        ParamSpec.KEYWORD_ONLY: 3,
+        ParamSpec.VAR_KEYWORD: 4,
     }
-    
+
     last_priority = -1
-    last_kind = None
-    
-    for i, spec in enumerate(parameters):
+    last_kind: str | None = None
+    seen_varpos = False
+    seen_varkw = False
+
+    for index, spec in enumerate(parameters):
         kind = spec.kind
+
         if kind not in kind_order:
-            raise SchemaError(f"Unknown parameter kind: {kind!r} at index {i}")
-        
+            raise SchemaError(f"Unknown parameter kind: {kind!r} at index {index}")
+
         priority = kind_order[kind]
-        
-        # Check ordering: priority must not decrease
         if priority < last_priority:
             raise SchemaError(
-                f"Invalid parameter order at index {i}: "
-                f"{kind} (priority {priority}) comes after {last_kind} (priority {last_priority})"
+                f"Invalid parameter order at index {index}: "
+                f"{kind} comes after {last_kind}"
             )
-        
+
+        if kind == ParamSpec.VAR_POSITIONAL:
+            if seen_varpos:
+                raise SchemaError("Only one VAR_POSITIONAL parameter is allowed")
+            seen_varpos = True
+            if spec.default is not NO_VAL:
+                raise SchemaError(
+                    f"VAR_POSITIONAL parameter {spec.name!r} cannot have a default"
+                )
+
+        elif kind == ParamSpec.VAR_KEYWORD:
+            if seen_varkw:
+                raise SchemaError("Only one VAR_KEYWORD parameter is allowed")
+            seen_varkw = True
+            if spec.default is not NO_VAL:
+                raise SchemaError(
+                    f"VAR_KEYWORD parameter {spec.name!r} cannot have a default"
+                )
+
         last_priority = priority
         last_kind = kind
-    
+
+    # ------------------------------------------------------------------
+    # Default placement
+    # ------------------------------------------------------------------
+    #
+    # Python's trailing-default rule applies only to parameters that can be
+    # passed positionally:
+    #   POSITIONAL_ONLY + POSITIONAL_OR_KEYWORD
+    #
+    # KEYWORD_ONLY parameters are a separate section and may be mixed
+    # required/optional in any order.
+    # ------------------------------------------------------------------
+    saw_default_in_positional_section = False
+
+    for index, spec in enumerate(parameters):
+        kind = spec.kind
+        has_default = spec.default is not NO_VAL
+
+        if kind in (ParamSpec.POSITIONAL_ONLY, ParamSpec.POSITIONAL_OR_KEYWORD):
+            if has_default:
+                saw_default_in_positional_section = True
+            elif saw_default_in_positional_section:
+                raise SchemaError(
+                    f"Required parameter {spec.name!r} at index {index} cannot follow "
+                    "a defaulted positional parameter"
+                )
+
+        elif kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.KEYWORD_ONLY, ParamSpec.VAR_KEYWORD):
+            # Separate section; no positional trailing-default rule applies here.
+            continue
+
     return True
 
 
