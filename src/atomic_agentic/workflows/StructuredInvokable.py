@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import logging
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Callable
 
 from ..core.Exceptions import PackagingError
 from ..core.Invokable import AtomicInvokable
 from ..core.Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from ..core.sentinels import NO_VAL
+from ..tools import toolify
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ class StructuredInvokable(AtomicInvokable):
 
     def __init__(
         self,
-        component: AtomicInvokable,
+        component: AtomicInvokable | Callable[..., Any],
         name: Optional[str] = None,
         description: Optional[str] = None,
         *,
@@ -54,9 +55,9 @@ class StructuredInvokable(AtomicInvokable):
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         """Initialize a structured-output wrapper around an invokable."""
-        if not isinstance(component, AtomicInvokable):
+        if not isinstance(component, (AtomicInvokable, Callable)):
             raise TypeError(
-                f"component must be an AtomicInvokable, got {type(component)!r}"
+                f"component must be an AtomicInvokable or callable, got {type(component)!r}"
             )
 
         resolved_filter = (
@@ -66,7 +67,7 @@ class StructuredInvokable(AtomicInvokable):
         )
 
         # Store the wrapped component before any downstream property usage.
-        self._component = component
+        self._component = component if isinstance(component, AtomicInvokable) else toolify(component)
 
         # Delegate the core invokable contract to AtomicInvokable.
         # - inputs mirror the wrapped component's parameters
