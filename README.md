@@ -166,14 +166,14 @@ print(result)
 
 ------------------------------------------------------------------------
 
+
 ## Quickstart D: Tool-Calling Agents
 
 Atomic-Agentic also supports autonomous **tool-calling agent classes**.
 
-`PlanActAgent` decomposes prompts into a sequence of steps and executes
-those steps using tools.
+`PlanActAgent` decomposes prompts into a sequence of steps and executes those steps using tools.
 
-``` python
+```python
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.tools.Plugins import MATH_TOOLS
@@ -194,35 +194,45 @@ print(result)
 
 ------------------------------------------------------------------------
 
+## Structured Output: StructuredInvokable
+
+Atomic-Agentic uses `StructuredInvokable` to transform and validate outputs from tools, agents, or other AtomicInvokable objects. This ensures outputs conform to a specified schema and handles missing or extra fields robustly.
+
+**Minimal Example:**
+
+```python
+from atomic_agentic.workflows import StructuredInvokable
+from atomic_agentic.tools import Tool
+
+def raw_tool(x, y):
+    return x + y, x * y
+
+schema = ["sum", "product"]
+structured = StructuredInvokable(component=Tool(raw_tool), output_schema=schema)
+result = structured.invoke({"x": 2, "y": 3})
+print(result)  # {'sum': 5, 'product': 6}
+```
+
+See the `StructuredInvokable` docstring for advanced options (absent value handling, mapping extras, etc).
+
+------------------------------------------------------------------------
+
 ## Workflows
 
-Workflows orchestrate Atomic-Agentic primitives into deterministic
-pipelines.
+Workflows orchestrate Atomic-Agentic primitives into deterministic pipelines. They provide patterns for composition, branching, iteration, and parallelism, enabling you to build complex agentic systems from modular components.
 
-They can coordinate:
+**Workflow classes include:**
+- `BasicFlow` – wraps a single component
+- `SequentialFlow` – chains steps in sequence
+- `ParallelFlow` – runs branches concurrently
+- `RoutingFlow` – routes input to a selected branch
+- `IterativeFlow` – loops until a judge condition is met
 
--   Tools
--   LLM Engines
--   Agents
--   other Workflows
+**Note:**
+Workflows do not perform output packaging themselves. Always use `StructuredInvokable` to enforce output schemas and handle missing/extra fields.
 
-A complete example can be found in:
-
-examples/Agentic_Research/AtomicWorkflowResearcher.py
-
-This example builds a research pipeline using:
-
--   a Tavily research tool
--   a **Maker-Checker workflow**
--   a **SequentialFlow pipeline**
-
-The pipeline structure is:
-
-Research Tool → Writer Agent → Critic Agent → Judge
-
-The MakerCheckerFlow iteratively refines the report until the judge
-approves the output, while SequentialFlow connects the research stage
-with the refinement pipeline.
+**For practical workflow usage and advanced patterns, see the examples in:**
+`examples/Workflow_Examples/`
 
 ------------------------------------------------------------------------
 
@@ -248,8 +258,9 @@ with the refinement pipeline.
     │       ├── agents/
     │       ├── core/
     │       ├── engines/
+    |       ├── mcp/
     │       ├── tools/
-    │       └── workflows/
+    │       ├── workflows/
     │       ├── __init__.py
     │       ├── _version.py
     │       └── py.typed
