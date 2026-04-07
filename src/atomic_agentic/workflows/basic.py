@@ -83,43 +83,34 @@ class BasicFlow(Workflow[BasicFlowRunMetadata]):
     # ------------------------------------------------------------------ #
     def _build_metadata(self, result: Mapping[str, Any]) -> BasicFlowRunMetadata:
         """Build typed checkpoint metadata from the wrapped component and result carrier."""
-        child_is_workflow = isinstance(self.component, Workflow)
-
-        if child_is_workflow:
-            if not isinstance(result, FlowResultDict):
-                raise ValidationError(
-                    f"{type(self).__name__}.{self.name}: wrapped workflow child returned "
-                    f"{type(result)!r}, expected FlowResultDict"
-                )
-
-            return BasicFlowRunMetadata(
-                child_is_workflow=True,
-                child_id=self.component.instance_id,
-                child_full_name=self.component.full_name,
-                child_run_id=result.run_id,
-                child_raw_result=NO_VAL,
-                has_child_raw_result=False,
-                child_raw_result_type="Any",
+        if not isinstance(result, StructuredResultDict) and not isinstance(result, FlowResultDict):
+            raise ValidationError(
+                f"{type(self).__name__}.{self.name}: wrapped component returned "
+                f"{type(result)!r}, expected StructuredResultDict or FlowResultDict"
             )
-
-        if not isinstance(result, StructuredResultDict):
+        child_is_workflow = isinstance(self.component, Workflow)
+        if child_is_workflow and isinstance(result, StructuredResultDict):
+            raise ValidationError(
+                f"{type(self).__name__}.{self.name}: wrapped workflow child returned "
+                f"{type(result)!r}, expected FlowResultDict"
+            )
+        elif not child_is_workflow and isinstance(result, FlowResultDict):
             raise ValidationError(
                 f"{type(self).__name__}.{self.name}: wrapped structured child returned "
                 f"{type(result)!r}, expected StructuredResultDict"
             )
-
-        raw_result = result.raw_result
+        raw_result = result.raw_result if not child_is_workflow else NO_VAL
         raw_result_type = type(raw_result).__name__ if raw_result is not NO_VAL else "Any"
 
         return BasicFlowRunMetadata(
-            child_is_workflow=False,
-            child_id=self.component.instance_id,
-            child_full_name=self.component.full_name,
-            child_run_id=NO_VAL,
-            child_raw_result=raw_result,
-            has_child_raw_result=True,
-            child_raw_result_type=raw_result_type,
-        )
+                child_is_workflow=child_is_workflow,
+                child_id=self.component.instance_id,
+                child_full_name=self.component.full_name,
+                child_run_id=result.run_id if child_is_workflow else NO_VAL,
+                child_raw_result=raw_result,
+                has_child_raw_result=not child_is_workflow,
+                child_raw_result_type=raw_result_type,
+            )
 
     # ------------------------------------------------------------------ #
     # Workflow run hooks
