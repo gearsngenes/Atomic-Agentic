@@ -21,13 +21,14 @@ from typing import Any, Optional
 from ..core.Exceptions import ValidationError
 from .StructuredInvokable import StructuredInvokable, StructuredResultDict
 from .base import FlowResultDict, Workflow
+from .metadata import BasicFlowRunMetadata, NO_VAL
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["BasicFlow"]
 
 
-class BasicFlow(Workflow):
+class BasicFlow(Workflow[BasicFlowRunMetadata]):
     """Thin workflow adapter for structured invokables and workflows.
 
     `BasicFlow` does not perform any output packaging of its own. The wrapped
@@ -77,36 +78,48 @@ class BasicFlow(Workflow):
         """The wrapped structured component."""
         return self._component
 
-    @component.setter
-    def component(self, candidate: StructuredInvokable | Workflow) -> None:
-        """Swap the wrapped component and refresh only the mirrored parameters."""
-        if not isinstance(candidate, (StructuredInvokable, Workflow)):
-            raise TypeError(
-                "BasicFlow.component must be a StructuredInvokable or Workflow, "
-                f"got {type(candidate)!r}"
-            )
-
-        self._component = candidate
-        self._parameters = candidate.parameters
-
     # ------------------------------------------------------------------ #
     # Metadata helpers
     # ------------------------------------------------------------------ #
-    def _build_metadata(self, result: Mapping[str, Any]) -> dict[str, Any]:
-        """Build checkpoint metadata from the wrapped component and result carrier."""
-        metadata: dict[str, Any] = {
-            "component_type": type(self.component).__name__,
-            "component_id": self.component.instance_id,
-            "component_full_name": self.component.full_name,
-            "result_type": type(result).__name__,
-        }
+    def _build_metadata(self, result: Mapping[str, Any]) -> BasicFlowRunMetadata:
+        """Build typed checkpoint metadata from the wrapped component and result carrier."""
+        child_is_workflow = isinstance(self.component, Workflow)
 
-        if isinstance(result, FlowResultDict):
-            metadata["run_id"] = result.run_id
-        elif isinstance(result, StructuredResultDict):
-            metadata["run_raw_result"] = result.raw_result
+        if child_is_workflow:
+            if not isinstance(result, FlowResultDict):
+                raise ValidationError(
+                    f"{type(self).__name__}.{self.name}: wrapped workflow child returned "
+                    f"{type(result)!r}, expected FlowResultDict"
+                )
 
-        return metadata
+            return BasicFlowRunMetadata(
+                child_is_workflow=True,
+                child_id=self.component.instance_id,
+                child_full_name=self.component.full_name,
+                child_run_id=result.run_id,
+                child_raw_result=NO_VAL,
+                has_child_raw_result=False,
+                child_raw_result_type="Any",
+            )
+
+        if not isinstance(result, StructuredResultDict):
+            raise ValidationError(
+                f"{type(self).__name__}.{self.name}: wrapped structured child returned "
+                f"{type(result)!r}, expected StructuredResultDict"
+            )
+
+        raw_result = result.raw_result
+        raw_result_type = type(raw_result).__name__ if raw_result is not NO_VAL else "Any"
+
+        return BasicFlowRunMetadata(
+            child_is_workflow=False,
+            child_id=self.component.instance_id,
+            child_full_name=self.component.full_name,
+            child_run_id=NO_VAL,
+            child_raw_result=raw_result,
+            has_child_raw_result=True,
+            child_raw_result_type=raw_result_type,
+        )
 
     # ------------------------------------------------------------------ #
     # Workflow run hooks
@@ -114,7 +127,7 @@ class BasicFlow(Workflow):
     def _run(
         self,
         inputs: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    ) -> tuple[BasicFlowRunMetadata, Mapping[str, Any]]:
         """Synchronously delegate to the wrapped component."""
         result = self.component.invoke(inputs)
 
@@ -129,7 +142,7 @@ class BasicFlow(Workflow):
     async def _async_run(
         self,
         inputs: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    ) -> tuple[BasicFlowRunMetadata, Mapping[str, Any]]:
         """Asynchronously delegate to the wrapped component's native async path."""
         result = await self.component.async_invoke(inputs)
 

@@ -12,6 +12,7 @@ from ..tools import Tool
 from ..core.sentinels import NO_VAL
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
+from .metadata import IterationRecord, IterativeFlowRunMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ _fallback_judge_tool = Tool(
 )
 
 
-class IterativeFlow(Workflow):
+class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
     """Repeat a fixed sequential body up to ``max_iterations``.
 
     Overview
@@ -89,20 +90,18 @@ class IterativeFlow(Workflow):
       Number of completed body iterations.
     - ``max_iterations``:
       Maximum number of iterations permitted for this run.
-    - ``stop_reason``:
-      String reason for loop termination. Currently one of:
-        - ``"judge_approved"``
-        - ``"max_iterations_exhausted"``
+    - ``judge_approved_early``:
+      ``True`` if the loop stopped early because the judge approved a body
+      iteration; ``False`` if the iteration bound was exhausted.
     - ``return_step_index``:
       Resolved absolute body-step index selected for the body return value.
     - ``handoff_step_index``:
       Resolved absolute body-step index selected for next-iteration inputs.
     - ``evaluate_step_index``:
       Resolved absolute body-step index selected for judge evaluation.
-    - ``judge_component_instance_id``:
-      Instance id of the normalized judge component active for this run.
     - ``iteration_records``:
-      ``list[dict[str, Any]]`` where each record contains:
+      ``tuple[IterationRecord, ...]`` where each record contains:
+        - ``iteration``: zero-based iteration number
         - ``body_run_id``: loop-body workflow run id for that iteration
         - ``judge_run_id``: judge workflow run id for that iteration
         - ``judge_decision``: boolean decision for that iteration
@@ -319,35 +318,13 @@ class IterativeFlow(Workflow):
 
         return dict(result)
 
-    def _build_run_metadata(
-        self,
-        *,
-        iterations_completed: int,
-        stop_reason: str,
-        return_step: int,
-        handoff_step: int,
-        evaluate_step: int,
-        iteration_records: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Build the final outer checkpoint metadata for one iterative run."""
-        return {
-            "iterations_completed": iterations_completed,
-            "max_iterations": self._max_iterations,
-            "stop_reason": stop_reason,
-            "return_step_index": return_step,
-            "handoff_step_index": handoff_step,
-            "evaluate_step_index": evaluate_step,
-            "judge_component_instance_id": self._judge.component.instance_id,
-            "iteration_records": iteration_records,
-        }
-
     # ------------------------------------------------------------------ #
     # Workflow run hooks
     # ------------------------------------------------------------------ #
     def _run(
         self,
         inputs: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    ) -> tuple[IterativeFlowRunMetadata, Mapping[str, Any]]:
         """Synchronously execute the iterative loop."""
         resolved_return_step = self._loop_body._resolve_step_index(self.return_index)
         resolved_handoff_step = self._loop_body._resolve_step_index(self.handoff_index)
@@ -355,9 +332,9 @@ class IterativeFlow(Workflow):
 
         current_inputs: Mapping[str, Any] = inputs
         final_result: Mapping[str, Any] = dict(inputs)
-        iteration_records: list[dict[str, Any]] = []
+        iteration_records: list[IterationRecord] = []
         iterations_completed = 0
-        stop_reason = "max_iterations_exhausted"
+        judge_approved_early = False
 
         for iteration in range(self.max_iterations):
             logger.info("%s: iteration %d", self.full_name, iteration)
@@ -372,12 +349,12 @@ class IterativeFlow(Workflow):
 
             handoff_result = self._require_body_step_result(
                 body_run_id,
-                self.handoff_index,
+                resolved_handoff_step,
                 purpose="handoff",
             )
             evaluate_result = self._require_body_step_result(
                 body_run_id,
-                self.evaluate_index,
+                resolved_evaluate_step,
                 purpose="evaluate",
             )
 
@@ -392,12 +369,12 @@ class IterativeFlow(Workflow):
             judge_decision = self._extract_judge_decision(judge_result)
 
             iteration_records.append(
-                {
-                    "iteration": iteration,
-                    "body_run_id": body_run_id,
-                    "judge_run_id": judge_result.run_id,
-                    "judge_decision": judge_decision,
-                }
+                IterationRecord(
+                    iteration=iteration,
+                    body_run_id=body_run_id,
+                    judge_run_id=judge_result.run_id,
+                    judge_decision=judge_decision,
+                )
             )
             iterations_completed += 1
 
@@ -405,38 +382,34 @@ class IterativeFlow(Workflow):
             current_inputs = handoff_result
 
             if judge_decision is True:
-                stop_reason = "judge_approved"
+                judge_approved_early = True
                 break
 
-        metadata = self._build_run_metadata(
+        metadata = IterativeFlowRunMetadata(
             iterations_completed=iterations_completed,
-            stop_reason=stop_reason,
-            return_step=resolved_return_step,
-            handoff_step=resolved_handoff_step,
-            evaluate_step=resolved_evaluate_step,
-            iteration_records=iteration_records,
+            max_iterations=self._max_iterations,
+            judge_approved_early=judge_approved_early,
+            return_step_index=resolved_return_step,
+            handoff_step_index=resolved_handoff_step,
+            evaluate_step_index=resolved_evaluate_step,
+            iteration_records=tuple(iteration_records),
         )
         return metadata, final_result
 
     async def _async_run(
         self,
         inputs: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    ) -> tuple[IterativeFlowRunMetadata, Mapping[str, Any]]:
         """Asynchronously execute the iterative loop."""
-        configured_return_index = self.return_index
-        resolved_return_step = self._loop_body._resolve_step_index(configured_return_index)
-
-        configured_handoff_index = self._handoff_index
-        resolved_handoff_step = self._loop_body._resolve_step_index(configured_handoff_index)
-
-        configured_evaluate_index = self._evaluate_index
-        resolved_evaluate_step = self._loop_body._resolve_step_index(configured_evaluate_index)
+        resolved_return_step = self._loop_body._resolve_step_index(self.return_index)
+        resolved_handoff_step = self._loop_body._resolve_step_index(self.handoff_index)
+        resolved_evaluate_step = self._loop_body._resolve_step_index(self.evaluate_index)
 
         current_inputs: Mapping[str, Any] = inputs
         final_result: Mapping[str, Any] = dict(inputs)
-        iteration_records: list[dict[str, Any]] = []
+        iteration_records: list[IterationRecord] = []
         iterations_completed = 0
-        stop_reason = "max_iterations_exhausted"
+        judge_approved_early = False
 
         for iteration in range(self._max_iterations):
             logger.info(
@@ -455,12 +428,12 @@ class IterativeFlow(Workflow):
 
             handoff_result = self._require_body_step_result(
                 body_run_id,
-                configured_handoff_index,
+                resolved_handoff_step,
                 purpose="handoff",
             )
             evaluate_result = self._require_body_step_result(
                 body_run_id,
-                configured_evaluate_index,
+                resolved_evaluate_step,
                 purpose="evaluate",
             )
 
@@ -479,30 +452,30 @@ class IterativeFlow(Workflow):
             judge_decision = self._extract_judge_decision(judge_result)
 
             iteration_records.append(
-                {
-                    "iteration": iteration,
-                    "body_run_id": body_run_id,
-                    "judge_run_id": judge_result.run_id,
-                    "judge_decision": judge_decision,
-                }
+                IterationRecord(
+                    iteration=iteration,
+                    body_run_id=body_run_id,
+                    judge_run_id=judge_result.run_id,
+                    judge_decision=judge_decision,
+                )
             )
-
             iterations_completed += 1
 
             final_result = body_result
             current_inputs = handoff_result
 
             if judge_decision is True:
-                stop_reason = "judge_approved"
+                judge_approved_early = True
                 break
 
-        metadata = self._build_run_metadata(
+        metadata = IterativeFlowRunMetadata(
             iterations_completed=iterations_completed,
-            stop_reason=stop_reason,
-            return_step=resolved_return_step,
-            handoff_step=resolved_handoff_step,
-            evaluate_step=resolved_evaluate_step,
-            iteration_records=iteration_records,
+            max_iterations=self._max_iterations,
+            judge_approved_early=judge_approved_early,
+            return_step_index=resolved_return_step,
+            handoff_step_index=resolved_handoff_step,
+            evaluate_step_index=resolved_evaluate_step,
+            iteration_records=tuple(iteration_records),
         )
         return metadata, final_result
 

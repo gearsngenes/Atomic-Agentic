@@ -10,13 +10,14 @@ from ..core.sentinels import NO_VAL
 from .StructuredInvokable import StructuredInvokable
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
+from .metadata import ChildRunRecord, RoutingFlowRunMetadata
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["RoutingFlow"]
 
 
-class RoutingFlow(Workflow):
+class RoutingFlow(Workflow[RoutingFlowRunMetadata]):
     """Route one invocation to exactly one fixed branch based on a router result.
 
     Overview
@@ -67,14 +68,12 @@ class RoutingFlow(Workflow):
 
     - ``router_run_id``:
       Child run id of the normalized router invocation.
-    - ``selected_index``:
-      The validated zero-based selected branch index.
-    - ``selected_branch_instance_id``:
-      Instance id of the selected branch.
-    - ``selected_branch_full_name``:
-      Full name of the selected branch.
-    - ``selected_branch_run_id``:
-      Child run id of the selected branch invocation.
+    - ``router_instance_id``:
+      Instance id of the normalized router wrapper.
+    - ``chosen_index``:
+      The validated zero-based chosen branch index.
+    - ``chosen_branch_record``:
+      A ``ChildRunRecord`` describing the chosen branch execution.
     """
 
     def __init__(
@@ -150,7 +149,7 @@ class RoutingFlow(Workflow):
     # Public retrieval helper
     # ------------------------------------------------------------------ #
     def get_router_decision(self, run_id: str) -> Optional[int]:
-        """Return the selected branch index for one parent routing run.
+        """Return the chosen branch index for one parent routing run.
 
         Parameters
         ----------
@@ -161,30 +160,26 @@ class RoutingFlow(Workflow):
         -------
         Optional[int]
             - ``None`` if the parent checkpoint is not found
-            - the validated selected branch index otherwise
+            - the validated chosen branch index otherwise
 
         Raises
         ------
         ValidationError
             If the stored checkpoint metadata does not contain a valid
-            ``selected_index`` entry.
+            ``chosen_index`` entry.
         """
         checkpoint = self.get_checkpoint(run_id)
         if checkpoint is None:
             return None
 
-        selected_index = checkpoint.metadata.get("selected_index", NO_VAL)
-        if selected_index is NO_VAL:
+        chosen_index = checkpoint.metadata.chosen_index
+        if not isinstance(chosen_index, int):
             raise ValidationError(
-                f"{self.full_name}: checkpoint metadata missing 'selected_index' for run_id {run_id!r}"
-            )
-        if not isinstance(selected_index, int) or isinstance(selected_index, bool):
-            raise ValidationError(
-                f"{self.full_name}: checkpoint metadata 'selected_index' must be a non-bool int, "
-                f"got {type(selected_index)!r}"
+                f"{self.full_name}: checkpoint metadata 'chosen_index' must be an int, "
+                f"got {type(chosen_index)!r}"
             )
 
-        return selected_index
+        return chosen_index
 
     # ------------------------------------------------------------------ #
     # Internal normalization helpers
@@ -215,9 +210,9 @@ class RoutingFlow(Workflow):
                 f"{self.full_name}: router result did not contain 'branch_selection'"
             )
 
-        if not isinstance(selected_index, int) or isinstance(selected_index, bool):
+        if not isinstance(selected_index, int):
             raise ValidationError(
-                f"{self.full_name}: branch_selection must be a non-bool int, "
+                f"{self.full_name}: branch_selection must be an int, "
                 f"got {type(selected_index)!r}"
             )
 
@@ -229,31 +224,14 @@ class RoutingFlow(Workflow):
 
         return selected_index
 
-    @staticmethod
-    def _build_metadata(
-        *,
-        router_run_id: str,
-        selected_index: int,
-        selected_branch: Workflow,
-        selected_branch_run_id: str,
-    ) -> dict[str, Any]:
-        """Build per-run outer checkpoint metadata."""
-        return {
-            "router_run_id": router_run_id,
-            "selected_index": selected_index,
-            "selected_branch_instance_id": selected_branch.instance_id,
-            "selected_branch_full_name": selected_branch.full_name,
-            "selected_branch_run_id": selected_branch_run_id,
-        }
-
     # ------------------------------------------------------------------ #
     # Workflow run hooks
     # ------------------------------------------------------------------ #
     def _run(
         self,
         inputs: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-        """Synchronously invoke the router, then exactly one selected branch."""
+    ) -> tuple[RoutingFlowRunMetadata, Mapping[str, Any]]:
+        """Synchronously invoke the router, then exactly one chosen branch."""
         logger.info("%s: invoking router (%s)", self.full_name, self._router.full_name)
         router_result = self._router.invoke(inputs)
 
@@ -279,19 +257,25 @@ class RoutingFlow(Workflow):
                 f"returned {type(selected_result)!r}, expected FlowResultDict"
             )
 
-        metadata = self._build_metadata(
+        metadata = RoutingFlowRunMetadata(
             router_run_id=router_result.run_id,
-            selected_index=selected_index,
-            selected_branch=selected_branch,
-            selected_branch_run_id=selected_result.run_id,
+            router_instance_id=self._router.instance_id,
+            chosen_index=selected_index,
+            chosen_branch_record=ChildRunRecord(
+                slot=selected_index,
+                instance_id=selected_branch.instance_id,
+                full_name=selected_branch.full_name,
+                run_id=selected_result.run_id,
+            ),
         )
+
         return metadata, selected_result
 
     async def _async_run(
         self,
         inputs: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-        """Asynchronously invoke the router, then exactly one selected branch."""
+    ) -> tuple[RoutingFlowRunMetadata, Mapping[str, Any]]:
+        """Asynchronously invoke the router, then exactly one chosen branch."""
         logger.info(
             "[Async %s]: invoking router (%s)",
             self.full_name,
@@ -321,12 +305,18 @@ class RoutingFlow(Workflow):
                 f"returned {type(selected_result)!r}, expected FlowResultDict"
             )
 
-        metadata = self._build_metadata(
+        metadata = RoutingFlowRunMetadata(
             router_run_id=router_result.run_id,
-            selected_index=selected_index,
-            selected_branch=selected_branch,
-            selected_branch_run_id=selected_result.run_id,
+            router_instance_id=self._router.instance_id,
+            chosen_index=selected_index,
+            chosen_branch_record=ChildRunRecord(
+                slot=selected_index,
+                instance_id=selected_branch.instance_id,
+                full_name=selected_branch.full_name,
+                run_id=selected_result.run_id,
+            ),
         )
+
         return metadata, selected_result
 
     # ------------------------------------------------------------------ #

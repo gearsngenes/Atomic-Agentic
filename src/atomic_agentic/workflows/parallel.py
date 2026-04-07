@@ -13,6 +13,7 @@ from ..core.Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_
 from ..core.sentinels import NO_VAL
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
+from .metadata import ChildRunRecord, OutputTopology, ParallelFlowRunMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ __all__ = ["ParallelFlow"]
 _VALID_OUTPUT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-class ParallelFlow(Workflow):
+class ParallelFlow(Workflow[ParallelFlowRunMetadata]):
     """Execute a fixed set of branches concurrently and project one outer result.
 
     Input contract
@@ -36,12 +37,12 @@ class ParallelFlow(Workflow):
         branch's parameters verbatim. That shortcut is intentionally risky:
         the outer workflow may then filter away keys needed by later branches.
 
-    - ``input_shape="enveloped"``
+    - ``input_shape="nested"``
         ``parameters`` are required explicitly, must normalize to a fixed
         ``list[ParamSpec]`` with length exactly equal to ``len(branches)``,
         and may not contain ``VAR_POSITIONAL`` or ``VAR_KEYWORD`` entries.
-        Parameter ``i`` supplies the input payload for branch ``i`` and each
-        such payload must itself be a mapping at runtime.
+        Parameter ``i`` supplies the nested input payload for branch ``i`` and
+        each such payload must itself be a mapping at runtime.
 
     Output contract
     ---------------
@@ -50,12 +51,25 @@ class ParallelFlow(Workflow):
 
     - ``output_indices``:
         Ordered branch indices whose results are forwarded.
-    - ``output_shape="enveloped"``
+    - ``output_shape="nested"``
         Requires ``output_names`` of matching length. Result shape is:
         ``{output_names[i]: branch_result[output_indices[i]]}``
     - ``output_shape="flattened"``
         Selected branch dicts are flattened in ``output_indices`` order using
         ``duplicate_key_policy``.
+
+    Metadata
+    --------
+    Per-run metadata contains:
+
+    - ``branch_records``:
+        ``tuple[ChildRunRecord, ...]`` containing one typed child execution
+        record per executed branch.
+    - ``output_topology``:
+        ``OutputTopology`` describing the resolved outward projection for
+        this run.
+    - ``output_count``:
+        Number of branch results forwarded into the final outer result.
 
     Mutability
     ----------
@@ -64,10 +78,15 @@ class ParallelFlow(Workflow):
     - Output projection remains mutable only through :meth:`configure_output`.
     - ``duplicate_key_policy`` is independently mutable.
     """
+
     # Input/output shape options:
     BROADCAST = "broadcast"
-    ENVELOPED = "enveloped"
-    FLATTENED = "flattened"
+    NESTED = OutputTopology.NESTED
+    FLATTENED = OutputTopology.FLATTENED
+
+    # Compatibility alias for older code paths; prefer ``NESTED``.
+    ENVELOPED = NESTED
+
     # Flattened result duplicate key policies:
     RAISE = "raise"
     SKIP = "skip"
@@ -81,7 +100,7 @@ class ParallelFlow(Workflow):
         *,
         input_shape: str = BROADCAST,
         parameters: type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec] | None = None,
-        output_shape: str = ENVELOPED,
+        output_shape: str = NESTED,
         output_indices: list[int] | None = None,
         output_range: tuple[int, int] | None = None,
         output_names: list[str] | None = None,
@@ -99,14 +118,14 @@ class ParallelFlow(Workflow):
         self._branches: tuple[Workflow, ...] = normalized_branches
 
         normalized_input_shape = str(input_shape).strip().lower()
-        if normalized_input_shape not in {self.BROADCAST, self.ENVELOPED}:
-            raise ValueError("input_shape must be either 'broadcast' or 'enveloped'")
+        if normalized_input_shape not in {self.BROADCAST, self.NESTED}:
+            raise ValueError("input_shape must be either 'broadcast' or 'nested'")
 
         used_parameter_fallback = False
         if parameters is None:
             if normalized_input_shape != self.BROADCAST:
                 raise ValueError(
-                    "parameters are required when input_shape='enveloped'"
+                    "parameters are required when input_shape='nested'"
                 )
             declared_parameters = list(normalized_branches[0].parameters)
             used_parameter_fallback = True
@@ -114,15 +133,15 @@ class ParallelFlow(Workflow):
             declared_parameters = to_paramspec_list(parameters)
             is_valid_parameter_order(declared_parameters)
 
-        if normalized_input_shape == self.ENVELOPED:
+        if normalized_input_shape == self.NESTED:
             if len(declared_parameters) != len(normalized_branches):
                 raise ValueError(
-                    "enveloped input_shape requires len(parameters) == len(branches)"
+                    "nested input_shape requires len(parameters) == len(branches)"
                 )
             for spec in declared_parameters:
                 if spec.kind in {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}:
                     raise ValueError(
-                        "enveloped input_shape does not permit VAR_POSITIONAL or VAR_KEYWORD parameters"
+                        "nested input_shape does not permit VAR_POSITIONAL or VAR_KEYWORD parameters"
                     )
 
         resolved_filter = (
@@ -142,7 +161,7 @@ class ParallelFlow(Workflow):
         self._used_parameter_fallback: bool = used_parameter_fallback
 
         self._output_indices: tuple[int, ...] = tuple()
-        self._output_shape: str = self.ENVELOPED
+        self._output_shape: str = self.NESTED
         self._output_names: tuple[str, ...] | None = None
 
         self.duplicate_key_policy = duplicate_key_policy
@@ -179,7 +198,7 @@ class ParallelFlow(Workflow):
 
     @property
     def output_names(self) -> Optional[list[str]]:
-        """Return the current enveloped output keys, if any."""
+        """Return the current nested output keys, if any."""
         return list(self._output_names) if self._output_names is not None else None
 
     # ------------------------------------------------------------------ #
@@ -209,6 +228,7 @@ class ParallelFlow(Workflow):
         output_range: tuple[int, int] | None = None,
         output_shape: str,
         output_names: list[str] | None = None,
+        duplicate_key_policy: Optional[str] = None,
     ) -> None:
         """Atomically update the output projection contract.
 
@@ -217,7 +237,7 @@ class ParallelFlow(Workflow):
         - Pass either ``output_indices`` or ``output_range``, not both.
         - If neither is supplied, all configured branches are projected in their
           natural order.
-        - ``output_shape='enveloped'`` requires valid ``output_names`` whose
+        - ``output_shape='nested'`` requires valid ``output_names`` whose
           length matches the resolved output count.
         - ``output_shape='flattened'`` requires ``output_names is None``.
         """
@@ -227,15 +247,15 @@ class ParallelFlow(Workflow):
         )
 
         normalized_output_shape = str(output_shape).strip().lower()
-        if normalized_output_shape not in {self.ENVELOPED, self.FLATTENED}:
-            raise ValueError("output_shape must be either 'enveloped' or 'flattened'")
+        if normalized_output_shape not in {self.NESTED, self.FLATTENED}:
+            raise ValueError("output_shape must be either 'nested' or 'flattened'")
 
         normalized_names: tuple[str, ...] | None = None
 
-        if normalized_output_shape == self.ENVELOPED:
+        if normalized_output_shape == self.NESTED:
             if output_names is None:
                 raise ValueError(
-                    "output_names are required when output_shape='enveloped'"
+                    "output_names are required when output_shape='nested'"
                 )
             if not isinstance(output_names, list):
                 raise TypeError(
@@ -268,6 +288,14 @@ class ParallelFlow(Workflow):
             if output_names is not None:
                 raise ValueError(
                     "output_names must be None when output_shape='flattened'"
+                )
+            if not duplicate_key_policy and self._duplicate_key_policy is None:
+                raise ValueError(
+                    "duplicate_key_policy is required when output_shape='flattened'"
+                )
+            if duplicate_key_policy not in {self.RAISE, self.SKIP, self.UPDATE}:
+                raise ValueError(
+                    "duplicate_key_policy must be one of: 'raise', 'skip', 'update'"
                 )
 
         self._output_indices = tuple(resolved_indices)
@@ -363,12 +391,12 @@ class ParallelFlow(Workflow):
                 payload = spec.default
             else:
                 raise ValidationError(
-                    f"{self.full_name}: missing enveloped payload for branch parameter {spec.name!r}"
+                    f"{self.full_name}: missing nested payload for branch parameter {spec.name!r}"
                 )
 
             if not isinstance(payload, Mapping):
                 raise ValidationError(
-                    f"{self.full_name}: enveloped payload for branch {branch_index} "
+                    f"{self.full_name}: nested payload for branch {branch_index} "
                     f"({self._branches[branch_index].full_name}) must be a mapping, "
                     f"got {type(payload)!r}"
                 )
@@ -382,7 +410,7 @@ class ParallelFlow(Workflow):
         branch_results: list[FlowResultDict],
     ) -> dict[str, Any]:
         """Project canonical branch results into the configured outer result shape."""
-        if self._output_shape == self.ENVELOPED:
+        if self._output_shape == self.NESTED:
             assert self._output_names is not None
             return {
                 self._output_names[position]: dict(branch_results[branch_index])
@@ -394,70 +422,46 @@ class ParallelFlow(Workflow):
             branch_result = branch_results[branch_index]
             for key, value in branch_result.items():
                 if key in flattened:
-                    if self._duplicate_key_policy == "raise":
+                    if self._duplicate_key_policy == self.RAISE:
                         raise ValidationError(
                             f"{self.full_name}: duplicate flattened output key {key!r}"
                         )
-                    if self._duplicate_key_policy == "skip":
+                    if self._duplicate_key_policy == self.SKIP:
                         continue
                 flattened[key] = value
 
         return flattened
 
+    def _build_output_topology(self) -> OutputTopology:
+        """Build the typed outward projection descriptor for one run."""
+        if self._output_shape == self.NESTED:
+            return OutputTopology(
+                topology=OutputTopology.NESTED,
+                indices=tuple(self._output_indices),
+                names=tuple(self._output_names) if self._output_names is not None else None,
+                duplicate_key_policy=None,
+            )
+
+        return OutputTopology(
+            topology=OutputTopology.FLATTENED,
+            indices=tuple(self._output_indices),
+            names=None,
+            duplicate_key_policy=self._duplicate_key_policy,
+        )
+
     # ------------------------------------------------------------------ #
     # Retrieval helpers
     # ------------------------------------------------------------------ #
-    def get_branch_records(self, run_id: str) -> Optional[list[dict[str, Any]]]:
-        """Return stored branch execution records for one parent run."""
+    def get_branch_records(
+        self,
+        run_id: str,
+    ) -> Optional[tuple[ChildRunRecord, ...]]:
+        """Return stored typed branch execution records for one parent run."""
         checkpoint = self.get_checkpoint(run_id)
         if checkpoint is None:
             return None
 
-        raw_records = checkpoint.metadata.get("branch_records")
-        if not isinstance(raw_records, list):
-            raise ValidationError(
-                f"{self.full_name}: checkpoint metadata missing valid 'branch_records' list "
-                f"for run_id {run_id!r}"
-            )
-
-        validated_records: list[dict[str, Any]] = []
-
-        for record_index, record in enumerate(raw_records):
-            if not isinstance(record, Mapping):
-                raise ValidationError(
-                    f"{self.full_name}: branch_records[{record_index}] must be a mapping, "
-                    f"got {type(record)!r}"
-                )
-
-            branch_index = record.get("branch")
-            instance_id = record.get("instance_id")
-            full_name = record.get("full_name")
-            child_run_id = record.get("run_id")
-
-            if not isinstance(branch_index, int) or branch_index < 0:
-                raise ValidationError(
-                    f"{self.full_name}: branch_records[{record_index}]['branch'] must be an int >= 0, "
-                    f"got {branch_index!r}"
-                )
-            if not isinstance(instance_id, str) or not instance_id.strip():
-                raise ValidationError(
-                    f"{self.full_name}: branch_records[{record_index}]['instance_id'] must be a "
-                    f"non-empty string, got {instance_id!r}"
-                )
-            if not isinstance(full_name, str) or not full_name.strip():
-                raise ValidationError(
-                    f"{self.full_name}: branch_records[{record_index}]['full_name'] must be a "
-                    f"non-empty string, got {full_name!r}"
-                )
-            if not isinstance(child_run_id, str) or not child_run_id.strip():
-                raise ValidationError(
-                    f"{self.full_name}: branch_records[{record_index}]['run_id'] must be a "
-                    f"non-empty string, got {child_run_id!r}"
-                )
-
-            validated_records.append(dict(record))
-
-        return validated_records
+        return tuple(checkpoint.metadata.branch_records)
 
     def get_branch_results(
         self,
@@ -471,7 +475,7 @@ class ParallelFlow(Workflow):
         branch_results: list[dict[str, Any] | None] = []
 
         for record_index, record in enumerate(branch_records):
-            branch_index = record["branch"]
+            branch_index = record.slot
             if branch_index >= len(self._branches):
                 raise ValidationError(
                     f"{self.full_name}: branch_records[{record_index}] references branch index "
@@ -479,7 +483,7 @@ class ParallelFlow(Workflow):
                 )
 
             branch = self._branches[branch_index]
-            recorded_instance_id = record["instance_id"]
+            recorded_instance_id = record.instance_id
 
             if branch.instance_id != recorded_instance_id:
                 raise ValidationError(
@@ -487,7 +491,7 @@ class ParallelFlow(Workflow):
                     f"branch {branch_index}: recorded {recorded_instance_id!r}, current {branch.instance_id!r}"
                 )
 
-            child_checkpoint = branch.get_checkpoint(record["run_id"])
+            child_checkpoint = branch.get_checkpoint(record.run_id)
             if child_checkpoint is None:
                 branch_results.append(None)
             else:
@@ -525,7 +529,7 @@ class ParallelFlow(Workflow):
     def _run(
         self,
         inputs: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    ) -> tuple[ParallelFlowRunMetadata, Mapping[str, Any]]:
         """Synchronously execute all configured branches concurrently."""
         branch_inputs = self._build_branch_inputs(inputs)
 
@@ -554,31 +558,27 @@ class ParallelFlow(Workflow):
         with ThreadPoolExecutor(max_workers=len(items)) as executor:
             branch_results = list(executor.map(run_one, items))
 
-        branch_records = [
-            {
-                "branch": index,
-                "instance_id": branch.instance_id,
-                "full_name": branch.full_name,
-                "run_id": result.run_id,
-            }
+        branch_records = tuple(
+            ChildRunRecord(
+                slot=index,
+                instance_id=branch.instance_id,
+                full_name=branch.full_name,
+                run_id=result.run_id,
+            )
             for index, (branch, result) in enumerate(zip(self._branches, branch_results))
-        ]
+        )
 
-        metadata = {
-            "branch_records": branch_records,
-            "output_shape": self._output_shape,
-            "output_indices": list(self._output_indices),
-            "output_names": list(self._output_names) if self._output_names is not None else None,
-            "duplicate_key_policy": self._duplicate_key_policy if self._output_shape == "flattened" else None,
-            "branch_count": len(self._branches),
-            "output_count": len(self._output_indices),
-        }
+        metadata = ParallelFlowRunMetadata(
+            branch_records=branch_records,
+            output_topology=self._build_output_topology(),
+            output_count=len(self._output_indices),
+        )
         return metadata, self._project_result(branch_results)
 
     async def _async_run(
         self,
         inputs: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    ) -> tuple[ParallelFlowRunMetadata, Mapping[str, Any]]:
         """Asynchronously execute all configured branches concurrently."""
         branch_inputs = self._build_branch_inputs(inputs)
 
@@ -611,25 +611,21 @@ class ParallelFlow(Workflow):
             )
         )
 
-        branch_records = [
-            {
-                "branch": index,
-                "instance_id": branch.instance_id,
-                "full_name": branch.full_name,
-                "run_id": result.run_id,
-            }
+        branch_records = tuple(
+            ChildRunRecord(
+                slot=index,
+                instance_id=branch.instance_id,
+                full_name=branch.full_name,
+                run_id=result.run_id,
+            )
             for index, (branch, result) in enumerate(zip(self._branches, branch_results))
-        ]
+        )
 
-        metadata = {
-            "branch_records": branch_records,
-            "output_shape": self._output_shape,
-            "output_indices": list(self._output_indices),
-            "output_names": list(self._output_names) if self._output_names is not None else None,
-            "duplicate_key_policy": self._duplicate_key_policy if self._output_shape == "flattened" else None,
-            "branch_count": len(self._branches),
-            "output_count": len(self._output_indices),
-        }
+        metadata = ParallelFlowRunMetadata(
+            branch_records=branch_records,
+            output_topology=self._build_output_topology(),
+            output_count=len(self._output_indices),
+        )
         return metadata, self._project_result(branch_results)
 
     # ------------------------------------------------------------------ #
