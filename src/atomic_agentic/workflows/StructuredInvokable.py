@@ -36,6 +36,12 @@ class StructuredInvokable(AtomicInvokable):
     DROP = "drop"
     FILL = "fill"
 
+    PASSTHROUGH = [ParamSpec(
+        name="__passthrough_mapping__",
+        index=0,
+        kind=ParamSpec.VAR_KEYWORD,
+        type="Mapping[str, Any]",)]
+
     def __init__(
         self,
         component: AtomicInvokable | Callable[..., Any],
@@ -440,6 +446,29 @@ class StructuredInvokable(AtomicInvokable):
         is_sequence_source = isinstance(source, Sequence) and not isinstance(
             source, (str, bytes, bytearray)
         )
+
+        # -------------------------------------------------------------------
+        # Step 3.5: Special passthrough mode for mapping sources with a passthrough schema.
+        #
+        # Special passthrough mode for mapping sources with a passthrough schema.
+        # In this mode, the raw mapping is returned as-is with no packaging or
+        # missing-value handling applied. This is an escape hatch for maximum flexibility
+        # when the source is already a mapping and the schema is just a generic passthrough.
+        # -------------------------------------------------------------------
+        if is_mapping_source and self.output_schema == self.PASSTHROUGH:
+            packaged = {}
+            for key,value in source.items():
+                if not isinstance(key, str):
+                    raise PackagingError(
+                        f"{self.full_name}: passthrough schema requires string keys in raw mapping source, "
+                        f"got key {key!r} of type {type(key).__name__}"
+                    )
+                packaged[str(key)] = value if value is not None and not self.none_is_absent else NO_VAL
+            return packaged
+        if self.output_schema == self.PASSTHROUGH:
+            raise PackagingError(
+                f"{self.full_name}: passthrough schema can only be used with mapping-shaped raw outputs"
+            )
 
         # ------------------------------------------------------------------
         # Step 4: Choose the packaging mode.

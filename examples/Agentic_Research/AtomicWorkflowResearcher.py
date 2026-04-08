@@ -28,8 +28,8 @@ maker_checker = IterativeFlow(
     name="research_report_makerchecker",
     description="Iteratively refine an APA report with early-stop approval.",
     body_steps=[
-        StructuredInvokable(writer, output_schema=["draft"]),
-        StructuredInvokable(critic, output_schema=["revision_notes"]),],
+        StructuredInvokable(writer, output_schema=StructuredInvokable.PASSTHROUGH),
+        StructuredInvokable(critic, output_schema=StructuredInvokable.PASSTHROUGH),],
     judge=judge,
     return_index=0,
     max_iterations=MAX_REVISIONS,
@@ -41,7 +41,9 @@ maker_checker = IterativeFlow(
 flow = SequentialFlow(
     name="atomic_researcher_flow",
     description="Atomic workflow chaining Tavily research with iterative maker-checker refinement.",
-    steps=[StructuredInvokable(research_tool, output_schema=["query", "sources"]), maker_checker],
+    steps=[StructuredInvokable(research_tool,
+                               output_schema=StructuredInvokable.PASSTHROUGH),
+           maker_checker],
 )
 
 def main() -> None:
