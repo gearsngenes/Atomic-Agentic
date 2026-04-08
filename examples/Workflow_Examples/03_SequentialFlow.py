@@ -22,16 +22,16 @@ from atomic_agentic import StructuredInvokable
 # ───────────────────────────────────────────────────────────────────────────────
 
 
-# Step 1: Add x + y, carry forward 'factor'
 def add_and_carry(x: int, y: int, factor: int = 10) -> tuple[int, int]:
+    """Step 1: Add x + y, carry forward 'factor'"""
     return x + y, factor
 
-# Step 2: Multiply value by factor
 def multiply(value: int, factor: int) -> int:
+    """Step 2: Multiply value by factor"""
     return value * factor
 
-# Step 3: Format as message
 def to_message(value: int) -> str:
+    """Step 3: Format value as a message"""
     return f"Final computed value = {value}"
 
 
@@ -39,27 +39,21 @@ def to_message(value: int) -> str:
 def main() -> None:
     # Wrap each function as a Tool, then as a StructuredInvokable with explicit output schema
     step1 = StructuredInvokable(
-        component=toolify(
-            add_and_carry,
-            name="add_and_carry",
-            description="Add x+y and carry factor forward"
-        ),
+        component=add_and_carry,
+        name="add_and_carry",
+        description="Add x+y and carry factor forward",
         output_schema=["value", "factor"]
     )
     step2 = StructuredInvokable(
-        component=toolify(
-            multiply,
-            name="multiply",
-            description="Multiply value by factor"
-        ),
+        component=multiply,
+        name="multiply",
+        description="Multiply value by factor",
         output_schema=["value"]
     )
     step3 = StructuredInvokable(
-        component=toolify(
-            to_message,
-            name="to_message",
-            description="Format value as a message"
-        ),
+        component=to_message,
+        name="to_message",
+        description="Format value as a message",
         output_schema=["message"]
     )
 
