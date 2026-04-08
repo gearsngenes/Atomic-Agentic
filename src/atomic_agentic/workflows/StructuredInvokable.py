@@ -66,6 +66,8 @@ class StructuredInvokable(AtomicInvokable):
                 f"component must be an AtomicInvokable or callable, got {type(component)!r}"
             )
 
+        component = component if isinstance(component, AtomicInvokable) else toolify(component)
+
         resolved_filter = (
             filter_extraneous_inputs
             if filter_extraneous_inputs is not None
@@ -73,7 +75,7 @@ class StructuredInvokable(AtomicInvokable):
         )
 
         # Store the wrapped component before any downstream property usage.
-        self._component = component if isinstance(component, AtomicInvokable) else toolify(component)
+        self._component = component
 
         # Delegate the core invokable contract to AtomicInvokable.
         # - inputs mirror the wrapped component's parameters
