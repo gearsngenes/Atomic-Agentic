@@ -5,6 +5,7 @@ from typing import Any, Mapping, Dict
 import re
 import threading
 import asyncio
+from uuid import uuid4
 
 from .sentinels import NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order
@@ -139,6 +140,8 @@ class AtomicInvokable(ABC):
         self._filter_extraneous_inputs = filter_extraneous_inputs
         # invoke lock
         self._invoke_lock = threading.RLock()
+        # unique identifier for this invokable instance
+        self._instance_id = str(uuid4())
 
     # ---------------------------------------------------------------- #
     # Name + description with validation
@@ -173,6 +176,11 @@ class AtomicInvokable(ABC):
     def full_name(self) -> str:
         """Fully-qualified name (for logging)."""
         return f"{type(self).__name__}.{self.name}"
+    
+    @property
+    def instance_id(self) -> str:
+        """Unique identifier for this invokable instance."""
+        return self._instance_id
     
     # ---------------------------------------------------------------- #
     # Parameters and return type (primary API)
@@ -280,18 +288,49 @@ class AtomicInvokable(ABC):
         """
         if not isinstance(inputs, Mapping):
             raise TypeError(f"{type(self).__name__}.invoke: inputs must be a mapping, got {type(inputs)!r}")
-        # Check if the component has varargs or kwargs parameters
-        has_varparams = self.has_varkwargs or self.has_varargs
-        params = [p.name for p in self.parameters]
 
-        # If filter_extraneous_inputs is True and the component does not have varargs/kwargs, filter out extraneous inputs
+        param_specs = {p.name: p for p in self.parameters}
+        param_names = set(param_specs.keys())
+        vararg_name = next((p.name for p in self.parameters if p.kind == "VAR_POSITIONAL"), None)
+        varkwarg_name = next((p.name for p in self.parameters if p.kind == "VAR_KEYWORD"), None)
+        # 1. Isolate all fields from inputs that exist in parameters (including variadics)
+        filtered = {}
+        for pname in param_names:
+            if pname in inputs:
+                filtered[pname] = inputs[pname]
+
+        # 2. For variadics, sanitize if filter_extraneous_inputs is True
         if self._filter_extraneous_inputs:
-            if not has_varparams:
-                # Filter out extraneous inputs not in the component's parameters
-                inputs = {k: v for k, v in inputs.items() if k in params}
-        # otherwise, pass all inputs through (including extraneous ones)
-        # and let the component handle them (e.g. by raising an error if unexpected)
-        return inputs
+            if vararg_name and vararg_name in filtered:
+                val = filtered[vararg_name]
+                if not isinstance(val, (list, tuple)):
+                    filtered[vararg_name] = tuple()  # or [] if you prefer
+            if varkwarg_name and varkwarg_name in filtered:
+                val = filtered[varkwarg_name]
+                if not isinstance(val, Mapping):
+                    filtered[varkwarg_name] = {}
+
+        # 3. Handle extra fields
+        extra_keys = [k for k in inputs if k not in param_names]
+        extras = {k: inputs[k] for k in extra_keys}
+
+        if varkwarg_name:
+            # Always add extras to VAR_KEYWORD, merging with explicit if present
+            explicit = filtered.get(varkwarg_name, {})
+            # If explicit is not a Mapping, sanitize
+            if not isinstance(explicit, Mapping):
+                explicit = {}
+            merged = dict(explicit)
+            merged.update(extras)
+            filtered[varkwarg_name] = merged
+        else:
+            # No VAR_KEYWORD
+            if not self._filter_extraneous_inputs:
+                # If filter is False, append extras directly
+                filtered.update(extras)
+            # If filter is True, ignore extras
+
+        return filtered
 
     # ---------------------------------------------------------------- #
     # Default metadata serialization
@@ -304,6 +343,7 @@ class AtomicInvokable(ABC):
         """
         return {
             "type": type(self).__name__,
+            "id": self.instance_id,
             "name": self.name,
             "description": self.description,
             "parameters": [spec.to_dict() for spec in self._parameters],

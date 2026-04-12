@@ -1,18 +1,18 @@
 from .base import(
-    NO_VAL,
     Workflow,
-    MappingPolicy,
-    BundlingPolicy,
-    AbsentValPolicy
 )
 from .basic import BasicFlow
-from .composites import SequentialFlow, MakerCheckerFlow
+from .sequential import SequentialFlow
+from .iterative import IterativeFlow
+from .parallel import ParallelFlow
+from .routing import RoutingFlow
+from .StructuredInvokable import StructuredInvokable
 
 __all__ = ["Workflow",
            "BasicFlow",
            "SequentialFlow",
-           "MakerCheckerFlow",
-           "MappingPolicy",
-           "BundlingPolicy",
-           "AbsentValPolicy",
+           "IterativeFlow",
+           "ParallelFlow",
+           "RoutingFlow",
+           "StructuredInvokable",
            ]

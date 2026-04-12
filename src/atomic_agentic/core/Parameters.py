@@ -8,11 +8,12 @@ This module provides:
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Mapping, get_args, get_origin
+from typing import Any, Callable, Mapping, Optional, get_args, get_origin, get_type_hints
 
 from .sentinels import NO_VAL
 from .Exceptions import SchemaError
 
+__all__ = ["ParamSpec", "extract_io", "to_paramspec_list", "is_valid_parameter_order"]
 
 class ParamSpec(dict):
     """Typed parameter specification for callable parameters.
@@ -32,6 +33,12 @@ class ParamSpec(dict):
       - Instances are intentionally immutable (attempts to set items will raise).
       - Use :meth:`to_dict()` for an explicit dict representation.
     """
+    
+    POSITIONAL_ONLY = "POSITIONAL_ONLY"
+    POSITIONAL_OR_KEYWORD = "POSITIONAL_OR_KEYWORD"
+    VAR_POSITIONAL = "VAR_POSITIONAL"
+    KEYWORD_ONLY = "KEYWORD_ONLY"
+    VAR_KEYWORD = "VAR_KEYWORD"
 
     __slots__ = ("_name", "_index", "_kind", "_type", "_default")
 
@@ -240,63 +247,250 @@ def extract_io(function: Callable) -> tuple[list[ParamSpec], str]:
 
 def is_valid_parameter_order(parameters: list[ParamSpec]) -> bool:
     """
-    Validate that parameters follow the correct signature order.
-    
-    Python parameter order rules:
-    1. POSITIONAL_ONLY (/)
-    2. POSITIONAL_OR_KEYWORD
-    3. VAR_POSITIONAL (*args)
-    4. KEYWORD_ONLY
-    5. VAR_KEYWORD (**kwargs)
-    
+    Validate that parameters follow Python-compatible signature rules.
+
+    Validates:
+    1. No duplicate parameter names.
+    2. Parameter kinds appear in valid order:
+       POSITIONAL_ONLY -> POSITIONAL_OR_KEYWORD -> VAR_POSITIONAL
+       -> KEYWORD_ONLY -> VAR_KEYWORD
+    3. VAR_POSITIONAL and VAR_KEYWORD appear at most once.
+    4. Defaults in the positional-capable section follow Python's trailing-default rule:
+       once a POSITIONAL_ONLY or POSITIONAL_OR_KEYWORD parameter has a default,
+       all later parameters in that same section must also have defaults.
+    5. KEYWORD_ONLY parameters may be mixed required/optional in any order.
+    6. VAR_POSITIONAL / VAR_KEYWORD must not declare defaults.
+
     Parameters
     ----------
     parameters : list[ParamSpec]
         List of parameter specifications to validate.
-    
+
     Returns
     -------
     bool
         True if valid ordering. Raises SchemaError if invalid.
-    
+
     Raises
     ------
     SchemaError
-        If parameters are out of order or contain duplicates.
-    """    
-    # Check for duplicate names
-    names = [p.name for p in parameters]
-    if len(names) != len(set(names)):
-        duplicates = [n for n in names if names.count(n) > 1]
-        raise SchemaError(f"Duplicate parameter names: {duplicates}")
-    
-    # Define ordering: kind name to priority
+        If parameters are malformed, out of order, duplicated, or violate
+        default-placement rules.
+    """
+    if not isinstance(parameters, list):
+        raise TypeError(
+            f"is_valid_parameter_order expects list[ParamSpec], got {type(parameters)!r}"
+        )
+
+    if not all(isinstance(spec, ParamSpec) for spec in parameters):
+        raise TypeError("All items in parameters must be ParamSpec instances")
+
+    # ------------------------------------------------------------------
+    # Duplicate names
+    # ------------------------------------------------------------------
+    seen_names: set[str] = set()
+    duplicate_names: list[str] = []
+
+    for spec in parameters:
+        if spec.name in seen_names and spec.name not in duplicate_names:
+            duplicate_names.append(spec.name)
+        seen_names.add(spec.name)
+
+    if duplicate_names:
+        raise SchemaError(f"Duplicate parameter names: {duplicate_names}")
+
+    # ------------------------------------------------------------------
+    # Kind ordering
+    # ------------------------------------------------------------------
     kind_order = {
-        "POSITIONAL_ONLY": 0,
-        "POSITIONAL_OR_KEYWORD": 1,
-        "VAR_POSITIONAL": 2,
-        "KEYWORD_ONLY": 3,
-        "VAR_KEYWORD": 4,
+        ParamSpec.POSITIONAL_ONLY: 0,
+        ParamSpec.POSITIONAL_OR_KEYWORD: 1,
+        ParamSpec.VAR_POSITIONAL: 2,
+        ParamSpec.KEYWORD_ONLY: 3,
+        ParamSpec.VAR_KEYWORD: 4,
     }
-    
+
     last_priority = -1
-    last_kind = None
-    
-    for i, spec in enumerate(parameters):
+    last_kind: str | None = None
+    seen_varpos = False
+    seen_varkw = False
+
+    for index, spec in enumerate(parameters):
         kind = spec.kind
+
         if kind not in kind_order:
-            raise SchemaError(f"Unknown parameter kind: {kind!r} at index {i}")
-        
+            raise SchemaError(f"Unknown parameter kind: {kind!r} at index {index}")
+
         priority = kind_order[kind]
-        
-        # Check ordering: priority must not decrease
         if priority < last_priority:
             raise SchemaError(
-                f"Invalid parameter order at index {i}: "
-                f"{kind} (priority {priority}) comes after {last_kind} (priority {last_priority})"
+                f"Invalid parameter order at index {index}: "
+                f"{kind} comes after {last_kind}"
             )
-        
+
+        if kind == ParamSpec.VAR_POSITIONAL:
+            if seen_varpos:
+                raise SchemaError("Only one VAR_POSITIONAL parameter is allowed")
+            seen_varpos = True
+            if spec.default is not NO_VAL:
+                raise SchemaError(
+                    f"VAR_POSITIONAL parameter {spec.name!r} cannot have a default"
+                )
+
+        elif kind == ParamSpec.VAR_KEYWORD:
+            if seen_varkw:
+                raise SchemaError("Only one VAR_KEYWORD parameter is allowed")
+            seen_varkw = True
+            if spec.default is not NO_VAL:
+                raise SchemaError(
+                    f"VAR_KEYWORD parameter {spec.name!r} cannot have a default"
+                )
+
         last_priority = priority
         last_kind = kind
-    
+
+    # ------------------------------------------------------------------
+    # Default placement
+    # ------------------------------------------------------------------
+    #
+    # Python's trailing-default rule applies only to parameters that can be
+    # passed positionally:
+    #   POSITIONAL_ONLY + POSITIONAL_OR_KEYWORD
+    #
+    # KEYWORD_ONLY parameters are a separate section and may be mixed
+    # required/optional in any order.
+    # ------------------------------------------------------------------
+    saw_default_in_positional_section = False
+
+    for index, spec in enumerate(parameters):
+        kind = spec.kind
+        has_default = spec.default is not NO_VAL
+
+        if kind in (ParamSpec.POSITIONAL_ONLY, ParamSpec.POSITIONAL_OR_KEYWORD):
+            if has_default:
+                saw_default_in_positional_section = True
+            elif saw_default_in_positional_section:
+                raise SchemaError(
+                    f"Required parameter {spec.name!r} at index {index} cannot follow "
+                    "a defaulted positional parameter"
+                )
+
+        elif kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.KEYWORD_ONLY, ParamSpec.VAR_KEYWORD):
+            # Separate section; no positional trailing-default rule applies here.
+            continue
+
     return True
+
+
+def _is_typed_dict_class(obj: Any) -> bool:
+    """Return whether ``obj`` appears to be a TypedDict class."""
+    return (
+        isinstance(obj, type)
+        and issubclass(obj, dict)
+        and hasattr(obj, "__annotations__")
+        and hasattr(obj, "__total__")
+    )
+
+
+def to_paramspec_list(
+    schema: Optional[type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec]],
+) -> list[ParamSpec]:
+    """Normalize supported schema inputs into a fresh canonical ``list[ParamSpec]``.
+
+    Accepted inputs
+    ---------------
+    - ``None`` -> empty list
+    - ``TypedDict`` class
+    - ``list[str]``
+    - ``tuple[str, ...]``
+    - ``set[str]`` using snapshot iteration order
+    - ``list[ParamSpec]``
+
+    Returns
+    -------
+    list[ParamSpec]
+        Fresh ParamSpec objects with canonical sequential indices.
+
+    Raises
+    ------
+    SchemaError
+        If the schema input is unsupported or invalid.
+    """
+    # ------------------------------------------------------------------
+    # None -> empty schema
+    # ------------------------------------------------------------------
+    if schema is None:
+        normalized: list[ParamSpec] = []
+        is_valid_parameter_order(normalized)
+        return normalized
+
+    # ------------------------------------------------------------------
+    # TypedDict class -> use field annotations as ParamSpec.type
+    # ------------------------------------------------------------------
+    if _is_typed_dict_class(schema):
+        hints = get_type_hints(schema)
+        normalized = [
+            ParamSpec(
+                name=name,
+                index=index,
+                kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                type=_format_annotation(annotation),
+                default=NO_VAL,
+            )
+            for index, (name, annotation) in enumerate(hints.items())
+        ]
+        is_valid_parameter_order(normalized)
+        return normalized
+
+    # ------------------------------------------------------------------
+    # list[str] / tuple[str, ...] / set[str]
+    # Snapshot current iteration order for tuples/sets as provided.
+    # ------------------------------------------------------------------
+    if isinstance(schema, (list, tuple, set)):
+        items = list(schema)
+
+        if not items:
+            normalized = []
+            is_valid_parameter_order(normalized)
+            return normalized
+
+        if all(isinstance(item, str) for item in items):
+            normalized = [
+                ParamSpec(
+                    name=item,
+                    index=index,
+                    kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                    type="Any",
+                    default=NO_VAL,
+                )
+                for index, item in enumerate(items)
+            ]
+            is_valid_parameter_order(normalized)
+            return normalized
+
+        if isinstance(schema, list) and all(isinstance(item, ParamSpec) for item in items):
+            normalized = [
+                ParamSpec(
+                    name=item.name,
+                    index=index,
+                    kind=item.kind,
+                    type=item.type,
+                    default=item.default,
+                )
+                for index, item in enumerate(items)
+            ]
+            is_valid_parameter_order(normalized)
+            return normalized
+
+        raise SchemaError(
+            "Schema sequences must be one of: list[str], tuple[str, ...], "
+            "set[str], or list[ParamSpec]."
+        )
+
+    # ------------------------------------------------------------------
+    # Unsupported input
+    # ------------------------------------------------------------------
+    raise SchemaError(
+        "Unsupported schema type. Expected one of: None, TypedDict class, "
+        "list[str], tuple[str, ...], set[str], or list[ParamSpec]."
+    )
