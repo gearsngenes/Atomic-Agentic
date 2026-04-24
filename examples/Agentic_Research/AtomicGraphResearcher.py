@@ -80,6 +80,7 @@ def main():
         "revision_notes": "",
         "draft": "",
         "sources": [],
+        "approved": False,
     }
 
     # Build and compile the graph
