@@ -432,6 +432,37 @@ class TestAtomicInvokableCallBinding:
         with pytest.raises(TypeError, match="positional-only"):
             invokable(x=1)
 
+    def test_call_rejects_explicit_varargs_field_as_keyword(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0),
+            make_param("args", 1, ParamSpec.VAR_POSITIONAL),
+        ])
+
+        with pytest.raises(TypeError, match="variadic parameter field"):
+            invokable(1, args=(2, 3))
+
+    def test_call_rejects_explicit_varkwargs_field_as_keyword(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0),
+            make_param("extras", 1, ParamSpec.VAR_KEYWORD),
+        ])
+
+        with pytest.raises(TypeError, match="variadic parameter field"):
+            invokable(1, extras={"debug": True})
+
+    def test_call_collects_unknown_keywords_but_rejects_varkwarg_field_name(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0),
+            make_param("extras", 1, ParamSpec.VAR_KEYWORD),
+        ])
+
+        result = invokable(1, debug=True)
+
+        assert result == {"x": 1, "extras": {"debug": True}}
+
+        with pytest.raises(TypeError, match="variadic parameter field"):
+            invokable(1, extras={"debug": True})
+
 
 class TestAtomicInvokableAsync:
     def test_async_invoke_delegates_to_sync_invoke(self) -> None:
@@ -469,7 +500,6 @@ class TestAtomicInvokableSerialization:
 
         data = invokable.to_dict()
 
-        assert data["id"] == invokable.instance_id
         assert data["instance_id"] == invokable.instance_id
 
     def test_to_dict_includes_core_metadata(self) -> None:

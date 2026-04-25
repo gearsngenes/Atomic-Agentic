@@ -137,7 +137,7 @@ class AtomicInvokable(ABC):
 
         self._parameters: list[ParamSpec] = parameters
         self._return_type: str = return_type
-        self._filter_extraneous_inputs = filter_extraneous_inputs
+        self.filter_extraneous_inputs = filter_extraneous_inputs
         # invoke lock
         self._invoke_lock = threading.RLock()
         # unique identifier for this invokable instance
@@ -216,6 +216,11 @@ class AtomicInvokable(ABC):
     
     @filter_extraneous_inputs.setter
     def filter_extraneous_inputs(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError(
+                f"{type(self).__name__}.filter_extraneous_inputs must be a bool, "
+                f"got {type(value)!r}"
+            )
         self._filter_extraneous_inputs = value
 
     # ---------------------------------------------------------------- #
@@ -284,51 +289,73 @@ class AtomicInvokable(ABC):
     # ---------------------------------------------------------------- #
     def filter_inputs(self, inputs: Mapping[str, Any]) -> Dict[str, Any]:
         """
-        The standardized superclass self.invoke that enforces the dict-first contract and handles extraneous input filtering.
+        Filter and normalize dict-first inputs according to this invokable's
+        declared parameter contract.
+
+        Behavior
+        --------
+        - Inputs must be a Mapping.
+        - Known parameter keys are retained.
+        - Unknown keys are dropped when filtering is enabled unless **kwargs exists.
+        - Unknown keys are retained when filtering is disabled and no **kwargs exists.
+        - Explicit *args payloads must be list or tuple.
+        - Explicit **kwargs payloads must be a Mapping.
+        - Extra unknown keys are merged into the **kwargs payload when present.
         """
         if not isinstance(inputs, Mapping):
-            raise TypeError(f"{type(self).__name__}.invoke: inputs must be a mapping, got {type(inputs)!r}")
+            raise TypeError(
+                f"{type(self).__name__}.invoke: inputs must be a mapping, "
+                f"got {type(inputs)!r}"
+            )
 
-        param_specs = {p.name: p for p in self.parameters}
-        param_names = set(param_specs.keys())
-        vararg_name = next((p.name for p in self.parameters if p.kind == "VAR_POSITIONAL"), None)
-        varkwarg_name = next((p.name for p in self.parameters if p.kind == "VAR_KEYWORD"), None)
-        # 1. Isolate all fields from inputs that exist in parameters (including variadics)
-        filtered = {}
-        for pname in param_names:
-            if pname in inputs:
-                filtered[pname] = inputs[pname]
+        parameters = self.parameters
+        param_specs = {param.name: param for param in parameters}
+        param_names = set(param_specs)
 
-        # 2. For variadics, sanitize if filter_extraneous_inputs is True
-        if self._filter_extraneous_inputs:
-            if vararg_name and vararg_name in filtered:
-                val = filtered[vararg_name]
-                if not isinstance(val, (list, tuple)):
-                    filtered[vararg_name] = tuple()  # or [] if you prefer
-            if varkwarg_name and varkwarg_name in filtered:
-                val = filtered[varkwarg_name]
-                if not isinstance(val, Mapping):
-                    filtered[varkwarg_name] = {}
+        vararg_spec = next(
+            (param for param in parameters if param.kind == ParamSpec.VAR_POSITIONAL),
+            None,
+        )
+        varkwarg_spec = next(
+            (param for param in parameters if param.kind == ParamSpec.VAR_KEYWORD),
+            None,
+        )
 
-        # 3. Handle extra fields
-        extra_keys = [k for k in inputs if k not in param_names]
-        extras = {k: inputs[k] for k in extra_keys}
+        vararg_name = vararg_spec.name if vararg_spec is not None else None
+        varkwarg_name = varkwarg_spec.name if varkwarg_spec is not None else None
 
-        if varkwarg_name:
-            # Always add extras to VAR_KEYWORD, merging with explicit if present
+        filtered: Dict[str, Any] = {}
+
+        for param_name in param_names:
+            if param_name in inputs:
+                filtered[param_name] = inputs[param_name]
+
+        if vararg_name is not None and vararg_name in filtered:
+            value = filtered[vararg_name]
+            if not isinstance(value, (list, tuple)):
+                raise TypeError(
+                    f"{self.full_name}: explicit VAR_POSITIONAL input "
+                    f"{vararg_name!r} must be a list or tuple, got {type(value)!r}"
+                )
+
+        if varkwarg_name is not None and varkwarg_name in filtered:
+            value = filtered[varkwarg_name]
+            if not isinstance(value, Mapping):
+                raise TypeError(
+                    f"{self.full_name}: explicit VAR_KEYWORD input "
+                    f"{varkwarg_name!r} must be a mapping, got {type(value)!r}"
+                )
+
+        extra_keys = [key for key in inputs if key not in param_names]
+        extras = {key: inputs[key] for key in extra_keys}
+
+        if varkwarg_name is not None:
             explicit = filtered.get(varkwarg_name, {})
-            # If explicit is not a Mapping, sanitize
-            if not isinstance(explicit, Mapping):
-                explicit = {}
             merged = dict(explicit)
             merged.update(extras)
             filtered[varkwarg_name] = merged
-        else:
-            # No VAR_KEYWORD
-            if not self._filter_extraneous_inputs:
-                # If filter is False, append extras directly
-                filtered.update(extras)
-            # If filter is True, ignore extras
+        elif not self._filter_extraneous_inputs:
+            filtered.update(extras)
 
         return filtered
 
@@ -343,7 +370,7 @@ class AtomicInvokable(ABC):
         """
         return {
             "type": type(self).__name__,
-            "id": self.instance_id,
+            "instance_id": self.instance_id,
             "name": self.name,
             "description": self.description,
             "parameters": [spec.to_dict() for spec in self._parameters],
@@ -381,42 +408,108 @@ class AtomicInvokable(ABC):
 
         return await self.async_invoke(inputs)
     
-    def _to_dict_input_conversion(self, *args, **kwargs) -> dict[str, Any]:
-        # ensure we have mutable copies
-        args, kwargs = list(args), dict(kwargs)
-        # number of variable types
-        num_pos = sum(1 for p in self.parameters if p.kind in ("POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD"))
-        # initialize inputs dict
-        inputs = {}
-        # Handle positional arguments
-        cutoff = min(len(args), num_pos)
-        # Raise if too many positional inputs
-        if len(args) > num_pos and not self.has_varargs:
-            raise TypeError(f"{self.full_name} takes at most {num_pos} positional arguments but {len(args)} were given")
-        # Map positional inputs to parameters
-        for i in range(cutoff):
-            inputs[self.parameters[i].name] = args[i]
-        # Handle variable positional arguments (*args)
-        if self.has_varargs and args[cutoff:]:
-            var_arg = next((p for p in self.parameters if p.kind == "VAR_POSITIONAL"), None)
-            inputs[var_arg.name] = tuple(args[cutoff:])  # consume remaining positional args as a tuple
-        # Handle keyword arguments
-        key_param_names = {p.name for p in self.parameters if p.kind in ("POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY")}
-        extra_keys = {}
-        for key, value in kwargs.items():
-            # Add to inputs if key in parameters
-            if key in key_param_names:
+    def _to_dict_input_conversion(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """
+        Convert Python call-style (*args, **kwargs) into the dict-first input shape.
+
+        This method is intentionally Python-call-like:
+        - extra positional arguments populate VAR_POSITIONAL
+        - unknown keyword arguments populate VAR_KEYWORD
+        - explicit VAR_POSITIONAL / VAR_KEYWORD field names are not accepted as
+        keyword arguments in call-style mode; use invoke({...}) for that.
+        """
+        positional_values = list(args)
+        keyword_values = dict(kwargs)
+
+        parameters = self.parameters
+
+        positional_capable = [
+            param
+            for param in parameters
+            if param.kind in {
+                ParamSpec.POSITIONAL_ONLY,
+                ParamSpec.POSITIONAL_OR_KEYWORD,
+            }
+        ]
+        positional_only_names = {
+            param.name
+            for param in parameters
+            if param.kind == ParamSpec.POSITIONAL_ONLY
+        }
+        keyword_bindable_names = {
+            param.name
+            for param in parameters
+            if param.kind in {
+                ParamSpec.POSITIONAL_OR_KEYWORD,
+                ParamSpec.KEYWORD_ONLY,
+            }
+        }
+
+        vararg_spec = next(
+            (param for param in parameters if param.kind == ParamSpec.VAR_POSITIONAL),
+            None,
+        )
+        varkwarg_spec = next(
+            (param for param in parameters if param.kind == ParamSpec.VAR_KEYWORD),
+            None,
+        )
+
+        vararg_name = vararg_spec.name if vararg_spec is not None else None
+        varkwarg_name = varkwarg_spec.name if varkwarg_spec is not None else None
+        variadic_field_names = {
+            name for name in (vararg_name, varkwarg_name) if name is not None
+        }
+
+        inputs: dict[str, Any] = {}
+
+        positional_count = len(positional_capable)
+        cutoff = min(len(positional_values), positional_count)
+
+        if len(positional_values) > positional_count and vararg_spec is None:
+            raise TypeError(
+                f"{self.full_name} takes at most {positional_count} positional "
+                f"arguments but {len(positional_values)} were given"
+            )
+
+        for index in range(cutoff):
+            param = positional_capable[index]
+            inputs[param.name] = positional_values[index]
+
+        if vararg_spec is not None and positional_values[cutoff:]:
+            inputs[vararg_spec.name] = tuple(positional_values[cutoff:])
+
+        extra_keywords: dict[str, Any] = {}
+
+        for key, value in keyword_values.items():
+            if key in positional_only_names:
+                raise TypeError(
+                    f"{self.full_name} got positional-only argument {key!r} "
+                    "passed as keyword"
+                )
+
+            if key in variadic_field_names:
+                raise TypeError(
+                    f"{self.full_name} got variadic parameter field {key!r} as a keyword; "
+                    "pass variadic values positionally or use invoke({...}) for explicit "
+                    "dict-first payloads"
+                )
+
+            if key in keyword_bindable_names:
+                if key in inputs:
+                    raise TypeError(
+                        f"{self.full_name} got multiple values for argument {key!r}"
+                    )
                 inputs[key] = value
-            # Otherwise track as extras
-            else:
-                extra_keys[key] = value
-                
-        if extra_keys:
-            # Raise if extraneous keys can't be handled by a VAR_KEYWORD parameter
-            if not self.has_varkwargs:
-                raise TypeError(f"{self.full_name} got unexpected keyword arguments: {', '.join(extra_keys.keys())}")
-            # Otherwise map them to the VAR_KEYWORD parameter as a dict
-            else:
-                var_kwarg = next((p for p in self.parameters if p.kind == "VAR_KEYWORD"), None)
-                inputs[var_kwarg.name] = extra_keys  # pass extraneous kwargs as a dict 
+                continue
+
+            extra_keywords[key] = value
+
+        if extra_keywords:
+            if varkwarg_spec is None:
+                raise TypeError(
+                    f"{self.full_name} got unexpected keyword arguments: "
+                    f"{', '.join(extra_keywords.keys())}"
+                )
+            inputs[varkwarg_spec.name] = extra_keywords
+
         return inputs

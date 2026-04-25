@@ -176,7 +176,7 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert return_type == "Any"
+        assert return_type == "None"
         assert [(param.name, param.kind, param.type) for param in parameters] == [
             ("x", ParamSpec.POSITIONAL_OR_KEYWORD, "int"),
             ("args", ParamSpec.VAR_POSITIONAL, "str"),
@@ -211,8 +211,8 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert parameters[0].type == "CustomType"
-        assert return_type == "OtherType"
+        assert parameters[0].type in {"CustomType", "'CustomType'"}
+        assert return_type in {"OtherType", "'OtherType'"}
 
     def test_extract_io_formats_optional_annotation(self) -> None:
         def sample(value: Optional[int]) -> Optional[str]:

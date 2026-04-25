@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import inspect
 from typing import Any, Callable, Mapping, Optional, get_args, get_origin, get_type_hints
+import re
 
 from .sentinels import NO_VAL
 from .Exceptions import SchemaError
 
 __all__ = ["ParamSpec", "extract_io", "to_paramspec_list", "is_valid_parameter_order"]
+
 
 class ParamSpec(dict):
     """Typed parameter specification for callable parameters.
@@ -392,6 +394,158 @@ def _is_typed_dict_class(obj: Any) -> bool:
     )
 
 
+_VALID_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_schema_name(name: str) -> str:
+    """Validate and normalize one parameter name from a string schema."""
+    if not isinstance(name, str):
+        raise SchemaError(
+            f"Schema parameter names must be strings, got {type(name)!r}"
+        )
+
+    cleaned = name.strip()
+    if not cleaned:
+        raise SchemaError("Schema parameter names must be non-empty strings")
+
+    if not _VALID_NAME.match(cleaned):
+        raise SchemaError(
+            f"Schema parameter name {cleaned!r} is not a valid identifier"
+        )
+
+    return cleaned
+
+
+def _paramspec_list_from_strings(items: list[str]) -> list[ParamSpec]:
+    """
+    Parse a string schema into a canonical list[ParamSpec].
+
+    Supported string grammar
+    ------------------------
+    - "name"      -> POSITIONAL_OR_KEYWORD before keyword-only mode,
+                     KEYWORD_ONLY after "*" or "*args"
+    - "/"         -> marker converting previous positional-or-keyword names
+                     to POSITIONAL_ONLY
+    - "*"         -> marker starting keyword-only mode
+    - "*args"    -> VAR_POSITIONAL and starts keyword-only mode
+    - "**kwargs" -> VAR_KEYWORD and must be final
+    """
+    normalized: list[ParamSpec] = []
+
+    saw_slash = False
+    keyword_only_mode = False
+    saw_bare_star = False
+    saw_varargs = False
+    saw_varkwargs = False
+    saw_keyword_only_name_after_bare_star = False
+
+    for raw_index, raw_item in enumerate(items):
+        item = raw_item.strip()
+
+        if item == "/":
+            if saw_slash:
+                raise SchemaError("String schema may contain '/' at most once")
+            if keyword_only_mode or saw_varargs or saw_bare_star or saw_varkwargs:
+                raise SchemaError("'/' marker must appear before keyword-only or variadic markers")
+            if not normalized:
+                raise SchemaError("'/' marker requires at least one preceding parameter")
+
+            for spec in normalized:
+                if spec.kind != ParamSpec.POSITIONAL_OR_KEYWORD:
+                    raise SchemaError(
+                        "'/' marker can only convert prior positional-or-keyword parameters"
+                    )
+
+            normalized = [
+                ParamSpec(
+                    name=spec.name,
+                    index=index,
+                    kind=ParamSpec.POSITIONAL_ONLY,
+                    type=spec.type,
+                    default=spec.default,
+                )
+                for index, spec in enumerate(normalized)
+            ]
+            saw_slash = True
+            continue
+
+        if item == "*":
+            if saw_bare_star or saw_varargs:
+                raise SchemaError("String schema may contain only one '*' or '*args' marker")
+            if saw_varkwargs:
+                raise SchemaError("'*' marker cannot appear after '**kwargs'")
+            saw_bare_star = True
+            keyword_only_mode = True
+            continue
+
+        if item.startswith("**"):
+            if saw_varkwargs:
+                raise SchemaError("String schema may contain only one '**kwargs' parameter")
+            if raw_index != len(items) - 1:
+                raise SchemaError("'**kwargs' style parameter must be the final schema item")
+
+            name = _validate_schema_name(item[2:])
+            normalized.append(
+                ParamSpec(
+                    name=name,
+                    index=len(normalized),
+                    kind=ParamSpec.VAR_KEYWORD,
+                    type="Any",
+                    default=NO_VAL,
+                )
+            )
+            saw_varkwargs = True
+            continue
+
+        if item.startswith("*"):
+            if saw_bare_star or saw_varargs:
+                raise SchemaError("String schema may contain only one '*' or '*args' marker")
+            if saw_varkwargs:
+                raise SchemaError("'*args' style parameter cannot appear after '**kwargs'")
+
+            name = _validate_schema_name(item[1:])
+            normalized.append(
+                ParamSpec(
+                    name=name,
+                    index=len(normalized),
+                    kind=ParamSpec.VAR_POSITIONAL,
+                    type="Any",
+                    default=NO_VAL,
+                )
+            )
+            saw_varargs = True
+            keyword_only_mode = True
+            continue
+
+        if saw_varkwargs:
+            raise SchemaError("No schema items may appear after '**kwargs'")
+
+        name = _validate_schema_name(item)
+        kind = (
+            ParamSpec.KEYWORD_ONLY
+            if keyword_only_mode
+            else ParamSpec.POSITIONAL_OR_KEYWORD
+        )
+
+        if saw_bare_star and kind == ParamSpec.KEYWORD_ONLY:
+            saw_keyword_only_name_after_bare_star = True
+
+        normalized.append(
+            ParamSpec(
+                name=name,
+                index=len(normalized),
+                kind=kind,
+                type="Any",
+                default=NO_VAL,
+            )
+        )
+
+    if saw_bare_star and not saw_keyword_only_name_after_bare_star:
+        raise SchemaError("Bare '*' marker must be followed by at least one keyword-only parameter")
+
+    return normalized
+
+
 def to_paramspec_list(
     schema: Optional[type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec]],
 ) -> list[ParamSpec]:
@@ -401,9 +555,12 @@ def to_paramspec_list(
     ---------------
     - ``None`` -> empty list
     - ``TypedDict`` class
-    - ``list[str]``
-    - ``tuple[str, ...]``
-    - ``set[str]`` using snapshot iteration order
+    - ``list[str]``, ``tuple[str, ...]``, or ``set[str]`` using marker grammar:
+      - ``"name"`` -> normal parameter, or keyword-only after ``"*"`` / ``"*args"``
+      - ``"/"`` -> converts preceding normal parameters to positional-only
+      - ``"*"`` -> starts keyword-only section
+      - ``"*args"`` -> var positional and starts keyword-only section
+      - ``"**kwargs"`` -> var keyword and must be final
     - ``list[ParamSpec]``
 
     Returns
@@ -455,16 +612,7 @@ def to_paramspec_list(
             return normalized
 
         if all(isinstance(item, str) for item in items):
-            normalized = [
-                ParamSpec(
-                    name=item,
-                    index=index,
-                    kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-                    type="Any",
-                    default=NO_VAL,
-                )
-                for index, item in enumerate(items)
-            ]
+            normalized = _paramspec_list_from_strings(items)
             is_valid_parameter_order(normalized)
             return normalized
 
