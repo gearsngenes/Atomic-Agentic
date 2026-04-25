@@ -612,6 +612,8 @@ class Agent(AtomicInvokable):
             if self._context_enabled and self._history:
                 if self._history_window is None:
                     prior = self._history
+                elif self._history_window == 0:
+                    prior = []
                 else:
                     window = min(self._history_window * 2, len(self._history))
                     prior = self._history[-(window):]
