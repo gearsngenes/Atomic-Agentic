@@ -14,3 +14,10 @@ dist/
 .mypy_cache/
 src/atomic_agentic/_version.py
 atomic_ui.py
+
+tests/*/__pycache__/
+tests/__pycache__/
+src/atomic_agentic/__pycache__/
+src/atomic_agentic/*/__pycache__/
+
+.coverage
