@@ -609,7 +609,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         if value is None:
             self._tool_calls_limit = None
             return
-        if not isinstance(value, int) or value < 0:
+        if type(value) is not int or value < 0:
             raise ToolAgentError("tool_calls_limit must be None or an int >= 0.")
         self._tool_calls_limit = value
 
