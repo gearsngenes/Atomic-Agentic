@@ -456,14 +456,15 @@ class StructuredInvokable(AtomicInvokable):
         # -------------------------------------------------------------------
         if is_mapping_source and self.output_schema == self.PASSTHROUGH:
             packaged = {}
-            for key,value in source.items():
+            for key, value in source.items():
                 if not isinstance(key, str):
                     raise PackagingError(
                         f"{self.full_name}: passthrough schema requires string keys in raw mapping source, "
                         f"got key {key!r} of type {type(key).__name__}"
                     )
-                packaged[str(key)] = value if value is not None and not self.none_is_absent else NO_VAL
+                packaged[str(key)] = NO_VAL if value is None and self.none_is_absent else value
             return packaged
+
         if self.output_schema == self.PASSTHROUGH:
             raise PackagingError(
                 f"{self.full_name}: passthrough schema can only be used with mapping-shaped raw outputs"
