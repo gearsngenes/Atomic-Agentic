@@ -16,7 +16,7 @@ behind a single, dictionary-based interface. The result is cleaner
 composition, less integration friction, and systems that are easier to
 reason about and extend.
 
-Through Atomic-Agentic, users can build **agentic systems** out of four
+Through Atomic-Agentic, users can build **agentic systems** out of five
 composable primitives:
 
 -   **Tool** -- A *dict-first adapter layer* for functions, methods, and
