@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 import pytest
+import asyncio
 
+from atomic_agentic.tools import Tool
 from atomic_agentic.agents.base import Agent
 from atomic_agentic.core.Exceptions import AgentError, AgentInvocationError
 from atomic_agentic.core.sentinels import NO_VAL
@@ -88,6 +90,25 @@ def defaulted_post_invoke(result: str = "default") -> str:
 def bad_post_two_required_args(result: str, suffix: str) -> str:
     return f"{result}{suffix}"
 
+def pre_with_two_fields(subject: str, style: str = "plain") -> str:
+    return f"{subject}:{style}"
+
+
+def pre_returns_int(prompt: str) -> int:
+    return 123
+
+
+def post_zero_args() -> str:
+    return "bad"
+
+
+def post_one_required_plus_default(result: str, suffix: str = "!") -> str:
+    return f"{result}{suffix}"
+
+
+class NonStringAsyncLLMEngine(StatefulEchoLLMEngine):
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+        return 123
 
 def make_agent(
     *,
@@ -406,3 +427,196 @@ class TestAgentSerialization:
 
         assert len(history_snapshot) == len(agent.history) + 1
         assert all(message["content"] != "mutated" for message in agent.history)
+
+class TestAgentAsyncInvoke:
+    def test_async_invoke_shapes_prompt_and_post_invoke_packages_result(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = make_agent(engine=engine)
+
+        result = asyncio.run(
+            agent.async_invoke({"topic": "pytest", "tone": "strict"})
+        )
+
+        expected_prompt = "Write about pytest in a strict tone."
+        expected_raw = f"ECHO: {expected_prompt}"
+
+        assert result == {
+            "final": expected_raw,
+            "length": len(expected_raw),
+            "was_postprocessed": True,
+        }
+        assert engine.calls == [
+            [
+                {"role": "system", "content": ROLE_PROMPT},
+                {"role": "user", "content": expected_prompt},
+            ]
+        ]
+
+    def test_async_context_enabled_stores_history(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = make_agent(engine=engine, context_enabled=True)
+
+        first = asyncio.run(
+            agent.async_invoke({"topic": "pytest", "tone": "strict"})
+        )
+        second = asyncio.run(
+            agent.async_invoke({"topic": "agents", "tone": "concise"})
+        )
+
+        assert first["final"] == "ECHO: Write about pytest in a strict tone."
+        assert second["final"] == "ECHO: Write about agents in a concise tone."
+        assert [message["role"] for message in agent.history] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert agent.history[0]["content"] == "Write about pytest in a strict tone."
+        assert agent.history[1]["content"] == "ECHO: Write about pytest in a strict tone."
+        assert agent.history[2]["content"] == "Write about agents in a concise tone."
+        assert agent.history[3]["content"] == "ECHO: Write about agents in a concise tone."
+
+    def test_async_context_enabled_resends_prior_history_on_second_call(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = make_agent(engine=engine, context_enabled=True)
+
+        asyncio.run(agent.async_invoke({"topic": "pytest", "tone": "strict"}))
+        asyncio.run(agent.async_invoke({"topic": "agents", "tone": "concise"}))
+
+        second_call_messages = engine.calls[1]
+
+        assert [message["role"] for message in second_call_messages] == [
+            "system",
+            "user",
+            "assistant",
+            "user",
+        ]
+        assert second_call_messages[0]["content"] == ROLE_PROMPT
+        assert second_call_messages[1]["content"] == "Write about pytest in a strict tone."
+        assert second_call_messages[2]["content"] == "ECHO: Write about pytest in a strict tone."
+        assert second_call_messages[3]["content"] == "Write about agents in a concise tone."
+
+    def test_async_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
+        agent = make_agent(pre_invoke=bad_pre_invoke)
+
+        with pytest.raises(AgentInvocationError, match="pre_invoke returned non-string"):
+            asyncio.run(agent.async_invoke({"topic": "pytest"}))
+
+    def test_async_engine_non_string_response_raises_agent_invocation_error(self) -> None:
+        agent = make_agent(engine=NonStringAsyncLLMEngine())
+
+        with pytest.raises(AgentInvocationError, match="engine returned non-string"):
+            asyncio.run(agent.async_invoke({"topic": "pytest", "tone": "strict"}))
+
+
+class TestAgentAttachmentDelegation:
+    def test_attach_delegates_to_engine_and_exposes_attachments(self, tmp_path: Any) -> None:
+        path = tmp_path / "sample.txt"
+        path.write_text("hello", encoding="utf-8")
+
+        agent = make_agent()
+
+        metadata = agent.attach(str(path))
+
+        assert metadata["path"] == str(path)
+        assert str(path) in agent.attachments
+        assert agent.attachments[str(path)]["path"] == str(path)
+
+    def test_detach_delegates_to_engine(self, tmp_path: Any) -> None:
+        path = tmp_path / "sample.txt"
+        path.write_text("hello", encoding="utf-8")
+
+        agent = make_agent()
+        agent.attach(str(path))
+
+        assert agent.detach(str(path)) is True
+        assert agent.detach(str(path)) is False
+        assert str(path) not in agent.attachments
+
+    def test_clear_attachments_delegates_to_engine(self, tmp_path: Any) -> None:
+        first = tmp_path / "first.txt"
+        second = tmp_path / "second.txt"
+        first.write_text("first", encoding="utf-8")
+        second.write_text("second", encoding="utf-8")
+
+        agent = make_agent()
+        agent.attach(str(first))
+        agent.attach(str(second))
+
+        assert agent.attachments
+
+        agent.clear_attachments()
+
+        assert agent.attachments == {}
+
+
+class TestAgentPropertySetters:
+    def test_role_prompt_setter_rejects_non_string(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(TypeError, match="role_prompt"):
+            agent.role_prompt = 123  # type: ignore[assignment]
+
+    def test_role_prompt_setter_strips_whitespace(self) -> None:
+        agent = make_agent()
+
+        agent.role_prompt = "  New role prompt.  "
+
+        assert agent.role_prompt == "New role prompt."
+
+    def test_pre_invoke_setter_rebuilds_parameters(self) -> None:
+        agent = make_agent()
+
+        agent.pre_invoke = pre_with_two_fields
+
+        assert [param.name for param in agent.parameters] == ["subject", "style"]
+        assert agent.invoke({"subject": "pytest", "style": "direct"}) == {
+            "final": "ECHO: pytest:direct",
+            "length": len("ECHO: pytest:direct"),
+            "was_postprocessed": True,
+        }
+
+    def test_pre_invoke_setter_rejects_non_string_return_type(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(AgentError, match="pre_invoke"):
+            agent.pre_invoke = pre_returns_int
+
+    def test_post_invoke_setter_rebuilds_return_type(self) -> None:
+        agent = make_agent()
+
+        agent.post_invoke = defaulted_post_invoke
+
+        assert agent.return_type == "str"
+        assert agent.invoke({"topic": "pytest", "tone": "strict"}) == (
+            "ECHO: WRITE ABOUT PYTEST IN A STRICT TONE."
+        )
+
+    def test_post_invoke_setter_rejects_zero_parameter_callable(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(AgentError, match="post_invoke"):
+            agent.post_invoke = post_zero_args
+
+    def test_post_invoke_setter_accepts_one_required_plus_defaults(self) -> None:
+        agent = make_agent()
+
+        agent.post_invoke = post_one_required_plus_default
+
+        assert agent.invoke({"topic": "pytest", "tone": "strict"}) == (
+            "ECHO: Write about pytest in a strict tone.!"
+        )
+
+    def test_pre_invoke_setter_accepts_tool_instance(self) -> None:
+        agent = make_agent()
+        tool = Tool(
+            function=pre_with_two_fields,
+            name="custom_pre",
+            namespace="tests",
+            description="Custom preprocessor.",
+        )
+
+        agent.pre_invoke = tool
+
+        assert agent.pre_invoke is tool
+        assert [param.name for param in agent.parameters] == ["subject", "style"]

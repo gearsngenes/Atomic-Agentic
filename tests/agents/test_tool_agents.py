@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping
+import asyncio
 
 import pytest
 
@@ -13,6 +14,10 @@ from atomic_agentic.agents.tool_agents import (
     ToolAgentRunState,
     extract_dependencies,
     return_tool,
+    PlanActAgent,
+    PlannedStep,
+    ReActAgent,
+    truncate_for_preview,
 )
 from atomic_agentic.core.Exceptions import (
     ToolAgentError,
@@ -58,6 +63,91 @@ class EchoLLMEngine(LLMEngine):
 
     def _on_detach(self, meta: Mapping[str, Any]) -> None:
         return None
+
+class ScriptedLLMEngine(LLMEngine):
+    """Deterministic LLMEngine that returns one scripted text response per call."""
+
+    def __init__(self, responses: list[str], **kwargs: Any) -> None:
+        super().__init__(
+            name="scripted_llm_engine",
+            description="Scripted LLM engine for ToolAgent subclass tests.",
+            **kwargs,
+        )
+        self.responses = list(responses)
+        self.calls: list[list[dict[str, str]]] = []
+
+    def _build_provider_payload(
+        self,
+        messages: list[dict[str, str]],
+        attachments: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        copied_messages = [dict(message) for message in messages]
+        self.calls.append(copied_messages)
+        return {"messages": copied_messages}
+
+    def _call_provider(self, payload: Any) -> str:
+        if not self.responses:
+            raise RuntimeError("No scripted LLM responses remain.")
+        return self.responses.pop(0)
+
+    def _extract_text(self, response: Any) -> str:
+        return str(response)
+
+    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
+        return {"path": path}
+
+    def _on_detach(self, meta: Mapping[str, Any]) -> None:
+        return None
+
+
+class BadRepr:
+    def __repr__(self) -> str:
+        raise RuntimeError("repr failed")
+
+    def __str__(self) -> str:
+        return "fallback string value that is long"
+
+
+def make_planact_agent(
+    responses: list[str],
+    *,
+    context_enabled: bool = False,
+    tool_calls_limit: int | None = None,
+    peek_at_cache: bool = False,
+    preview_limit: int | None = None,
+) -> PlanActAgent:
+    agent = PlanActAgent(
+        name="planact_agent",
+        description="PlanAct agent under test.",
+        llm_engine=ScriptedLLMEngine(responses),
+        context_enabled=context_enabled,
+        tool_calls_limit=tool_calls_limit,
+        peek_at_cache=peek_at_cache,
+        preview_limit=preview_limit,
+    )
+    register_math_tools(agent)  # type: ignore[arg-type]
+    return agent
+
+
+def make_react_agent(
+    responses: list[str],
+    *,
+    context_enabled: bool = False,
+    tool_calls_limit: int = 3,
+    peek_at_cache: bool = False,
+    preview_limit: int | None = None,
+) -> ReActAgent:
+    agent = ReActAgent(
+        name="react_agent",
+        description="ReAct agent under test.",
+        llm_engine=ScriptedLLMEngine(responses),
+        context_enabled=context_enabled,
+        tool_calls_limit=tool_calls_limit,
+        peek_at_cache=peek_at_cache,
+        preview_limit=preview_limit,
+    )
+    register_math_tools(agent)  # type: ignore[arg-type]
+    return agent
 
 
 def add(x: int, y: int) -> int:
@@ -1043,3 +1133,539 @@ class TestParsingHelpers:
 
         with pytest.raises(ToolAgentError):
             agent._str_to_dict(raw)
+
+
+class TestPreviewTruncation:
+    def test_limit_none_returns_original_object(self) -> None:
+        obj = {"a": [1, 2, 3]}
+
+        assert truncate_for_preview(obj, None) is obj
+
+    def test_short_repr_returns_original_object(self) -> None:
+        obj = ["short"]
+
+        assert truncate_for_preview(obj, 100) is obj
+
+    def test_long_string_is_truncated_with_type_prefix(self) -> None:
+        result = truncate_for_preview("abcdefghijklmnopqrstuvwxyz", 5)
+
+        assert isinstance(result, str)
+        assert result.startswith("(str)")
+        assert result.endswith("...")
+
+    def test_long_list_is_truncated_at_collection_boundary(self) -> None:
+        result = truncate_for_preview([1, 2, 3, 4, 5], 5)
+
+        assert isinstance(result, str)
+        assert result.startswith("(list)[")
+        assert result.endswith("...]")
+
+    def test_long_dict_is_truncated_at_collection_boundary(self) -> None:
+        result = truncate_for_preview({"alpha": 1, "beta": 2, "gamma": 3}, 12)
+
+        assert isinstance(result, str)
+        assert result.startswith("(dict){")
+        assert result.endswith("...}")
+
+    def test_repr_failure_falls_back_to_str(self) -> None:
+        result = truncate_for_preview(BadRepr(), 8)
+
+        assert isinstance(result, str)
+        assert result.startswith("(BadRepr)")
+        assert result.endswith("...")
+
+
+class TestPlannedStep:
+    def test_from_dict_extracts_placeholder_dependencies(self) -> None:
+        step = PlannedStep.from_dict(
+            {
+                "tool": "Tool.tests.multiply",
+                "args": {"x": "<<__s0__>>", "y": "inline <<__s2__>>"},
+            }
+        )
+
+        assert step.tool == "Tool.tests.multiply"
+        assert step.args == {"x": "<<__s0__>>", "y": "inline <<__s2__>>"}
+        assert step.deps == frozenset({0, 2})
+        assert step.is_return is False
+
+    def test_from_dict_adds_await_dependency(self) -> None:
+        step = PlannedStep.from_dict(
+            {
+                "tool": "Tool.tests.multiply",
+                "args": {"x": "<<__s0__>>", "y": 10},
+                "await": 1,
+            }
+        )
+
+        assert step.deps == frozenset({0, 1})
+
+    def test_from_dict_ignores_await_for_return_tool(self) -> None:
+        step = PlannedStep.from_dict(
+            {
+                "tool": return_tool.full_name,
+                "args": {"val": "<<__s0__>>"},
+                "await": 99,
+            }
+        )
+
+        assert step.is_return is True
+        assert step.deps == frozenset({0})
+
+    def test_from_dict_rejects_non_mapping(self) -> None:
+        with pytest.raises(ToolAgentError, match="requires a mapping"):
+            PlannedStep.from_dict(["bad"])  # type: ignore[arg-type]
+
+    def test_from_dict_rejects_extra_keys(self) -> None:
+        with pytest.raises(ToolAgentError, match="unsupported keys"):
+            PlannedStep.from_dict(
+                {
+                    "tool": "Tool.tests.add",
+                    "args": {},
+                    "extra": True,
+                }
+            )
+
+    def test_from_dict_rejects_missing_tool(self) -> None:
+        with pytest.raises(ToolAgentError, match="missing required key: 'tool'"):
+            PlannedStep.from_dict({"args": {}})
+
+    def test_from_dict_rejects_missing_args(self) -> None:
+        with pytest.raises(ToolAgentError, match="missing required key: 'args'"):
+            PlannedStep.from_dict({"tool": "Tool.tests.add"})
+
+    def test_from_dict_rejects_invalid_tool(self) -> None:
+        with pytest.raises(ToolAgentError, match="'tool' must be"):
+            PlannedStep.from_dict({"tool": "", "args": {}})
+
+    @pytest.mark.parametrize("await_value", [-1, "0", 1.5])
+    def test_from_dict_rejects_invalid_await(self, await_value: Any) -> None:
+        with pytest.raises(ToolAgentError, match="'await'"):
+            PlannedStep.from_dict(
+                {
+                    "tool": "Tool.tests.add",
+                    "args": {},
+                    "await": await_value,
+                }
+            )
+
+    def test_to_dict_preserves_tool_and_args_only(self) -> None:
+        step = PlannedStep.from_dict(
+            {
+                "tool": "Tool.tests.add",
+                "args": {"x": 1, "y": 2},
+                "await": 0,
+                "step": 99,
+            }
+        )
+
+        assert step.to_dict() == {
+            "tool": "Tool.tests.add",
+            "args": {"x": 1, "y": 2},
+        }
+
+
+class TestPlanActAgent:
+    def test_invokes_planned_tools_and_returns_value(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
+                  {{"tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 10}}}},
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                ]
+                """
+            ]
+        )
+
+        result = agent.invoke({"prompt": "run plan"})
+
+        assert result == 50
+
+    def test_auto_appends_return_none_when_plan_has_no_return(self) -> None:
+        agent = make_planact_agent(
+            [
+                """
+                [
+                  {"tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}
+                ]
+                """
+            ]
+        )
+
+        result = agent.invoke({"prompt": "run plan"})
+
+        assert result is None
+
+    def test_moves_return_step_to_end(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}},
+                  {{"tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}}
+                ]
+                """
+            ]
+        )
+
+        result = agent.invoke({"prompt": "run plan"})
+
+        assert result == 3
+
+    def test_executes_independent_steps_in_same_batch(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
+                  {{"tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": ["<<__s0__>>", "<<__s1__>>"]}}}}
+                ]
+                """
+            ]
+        )
+
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "plan"}]
+        )
+
+        assert state.batches == [[0, 1], [2]]
+
+    def test_rejects_multiple_return_steps(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": 1}}}},
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": 2}}}}
+                ]
+                """
+            ]
+        )
+
+        with pytest.raises(ToolAgentError, match="multiple return"):
+            agent.invoke({"prompt": "run plan"})
+
+    def test_rejects_unknown_tool_in_plan(self) -> None:
+        agent = make_planact_agent(
+            [
+                """
+                [
+                  {"tool": "Tool.tests.missing", "args": {}}
+                ]
+                """
+            ]
+        )
+
+        with pytest.raises(ToolAgentError, match="unknown tool"):
+            agent.invoke({"prompt": "run plan"})
+
+    def test_rejects_plan_exceeding_tool_calls_limit(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
+                  {{"tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                ]
+                """
+            ],
+            tool_calls_limit=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="tool_calls_limit"):
+            agent.invoke({"prompt": "run plan"})
+
+    def test_rejects_out_of_range_cache_reference(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__c0__>>"}}}}
+                ]
+                """
+            ]
+        )
+
+        with pytest.raises(ToolAgentError, match="out-of-range cache"):
+            agent.invoke({"prompt": "run plan"})
+
+    def test_rejects_future_step_dependency(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"tool": "Tool.tests.add", "args": {{"x": "<<__s1__>>", "y": 2}}}},
+                  {{"tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                ]
+                """
+            ]
+        )
+
+        with pytest.raises(ToolAgentError, match="illegal deps"):
+            agent.invoke({"prompt": "run plan"})
+
+    def test_context_enabled_can_reference_cached_result_on_next_invoke(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
+                ]
+                """,
+                f"""
+                [
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__c0__>>"}}}}
+                ]
+                """,
+            ],
+            context_enabled=True,
+        )
+
+        assert agent.invoke({"prompt": "first"}) == 5
+        assert agent.invoke({"prompt": "second"}) == 5
+
+    def test_compile_batches_isolates_return_step(self) -> None:
+        agent = make_planact_agent(["[]"])
+        planned = [
+            PlannedStep.from_dict(
+                {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}
+            ),
+            PlannedStep.from_dict(
+                {"tool": "Tool.tests.multiply", "args": {"x": 3, "y": 4}}
+            ),
+            PlannedStep.from_dict(
+                {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}}
+            ),
+        ]
+
+        batches = agent._compile_batches_from_deps(
+            planned_steps=planned,
+            return_idx=2,
+        )
+
+        assert batches == [[0, 1], [2]]
+
+    def test_async_invoke_executes_plan_and_returns_value(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
+                  {{"tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 10}}}},
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                ]
+                """
+            ]
+        )
+
+        result = asyncio.run(agent.async_invoke({"prompt": "run plan"}))
+
+        assert result == 50
+
+
+class TestReActAgent:
+    def test_requires_concrete_non_negative_tool_calls_limit(self) -> None:
+        with pytest.raises(ToolAgentError, match="tool_calls_limit"):
+            ReActAgent(
+                name="bad_react",
+                description="Bad ReAct agent.",
+                llm_engine=ScriptedLLMEngine([]),
+                tool_calls_limit=-1,
+            )
+
+    def test_invokes_step_by_step_until_return(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}',
+                '{"step": 1, "tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 10}}',
+                f'{{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}',
+            ],
+            tool_calls_limit=2,
+        )
+
+        result = agent.invoke({"prompt": "run react"})
+
+        assert result == 50
+
+    def test_injects_observation_after_first_step(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}',
+                f'{{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}',
+            ],
+            tool_calls_limit=1,
+        )
+
+        result = agent.invoke({"prompt": "run react"})
+
+        assert result == 5
+        engine = agent.llm_engine
+        assert isinstance(engine, ScriptedLLMEngine)
+        assert len(engine.calls) == 2
+        second_call_text = "\n".join(message["content"] for message in engine.calls[1])
+        assert "Most recently executed steps and results" in second_call_text
+        assert "Tool.tests.add" in second_call_text
+        assert "5" in second_call_text
+
+    @pytest.mark.parametrize(
+        "raw_response, match",
+        [
+            ('{"tool": "Tool.tests.add", "args": {}}', "missing required keys"),
+            ('{"step": 0, "args": {}}', "missing required keys"),
+            ('{"step": 0, "tool": "Tool.tests.add"}', "missing required keys"),
+        ],
+    )
+    def test_rejects_missing_required_step_keys(
+        self,
+        raw_response: str,
+        match: str,
+    ) -> None:
+        agent = make_react_agent([raw_response], tool_calls_limit=1)
+
+        with pytest.raises(ToolAgentError, match=match):
+            agent.invoke({"prompt": "run react"})
+
+    def test_rejects_extra_step_keys(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 0, "tool": "Tool.tests.add", "args": {}, "extra": true}',
+            ],
+            tool_calls_limit=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="unsupported keys"):
+            agent.invoke({"prompt": "run react"})
+
+    def test_rejects_non_dict_args(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 0, "tool": "Tool.tests.add", "args": []}',
+            ],
+            tool_calls_limit=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="'args' must be a dict"):
+            agent.invoke({"prompt": "run react"})
+
+    def test_rejects_illegal_step_index(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 1, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}',
+            ],
+            tool_calls_limit=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="illegal step index"):
+            agent.invoke({"prompt": "run react"})
+
+    def test_rejects_future_step_dependency(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}}',
+            ],
+            tool_calls_limit=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="illegal dependency"):
+            agent.invoke({"prompt": "run react"})
+
+    def test_rejects_unknown_tool(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 0, "tool": "Tool.tests.missing", "args": {}}',
+            ],
+            tool_calls_limit=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="unknown tool"):
+            agent.invoke({"prompt": "run react"})
+
+    def test_rejects_when_next_step_exceeds_capacity(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}',
+                '{"step": 1, "tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 3}}',
+            ],
+            tool_calls_limit=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="tool_calls_limit exceeded"):
+            agent.invoke({"prompt": "run react"})
+
+    def test_async_invoke_executes_step_by_step_until_return(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}',
+                '{"step": 1, "tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 10}}',
+                f'{{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}',
+            ],
+            tool_calls_limit=2,
+        )
+
+        result = asyncio.run(agent.async_invoke({"prompt": "run react"}))
+
+        assert result == 50
+
+
+class TestToolAgentAsyncBaseLoop:
+    def test_async_scripted_invoke_runs_tools_placeholders_and_return(self) -> None:
+        agent = make_agent()
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
+                [{"tool": keys["multiply"], "args": {"x": "<<__s0__>>", "y": 10}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}}],
+            ]
+        )
+
+        result = asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+        assert result == 50
+
+    def test_async_context_enabled_persists_blackboard(self) -> None:
+        agent = make_agent(context_enabled=True)
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+
+        result = asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+        assert result == 5
+        assert len(agent.blackboard) == 2
+        assert agent.blackboard[0].result == 5
+        assert agent.blackboard[1].result == 5
+
+    def test_async_execute_prepared_batch_records_tool_error(self) -> None:
+        agent = make_agent()
+        keys = register_math_tools(agent)
+        slot = prepared_slot(0, keys["fail_tool"], {})
+        state = make_state(running=[slot], prepared_steps=[0])
+
+        with pytest.raises((ToolInvocationError, ToolAgentError)):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+        assert state.running_blackboard[0].error is not NO_VAL
+
+    def test_async_initialize_run_state_wrong_type_raises(self) -> None:
+        agent = BadInitializeToolAgent(script=[])
+
+        with pytest.raises(ToolAgentError, match="must return a ToolAgentRunState"):
+            asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+    def test_async_prepare_empty_batch_raises(self) -> None:
+        agent = make_agent()
+        agent.set_script([[]])
+
+        with pytest.raises(ToolAgentError, match="empty batch"):
+            asyncio.run(agent.async_invoke({"prompt": "run"}))
