@@ -478,12 +478,8 @@ class TestParallelFlowOutputConfiguration:
         with pytest.raises(ValueError, match="duplicate_key_policy"):
             flow.duplicate_key_policy = "overwrite"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Current ParallelFlow.__init__ does not pass duplicate_key_policy through to configure_output for flattened output.",
-    )
     def test_flattened_output_can_be_configured_at_construction(self) -> None:
-        ParallelFlow(
+        flow = ParallelFlow(
             name="parallel_flow",
             description="Parallel test flow.",
             branches=[
@@ -495,6 +491,11 @@ class TestParallelFlowOutputConfiguration:
             output_names=None,
             duplicate_key_policy=ParallelFlow.RAISE,
         )
+
+        assert flow.output_shape == ParallelFlow.FLATTENED
+        assert flow.output_indices == [0, 1]
+        assert flow.output_names is None
+        assert flow.duplicate_key_policy == ParallelFlow.RAISE
 
 
 class TestParallelFlowBroadcastInvoke:

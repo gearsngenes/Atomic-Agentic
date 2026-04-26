@@ -173,7 +173,7 @@ class RoutingFlow(Workflow[RoutingFlowRunMetadata]):
             return None
 
         chosen_index = checkpoint.metadata.chosen_index
-        if not isinstance(chosen_index, int):
+        if not type(chosen_index) is int:
             raise ValidationError(
                 f"{self.full_name}: checkpoint metadata 'chosen_index' must be an int, "
                 f"got {type(chosen_index)!r}"
@@ -210,7 +210,7 @@ class RoutingFlow(Workflow[RoutingFlowRunMetadata]):
                 f"{self.full_name}: router result did not contain 'branch_selection'"
             )
 
-        if not isinstance(selected_index, int):
+        if type(selected_index) is not int:
             raise ValidationError(
                 f"{self.full_name}: branch_selection must be an int, "
                 f"got {type(selected_index)!r}"

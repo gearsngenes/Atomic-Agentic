@@ -171,6 +171,7 @@ class ParallelFlow(Workflow[ParallelFlowRunMetadata]):
             output_range=output_range,
             output_shape=output_shape,
             output_names=output_names,
+            duplicate_key_policy=duplicate_key_policy,
         )
 
     # ------------------------------------------------------------------ #
@@ -236,10 +237,12 @@ class ParallelFlow(Workflow[ParallelFlowRunMetadata]):
         -----
         - Pass either ``output_indices`` or ``output_range``, not both.
         - If neither is supplied, all configured branches are projected in their
-          natural order.
+        natural order.
         - ``output_shape='nested'`` requires valid ``output_names`` whose
-          length matches the resolved output count.
+        length matches the resolved output count.
         - ``output_shape='flattened'`` requires ``output_names is None``.
+        - ``duplicate_key_policy`` is optional for flattened output; when omitted,
+        the current configured policy is reused.
         """
         resolved_indices = self._resolve_output_indices(
             output_indices=output_indices,
@@ -289,11 +292,11 @@ class ParallelFlow(Workflow[ParallelFlowRunMetadata]):
                 raise ValueError(
                     "output_names must be None when output_shape='flattened'"
                 )
-            if not duplicate_key_policy and self._duplicate_key_policy is None:
-                raise ValueError(
-                    "duplicate_key_policy is required when output_shape='flattened'"
-                )
-            if duplicate_key_policy not in {self.RAISE, self.SKIP, self.UPDATE}:
+
+            if duplicate_key_policy is not None:
+                self.duplicate_key_policy = duplicate_key_policy
+
+            if self._duplicate_key_policy not in {self.RAISE, self.SKIP, self.UPDATE}:
                 raise ValueError(
                     "duplicate_key_policy must be one of: 'raise', 'skip', 'update'"
                 )
