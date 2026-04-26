@@ -26,8 +26,10 @@ composable primitives:
     messages.
 -   **Agent** -- An autonomous reasoning component that uses LLM Engines
     and Tools to complete tasks and interact with its environment.
--   **Workflow** -- A deterministic **packaging boundary** that
-    orchestrates tools, engines, agents, and workflows into structured
+-   **StructuredInvokable** -- A packaging boundary wrapper for other
+    primary primitives to format raw outputs into structured, dictionary-based outputs. 
+-   **Workflow** -- An **orchestration and checkpointing** layer that
+    coordinates tools, engines, agents, and other workflows into structured
     pipelines.
 
 Together, these primitives form a composable system where **LLMs handle
@@ -265,6 +267,7 @@ Workflows do not perform output packaging themselves. Always use `StructuredInvo
     │       ├── _version.py
     │       └── py.typed
     │
+    ├── tests/
     ├── README.md
     ├── pyproject.toml
     └── requirements.txt
