@@ -24,6 +24,7 @@ try: from llama_cpp import Llama  # local inference
 except: pass
 
 logger = logging.getLogger(__name__)
+import warnings
 
 __all__ = [
     "EmbedEngine",
@@ -62,6 +63,16 @@ class EmbedEngine(ABC):
     """
 
     def __init__(self, *, dimension: Optional[int] = None, normalize: bool = False):
+        warnings.warn(
+            (
+                "EmbedEngine and its provider subclasses are deprecated as of "
+                "atomic-agentic v1.0.2 and are planned for removal in later versions. "
+                "Prefer wrapping embedding functions as Tools, or migrate to a future "
+                "SemanticStore/VectorStore retrieval abstraction."
+            ),
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._dimension: Optional[int] = dimension
         self.normalize: bool = bool(normalize)
 
