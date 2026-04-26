@@ -80,6 +80,10 @@ norecursedirs = [
 [tool.coverage.run]
 source = ["atomic_agentic"]
 branch = true
+omit = [
+    "*/atomic_agentic/_version.py",
+    "*/atomic_agentic/engines/EmbedEngines.py",
+]
 
 [tool.coverage.report]
 show_missing = true
@@ -88,4 +92,8 @@ exclude_also = [
   "if TYPE_CHECKING:",
   "raise NotImplementedError",
   "pragma: no cover",
+]
+omit = [
+    "*/atomic_agentic/_version.py",
+    "*/atomic_agentic/engines/EmbedEngines.py",
 ]
