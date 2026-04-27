@@ -19,32 +19,27 @@ classifiers = [
   "Development Status :: 3 - Alpha"
 ]
 
-# Core deps — importable everywhere, with MCP/A2A made mandatory per your request.
+# Core deps — direct runtime imports only.
 dependencies = [
-  "pydantic>=2",
-  "requests",
-  "mcp",             # Model Context Protocol Python SDK
-  "python-a2a",      # Agent-to-Agent (A2A) SDK
-  "uvicorn",         # ASGI server commonly used to host MCP/A2A endpoints
-  "mcpo",            # MCP→OpenAPI proxy utility
-  "uv",              # included as requested; primarily a CLI/tooling package
+  "mcp>=1.25,<2",
+  "python-a2a>=0.5.10,<0.6",
+  "httpx>=0.28.1,<0.29",
+  "openai>=2.15,<3",
+  "google-genai>=1.64,<2",
+  "mistralai>=1.12,<2",
 ]
 
 [project.optional-dependencies]
-# LLM / embedding providers (kept optional)
-llama       = ["llama-cpp-python", "huggingface-hub"]
-
-# Convenience bundle for all optional providers + demo (explicitly expanded for tool compatibility)
-llm-providers = [
-  "openai",
-  "google-genai",
-  "mistralai",
+# Llama / local model support.
+llama = [
+  "llama-cpp-python>=0.3.16,<0.4",
+  "huggingface-hub>=1.5,<2",
 ]
 
 # Development / test tooling only. Not required at runtime.
 dev = [
-  "pytest>=8",
-  "pytest-cov>=5",
+  "pytest>=9,<10",
+  "pytest-cov>=7,<8",
 ]
 
 [project.urls]
