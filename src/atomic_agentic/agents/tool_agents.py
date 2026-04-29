@@ -2262,6 +2262,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 
         state.prepared_steps = sorted(batch)
         state.batch_index += 1
+        logger.info(f"{self.full_name}: Prepared batch {state.batch_index}/{len(state.batches)} with steps {state.prepared_steps}.")
         return state
 
 

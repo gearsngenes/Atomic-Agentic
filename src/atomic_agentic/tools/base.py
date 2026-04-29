@@ -9,7 +9,12 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Awaitable,
+    TypeVar,
 )
+
+import threading
+import asyncio
 
 from ..core.Exceptions import *
 from ..core.Invokable import AtomicInvokable, ParameterMap
@@ -19,6 +24,42 @@ from ..core.sentinels import NO_VAL
 
 logger = logging.getLogger(__name__)
 
+
+T = TypeVar("T")
+
+def _run_coro_sync(coro: Awaitable[T]) -> T:
+    """
+    Run an async coroutine from sync code, even if a loop is already running
+    in the current thread.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result_box: list[T] = []
+    error_box: list[BaseException] = []
+
+    def runner() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            result_box.append(loop.run_until_complete(coro))
+        except BaseException as exc:  # noqa: BLE001
+            error_box.append(exc)
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+
+    if error_box:
+        raise error_box[0]
+    if not result_box:
+        raise RuntimeError("Coroutine completed without producing a result.")
+
+    return result_box[0]
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Tool Invokable
@@ -313,11 +354,21 @@ class Tool(AtomicInvokable):
         Subclasses may override this to change *how* a tool is executed (for
         example, by making a remote MCP call or invoking an Agent), but should
         not change the high-level semantics.
+
+        If the callable returns an awaitable, the sync path runs it to completion
+        using a private event-loop bridge.
         """
         try:
             result = self._function(*args, **kwargs)
+
+            if inspect.isawaitable(result):
+                result = _run_coro_sync(result)
+
+        except ToolInvocationError:
+            raise
         except Exception as e:  # pragma: no cover - thin wrapper
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
+
         return result
 
     async def async_execute(
@@ -328,15 +379,24 @@ class Tool(AtomicInvokable):
         """
         Async execution hook for the underlying callable.
 
-        - If the callable returns an awaitable, await it.
-        - Otherwise, return the plain result directly.
+        - Native async callables are awaited directly.
+        - Sync callables are offloaded to a worker thread.
+        - If the result is awaitable, it is awaited before returning.
         """
         try:
-            result = self._function(*args, **kwargs)
+            if inspect.iscoroutinefunction(self._function):
+                result = await self._function(*args, **kwargs)
+            else:
+                result = await asyncio.to_thread(self._function, *args, **kwargs)
+
             if inspect.isawaitable(result):
                 result = await result
+
+        except ToolInvocationError:
+            raise
         except Exception as e:  # pragma: no cover - thin wrapper
             raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
+
         return result
 
     # ------------------------------------------------------------------ #
