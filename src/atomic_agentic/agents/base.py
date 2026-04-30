@@ -4,6 +4,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     Mapping,
     Optional,
     Union,
@@ -11,6 +12,7 @@ from typing import (
 )
 import logging
 import threading
+import warnings
 
 from ..core.Exceptions import (
     AgentError,
@@ -22,6 +24,7 @@ from ..core.Parameters import ParamSpec
 from ..core.sentinels import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool, toolify
+from .data_classes import AgentTurn
 
 logger = logging.getLogger(__name__)
 
@@ -83,10 +86,9 @@ class Agent(AtomicInvokable):
 
     History and context
     -------------------
-    - The Agent keeps an in-memory history of messages as a flat list of dicts:
-      `{"role": "user"|"assistant"|"system", "content": str}`.
-    - `history_window` controls how many *turns* (user+assistant pairs) from the tail
-      of the history are included when building messages.
+    - The Agent keeps an in-memory history of AgentTurn objects.
+    - `history_window` controls how many *turns* from the tail of the history
+      are included when building messages.
     - History is append-only; no trimming or summarization is performed by default.
 
     Parameters
@@ -103,7 +105,7 @@ class Agent(AtomicInvokable):
         If True, the agent includes and logs conversation context (turns).
         If False, the agent sends no prior turns and does not log new ones.
     history_window : int, default 50
-        Send-window measured in **turns** (user+assistant pairs). `0` sends no turns.
+        Send-window measured in **turns**. `0` sends no turns.
         Stored history is never trimmed.
     pre_invoke : Optional[Tool or Callable], default None
         Tool that converts the input mapping to a `str` prompt. If None, a strict
@@ -112,6 +114,12 @@ class Agent(AtomicInvokable):
         Tool that converts the raw result from :meth:`_invoke` into the final
         return value. It must accept exactly one parameter. If None, a default
         identity Tool is used that returns its single argument unchanged.
+    response_preview_limit : Optional[int], default None
+        Optional character limit applied when rendering stored assistant responses
+        into future LLM-facing message history. Stored turn values are not mutated.
+    assistant_response_source : Literal["raw", "final"], default "raw"
+        Whether rendered assistant history should use each turn's raw response or
+        final post-processed response.
 
     Properties (selected)
     ---------------------
@@ -121,7 +129,8 @@ class Agent(AtomicInvokable):
     llm_engine : LLMEngine (read-write, type-enforced)
     context_enabled : bool (read-write)
     history_window : int (read-write; see semantics above)
-    history : List[Dict[str, str]] (read-only view)
+    history : List[Dict[str, str]] (deprecated rendered message view)
+    turn_history : List[AgentTurn] (read-only canonical turn view)
     attachments : Dict[str, Dict[str, Any]] (read-only view)
     pre_invoke : Tool (read-write)
     post_invoke : Tool (read-write)
@@ -142,6 +151,8 @@ class Agent(AtomicInvokable):
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
         history_window: Optional[int] = None,
+        response_preview_limit: Optional[int] = None,
+        assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
 
         # Prepare pre_invoke
@@ -184,7 +195,7 @@ class Agent(AtomicInvokable):
         # Set the agent-specific attributes
         self._llm_engine: LLMEngine = llm_engine
         self._role_prompt: str = "You are a helpful AI assistant"
-        if (role_prompt is not None or role_prompt.strip()):
+        if role_prompt is not None and role_prompt.strip():
             self._role_prompt = role_prompt.strip()
         self._context_enabled: bool = context_enabled
 
@@ -193,15 +204,18 @@ class Agent(AtomicInvokable):
             raise AgentError("history_window must be an int >= 0 or be 'None'.")
         self._history_window: Optional[int] = history_window
 
-        # Stored message history (flat list of role/content dicts).
+        # Stored turn history.
         # We never trim storage; we only limit what we *send* to the engine.
-        self._history: List[Dict[str, str]] = []
+        self._history: List[AgentTurn] = []
+
+        self.response_preview_limit = response_preview_limit
+        self.assistant_response_source = assistant_response_source
 
         filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else pre_tool.filter_extraneous_inputs
         # Build schema directly from pre_invoke and post_invoke, then delegate to parent
         super().__init__(name=name,
-                         description=description, 
-                         parameters=self._pre_invoke.parameters, 
+                         description=description,
+                         parameters=self._pre_invoke.parameters,
                          return_type=self._post_invoke.return_type,
                          filter_extraneous_inputs=filter,)
 
@@ -218,7 +232,7 @@ class Agent(AtomicInvokable):
         if value is not None and not isinstance(value, str):
             raise TypeError(f"role_prompt must be of type 'str' or 'None', but got {type(value).__name__}")
         self._role_prompt = value.strip() or "You are a helpful AI assistant"
-    
+
     @property
     def llm_engine(self) -> LLMEngine:
         """LLMEngine used for this agent."""
@@ -245,22 +259,62 @@ class Agent(AtomicInvokable):
         self._context_enabled = value
 
     @property
-    def history_window(self) -> int:
+    def history_window(self) -> Optional[int]:
         """
-        Number of *turns* (user+assistant pairs) to include from the tail of the
-        conversation history when building messages for the engine.
+        Number of *turns* to include from the tail of the conversation history
+        when building messages for the engine.
         """
         return self._history_window
 
     @history_window.setter
-    def history_window(self, value: int) -> None:
-        if not isinstance(value, int) or value < 0:
-            raise ValueError("history_window must be an int >= 0.")
+    def history_window(self, value: Optional[int]) -> None:
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError("history_window must be an int >= 0 or be 'None'.")
         self._history_window = value
 
     @property
+    def response_preview_limit(self) -> Optional[int]:
+        """Character limit for rendered assistant responses. None means no truncation."""
+        return self._response_preview_limit
+
+    @response_preview_limit.setter
+    def response_preview_limit(self, value: Optional[int]) -> None:
+        if value is None:
+            self._response_preview_limit = None
+            return
+        if not isinstance(value, int) or value <= 0:
+            raise AgentError("response_preview_limit must be None or a positive integer > 0.")
+        self._response_preview_limit = value
+
+    @property
+    def assistant_response_source(self) -> Literal["raw", "final"]:
+        """Whether rendered assistant history uses raw or final turn responses."""
+        return self._assistant_response_source
+
+    @assistant_response_source.setter
+    def assistant_response_source(self, value: Literal["raw", "final"]) -> None:
+        if value not in {"raw", "final"}:
+            raise AgentError("assistant_response_source must be either 'raw' or 'final'.")
+        self._assistant_response_source = value
+
+    @property
     def history(self) -> List[Dict[str, str]]:
-        """Return a shallow copy of the stored message history (never trimmed)."""
+        """Return a rendered message history compatibility view."""
+        warnings.warn(
+            "Agent.history currently returns rendered message dictionaries for compatibility. "
+            "Use Agent.turn_history for canonical stored turns. In a future version, "
+            "Agent.history may become turn-native.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        rendered: List[Dict[str, str]] = []
+        for turn in self._history:
+            rendered.extend(self.render_turn(turn))
+        return rendered
+
+    @property
+    def turn_history(self) -> List[AgentTurn]:
+        """Return a shallow copy of the stored turn history (never trimmed)."""
         return list(self._history)
 
     @property
@@ -311,7 +365,7 @@ class Agent(AtomicInvokable):
         # Apply the candidate and rebuild schema from components
         self._pre_invoke = pre_tool
         self._parameters = self._pre_invoke.parameters
-    
+
     @property
     def post_invoke(self) -> Tool:
         """
@@ -365,7 +419,72 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
-    async def _ainvoke(self, messages: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], Any]:
+    def build_messages(self, prompt: str) -> List[Dict[str, str]]:
+        """Build LLM-facing messages from the role prompt, prior turns, and current prompt."""
+        messages: List[Dict[str, str]] = [{"role": "system", "content": self.role_prompt}]
+
+        if self._context_enabled and self._history:
+            if self._history_window is None:
+                prior = self._history
+            elif self._history_window == 0:
+                prior = []
+            else:
+                prior = self._history[-self._history_window:]
+
+            for turn in prior:
+                messages.extend(self.render_turn(turn))
+
+        user_msg = {"role": "user", "content": prompt}
+        messages.append(user_msg)
+
+        return messages
+
+    def render_turn(self, turn: AgentTurn) -> List[Dict[str, str]]:
+        """Render one stored AgentTurn into LLM-facing user/assistant messages."""
+        if not isinstance(turn, AgentTurn):
+            raise AgentInvocationError(
+                f"render_turn expected AgentTurn, got {type(turn)!r}"
+            )
+
+        response = (
+            turn.raw_response
+            if self._assistant_response_source == "raw"
+            else turn.final_response
+        )
+        response_text = str(response)
+
+        if (
+            self._response_preview_limit is not None
+            and len(response_text) > self._response_preview_limit
+        ):
+            response_text = response_text[:self._response_preview_limit] + "..."
+
+        return [
+            {"role": "user", "content": turn.prompt},
+            {"role": "assistant", "content": response_text},
+        ]
+
+    def _make_turn(
+        self,
+        *,
+        prompt: str,
+        raw_response: Any,
+        final_response: Any,
+        **metadata: Any,
+    ) -> AgentTurn:
+        """Construct the stored turn for one completed invocation."""
+        if metadata:
+            raise AgentInvocationError(
+                f"{type(self).__name__}._make_turn received unexpected metadata: "
+                f"{sorted(metadata.keys())!r}"
+            )
+        return AgentTurn(
+            prompt=prompt,
+            raw_response=raw_response,
+            final_response=final_response,
+        )
+
+    async def _ainvoke(self, messages: List[Dict[str, str]]) -> Tuple[Any, Mapping[str, Any]]:
         """Async internal call path used by :meth:`async_invoke`.
 
         Default implementation mirrors `_invoke(...)`, but delegates to the engine's
@@ -382,23 +501,20 @@ class Agent(AtomicInvokable):
                 f"engine returned non-string (type={type(text)!r}); a string is required"
             )
 
-        user_msg = messages[-1]
-        newest_history = [user_msg, {"role": "assistant", "content": text}]
-        return newest_history, text
+        return text, {}
 
-    def _invoke(self, messages: List[Dict[str, str]]) -> Tuple[List[Dict[str,str]], Any]:
+    def _invoke(self, messages: List[Dict[str, str]]) -> Tuple[Any, Mapping[str, Any]]:
         """Internal call path used by :meth:`invoke`.
 
         This base implementation:
         - Invokes the configured LLM engine with the provided ``messages``.
-        - Populates ``newest_history`` with the *current turn only*
-          (user + assistant messages).
+        - Returns the raw engine response plus turn metadata.
 
         Subclasses may override this method to implement more complex behavior,
         but **must not** mutate ``self._history`` directly. Instead, they should
         return:
-        - a ``newest_history`` list
-        - a final raw return result
+        - a raw response
+        - a metadata mapping consumed by :meth:`_make_turn`
         """
         # 1) Call engine (attachments are managed by the engine itself)
         try:
@@ -413,13 +529,7 @@ class Agent(AtomicInvokable):
                 f"engine returned non-string (type={type(text)!r}); a string is required"
             )
 
-        # 3) Record the current turn into the per-invoke buffer.
-        # The base Agent simply stores the user prompt and raw assistant text.
-        user_msg = messages[-1]
-        
-        newest_history = [user_msg, {"role": "assistant", "content": text}]
-
-        return newest_history, text
+        return text, {}
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -427,28 +537,28 @@ class Agent(AtomicInvokable):
     def attach(self, path: str) -> Mapping[str, Any]:
         """
         Attach a file to this Agent via the underlying LLM engine.
-        
+
         This method delegates to the engine's attachment system, which validates
         paths, extracts metadata, and prepares provider-specific structures.
         Each engine has its own supported formats, policies, and size limits.
-        
+
         Parameters
         ----------
         path : str
             Local filesystem path to the file. Must be a non-empty string.
-            
+
         Returns
         -------
         Mapping[str, Any]
             Provider-specific attachment metadata. The structure depends on the
             engine; see the engine class documentation for details.
-            
+
         Raises
         ------
         LLMEngineError
             If the path is invalid, the engine does not support the file format,
             or the file is too large for the provider.
-            
+
         Notes
         -----
         - Not all engines support file attachments. Check your engine's
@@ -461,15 +571,15 @@ class Agent(AtomicInvokable):
     def detach(self, path: str) -> bool:
         """
         Detach a previously attached file from this Agent.
-        
+
         Delegates to the underlying engine's detach logic, which performs
         provider-specific cleanup if needed.
-        
+
         Parameters
         ----------
         path : str
             The local filesystem path to detach.
-            
+
         Returns
         -------
         bool
@@ -481,14 +591,14 @@ class Agent(AtomicInvokable):
     def clear_attachments(self) -> None:
         """
         Remove all currently attached files from this Agent.
-        
+
         Delegates to the underlying engine to detach all paths and perform
         any necessary provider-specific cleanup.
         """
         return self.llm_engine.clear_attachments()
 
     def clear_memory(self) -> None:
-        """Clear the stored message history."""
+        """Clear the stored turn history."""
         self._history.clear()
 
     async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
@@ -515,25 +625,15 @@ class Agent(AtomicInvokable):
             )
 
         logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
-        messages: List[Dict[str, str]] = [{"role": "system", "content": self.role_prompt}]
-
-        if self._context_enabled and self._history:
-            if self._history_window is None:
-                prior = self._history
-            else:
-                window = min(self._history_window * 2, len(self._history))
-                prior = self._history[-window:]
-            messages.extend(prior)
-
-        user_msg = {"role": "user", "content": prompt}
-        messages.append(user_msg)
+        messages = self.build_messages(prompt)
 
         logger.debug(f"Agent.{self.name} performing async logic for class '{type(self).__name__}'")
-        new_history, raw_result = await self._ainvoke(messages=messages)
+        raw_result, turn_metadata = await self._ainvoke(messages=messages)
 
-        if self._context_enabled:
-            logger.debug(f"Agent.{self.name} updating history")
-            self._history.extend(new_history)
+        if not isinstance(turn_metadata, Mapping):
+            raise AgentInvocationError(
+                f"_ainvoke returned non-mapping metadata (type={type(turn_metadata)!r})"
+            )
 
         try:
             logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
@@ -542,6 +642,16 @@ class Agent(AtomicInvokable):
             raise
         except Exception as e:  # pragma: no cover
             raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
+
+        if self._context_enabled:
+            logger.debug(f"Agent.{self.name} updating history")
+            turn = self._make_turn(
+                prompt=prompt,
+                raw_response=raw_result,
+                final_response=result,
+                **dict(turn_metadata),
+            )
+            self._history.append(turn)
 
         logger.info(f"[Async {self.full_name} finished]")
 
@@ -559,11 +669,11 @@ class Agent(AtomicInvokable):
         3) Build the messages list from the optional role prompt, the windowed
            history, and the current user ``prompt``.
         4) Delegate to :meth:`_invoke`, which performs the actual engine call and
-           returns ``newest_history`` and the raw result for this run.
-        5) If ``context_enabled`` is True, call update history with the newest_history to commit
-           the newest turn(s) into persistent history.
-        6) Run ``post_invoke`` on the raw result to obtain the final output and
-           return it.
+           returns the raw result plus turn metadata for this run.
+        5) Run ``post_invoke`` on the raw result to obtain the final output.
+        6) If ``context_enabled`` is True, construct and commit the newest turn
+           into persistent history.
+        7) Return the final output.
 
         Parameters
         ----------
@@ -585,8 +695,8 @@ class Agent(AtomicInvokable):
         AgentInvocationError
             For unexpected runtime errors in Tools or the engine.
         """
-        
-        # main invoke lock        
+
+        # main invoke lock
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
             # Filter inputs
@@ -607,29 +717,16 @@ class Agent(AtomicInvokable):
 
             # Build messages
             logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
-            messages: List[Dict[str, str]] = [{"role": "system", "content": self.role_prompt}]
-
-            if self._context_enabled and self._history:
-                if self._history_window is None:
-                    prior = self._history
-                elif self._history_window == 0:
-                    prior = []
-                else:
-                    window = min(self._history_window * 2, len(self._history))
-                    prior = self._history[-(window):]
-                messages.extend(prior)
-
-            user_msg = {"role": "user", "content": prompt}
-            messages.append(user_msg)
+            messages = self.build_messages(prompt)
 
             # Invoke core logic
             logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
-            new_history, raw_result = self._invoke(messages=messages)
+            raw_result, turn_metadata = self._invoke(messages=messages)
 
-            # Update history if enabled
-            if self._context_enabled:
-                logger.debug(f"Agent.{self.name} updating history")
-                self._history.extend(new_history)
+            if not isinstance(turn_metadata, Mapping):
+                raise AgentInvocationError(
+                    f"_invoke returned non-mapping metadata (type={type(turn_metadata)!r})"
+                )
 
             # Postprocess raw result
             try:
@@ -640,6 +737,17 @@ class Agent(AtomicInvokable):
             except Exception as e:  # pragma: no cover
                 raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
 
+            # Update history if enabled
+            if self._context_enabled:
+                logger.debug(f"Agent.{self.name} updating history")
+                turn = self._make_turn(
+                    prompt=prompt,
+                    raw_response=raw_result,
+                    final_response=result,
+                    **dict(turn_metadata),
+                )
+                self._history.append(turn)
+
             # Final logging and return
             logger.info(f"[{self.full_name} finished]")
             return result
@@ -649,6 +757,10 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     def to_dict(self) -> Dict[str, Any]:
         """A minimal diagnostic snapshot of this agent (safe to log/serialize)."""
+        rendered_history: List[Dict[str, str]] = []
+        for turn in self._history:
+            rendered_history.extend(self.render_turn(turn))
+
         d = super().to_dict()
         d.update({
             "role_prompt": self.role_prompt,
@@ -657,6 +769,9 @@ class Agent(AtomicInvokable):
             "llm": self._llm_engine.to_dict(),
             "context_enabled": self.context_enabled,
             "history_window": self.history_window,
-            "history": self.history
+            "response_preview_limit": self.response_preview_limit,
+            "assistant_response_source": self.assistant_response_source,
+            "history": rendered_history,
+            "turn_history": [turn.to_dict() for turn in self._history],
         })
         return d
