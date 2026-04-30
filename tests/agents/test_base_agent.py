@@ -10,6 +10,7 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.core.Exceptions import AgentError, AgentInvocationError
 from atomic_agentic.core.sentinels import NO_VAL
 from atomic_agentic.engines.LLMEngines import LLMEngine
+from atomic_agentic.agents.data_classes import AgentTurn
 
 
 ROLE_PROMPT = "You are a deterministic test writer."
@@ -620,3 +621,201 @@ class TestAgentPropertySetters:
 
         assert agent.pre_invoke is tool
         assert [param.name for param in agent.parameters] == ["subject", "style"]
+
+class UnexpectedMetadataAgent(Agent):
+    def _invoke(
+        self,
+        messages: list[dict[str, str]],
+    ) -> tuple[Any, Mapping[str, Any]]:
+        return "raw metadata response", {"unexpected": True}
+
+
+class NonMappingMetadataAgent(Agent):
+    def _invoke(
+        self,
+        messages: list[dict[str, str]],
+    ) -> tuple[Any, Any]:
+        return "raw metadata response", []
+
+
+class AsyncUnexpectedMetadataAgent(Agent):
+    async def _ainvoke(
+        self,
+        messages: list[dict[str, str]],
+    ) -> tuple[Any, Mapping[str, Any]]:
+        return "raw async metadata response", {"unexpected": True}
+
+
+class AsyncNonMappingMetadataAgent(Agent):
+    async def _ainvoke(
+        self,
+        messages: list[dict[str, str]],
+    ) -> tuple[Any, Any]:
+        return "raw async metadata response", []
+
+
+class TestAgentTurnHistory:
+    def test_context_enabled_stores_agent_turn_objects(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = make_agent(engine=engine, context_enabled=True)
+
+        first = agent.invoke({"topic": "pytest", "tone": "strict"})
+        second = agent.invoke({"topic": "agents", "tone": "concise"})
+
+        assert first["final"] == "ECHO: Write about pytest in a strict tone."
+        assert second["final"] == "ECHO: Write about agents in a concise tone."
+
+        turns = agent.turn_history
+
+        assert len(turns) == 2
+        assert all(isinstance(turn, AgentTurn) for turn in turns)
+
+        assert turns[0].prompt == "Write about pytest in a strict tone."
+        assert turns[0].raw_response == "ECHO: Write about pytest in a strict tone."
+        assert turns[0].final_response == first
+
+        assert turns[1].prompt == "Write about agents in a concise tone."
+        assert turns[1].raw_response == "ECHO: Write about agents in a concise tone."
+        assert turns[1].final_response == second
+
+    def test_turn_history_returns_shallow_copy(self) -> None:
+        agent = make_agent(context_enabled=True)
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        snapshot = agent.turn_history
+        snapshot.append(
+            AgentTurn(
+                prompt="mutated",
+                raw_response="mutated",
+                final_response="mutated",
+            )
+        )
+
+        assert len(snapshot) == len(agent.turn_history) + 1
+        assert all(turn.prompt != "mutated" for turn in agent.turn_history)
+
+    def test_response_preview_limit_only_affects_rendered_history(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = Agent(
+            name="preview_agent",
+            description="Preview test agent.",
+            llm_engine=engine,
+            role_prompt=ROLE_PROMPT,
+            context_enabled=True,
+            pre_invoke=build_prompt,
+            post_invoke=package_response,
+            response_preview_limit=10,
+        )
+
+        result = agent.invoke({"topic": "abcdefghijklmnopqrstuvwxyz", "tone": "plain"})
+
+        expected_prompt = "Write about abcdefghijklmnopqrstuvwxyz in a plain tone."
+        expected_raw = f"ECHO: {expected_prompt}"
+
+        turn = agent.turn_history[0]
+
+        assert turn.prompt == expected_prompt
+        assert turn.raw_response == expected_raw
+        assert turn.final_response == result
+
+        with pytest.warns(DeprecationWarning):
+            rendered_history = agent.history
+
+        assert rendered_history[1]["content"] == expected_raw[:10] + "..."
+
+    def test_history_property_warns_and_returns_rendered_messages(self) -> None:
+        agent = make_agent(context_enabled=True)
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        with pytest.warns(DeprecationWarning):
+            rendered_history = agent.history
+
+        assert [message["role"] for message in rendered_history] == ["user", "assistant"]
+        assert rendered_history[0]["content"] == "Write about pytest in a strict tone."
+        assert rendered_history[1]["content"] == "ECHO: Write about pytest in a strict tone."
+
+
+class TestAgentTurnRendering:
+    def test_rendered_history_uses_raw_response_by_default(self) -> None:
+        agent = Agent(
+            name="raw_render_agent",
+            description="Raw render test agent.",
+            llm_engine=StatefulEchoLLMEngine(),
+            role_prompt=ROLE_PROMPT,
+            context_enabled=True,
+            pre_invoke=build_prompt,
+            post_invoke=package_response,
+        )
+
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        with pytest.warns(DeprecationWarning):
+            rendered_history = agent.history
+
+        assert rendered_history[1]["content"] == "ECHO: Write about pytest in a strict tone."
+
+    def test_rendered_history_uses_final_response_when_configured(self) -> None:
+        agent = Agent(
+            name="final_render_agent",
+            description="Final render test agent.",
+            llm_engine=StatefulEchoLLMEngine(),
+            role_prompt=ROLE_PROMPT,
+            context_enabled=True,
+            pre_invoke=build_prompt,
+            post_invoke=package_response,
+            assistant_response_source="final",
+        )
+
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        with pytest.warns(DeprecationWarning):
+            rendered_history = agent.history
+
+        assert "was_postprocessed" in rendered_history[1]["content"]
+        assert "ECHO: Write about pytest in a strict tone." in rendered_history[1]["content"]
+
+
+class TestAgentTurnMetadataContract:
+    def test_base_make_turn_rejects_unexpected_metadata(self) -> None:
+        agent = UnexpectedMetadataAgent(
+            name="unexpected_metadata_agent",
+            description="Unexpected metadata test agent.",
+            llm_engine=StatefulEchoLLMEngine(),
+            context_enabled=True,
+        )
+
+        with pytest.raises(AgentInvocationError, match="unexpected metadata"):
+            agent.invoke({"prompt": "run"})
+
+    def test_invoke_rejects_non_mapping_metadata(self) -> None:
+        agent = NonMappingMetadataAgent(
+            name="non_mapping_metadata_agent",
+            description="Non-mapping metadata test agent.",
+            llm_engine=StatefulEchoLLMEngine(),
+            context_enabled=True,
+        )
+
+        with pytest.raises(AgentInvocationError, match="_invoke returned non-mapping metadata"):
+            agent.invoke({"prompt": "run"})
+
+    def test_async_base_make_turn_rejects_unexpected_metadata(self) -> None:
+        agent = AsyncUnexpectedMetadataAgent(
+            name="async_unexpected_metadata_agent",
+            description="Async unexpected metadata test agent.",
+            llm_engine=StatefulEchoLLMEngine(),
+            context_enabled=True,
+        )
+
+        with pytest.raises(AgentInvocationError, match="unexpected metadata"):
+            asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+    def test_async_invoke_rejects_non_mapping_metadata(self) -> None:
+        agent = AsyncNonMappingMetadataAgent(
+            name="async_non_mapping_metadata_agent",
+            description="Async non-mapping metadata test agent.",
+            llm_engine=StatefulEchoLLMEngine(),
+            context_enabled=True,
+        )
+
+        with pytest.raises(AgentInvocationError, match="_ainvoke returned non-mapping metadata"):
+            asyncio.run(agent.async_invoke({"prompt": "run"}))

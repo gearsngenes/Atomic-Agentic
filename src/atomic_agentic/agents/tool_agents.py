@@ -1,45 +1,48 @@
 """
-ToolAgents: LLM-Driven Iterative Tool Calling with Persistent Memory
+ToolAgents: LLM-Driven Iterative Tool Calling with Persistent Blackboard Memory
 
-This module provides an extensible framework for building intelligent agents that leverage
-**Large Language Models (LLMs)** to iteratively decide which tools to invoke, observe
-results, and react or plan accordingly. All tool calls and LLM messages are **saved together**
-in a persistent execution trace, enabling agents to learn from prior interactions and
-efficiently reuse results across multiple invocations.
+This module provides an extensible framework for building intelligent agents that
+use **Large Language Models (LLMs)** to decide which tools to invoke, observe
+results, and either plan or react accordingly.
 
 Core Concept
 ------------
-Rather than executing a fixed sequence of operations, ToolAgents maintain an interactive loop:
+Rather than executing a fixed sequence of operations, ToolAgents maintain an
+interactive execution loop:
 
 1. **LLM decides**: The LLM examines the current state and decides which tools to invoke
-2. **Tools execute**: Selected tools run (concurrently or sequentially) and produce results
-3. **State persists**: Both the LLM messages AND the tool call results are saved in an
-   execution journal (the "blackboard")
-4. **Loop continues**: The LLM observes results and decides next steps (or terminates)
-5. **Future reuse**: In subsequent invocations, the agent can reference and reuse
-   previously computed results via placeholder syntax (``<<__cN__>>``), avoiding recomputation
+2. **Tools execute**: Selected tools run and produce results
+3. **Run state updates**: Results are stored in the invocation's running blackboard
+4. **Loop continues**: The LLM observes results and decides next steps, or terminates
+5. **Memory persists**: If `context_enabled=True`, completed tool slots are merged into
+   the persisted blackboard and the completed invocation is stored as a ToolAgentTurn
 
-This design enables stateful, multi-turn tool orchestration where the LLM maintains
-full context of the execution trace and can reference historical results.
+The canonical memory model separates storage from rendering:
+
+- Agent memory is stored as turn objects (`AgentTurn` / `ToolAgentTurn`)
+- Tool execution results are stored as blackboard slots
+- A ToolAgentTurn stores the half-open blackboard span produced by one invocation
+- Future LLM-facing messages are rendered from turns and their associated blackboard spans
 
 Execution Persistence
 ---------------------
-All tool invocations are tracked in an **execution blackboard** (a journal of steps):
+Tool invocations are tracked in an execution blackboard:
 
 - Each step records: **tool name**, **arguments** (possibly containing placeholders),
   **resolved arguments**, and **execution result** (or error)
-- **LLM messages** are preserved alongside tool calls, creating a unified conversation history
-- If ``context_enabled=True``, the blackboard is **persisted** between invoke() calls,
+- If `context_enabled=True`, the blackboard is persisted between invoke() calls,
   allowing new runs to reference prior results
+- LLM-facing message history is rendered from stored turns rather than stored as the
+  canonical memory format
 
 Blackboard Architecture
 ~~~~~~~~~~~~~~~~~~~~~~~
-The **blackboard pattern** is used internally to store and manage this execution trace:
+The **blackboard pattern** is used internally to store and manage tool execution state:
 
 - **Running blackboard**: Current invocation's tool calls (ephemeral, local to this run)
 - **Cached blackboard**: Prior invocation results persisted from previous runs
 - **Placeholders**: Tool arguments can reference results from:
-  
+
   - ``<<__sN__>>`` – result from running step N (current invoke, 0-based index)
   - ``<<__cN__>>`` – result from cache entry N (prior invokes, 0-based index)
 
@@ -50,47 +53,48 @@ Intelligent Iteration Strategies
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Subclasses implement different iteration approaches:
 
-- **PlanActAgent**: LLM generates a **complete plan upfront** (all tool calls),
-  then the system executes them in **topologically-sorted concurrent batches** for speed.
-- **ReActAgent**: LLM **emits one tool call per turn**, observes the result,
-  then decides the next step (ReAct-style reasoning with full visibility).
+- **PlanActAgent**: LLM generates a complete plan upfront, then the system executes it
+  in topologically-sorted concurrent batches.
+- **ReActAgent**: LLM emits one tool call per turn, observes the current-run result,
+  then decides the next step.
 
 Execution Model
 ~~~~~~~~~~~~~~~
 **Template-Method Pattern**: ``ToolAgent`` owns the invariant iteration loop; subclasses
 provide domain-specific planning/iteration logic via abstract hooks.
 
-**Concurrent Execution**: Batches of independent tool calls execute concurrently
-(thread pool) with fail-fast semantics: first error aborts the batch.
+**Concurrent Execution**: Batches of independent tool calls execute concurrently with
+gather-based error handling.
 
 **Termination**: Agents invoke the canonical ``return`` tool to signal completion and
 return a final value.
 
 Subclass Responsibilities
---------------------------
+-------------------------
 Subclasses must implement two abstract methods:
 
 **_initialize_run_state(messages)** → ``RS``
   Initialize and snapshot the execution state for this invoke:
-  - Snapshot prior cached results (if context enabled)
-  - Allocate slots for upcoming tool calls
-  - Store the LLM messages for context
+  - Copy the incoming LLM-facing messages into run-local state
+  - Snapshot prior cached results if context is enabled
+  - Allocate running blackboard slots for current-run tool calls
 
 **_prepare_next_batch(state)** → ``RS``
-  Generate the next batch of tool calls by querying the LLM:
+  Prepare the next executable batch:
   - Decide which tools to invoke based on current state
-  - Resolve placeholders to concrete values
-  - Return the list of prepared steps ready for execution
+  - Validate tool names, dependencies, and placeholders
+  - Resolve placeholders into concrete arguments
+  - Populate `state.prepared_steps`
 
 The run state is extensible: ``RS`` is a TypeVar bound to ``ToolAgentRunState``,
-allowing subclasses to carry domain-specific fields (e.g., ``batches``, ``batch_index``,
-planning metadata).
+allowing subclasses to carry domain-specific fields such as batches, cursors, or
+planning metadata.
 
 Concrete Subclasses
 -------------------
-- **PlanActAgent**: One-shot planner; queries LLM once to generate entire plan,
+- **PlanActAgent**: One-shot planner; queries LLM once to generate an entire plan,
   then executes in concurrent batches. Fast, deterministic, no replanning.
-- **ReActAgent**: Iterative actor; queries LLM once per turn, reacts to each result.
+- **ReActAgent**: Iterative actor; queries LLM once per step, reacts to each result.
   Fully adaptive, but requires more LLM turns and sequential execution.
 """
 
@@ -108,6 +112,7 @@ from typing import Any, Callable, Dict, Generic, Mapping, Optional, Sequence, Li
 import pprint
 
 from .base import Agent
+from .data_classes import AgentTurn, ToolAgentTurn
 from ..core.Exceptions import (
     ToolAgentError,
     ToolDefinitionError,
@@ -132,163 +137,68 @@ logger = logging.getLogger(__name__)
 _STEP_TOKEN: re.Pattern[str] = re.compile(r"<<__s(\d+)__>>")
 _CACHE_TOKEN: re.Pattern[str] = re.compile(r"<<__c(\d+)__>>")
 
-def truncate_for_preview(obj: Any, limit: Optional[int]) -> Any:
+def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:
     """
-    Truncate an object's representation for display in preview messages.
-    
-    If limit is None, returns obj unchanged.
-    If repr(obj) length <= limit, returns obj unchanged.
-    Otherwise, intelligently truncates at collection boundaries and returns
-    a formatted string: "(type_name)truncated_repr..." where the type prefix
-    and ellipsis do not count toward the character limit.
-    
-    For collections (list, dict, set, tuple), truncation attempts to include
-    complete items/pairs and ends with the appropriate closing bracket.
-    
+    Recursively extract all placeholder references from an object.
+
+    Scans the object for occurrences of a given placeholder pattern (e.g., ``<<__sN__>>``)
+    and returns the set of all referenced indices. Used during planning to extract
+    dependencies between steps.
+
     Parameters
     ----------
     obj : Any
-        Object to potentially truncate
-    limit : Optional[int]
-        Character limit for the representation. If None, no truncation.
-        If a positive integer, truncation occurs only if repr exceeds this limit.
-    
+        Object to scan. Typically a dict (tool args) but can be any nested structure
+        (lists, tuples, dicts, sets, scalars).
+    placeholder_pattern : re.Pattern[str]
+        Compiled regex pattern matching placeholders. Usually:
+        - ``_STEP_TOKEN`` for step refs (``<<__sN__>>``)
+        - ``_CACHE_TOKEN`` for cache refs (``<<__cN__>>``)
+
     Returns
     -------
-    Any
-        Either the original object unchanged, or a truncated string representation.
+    set[int]
+        Set of all indices found (0-based). Empty set if no placeholders found.
+
+    Validation
+    ~~~~~~~~~~
+    This method performs **NO validation** of the found indices:
+    - Does NOT check bounds (N might be >= blackboard length)
+    - Does NOT check execution status (referenced slot might not be executed yet)
+    - Purely structural scanning
+
+    Validation happens later in ``_resolve_placeholders()`` at prepare time.
+
+    Examples
+    --------
+    >>> pattern = _STEP_TOKEN  # Matches <<__sN__>>
+    >>> obj = {\"query\": \"<<__s0__>>\", \"context\": [\"<<__s1__>>\", \"<<__s0__>>\"]}
+    >>> extract_dependencies(obj, pattern)
+    {0, 1}
+
+    >>> obj = {\"static\": \"no placeholders here\"}
+    >>> extract_dependencies(obj, pattern)
+    set()
     """
-    if limit is None:
-        return obj
-    
-    try:
-        repr_str = repr(obj)
-    except Exception:
-        repr_str = str(obj)
-    
-    if len(repr_str) <= limit:
-        return obj
-    
-    # Need to truncate
-    type_name = type(obj).__name__
-    
-    # Try intelligent truncation for collections
-    if isinstance(obj, (list, tuple, set, dict)):
-        # Choose bracket characters
-        if isinstance(obj, list):
-            open_br, close_br = "[", "]"
-        elif isinstance(obj, tuple):
-            open_br, close_br = "(", ")"
-        elif isinstance(obj, set):
-            open_br, close_br = "{", "}"
-        else:
-            open_br, close_br = "{", "}"
+    deps: set[int] = set()
 
-        # Build inner content up to the limit (limit counts ONLY inner characters)
-        inner = ""
-        if isinstance(obj, dict):
-            iterator = obj.items()
-            for i, (k, v) in enumerate(iterator):
-                kv_repr = f"{repr(k)}: {repr(v)}"
-                sep = ", " if i > 0 else ""
-                if len(inner) + len(sep) + len(kv_repr) > limit:
-                    break
-                inner += sep + kv_repr
-        else:
-            iterator = obj
-            for i, item in enumerate(iterator):
-                item_repr = repr(item)
-                sep = ", " if i > 0 else ""
-                if len(inner) + len(sep) + len(item_repr) > limit:
-                    break
-                inner += sep + item_repr
+    def walk(x: Any) -> None:
+        if isinstance(x, str):
+            for m in placeholder_pattern.finditer(x):
+                deps.add(int(m.group(1)))
+            return
+        if isinstance(x, dict):
+            for k, v in x.items():
+                walk(k)
+                walk(v)
+            return
+        if isinstance(x, (list, tuple, set)):
+            for v in x:
+                walk(v)
+            return
 
-        # If everything fit, return full representation without ellipsis
-        full_inner = None
-        try:
-            full_inner = repr(obj)[len(open_br):-len(close_br)] if repr_str.startswith(open_br) and repr_str.endswith(close_br) else None
-        except Exception:
-            full_inner = None
-
-        if inner and (len(inner) < len(repr_str) or full_inner is None and len(repr_str) > limit):
-            # Truncated: place ellipsis INSIDE the brackets
-            return f"({type_name}){open_br}{inner}...{close_br}"
-
-        # If inner is empty but repr_str was longer than limit, fall back to simple truncation
-        if not inner and len(repr_str) > limit:
-            truncated = repr_str[:limit]
-            return f"({type_name}){truncated}..."
-
-        # Not truncated — return original representation (as string) to preserve formatting
-        return f"({type_name}){repr_str}"
-
-    else:
-        # For other types, just truncate the repr directly
-        truncated = repr_str[:limit]
-        return f"({type_name}){truncated}..."
-
-def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:
-        """
-        Recursively extract all placeholder references from an object.
-
-        Scans the object for occurrences of a given placeholder pattern (e.g., ``<<__sN__>>``)
-        and returns the set of all referenced indices. Used during planning to extract
-        dependencies between steps.
-
-        Parameters
-        ----------
-        obj : Any
-            Object to scan. Typically a dict (tool args) but can be any nested structure
-            (lists, tuples, dicts, sets, scalars).
-        placeholder_pattern : re.Pattern[str]
-            Compiled regex pattern matching placeholders. Usually:
-            - ``_STEP_TOKEN`` for step refs (``<<__sN__>>``)
-            - ``_CACHE_TOKEN`` for cache refs (``<<__cN__>>``)
-
-        Returns
-        -------
-        set[int]
-            Set of all indices found (0-based). Empty set if no placeholders found.
-
-        Validation
-        ~~~~~~~~~~
-        This method performs **NO validation** of the found indices:
-        - Does NOT check bounds (N might be >= blackboard length)
-        - Does NOT check execution status (referenced slot might not be executed yet)
-        - Purely structural scanning
-
-        Validation happens later in ``_resolve_placeholders()`` at prepare time.
-
-        Examples
-        --------
-        >>> pattern = _STEP_TOKEN  # Matches <<__sN__>>
-        >>> obj = {\"query\": \"<<__s0__>>\", \"context\": [\"<<__s1__>>\", \"<<__s0__>>\"]}
-        >>> extract_dependencies(obj, pattern)
-        {0, 1}
-
-        >>> obj = {\"static\": \"no placeholders here\"}
-        >>> extract_dependencies(obj, pattern)
-        set()
-        """
-        deps: set[int] = set()
-
-        def walk(x: Any) -> None:
-            if isinstance(x, str):
-                for m in placeholder_pattern.finditer(x):
-                    deps.add(int(m.group(1)))
-                return
-            if isinstance(x, dict):
-                for k, v in x.items():
-                    walk(k)
-                    walk(v)
-                return
-            if isinstance(x, (list, tuple, set)):
-                for v in x:
-                    walk(v)
-                return
-
-        walk(obj)
-        return deps
+    walk(obj)
+    return deps
 
 # --------------------------------------------------------------------------- #
 # Canonical final-return tool (shared common resource)
@@ -396,49 +306,51 @@ class ToolAgentRunState:
 
     Blackboard Architecture
     -----------------------
-    **cache_blackboard** : list[BlackboardSlot] (read-only)
-        Snapshot of the persisted ``self._blackboard`` at invoke start. Previous
-        invocation results are available here and can be referenced via
-        ``<<__cN__>>`` placeholders in the running plan.
+    **cache_blackboard** : list[BlackboardSlot]
+        Snapshot of the persisted ``self._blackboard`` at invoke start when context is
+        enabled. Previous invocation results are available here and can be referenced
+        via ``<<__cN__>>`` placeholders.
 
     **running_blackboard** : list[BlackboardSlot]
         Plan-local slots (0-based indices) created during this invoke. Populated by
         ``_initialize_run_state()``, planned by ``_prepare_next_batch()``, and
-        executed by ``_execute_prepared_batch()``.\n        If ``context_enabled=True``, this is persisted and merged into
+        executed by ``_execute_prepared_batch()``.
+        If ``context_enabled=True``, executed slots are persisted and merged into
         ``self._blackboard`` after ``invoke()`` completes.
 
     Placeholder Semantics & Resolvability
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    **Cached Placeholder** (``<<__cN__>>``)\n        Resolvable iff ``0 <= N < len(cache_blackboard)`` AND
-        ``cache_blackboard[N].result is not NO_VAL`` (i.e., previously executed).
+    **Cached Placeholder** (``<<__cN__>>``)
+        Resolvable iff ``0 <= N < len(cache_blackboard)`` AND
+        ``cache_blackboard[N].result is not NO_VAL``.
 
-    **Step Placeholder** (``<<__sN__>>``)\n        Resolvable iff ``0 <= N < len(running_blackboard)`` AND
-        ``running_blackboard[N].is_executed()`` (i.e., result set in this run).
+    **Step Placeholder** (``<<__sN__>>``)
+        Resolvable iff ``0 <= N < len(running_blackboard)`` AND
+        ``running_blackboard[N].is_executed()``.
 
     Execution State Machine
     -----------------------
     **messages** : list[dict[str, str]]
-        LLM conversation history (messages exchanged so far).
-        Augmented during iteration by prepare/execute steps for context.
+        Run-local LLM-facing messages used during this invocation. ReAct may augment
+        this list with current-run observations. These messages are not the canonical
+        stored memory format; completed invocations are stored as turns.
 
     **executed_steps** : set[int]
-        Running plan indices that have been executed (result != NO_VAL).
-        Used for fast-path integrity checking.
+        Running plan indices that have been executed.
 
     **prepared_steps** : list[int]
-        Running plan indices ready for concurrent execution in the *next*
-        ``_execute_prepared_batch()`` call. Must be set by ``_prepare_next_batch()``.
-        Must be non-empty; cleared after execution.
+        Running plan indices ready for execution in the next batch. Must be set by
+        ``_prepare_next_batch()`` and consumed by the base execution path.
 
     **tool_calls_used** : int
-        Count of non-return tool calls executed so far (for budget tracking).
+        Count of non-return tool calls executed so far.
 
     **is_done** : bool
         Loop termination flag. Set to True when the ``return`` tool executes.
 
     **return_value** : Any | NO_VAL
-        Agent's final output. Set by ``_execute_prepared_batch()`` when the return
-        tool executes. Returned from ``invoke()`` (post-processed via ``post_invoke``).
+        Agent's raw final output. Set when the return tool executes. This becomes the
+        raw response passed into the base Agent post-processing and turn pipeline.
     """
     messages: list[dict[str, str]]
 
@@ -470,20 +382,27 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     Abstract base class implementing the template-method pattern for tool-using agents.
 
     This class owns the invariant iteration loop; subclasses provide domain-specific
-    planning and batch preparation strategies. The architecture leverages a blackboard
-    slot system with sentinel-driven state and placeholder-based dependency management.
+    planning and batch preparation strategies. The architecture uses a blackboard slot
+    system with sentinel-driven state and placeholder-based dependency management.
 
     Template-Method Loop
     --------------------
-    The ``_invoke(messages)`` method (FINAL; do not override) orchestrates::
+    The ``_invoke(messages=...)`` method (FINAL; do not override) orchestrates::
 
-      1. state = _initialize_run_state(messages)  [subclass hook]
-      2. while not state.is_done:
-           state = _prepare_next_batch(state)      [subclass hook]
-           state = _execute_prepared_batch(state)  [base implementation]
-           [completion check: if return tool executed, is_done=True]
-      3. if context_enabled: state = update_blackboard(state)  [base implementation]
-      4. return newest_history, state.return_value
+    1. state = _initialize_run_state(messages=messages)  [subclass hook]
+    2. while not state.is_done:
+        state = _prepare_next_batch(state)             [subclass hook]
+        state = _execute_prepared_batch(state)         [base implementation]
+        [completion check: if return tool executed, is_done=True]
+    3. if context_enabled:
+        blackboard_start = len(self._blackboard)
+        state = update_blackboard(state)
+        blackboard_end = len(self._blackboard)
+    4. return state.return_value, {"blackboard_start": ..., "blackboard_end": ...}
+
+    The returned metadata is consumed by ``_make_turn(...)`` to construct a
+    ``ToolAgentTurn``. The turn stores the half-open blackboard span produced by the
+    invocation. Future LLM-facing messages are rendered by ``render_turn(...)``.
 
     Subclass Responsibilities
     -------------------------
@@ -491,48 +410,43 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
     **_initialize_run_state(messages)** → ``RS`` (TypeVar[ToolAgentRunState])
         Initialize and return a run state for this invoke. Must:
-        - Snapshot ``self._blackboard`` as ``state.cache_blackboard``
-        - Create appropriate ``state.running_blackboard`` (may be fixed-size or dynamic)
-        - Store ``messages`` for LLM context
-        - Initialize ``executed_steps=set()``, ``prepared_steps=[]``, etc.
+        - Copy incoming LLM-facing messages into run-local state
+        - Snapshot cached blackboard entries if context is enabled
+        - Create an appropriate running blackboard
+        - Initialize ``executed_steps``, ``prepared_steps``, and completion state
 
     **_prepare_next_batch(state)** → ``RS``
         Prepare exactly one executable batch per loop iteration:
-        - Generate next tool calls (via LLM, pre-computed plan, heuristic, etc.)
+        - Generate next tool calls via LLM, precomputed plan, or another strategy
         - Validate tool names, placeholder dependencies, and budget
-        - Fill ``state.prepared_steps`` with indices of slots ready to execute
-        - Call ``self._resolve_placeholders(args, state=state)`` to populate
-          ``slot.resolved_args`` for each prepared step
+        - Resolve placeholders with ``self._resolve_placeholders(...)``
+        - Fill ``state.prepared_steps`` with indices ready to execute
         - Return the updated state
-        Raise on any validation failure; raising exits the loop with error.
 
     Key Features
     ~~~~~~~~~~~~
-    **Concurrent Execution**: Each batch runs concurrently (thread pool) with fail-fast
-    semantics. First error aborts; remaining futures are cancelled.
+    **Concurrent Execution**: Each prepared batch runs through async tool invocation and
+    gather-based result collection.
 
     **Placeholder Resolution**: Supported syntaxes:
-        - ``<<__sN__>>`` – reference to running step N (resolved after N executes)
-        - ``<<__cN__>>`` – reference to cache entry N (must exist and be executed)
-        Placeholders are resolved at prepare time; inline refs in strings use ``repr()``;
-        full-string placeholders preserve types.
+        - ``<<__sN__>>`` – reference to running step N
+        - ``<<__cN__>>`` – reference to cache entry N
+        Full-string placeholders preserve types; inline placeholders render via ``repr()``.
 
     **Return Semantics**: The canonical ``return_tool`` is registered automatically.
-        When return executes, ``state.return_value`` is set and loop exits.
-        Only one return per run is allowed; multiple raises.
+        When return executes, ``state.return_value`` is set and the loop exits.
 
-    **Budget Enforcement**: If ``tool_calls_limit`` is set, non-return tool calls
-        (across all iterations) are tracked; exceeding the limit raises.
+    **Budget Enforcement**: If ``tool_calls_limit`` is set, non-return tool calls are
+        tracked and exceeding the limit raises.
 
-    **Context Persistence**: If ``context_enabled=True``, the trimmed run blackboard
-        is merged into ``self._blackboard`` after invoke completes, with step placeholders
-        rewritten to cache placeholders for future invokes' reference.
+    **Context Persistence**: If ``context_enabled=True``, the completed run blackboard
+        is merged into ``self._blackboard`` and the produced span is stored on the
+        ToolAgentTurn for future rendering.
 
     Generic Type Parameter
     ~~~~~~~~~~~~~~~~~~~~~~
     ``RS`` is a TypeVar bound to ``ToolAgentRunState``. Subclasses provide a concrete
-    runtime-specific state class (e.g., ``PlanActRunState``, ``ReActRunState``) that
-    may carry additional fields for planning/execution state.
+    runtime-specific state class such as ``PlanActRunState`` or ``ReActRunState``.
     """
 
     def __init__(
@@ -546,12 +460,22 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         *,
         tool_calls_limit: Optional[int] = None,
         peek_at_cache: bool = False,
+        response_preview_limit: Optional[int] = None,
+        blackboard_preview_limit: Optional[int] = None,
         preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         history_window: Optional[int] = None,
     ) -> None:
         template = self._validate_role_prompt_template(role_prompt)
+
+        if preview_limit is not None:
+            if response_preview_limit is not None:
+                raise ToolAgentError(
+                    "preview_limit and response_preview_limit cannot both be provided; "
+                    "preview_limit is a compatibility alias for response_preview_limit."
+                )
+            response_preview_limit = preview_limit
 
         super().__init__(
             name=name,
@@ -563,12 +487,16 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             history_window=history_window,
+            response_preview_limit=response_preview_limit,
         )
 
         self._toolbox: dict[str, Tool] = {}
         self._blackboard: list[BlackboardSlot] = []
-        self._peek_at_cache = peek_at_cache
-        self._preview_limit: Optional[int] = preview_limit
+
+        self._peek_at_cache = False
+        self.peek_at_cache = peek_at_cache
+
+        self.blackboard_preview_limit = blackboard_preview_limit
 
         self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
@@ -633,26 +561,50 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     @property
     def peek_at_cache(self) -> bool:
         return self._peek_at_cache
-    
+
     @peek_at_cache.setter
     def peek_at_cache(self, val: bool) -> None:
-        if not isinstance(val, bool):
+        if type(val) is not bool:
             raise ToolAgentError("peek_at_cache must be a boolean.")
         self._peek_at_cache = val
     
     @property
+    def blackboard_preview_limit(self) -> Optional[int]:
+        """Character limit for cached blackboard result previews. None means no truncation."""
+        return self._blackboard_preview_limit
+    
+    @blackboard_preview_limit.setter
+    def blackboard_preview_limit(self, value: Optional[int]) -> None:
+        if value is None:
+            self._blackboard_preview_limit = None
+            return
+        if type(value) is not int or value <= 0:
+            raise ToolAgentError("blackboard_preview_limit must be None or a positive integer > 0.")
+        self._blackboard_preview_limit = value
+
+    @property
     def preview_limit(self) -> Optional[int]:
-        """Character limit for result preview in messages. None means no truncation."""
-        return self._preview_limit
+        """Compatibility alias for response_preview_limit."""
+        return self.response_preview_limit
     
     @preview_limit.setter
     def preview_limit(self, value: Optional[int]) -> None:
-        if value is None:
-            self._preview_limit = None
-            return
-        if not isinstance(value, int) or value <= 0:
-            raise ToolAgentError("preview_limit must be None or a positive integer > 0.")
-        self._preview_limit = value
+        self.response_preview_limit = value
+
+    def _preview_blackboard_result(self, result: Any) -> str:
+        """Render and optionally truncate a cached blackboard result preview."""
+        try:
+            text = repr(result)
+        except Exception:
+            text = str(result)
+
+        if (
+            self._blackboard_preview_limit is not None
+            and len(text) > self._blackboard_preview_limit
+        ):
+            text = text[: self._blackboard_preview_limit] + "..."
+
+        return text
 
     # ------------------------------------------------------------------ #
     # Memory management
@@ -837,25 +789,26 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Pretty representation of the persisted blackboard.
 
         peek=False -> placeholder-view (args)
-        peek=True  -> resolved-view (resolved_args)
+        peek=True  -> placeholder-view plus result previews
 
         Includes explicit `step` numbering to make global indexing unambiguous.
         If a slot's `step` is NO_VAL, the list position is used.
         """
-        key = "resolved_args" if peek else "args"
         view: list[dict[str, Any]] = []
 
         for i, d in enumerate(self.blackboard_serialized):
             d["step"] = i
-            d.pop("resolved_args")
+            d.pop("resolved_args", None)
             if d["error"] is NO_VAL:
                 d.pop("error")
-            if not peek:
+            if peek:
+                d["result"] = self._preview_blackboard_result(d["result"])
+            else:
                 d.pop("result")
             view.append(d)
 
         try:
-            return pprint.pformat(view, indent=indent, width=width)
+            return pprint.pformat(view, indent=indent, width=width, sort_dicts=False)
         except Exception:  # pragma: no cover
             return str(view)
 
@@ -1384,12 +1337,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         - Future invokes can use ``<<__c5__>>``, ``<<__c6__>>``, ``<<__c7__>>``
           to reference steps 0, 1, 2 respectively
 
-        Metadata Augmentation
-        ~~~~~~~~~~~~~~~~~~~~
-        If ``peek_at_cache=True``, results are also included in the assistant message
-        appended to ``state.messages``. This allows the LLM to \"see\" cached results
-        for reflection or planning in future invokes.
-
         Parameters
         ----------
         state : ToolAgentRunState
@@ -1398,14 +1345,11 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Returns
         -------
         ToolAgentRunState
-            Updated state with messages augmented (side effect only; state object
-            itself is returned unchanged).
+            Updated state after blackboard persistence.
 
         Side Effects
         ~~~~~~~~~~~~
         - ``self._blackboard`` is replaced with merged cache + appended slots
-        - ``state.messages`` is augmented with an assistant message describing
-          newly cached steps (for context in future LLM turns)
         """
         base_cache: list[BlackboardSlot] = list(state.cache_blackboard)
         base_len = len(base_cache)
@@ -1463,16 +1407,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         combined = base_cache + appended
 
-        extracted = [{"step":slot.step, "tool":slot.tool, "args": slot.args} for slot in appended]
-        if self.peek_at_cache:
-            for i, d in enumerate(extracted):
-                result = appended[i].result
-                result = truncate_for_preview(result, self._preview_limit)
-                d.update({"result": result})
-        newest_dump = ",".join([f"\n  {step}" for step in extracted])
-        newest_dump = f"CACHED STEPS & RESULTS #{appended[0].step}-{appended[-1].step} PRODUCED:\n\n[{newest_dump}\n]"
-        state.messages.append({"role":"assistant", "content": newest_dump})
-
         # 3) Trim empty tail from combined cache.
         if combined:
             last2 = len(combined) - 1
@@ -1486,7 +1420,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     # ------------------------------------------------------------------ #
     # Template Method (FINAL)
     # ------------------------------------------------------------------ #
-    def _invoke(self, *, messages: list[dict[str, str]]) -> tuple[list[dict[str, str]], Any]:
+    def _invoke(self, *, messages: list[dict[str, str]]) -> tuple[Any, Mapping[str, Any]]:
         """
         FINAL template method (do not override in subclasses).
 
@@ -1496,8 +1430,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         """
         if not messages:
             raise ToolAgentError("ToolAgent._invoke requires a non-empty messages list.")
-
-        original_user_msg = dict(messages[-1])
 
         state = self._initialize_run_state(messages=messages)
 
@@ -1525,34 +1457,44 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
             state = self._execute_prepared_batch(state)
 
+        blackboard_start: int | None = None
+        blackboard_end: int | None = None
+
         # Persist run outputs into cache if context is enabled.
         if self.context_enabled:
+            blackboard_start = len(self._blackboard)
             state = self.update_blackboard(state)
+            blackboard_end = len(self._blackboard)
 
-        newest_history = [original_user_msg, state.messages[-1]]
-        return newest_history, state.return_value
+        return state.return_value, {
+            "blackboard_start": blackboard_start,
+            "blackboard_end": blackboard_end,
+        }
 
     async def _ainvoke(
         self,
         *,
         messages: list[dict[str, str]],
-    ) -> tuple[list[dict[str, str]], Any]:
+    ) -> tuple[Any, Mapping[str, Any]]:
         """
         Async ToolAgent template method.
 
-        Mirrors the existing sync ``_invoke(...)`` loop, but:
-        - offloads the current sync planning hooks to worker threads, and
-        - awaits the async batch executor for tool execution.
+        Mirrors the sync `_invoke(...)` loop, but offloads the current sync planning hooks
+        to worker threads and awaits the async batch executor for tool execution.
 
-        This keeps the subclass contract minimal:
-        - _initialize_run_state(...) stays sync
-        - _prepare_next_batch(...) stays sync
-        - only the execution phase becomes natively async
+        Subclasses keep the same minimal contract:
+        - `_initialize_run_state(...)` stays sync
+        - `_prepare_next_batch(...)` stays sync
+        - only the execution phase is natively async
+
+        Returns
+        -------
+        tuple[Any, Mapping[str, Any]]
+            The raw return-tool value and metadata containing `blackboard_start` and
+            `blackboard_end`.
         """
         if not messages:
             raise ToolAgentError("ToolAgent._ainvoke requires a non-empty messages list.")
-
-        original_user_msg = dict(messages[-1])
 
         state = await asyncio.to_thread(self._initialize_run_state, messages=messages)
 
@@ -1585,11 +1527,116 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
             state = await self._async_execute_prepared_batch(state)
 
-        if self.context_enabled:
-            state = self.update_blackboard(state)
+        blackboard_start: int | None = None
+        blackboard_end: int | None = None
 
-        newest_history = [original_user_msg, state.messages[-1]]
-        return newest_history, state.return_value
+        if self.context_enabled:
+            blackboard_start = len(self._blackboard)
+            state = self.update_blackboard(state)
+            blackboard_end = len(self._blackboard)
+
+        return state.return_value, {
+            "blackboard_start": blackboard_start,
+            "blackboard_end": blackboard_end,
+        }
+
+    def _make_turn(
+        self,
+        *,
+        prompt: str,
+        raw_response: Any,
+        final_response: Any,
+        **metadata: Any,
+    ) -> ToolAgentTurn:
+        """Construct the stored ToolAgentTurn for one completed invocation.
+
+        Consumes the blackboard span metadata returned by `_invoke(...)` or `_ainvoke(...)`.
+        The span is half-open: `blackboard_start` is inclusive and `blackboard_end` is
+        exclusive.
+        """
+        allowed = {"blackboard_start", "blackboard_end"}
+        extra = set(metadata) - allowed
+        if extra:
+            raise ToolAgentError(
+                f"{type(self).__name__}._make_turn received unexpected metadata: "
+                f"{sorted(extra)!r}"
+            )
+
+        blackboard_start = metadata.get("blackboard_start")
+        blackboard_end = metadata.get("blackboard_end")
+
+        if blackboard_start is None or blackboard_end is None:
+            if blackboard_start is not None or blackboard_end is not None:
+                raise ToolAgentError(
+                    "blackboard_start and blackboard_end must both be None or both be integers."
+                )
+        else:
+            if type(blackboard_start) is not int or type(blackboard_end) is not int:
+                raise ToolAgentError("blackboard_start and blackboard_end must be integers or None.")
+            if blackboard_start < 0 or blackboard_end < blackboard_start:
+                raise ToolAgentError(
+                    "blackboard_start and blackboard_end must satisfy 0 <= start <= end."
+                )
+
+        return ToolAgentTurn(
+            prompt=prompt,
+            raw_response=raw_response,
+            final_response=final_response,
+            blackboard_start=blackboard_start,
+            blackboard_end=blackboard_end,
+        )
+
+    def render_turn(self, turn: AgentTurn) -> list[dict[str, str]]:
+        """Render one stored ToolAgentTurn into LLM-facing user/assistant messages.
+
+        The base assistant response is rendered through `Agent.render_turn(...)`, preserving
+        `assistant_response_source` and `response_preview_limit` behavior. If the turn has
+        a non-empty blackboard span, this method appends a cached-step block containing
+        each produced step's unresolved args. Result previews are included only when
+        `peek_at_cache=True` and are bounded by `blackboard_preview_limit`.
+        """
+        if not isinstance(turn, ToolAgentTurn):
+            raise ToolAgentError(
+                f"render_turn expected ToolAgentTurn, got {type(turn)!r}"
+            )
+
+        messages = super().render_turn(turn)
+        user_message = messages[0]
+        assistant_response = messages[1]["content"]
+
+        start = turn.blackboard_start
+        end = turn.blackboard_end
+        if start is None or end is None or start == end:
+            return messages
+
+        if start < 0 or end < start or end > len(self._blackboard):
+            raise ToolAgentError(
+                f"Invalid blackboard span for rendered turn: start={start!r}, end={end!r}, "
+                f"blackboard_length={len(self._blackboard)}."
+            )
+
+        extracted: list[dict[str, Any]] = []
+        for slot in self._blackboard[start:end]:
+            step: dict[str, Any] = {
+                "step": slot.step,
+                "tool": slot.tool,
+                "args": slot.args,
+            }
+            if self.peek_at_cache:
+                step["result"] = self._preview_blackboard_result(slot.result)
+            extracted.append(step)
+
+        newest_dump = pprint.pformat(extracted, indent=2, width=160, sort_dicts=False)
+        assistant_content = (
+            f"RESPONSE:\n{assistant_response}\n\n"
+            f"CACHED STEPS #{start}-{end - 1} PRODUCED:\n\n"
+            f"{newest_dump}"
+        )
+
+        return [
+            user_message,
+            {"role": "assistant", "content": assistant_content},
+        ]
 
     # ------------------------------------------------------------------ #
     # String to List of Objects helper
@@ -1706,29 +1753,54 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     @abstractmethod
     def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> RS:
         """
-        Must:
-          - snapshot messages and any persisted blackboard prefix (if context enabled)
-          - append (tool_calls_limit + 1) empty slots, or a fixed cap if unlimited
-          - set resolvable_cutoff = prefix_len - 1
-          - set planned_cutoff = resolvable_cutoff
+        Initialize and return a run state for this invocation.
+
+        Implementations should:
+        - copy the incoming LLM-facing messages into run-local state
+        - snapshot persisted blackboard entries if context is enabled
+        - allocate an appropriate running blackboard for current-run tool calls
+        - initialize execution bookkeeping such as executed_steps, prepared_steps,
+        tool_calls_used, is_done, and return_value
         """
         raise NotImplementedError
 
     @abstractmethod
     def _prepare_next_batch(self, state: RS) -> RS:
         """
-        Must:
-          - plan exactly one batch per loop iteration
-          - validate placeholders against state.resolvable_cutoff (raise on violation)
-          - fill slots [planned_cutoff+1 .. new_planned_cutoff] contiguously:
-              slot.tool, slot.args, slot.resolved_args
-            where slot.resolved_args is produced by resolving placeholders now
-            (use self._resolve_placeholders(obj, state=state))
-          - advance state.planned_cutoff
-          - may plan a return tool call; base will detect it after execution
+        Prepare exactly one executable batch for the next loop iteration.
+
+        Implementations should:
+        - decide which tool call(s) should execute next
+        - validate tool names, step indices, dependencies, and placeholder legality
+        - resolve placeholders with `_resolve_placeholders(...)`
+        - populate `state.prepared_steps` with the running blackboard indices ready
+        for execution
+        - return the updated state
+
+        The base ToolAgent loop will execute the prepared batch and handle return-tool
+        completion.
         """
         raise NotImplementedError
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return a diagnostic snapshot of this ToolAgent.
+
+        Extends the base Agent snapshot with ToolAgent-specific toolbox and blackboard
+        diagnostics. The inherited `history` field remains a rendered compatibility
+        view, while `turn_history` remains the canonical stored turn representation.
+        """
+        d = super().to_dict()
+        d.update({
+            "tool_calls_limit": self.tool_calls_limit,
+            "peek_at_cache": self.peek_at_cache,
+            "blackboard_preview_limit": self.blackboard_preview_limit,
+            "tools": {
+                name: tool.to_dict()
+                for name, tool in self._toolbox.items()
+            },
+            "blackboard": self.blackboard_serialized,
+        })
+        return d
 
 # --------------------------------------------------------------------------- #
 # PlanAct Agent
@@ -1918,6 +1990,8 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         context_enabled: bool = False,
         tool_calls_limit: int | None = None,
         peek_at_cache: bool = False,
+        response_preview_limit: Optional[int] = None,
+        blackboard_preview_limit: Optional[int] = None,
         preview_limit: Optional[int] = None,
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
@@ -1932,6 +2006,8 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
+            response_preview_limit=response_preview_limit,
+            blackboard_preview_limit=blackboard_preview_limit,
             preview_limit=preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
@@ -1951,12 +2027,13 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 
         Execution Steps
         ~~~~~~~~~~~~~~~
-        1. **Snapshot cache** from ``self._blackboard`` (persisted results from prior invokes)
+        1. **Snapshot cache** from ``self._blackboard`` if ``context_enabled=True``
+           (persisted results from prior invokes)
 
         2. **LLM plan generation** (via PLANNER_PROMPT):
            - LLM receives the conversation messages
-           - Expected to emit a JSON array of step objects: ``[{\"tool\": \"...\", \"args\": {...}}, ...]``
-           - Optionally, each step can include an \"await\" field (dependency barrier)
+           - Expected to emit a JSON array of step objects: ``[{"tool": "...", "args": {...}}, ...]``
+           - Optionally, each step can include an "await" field (dependency barrier)
 
         3. **Return normalization**:
            - Validates at most one return step; if multiple, raises
@@ -1994,7 +2071,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         -------
         PlanActRunState
             Initialized state ready for the base template-method loop:
-            - cache_blackboard populated with prior results
+            - cache_blackboard populated with prior results when context_enabled=True
             - running_blackboard pre-allocated and pre-filled with tools+args
             - batches list with topologically-sorted concurrent batches
             - batch_index=0 (first batch)
@@ -2014,7 +2091,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 
         working_messages = [dict(m) for m in messages]
 
-        cache_blackboard: list[BlackboardSlot] = list(self._blackboard) if self._blackboard else []
+        cache_blackboard: list[BlackboardSlot] = self.blackboard if self.context_enabled else []
         for i, slot in enumerate(cache_blackboard):
             slot.step = i
 
@@ -2049,7 +2126,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                 raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool in plan: {ps.tool!r}.")
             planned.append(ps)
 
-        # NEW: Force return to be final step with deps = all prior steps
+        # Force return to be final step with deps = all prior steps.
         return_idx = len(planned) - 1
         planned[return_idx] = PlannedStep(
             tool=planned[return_idx].tool,
@@ -2336,10 +2413,11 @@ class ReActAgent(ToolAgent[ReActRunState]):
        - Pre-allocates a fixed-size running blackboard: ``tool_calls_limit + 1`` slots
          (to accommodate non-return tool calls + one return call)
        - Requires ``tool_calls_limit`` to be a concrete integer (not None)
+       - Snapshots cached blackboard entries only when ``context_enabled=True``
 
     2. **Preparation** (``_prepare_next_batch`` – single step per turn)
        - **First turn**: LLM receives the original user query; emits first step as JSON
-       - **Subsequent turns**: Injects \"most recently executed step and result\" into
+       - **Subsequent turns**: Injects "most recently executed step and result" into
          messages, then asks for the next step
        - Step must be a JSON object: ``{"step": <int>, "tool": "<name>", "args": {...}}``
        - Validates step index matches expected position (cursor enforcement)
@@ -2383,6 +2461,8 @@ class ReActAgent(ToolAgent[ReActRunState]):
         context_enabled: bool = False,
         tool_calls_limit: int = 25,
         peek_at_cache: bool = False,
+        response_preview_limit: Optional[int] = None,
+        blackboard_preview_limit: Optional[int] = None,
         preview_limit: Optional[int] = None,
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
@@ -2397,6 +2477,8 @@ class ReActAgent(ToolAgent[ReActRunState]):
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
+            response_preview_limit=response_preview_limit,
+            blackboard_preview_limit=blackboard_preview_limit,
             preview_limit=preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
@@ -2405,7 +2487,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         # ReAct requires a concrete integer tool_calls_limit so that we can preallocate
         # a fixed-size running blackboard.
-        if not isinstance(tool_calls_limit, int) or tool_calls_limit < 0:
+        if type(tool_calls_limit) is not int or tool_calls_limit < 0:
             raise ToolAgentError("ReActAgent requires tool_calls_limit to be an int >= 0.")
 
     # ------------------------------------------------------------------ #
@@ -2413,13 +2495,13 @@ class ReActAgent(ToolAgent[ReActRunState]):
     # ------------------------------------------------------------------ #
     @property
     def tool_calls_limit(self) -> int:
-        """Max allowed non-return tool calls per invoke() run. None means unlimited."""
+        """Max allowed non-return tool calls per invoke() run. Must be an int >= 0."""
         return self._tool_calls_limit
 
     @tool_calls_limit.setter
     def tool_calls_limit(self, value: int) -> None:
-        if not isinstance(value, int) or value < 0:
-            raise ToolAgentError("tool_calls_limit must be None or an int >= 0.")
+        if type(value) is not int or value < 0:
+            raise ToolAgentError("ReActAgent requires tool_calls_limit to be an int >= 0.")
         self._tool_calls_limit = value
 
     # ------------------------------------------------------------------ #
@@ -2429,10 +2511,12 @@ class ReActAgent(ToolAgent[ReActRunState]):
         if not messages:
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
 
-        if self._tool_calls_limit is None or not isinstance(self._tool_calls_limit, int) or self._tool_calls_limit < 0:
+        if self._tool_calls_limit is None or type(self._tool_calls_limit) is not int or self._tool_calls_limit < 0:
             raise ToolAgentError("ReActAgent requires tool_calls_limit to be an int >= 0.")
 
-        cache_blackboard = list(self._blackboard)
+        cache_blackboard = self.blackboard if self.context_enabled else []
+        for i, slot in enumerate(cache_blackboard):
+            slot.step = i
 
         working_messages = list(messages)
 
@@ -2486,7 +2570,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 "step": slot.step,
                 "tool": slot.tool,
                 "args": slot.args,
-                "result": truncate_for_preview(slot.result, self._preview_limit),
+                "result": self._preview_blackboard_result(slot.result),
             }
             obs_text = "Most recently executed steps and results:\n" + pprint.pformat(
                 obs_payload, indent=2, sort_dicts=False

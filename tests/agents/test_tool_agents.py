@@ -17,14 +17,15 @@ from atomic_agentic.agents.tool_agents import (
     PlanActAgent,
     PlannedStep,
     ReActAgent,
-    truncate_for_preview,
 )
 from atomic_agentic.core.Exceptions import (
+    AgentError,
     ToolAgentError,
     ToolInvocationError,
     ToolRegistrationError,
 )
 from atomic_agentic.core.sentinels import NO_VAL
+from atomic_agentic.agents.data_classes import AgentTurn, ToolAgentTurn
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.tools import Tool
 
@@ -115,6 +116,8 @@ def make_planact_agent(
     tool_calls_limit: int | None = None,
     peek_at_cache: bool = False,
     preview_limit: int | None = None,
+    response_preview_limit: int | None = None,
+    blackboard_preview_limit: int | None = None,
 ) -> PlanActAgent:
     agent = PlanActAgent(
         name="planact_agent",
@@ -124,6 +127,8 @@ def make_planact_agent(
         tool_calls_limit=tool_calls_limit,
         peek_at_cache=peek_at_cache,
         preview_limit=preview_limit,
+        response_preview_limit=response_preview_limit,
+        blackboard_preview_limit=blackboard_preview_limit,
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
@@ -136,6 +141,8 @@ def make_react_agent(
     tool_calls_limit: int = 3,
     peek_at_cache: bool = False,
     preview_limit: int | None = None,
+    response_preview_limit: int | None = None,
+    blackboard_preview_limit: int | None = None,
 ) -> ReActAgent:
     agent = ReActAgent(
         name="react_agent",
@@ -145,6 +152,8 @@ def make_react_agent(
         tool_calls_limit=tool_calls_limit,
         peek_at_cache=peek_at_cache,
         preview_limit=preview_limit,
+        response_preview_limit=response_preview_limit,
+        blackboard_preview_limit=blackboard_preview_limit,
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
@@ -184,6 +193,8 @@ class ScriptedToolAgent(ToolAgent[ScriptedRunState]):
         tool_calls_limit: int | None = None,
         peek_at_cache: bool = False,
         preview_limit: int | None = None,
+        response_preview_limit: int | None = None,
+        blackboard_preview_limit: int | None = None,
     ) -> None:
         super().__init__(
             name="scripted_agent",
@@ -194,6 +205,8 @@ class ScriptedToolAgent(ToolAgent[ScriptedRunState]):
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
             preview_limit=preview_limit,
+            response_preview_limit=response_preview_limit,
+            blackboard_preview_limit=blackboard_preview_limit,
         )
         self.script = script or []
 
@@ -276,12 +289,16 @@ def make_agent(
     tool_calls_limit: int | None = None,
     peek_at_cache: bool = False,
     preview_limit: int | None = None,
+    response_preview_limit: int | None = None,
+    blackboard_preview_limit: int | None = None,
 ) -> ScriptedToolAgent:
     return ScriptedToolAgent(
         context_enabled=context_enabled,
         tool_calls_limit=tool_calls_limit,
         peek_at_cache=peek_at_cache,
         preview_limit=preview_limit,
+        response_preview_limit=response_preview_limit,
+        blackboard_preview_limit=blackboard_preview_limit,
     )
 
 
@@ -450,7 +467,7 @@ class TestToolAgentConstruction:
             agent.peek_at_cache = value  # type: ignore[assignment]
 
     @pytest.mark.parametrize("value", [None, 1, 20])
-    def test_preview_limit_accepts_none_or_positive_int(
+    def test_preview_limit_alias_sets_response_preview_limit(
         self,
         value: int | None,
     ) -> None:
@@ -459,13 +476,36 @@ class TestToolAgentConstruction:
         agent.preview_limit = value
 
         assert agent.preview_limit == value
+        assert agent.response_preview_limit == value
 
     @pytest.mark.parametrize("value", [0, -1, "10"])
-    def test_preview_limit_rejects_zero_negative_or_non_int(self, value: Any) -> None:
+    def test_preview_limit_alias_rejects_via_response_preview_limit(self, value: Any) -> None:
         agent = make_agent()
 
-        with pytest.raises(ToolAgentError, match="preview_limit"):
+        with pytest.raises(AgentError, match="response_preview_limit"):
             agent.preview_limit = value  # type: ignore[assignment]
+
+    def test_constructor_rejects_preview_limit_and_response_preview_limit_together(self) -> None:
+        with pytest.raises(ToolAgentError, match="preview_limit and response_preview_limit"):
+            make_agent(preview_limit=10, response_preview_limit=20)
+
+    @pytest.mark.parametrize("value", [None, 1, 20])
+    def test_blackboard_preview_limit_accepts_none_or_positive_int(
+        self,
+        value: int | None,
+    ) -> None:
+        agent = make_agent()
+
+        agent.blackboard_preview_limit = value
+
+        assert agent.blackboard_preview_limit == value
+
+    @pytest.mark.parametrize("value", [0, -1, "10"])
+    def test_blackboard_preview_limit_rejects_zero_negative_or_non_int(self, value: Any) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="blackboard_preview_limit"):
+            agent.blackboard_preview_limit = value  # type: ignore[assignment]
 
 
 class TestToolRegistration:
@@ -894,6 +934,28 @@ class TestScriptedInvokeLoop:
 
         assert agent.invoke({"prompt": "run"}) == 5
         assert agent.blackboard == []
+        assert agent.turn_history == []
+
+    def test_context_enabled_stores_tool_agent_turn_with_blackboard_span(self) -> None:
+        agent = make_agent(context_enabled=True)
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+
+        assert agent.invoke({"prompt": "run"}) == 5
+
+        assert len(agent.turn_history) == 1
+        turn = agent.turn_history[0]
+        assert isinstance(turn, ToolAgentTurn)
+        assert turn.prompt == "run"
+        assert turn.raw_response == 5
+        assert turn.final_response == 5
+        assert turn.blackboard_start == 0
+        assert turn.blackboard_end == len(agent.blackboard)
 
     def test_context_enabled_persists_executed_blackboard(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -944,12 +1006,17 @@ class TestScriptedInvokeLoop:
         agent.invoke({"prompt": "run"})
 
         assert agent.blackboard
-        assert agent.history
+        assert agent.turn_history
 
         agent.clear_memory()
 
         assert agent.blackboard == []
-        assert agent.history == []
+        assert agent.turn_history == []
+
+        with pytest.warns(DeprecationWarning):
+            rendered_history = agent.history
+
+        assert rendered_history == []
 
     def test_prepare_empty_batch_raises(self) -> None:
         agent = make_agent()
@@ -1042,7 +1109,7 @@ class TestBlackboardPersistenceAndDisplay:
         assert "Tool.tests.add" in dump
         assert "'result'" not in dump
 
-    def test_blackboard_dumps_with_peek_uses_resolved_args(self) -> None:
+    def test_blackboard_dumps_with_peek_includes_results_but_hides_resolved_args(self) -> None:
         agent = make_agent(context_enabled=True)
         keys = register_math_tools(agent)
         agent.set_script(
@@ -1056,9 +1123,12 @@ class TestBlackboardPersistenceAndDisplay:
         dump = agent.blackboard_dumps(peek=True)
 
         assert "val" in dump
+        assert "'result'" in dump
+        assert "resolved_args" not in dump
+        assert "<<__c0__>>" in dump
 
-    def test_update_blackboard_with_peek_at_cache_includes_result_preview_message(self) -> None:
-        agent = make_agent(context_enabled=True, peek_at_cache=True, preview_limit=10)
+    def test_rendered_history_with_peek_at_cache_includes_cached_step_results(self) -> None:
+        agent = make_agent(context_enabled=True, peek_at_cache=True, blackboard_preview_limit=10)
         keys = register_math_tools(agent)
         agent.set_script(
             [
@@ -1078,9 +1148,160 @@ class TestBlackboardPersistenceAndDisplay:
         result = agent.invoke({"prompt": "run"})
 
         assert result == "long:abcdefghijklmnopqrstuvwxyz"
-        assert agent.history
-        assert "CACHED STEPS" in agent.history[-1]["content"]
-        assert "result" in agent.history[-1]["content"]
+        with pytest.warns(DeprecationWarning):
+            history = agent.history
+
+        content = history[-1]["content"]
+        assert "CACHED STEPS" in content
+        assert "result" in content
+        assert "long:abcd" in content
+        assert "long:abcdefghijklmnopqrstuvwxyz" in content
+
+    def test_rendered_history_without_peek_at_cache_hides_cached_step_results(self) -> None:
+        agent = make_agent(context_enabled=True, peek_at_cache=False)
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+
+        assert agent.invoke({"prompt": "run"}) == 3
+
+        with pytest.warns(DeprecationWarning):
+            history = agent.history
+
+        content = history[-1]["content"]
+        assert "CACHED STEPS" in content
+        assert "'args'" in content
+        assert "'result'" not in content
+
+    def test_rendered_history_blackboard_preview_limit_truncates_results_only(self) -> None:
+        agent = make_agent(
+            context_enabled=True,
+            peek_at_cache=True,
+            blackboard_preview_limit=10,
+        )
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [
+                    {
+                        "tool": keys["join_text"],
+                        "args": {
+                            "prefix": "long",
+                            "value": "abcdefghijklmnopqrstuvwxyz",
+                        },
+                    }
+                ],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+
+        assert agent.invoke({"prompt": "run"}) == "long:abcdefghijklmnopqrstuvwxyz"
+
+        with pytest.warns(DeprecationWarning):
+            history = agent.history
+
+        content = history[-1]["content"]
+        assert "abcdefghijklmnopqrstuvwxyz" in content
+        assert "'long:abcd..." in content
+
+    def test_response_preview_limit_truncates_response_not_cached_args(self) -> None:
+        agent = make_agent(
+            context_enabled=True,
+            peek_at_cache=True,
+            response_preview_limit=10,
+            blackboard_preview_limit=None,
+        )
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [
+                    {
+                        "tool": keys["join_text"],
+                        "args": {
+                            "prefix": "long",
+                            "value": "abcdefghijklmnopqrstuvwxyz",
+                        },
+                    }
+                ],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+
+        assert agent.invoke({"prompt": "run"}) == "long:abcdefghijklmnopqrstuvwxyz"
+
+        with pytest.warns(DeprecationWarning):
+            history = agent.history
+
+        content = history[-1]["content"]
+        response_section = content.split("CACHED STEPS", maxsplit=1)[0]
+        cached_section = content.split("CACHED STEPS", maxsplit=1)[1]
+        assert "RESPONSE:\nlong:abcde..." in response_section
+        assert "abcdefghijklmnopqrstuvwxyz" in cached_section
+        assert "'long:abcdefghijklmnopqrstuvwxyz'" in cached_section
+
+
+class TestToolAgentTurnRendering:
+    def test_render_turn_returns_single_user_assistant_pair(self) -> None:
+        agent = make_agent(context_enabled=True, peek_at_cache=True)
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+
+        assert agent.invoke({"prompt": "run"}) == 3
+
+        rendered = agent.render_turn(agent.turn_history[0])
+
+        assert len(rendered) == 2
+        assert [message["role"] for message in rendered] == ["user", "assistant"]
+        assert rendered[0]["content"] == "run"
+        assert rendered[1]["content"].startswith("RESPONSE:")
+        assert "CACHED STEPS #0-1 PRODUCED" in rendered[1]["content"]
+
+    def test_render_turn_uses_blackboard_span_only_for_that_turn(self) -> None:
+        agent = make_agent(context_enabled=True, peek_at_cache=True)
+        keys = register_math_tools(agent)
+
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+        assert agent.invoke({"prompt": "first"}) == 3
+
+        agent.set_script(
+            [
+                [{"tool": keys["multiply"], "args": {"x": 4, "y": 5}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+        assert agent.invoke({"prompt": "second"}) == 20
+
+        first_rendered = agent.render_turn(agent.turn_history[0])[1]["content"]
+        second_rendered = agent.render_turn(agent.turn_history[1])[1]["content"]
+
+        assert "CACHED STEPS #0-1 PRODUCED" in first_rendered
+        assert "CACHED STEPS #2-3 PRODUCED" in second_rendered
+        assert "Tool.tests.add" in first_rendered
+        assert "Tool.tests.multiply" not in first_rendered
+        assert "Tool.tests.multiply" in second_rendered
+        assert "Tool.tests.add" not in second_rendered
+
+    def test_render_turn_raises_for_non_tool_agent_turn(self) -> None:
+        agent = make_agent()
+        turn = AgentTurn(prompt="run", raw_response="raw", final_response="final")
+
+        with pytest.raises(ToolAgentError, match="ToolAgentTurn"):
+            agent.render_turn(turn)
+
 
 
 class TestParsingHelpers:
@@ -1133,46 +1354,6 @@ class TestParsingHelpers:
 
         with pytest.raises(ToolAgentError):
             agent._str_to_dict(raw)
-
-
-class TestPreviewTruncation:
-    def test_limit_none_returns_original_object(self) -> None:
-        obj = {"a": [1, 2, 3]}
-
-        assert truncate_for_preview(obj, None) is obj
-
-    def test_short_repr_returns_original_object(self) -> None:
-        obj = ["short"]
-
-        assert truncate_for_preview(obj, 100) is obj
-
-    def test_long_string_is_truncated_with_type_prefix(self) -> None:
-        result = truncate_for_preview("abcdefghijklmnopqrstuvwxyz", 5)
-
-        assert isinstance(result, str)
-        assert result.startswith("(str)")
-        assert result.endswith("...")
-
-    def test_long_list_is_truncated_at_collection_boundary(self) -> None:
-        result = truncate_for_preview([1, 2, 3, 4, 5], 5)
-
-        assert isinstance(result, str)
-        assert result.startswith("(list)[")
-        assert result.endswith("...]")
-
-    def test_long_dict_is_truncated_at_collection_boundary(self) -> None:
-        result = truncate_for_preview({"alpha": 1, "beta": 2, "gamma": 3}, 12)
-
-        assert isinstance(result, str)
-        assert result.startswith("(dict){")
-        assert result.endswith("...}")
-
-    def test_repr_failure_falls_back_to_str(self) -> None:
-        result = truncate_for_preview(BadRepr(), 8)
-
-        assert isinstance(result, str)
-        assert result.startswith("(BadRepr)")
-        assert result.endswith("...")
 
 
 class TestPlannedStep:
@@ -1669,3 +1850,145 @@ class TestToolAgentAsyncBaseLoop:
 
         with pytest.raises(ToolAgentError, match="empty batch"):
             asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+class TestToolAgentTurnMetadataContract:
+    def test_make_turn_accepts_valid_blackboard_span(self) -> None:
+        agent = make_agent()
+
+        turn = agent._make_turn(
+            prompt="run",
+            raw_response=3,
+            final_response=3,
+            blackboard_start=0,
+            blackboard_end=2,
+        )
+
+        assert isinstance(turn, ToolAgentTurn)
+        assert turn.prompt == "run"
+        assert turn.raw_response == 3
+        assert turn.final_response == 3
+        assert turn.blackboard_start == 0
+        assert turn.blackboard_end == 2
+
+    def test_make_turn_accepts_none_blackboard_span(self) -> None:
+        agent = make_agent()
+
+        turn = agent._make_turn(
+            prompt="run",
+            raw_response="raw",
+            final_response="final",
+            blackboard_start=None,
+            blackboard_end=None,
+        )
+
+        assert isinstance(turn, ToolAgentTurn)
+        assert turn.blackboard_start is None
+        assert turn.blackboard_end is None
+
+    def test_make_turn_rejects_partial_none_blackboard_span(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="both be None or both be integers"):
+            agent._make_turn(
+                prompt="run",
+                raw_response="raw",
+                final_response="final",
+                blackboard_start=0,
+                blackboard_end=None,
+            )
+
+        with pytest.raises(ToolAgentError, match="both be None or both be integers"):
+            agent._make_turn(
+                prompt="run",
+                raw_response="raw",
+                final_response="final",
+                blackboard_start=None,
+                blackboard_end=1,
+            )
+
+    @pytest.mark.parametrize(
+        ("blackboard_start", "blackboard_end"),
+        [
+            (-1, 1),
+            (2, 1),
+            (True, 1),
+            (0, False),
+            ("0", 1),
+            (0, "1"),
+        ],
+    )
+    def test_make_turn_rejects_invalid_blackboard_span(
+        self,
+        blackboard_start: Any,
+        blackboard_end: Any,
+    ) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="blackboard_start and blackboard_end"):
+            agent._make_turn(
+                prompt="run",
+                raw_response="raw",
+                final_response="final",
+                blackboard_start=blackboard_start,
+                blackboard_end=blackboard_end,
+            )
+
+    def test_make_turn_rejects_unexpected_metadata(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="unexpected metadata"):
+            agent._make_turn(
+                prompt="run",
+                raw_response="raw",
+                final_response="final",
+                blackboard_start=0,
+                blackboard_end=1,
+                unexpected=True,
+            )
+
+    def test_render_turn_with_none_span_returns_base_user_assistant_pair(self) -> None:
+        agent = make_agent()
+        turn = ToolAgentTurn(
+            prompt="run",
+            raw_response="raw response",
+            final_response="final response",
+            blackboard_start=None,
+            blackboard_end=None,
+        )
+
+        rendered = agent.render_turn(turn)
+
+        assert rendered == [
+            {"role": "user", "content": "run"},
+            {"role": "assistant", "content": "raw response"},
+        ]
+
+    def test_render_turn_with_empty_span_returns_base_user_assistant_pair(self) -> None:
+        agent = make_agent()
+        turn = ToolAgentTurn(
+            prompt="run",
+            raw_response="raw response",
+            final_response="final response",
+            blackboard_start=0,
+            blackboard_end=0,
+        )
+
+        rendered = agent.render_turn(turn)
+
+        assert rendered == [
+            {"role": "user", "content": "run"},
+            {"role": "assistant", "content": "raw response"},
+        ]
+
+    def test_render_turn_rejects_span_beyond_current_blackboard(self) -> None:
+        agent = make_agent()
+        turn = ToolAgentTurn(
+            prompt="run",
+            raw_response="raw response",
+            final_response="final response",
+            blackboard_start=0,
+            blackboard_end=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="Invalid blackboard span"):
+            agent.render_turn(turn)
