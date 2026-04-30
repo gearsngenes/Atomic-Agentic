@@ -17,7 +17,6 @@ from atomic_agentic.agents.tool_agents import (
     PlanActAgent,
     PlannedStep,
     ReActAgent,
-    truncate_for_preview,
 )
 from atomic_agentic.core.Exceptions import (
     AgentError,
@@ -1355,46 +1354,6 @@ class TestParsingHelpers:
 
         with pytest.raises(ToolAgentError):
             agent._str_to_dict(raw)
-
-
-class TestPreviewTruncation:
-    def test_limit_none_returns_original_object(self) -> None:
-        obj = {"a": [1, 2, 3]}
-
-        assert truncate_for_preview(obj, None) is obj
-
-    def test_short_repr_returns_original_object(self) -> None:
-        obj = ["short"]
-
-        assert truncate_for_preview(obj, 100) is obj
-
-    def test_long_string_is_truncated_with_type_prefix(self) -> None:
-        result = truncate_for_preview("abcdefghijklmnopqrstuvwxyz", 5)
-
-        assert isinstance(result, str)
-        assert result.startswith("(str)")
-        assert result.endswith("...")
-
-    def test_long_list_is_truncated_at_collection_boundary(self) -> None:
-        result = truncate_for_preview([1, 2, 3, 4, 5], 5)
-
-        assert isinstance(result, str)
-        assert result.startswith("(list)[")
-        assert result.endswith("...]")
-
-    def test_long_dict_is_truncated_at_collection_boundary(self) -> None:
-        result = truncate_for_preview({"alpha": 1, "beta": 2, "gamma": 3}, 12)
-
-        assert isinstance(result, str)
-        assert result.startswith("(dict){")
-        assert result.endswith("...}")
-
-    def test_repr_failure_falls_back_to_str(self) -> None:
-        result = truncate_for_preview(BadRepr(), 8)
-
-        assert isinstance(result, str)
-        assert result.startswith("(BadRepr)")
-        assert result.endswith("...")
 
 
 class TestPlannedStep:
