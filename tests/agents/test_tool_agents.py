@@ -1850,3 +1850,145 @@ class TestToolAgentAsyncBaseLoop:
 
         with pytest.raises(ToolAgentError, match="empty batch"):
             asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+class TestToolAgentTurnMetadataContract:
+    def test_make_turn_accepts_valid_blackboard_span(self) -> None:
+        agent = make_agent()
+
+        turn = agent._make_turn(
+            prompt="run",
+            raw_response=3,
+            final_response=3,
+            blackboard_start=0,
+            blackboard_end=2,
+        )
+
+        assert isinstance(turn, ToolAgentTurn)
+        assert turn.prompt == "run"
+        assert turn.raw_response == 3
+        assert turn.final_response == 3
+        assert turn.blackboard_start == 0
+        assert turn.blackboard_end == 2
+
+    def test_make_turn_accepts_none_blackboard_span(self) -> None:
+        agent = make_agent()
+
+        turn = agent._make_turn(
+            prompt="run",
+            raw_response="raw",
+            final_response="final",
+            blackboard_start=None,
+            blackboard_end=None,
+        )
+
+        assert isinstance(turn, ToolAgentTurn)
+        assert turn.blackboard_start is None
+        assert turn.blackboard_end is None
+
+    def test_make_turn_rejects_partial_none_blackboard_span(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="both be None or both be integers"):
+            agent._make_turn(
+                prompt="run",
+                raw_response="raw",
+                final_response="final",
+                blackboard_start=0,
+                blackboard_end=None,
+            )
+
+        with pytest.raises(ToolAgentError, match="both be None or both be integers"):
+            agent._make_turn(
+                prompt="run",
+                raw_response="raw",
+                final_response="final",
+                blackboard_start=None,
+                blackboard_end=1,
+            )
+
+    @pytest.mark.parametrize(
+        ("blackboard_start", "blackboard_end"),
+        [
+            (-1, 1),
+            (2, 1),
+            (True, 1),
+            (0, False),
+            ("0", 1),
+            (0, "1"),
+        ],
+    )
+    def test_make_turn_rejects_invalid_blackboard_span(
+        self,
+        blackboard_start: Any,
+        blackboard_end: Any,
+    ) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="blackboard_start and blackboard_end"):
+            agent._make_turn(
+                prompt="run",
+                raw_response="raw",
+                final_response="final",
+                blackboard_start=blackboard_start,
+                blackboard_end=blackboard_end,
+            )
+
+    def test_make_turn_rejects_unexpected_metadata(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="unexpected metadata"):
+            agent._make_turn(
+                prompt="run",
+                raw_response="raw",
+                final_response="final",
+                blackboard_start=0,
+                blackboard_end=1,
+                unexpected=True,
+            )
+
+    def test_render_turn_with_none_span_returns_base_user_assistant_pair(self) -> None:
+        agent = make_agent()
+        turn = ToolAgentTurn(
+            prompt="run",
+            raw_response="raw response",
+            final_response="final response",
+            blackboard_start=None,
+            blackboard_end=None,
+        )
+
+        rendered = agent.render_turn(turn)
+
+        assert rendered == [
+            {"role": "user", "content": "run"},
+            {"role": "assistant", "content": "raw response"},
+        ]
+
+    def test_render_turn_with_empty_span_returns_base_user_assistant_pair(self) -> None:
+        agent = make_agent()
+        turn = ToolAgentTurn(
+            prompt="run",
+            raw_response="raw response",
+            final_response="final response",
+            blackboard_start=0,
+            blackboard_end=0,
+        )
+
+        rendered = agent.render_turn(turn)
+
+        assert rendered == [
+            {"role": "user", "content": "run"},
+            {"role": "assistant", "content": "raw response"},
+        ]
+
+    def test_render_turn_rejects_span_beyond_current_blackboard(self) -> None:
+        agent = make_agent()
+        turn = ToolAgentTurn(
+            prompt="run",
+            raw_response="raw response",
+            final_response="final response",
+            blackboard_start=0,
+            blackboard_end=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="Invalid blackboard span"):
+            agent.render_turn(turn)
