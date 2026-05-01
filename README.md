@@ -63,6 +63,10 @@ demonstrations of **Tools, Engines, Agents, and Workflows**.
 
 ------------------------------------------------------------------------
 
+![](images/AtomicInvokable.gif)
+
+------------------------------------------------------------------------
+
 ## Quickstart A: Tools
 
 `Tool` wraps a Python callable and exposes a **dict-first** interface.
