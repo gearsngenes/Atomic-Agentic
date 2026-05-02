@@ -112,7 +112,7 @@ from typing import Any, Callable, Dict, Generic, Mapping, Optional, Sequence, Li
 import pprint
 
 from .base import Agent
-from .data_classes import AgentTurn, ToolAgentTurn
+from .data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot
 from ..core.Exceptions import (
     ToolAgentError,
     ToolDefinitionError,
@@ -220,82 +220,6 @@ return_tool = Tool(
 # --------------------------------------------------------------------------- #
 # Support classes / types
 # --------------------------------------------------------------------------- #
-@dataclass(slots=True)
-class BlackboardSlot:
-    """
-    One indexed slot in the run blackboard, representing a single tool invocation.
-
-    Each slot tracks the complete lifecycle of a tool call from planning through execution.
-    State transitions are **sentinel-driven** using the ``NO_VAL`` marker:
-
-    State Lifecycle
-    ~~~~~~~~~~~~~~~
-    1. **Empty** (initial): ``tool=NO_VAL, resolved_args=NO_VAL, result=NO_VAL``
-       - Slot allocated but not yet planned
-
-    2. **Prepared**: ``tool≠NO_VAL, resolved_args≠NO_VAL, result=NO_VAL``
-       - Slot assigned a tool and resolved arguments; ready for execution
-       - Placeholder dependencies have been resolved to concrete values
-
-    3. **Executed**: ``result≠NO_VAL`` (or ``error≠NO_VAL`` on failure)
-       - Tool has been invoked; result (or exception) stored
-       - Slot is now available for subsequent steps' placeholder resolution
-
-    Fields
-    ------
-    step : int
-        Global blackboard index (0-based). Always matches the slot's position in the
-        containing blackboard list during planning. After persistence to cache, this
-        index becomes globally unique (incremented from previous cache length).
-
-    tool : str | NO_VAL
-        Tool name (``Tool.full_name``). Set at prepare time; must reference a
-        registered tool or invoke will raise.
-
-    args : Any (typically dict)
-        Raw, unresolved arguments. May contain placeholders (``<<__sN__>>``,
-        ``<<__cN__>>``). Immutable after prepare time.
-
-    resolved_args : Any (typically dict) | NO_VAL
-        Arguments after placeholder resolution. Created at prepare time by
-        ``_resolve_placeholders(args, state=...)``. Passed to ``tool.invoke()``.
-
-    result : Any | NO_VAL
-        Tool execution result. Set by ``_execute_prepared_batch()`` on success.
-        Used for placeholder resolution in dependent steps.
-
-    error : Any | NO_VAL
-        Exception captured during execution (if any). Set only on failure.
-        Result remains ``NO_VAL`` if error is set.
-    """
-    step: int
-
-    tool: str | Any = NO_VAL
-    args: Any = NO_VAL
-    resolved_args: Any = NO_VAL
-    result: Any = NO_VAL
-    error: Any = NO_VAL
-
-    def is_empty(self) -> bool:
-        return self.tool is NO_VAL and self.result is NO_VAL and self.resolved_args is NO_VAL
-
-    def is_prepared(self) -> bool:
-        return self.tool is not NO_VAL and self.resolved_args is not NO_VAL and self.result is NO_VAL
-
-    def is_executed(self) -> bool:
-        return self.result is not NO_VAL
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "step": self.step,
-            "tool": self.tool,
-            "args": self.args,
-            "resolved_args": self.resolved_args,
-            "result": self.result,
-            "error": self.error,
-            "completed": bool(self.is_executed()),
-        }
-
 @dataclass(slots=True)
 class ToolAgentRunState:
     """
@@ -621,7 +545,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         ToolAgent requires a non-empty role prompt template containing:
           - {TOOLS}
           - {TOOL_CALLS_LIMIT}
-        No other format fields are allowed.
+        Additional simple named format fields are allowed.
         """
         if not isinstance(template, str):
             raise ToolAgentError(
@@ -646,7 +570,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             if any(ch in field_name for ch in ".[]"):
                 raise ToolAgentError(
                     f"ToolAgent role_prompt template contains unsupported field expression {{{field_name}}}. "
-                    "Only {TOOLS} and {TOOL_CALLS_LIMIT} are supported."
+                    "Only simple named placeholders are supported."
                 )
             fields.add(field_name)
 
@@ -655,13 +579,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         if missing:
             raise ToolAgentError(
                 f"ToolAgent role_prompt template missing required placeholder(s): {', '.join(sorted(missing))}."
-            )
-
-        extra = fields - required
-        if extra:
-            raise ToolAgentError(
-                f"ToolAgent role_prompt template contains unsupported placeholder(s): {', '.join(sorted(extra))}. "
-                "Only {TOOLS} and {TOOL_CALLS_LIMIT} are supported."
             )
 
         return cleaned
