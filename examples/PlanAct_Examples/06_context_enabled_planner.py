@@ -35,5 +35,7 @@ while True:
     query = f"Use all available context to answer the query/task by the user: {query}"
     result = my_planner.invoke({"prompt": query})
     print(f"Result: {result}\n")
-    print(f"Blackboard:\n{my_planner.blackboard_dumps(peek=False)}")
+    from pprint import pprint
+    print("Blackboard:")
+    pprint(my_planner.blackboard)
     print("-" * 40 + "\n")

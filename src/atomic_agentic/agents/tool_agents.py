@@ -246,11 +246,11 @@ class ToolAgentRunState:
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     **Cached Placeholder** (``<<__cN__>>``)
         Resolvable iff ``0 <= N < len(cache_blackboard)`` AND
-        ``cache_blackboard[N].result is not NO_VAL``.
+        ``cache_blackboard[N].is_executed() == True``.
 
     **Step Placeholder** (``<<__sN__>>``)
         Resolvable iff ``0 <= N < len(running_blackboard)`` AND
-        ``running_blackboard[N].is_executed()``.
+        ``running_blackboard[N].is_executed() == True``.
 
     Execution State Machine
     -----------------------
@@ -465,22 +465,25 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             raise ToolAgentError("tool_calls_limit must be None or an int >= 0.")
         self._tool_calls_limit = value
 
-    @property
-    def blackboard_serialized(self) -> list[dict[str, Any]]:
+    def blackboard_serialized(self, peek: bool = False) -> list[dict[str, Any]]:
         """
         Read-only serialized view of the persisted blackboard.
         (Keeps backward-friendly dict shape.)
         """
-        return [slot.to_dict() for slot in self._blackboard]
+        result = []
+        if peek:
+            result = [slot.to_dict() for slot in self._blackboard]
+        else:
+            dicts = [slot.to_dict() for slot in self._blackboard]
+            for _dict in dicts:
+                _dict.pop("resolved_args")
+                result.append(_dict)
+            
+        return result
     
     @property
     def blackboard(self) -> list[BlackboardSlot]:
-        return [BlackboardSlot(step = slot.step,
-                               tool = slot.tool,
-                               args = slot.args,
-                               resolved_args = slot.resolved_args,
-                               result = slot.result,
-                               error = slot.error) for slot in self._blackboard]
+        return [slot.copy() for slot in self._blackboard]
     
     @property
     def peek_at_cache(self) -> bool:
@@ -699,37 +702,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         return registered
 
     # ------------------------------------------------------------------ #
-    # Blackboard formatting
-    # ------------------------------------------------------------------ #
-    def blackboard_dumps(self, *, peek: bool = False, indent = 2, width = 160) -> str:
-        """
-        Pretty representation of the persisted blackboard.
-
-        peek=False -> placeholder-view (args)
-        peek=True  -> placeholder-view plus result previews
-
-        Includes explicit `step` numbering to make global indexing unambiguous.
-        If a slot's `step` is NO_VAL, the list position is used.
-        """
-        view: list[dict[str, Any]] = []
-
-        for i, d in enumerate(self.blackboard_serialized):
-            d["step"] = i
-            d.pop("resolved_args", None)
-            if d["error"] is NO_VAL:
-                d.pop("error")
-            if peek:
-                d["result"] = self._preview_blackboard_result(d["result"])
-            else:
-                d.pop("result")
-            view.append(d)
-
-        try:
-            return pprint.pformat(view, indent=indent, width=width, sort_dicts=False)
-        except Exception:  # pragma: no cover
-            return str(view)
-
-    # ------------------------------------------------------------------ #
     # Placeholder resolution helpers (prepare-time)
     # ------------------------------------------------------------------ #
     def _resolve_placeholders(self, obj: Any, *, state: ToolAgentRunState) -> Any:
@@ -758,10 +730,10 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         Readiness Validation
         ~~~~~~~~~~~~~~~~~~~~
-        Before resolution, validates that all referenced slots are **executed** (result set):
+        Before resolution, validates that all referenced slots are marked **executed**:
 
         - Referenced slot must exist (index within bounds)
-        - Referenced slot must have ``result != NO_VAL``
+        - Referenced slot must satisfy ``is_executed()``
 
         Raises ``ToolAgentError`` if any reference is invalid or unexecuted.
 
@@ -810,8 +782,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 raise ToolAgentError(
                     f"Cache reference {idx} out of range (cache length={len(cache)})."
                 )
-            if cache[idx].result is NO_VAL:
-                raise ToolAgentError(f"Referenced cache {idx} is not executed (result is NO_VAL).")
+            if not cache[idx].is_executed():
+                raise ToolAgentError(f"Referenced cache {idx} is not yet executed.")
 
         for idx in sorted(needed_steps):
             if idx < 0 or idx >= len(running):
@@ -819,7 +791,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                     f"Step reference {idx} out of range (running plan length={len(running)})."
                 )
             if not running[idx].is_executed():
-                raise ToolAgentError(f"Referenced step {idx} is not executed (result is NO_VAL).")
+                raise ToolAgentError(f"Referenced step {idx} is not executed.")
 
         # ----------------------------
         # 3) Resolve recursively.
@@ -897,7 +869,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         2. **No duplicates**: Raises if any index appears twice
         3. **Bounds**: Each index must be 0 <= idx < len(running_blackboard)
         4. **Not already executed**: Raises if slot already has result set
-        5. **Is prepared**: Slot must have tool ≠ NO_VAL, resolved_args ≠ NO_VAL
+        5. **Is prepared**: Slot must be prepared for execution
         6. **Tool exists**: Tool name must be registered in toolbox
         7. **Budget enforcement**: Non-return calls don't exceed tool_calls_limit
 
@@ -908,8 +880,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         3. If tool_calls_limit set, check budget
         4. Execute concurrently via ``asyncio.gather(..., return_exceptions=True)``
         5. If any gathered result is an exception, identify the first such step,
-        store the error on that slot, and raise
-        6. Otherwise, store results in ``slot.result``
+        store the error on that slot, mark it failed, and raise
+        6. Otherwise, store results in ``slot.result`` and mark slots executed
         7. If return tool executed: set ``state.return_value`` and ``state.is_done = True``
         8. Update ``state.executed_steps``, ``state.tool_calls_used``
         9. Clear ``prepared_steps`` (consumed)
@@ -935,6 +907,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         ~~~~~~~~~~~~
         - ``state.running_blackboard[idx].result`` is set for executed steps
         - ``state.running_blackboard[idx].error`` is set on failure
+        - ``state.running_blackboard[idx].status`` is updated to executed/failed
         - ``state.executed_steps`` is updated with executed indices
         - ``state.tool_calls_used`` incremented by non-return call count
         - ``state.prepared_steps`` is cleared
@@ -1039,12 +1012,14 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
                 if isinstance(raw_error, ToolInvocationError):
                     board[idx].error = raw_error
+                    board[idx].status = "failed"
                     raise raw_error
 
                 wrapped = ToolAgentError(
                     f"{type(self).__name__}.{self.name}: tool call failed at step {idx} for {board[idx].tool!r}: {raw_error}"
                 )
                 board[idx].error = wrapped
+                board[idx].status = "failed"
                 raise wrapped from raw_error
 
             return [(idx, result) for idx, result in zip(indices, raw_results)]
@@ -1053,6 +1028,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         for idx, result in results:
             board[idx].result = result
+            board[idx].error = NO_VAL
+            board[idx].status = "executed"
 
         # Post-execution bookkeeping
         for idx in indices:
@@ -1188,6 +1165,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
             if isinstance(raw_error, ToolInvocationError):
                 board[idx].error = raw_error
+                board[idx].status = "failed"
                 raise raw_error
 
             wrapped = ToolAgentError(
@@ -1195,11 +1173,13 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 f"for {board[idx].tool!r}: {raw_error}"
             )
             board[idx].error = wrapped
+            board[idx].status = "failed"
             raise wrapped from raw_error
 
         for idx, result in zip(indices, raw_results):
             board[idx].result = result
             board[idx].error = NO_VAL
+            board[idx].status = "executed"
             state.executed_steps.add(idx)
 
         state.tool_calls_used += non_return_planned
@@ -1235,7 +1215,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         2. **Rewrite placeholders**: All ``<<__sN__>>`` step references in appended slots'
            args are rewritten to ``<<__c{new_global_index}__>>`` cache references.
            This ensures cached args never contain step-local placeholders.
-        3. **Merge into cache**: Append rewritten slots to persist them
+        3. **Merge into cache**: Append rewritten executed slots to persist them
         4. **Trim cache tail**: Remove trailing empty slots from final cache
 
         Placeholder Rewriting Example
@@ -1268,7 +1248,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         ~~~~~~~~~~~~
         - ``self._blackboard`` is replaced with merged cache + appended slots
         """
-        base_cache: list[BlackboardSlot] = list(state.cache_blackboard)
+        base_cache: list[BlackboardSlot] = [slot.copy() for slot in state.cache_blackboard]
         base_len = len(base_cache)
 
         running: list[BlackboardSlot] = list(state.running_blackboard)
@@ -1309,17 +1289,20 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         # 2) Append executed running slots as new cache slots with global cache indices.
         appended: list[BlackboardSlot] = []
         for local_i, slot in enumerate(running):
-            # Only persist slots that were actually planned (tool set) and executed (result set),
-            # plus allow return slot (also executed).
-            if slot.tool is NO_VAL and slot.result is NO_VAL and slot.resolved_args is NO_VAL:
+            if not slot.is_executed():
                 continue
 
-            new_slot = BlackboardSlot(step=base_len + local_i)
-            new_slot.tool = slot.tool
-            new_slot.args = rewrite_step_to_cache_placeholders(slot.args)
-            new_slot.resolved_args = slot.resolved_args
-            new_slot.result = slot.result
-            new_slot.error = slot.error
+            new_slot = BlackboardSlot(
+                step = base_len + local_i,
+                tool = slot.tool,
+                args = rewrite_step_to_cache_placeholders(slot.args),
+                resolved_args = slot.resolved_args,
+                result = slot.result,
+                error = slot.error,
+                status = "executed",
+                step_dependencies = slot.step_dependencies,
+                await_step = slot.await_step,
+            )
             appended.append(new_slot)
 
         combined = base_cache + appended
@@ -1934,6 +1917,129 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
     # ------------------------------------------------------------------ #
     # Planning + initialization
     # ------------------------------------------------------------------ #
+    def _validate_plan_step_dict(
+        self,
+        data: Mapping[str, Any],
+        *,
+        expected_step: int,
+    ) -> dict[str, Any]:
+        """
+        Validate one raw planner step dict before return normalization.
+
+        PlanAct planner output must use exactly:
+          - step
+          - tool
+          - args
+          - await (optional)
+
+        The raw LLM-produced step number must match its original list position.
+        Return normalization may later move the return step to the end, after which
+        normalized slot positions become authoritative.
+        """
+        if not isinstance(data, Mapping):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan step must be a mapping; "
+                f"got {type(data).__name__!r}."
+            )
+
+        allowed = {"step", "tool", "args", "await"}
+        extra = set(data.keys()) - allowed
+        if extra:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan step contains unsupported keys: "
+                f"{sorted(extra)!r}."
+            )
+
+        required = {"step", "tool", "args"}
+        missing = required - set(data.keys())
+        if missing:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan step missing required keys: "
+                f"{sorted(missing)!r}."
+            )
+
+        step = data["step"]
+        if type(step) is not int or step < 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan step 'step' must be an int >= 0; "
+                f"got {step!r}."
+            )
+
+        if step != expected_step:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan step index mismatch: "
+                f"got step={step}, expected {expected_step}."
+            )
+
+        tool = data["tool"]
+        if not isinstance(tool, str) or not tool.strip():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan step 'tool' must be a non-empty string."
+            )
+
+        args = data["args"]
+        if not isinstance(args, dict):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan step 'args' must be a dict; "
+                f"got {type(args).__name__!r}."
+            )
+
+        if "await" in data:
+            await_step = data["await"]
+            if type(await_step) is not int or await_step < 0:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: plan step 'await' must be an int >= 0."
+                )
+            if tool == return_tool.full_name:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: return step must not include 'await'."
+                )
+
+        return dict(data)
+
+    def _plan_dict_to_slot(
+        self,
+        data: Mapping[str, Any],
+        *,
+        step: int,
+    ) -> BlackboardSlot:
+        """
+        Convert a normalized planner dict into a planned BlackboardSlot.
+
+        Dependency extraction remains PlanAct-owned. BlackboardSlot stores the dependency
+        metadata but does not infer it from args.
+        """
+        tool = data["tool"]
+        args = data["args"]
+        is_return = tool == return_tool.full_name
+
+        await_step = data.get("await", NO_VAL)
+        if await_step is not NO_VAL and is_return:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return step must not include 'await'."
+            )
+
+        deps: set[int] = set(extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN))
+        if await_step is not NO_VAL:
+            deps.add(await_step)
+
+        try:
+            return BlackboardSlot.from_dict(
+                {
+                    "step": step,
+                    "tool": tool,
+                    "args": args,
+                    "status": "planned",
+                    "step_dependencies": tuple(sorted(deps)),
+                    "await_step": await_step,
+                }
+            )
+        except Exception as exc:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: failed to construct planned blackboard slot "
+                f"for step {step}: {exc}"
+            ) from exc
+
     def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> PlanActRunState:
         """
         One-shot plan generation and compilation into concurrent batches.
@@ -1949,35 +2055,40 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 
         2. **LLM plan generation** (via PLANNER_PROMPT):
            - LLM receives the conversation messages
-           - Expected to emit a JSON array of step objects: ``[{"tool": "...", "args": {...}}, ...]``
-           - Optionally, each step can include an "await" field (dependency barrier)
+           - Expected to emit a JSON array of step objects:
+             ``[{"step": 0, "tool": "...", "args": {...}}, ...]``
+           - Optionally, each non-return step can include an "await" field
 
-        3. **Return normalization**:
+        3. **Raw plan validation**:
+           - Each raw step must contain ``step``, ``tool``, and ``args``
+           - Raw ``step`` values must match their original list positions
+           - Only ``await`` is allowed as an optional extra key
+
+        4. **Return normalization**:
            - Validates at most one return step; if multiple, raises
-           - Always moves return to the END of the plan (even if already last)
+           - Always moves return to the END of the plan
            - If no return step, auto-appends one calling ``return(None)``
 
-        4. **Conversion to PlannedStep**:
-           - Each dict is converted to a ``PlannedStep`` (normalized representation)
-           - Tool name is validated to exist in toolbox (early error detection)
+        5. **Conversion to planned BlackboardSlot**:
+           - Each normalized dict is converted to a ``BlackboardSlot`` with
+             ``status="planned"``
+           - Step dependencies are computed by PlanAct and stored on
+             ``slot.step_dependencies``
+           - Explicit await barriers are stored on ``slot.await_step``
 
-        5. **Return dependency forcing**:
-           - The return step's deps are set to ``frozenset(range(return_idx))``
+        6. **Return dependency forcing**:
+           - The return slot's dependencies are set to all prior steps
            - This ensures return always waits for all prior steps to complete
 
-        6. **Validation**:
+        7. **Validation**:
            - Budget check: Non-return steps don't exceed ``tool_calls_limit``
            - Cache placeholder ranges: All ``<<__cN__>>`` must reference existing cache
            - Plan-local dependency ranges: All ``<<__sN__>>`` refs must be to prior steps
 
-        7. **Batch compilation**:
-           - Topologically sorts steps by dependency level (see ``_compile_batches_from_deps``)
+        8. **Batch compilation**:
+           - Topologically sorts slots by ``step_dependencies``
            - Returns list of batches: each batch indices execute concurrently
-           - Returns always in its own final batch
-
-        8. **Blackboard pre-allocation**:
-           - Creates running blackboard with exactly ``len(planned)`` slots
-           - Pre-fills tool and args; result/resolved_args left as NO_VAL
+           - Return is always in its own final batch
 
         Parameters
         ----------
@@ -1989,7 +2100,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         PlanActRunState
             Initialized state ready for the base template-method loop:
             - cache_blackboard populated with prior results when context_enabled=True
-            - running_blackboard pre-allocated and pre-filled with tools+args
+            - running_blackboard populated with planned BlackboardSlot objects
             - batches list with topologically-sorted concurrent batches
             - batch_index=0 (first batch)
 
@@ -2015,9 +2126,18 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         raw_plan = self._llm_engine.invoke({"messages": working_messages})
         plan_dicts = self._str_to_steps(raw_plan)
 
+        validated_plan: list[dict[str, Any]] = []
+        for i, step_dict in enumerate(plan_dicts):
+            validated_plan.append(
+                self._validate_plan_step_dict(step_dict, expected_step=i)
+            )
+
         # ---- Normalize return: ensure exactly one return step and it is last. ----
         return_name = return_tool.full_name
-        return_positions = [i for i, d in enumerate(plan_dicts) if d.get("tool") == return_name]
+        return_positions = [
+            i for i, d in enumerate(validated_plan)
+            if d.get("tool") == return_name
+        ]
 
         if len(return_positions) > 1:
             raise ToolAgentError(
@@ -2025,37 +2145,57 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             )
 
         if len(return_positions) == 1:
-            # ALWAYS remove return and append at the end (even if already last)
+            # ALWAYS remove return and append at the end (even if already last).
             pos = return_positions[0]
-            ret = plan_dicts.pop(pos)
-            plan_dicts.append(ret)
+            ret = validated_plan.pop(pos)
+            validated_plan.append(ret)
         else:
-            plan_dicts.append({"tool": return_name, "args": {"val": None}})
+            validated_plan.append(
+                {
+                    "step": len(validated_plan),
+                    "tool": return_name,
+                    "args": {"val": None},
+                }
+            )
 
-        if not plan_dicts:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: internal error: empty plan after normalization.")
+        if not validated_plan:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: internal error: empty plan after normalization."
+            )
 
-        # ---- Convert to PlannedStep and validate tool existence early. ----
-        planned: list[PlannedStep] = []
-        for i, d in enumerate(plan_dicts):
-            ps = PlannedStep.from_dict(d)
-            if not self.has_tool(ps.tool):
-                raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool in plan: {ps.tool!r}.")
-            planned.append(ps)
+        # ---- Convert normalized plan dicts directly into planned blackboard slots. ----
+        planned_slots: list[BlackboardSlot] = []
+        for i, step_dict in enumerate(validated_plan):
+            slot = self._plan_dict_to_slot(step_dict, step=i)
 
-        # Force return to be final step with deps = all prior steps.
-        return_idx = len(planned) - 1
-        planned[return_idx] = PlannedStep(
-            tool=planned[return_idx].tool,
-            args=planned[return_idx].args,
-            deps=frozenset(range(return_idx)),
-            is_return=True,
-        )
+            # Normalized list position is now authoritative after return normalization.
+            slot.step = i
+
+            if not self.has_tool(slot.tool):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: unknown tool in plan: {slot.tool!r}."
+                )
+
+            planned_slots.append(slot)
+
+        return_idx = len(planned_slots) - 1
+        if planned_slots[return_idx].tool != return_name:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: internal error: normalized plan does not end with return tool."
+            )
+
+        # Force return to be final step with dependencies on all prior steps.
+        planned_slots[return_idx].step_dependencies = tuple(range(return_idx))
+        planned_slots[return_idx].await_step = NO_VAL
+        planned_slots[return_idx].status = "planned"
 
         # ---- Enforce budget (non-return only). ----
         limit = self.tool_calls_limit
         if limit is not None:
-            non_return = sum(1 for ps in planned if not ps.is_return)
+            non_return = sum(
+                1 for slot in planned_slots
+                if slot.tool != return_name
+            )
             if non_return > limit:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: plan exceeds tool_calls_limit={limit} "
@@ -2065,9 +2205,8 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         # ---- Validate placeholder ranges and plan-local deps. ----
         cache_len = len(cache_blackboard)
 
-        for i, ps in enumerate(planned):
-            # Validate cache references in args
-            cache_refs = extract_dependencies(ps.args, placeholder_pattern=_CACHE_TOKEN)
+        for i, slot in enumerate(planned_slots):
+            cache_refs = extract_dependencies(slot.args, placeholder_pattern=_CACHE_TOKEN)
             bad_cache = [k for k in cache_refs if k < 0 or k >= cache_len]
             if bad_cache:
                 raise ToolAgentError(
@@ -2075,26 +2214,23 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                     f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
                 )
 
-            bad = [d for d in ps.deps if d < 0 or d >= i]
+            bad = [d for d in slot.step_dependencies if d < 0 or d >= i]
             if bad:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: plan step {i} has illegal deps {sorted(set(bad))!r}; "
                     f"deps must be < {i}."
                 )
 
-        # ---- Compile batches from deps; isolate return as final batch. ----
-        batches = self._compile_batches_from_deps(planned_steps=planned, return_idx=return_idx)
-
-        # ---- Allocate running blackboard plan-locally and prefill tool+args. ----
-        running_blackboard = [BlackboardSlot(step=i) for i in range(len(planned))]
-        for i, ps in enumerate(planned):
-            running_blackboard[i].tool = ps.tool
-            running_blackboard[i].args = ps.args
+        # ---- Compile batches from slot dependencies; isolate return as final batch. ----
+        batches = self._compile_batches_from_deps(
+            planned_slots=planned_slots,
+            return_idx=return_idx,
+        )
 
         return PlanActRunState(
             messages=working_messages,
             cache_blackboard=cache_blackboard,
-            running_blackboard=running_blackboard,
+            running_blackboard=planned_slots,
             executed_steps=set(),
             prepared_steps=[],
             tool_calls_used=0,
@@ -2104,28 +2240,37 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             batch_index=0,
         )
 
-    def _compile_batches_from_deps(self, *, planned_steps: list[PlannedStep], return_idx: int) -> list[list[int]]:
+    def _compile_batches_from_deps(
+        self,
+        *,
+        planned_slots: list[BlackboardSlot],
+        return_idx: int,
+    ) -> list[list[int]]:
         """
-        Compile concurrent batches from plan-local deps.
+        Compile concurrent batches from plan-local slot dependencies.
 
         For non-return step i:
-          level[i] = 0 if deps empty else 1 + max(level[d] for d in deps)
+          level[i] = 0 if dependencies are empty else
+          1 + max(level[d] for d in dependencies)
 
         Return step is always isolated as its own final batch [return_idx].
         """
-        if not planned_steps:
+        if not planned_slots:
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: cannot compile empty plan.")
 
-        if return_idx != len(planned_steps) - 1 or not planned_steps[return_idx].is_return:
+        if (
+            return_idx != len(planned_slots) - 1
+            or planned_slots[return_idx].tool != return_tool.full_name
+        ):
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: internal error: return_idx mismatch during batch compilation."
             )
 
         levels: dict[int, int] = {}
 
-        # Non-return only
+        # Non-return only.
         for i in range(return_idx):
-            deps = planned_steps[i].deps
+            deps = planned_slots[i].step_dependencies
             if not deps:
                 levels[i] = 0
             else:
@@ -2152,22 +2297,24 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         """
         Prepare the next pre-compiled batch for execution.
 
-        PlanActAgent uses pre-compiled batches (created during initialization). This method
-        simply reads the next batch indices, resolves placeholders, and populates the
-        prepared_steps list.
+        PlanActAgent uses pre-compiled batches created during initialization. This method
+        reads the next batch indices, resolves placeholders, marks those slots prepared,
+        and populates the prepared_steps list.
 
         Execution
         ~~~~~~~~~
-        1. **Validate state**: prepared_steps must be empty (batch fully executed already)
+        1. **Validate state**: prepared_steps must be empty
         2. **Read next batch**: Get batch indices from ``state.batches[state.batch_index]``
-        3. **Validate non-empty**: Batch must have at least one step (internal check)
+        3. **Validate non-empty**: Batch must have at least one step
         4. **For each step in batch**:
            - Validate bounds: index must be within running_blackboard
            - Validate not already executed or prepared
+           - Validate slot is currently planned
            - Validate tool name is set
            - Call ``_resolve_placeholders(slot.args, state=state)``
            - Store resolved args in ``slot.resolved_args``
-        5. **Set prepared_steps**: List of all indices in this batch (ready for execution)
+           - Mark slot ``status="prepared"``
+        5. **Set prepared_steps**: List of all indices in this batch
         6. **Advance cursor**: Increment ``state.batch_index`` for next iteration
 
         Concurrency
@@ -2189,10 +2336,10 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         ------
         ToolAgentError
             On any of:
-            - prepared_steps not empty (previous batch not executed)
+            - prepared_steps not empty
             - batch_index out of bounds
-            - Batch validation failure (bounds, prep state, tool name)
-            - Placeholder resolution failure (out-of-range or unexecuted refs)
+            - Batch validation failure
+            - Placeholder resolution failure
         """
         if state.prepared_steps:
             raise ToolAgentError(
@@ -2213,7 +2360,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         board = state.running_blackboard
         board_len = len(board)
 
-        # Resolve args for all steps in the batch; resolver enforces readiness (results exist).
+        # Resolve args for all steps in the batch; resolver enforces readiness.
         for i in batch:
             if not isinstance(i, int):
                 raise ToolAgentError(
@@ -2240,6 +2387,15 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: batch references already prepared step {i}."
                 )
+            if slot.is_failed():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: batch references failed step {i}."
+                )
+            if not slot.is_planned():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: batch references non-planned step {i} "
+                    f"with status={slot.status!r}."
+                )
 
             if slot.tool is NO_VAL or not isinstance(slot.tool, str) or not slot.tool.strip():
                 raise ToolAgentError(
@@ -2254,9 +2410,15 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                     f"{type(self).__name__}.{self.name}: internal error: step {i} result was set during preparation."
                 )
 
+            slot.error = NO_VAL
+            slot.status = "prepared"
+
         state.prepared_steps = sorted(batch)
         state.batch_index += 1
-        logger.info(f"{self.full_name}: Prepared batch {state.batch_index}/{len(state.batches)} with steps {state.prepared_steps}.")
+        logger.info(
+            f"{self.full_name}: Prepared batch {state.batch_index}/{len(state.batches)} "
+            f"with steps {state.prepared_steps}."
+        )
         return state
 
 

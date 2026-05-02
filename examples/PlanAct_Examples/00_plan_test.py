@@ -53,4 +53,6 @@ final = agent.invoke({"prompt": task_prompt})
 print("\nFinal Result:\n", final)
 
 # Optional: inspect executed steps (even if context_enabled=False, the view is useful for debugging)
-print("\nBlackboard (resolved args):\n", agent.blackboard_dumps(peek=False))
+from pprint import pprint
+print("\nBlackboard:\n")
+pprint(agent.blackboard)
