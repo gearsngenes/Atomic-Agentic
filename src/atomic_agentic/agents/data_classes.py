@@ -105,12 +105,4 @@ class BlackboardSlot:
         return self.result is not NO_VAL
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "step": self.step,
-            "tool": self.tool,
-            "args": self.args,
-            "resolved_args": self.resolved_args,
-            "result": self.result,
-            "error": self.error,
-            "completed": bool(self.is_executed()),
-        }
+        return asdict(self)
