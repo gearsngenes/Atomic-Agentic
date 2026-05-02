@@ -477,6 +477,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             dicts = [slot.to_dict() for slot in self._blackboard]
             for _dict in dicts:
                 _dict.pop("resolved_args")
+                _dict.pop("result")
                 result.append(_dict)
             
         return result
@@ -1698,109 +1699,13 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 name: tool.to_dict()
                 for name, tool in self._toolbox.items()
             },
-            "blackboard": self.blackboard_serialized,
+            "blackboard": self.blackboard_serialized(peek=False),
         })
         return d
 
 # --------------------------------------------------------------------------- #
 # PlanAct Agent
 # --------------------------------------------------------------------------- #
-@dataclass(frozen=True, slots=True)
-class PlannedStep:
-    """
-    Normalized, immutable representation of a planned tool invocation.
-
-    Created from LLM plan output (JSON dict) and used internally during planning.
-    Frozen dataclass ensures immutability; external API uses running blackboard slots.
-
-    Dependency Extraction
-    ~~~~~~~~~~~~~~~~~~~~~
-    Dependencies are automatically extracted from args during construction:
-    - Scans args for ``<<__sN__>>`` placeholders; extracts all referenced step indices
-    - If \"await\" field is provided, adds it as an explicit dependency barrier
-
-    This enables automatic topological sorting and concurrent batch compilation.
-
-    Fields
-    ------
-    tool : str
-        Tool name (``Tool.full_name``). Must exist in agent's toolbox when executed.
-
-    args : Any (typically dict)
-        Raw, unresolved tool arguments. May contain ``<<__sN__>>`` or ``<<__cN__>>``
-        placeholders. Immutable; resolution happens at execution time.
-
-    deps : frozenset[int]
-        Plan-local dependencies (step indices this step waits for). Extracted from args
-        and optionally from \"await\" field. Empty if no dependencies.
-        Used for topological sorting into concurrent batches.
-
-    is_return : bool
-        ``True`` iff tool is the canonical ``return_tool``. Return steps always have
-        special semantics (wait for all prior steps, trigger loop exit when executed).
-
-    Construction Methods
-    ~~~~~~~~~~~~~~~~~~~~
-    **from_dict(data)** (classmethod):
-        Parse LLM plan step output. Accepts keys: \"tool\", \"args\", \"await\" (optional),
-        \"step\" (optional, ignored).
-
-        Example:
-        >>> step_dict = {\"tool\": \"search\", \"args\": {\"q\": \"<<__s0__>>\"}, \"await\": 0}
-        >>> ps = PlannedStep.from_dict(step_dict)
-        >>> ps.deps  # frozenset({0})
-
-    **to_dict()** (instance):
-        Returns minimal dict: {\"tool\", \"args\"}. Deps and is_return are not preserved
-        (they are computed at serialization time).
-    """
-    tool: str
-    args: Any
-    deps: frozenset[int]
-    is_return: bool
-
-    def to_dict(self) -> dict[str, Any]:
-        # NOTE: await is intentionally not preserved. Deps is canonical.
-        return {"tool": self.tool, "args": self.args}
-
-    @staticmethod
-    def from_dict(data: Mapping[str, Any]) -> PlannedStep:
-        if not isinstance(data, Mapping):
-            raise ToolAgentError(
-                f"PlannedStep.from_dict requires a mapping; got {type(data).__name__!r}."
-            )
-
-        allowed = {"tool", "args", "await", "step"}
-        extra = set(data.keys()) - allowed
-        if extra:
-            raise ToolAgentError(f"Plan step contains unsupported keys: {sorted(extra)!r}.")
-
-        if "tool" not in data:
-            raise ToolAgentError("Plan step missing required key: 'tool'.")
-        if "args" not in data:
-            raise ToolAgentError("Plan step missing required key: 'args'.")
-
-        tool = data["tool"]
-        if not isinstance(tool, str) or not tool.strip():
-            raise ToolAgentError("Plan step 'tool' must be a non-empty string.")
-
-        args = data["args"]
-        is_return = tool == return_tool.full_name
-
-        deps: set[int] = set(extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN))
-
-        # Treat await as a dependency barrier if present.
-        await_val = data.get("await", None)
-        if await_val is not None:
-            if not isinstance(await_val, int) or await_val < 0:
-                raise ToolAgentError("Plan step 'await' must be null or an int >= 0.")
-            # Return step: ignore await entirely (allowed).
-            if not is_return:
-                deps.add(await_val)
-
-        return PlannedStep(tool=tool, args=args, deps=frozenset(deps), is_return=is_return)
-
-
 @dataclass(slots=True)
 class PlanActRunState(ToolAgentRunState):
     """
@@ -2712,7 +2617,8 @@ class ReActAgent(ToolAgent[ReActRunState]):
         # ------------------------------------------------------------------ #
         # 3) Validate dependency legality for this single step
         # ------------------------------------------------------------------ #
-        for dep in extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN):
+        step_dependencies = extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN)
+        for dep in step_dependencies:
             if dep >= step_index:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: illegal dependency: "
@@ -2742,6 +2648,9 @@ class ReActAgent(ToolAgent[ReActRunState]):
         slot.resolved_args = self._resolve_placeholders(args, state=state)
         slot.result = NO_VAL
         slot.error = NO_VAL
+        slot.step_dependencies = tuple(sorted(step_dependencies))
+        slot.await_step = NO_VAL
+        slot.status = "prepared"
 
         # prepared_steps is what the base execute() will run next (list-of-one).
         state.prepared_steps = [prefix_len]
