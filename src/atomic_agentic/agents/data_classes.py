@@ -264,4 +264,14 @@ class BlackboardSlot:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "step": self.step,
+            "tool": self.tool,
+            "args": self.args,
+            "resolved_args": self.resolved_args,
+            "result": self.result,
+            "error": self.error,
+            "status": self.status,
+            "step_dependencies": self.step_dependencies,
+            "await_step": self.await_step,
+        }

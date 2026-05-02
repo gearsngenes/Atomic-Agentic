@@ -9,13 +9,11 @@ import pytest
 from atomic_agentic.agents.tool_agents import (
     _CACHE_TOKEN,
     _STEP_TOKEN,
-    BlackboardSlot,
     ToolAgent,
     ToolAgentRunState,
     extract_dependencies,
     return_tool,
     PlanActAgent,
-    PlannedStep,
     ReActAgent,
 )
 from atomic_agentic.core.Exceptions import (
@@ -25,7 +23,7 @@ from atomic_agentic.core.Exceptions import (
     ToolRegistrationError,
 )
 from atomic_agentic.core.sentinels import NO_VAL
-from atomic_agentic.agents.data_classes import AgentTurn, ToolAgentTurn
+from atomic_agentic.agents.data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.tools import Tool
 
@@ -258,6 +256,11 @@ class ScriptedToolAgent(ToolAgent[ScriptedRunState]):
             slot.resolved_args = self._resolve_placeholders(args, state=state)
             slot.result = NO_VAL
             slot.error = NO_VAL
+            slot.step_dependencies = tuple(
+                sorted(extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN))
+            )
+            slot.await_step = NO_VAL
+            slot.status = "prepared"
 
             prepared_steps.append(step)
             state.next_step_index += 1
@@ -316,6 +319,7 @@ def prepared_slot(step: int, tool: str, args: Mapping[str, Any]) -> BlackboardSl
     slot.tool = tool
     slot.args = dict(args)
     slot.resolved_args = dict(args)
+    slot.status = "prepared"
     return slot
 
 
@@ -325,6 +329,7 @@ def executed_slot(step: int, result: Any, *, tool: str = "Tool.tests.add") -> Bl
     slot.args = {}
     slot.resolved_args = {}
     slot.result = result
+    slot.status = "executed"
     return slot
 
 
@@ -348,49 +353,6 @@ def make_state(
         batch_index=0,
         next_step_index=0,
     )
-
-
-class TestBlackboardSlot:
-    def test_empty_slot_state(self) -> None:
-        slot = BlackboardSlot(step=0)
-
-        assert slot.is_empty() is True
-        assert slot.is_prepared() is False
-        assert slot.is_executed() is False
-
-    def test_prepared_slot_state(self) -> None:
-        slot = prepared_slot(0, "Tool.tests.add", {"x": 1, "y": 2})
-
-        assert slot.is_empty() is False
-        assert slot.is_prepared() is True
-        assert slot.is_executed() is False
-
-    def test_executed_slot_state(self) -> None:
-        slot = executed_slot(0, 3)
-
-        assert slot.is_empty() is False
-        assert slot.is_prepared() is False
-        assert slot.is_executed() is True
-
-    def test_error_slot_is_not_executed_without_result(self) -> None:
-        slot = prepared_slot(0, "Tool.tests.fail_tool", {})
-        slot.error = RuntimeError("boom")
-
-        assert slot.is_executed() is False
-
-    def test_to_dict_shape(self) -> None:
-        slot = executed_slot(0, 3)
-        data = slot.to_dict()
-
-        assert data == {
-            "step": 0,
-            "tool": "Tool.tests.add",
-            "args": {},
-            "resolved_args": {},
-            "result": 3,
-            "error": NO_VAL,
-            "completed": True,
-        }
 
 
 class TestToolAgentConstruction:
@@ -419,11 +381,10 @@ class TestToolAgentConstruction:
         with pytest.raises(ToolAgentError, match="TOOL_CALLS_LIMIT"):
             ScriptedToolAgent._validate_role_prompt_template("Tools: {TOOLS}")
 
-    def test_role_prompt_extra_placeholder_raises(self) -> None:
-        with pytest.raises(ToolAgentError, match="unsupported placeholder"):
-            ScriptedToolAgent._validate_role_prompt_template(
-                "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Extra: {EXTRA}"
-            )
+    def test_role_prompt_extra_simple_placeholder_is_allowed(self) -> None:
+        assert ScriptedToolAgent._validate_role_prompt_template(
+            "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Extra: {EXTRA}"
+        ) == "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Extra: {EXTRA}"
 
     def test_role_prompt_positional_placeholder_raises(self) -> None:
         with pytest.raises(ToolAgentError, match="positional fields"):
@@ -707,7 +668,7 @@ class TestPlaceholderResolution:
         agent = make_agent()
         state = make_state(cache=[BlackboardSlot(step=0)])
 
-        with pytest.raises(ToolAgentError, match="Referenced cache 0 is not executed"):
+        with pytest.raises(ToolAgentError, match="Referenced cache 0 is not.*executed"):
             agent._resolve_placeholders("<<__c0__>>", state=state)
 
     def test_non_string_scalar_is_returned_unchanged(self) -> None:
@@ -735,6 +696,8 @@ class TestExecutePreparedBatch:
         updated = agent._execute_prepared_batch(state)
 
         assert updated.running_blackboard[0].result == 5
+        assert updated.running_blackboard[0].status == "executed"
+        assert updated.running_blackboard[0].is_executed() is True
         assert updated.executed_steps == {0}
         assert updated.tool_calls_used == 1
         assert updated.prepared_steps == []
@@ -754,7 +717,9 @@ class TestExecutePreparedBatch:
         updated = agent._execute_prepared_batch(state)
 
         assert updated.running_blackboard[0].result == 5
+        assert updated.running_blackboard[0].status == "executed"
         assert updated.running_blackboard[1].result == 20
+        assert updated.running_blackboard[1].status == "executed"
         assert updated.tool_calls_used == 2
 
     def test_executes_return_tool_sets_done_and_return_value(self) -> None:
@@ -769,6 +734,7 @@ class TestExecutePreparedBatch:
 
         assert updated.is_done is True
         assert updated.return_value == 123
+        assert updated.running_blackboard[0].status == "executed"
         assert updated.tool_calls_used == 0
 
     def test_return_tool_does_not_increment_tool_calls_used(self) -> None:
@@ -892,6 +858,8 @@ class TestExecutePreparedBatch:
             agent._execute_prepared_batch(state)
 
         assert state.running_blackboard[0].error is not NO_VAL
+        assert state.running_blackboard[0].status == "failed"
+        assert state.running_blackboard[0].is_failed() is True
 
     def test_prepared_steps_cleared_after_success(self) -> None:
         agent = make_agent()
@@ -973,8 +941,10 @@ class TestScriptedInvokeLoop:
         assert len(board) == 2
         assert board[0].tool == keys["add"]
         assert board[0].result == 5
+        assert board[0].status == "executed"
         assert board[1].tool == return_tool.full_name
         assert board[1].result == 5
+        assert board[1].status == "executed"
 
     def test_context_enabled_rewrites_step_placeholders_to_cache_placeholders(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -1076,7 +1046,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         assert agent.blackboard[0].result == 3
 
-    def test_blackboard_serialized_returns_dicts(self) -> None:
+    def test_blackboard_serialized_without_peek_hides_results_and_resolved_args(self) -> None:
         agent = make_agent(context_enabled=True)
         keys = register_math_tools(agent)
         agent.set_script(
@@ -1087,45 +1057,31 @@ class TestBlackboardPersistenceAndDisplay:
         )
         agent.invoke({"prompt": "run"})
 
-        serialized = agent.blackboard_serialized
+        serialized = agent.blackboard_serialized(peek=False)
+
+        assert isinstance(serialized, list)
+        assert serialized[0]["tool"] == keys["add"]
+        assert serialized[0]["status"] == "executed"
+        assert "result" not in serialized[0]
+        assert "resolved_args" not in serialized[0]
+
+    def test_blackboard_serialized_with_peek_includes_results_and_resolved_args(self) -> None:
+        agent = make_agent(context_enabled=True)
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+        agent.invoke({"prompt": "run"})
+
+        serialized = agent.blackboard_serialized(peek=True)
 
         assert isinstance(serialized, list)
         assert serialized[0]["result"] == 3
-        assert serialized[0]["completed"] is True
-
-    def test_blackboard_dumps_without_peek_hides_results(self) -> None:
-        agent = make_agent(context_enabled=True)
-        keys = register_math_tools(agent)
-        agent.set_script(
-            [
-                [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
-            ]
-        )
-        agent.invoke({"prompt": "run"})
-
-        dump = agent.blackboard_dumps(peek=False)
-
-        assert "Tool.tests.add" in dump
-        assert "'result'" not in dump
-
-    def test_blackboard_dumps_with_peek_includes_results_but_hides_resolved_args(self) -> None:
-        agent = make_agent(context_enabled=True)
-        keys = register_math_tools(agent)
-        agent.set_script(
-            [
-                [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
-            ]
-        )
-        agent.invoke({"prompt": "run"})
-
-        dump = agent.blackboard_dumps(peek=True)
-
-        assert "val" in dump
-        assert "'result'" in dump
-        assert "resolved_args" not in dump
-        assert "<<__c0__>>" in dump
+        assert serialized[0]["resolved_args"] == {"x": 1, "y": 2}
+        assert serialized[0]["status"] == "executed"
 
     def test_rendered_history_with_peek_at_cache_includes_cached_step_results(self) -> None:
         agent = make_agent(context_enabled=True, peek_at_cache=True, blackboard_preview_limit=10)
@@ -1309,19 +1265,19 @@ class TestParsingHelpers:
         agent = make_agent()
 
         steps = agent._str_to_steps(
-            'Plan:\n[{"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]\nDone.'
+            'Plan:\n[{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]\nDone.'
         )
 
-        assert steps == [{"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]
+        assert steps == [{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]
 
     def test_str_to_steps_extracts_json_array_from_markdown_fence(self) -> None:
         agent = make_agent()
 
         steps = agent._str_to_steps(
-            '```json\n[{"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]\n```'
+            '```json\n[{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]\n```'
         )
 
-        assert steps == [{"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]
+        assert steps == [{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]
 
     @pytest.mark.parametrize("raw", ["", "   ", "not json", "[]", "{}"])
     def test_str_to_steps_rejects_invalid_text(self, raw: str) -> None:
@@ -1356,105 +1312,15 @@ class TestParsingHelpers:
             agent._str_to_dict(raw)
 
 
-class TestPlannedStep:
-    def test_from_dict_extracts_placeholder_dependencies(self) -> None:
-        step = PlannedStep.from_dict(
-            {
-                "tool": "Tool.tests.multiply",
-                "args": {"x": "<<__s0__>>", "y": "inline <<__s2__>>"},
-            }
-        )
-
-        assert step.tool == "Tool.tests.multiply"
-        assert step.args == {"x": "<<__s0__>>", "y": "inline <<__s2__>>"}
-        assert step.deps == frozenset({0, 2})
-        assert step.is_return is False
-
-    def test_from_dict_adds_await_dependency(self) -> None:
-        step = PlannedStep.from_dict(
-            {
-                "tool": "Tool.tests.multiply",
-                "args": {"x": "<<__s0__>>", "y": 10},
-                "await": 1,
-            }
-        )
-
-        assert step.deps == frozenset({0, 1})
-
-    def test_from_dict_ignores_await_for_return_tool(self) -> None:
-        step = PlannedStep.from_dict(
-            {
-                "tool": return_tool.full_name,
-                "args": {"val": "<<__s0__>>"},
-                "await": 99,
-            }
-        )
-
-        assert step.is_return is True
-        assert step.deps == frozenset({0})
-
-    def test_from_dict_rejects_non_mapping(self) -> None:
-        with pytest.raises(ToolAgentError, match="requires a mapping"):
-            PlannedStep.from_dict(["bad"])  # type: ignore[arg-type]
-
-    def test_from_dict_rejects_extra_keys(self) -> None:
-        with pytest.raises(ToolAgentError, match="unsupported keys"):
-            PlannedStep.from_dict(
-                {
-                    "tool": "Tool.tests.add",
-                    "args": {},
-                    "extra": True,
-                }
-            )
-
-    def test_from_dict_rejects_missing_tool(self) -> None:
-        with pytest.raises(ToolAgentError, match="missing required key: 'tool'"):
-            PlannedStep.from_dict({"args": {}})
-
-    def test_from_dict_rejects_missing_args(self) -> None:
-        with pytest.raises(ToolAgentError, match="missing required key: 'args'"):
-            PlannedStep.from_dict({"tool": "Tool.tests.add"})
-
-    def test_from_dict_rejects_invalid_tool(self) -> None:
-        with pytest.raises(ToolAgentError, match="'tool' must be"):
-            PlannedStep.from_dict({"tool": "", "args": {}})
-
-    @pytest.mark.parametrize("await_value", [-1, "0", 1.5])
-    def test_from_dict_rejects_invalid_await(self, await_value: Any) -> None:
-        with pytest.raises(ToolAgentError, match="'await'"):
-            PlannedStep.from_dict(
-                {
-                    "tool": "Tool.tests.add",
-                    "args": {},
-                    "await": await_value,
-                }
-            )
-
-    def test_to_dict_preserves_tool_and_args_only(self) -> None:
-        step = PlannedStep.from_dict(
-            {
-                "tool": "Tool.tests.add",
-                "args": {"x": 1, "y": 2},
-                "await": 0,
-                "step": 99,
-            }
-        )
-
-        assert step.to_dict() == {
-            "tool": "Tool.tests.add",
-            "args": {"x": 1, "y": 2},
-        }
-
-
 class TestPlanActAgent:
     def test_invokes_planned_tools_and_returns_value(self) -> None:
         agent = make_planact_agent(
             [
                 f"""
                 [
-                  {{"tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
-                  {{"tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 10}}}},
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
+                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 10}}}},
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
                 ]
                 """
             ]
@@ -1469,7 +1335,7 @@ class TestPlanActAgent:
             [
                 """
                 [
-                  {"tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}
+                  {"step": 0, "tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}
                 ]
                 """
             ]
@@ -1484,8 +1350,8 @@ class TestPlanActAgent:
             [
                 f"""
                 [
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}},
-                  {{"tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}}
+                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}},
+                  {{"step": 1, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}}
                 ]
                 """
             ]
@@ -1500,9 +1366,9 @@ class TestPlanActAgent:
             [
                 f"""
                 [
-                  {{"tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": ["<<__s0__>>", "<<__s1__>>"]}}}}
+                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
+                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": ["<<__s0__>>", "<<__s1__>>"]}}}}
                 ]
                 """
             ]
@@ -1519,8 +1385,8 @@ class TestPlanActAgent:
             [
                 f"""
                 [
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": 1}}}},
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": 2}}}}
+                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": 1}}}},
+                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": 2}}}}
                 ]
                 """
             ]
@@ -1534,7 +1400,7 @@ class TestPlanActAgent:
             [
                 """
                 [
-                  {"tool": "Tool.tests.missing", "args": {}}
+                  {"step": 0, "tool": "Tool.tests.missing", "args": {}}
                 ]
                 """
             ]
@@ -1548,9 +1414,9 @@ class TestPlanActAgent:
             [
                 f"""
                 [
-                  {{"tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
+                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
                 ]
                 """
             ],
@@ -1565,7 +1431,7 @@ class TestPlanActAgent:
             [
                 f"""
                 [
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__c0__>>"}}}}
+                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "<<__c0__>>"}}}}
                 ]
                 """
             ]
@@ -1579,9 +1445,9 @@ class TestPlanActAgent:
             [
                 f"""
                 [
-                  {{"tool": "Tool.tests.add", "args": {{"x": "<<__s1__>>", "y": 2}}}},
-                  {{"tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": "<<__s1__>>", "y": 2}}}},
+                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
                 ]
                 """
             ]
@@ -1595,13 +1461,13 @@ class TestPlanActAgent:
             [
                 f"""
                 [
-                  {{"tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
+                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
+                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
                 ]
                 """,
                 f"""
                 [
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__c0__>>"}}}}
+                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "<<__c0__>>"}}}}
                 ]
                 """,
             ],
@@ -1613,33 +1479,134 @@ class TestPlanActAgent:
 
     def test_compile_batches_isolates_return_step(self) -> None:
         agent = make_planact_agent(["[]"])
-        planned = [
-            PlannedStep.from_dict(
-                {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}
+        planned_slots = [
+            BlackboardSlot(
+                step=0,
+                tool="Tool.tests.add",
+                args={"x": 1, "y": 2},
+                status="planned",
+                step_dependencies=(),
             ),
-            PlannedStep.from_dict(
-                {"tool": "Tool.tests.multiply", "args": {"x": 3, "y": 4}}
+            BlackboardSlot(
+                step=1,
+                tool="Tool.tests.multiply",
+                args={"x": 3, "y": 4},
+                status="planned",
+                step_dependencies=(),
             ),
-            PlannedStep.from_dict(
-                {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}}
+            BlackboardSlot(
+                step=2,
+                tool=return_tool.full_name,
+                args={"val": "<<__s1__>>"},
+                status="planned",
+                step_dependencies=(0, 1),
             ),
         ]
 
         batches = agent._compile_batches_from_deps(
-            planned_steps=planned,
+            planned_slots=planned_slots,
             return_idx=2,
         )
 
         assert batches == [[0, 1], [2]]
+
+    def test_initialize_run_state_records_planned_slot_metadata(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
+                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 4}}, "await": 0}},
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                ]
+                """
+            ]
+        )
+
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "plan"}]
+        )
+
+        assert state.running_blackboard[0].status == "planned"
+        assert state.running_blackboard[0].step_dependencies == ()
+        assert state.running_blackboard[1].status == "planned"
+        assert state.running_blackboard[1].step_dependencies == (0,)
+        assert state.running_blackboard[1].await_step == 0
+        assert state.running_blackboard[2].tool == return_tool.full_name
+        assert state.running_blackboard[2].step_dependencies == (0, 1)
+
+    def test_prepare_next_batch_marks_slots_prepared(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
+                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
+                ]
+                """
+            ]
+        )
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "plan"}]
+        )
+
+        updated = agent._prepare_next_batch(state)
+
+        assert updated.prepared_steps == [0]
+        assert updated.running_blackboard[0].status == "prepared"
+        assert updated.running_blackboard[0].is_prepared() is True
+        assert updated.running_blackboard[0].resolved_args == {"x": 1, "y": 2}
+
+    def test_rejects_plan_missing_step_key(self) -> None:
+        agent = make_planact_agent(
+            [
+                """
+                [
+                  {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}
+                ]
+                """
+            ]
+        )
+
+        with pytest.raises(ToolAgentError, match="missing required keys"):
+            agent.invoke({"prompt": "run plan"})
+
+    def test_rejects_non_sequential_plan_step(self) -> None:
+        agent = make_planact_agent(
+            [
+                """
+                [
+                  {"step": 1, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}
+                ]
+                """
+            ]
+        )
+
+        with pytest.raises(ToolAgentError, match="step index mismatch"):
+            agent.invoke({"prompt": "run plan"})
+
+    def test_rejects_await_on_return_step(self) -> None:
+        agent = make_planact_agent(
+            [
+                f"""
+                [
+                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": 1}}, "await": 0}}
+                ]
+                """
+            ]
+        )
+
+        with pytest.raises(ToolAgentError, match="return step must not include 'await'"):
+            agent.invoke({"prompt": "run plan"})
 
     def test_async_invoke_executes_plan_and_returns_value(self) -> None:
         agent = make_planact_agent(
             [
                 f"""
                 [
-                  {{"tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
-                  {{"tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 10}}}},
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
+                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 10}}}},
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
                 ]
                 """
             ]
@@ -1779,6 +1746,48 @@ class TestReActAgent:
         with pytest.raises(ToolAgentError, match="tool_calls_limit exceeded"):
             agent.invoke({"prompt": "run react"})
 
+    def test_prepare_next_batch_records_slot_metadata(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}',
+            ],
+            tool_calls_limit=1,
+        )
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "react"}]
+        )
+
+        updated = agent._prepare_next_batch(state)
+
+        slot = updated.running_blackboard[0]
+        assert updated.prepared_steps == [0]
+        assert slot.status == "prepared"
+        assert slot.is_prepared() is True
+        assert slot.step_dependencies == ()
+        assert slot.await_step is NO_VAL
+        assert slot.resolved_args == {"x": 2, "y": 3}
+
+    def test_prepare_next_batch_records_step_dependencies(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"step": 1, "tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 10}}',
+            ],
+            tool_calls_limit=2,
+        )
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "react"}]
+        )
+        state.next_step_index = 1
+        state.running_blackboard[0] = executed_slot(0, 5)
+
+        updated = agent._prepare_next_batch(state)
+
+        slot = updated.running_blackboard[1]
+        assert slot.status == "prepared"
+        assert slot.step_dependencies == (0,)
+        assert slot.await_step is NO_VAL
+        assert slot.resolved_args == {"x": 5, "y": 10}
+
     def test_async_invoke_executes_step_by_step_until_return(self) -> None:
         agent = make_react_agent(
             [
@@ -1837,6 +1846,8 @@ class TestToolAgentAsyncBaseLoop:
             asyncio.run(agent._async_execute_prepared_batch(state))
 
         assert state.running_blackboard[0].error is not NO_VAL
+        assert state.running_blackboard[0].status == "failed"
+        assert state.running_blackboard[0].is_failed() is True
 
     def test_async_initialize_run_state_wrong_type_raises(self) -> None:
         agent = BadInitializeToolAgent(script=[])
