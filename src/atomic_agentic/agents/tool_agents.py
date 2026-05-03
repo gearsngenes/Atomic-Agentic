@@ -1614,111 +1614,245 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         return best_val
 
-    def _str_to_steps(self, raw_text: str) -> list[dict[str, Any]]:
+    # ------------------------------------------------------------------ #
+    # Dictionary Validation & Conversion Helpers
+    # ------------------------------------------------------------------ #
+    def _validate_tool_step_dict(
+        self,
+        data: Mapping[str, Any],
+        *,
+        expected_step: int,
+        allow_await: bool,
+        context: str,
+    ) -> dict[str, Any]:
         """
-        Parse LLM plan output into a list[dict].
+        Validate and normalize one raw LLM-produced tool-step mapping.
 
-        Robustness:
-        - Strips common markdown fences (``` / ```json).
-        - Scans for JSON arrays using `re` to find candidate '[' starts.
-        - Uses JSON decoding (nesting-aware) to select the *largest* decodable JSON array
-        that is a non-empty list of dicts.
-        - Raises ToolAgentError on failure.
+        This helper is strategy-neutral enough to be shared by PlanAct and ReAct:
+        - PlanAct should call it with allow_await=True.
+        - ReAct should call it with allow_await=False.
+
+        The raw LLM-produced step number is treated as advisory. The caller-provided
+        expected_step is authoritative, so the returned dict always has "step" set to
+        expected_step.
+
+        Parameters
+        ----------
+        data : Mapping[str, Any]
+            Raw parsed JSON object representing one tool step.
+
+        expected_step : int
+            Authoritative run-local step index to assign to the returned dict.
+
+        allow_await : bool
+            Whether the planner-facing "await" scheduling barrier is allowed.
+
+        context : str
+            Human-readable label used in error messages, such as "plan step" or
+            "next step".
+
+        Returns
+        -------
+        dict[str, Any]
+            Shallow normalized dict with "step" set to expected_step.
+
+        Raises
+        ------
+        ToolAgentError
+            If the raw step shape is invalid.
         """
-        if not isinstance(raw_text, str) or not raw_text.strip():
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: LLM returned empty plan output.")
-
-        text = raw_text.strip()
-
-        # Strip a single fenced block wrapper if present
-        # Examples:
-        # ```json
-        # [...]
-        # ```
-        text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", text)
-        text = re.sub(r"\s*```\s*$", "", text).strip()
-
-        decoder = json.JSONDecoder()
-
-        best_val: list[dict[str, Any]] | None = None
-        best_span_len: int = -1
-
-        # Candidate starts: every '[' in the text (cheap via regex)
-        for m in re.finditer(r"\[", text):
-            start = m.start()
-            try:
-                val, end_rel = decoder.raw_decode(text[start:])  # nesting-aware decode
-            except json.JSONDecodeError:
-                continue
-
-            # Must be a non-empty list of dicts
-            if not isinstance(val, list) or not val:
-                continue
-            if not all(isinstance(x, dict) for x in val):
-                continue
-
-            if end_rel > best_span_len:
-                best_span_len = end_rel
-                # Snapshot as plain dicts to ensure downstream mutation safety
-                best_val = [dict(x) for x in val]
-
-        if best_val is None:
+        if type(expected_step) is not int or expected_step < 0:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: failed to find a valid JSON array of dicts in plan output."
+                f"{type(self).__name__}.{self.name}: {context} expected_step must be an int >= 0; "
+                f"got {expected_step!r}."
             )
 
-        return best_val
-
-    def _str_to_dict(self, raw_text: str) -> dict[str, Any]:
-        """
-        Parse LLM output into a single dict[str, Any].
-
-        Robustness:
-        - Strips common markdown fences (``` / ```json).
-        - Scans for JSON objects using `re` to find candidate '{' starts.
-        - Uses JSON decoding (nesting-aware) to select the *largest* decodable JSON object
-        that is a dict.
-        - Raises ToolAgentError on failure.
-        """
-        if not isinstance(raw_text, str) or not raw_text.strip():
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: LLM returned empty output.")
-
-        text = raw_text.strip()
-
-        # Strip a single fenced block wrapper if present
-        # Examples:
-        # ```json
-        # {...}
-        # ```
-        text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", text)
-        text = re.sub(r"\s*```\s*$", "", text).strip()
-
-        decoder = json.JSONDecoder()
-
-        best_val: dict[str, Any] | None = None
-        best_span_len: int = -1
-
-        # Candidate starts: every '{' in the text (cheap via regex)
-        for m in re.finditer(r"\{", text):
-            start = m.start()
-            try:
-                val, end_rel = decoder.raw_decode(text[start:])  # nesting-aware decode
-            except json.JSONDecodeError:
-                continue
-
-            if not isinstance(val, dict):
-                continue
-
-            if end_rel > best_span_len:
-                best_span_len = end_rel
-                best_val = dict(val)  # snapshot for downstream mutation safety
-
-        if best_val is None:
+        if type(allow_await) is not bool:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: failed to find a valid JSON object in LLM output."
+                f"{type(self).__name__}.{self.name}: {context} allow_await must be a bool; "
+                f"got {type(allow_await).__name__!r}."
             )
 
-        return best_val
+        if not isinstance(context, str) or not context.strip():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: context must be a non-empty string."
+            )
+
+        if not isinstance(data, Mapping):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} must be a mapping; "
+                f"got {type(data).__name__!r}."
+            )
+
+        allowed = {"step", "tool", "args"}
+        if allow_await:
+            allowed.add("await")
+
+        extra = set(data.keys()) - allowed
+        if extra:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} contains unsupported keys: "
+                f"{sorted(extra)!r}."
+            )
+
+        required = {"tool", "args"}
+        missing = required - set(data.keys())
+        if missing:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} missing required keys: "
+                f"{sorted(missing)!r}."
+            )
+
+        normalized = dict(data)
+        normalized["step"] = expected_step
+
+        tool = normalized["tool"]
+        if not isinstance(tool, str) or not tool.strip():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} 'tool' must be a non-empty string."
+            )
+
+        args = normalized["args"]
+        if not isinstance(args, dict):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} 'args' must be a dict; "
+                f"got {type(args).__name__!r}."
+            )
+
+        if "await" in normalized:
+            if not allow_await:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: {context} must not include 'await'."
+                )
+
+            await_step = normalized["await"]
+            if type(await_step) is not int or await_step < 0:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: {context} 'await' must be an int >= 0."
+                )
+
+            if tool == return_tool.full_name:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: return step must not include 'await'."
+                )
+
+        return normalized
+
+    def _tool_step_dict_to_slot(
+        self,
+        data: Mapping[str, Any],
+        *,
+        step: int,
+        allow_await: bool,
+        context: str,
+    ) -> BlackboardSlot:
+        """
+        Convert a normalized tool-step mapping into a planned BlackboardSlot.
+
+        This helper does not validate plan chronology or cache-reference bounds.
+        Subclasses remain responsible for validating dependencies against their own
+        lifecycle constraints.
+
+        Dependency semantics
+        --------------------
+        - step_dependencies stores data dependencies extracted from <<__sN__>> args.
+        - await_step stores the explicit planner-facing "await" barrier separately.
+        - await_step is not folded into step_dependencies here.
+
+        Parameters
+        ----------
+        data : Mapping[str, Any]
+            Normalized step mapping, typically returned by _validate_tool_step_dict(...).
+
+        step : int
+            Authoritative run-local step index for the slot.
+
+        allow_await : bool
+            Whether to preserve an "await" scheduling barrier from data.
+
+        context : str
+            Human-readable label used in error messages.
+
+        Returns
+        -------
+        BlackboardSlot
+            Planned blackboard slot with unresolved args and extracted data dependencies.
+
+        Raises
+        ------
+        ToolAgentError
+            If slot construction fails.
+        """
+        if type(step) is not int or step < 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} step must be an int >= 0; "
+                f"got {step!r}."
+            )
+
+        if type(allow_await) is not bool:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} allow_await must be a bool; "
+                f"got {type(allow_await).__name__!r}."
+            )
+
+        if not isinstance(context, str) or not context.strip():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: context must be a non-empty string."
+            )
+
+        if not isinstance(data, Mapping):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} must be a mapping; "
+                f"got {type(data).__name__!r}."
+            )
+
+        tool = data.get("tool", NO_VAL)
+        args = data.get("args", NO_VAL)
+
+        if not isinstance(tool, str) or not tool.strip():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} 'tool' must be a non-empty string."
+            )
+
+        if not isinstance(args, dict):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} 'args' must be a dict; "
+                f"got {type(args).__name__!r}."
+            )
+
+        await_step = NO_VAL
+        if "await" in data:
+            if not allow_await:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: {context} must not include 'await'."
+                )
+            await_step = data["await"]
+
+        if await_step is not NO_VAL and tool == return_tool.full_name:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return step must not include 'await'."
+            )
+
+        deps: set[int] = set(
+            extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN)
+        )
+
+        try:
+            return BlackboardSlot.from_dict(
+                {
+                    "step": step,
+                    "tool": tool,
+                    "args": args,
+                    "status": "planned",
+                    "step_dependencies": tuple(sorted(deps)),
+                    "await_step": await_step,
+                }
+            )
+        except Exception as exc:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: failed to construct blackboard slot "
+                f"for {context} {step}: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------ #
     # Subclass Hooks
@@ -1894,121 +2028,6 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
     # ------------------------------------------------------------------ #
     # Planning + initialization
     # ------------------------------------------------------------------ #
-    def _validate_plan_step_dict(
-        self,
-        data: Mapping[str, Any],
-        *,
-        expected_step: int,
-    ) -> dict[str, Any]:
-        """
-        Validate one raw planner step dict before return normalization.
-
-        PlanAct planner output must use exactly:
-          - step (optional; normalized to expected_step if missing or mismatched)
-          - tool
-          - args
-          - await (optional)
-
-        The raw LLM-produced step number is treated as advisory. The JSON array
-        position is authoritative, so the returned dict always has "step" set to
-        expected_step. Return normalization may later move the return step to the end,
-        after which normalized slot positions become authoritative.
-        """
-        if not isinstance(data, Mapping):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan step must be a mapping; "
-                f"got {type(data).__name__!r}."
-            )
-
-        allowed = {"step", "tool", "args", "await"}
-        extra = set(data.keys()) - allowed
-        if extra:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan step contains unsupported keys: "
-                f"{sorted(extra)!r}."
-            )
-
-        required = {"tool", "args"}
-        missing = required - set(data.keys())
-        if missing:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan step missing required keys: "
-                f"{sorted(missing)!r}."
-            )
-
-        normalized = dict(data)
-        normalized["step"] = expected_step
-
-        tool = normalized["tool"]
-        if not isinstance(tool, str) or not tool.strip():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan step 'tool' must be a non-empty string."
-            )
-
-        args = normalized["args"]
-        if not isinstance(args, dict):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan step 'args' must be a dict; "
-                f"got {type(args).__name__!r}."
-            )
-
-        if "await" in normalized:
-            await_step = normalized["await"]
-            if type(await_step) is not int or await_step < 0:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: plan step 'await' must be an int >= 0."
-                )
-            if tool == return_tool.full_name:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: return step must not include 'await'."
-                )
-
-        return normalized
-
-    def _plan_dict_to_slot(
-        self,
-        data: Mapping[str, Any],
-        *,
-        step: int,
-    ) -> BlackboardSlot:
-        """
-        Convert a normalized planner dict into a planned BlackboardSlot.
-
-        Dependency extraction remains PlanAct-owned. BlackboardSlot stores data
-        dependency metadata directly on step_dependencies, while explicit "await"
-        barriers are stored separately on await_step.
-        """
-        tool = data["tool"]
-        args = data["args"]
-        is_return = tool == return_tool.full_name
-
-        await_step = data.get("await", NO_VAL)
-        if await_step is not NO_VAL and is_return:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return step must not include 'await'."
-            )
-
-        deps: set[int] = set(
-            extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN)
-        )
-
-        try:
-            return BlackboardSlot.from_dict(
-                {
-                    "step": step,
-                    "tool": tool,
-                    "args": args,
-                    "status": "planned",
-                    "step_dependencies": tuple(sorted(deps)),
-                    "await_step": await_step,
-                }
-            )
-        except Exception as exc:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: failed to construct planned blackboard slot "
-                f"for step {step}: {exc}"
-            ) from exc
-
     def _normalize_planned_slots(
         self,
         planned_slots: list[BlackboardSlot],
@@ -2023,7 +2042,9 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         - If a return slot is present, it is moved to the end.
         - If no return slot is present, `return(None)` is appended.
         - Final list positions become authoritative step indices.
-        - The final return slot depends on all prior slots and cannot have await_step.
+        - The final return slot is forced to depend on all prior slots so completion
+          represents the whole plan, not just the value in return args.
+        - The final return slot cannot have await_step.
 
         Parameters
         ----------
@@ -2099,6 +2120,10 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                 f"{type(self).__name__}.{self.name}: internal error: normalized plan does not end with return tool."
             )
 
+        # Return is a synthetic finalization step, not a normal data-only step.
+        # Force it to depend on every prior step so completion represents the whole plan.
+        # This makes the blackboard invariant explicit even though batch compilation also
+        # isolates return as the final batch.
         return_slot.step_dependencies = tuple(range(return_idx))
         return_slot.await_step = NO_VAL
         return_slot.status = "planned"
@@ -2300,8 +2325,18 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                     f"got {type(item).__name__!r}."
                 )
 
-            step_dict = self._validate_plan_step_dict(item, expected_step=i)
-            slot = self._plan_dict_to_slot(step_dict, step=i)
+            step_dict = self._validate_tool_step_dict(
+                item,
+                expected_step=i,
+                allow_await=True,
+                context="plan step",
+            )
+            slot = self._tool_step_dict_to_slot(
+                step_dict,
+                step=i,
+                allow_await=True,
+                context="plan step",
+            )
             planned_slots.append(slot)
 
         planned_slots = self._normalize_planned_slots(planned_slots)
@@ -2805,36 +2840,190 @@ class ReActAgent(ToolAgent[ReActRunState]):
             latest_executed=[],
         )
 
+    def _generate_next_step(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        cache_blackboard: list[BlackboardSlot],
+        expected_step: int,
+    ) -> BlackboardSlot:
+        """
+        Generate and validate one ReAct tool step as a planned BlackboardSlot.
+
+        This is the ReAct generation hook. It is intentionally single-shot and
+        fail-fast: no retry logic is performed here.
+
+        Lifecycle
+        ---------
+        1. Generate raw LLM text from the provided messages.
+        2. Extract the largest JSON array/object from the raw text.
+        3. Validate that the extracted value is a mapping.
+        4. Normalize the raw step dict using expected_step as authoritative.
+        5. Convert the normalized mapping into a planned BlackboardSlot.
+        6. Validate tool existence.
+        7. Validate cache references against cache_blackboard.
+        8. Validate step dependencies are prior-only.
+        9. Return the planned slot.
+
+        Parameters
+        ----------
+        messages : list[dict[str, str]]
+            LLM-facing messages for this ReAct step.
+
+        cache_blackboard : list[BlackboardSlot]
+            Snapshot of persisted blackboard entries available to this invoke.
+            Used for validating cache placeholder references.
+
+        expected_step : int
+            Authoritative plan-local step index for the generated slot. The raw
+            LLM-produced "step" value is optional/advisory and is overwritten.
+
+        Returns
+        -------
+        BlackboardSlot
+            Planned single-step slot. The slot is not inserted into the running
+            blackboard and placeholders are not resolved here.
+
+        Raises
+        ------
+        ToolAgentError
+            If generation output cannot be parsed, converted, or validated.
+        """
+        if not messages:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: messages must be non-empty."
+            )
+
+        if not isinstance(cache_blackboard, list):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: cache_blackboard must be a list."
+            )
+
+        if type(expected_step) is not int or expected_step < 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: expected_step must be an int >= 0; "
+                f"got {expected_step!r}."
+            )
+
+        raw_text = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
+        parsed = self._extract_from_json_string(raw_text)
+
+        if not isinstance(parsed, Mapping):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step output must be a JSON object; "
+                f"got {type(parsed).__name__!r}."
+            )
+
+        step_dict = self._validate_tool_step_dict(
+            parsed,
+            expected_step=expected_step,
+            allow_await=False,
+            context="next step",
+        )
+
+        slot = self._tool_step_dict_to_slot(
+            step_dict,
+            step=expected_step,
+            allow_await=False,
+            context="next step",
+        )
+
+        # Validate tool exists before this slot is later stamped into run state.
+        self.get_tool(slot.tool)
+
+        cache_len = len(cache_blackboard)
+        cache_refs = extract_dependencies(slot.args, placeholder_pattern=_CACHE_TOKEN)
+        bad_cache = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
+        if bad_cache:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step references out-of-range cache indices "
+                f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
+            )
+
+        bad_step_deps = [
+            dep for dep in slot.step_dependencies
+            if dep < 0 or dep >= expected_step
+        ]
+        if bad_step_deps:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step has illegal deps "
+                f"{sorted(set(bad_step_deps))!r}; deps must be < {expected_step}."
+            )
+
+        return slot
+
     def _prepare_next_batch(self, state: ReActRunState) -> ReActRunState:
         """
         Prepare the next single-step batch.
 
         Semantics (single-step ReAct):
         - If state.latest_executed is non-empty, inject an assistant observation message
-            describing the most recently executed step(s) including results, followed by a
+            describing the most recently executed step including result, followed by a
             small user request for the next step.
-        - Call the LLM orchestrator, which must emit exactly ONE JSON object:
-            {"step": <int>, "tool": "<Tool.full_name>", "args": {...}}
-        - Validate strict schema + step index correctness.
-        - Validate placeholder dependencies: any <<__sN__>> must satisfy N < step.
-        - Fill exactly one slot in the running_blackboard.
+        - Call `_generate_next_step(...)`, which must return one planned BlackboardSlot.
+        - Validate the generated slot against the current run cursor.
+        - Fill exactly one preallocated slot in the running_blackboard.
+        - Resolve placeholders against the current ToolAgent run state.
+        - Mark the slot prepared.
         - prepared_steps is a list of exactly one index.
         - next_step_index advances by 1.
-        - latest_executed is overwritten with the newly prepared index (it will be
-            completed by the base execute loop before the next prepare call).
+        - latest_executed is overwritten with the newly prepared index. By the next
+            prepare call, the base execute loop must have executed it.
         """
         if not isinstance(state, ReActRunState):
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: _prepare_next_batch requires a ReActRunState."
             )
 
+        if state.prepared_steps:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
+            )
+
+        prefix_len = state.next_step_index
+        if type(prefix_len) is not int or prefix_len < 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next_step_index must be an int >= 0; "
+                f"got {prefix_len!r}."
+            )
+
+        if prefix_len >= len(state.running_blackboard):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next_step_index exceeds run blackboard capacity "
+                f"({prefix_len} >= {len(state.running_blackboard)})."
+            )
+
         # ------------------------------------------------------------------ #
-        # 1) Build messages for this LLM turn
+        # 1) Build run-local messages for this ReAct LLM turn
         # ------------------------------------------------------------------ #
-        working_messages: list[dict[str, str]] = list(state.messages)
+        working_messages: list[dict[str, str]] = [dict(m) for m in state.messages]
 
         if state.latest_executed:
-            slot = state.running_blackboard[state.latest_executed[0]]
+            if len(state.latest_executed) != 1:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: ReAct latest_executed must contain exactly one index; "
+                    f"got {state.latest_executed!r}."
+                )
+
+            latest_idx = state.latest_executed[0]
+            if type(latest_idx) is not int:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: latest_executed index must be int; "
+                    f"got {type(latest_idx).__name__!r}."
+                )
+            if latest_idx < 0 or latest_idx >= len(state.running_blackboard):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: latest_executed index {latest_idx} out of range "
+                    f"(running plan length={len(state.running_blackboard)})."
+                )
+
+            slot = state.running_blackboard[latest_idx]
+            if not slot.is_executed():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: latest_executed step {latest_idx} is not executed "
+                    f"(status={slot.status!r})."
+                )
+
             obs_payload = {
                 "step": slot.step,
                 "tool": slot.tool,
@@ -2846,7 +3035,6 @@ class ReActAgent(ToolAgent[ReActRunState]):
             )
             working_messages.append({"role": "assistant", "content": obs_text})
 
-            # Phase B: ONLY when latest_executed is non-empty
             working_messages.append(
                 {
                     "role": "user",
@@ -2855,92 +3043,68 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 }
             )
 
-        # Persist the augmented message history for subsequent turns.
+        # ------------------------------------------------------------------ #
+        # 2) Generate and validate the next planned slot
+        # ------------------------------------------------------------------ #
+        generated_slot = self._generate_next_step(
+            messages=working_messages,
+            cache_blackboard=state.cache_blackboard,
+            expected_step=prefix_len,
+        )
+
+        if not isinstance(generated_slot, BlackboardSlot):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: _generate_next_step must return a BlackboardSlot; "
+                f"got {type(generated_slot).__name__!r}."
+            )
+
+        if generated_slot.step != prefix_len:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: generated step mismatch: "
+                f"got {generated_slot.step}, expected {prefix_len}."
+            )
+
+        if not generated_slot.is_planned():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: generated slot must be planned; "
+                f"got status={generated_slot.status!r}."
+            )
+
+        # Persist the run-local ReAct message transcript only after successful generation.
         state.messages = working_messages
 
         # ------------------------------------------------------------------ #
-        # 2) Call LLM and parse a single step object
+        # 3) Fill the next slot of the preallocated running blackboard
         # ------------------------------------------------------------------ #
-        raw_text = self._llm_engine.invoke({"messages": working_messages})
-        step_obj = self._str_to_dict(raw_text)
-
-        # Strict schema: exactly step/tool/args
-        allowed = {"step", "tool", "args"}
-        extra = set(step_obj.keys()) - allowed
-        missing = allowed - set(step_obj.keys())
-        if missing:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: step object missing required keys: {sorted(missing)!r}."
-            )
-        if extra:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: step object contains unsupported keys: {sorted(extra)!r}."
-            )
-
-        step_index = step_obj.get("step")
-        tool = step_obj.get("tool")
-        args = step_obj.get("args")
-
-        if not isinstance(step_index, int) or step_index < 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: 'step' must be an int >= 0; got {step_index!r}."
-            )
-        if not isinstance(tool, str) or not tool.strip():
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: 'tool' must be a non-empty string.")
-        if not isinstance(args, dict):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: 'args' must be a dict; got {type(args).__name__!r}."
-            )
-
-        # Enforce step index matches the run cursor exactly
-        prefix_len = state.next_step_index
-        if step_index != prefix_len:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: illegal step index: got {step_index}, expected {prefix_len}."
-            )
-
-        # ------------------------------------------------------------------ #
-        # 3) Validate dependency legality for this single step
-        # ------------------------------------------------------------------ #
-        step_dependencies = extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN)
-        for dep in step_dependencies:
-            if dep >= step_index:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: illegal dependency: "
-                    f"step args reference <<__s{dep}__>> but current step is {step_index}."
-                )
-
-        # ------------------------------------------------------------------ #
-        # 4) Fill the next slot of the preallocated running blackboard
-        # ------------------------------------------------------------------ #
-        if prefix_len >= len(state.running_blackboard):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next_step_index exceeds run blackboard capacity "
-                f"({prefix_len} >= {len(state.running_blackboard)})."
-            )
-
         slot = state.running_blackboard[prefix_len]
+        if slot.step != prefix_len:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: running slot step mismatch at index {prefix_len}: "
+                f"slot.step={slot.step}."
+            )
+
         if not slot.is_empty():
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: attempted to prepare into non-empty slot {prefix_len}."
             )
 
-        # Validate tool exists before stamping it into the slot.
-        self.get_tool(tool)
-
-        slot.tool = tool
-        slot.args = args
-        slot.resolved_args = self._resolve_placeholders(args, state=state)
+        slot.tool = generated_slot.tool
+        slot.args = generated_slot.args
         slot.result = NO_VAL
         slot.error = NO_VAL
-        slot.step_dependencies = tuple(sorted(step_dependencies))
-        slot.await_step = NO_VAL
+        slot.step_dependencies = generated_slot.step_dependencies
+        slot.await_step = generated_slot.await_step
+
+        # Resolve placeholders after stamping the planned slot into the running state.
+        # The base resolver validates that referenced cache/running slots are executed.
+        slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
         slot.status = "prepared"
 
         # prepared_steps is what the base execute() will run next (list-of-one).
         state.prepared_steps = [prefix_len]
 
-        # Used for injection at the start of the next prepare() call.
+        # Used for observation injection at the start of the next prepare() call.
+        # The base ToolAgent loop executes this prepared step before preparing again.
         state.latest_executed = [prefix_len]
 
         # Advance cursor.
