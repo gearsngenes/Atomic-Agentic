@@ -1261,55 +1261,64 @@ class TestToolAgentTurnRendering:
 
 
 class TestParsingHelpers:
-    def test_str_to_steps_extracts_json_array_from_plain_text(self) -> None:
+    def test_extract_from_json_string_extracts_json_array_from_plain_text(self) -> None:
         agent = make_agent()
 
-        steps = agent._str_to_steps(
+        value = agent._extract_from_json_string(
             'Plan:\n[{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]\nDone.'
         )
 
-        assert steps == [{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]
+        assert value == [{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]
 
-    def test_str_to_steps_extracts_json_array_from_markdown_fence(self) -> None:
+    def test_extract_from_json_string_extracts_json_array_from_markdown_fence(self) -> None:
         agent = make_agent()
 
-        steps = agent._str_to_steps(
+        value = agent._extract_from_json_string(
             '```json\n[{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]\n```'
         )
 
-        assert steps == [{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]
+        assert value == [{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}]
 
-    @pytest.mark.parametrize("raw", ["", "   ", "not json", "[]", "{}"])
-    def test_str_to_steps_rejects_invalid_text(self, raw: str) -> None:
+    def test_extract_from_json_string_extracts_json_object_from_plain_text(self) -> None:
         agent = make_agent()
 
-        with pytest.raises(ToolAgentError):
-            agent._str_to_steps(raw)
-
-    def test_str_to_dict_extracts_json_object_from_plain_text(self) -> None:
-        agent = make_agent()
-
-        data = agent._str_to_dict(
+        value = agent._extract_from_json_string(
             'Before {"step": 0, "tool": "Tool.tests.add", "args": {}} after'
         )
 
-        assert data == {"step": 0, "tool": "Tool.tests.add", "args": {}}
+        assert value == {"step": 0, "tool": "Tool.tests.add", "args": {}}
 
-    def test_str_to_dict_extracts_json_object_from_markdown_fence(self) -> None:
+    def test_extract_from_json_string_extracts_json_object_from_markdown_fence(self) -> None:
         agent = make_agent()
 
-        data = agent._str_to_dict(
+        value = agent._extract_from_json_string(
             '```json\n{"step": 0, "tool": "Tool.tests.add", "args": {}}\n```'
         )
 
-        assert data == {"step": 0, "tool": "Tool.tests.add", "args": {}}
+        assert value == {"step": 0, "tool": "Tool.tests.add", "args": {}}
 
-    @pytest.mark.parametrize("raw", ["", "   ", "not json", "[]"])
-    def test_str_to_dict_rejects_invalid_text(self, raw: str) -> None:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("[]", []),
+            ("{}", {}),
+        ],
+    )
+    def test_extract_from_json_string_accepts_empty_json_array_or_object(
+        self,
+        raw: str,
+        expected: Any,
+    ) -> None:
+        agent = make_agent()
+
+        assert agent._extract_from_json_string(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["", "   ", "not json"])
+    def test_extract_from_json_string_rejects_invalid_text(self, raw: str) -> None:
         agent = make_agent()
 
         with pytest.raises(ToolAgentError):
-            agent._str_to_dict(raw)
+            agent._extract_from_json_string(raw)
 
 
 class TestPlanActAgent:
@@ -1557,33 +1566,45 @@ class TestPlanActAgent:
         assert updated.running_blackboard[0].is_prepared() is True
         assert updated.running_blackboard[0].resolved_args == {"x": 1, "y": 2}
 
-    def test_rejects_plan_missing_step_key(self) -> None:
+    def test_accepts_plan_missing_step_key_and_normalizes(self) -> None:
         agent = make_planact_agent(
             [
-                """
+                f"""
                 [
-                  {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}
+                  {{"tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
                 ]
                 """
             ]
         )
 
-        with pytest.raises(ToolAgentError, match="missing required keys"):
-            agent.invoke({"prompt": "run plan"})
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "plan"}]
+        )
 
-    def test_rejects_non_sequential_plan_step(self) -> None:
+        assert [slot.step for slot in state.running_blackboard] == [0, 1]
+        assert state.running_blackboard[0].tool == "Tool.tests.add"
+        assert state.running_blackboard[1].tool == return_tool.full_name
+
+    def test_accepts_non_sequential_plan_step_and_normalizes(self) -> None:
         agent = make_planact_agent(
             [
-                """
+                f"""
                 [
-                  {"step": 1, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}
+                  {{"step": 99, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
+                  {{"step": 42, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
                 ]
                 """
             ]
         )
 
-        with pytest.raises(ToolAgentError, match="step index mismatch"):
-            agent.invoke({"prompt": "run plan"})
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "plan"}]
+        )
+
+        assert [slot.step for slot in state.running_blackboard] == [0, 1]
+        assert state.running_blackboard[0].tool == "Tool.tests.add"
+        assert state.running_blackboard[1].tool == return_tool.full_name
 
     def test_rejects_await_on_return_step(self) -> None:
         agent = make_planact_agent(
@@ -1664,7 +1685,6 @@ class TestReActAgent:
     @pytest.mark.parametrize(
         "raw_response, match",
         [
-            ('{"tool": "Tool.tests.add", "args": {}}', "missing required keys"),
             ('{"step": 0, "args": {}}', "missing required keys"),
             ('{"step": 0, "tool": "Tool.tests.add"}', "missing required keys"),
         ],
@@ -1678,6 +1698,25 @@ class TestReActAgent:
 
         with pytest.raises(ToolAgentError, match=match):
             agent.invoke({"prompt": "run react"})
+
+    def test_accepts_missing_step_key_and_uses_expected_step(self) -> None:
+        agent = make_react_agent(
+            [
+                '{"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}',
+            ],
+            tool_calls_limit=1,
+        )
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "react"}]
+        )
+
+        updated = agent._prepare_next_batch(state)
+
+        slot = updated.running_blackboard[0]
+        assert updated.prepared_steps == [0]
+        assert slot.step == 0
+        assert slot.tool == "Tool.tests.add"
+        assert slot.resolved_args == {"x": 1, "y": 2}
 
     def test_rejects_extra_step_keys(self) -> None:
         agent = make_react_agent(
@@ -1701,16 +1740,24 @@ class TestReActAgent:
         with pytest.raises(ToolAgentError, match="'args' must be a dict"):
             agent.invoke({"prompt": "run react"})
 
-    def test_rejects_illegal_step_index(self) -> None:
+    def test_accepts_mismatched_step_index_and_overrides_with_expected_step(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 1, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}',
+                '{"step": 99, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}',
             ],
             tool_calls_limit=1,
         )
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "react"}]
+        )
 
-        with pytest.raises(ToolAgentError, match="illegal step index"):
-            agent.invoke({"prompt": "run react"})
+        updated = agent._prepare_next_batch(state)
+
+        slot = updated.running_blackboard[0]
+        assert updated.prepared_steps == [0]
+        assert slot.step == 0
+        assert slot.tool == "Tool.tests.add"
+        assert slot.resolved_args == {"x": 1, "y": 2}
 
     def test_rejects_future_step_dependency(self) -> None:
         agent = make_react_agent(
@@ -1720,7 +1767,7 @@ class TestReActAgent:
             tool_calls_limit=1,
         )
 
-        with pytest.raises(ToolAgentError, match="illegal dependency"):
+        with pytest.raises(ToolAgentError, match="illegal deps"):
             agent.invoke({"prompt": "run react"})
 
     def test_rejects_unknown_tool(self) -> None:
