@@ -294,6 +294,8 @@ class ToolAgentRunState:
     is_done: bool = False
     return_value: Any = NO_VAL  # NO_VAL by default; set once return tool executes
 
+    # Run metadata:
+    run_metadata: dict[str, Any] = field(default_factory=dict)
 
 RS = TypeVar("RS", bound=ToolAgentRunState)
 
@@ -1367,10 +1369,15 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             state = self.update_blackboard(state)
             blackboard_end = len(self._blackboard)
 
-        return state.return_value, {
+        # Collect the final turn metadata.
+        turn_metadata = {
             "blackboard_start": blackboard_start,
             "blackboard_end": blackboard_end,
         }
+        # Add any additional run metadata from the run state
+        turn_metadata.update(state.run_metadata)
+
+        return state.return_value, turn_metadata
 
     async def _ainvoke(
         self,
@@ -1436,10 +1443,15 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             state = self.update_blackboard(state)
             blackboard_end = len(self._blackboard)
 
-        return state.return_value, {
+        # Collect the final turn metadata.
+        turn_metadata = {
             "blackboard_start": blackboard_start,
             "blackboard_end": blackboard_end,
         }
+        # Add any additional run metadata from the run state
+        turn_metadata.update(state.run_metadata)
+
+        return state.return_value, turn_metadata
 
     def _make_turn(
         self,
