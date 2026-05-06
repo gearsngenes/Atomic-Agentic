@@ -1,4 +1,5 @@
 import logging
+import math
 
 from dotenv import load_dotenv
 
@@ -27,13 +28,17 @@ orchestrator = ReActAgent(
 orchestrator.batch_register(MATH_TOOLS)
 orchestrator.batch_register(CONSOLE_TOOLS)
 
+# 4) Register the pi constant
+orchestrator.register_constant("PI", math.pi, "Mathematical constant `pi`")
+
 # 4) Task (schema-first: mapping with 'prompt')
-task = (
-    "Calculate the sum of 42 and 58, multiply it by three, take the square root, "
-    "then divide by four. Print the intermediate result to console as: "
-    "PARTIAL RESULT: <value>. "
-    "Finally, return three times that partial result."
-)
+task = """
+1) Compute the area of a circle with a radius of 5.
+2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
+3) Compute the volume of a cylinder with radius of 2 and height of 10.
+
+Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN ORDER ABOVE.
+"""
 
 final_result = orchestrator.invoke({"prompt": task})
 

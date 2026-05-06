@@ -15,6 +15,13 @@ Max non-return tool calls allowed: {TOOL_CALLS_LIMIT}
 Use these callable tool ids exactly (character-for-character):
 {TOOLS}
 
+# AVAILABLE CONSTANTS
+Registered constants are exact runtime values available by symbolic name.
+Use a constant only when a tool argument should receive that exact registered value.
+Do NOT guess, approximate, or manually write constant values.
+
+{CONSTANTS}
+
 # OUTPUT FORMAT (STRICT)
 Emit exactly ONE JSON array.
 Each element MUST be a JSON object with EXACTLY AND ONLY these keys:
@@ -35,9 +42,10 @@ Use cache history to understand what has already been computed and what cache in
 Do NOT invent or guess unseen cache indices (especially if older history is not visible).
 
 # PLACEHOLDERS (REQUIRED FOR REUSE)
-To reference prior results, use ONLY these placeholders:
+To reference prior results or registered constants, use ONLY these placeholders:
 - <<__sN__>> : result of step N in THIS NEW PLAN (plan-local indices start at 0)
 - <<__cN__>> : result of CACHE step N (global cache index)
+- <<__k.NAME__>> : registered constant named NAME
 
 Rules:
 1) Placeholders MUST contain a concrete non-negative integer N (never output a template like "<<__si__>>" or "<<__ci__>>").
@@ -46,6 +54,11 @@ Rules:
 4) Placeholders may be used as full values or embedded inside strings.
 5) Do NOT use natural-language references like "the previous result". Use placeholders.
 6) Do NOT do inline computation inside args (no math/expressions/function calls). Use tools.
+
+Constants:
+- <<__k.NAME__>> may only reference constant names listed in AVAILABLE CONSTANTS.
+- Use the exact registered constant name in place of NAME.
+- Do NOT invent constant names.
 
 # AWAIT (SCHEDULING BARRIER)
 "await" is OPTIONAL. If present on a non-return step at index i:
@@ -67,7 +80,7 @@ The plan MUST end with exactly one return step as the FINAL element:
 Rules:
 - Return step appears EXACTLY ONCE and MUST be LAST.
 - Return step MUST NOT include "await".
-- Return val may be: <<__sN__>>, <<__cN__>>, any JSON literal, or null.
+- Return val may be: <<__sN__>>, <<__cN__>>, <<__k.NAME__>>, any JSON literal, or null.
 
 # EXAMPLE (NEW TASK)
 User: "Compute 3^2, then multiply by 10, print the message 'done', and return the final number."
@@ -106,6 +119,13 @@ Max non-return tool calls for this run: {TOOL_CALLS_LIMIT}. Return does not coun
 # AVAILABLE TOOLS (USE IDS VERBATIM)
 {TOOLS}
 
+# AVAILABLE CONSTANTS
+Registered constants are exact runtime values available by symbolic name.
+Use a constant only when a tool argument should receive that exact registered value.
+Do NOT guess, approximate, or manually write constant values.
+
+{CONSTANTS}
+
 # CONTEXT YOU MAY SEE (READ-ONLY)
 You may see:
 1) CACHE: results from PREVIOUS invokes (prior completed user tasks). NEVER recompute CACHE.
@@ -131,9 +151,10 @@ Step index rule:
 - You MUST output "step": i.
 
 # PLACEHOLDERS (REQUIRED)
-To reference prior results, use ONLY these placeholders:
+To reference prior results or registered constants, use ONLY these placeholders:
 - <<__sN__>> : result of executed step N in THIS run (run-local indices start at 0)
 - <<__cN__>> : result of CACHE step N (global cache index)
+- <<__k.NAME__>> : registered constant named NAME
 
 Rules:
 1) Placeholders MUST contain a concrete non-negative integer N (never output a template like "<<__si__>>" or "<<__ci__>>").
@@ -143,13 +164,18 @@ Rules:
 5) Do NOT use natural-language references like "the previous result". Use placeholders.
 6) Do NOT do inline computation inside args (no math/expressions/function calls). Use tools.
 
+Constants:
+- <<__k.NAME__>> may only reference constant names listed in AVAILABLE CONSTANTS.
+- Use the exact registered constant name in place of NAME.
+- Do NOT invent constant names.
+
 # FINALIZATION (REQUIRED)
 When the task is complete, emit the return tool call as the single output object:
 {{"step": <int>, "tool": "Tool.ToolAgents.return", "args": {{"val": <literal-or-placeholder-or-null>}}}}
 
 Rules:
 - Return appears at most once (only when complete).
-- Return "val" may be: <<__sN__>>, <<__cN__>>, any JSON literal, or null.
+- Return "val" may be: <<__sN__>>, <<__cN__>>, <<__k.NAME__>>, any JSON literal, or null.
 
 # CANONICAL EXAMPLE (ILLUSTRATIVE ONLY)
 The following arrays are INPUT CONTEXT ONLY. Do NOT copy them. Do NOT output arrays.
