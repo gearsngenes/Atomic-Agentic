@@ -442,6 +442,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         ToolAgent role prompt is a template requiring:
           - {TOOLS}
           - {TOOL_CALLS_LIMIT}
+          - {CONSTANTS}
         """
         template = self._role_prompt
         limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
@@ -449,6 +450,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             return template.format(
                 TOOLS=self.actions_context(),
                 TOOL_CALLS_LIMIT=limit_text,
+                CONSTANTS=self.constants_context(),
             )
         except Exception as exc:  # pragma: no cover
             raise ToolAgentError(f"Failed to format ToolAgent role_prompt template: {exc}") from exc
@@ -554,6 +556,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         ToolAgent requires a non-empty role prompt template containing:
           - {TOOLS}
           - {TOOL_CALLS_LIMIT}
+          - {CONSTANTS}
+
         Additional simple named format fields are allowed.
         """
         if not isinstance(template, str):
@@ -574,7 +578,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             if field_name == "":
                 raise ToolAgentError(
                     "ToolAgent role_prompt template may not use positional fields '{}'. "
-                    "Use named placeholders like {TOOLS} and {TOOL_CALLS_LIMIT}."
+                    "Use named placeholders like {TOOLS}, {TOOL_CALLS_LIMIT}, and {CONSTANTS}."
                 )
             if any(ch in field_name for ch in ".[]"):
                 raise ToolAgentError(
@@ -583,7 +587,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 )
             fields.add(field_name)
 
-        required = {"TOOLS", "TOOL_CALLS_LIMIT"}
+        required = {"TOOLS", "TOOL_CALLS_LIMIT", "CONSTANTS"}
         missing = required - fields
         if missing:
             raise ToolAgentError(
@@ -934,39 +938,45 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Resolve all placeholders in an object to their concrete values.
 
         This method recursively traverses the object structure and replaces placeholder
-        references with their concrete results. Placeholders are references to previously
-        executed steps (``<<__sN__>>``) or cached prior results (``<<__cN__>>``).
+        references with their concrete runtime values. Placeholders can reference:
+
+        - previously executed current-run steps,
+        - previously persisted cache entries,
+        - registered ToolAgent constants.
 
         Supported Placeholder Formats
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         - ``<<__sN__>>`` – Result from running step N (0-based, plan-local to this invoke)
         - ``<<__cN__>>`` – Result from cache entry N (0-based, from persisted blackboard)
+        - ``<<__k.NAME__>>`` – Registered ToolAgent constant named NAME
 
         Two resolution modes apply depending on placeholder position:
 
-        1. **Full-String Placeholder** (e.g., entire value is ``\"<<__s0__>>\"``):
-           - Returns the referenced result as-is, **preserving its type**
-           - Example: if ref is ``[1, 2, 3]``, returns the list, not ``\"[1, 2, 3]\"``
+        1. **Full-String Placeholder**:
+           - Returns the referenced value as-is, preserving its type.
+           - Examples:
+             - ``"<<__s0__>>"`` returns step 0's result directly.
+             - ``"<<__c0__>>"`` returns cache 0's result directly.
+             - ``"<<__k.PI__>>"`` returns the registered constant value directly.
 
-        2. **Inline Placeholder** (e.g., within ``\"prefix <<__s0__>> suffix\"``):
-           - Replaces placeholder with ``repr(result)``, then returns the string
-           - Fallback to ``str(result)`` if ``repr()`` fails
-           - Example: if ref is ``[1, 2, 3]``, inline becomes ``\"prefix [1, 2, 3] suffix\"``
+        2. **Inline Placeholder**:
+           - Replaces the placeholder with ``repr(value)``, falling back to ``str(value)``.
+           - For constants only, applies ``ConstantSpec.inline_limit`` if configured.
+           - Example:
+             - ``"Step returned: <<__s0__>>"`` becomes a string.
+             - ``"Use constant: <<__k.NAME__>>"`` becomes a string, possibly truncated
+               for that constant's inline representation.
 
         Readiness Validation
         ~~~~~~~~~~~~~~~~~~~~
-        Before resolution, validates that all referenced slots are marked **executed**:
-
-        - Referenced slot must exist (index within bounds)
-        - Referenced slot must satisfy ``is_executed()``
-
-        Raises ``ToolAgentError`` if any reference is invalid or unexecuted.
+        Before resolution, validates that all referenced step/cache slots are marked
+        executed and that all referenced constants are registered.
 
         Parameters
         ----------
         obj : Any
-            Object to resolve (typically a dict of args). Can be nested (lists, tuples,
-            dicts, sets, or scalars).
+            Object to resolve. Can be nested lists, tuples, sets, dicts, strings,
+            or scalar values.
         state : ToolAgentRunState
             Execution state containing cache_blackboard and running_blackboard.
 
@@ -979,25 +989,40 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Raises
         ------
         ToolAgentError
-            If a referenced placeholder is out of bounds or not executed.
-
-        Examples
-        --------
-        >>> # Full-string placeholder (preserves type)
-        >>> obj = {\"result\": \"<<__s0__>>\"}
-        >>> # If step 0 result is [1, 2, 3]:
-        >>> resolved[\"result\"]  # → [1, 2, 3] (list, not string)
-
-        >>> # Inline placeholder (coerced to string)
-        >>> obj = {\"message\": \"Step 0 returned: <<__s0__>>\"}
-        >>> # If step 0 result is [1, 2, 3]:
-        >>> resolved[\"message\"]  # → \"Step 0 returned: [1, 2, 3]\" (string)
+            If a referenced step/cache placeholder is out of bounds or unexecuted,
+            or if a referenced constant is not registered.
         """
         cache = state.cache_blackboard
         running = state.running_blackboard
+        constants_by_name: dict[str, ConstantSpec] = {
+            spec.name: spec
+            for spec in self._constants
+        }
 
-        needed_cache: set[int] = set(extract_dependencies(obj, placeholder_pattern=_CACHE_TOKEN))
-        needed_steps: set[int] = set(extract_dependencies(obj, placeholder_pattern=_STEP_TOKEN))
+        needed_cache: set[int] = set(
+            extract_dependencies(obj, placeholder_pattern=_CACHE_TOKEN)
+        )
+        needed_steps: set[int] = set(
+            extract_dependencies(obj, placeholder_pattern=_STEP_TOKEN)
+        )
+        needed_constants: set[str] = set()
+
+        def collect_constant_refs(x: Any) -> None:
+            if isinstance(x, str):
+                for match in _CONSTANT_TOKEN.finditer(x):
+                    needed_constants.add(match.group(1))
+                return
+            if isinstance(x, dict):
+                for key, value in x.items():
+                    collect_constant_refs(key)
+                    collect_constant_refs(value)
+                return
+            if isinstance(x, (list, tuple, set)):
+                for value in x:
+                    collect_constant_refs(value)
+                return
+
+        collect_constant_refs(obj)
 
         # ----------------------------
         # 2) Validate readiness.
@@ -1018,9 +1043,26 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             if not running[idx].is_executed():
                 raise ToolAgentError(f"Referenced step {idx} is not executed.")
 
+        for name in sorted(needed_constants):
+            if name not in constants_by_name:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: unknown constant reference {name!r}."
+                )
+
         # ----------------------------
         # 3) Resolve recursively.
         # ----------------------------
+        def render_inline(value: Any, *, inline_limit: int | None = None) -> str:
+            try:
+                text = repr(value)
+            except Exception:
+                text = str(value)
+
+            if inline_limit is not None and len(text) > inline_limit:
+                text = text[:inline_limit]
+
+            return text
+
         def resolve_str(s: str) -> Any:
             # Exact placeholder -> preserve type
             m_cache = _CACHE_TOKEN.fullmatch(s)
@@ -1031,25 +1073,29 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             if m_step:
                 return running[int(m_step.group(1))].result
 
+            m_constant = _CONSTANT_TOKEN.fullmatch(s)
+            if m_constant:
+                return constants_by_name[m_constant.group(1)].value
+
             # Inline substitution
             def repl_cache(m: re.Match[str]) -> str:
                 idx = int(m.group(1))
-                val = cache[idx].result
-                try:
-                    return repr(val)
-                except Exception:
-                    return str(val)
+                return render_inline(cache[idx].result)
 
             def repl_step(m: re.Match[str]) -> str:
                 idx = int(m.group(1))
-                val = running[idx].result
-                try:
-                    return repr(val)
-                except Exception:
-                    return str(val)
+                return render_inline(running[idx].result)
+
+            def repl_constant(m: re.Match[str]) -> str:
+                spec = constants_by_name[m.group(1)]
+                return render_inline(
+                    spec.value,
+                    inline_limit=spec.inline_limit,
+                )
 
             out = _CACHE_TOKEN.sub(repl_cache, s)
             out = _STEP_TOKEN.sub(repl_step, out)
+            out = _CONSTANT_TOKEN.sub(repl_constant, out)
             return out
 
         def resolve(x: Any) -> Any:
@@ -1066,7 +1112,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             return x
 
         return resolve(obj)
-
     # ------------------------------------------------------------------ #
     # Execution (base-owned)
     # ------------------------------------------------------------------ #
