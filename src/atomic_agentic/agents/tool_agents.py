@@ -112,7 +112,7 @@ from typing import Any, Callable, Dict, Generic, Mapping, Optional, Sequence, Li
 import pprint
 
 from .base import Agent
-from .data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot
+from .data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot, ConstantSpec
 from ..core.Exceptions import (
     ToolAgentError,
     ToolDefinitionError,
@@ -132,10 +132,12 @@ from ..a2a import PyA2AtomicClient
 logger = logging.getLogger(__name__)
 
 # Canonical placeholders:
-#   <<__si__>>  : result of plan-local step i (0-based within the running plan)
-#   <<__ci__>> : result of cache entry i (0-based within persisted cache)
+#   <<__si__>>      : result of plan-local step i (0-based within the running plan)
+#   <<__ci__>>      : result of cache entry i (0-based within persisted cache)
+#   <<__k.NAME__>>  : registered ToolAgent constant named NAME
 _STEP_TOKEN: re.Pattern[str] = re.compile(r"<<__s(\d+)__>>")
 _CACHE_TOKEN: re.Pattern[str] = re.compile(r"<<__c(\d+)__>>")
+_CONSTANT_TOKEN: re.Pattern[str] = re.compile(r"<<__k\.([A-Za-z_][A-Za-z0-9_]*)__>>")
 
 def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:
     """
@@ -418,6 +420,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         self._toolbox: dict[str, Tool] = {}
         self._blackboard: list[BlackboardSlot] = []
+        self._constants: list[ConstantSpec] = []
 
         self._peek_at_cache = False
         self.peek_at_cache = peek_at_cache
@@ -614,6 +617,225 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
     def clear_tools(self) -> None:
         self._toolbox.clear()
+
+    # ------------------------------------------------------------------ #
+    # Constants Helpers
+    # ------------------------------------------------------------------ #
+    @property
+    def constants(self) -> list[ConstantSpec]:
+        """Return a shallow copy of registered ToolAgent constants."""
+        return list(self._constants)
+
+    def register_constant(
+        self,
+        name: str,
+        value: Any,
+        description: str | None = None,
+        inline_limit: int | None = None,
+    ) -> str:
+        """
+        Register one named runtime constant on this ToolAgent.
+
+        Constants are stored separately from tools. They are not executable and
+        do not participate in tool registration, tool-call budgeting, or
+        blackboard persistence.
+
+        Parameters
+        ----------
+        name : str
+            Constant name. Must be identifier-like: letters/underscore first,
+            then letters/numbers/underscore.
+        value : Any
+            Runtime value to bind to the constant.
+        description : str | None
+            Optional human-readable description.
+        inline_limit : int | None
+            Optional character limit for future inline string substitution.
+
+        Returns
+        -------
+        str
+            The normalized registered constant name.
+
+        Raises
+        ------
+        ToolAgentError
+            If the spec is invalid or the name is already registered.
+        """
+        try:
+            spec = ConstantSpec(
+                name=name,
+                value=value,
+                description=description,
+                inline_limit=inline_limit,
+            )
+        except Exception as exc:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: invalid constant spec: {exc}"
+            ) from exc
+
+        if any(existing.name == spec.name for existing in self._constants):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: constant already registered: {spec.name!r}."
+            )
+
+        self._constants.append(spec)
+        return spec.name
+
+    def batch_register_constants(
+        self,
+        **constants: tuple[Any, ...],
+    ) -> list[str]:
+        """
+        Register constants from keyword arguments.
+
+        Each keyword name becomes the constant name. Each keyword value must be
+        a tuple with one, two, or three items:
+
+        - ``NAME=(value,)``
+        - ``NAME=(value, description)``
+        - ``NAME=(value, description, inline_limit)``
+
+        Tuple-valued constants must be wrapped as the first item of a one-item
+        tuple, for example: ``COORDS=((1, 2),)``.
+
+        This method validates the whole batch before mutating ``self._constants``.
+
+        Returns
+        -------
+        list[str]
+            Registered constant names in keyword insertion order.
+
+        Raises
+        ------
+        ToolAgentError
+            If any item is malformed, duplicated in the batch, or already
+            registered on this ToolAgent.
+        """
+        if not constants:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: batch_register_constants expects at least one constant."
+            )
+
+        existing_names = {spec.name for spec in self._constants}
+        candidate_names: set[str] = set()
+        candidates: list[ConstantSpec] = []
+
+        for raw_name, payload in constants.items():
+            if not isinstance(payload, tuple):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: constant {raw_name!r} must be provided as a tuple "
+                    "of (value,), (value, description), or (value, description, inline_limit)."
+                )
+
+            if len(payload) not in {1, 2, 3}:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: constant {raw_name!r} tuple must have length 1, 2, or 3; "
+                    f"got {len(payload)}."
+                )
+
+            value = payload[0]
+            description = payload[1] if len(payload) >= 2 else None
+            inline_limit = payload[2] if len(payload) == 3 else None
+
+            try:
+                spec = ConstantSpec(
+                    name=raw_name,
+                    value=value,
+                    description=description,
+                    inline_limit=inline_limit,
+                )
+            except Exception as exc:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: invalid constant spec for {raw_name!r}: {exc}"
+                ) from exc
+
+            if spec.name in candidate_names:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: duplicate constant name in batch: {spec.name!r}."
+                )
+
+            if spec.name in existing_names:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: constant already registered: {spec.name!r}."
+                )
+
+            candidate_names.add(spec.name)
+            candidates.append(spec)
+
+        self._constants.extend(candidates)
+        return [spec.name for spec in candidates]
+
+    def has_constant(self, name: str) -> bool:
+        """Return whether a constant with the given name is registered."""
+        if not isinstance(name, str) or not name.strip():
+            return False
+
+        normalized_name = name.strip()
+        return any(spec.name == normalized_name for spec in self._constants)
+
+    def get_constant(self, name: str) -> ConstantSpec:
+        """
+        Return the registered constant with the given name.
+
+        Raises ``ToolAgentError`` if no constant with that name exists.
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: constant name must be a non-empty string."
+            )
+
+        normalized_name = name.strip()
+        for spec in self._constants:
+            if spec.name == normalized_name:
+                return spec
+
+        raise ToolAgentError(
+            f"{type(self).__name__}.{self.name}: unknown constant {normalized_name!r}."
+        )
+
+    def remove_constant(self, name: str) -> bool:
+        """Remove a registered constant by name. Returns True if removed."""
+        if not isinstance(name, str) or not name.strip():
+            return False
+
+        normalized_name = name.strip()
+        for index, spec in enumerate(self._constants):
+            if spec.name == normalized_name:
+                del self._constants[index]
+                return True
+
+        return False
+
+    def clear_constants(self) -> None:
+        """Remove all registered constants from this ToolAgent."""
+        self._constants.clear()
+
+    def constants_context(self) -> str:
+        """
+        Render the dynamic constants list for future prompt injection.
+
+        This method intentionally renders only the list body, not a section
+        header or explanatory text. It also intentionally does not render raw
+        constant values.
+        """
+        if not self._constants:
+            return "No constants registered."
+
+        rendered: list[str] = []
+        for spec in self._constants:
+            description = (
+                spec.description
+                if spec.description is not None
+                else "No description provided."
+            )
+            rendered.append(
+                f"- {spec.name}\n"
+                f"  Type: {spec.type}\n"
+                f"  Description: {description}"
+            )
+
+        return "\n\n".join(rendered)
 
     def register(
         self,

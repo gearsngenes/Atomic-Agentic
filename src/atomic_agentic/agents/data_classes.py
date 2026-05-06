@@ -1,12 +1,87 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+import re
 from typing import Any, ClassVar, Dict, Mapping
 
 from ..core.sentinels import NO_VAL
 
-__all__ = ["AgentTurn", "ToolAgentTurn", "BlackboardSlot"]
+__all__ = ["AgentTurn", "ToolAgentTurn", "BlackboardSlot", "ConstantSpec"]
 
+
+_VALID_CONSTANT_NAME: re.Pattern[str] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@dataclass(frozen=True, slots=True)
+class ConstantSpec:
+    """
+    Read-only named runtime value registered on a ToolAgent.
+
+    Constants are stable symbolic bindings that can be exposed to an LLM by
+    name/type/description and later resolved by the ToolAgent runtime. The
+    actual value is stored here, but prompt-facing renderers should avoid
+    displaying it unless deliberately designed to do so.
+
+    Fields
+    ------
+    name : str
+        Safe constant name. Must be identifier-like: letters/underscore first,
+        then letters/numbers/underscore.
+
+    value : Any
+        Runtime value bound to this constant.
+
+    description : str | None
+        Optional human-readable context for what the constant represents.
+
+    inline_limit : int | None
+        Optional character limit for future inline string substitution. None
+        means no limit. If provided, must be an int > 0.
+
+    type : str
+        Derived automatically from ``type(value).__name__``.
+    """
+
+    name: str
+    value: Any
+    description: str | None = None
+    inline_limit: int | None = None
+    type: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("ConstantSpec.name must be a non-empty string.")
+
+        normalized_name = self.name.strip()
+        if not _VALID_CONSTANT_NAME.fullmatch(normalized_name):
+            raise ValueError(
+                "ConstantSpec.name must be alphanumeric/underscore and not start "
+                f"with a digit; got {self.name!r}."
+            )
+
+        normalized_description: str | None
+        if self.description is None:
+            normalized_description = None
+        else:
+            if not isinstance(self.description, str):
+                raise TypeError(
+                    "ConstantSpec.description must be a string or None."
+                )
+            normalized_description = self.description.strip() or None
+
+        if self.inline_limit is not None:
+            if type(self.inline_limit) is not int or self.inline_limit <= 0:
+                raise ValueError(
+                    "ConstantSpec.inline_limit must be None or an int > 0."
+                )
+
+        object.__setattr__(self, "name", normalized_name)
+        object.__setattr__(self, "description", normalized_description)
+        object.__setattr__(self, "type", type(self.value).__name__)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a dictionary representation of this constant spec."""
+        return asdict(self)
 
 @dataclass(slots=True)
 class AgentTurn:
