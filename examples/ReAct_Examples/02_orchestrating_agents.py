@@ -92,3 +92,11 @@ result = orchestrator.invoke({"prompt": task})
 
 print("\n=== Final Result ===\n")
 print(result)
+
+from pathlib import Path
+
+out_dir = Path("examples/output_markdowns")
+out_dir.mkdir(exist_ok=True)
+filepath = out_dir / "ReAct_Code.txt"
+filepath.write_text(result, encoding="utf-8")
+print(f"\n✓ Story saved to: {filepath.resolve()}")
