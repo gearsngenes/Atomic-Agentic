@@ -82,7 +82,7 @@ task = (
     "Process:\n"
     "1) Call the builder tool to draft code.\n"
     "2) Call the reviewer tool to critique it.\n"
-    "3) If the reviewer returns 'Approved', stop and return the latest code.\n"
+    "3) Check if the reviewer returns 'Approved'. If it does, stop and return the latest code draft.\n"
     "4) Otherwise, call the builder again and send ONLY the revision notes feedback and iterate.\n\n"
     "Note: Do NOT try use the ENTIRE # of tool call limits you have. consider this if you start "
     "approaching your limit"

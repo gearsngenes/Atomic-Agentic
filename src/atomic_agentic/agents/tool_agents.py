@@ -2950,26 +2950,35 @@ class ReActRunState(ToolAgentRunState):
         Example: If next_step_index=3, step being prepared cannot use <<__s3__>> or higher.
 
     latest_executed : list[int]
-        Plan-local indices of the most recently *prepared* batch (always length 1 for
-        ReAct). Used at the start of the next prepare() call to inject observation
-        message into LLM context.
+        Plan-local indices of the most recently prepared single-step batch.
+        ReAct always prepares one step at a time, so this is expected to be empty
+        before the first step and length 1 after each prepared/executed step.
 
-        Workflow:
-        - After step N prepared: latest_executed = [N]
-        - After step N executed: next iteration calls prepare() with latest_executed=[N]
-        - prepare() injects \"Most recently executed: step N result=...\" into messages
-        - LLM sees this observation and emits next step
+        This remains lightweight bookkeeping for the ReAct loop. The LLM-facing
+        running-plan context is rendered fresh from running_blackboard each turn
+        rather than persisted into messages.
 
-        Enables reactive feedback loop: see result → emit next step.
+    observables : list[int]
+        Per-step raw-result visibility counters for the current ReAct run.
+
+        - observables[i] == 0 means step i's raw result is not shown to the LLM.
+        - observables[i] > 0 means step i's raw result is shown as observable_result
+          for that many future successful step-generation turns.
+
+        Regardless of observability, every executed step is rendered with a
+        result_ref placeholder like <<__s0__>> so the model can pass values forward
+        without seeing or copying raw literals.
 
     Workflow
     ~~~~~~~~
     Iteration k (k=1,2,...):
 
     1. prepare():
-       - If latest_executed non-empty: inject observation into messages
-       - Request next step from LLM (fresh turn)
-       - Parse step object: {\"step\": idx, \"tool\": ..., \"args\": {...}}
+       - Build a fresh temporary copy of the static base messages.
+       - Append one assistant message containing the current running-plan snapshot.
+       - Append one small user request asking for the next single step.
+       - Request next step from LLM.
+       - Parse step object: {"step": idx, "tool": ..., "args": {...}}
        - Validate: idx == next_step_index (cursor enforcement)
        - Fill running_blackboard[idx]
        - Set prepared_steps=[idx], latest_executed=[idx]
@@ -2983,6 +2992,7 @@ class ReActRunState(ToolAgentRunState):
     """
     next_step_index: int = 0
     latest_executed: list[int] = field(default_factory=list)
+    observables: list[int] = field(default_factory=list)
 
 
 class ReActAgent(ToolAgent[ReActRunState]):
@@ -3101,7 +3111,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         for i, slot in enumerate(cache_blackboard):
             slot.step = i
 
-        working_messages = list(messages)
+        working_messages = [dict(m) for m in messages]
 
         # Preallocate fixed-size run blackboard: non-return calls + 1 return call.
         running_blackboard = [BlackboardSlot(step=i) for i in range(self._tool_calls_limit + 1)]
@@ -3117,6 +3127,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
             return_value=NO_VAL,
             next_step_index=0,
             latest_executed=[],
+            observables=[0 for _ in running_blackboard],
         )
 
     def _generate_next_step(
@@ -3125,9 +3136,10 @@ class ReActAgent(ToolAgent[ReActRunState]):
         messages: list[dict[str, str]],
         cache_blackboard: list[BlackboardSlot],
         expected_step: int,
-    ) -> BlackboardSlot:
+    ) -> tuple[BlackboardSlot, int]:
         """
-        Generate and validate one ReAct tool step as a planned BlackboardSlot.
+        Generate and validate one ReAct tool step as a planned BlackboardSlot plus
+        observation duration.
 
         This is the ReAct generation hook. It is intentionally single-shot and
         fail-fast: no retry logic is performed here.
@@ -3137,12 +3149,13 @@ class ReActAgent(ToolAgent[ReActRunState]):
         1. Generate raw LLM text from the provided messages.
         2. Extract the largest JSON array/object from the raw text.
         3. Validate that the extracted value is a mapping.
-        4. Normalize the raw step dict using expected_step as authoritative.
-        5. Convert the normalized mapping into a planned BlackboardSlot.
-        6. Validate tool existence.
-        7. Validate cache references against cache_blackboard.
-        8. Validate step dependencies are prior-only.
-        9. Return the planned slot.
+        4. Extract and validate "duration" as an int in [0, 3].
+        5. Normalize the remaining raw step dict using expected_step as authoritative.
+        6. Convert the normalized mapping into a planned BlackboardSlot.
+        7. Validate tool existence.
+        8. Validate cache references against cache_blackboard.
+        9. Validate step dependencies are prior-only.
+        10. Return the planned slot and duration.
 
         Parameters
         ----------
@@ -3159,9 +3172,11 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         Returns
         -------
-        BlackboardSlot
-            Planned single-step slot. The slot is not inserted into the running
-            blackboard and placeholders are not resolved here.
+        tuple[BlackboardSlot, int]
+            Planned single-step slot and observation duration. The slot is not
+            inserted into the running blackboard and placeholders are not resolved here.
+            The duration controls how many future successful step-generation turns may
+            render this step's raw result as observable_result.
 
         Raises
         ------
@@ -3193,8 +3208,22 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"got {type(parsed).__name__!r}."
             )
 
+        step_payload = dict(parsed)
+        duration = step_payload.pop("duration", NO_VAL)
+
+        if duration is NO_VAL:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step missing required key 'duration'."
+            )
+
+        if type(duration) is not int or duration < 0 or duration > 3:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step 'duration' must be an int in [0, 3]; "
+                f"got {duration!r}."
+            )
+
         step_dict = self._validate_tool_step_dict(
-            parsed,
+            step_payload,
             expected_step=expected_step,
             allow_await=False,
             context="next step",
@@ -3229,25 +3258,29 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"{sorted(set(bad_step_deps))!r}; deps must be < {expected_step}."
             )
 
-        return slot
-
+        return slot, duration
     def _prepare_next_batch(self, state: ReActRunState) -> ReActRunState:
         """
         Prepare the next single-step batch.
 
         Semantics (single-step ReAct):
-        - If state.latest_executed is non-empty, inject an assistant observation message
-            describing the most recently executed step including result, followed by a
-            small user request for the next step.
-        - Call `_generate_next_step(...)`, which must return one planned BlackboardSlot.
+        - Build a fresh, temporary LLM message list from the static base messages.
+        - Append one assistant message containing the current running-plan snapshot.
+        - Append one small user request for the next step.
+        - Call `_generate_next_step(...)`, which returns one planned BlackboardSlot
+          and a duration for future raw-result observability.
         - Validate the generated slot against the current run cursor.
+        - Decrement existing non-zero observability durations after successful generation.
         - Fill exactly one preallocated slot in the running_blackboard.
         - Resolve placeholders against the current ToolAgent run state.
         - Mark the slot prepared.
         - prepared_steps is a list of exactly one index.
         - next_step_index advances by 1.
         - latest_executed is overwritten with the newly prepared index. By the next
-            prepare call, the base execute loop must have executed it.
+          prepare call, the base execute loop must have executed it.
+
+        The temporary running-plan messages do not persist between turns; state.messages
+        remains the static base message list for this invoke.
         """
         if not isinstance(state, ReActRunState):
             raise ToolAgentError(
@@ -3272,10 +3305,23 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"({prefix_len} >= {len(state.running_blackboard)})."
             )
 
-        # ------------------------------------------------------------------ #
-        # 1) Build run-local messages for this ReAct LLM turn
-        # ------------------------------------------------------------------ #
-        working_messages: list[dict[str, str]] = [dict(m) for m in state.messages]
+        if not isinstance(state.observables, list):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: observables must be a list."
+            )
+
+        if len(state.observables) != len(state.running_blackboard):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: observables length must match running_blackboard length "
+                f"({len(state.observables)} != {len(state.running_blackboard)})."
+            )
+
+        for obs_idx, turns_left in enumerate(state.observables):
+            if type(turns_left) is not int or turns_left < 0 or turns_left > 3:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: observables[{obs_idx}] must be an int in [0, 3]; "
+                    f"got {turns_left!r}."
+                )
 
         if state.latest_executed:
             if len(state.latest_executed) != 1:
@@ -3296,36 +3342,73 @@ class ReActAgent(ToolAgent[ReActRunState]):
                     f"(running plan length={len(state.running_blackboard)})."
                 )
 
-            slot = state.running_blackboard[latest_idx]
-            if not slot.is_executed():
+            latest_slot = state.running_blackboard[latest_idx]
+            if not latest_slot.is_executed():
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: latest_executed step {latest_idx} is not executed "
-                    f"(status={slot.status!r})."
+                    f"(status={latest_slot.status!r})."
                 )
 
-            obs_payload = {
+        # ------------------------------------------------------------------ #
+        # 1) Build non-persistent messages for this ReAct LLM turn
+        # ------------------------------------------------------------------ #
+        working_messages: list[dict[str, str]] = [dict(m) for m in state.messages]
+
+        running_records: list[dict[str, Any]] = []
+        for idx in range(prefix_len):
+            slot = state.running_blackboard[idx]
+            if not slot.is_executed():
+                continue
+
+            record: dict[str, Any] = {
                 "step": slot.step,
                 "tool": slot.tool,
                 "args": slot.args,
-                "result": self._preview_blackboard_result(slot.result),
+                "result_ref": f"<<__s{idx}__>>",
             }
-            obs_text = "Most recently executed steps and results:\n" + pprint.pformat(
-                obs_payload, indent=2, sort_dicts=False
-            )
-            working_messages.append({"role": "assistant", "content": obs_text})
 
-            working_messages.append(
-                {
-                    "role": "user",
-                    "content": "Given the most recently executed steps and available CACHE (if provided) above, "
-                            "produce the NEXT single step as ONE JSON object with keys {step, tool, args}.",
-                }
+            if state.observables[idx] > 0:
+                record["observable_result"] = self._preview_blackboard_result(slot.result)
+
+            running_records.append(record)
+
+        if running_records:
+            running_text = (
+                f"RUNNING PLAN STEPS 0-{prefix_len - 1} SO FAR:\n"
+                "These are the executed steps for the current user task.\n"
+                "Use result_ref placeholders when a new arg needs a prior step value.\n"
+                "observable_result fields are for OBSERVATION ONLY: use them only to choose the next tool or branch.\n"
+                "Do not copy observable_result values into new args.\n\n"
+                + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
             )
+        else:
+            running_text = (
+                "RUNNING PLAN STEPS SO FAR:\n"
+                "No steps executed yet.\n"
+                "When steps execute, their results will be available by result_ref placeholders like <<__s0__>>."
+            )
+
+        working_messages.append({"role": "assistant", "content": running_text})
+        working_messages.append(
+            {
+                "role": "user",
+                "content": "Produce the NEXT BEST single tool call dictionary for the current task. "
+                           "If the running plan has completed all needed work, call Tool.ToolAgents.return. "
+                           "Output ONE JSON object with keys {step, tool, args, duration}. "
+                           "Use placeholders greedily: use <<__sN__>> for prior running-step results, "
+                           "<<__cN__>> for cached results, and <<__k.NAME__>> for registered constants. "
+                           "All placeholders must be quoted JSON strings. "
+                           "DO NOT copy raw values shown in observable_result fields into args. "
+                           "Use duration 0 unless this step's raw result must be observed to decide a future tool choice. "
+                           "Use duration 1 for an immediate next-tool branch, and duration 2 or 3 only when that "
+                           "branching decision is expected farther down the run.",
+            }
+        )
 
         # ------------------------------------------------------------------ #
         # 2) Generate and validate the next planned slot
         # ------------------------------------------------------------------ #
-        generated_slot = self._generate_next_step(
+        generated_slot, observe_duration = self._generate_next_step(
             messages=working_messages,
             cache_blackboard=state.cache_blackboard,
             expected_step=prefix_len,
@@ -3333,8 +3416,14 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         if not isinstance(generated_slot, BlackboardSlot):
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: _generate_next_step must return a BlackboardSlot; "
-                f"got {type(generated_slot).__name__!r}."
+                f"{type(self).__name__}.{self.name}: _generate_next_step must return a BlackboardSlot "
+                f"or (BlackboardSlot, observe_duration); got {type(generated_slot).__name__!r}."
+            )
+
+        if type(observe_duration) is not int or observe_duration < 0 or observe_duration > 3:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: observe_duration must be an int in [0, 3]; "
+                f"got {observe_duration!r}."
             )
 
         if generated_slot.step != prefix_len:
@@ -3349,8 +3438,10 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"got status={generated_slot.status!r}."
             )
 
-        # Persist the run-local ReAct message transcript only after successful generation.
-        state.messages = working_messages
+        # A successful generation turn consumed any raw results that were visible.
+        for obs_idx, turns_left in enumerate(state.observables):
+            if turns_left > 0:
+                state.observables[obs_idx] = turns_left - 1
 
         # ------------------------------------------------------------------ #
         # 3) Fill the next slot of the preallocated running blackboard
@@ -3379,10 +3470,15 @@ class ReActAgent(ToolAgent[ReActRunState]):
         slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
         slot.status = "prepared"
 
+        # Store this step's future raw-result visibility duration.
+        # The result is not available until after the base execute loop runs this step,
+        # so this duration is not decremented in the current prepare turn.
+        state.observables[prefix_len] = observe_duration
+
         # prepared_steps is what the base execute() will run next (list-of-one).
         state.prepared_steps = [prefix_len]
 
-        # Used for observation injection at the start of the next prepare() call.
+        # Used for lightweight ReAct bookkeeping at the start of the next prepare() call.
         # The base ToolAgent loop executes this prepared step before preparing again.
         state.latest_executed = [prefix_len]
 

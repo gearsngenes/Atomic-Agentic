@@ -21,7 +21,7 @@ orchestrator = ReActAgent(
     llm_engine=llm,
     history_window=20,    # send-window (turns) to the model
     tool_calls_limit=15,  # max *non-return* tool calls per run
-    context_enabled=False,
+    context_enabled=True,
 )
 
 # 3) Register tool lists
@@ -29,15 +29,13 @@ orchestrator.batch_register(MATH_TOOLS)
 orchestrator.batch_register(CONSOLE_TOOLS)
 
 # 4) Register the pi constant
-orchestrator.register_constant("PI", math.pi, "Mathematical constant `pi`")
+orchestrator.register_constant("PI", math.pi, "Mathematical constant `PI`")
 
 # 4) Task (schema-first: mapping with 'prompt')
 task = """
-1) Compute the area of a circle with a radius of 5.
-2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
-3) Compute the volume of a cylinder with radius of 2 and height of 10.
-
-Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN ORDER ABOVE.
+1. Compute the volume of a cylinder with a radius of 2 and a height of 10 (PI * r^2 * h).
+2. Then print the result in the format "The volume of the cylinder is: <result>".
+Return None.
 """
 
 final_result = orchestrator.invoke({"prompt": task})
