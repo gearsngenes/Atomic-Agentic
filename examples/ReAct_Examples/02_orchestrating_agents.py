@@ -68,7 +68,7 @@ orchestrator = ReActAgent(
     llm_engine=llm,
     history_window=10,
     tool_calls_limit=10,
-    context_enabled=False,
+    context_enabled=True,
     preview_limit=100,
 )
 
@@ -82,7 +82,7 @@ task = (
     "Process:\n"
     "1) Call the builder tool to draft code.\n"
     "2) Call the reviewer tool to critique it.\n"
-    "3) If the reviewer returns 'Approved', stop and return the latest code.\n"
+    "3) Check if the reviewer returns 'Approved'. If it does, stop and return the latest code draft.\n"
     "4) Otherwise, call the builder again and send ONLY the revision notes feedback and iterate.\n\n"
     "Note: Do NOT try use the ENTIRE # of tool call limits you have. consider this if you start "
     "approaching your limit"
@@ -90,5 +90,16 @@ task = (
 
 result = orchestrator.invoke({"prompt": task})
 
-print("\n=== Final Result ===\n")
-print(result)
+from pprint import pformat, pprint
+pprint(orchestrator.blackboard)
+
+from pathlib import Path
+
+out_dir = Path("examples/output_markdowns")
+out_dir.mkdir(exist_ok=True)
+filepath = out_dir / "ReAct_Code.py"
+filepath.write_text(result, encoding="utf-8")
+print(f"\n✓ Final Draft code saved to: {filepath.resolve()}")
+filepath = out_dir / "ReAct_Blackboard.txt"
+filepath.write_text(pformat(orchestrator.blackboard), encoding="utf-8")
+print(f"\n✓ Blackboard content saved to: {filepath.resolve()}")

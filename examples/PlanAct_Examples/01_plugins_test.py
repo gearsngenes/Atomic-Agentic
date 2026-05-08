@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 import logging
+import math
 
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.tools.Plugins import MATH_TOOLS, CONSOLE_TOOLS
@@ -8,7 +9,6 @@ from atomic_agentic.engines.LLMEngines import OpenAIEngine
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-print("\n───────────────────────────────\n")
 print("Testing Task Decomposition and Printing capabilities")
 
 # ──────────────────────────  SET-UP  ───────────────────────────
@@ -24,13 +24,14 @@ agent = PlanActAgent(
 agent.batch_register(MATH_TOOLS)
 agent.batch_register(CONSOLE_TOOLS)
 
+# Register the pi constant
+agent.register_constant("PI", math.pi, "Mathematical constant `pi`")
+
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
-Assuming pi = 3.14159265358979323846 where needed
-
-1) Compute the area of a circle with a radius of 5 (pi * r^2).
+1) Compute the area of a circle with a radius of 5.
 2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
-3) Compute the volume of a cylinder with radius of 2 and height of 10 (pi * r^2 * h).
+3) Compute the volume of a cylinder with radius of 2 and height of 10.
 
 Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN ORDER ABOVE.
 """

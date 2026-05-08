@@ -79,12 +79,12 @@ def cot(x: float) -> float:
 
 
 MATH_TOOLS: List[Tool] = [
-    Tool(function=add, name="add", namespace="Math", description="Return a + b."),
-    Tool(function=subtract, name="subtract", namespace="Math", description="Return a - b."),
-    Tool(function=multiply, name="multiply", namespace="Math", description="Return a * b."),
-    Tool(function=divide, name="divide", namespace="Math", description="Return a / b (inf if b == 0)."),
-    Tool(function=power, name="power", namespace="Math", description="Return a ** b."),
-    Tool(function=sqrt, name="sqrt", namespace="Math", description="Return sqrt(x); x must be >= 0."),
+    Tool(function=add, name="add", namespace="Math", description="Return sum of two numbers a + b."),
+    Tool(function=subtract, name="subtract", namespace="Math", description="Return difference of two numbers a - b."),
+    Tool(function=multiply, name="multiply", namespace="Math", description="Return product of two numbers a * b."),
+    Tool(function=divide, name="divide", namespace="Math", description="Return quotient of two numbers a / b (inf if b == 0)."),
+    Tool(function=power, name="power", namespace="Math", description="Return power of two numbers a ** b."),
+    Tool(function=sqrt, name="sqrt", namespace="Math", description="Return square root of a number x; x must be >= 0."),
     Tool(function=mean, name="mean", namespace="Math", description="Return arithmetic mean of a list of numbers."),
     Tool(function=max_value, name="max_value", namespace="Math", description="Return the maximum of a list of numbers."),
     Tool(function=min_value, name="min_value", namespace="Math", description="Return the minimum of a list of numbers."),

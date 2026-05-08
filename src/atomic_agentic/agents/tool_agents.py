@@ -112,7 +112,7 @@ from typing import Any, Callable, Dict, Generic, Mapping, Optional, Sequence, Li
 import pprint
 
 from .base import Agent
-from .data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot
+from .data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot, ConstantSpec
 from ..core.Exceptions import (
     ToolAgentError,
     ToolDefinitionError,
@@ -132,10 +132,12 @@ from ..a2a import PyA2AtomicClient
 logger = logging.getLogger(__name__)
 
 # Canonical placeholders:
-#   <<__si__>>  : result of plan-local step i (0-based within the running plan)
-#   <<__ci__>> : result of cache entry i (0-based within persisted cache)
+#   <<__si__>>      : result of plan-local step i (0-based within the running plan)
+#   <<__ci__>>      : result of cache entry i (0-based within persisted cache)
+#   <<__k.NAME__>>  : registered ToolAgent constant named NAME
 _STEP_TOKEN: re.Pattern[str] = re.compile(r"<<__s(\d+)__>>")
 _CACHE_TOKEN: re.Pattern[str] = re.compile(r"<<__c(\d+)__>>")
+_CONSTANT_TOKEN: re.Pattern[str] = re.compile(r"<<__k\.([A-Za-z_][A-Za-z0-9_]*)__>>")
 
 def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:
     """
@@ -418,6 +420,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         self._toolbox: dict[str, Tool] = {}
         self._blackboard: list[BlackboardSlot] = []
+        self._constants: list[ConstantSpec] = []
 
         self._peek_at_cache = False
         self.peek_at_cache = peek_at_cache
@@ -439,6 +442,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         ToolAgent role prompt is a template requiring:
           - {TOOLS}
           - {TOOL_CALLS_LIMIT}
+          - {CONSTANTS}
         """
         template = self._role_prompt
         limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
@@ -446,6 +450,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             return template.format(
                 TOOLS=self.actions_context(),
                 TOOL_CALLS_LIMIT=limit_text,
+                CONSTANTS=self.constants_context(),
             )
         except Exception as exc:  # pragma: no cover
             raise ToolAgentError(f"Failed to format ToolAgent role_prompt template: {exc}") from exc
@@ -551,6 +556,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         ToolAgent requires a non-empty role prompt template containing:
           - {TOOLS}
           - {TOOL_CALLS_LIMIT}
+          - {CONSTANTS}
+
         Additional simple named format fields are allowed.
         """
         if not isinstance(template, str):
@@ -571,7 +578,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             if field_name == "":
                 raise ToolAgentError(
                     "ToolAgent role_prompt template may not use positional fields '{}'. "
-                    "Use named placeholders like {TOOLS} and {TOOL_CALLS_LIMIT}."
+                    "Use named placeholders like {TOOLS}, {TOOL_CALLS_LIMIT}, and {CONSTANTS}."
                 )
             if any(ch in field_name for ch in ".[]"):
                 raise ToolAgentError(
@@ -580,7 +587,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 )
             fields.add(field_name)
 
-        required = {"TOOLS", "TOOL_CALLS_LIMIT"}
+        required = {"TOOLS", "TOOL_CALLS_LIMIT", "CONSTANTS"}
         missing = required - fields
         if missing:
             raise ToolAgentError(
@@ -614,6 +621,225 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
     def clear_tools(self) -> None:
         self._toolbox.clear()
+
+    # ------------------------------------------------------------------ #
+    # Constants Helpers
+    # ------------------------------------------------------------------ #
+    @property
+    def constants(self) -> list[ConstantSpec]:
+        """Return a shallow copy of registered ToolAgent constants."""
+        return list(self._constants)
+
+    def register_constant(
+        self,
+        name: str,
+        value: Any,
+        description: str | None = None,
+        inline_limit: int | None = None,
+    ) -> str:
+        """
+        Register one named runtime constant on this ToolAgent.
+
+        Constants are stored separately from tools. They are not executable and
+        do not participate in tool registration, tool-call budgeting, or
+        blackboard persistence.
+
+        Parameters
+        ----------
+        name : str
+            Constant name. Must be identifier-like: letters/underscore first,
+            then letters/numbers/underscore.
+        value : Any
+            Runtime value to bind to the constant.
+        description : str | None
+            Optional human-readable description.
+        inline_limit : int | None
+            Optional character limit for future inline string substitution.
+
+        Returns
+        -------
+        str
+            The normalized registered constant name.
+
+        Raises
+        ------
+        ToolAgentError
+            If the spec is invalid or the name is already registered.
+        """
+        try:
+            spec = ConstantSpec(
+                name=name,
+                value=value,
+                description=description,
+                inline_limit=inline_limit,
+            )
+        except Exception as exc:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: invalid constant spec: {exc}"
+            ) from exc
+
+        if any(existing.name == spec.name for existing in self._constants):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: constant already registered: {spec.name!r}."
+            )
+
+        self._constants.append(spec)
+        return spec.name
+
+    def batch_register_constants(
+        self,
+        **constants: tuple[Any, ...],
+    ) -> list[str]:
+        """
+        Register constants from keyword arguments.
+
+        Each keyword name becomes the constant name. Each keyword value must be
+        a tuple with one, two, or three items:
+
+        - ``NAME=(value,)``
+        - ``NAME=(value, description)``
+        - ``NAME=(value, description, inline_limit)``
+
+        Tuple-valued constants must be wrapped as the first item of a one-item
+        tuple, for example: ``COORDS=((1, 2),)``.
+
+        This method validates the whole batch before mutating ``self._constants``.
+
+        Returns
+        -------
+        list[str]
+            Registered constant names in keyword insertion order.
+
+        Raises
+        ------
+        ToolAgentError
+            If any item is malformed, duplicated in the batch, or already
+            registered on this ToolAgent.
+        """
+        if not constants:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: batch_register_constants expects at least one constant."
+            )
+
+        existing_names = {spec.name for spec in self._constants}
+        candidate_names: set[str] = set()
+        candidates: list[ConstantSpec] = []
+
+        for raw_name, payload in constants.items():
+            if not isinstance(payload, tuple):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: constant {raw_name!r} must be provided as a tuple "
+                    "of (value,), (value, description), or (value, description, inline_limit)."
+                )
+
+            if len(payload) not in {1, 2, 3}:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: constant {raw_name!r} tuple must have length 1, 2, or 3; "
+                    f"got {len(payload)}."
+                )
+
+            value = payload[0]
+            description = payload[1] if len(payload) >= 2 else None
+            inline_limit = payload[2] if len(payload) == 3 else None
+
+            try:
+                spec = ConstantSpec(
+                    name=raw_name,
+                    value=value,
+                    description=description,
+                    inline_limit=inline_limit,
+                )
+            except Exception as exc:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: invalid constant spec for {raw_name!r}: {exc}"
+                ) from exc
+
+            if spec.name in candidate_names:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: duplicate constant name in batch: {spec.name!r}."
+                )
+
+            if spec.name in existing_names:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: constant already registered: {spec.name!r}."
+                )
+
+            candidate_names.add(spec.name)
+            candidates.append(spec)
+
+        self._constants.extend(candidates)
+        return [spec.name for spec in candidates]
+
+    def has_constant(self, name: str) -> bool:
+        """Return whether a constant with the given name is registered."""
+        if not isinstance(name, str) or not name.strip():
+            return False
+
+        normalized_name = name.strip()
+        return any(spec.name == normalized_name for spec in self._constants)
+
+    def get_constant(self, name: str) -> ConstantSpec:
+        """
+        Return the registered constant with the given name.
+
+        Raises ``ToolAgentError`` if no constant with that name exists.
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: constant name must be a non-empty string."
+            )
+
+        normalized_name = name.strip()
+        for spec in self._constants:
+            if spec.name == normalized_name:
+                return spec
+
+        raise ToolAgentError(
+            f"{type(self).__name__}.{self.name}: unknown constant {normalized_name!r}."
+        )
+
+    def remove_constant(self, name: str) -> bool:
+        """Remove a registered constant by name. Returns True if removed."""
+        if not isinstance(name, str) or not name.strip():
+            return False
+
+        normalized_name = name.strip()
+        for index, spec in enumerate(self._constants):
+            if spec.name == normalized_name:
+                del self._constants[index]
+                return True
+
+        return False
+
+    def clear_constants(self) -> None:
+        """Remove all registered constants from this ToolAgent."""
+        self._constants.clear()
+
+    def constants_context(self) -> str:
+        """
+        Render the dynamic constants list for future prompt injection.
+
+        This method intentionally renders only the list body, not a section
+        header or explanatory text. It also intentionally does not render raw
+        constant values.
+        """
+        if not self._constants:
+            return "No constants registered."
+
+        rendered: list[str] = []
+        for spec in self._constants:
+            description = (
+                spec.description
+                if spec.description is not None
+                else "No description provided."
+            )
+            rendered.append(
+                f"- {spec.name}\n"
+                f"  Type: {spec.type}\n"
+                f"  Description: {description}"
+            )
+
+        return "\n\n".join(rendered)
 
     def register(
         self,
@@ -712,39 +938,45 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Resolve all placeholders in an object to their concrete values.
 
         This method recursively traverses the object structure and replaces placeholder
-        references with their concrete results. Placeholders are references to previously
-        executed steps (``<<__sN__>>``) or cached prior results (``<<__cN__>>``).
+        references with their concrete runtime values. Placeholders can reference:
+
+        - previously executed current-run steps,
+        - previously persisted cache entries,
+        - registered ToolAgent constants.
 
         Supported Placeholder Formats
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         - ``<<__sN__>>`` – Result from running step N (0-based, plan-local to this invoke)
         - ``<<__cN__>>`` – Result from cache entry N (0-based, from persisted blackboard)
+        - ``<<__k.NAME__>>`` – Registered ToolAgent constant named NAME
 
         Two resolution modes apply depending on placeholder position:
 
-        1. **Full-String Placeholder** (e.g., entire value is ``\"<<__s0__>>\"``):
-           - Returns the referenced result as-is, **preserving its type**
-           - Example: if ref is ``[1, 2, 3]``, returns the list, not ``\"[1, 2, 3]\"``
+        1. **Full-String Placeholder**:
+           - Returns the referenced value as-is, preserving its type.
+           - Examples:
+             - ``"<<__s0__>>"`` returns step 0's result directly.
+             - ``"<<__c0__>>"`` returns cache 0's result directly.
+             - ``"<<__k.PI__>>"`` returns the registered constant value directly.
 
-        2. **Inline Placeholder** (e.g., within ``\"prefix <<__s0__>> suffix\"``):
-           - Replaces placeholder with ``repr(result)``, then returns the string
-           - Fallback to ``str(result)`` if ``repr()`` fails
-           - Example: if ref is ``[1, 2, 3]``, inline becomes ``\"prefix [1, 2, 3] suffix\"``
+        2. **Inline Placeholder**:
+           - Replaces the placeholder with ``repr(value)``, falling back to ``str(value)``.
+           - For constants only, applies ``ConstantSpec.inline_limit`` if configured.
+           - Example:
+             - ``"Step returned: <<__s0__>>"`` becomes a string.
+             - ``"Use constant: <<__k.NAME__>>"`` becomes a string, possibly truncated
+               for that constant's inline representation.
 
         Readiness Validation
         ~~~~~~~~~~~~~~~~~~~~
-        Before resolution, validates that all referenced slots are marked **executed**:
-
-        - Referenced slot must exist (index within bounds)
-        - Referenced slot must satisfy ``is_executed()``
-
-        Raises ``ToolAgentError`` if any reference is invalid or unexecuted.
+        Before resolution, validates that all referenced step/cache slots are marked
+        executed and that all referenced constants are registered.
 
         Parameters
         ----------
         obj : Any
-            Object to resolve (typically a dict of args). Can be nested (lists, tuples,
-            dicts, sets, or scalars).
+            Object to resolve. Can be nested lists, tuples, sets, dicts, strings,
+            or scalar values.
         state : ToolAgentRunState
             Execution state containing cache_blackboard and running_blackboard.
 
@@ -757,25 +989,40 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Raises
         ------
         ToolAgentError
-            If a referenced placeholder is out of bounds or not executed.
-
-        Examples
-        --------
-        >>> # Full-string placeholder (preserves type)
-        >>> obj = {\"result\": \"<<__s0__>>\"}
-        >>> # If step 0 result is [1, 2, 3]:
-        >>> resolved[\"result\"]  # → [1, 2, 3] (list, not string)
-
-        >>> # Inline placeholder (coerced to string)
-        >>> obj = {\"message\": \"Step 0 returned: <<__s0__>>\"}
-        >>> # If step 0 result is [1, 2, 3]:
-        >>> resolved[\"message\"]  # → \"Step 0 returned: [1, 2, 3]\" (string)
+            If a referenced step/cache placeholder is out of bounds or unexecuted,
+            or if a referenced constant is not registered.
         """
         cache = state.cache_blackboard
         running = state.running_blackboard
+        constants_by_name: dict[str, ConstantSpec] = {
+            spec.name: spec
+            for spec in self._constants
+        }
 
-        needed_cache: set[int] = set(extract_dependencies(obj, placeholder_pattern=_CACHE_TOKEN))
-        needed_steps: set[int] = set(extract_dependencies(obj, placeholder_pattern=_STEP_TOKEN))
+        needed_cache: set[int] = set(
+            extract_dependencies(obj, placeholder_pattern=_CACHE_TOKEN)
+        )
+        needed_steps: set[int] = set(
+            extract_dependencies(obj, placeholder_pattern=_STEP_TOKEN)
+        )
+        needed_constants: set[str] = set()
+
+        def collect_constant_refs(x: Any) -> None:
+            if isinstance(x, str):
+                for match in _CONSTANT_TOKEN.finditer(x):
+                    needed_constants.add(match.group(1))
+                return
+            if isinstance(x, dict):
+                for key, value in x.items():
+                    collect_constant_refs(key)
+                    collect_constant_refs(value)
+                return
+            if isinstance(x, (list, tuple, set)):
+                for value in x:
+                    collect_constant_refs(value)
+                return
+
+        collect_constant_refs(obj)
 
         # ----------------------------
         # 2) Validate readiness.
@@ -796,9 +1043,26 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             if not running[idx].is_executed():
                 raise ToolAgentError(f"Referenced step {idx} is not executed.")
 
+        for name in sorted(needed_constants):
+            if name not in constants_by_name:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: unknown constant reference {name!r}."
+                )
+
         # ----------------------------
         # 3) Resolve recursively.
         # ----------------------------
+        def render_inline(value: Any, *, inline_limit: int | None = None) -> str:
+            try:
+                text = repr(value)
+            except Exception:
+                text = str(value)
+
+            if inline_limit is not None and len(text) > inline_limit:
+                text = text[:inline_limit]
+
+            return text
+
         def resolve_str(s: str) -> Any:
             # Exact placeholder -> preserve type
             m_cache = _CACHE_TOKEN.fullmatch(s)
@@ -809,25 +1073,29 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             if m_step:
                 return running[int(m_step.group(1))].result
 
+            m_constant = _CONSTANT_TOKEN.fullmatch(s)
+            if m_constant:
+                return constants_by_name[m_constant.group(1)].value
+
             # Inline substitution
             def repl_cache(m: re.Match[str]) -> str:
                 idx = int(m.group(1))
-                val = cache[idx].result
-                try:
-                    return repr(val)
-                except Exception:
-                    return str(val)
+                return render_inline(cache[idx].result)
 
             def repl_step(m: re.Match[str]) -> str:
                 idx = int(m.group(1))
-                val = running[idx].result
-                try:
-                    return repr(val)
-                except Exception:
-                    return str(val)
+                return render_inline(running[idx].result)
+
+            def repl_constant(m: re.Match[str]) -> str:
+                spec = constants_by_name[m.group(1)]
+                return render_inline(
+                    spec.value,
+                    inline_limit=spec.inline_limit,
+                )
 
             out = _CACHE_TOKEN.sub(repl_cache, s)
             out = _STEP_TOKEN.sub(repl_step, out)
+            out = _CONSTANT_TOKEN.sub(repl_constant, out)
             return out
 
         def resolve(x: Any) -> Any:
@@ -844,7 +1112,6 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             return x
 
         return resolve(obj)
-
     # ------------------------------------------------------------------ #
     # Execution (base-owned)
     # ------------------------------------------------------------------ #
@@ -2667,99 +2934,125 @@ class ReActRunState(ToolAgentRunState):
     """
     ReActAgent-specific run state extending ToolAgentRunState.
 
-    Tracks iteration-specific state for step-by-step reactive planning.
+    Tracks cursor, visibility, and semantic step metadata for step-by-step
+    reactive planning.
 
     Fields
     ------
     next_step_index : int
-        Cursor for the next plan-local running_blackboard slot to fill. Starts at 0;
-        incremented after each step is prepared.
+        Cursor for the next plan-local running_blackboard slot to fill. Starts at 0
+        and increments after each step is prepared.
 
         Dual role:
-        1. **Allocation cursor**: Determines which slot index gets the next prepared step
-        2. **Dependency cutoff**: Any <<__sN__>> placeholder in newly prepared args
-           must satisfy N < next_step_index (cannot reference future steps)
-
-        Example: If next_step_index=3, step being prepared cannot use <<__s3__>> or higher.
+        1. Allocation cursor: determines which slot index gets the next prepared step.
+        2. Dependency cutoff: any <<__sN__>> placeholder in newly prepared args must
+           satisfy N < next_step_index.
 
     latest_executed : list[int]
-        Plan-local indices of the most recently *prepared* batch (always length 1 for
-        ReAct). Used at the start of the next prepare() call to inject observation
-        message into LLM context.
+        Plan-local indices of the most recently prepared single-step batch.
+        ReAct prepares one step at a time, so this is expected to be empty before
+        the first step and length 1 after each prepared/executed step.
 
-        Workflow:
-        - After step N prepared: latest_executed = [N]
-        - After step N executed: next iteration calls prepare() with latest_executed=[N]
-        - prepare() injects \"Most recently executed: step N result=...\" into messages
-        - LLM sees this observation and emits next step
+    observables : list[int]
+        Per-step raw-result visibility counters for the current ReAct run.
 
-        Enables reactive feedback loop: see result → emit next step.
+        - observables[i] == 0 means step i's raw result is not shown to the LLM.
+        - observables[i] > 0 means step i's raw result is shown as observable_result
+          for that many future successful step-generation turns.
+
+        Regardless of observability, every executed step is rendered with a
+        result_ref placeholder like <<__s0__>> so the model can pass values forward
+        without seeing or copying raw literals.
+
+    descriptions : list[str]
+        Per-step one-sentence descriptions for the current ReAct run.
+
+        descriptions[i] describes what running step i was intended to do for the
+        current user task. Descriptions are rendered in the running-plan snapshot
+        to preserve semantic intent without requiring raw result visibility.
 
     Workflow
     ~~~~~~~~
-    Iteration k (k=1,2,...):
+    Iteration k:
 
     1. prepare():
-       - If latest_executed non-empty: inject observation into messages
-       - Request next step from LLM (fresh turn)
-       - Parse step object: {\"step\": idx, \"tool\": ..., \"args\": {...}}
-       - Validate: idx == next_step_index (cursor enforcement)
-       - Fill running_blackboard[idx]
-       - Set prepared_steps=[idx], latest_executed=[idx]
-       - Increment next_step_index
+       - Build a fresh temporary copy of the static base messages.
+       - Append one assistant message containing the current running-plan snapshot.
+       - Append one small user request asking for the next single step.
+       - Request the next step from the LLM.
+       - Parse step object plus ReAct metadata:
+         {"step": idx, "tool": ..., "args": {...}, "duration": ..., "description": ...}
+       - Validate idx == next_step_index.
+       - Fill running_blackboard[idx].
+       - Store duration and description in ReAct run state.
+       - Set prepared_steps=[idx], latest_executed=[idx].
+       - Increment next_step_index.
 
     2. execute():
-       - Run step concurrently (trivial: length 1 batch)
-       - Store result in running_blackboard[idx]
+       - Run the prepared single-step batch.
+       - Store result in running_blackboard[idx].
 
-    3. emit control back to loop → goto iteration k+1
+    3. Continue until the return tool executes.
     """
     next_step_index: int = 0
     latest_executed: list[int] = field(default_factory=list)
+    observables: list[int] = field(default_factory=list)
+    descriptions: list[str] = field(default_factory=list)
 
 
 class ReActAgent(ToolAgent[ReActRunState]):
     """
     Iterative agent with reactive step-by-step planning (ReAct-style architecture).
 
-    **Design**: ReActAgent implements **dynamic iteration**: one step is emitted per LLM
-    turn, with full visibility into prior results.
+    **Design**: ReActAgent implements dynamic iteration: one step is emitted per LLM
+    turn from a compact running-plan snapshot. Result references are always visible
+    by placeholder; raw result previews are shown only while their observability
+    duration remains active. Generated step descriptions preserve semantic intent
+    across turns without exposing raw results.
 
     1. **Initialization** (``_initialize_run_state``)
        - Pre-allocates a fixed-size running blackboard: ``tool_calls_limit + 1`` slots
-         (to accommodate non-return tool calls + one return call)
-       - Requires ``tool_calls_limit`` to be a concrete integer (not None)
-       - Snapshots cached blackboard entries only when ``context_enabled=True``
+         to accommodate non-return tool calls plus one return call.
+       - Requires ``tool_calls_limit`` to be a concrete integer.
+       - Snapshots cached blackboard entries only when ``context_enabled=True``.
+       - Initializes ReAct-specific per-step metadata:
+         observability counters and generated step descriptions.
 
     2. **Preparation** (``_prepare_next_batch`` – single step per turn)
-       - **First turn**: LLM receives the original user query; emits first step as JSON
-       - **Subsequent turns**: Injects "most recently executed step and result" into
-         messages, then asks for the next step
-       - Step must be a JSON object: ``{"step": <int>, "tool": "<name>", "args": {...}}``
-       - Validates step index matches expected position (cursor enforcement)
-       - Validates placeholder dependencies forward (step N can only ref steps < N)
-       - Resolves placeholders; stores in ``running_blackboard[step_index]``
-       - Sets ``prepared_steps = [step_index]`` (always length 1)
+       - Builds a fresh temporary message list from static base messages.
+       - Appends a compact running-plan snapshot containing executed steps,
+         descriptions, unresolved args, result_ref placeholders, and any currently
+         observable_result values.
+       - Asks the LLM for the next single step.
+       - Step generation returns a planned slot, observability duration, and
+         one-sentence description.
+       - Validates step index matches the expected cursor position.
+       - Validates placeholder dependencies are prior-only.
+       - Resolves placeholders into concrete tool args.
+       - Stores the prepared slot in ``running_blackboard[step_index]``.
+       - Stores duration and description in ReAct run state.
+       - Sets ``prepared_steps = [step_index]``.
 
     3. **Execution**
-       - Base loop executes the single step (trivial with thread pool)
-       - Result is stored; loop returns to prepare next step
+       - Base loop executes the single prepared step.
+       - Result is stored; loop returns to preparation for the next step.
 
     4. **Termination**
-       - When return tool is emitted and executed, loop exits
-       - Running blackboard is persisted if ``context_enabled=True``
+       - When the return tool is emitted and executed, loop exits.
+       - Running blackboard is persisted if ``context_enabled=True``.
 
     Advantages
     ~~~~~~~~~~
-    - **Fully adaptive**: Each step reacts to prior results; LLM can adjust dynamically
-    - **Error recovery**: Failed steps don't invalidate entire plan; agent can replan
-    - **Interpretability**: Clear step-by-step execution trace for auditing
+    - Fully adaptive: each step can react to prior tool results.
+    - Context-hygienic: running-plan messages are rebuilt fresh each turn.
+    - Interpretable: descriptions, placeholders, and optional observations provide
+      a compact execution trace.
 
     Limitations
     ~~~~~~~~~~~
-    - **Higher latency**: One LLM call per step (vs. entire plan upfront)
-    - **No concurrency**: Only one step executes per iteration
-    - **Harder to optimize**: Difficult to parallelize cross-invocation
+    - Higher latency: one LLM call per step.
+    - No concurrency: only one step executes per iteration.
+    - Step quality depends on the model's ability to select the next best action.
 
     Parameters (construction)
     ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2834,7 +3127,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         for i, slot in enumerate(cache_blackboard):
             slot.step = i
 
-        working_messages = list(messages)
+        working_messages = [dict(m) for m in messages]
 
         # Preallocate fixed-size run blackboard: non-return calls + 1 return call.
         running_blackboard = [BlackboardSlot(step=i) for i in range(self._tool_calls_limit + 1)]
@@ -2850,6 +3143,8 @@ class ReActAgent(ToolAgent[ReActRunState]):
             return_value=NO_VAL,
             next_step_index=0,
             latest_executed=[],
+            observables=[0 for _ in running_blackboard],
+            descriptions=["" for _ in running_blackboard],
         )
 
     def _generate_next_step(
@@ -2858,9 +3153,10 @@ class ReActAgent(ToolAgent[ReActRunState]):
         messages: list[dict[str, str]],
         cache_blackboard: list[BlackboardSlot],
         expected_step: int,
-    ) -> BlackboardSlot:
+    ) -> tuple[BlackboardSlot, int, str]:
         """
-        Generate and validate one ReAct tool step as a planned BlackboardSlot.
+        Generate and validate one ReAct tool step as a planned BlackboardSlot plus
+        observation duration and description.
 
         This is the ReAct generation hook. It is intentionally single-shot and
         fail-fast: no retry logic is performed here.
@@ -2870,12 +3166,16 @@ class ReActAgent(ToolAgent[ReActRunState]):
         1. Generate raw LLM text from the provided messages.
         2. Extract the largest JSON array/object from the raw text.
         3. Validate that the extracted value is a mapping.
-        4. Normalize the raw step dict using expected_step as authoritative.
-        5. Convert the normalized mapping into a planned BlackboardSlot.
-        6. Validate tool existence.
-        7. Validate cache references against cache_blackboard.
-        8. Validate step dependencies are prior-only.
-        9. Return the planned slot.
+        4. Extract and validate "duration" as an int within the remaining future
+           step-generation capacity.
+        5. Extract and validate "description" as a non-empty string.
+        6. Normalize the remaining raw step dict using expected_step as authoritative.
+        7. Convert the normalized mapping into a planned BlackboardSlot.
+        8. Validate tool existence.
+        9. Validate return-tool duration is 0.
+        10. Validate cache references against cache_blackboard.
+        11. Validate step dependencies are prior-only.
+        12. Return the planned slot, duration, and description.
 
         Parameters
         ----------
@@ -2892,9 +3192,11 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         Returns
         -------
-        BlackboardSlot
-            Planned single-step slot. The slot is not inserted into the running
-            blackboard and placeholders are not resolved here.
+        tuple[BlackboardSlot, int, str]
+            Planned single-step slot, observation duration, and step description.
+            The slot is not inserted into the running blackboard and placeholders
+            are not resolved here. The duration controls how many future successful
+            step-generation turns may render this step's raw result as observable_result.
 
         Raises
         ------
@@ -2917,6 +3219,13 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"got {expected_step!r}."
             )
 
+        if self._tool_calls_limit is None or type(self._tool_calls_limit) is not int or self._tool_calls_limit < 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: ReActAgent requires tool_calls_limit to be an int >= 0."
+            )
+
+        max_duration = max(0, self._tool_calls_limit - expected_step)
+
         raw_text = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
         parsed = self._extract_from_json_string(raw_text)
 
@@ -2926,8 +3235,40 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"got {type(parsed).__name__!r}."
             )
 
+        step_payload = dict(parsed)
+
+        duration = step_payload.pop("duration", NO_VAL)
+        if duration is NO_VAL:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step missing required key 'duration'."
+            )
+
+        if type(duration) is not int or duration < 0 or duration > max_duration:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step 'duration' must be an int in "
+                f"[0, {max_duration}] for expected_step={expected_step}; got {duration!r}."
+            )
+
+        description = step_payload.pop("description", NO_VAL)
+        if description is NO_VAL:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step missing required key 'description'."
+            )
+
+        if type(description) is not str:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step 'description' must be a string; "
+                f"got {type(description).__name__!r}."
+            )
+
+        description = description.strip()
+        if not description:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step 'description' cannot be empty."
+            )
+
         step_dict = self._validate_tool_step_dict(
-            parsed,
+            step_payload,
             expected_step=expected_step,
             allow_await=False,
             context="next step",
@@ -2942,6 +3283,12 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         # Validate tool exists before this slot is later stamped into run state.
         self.get_tool(slot.tool)
+
+        if slot.tool == return_tool.full_name and duration != 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return tool must use duration 0; "
+                f"got {duration!r}."
+            )
 
         cache_len = len(cache_blackboard)
         cache_refs = extract_dependencies(slot.args, placeholder_pattern=_CACHE_TOKEN)
@@ -2962,25 +3309,31 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"{sorted(set(bad_step_deps))!r}; deps must be < {expected_step}."
             )
 
-        return slot
+        return slot, duration, description
 
     def _prepare_next_batch(self, state: ReActRunState) -> ReActRunState:
         """
         Prepare the next single-step batch.
 
         Semantics (single-step ReAct):
-        - If state.latest_executed is non-empty, inject an assistant observation message
-            describing the most recently executed step including result, followed by a
-            small user request for the next step.
-        - Call `_generate_next_step(...)`, which must return one planned BlackboardSlot.
+        - Build a fresh, temporary LLM message list from the static base messages.
+        - Append one assistant message containing the current running-plan snapshot.
+        - Append one small user request for the next step.
+        - Call `_generate_next_step(...)`, which returns one planned BlackboardSlot,
+          a duration for future raw-result observability, and a step description.
         - Validate the generated slot against the current run cursor.
+        - Decrement existing non-zero observability durations after successful generation.
         - Fill exactly one preallocated slot in the running_blackboard.
         - Resolve placeholders against the current ToolAgent run state.
+        - Store the generated description for future running-plan rendering.
         - Mark the slot prepared.
         - prepared_steps is a list of exactly one index.
         - next_step_index advances by 1.
         - latest_executed is overwritten with the newly prepared index. By the next
-            prepare call, the base execute loop must have executed it.
+          prepare call, the base execute loop must have executed it.
+
+        The temporary running-plan messages do not persist between turns; state.messages
+        remains the static base message list for this invoke.
         """
         if not isinstance(state, ReActRunState):
             raise ToolAgentError(
@@ -3005,10 +3358,42 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"({prefix_len} >= {len(state.running_blackboard)})."
             )
 
-        # ------------------------------------------------------------------ #
-        # 1) Build run-local messages for this ReAct LLM turn
-        # ------------------------------------------------------------------ #
-        working_messages: list[dict[str, str]] = [dict(m) for m in state.messages]
+        if not isinstance(state.observables, list):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: observables must be a list."
+            )
+
+        if len(state.observables) != len(state.running_blackboard):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: observables length must match running_blackboard length "
+                f"({len(state.observables)} != {len(state.running_blackboard)})."
+            )
+
+        for obs_idx, turns_left in enumerate(state.observables):
+            max_turns_left = len(state.running_blackboard) - obs_idx - 1
+            if type(turns_left) is not int or turns_left < 0 or turns_left > max_turns_left:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: observables[{obs_idx}] must be an int in "
+                    f"[0, {max_turns_left}]; got {turns_left!r}."
+                )
+
+        if not isinstance(state.descriptions, list):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: descriptions must be a list."
+            )
+
+        if len(state.descriptions) != len(state.running_blackboard):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: descriptions length must match running_blackboard length "
+                f"({len(state.descriptions)} != {len(state.running_blackboard)})."
+            )
+
+        for desc_idx, step_description in enumerate(state.descriptions):
+            if type(step_description) is not str:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: descriptions[{desc_idx}] must be a string; "
+                    f"got {type(step_description).__name__!r}."
+                )
 
         if state.latest_executed:
             if len(state.latest_executed) != 1:
@@ -3029,36 +3414,72 @@ class ReActAgent(ToolAgent[ReActRunState]):
                     f"(running plan length={len(state.running_blackboard)})."
                 )
 
-            slot = state.running_blackboard[latest_idx]
-            if not slot.is_executed():
+            latest_slot = state.running_blackboard[latest_idx]
+            if not latest_slot.is_executed():
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: latest_executed step {latest_idx} is not executed "
-                    f"(status={slot.status!r})."
+                    f"(status={latest_slot.status!r})."
                 )
 
-            obs_payload = {
+        # ------------------------------------------------------------------ #
+        # 1) Build non-persistent messages for this ReAct LLM turn
+        # ------------------------------------------------------------------ #
+        working_messages: list[dict[str, str]] = [dict(m) for m in state.messages]
+
+        running_records: list[dict[str, Any]] = []
+        for idx in range(prefix_len):
+            slot = state.running_blackboard[idx]
+            if not slot.is_executed():
+                continue
+
+            record: dict[str, Any] = {
                 "step": slot.step,
+                "description": state.descriptions[idx],
                 "tool": slot.tool,
                 "args": slot.args,
-                "result": self._preview_blackboard_result(slot.result),
+                "result_ref": f"<<__s{idx}__>>",
             }
-            obs_text = "Most recently executed steps and results:\n" + pprint.pformat(
-                obs_payload, indent=2, sort_dicts=False
-            )
-            working_messages.append({"role": "assistant", "content": obs_text})
 
-            working_messages.append(
-                {
-                    "role": "user",
-                    "content": "Given the most recently executed steps and available CACHE (if provided) above, "
-                            "produce the NEXT single step as ONE JSON object with keys {step, tool, args}.",
-                }
+            if state.observables[idx] > 0:
+                record["observable_result"] = self._preview_blackboard_result(slot.result)
+
+            running_records.append(record)
+
+        if running_records:
+            running_text = (
+                f"RUNNING PLAN STEPS 0-{prefix_len - 1} SO FAR:\n"
+                "These are the executed steps for the current user task.\n"
+                "Use descriptions to understand what each executed step was intended to do.\n"
+                "Use result_ref placeholders when a new arg needs a prior step value.\n"
+                "observable_result fields are for OBSERVATION ONLY: use them only to choose the next tool or branch.\n"
+                "Do not copy observable_result values into new args.\n\n"
+                + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
             )
+        else:
+            running_text = (
+                "RUNNING PLAN STEPS SO FAR:\n"
+                "No steps executed yet.\n"
+                "When steps execute, their results will be available by result_ref placeholders like <<__s0__>>."
+            )
+
+        max_duration = len(state.running_blackboard) - prefix_len - 1
+
+        working_messages.append({"role": "assistant", "content": running_text})
+        working_messages.append(
+            {
+                "role": "user",
+                "content": "Produce the NEXT BEST single tool call for the current task. "
+                           "Pick the return tool if the running plan has completed all needed work. "
+                           "Output exactly one JSON object with keys {step, tool, args, duration, description}. "
+                           "Preserve symbolic dataflow with quoted placeholders; do not copy observable_result values into args. "
+                           f"For this output step, duration must be an int from 0 to {max_duration}.",
+            }
+        )
 
         # ------------------------------------------------------------------ #
         # 2) Generate and validate the next planned slot
         # ------------------------------------------------------------------ #
-        generated_slot = self._generate_next_step(
+        generated_slot, observe_duration, description = self._generate_next_step(
             messages=working_messages,
             cache_blackboard=state.cache_blackboard,
             expected_step=prefix_len,
@@ -3066,9 +3487,30 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         if not isinstance(generated_slot, BlackboardSlot):
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: _generate_next_step must return a BlackboardSlot; "
-                f"got {type(generated_slot).__name__!r}."
+                f"{type(self).__name__}.{self.name}: _generate_next_step must return "
+                f"(BlackboardSlot, observe_duration, description); got first item "
+                f"{type(generated_slot).__name__!r}."
             )
+
+        if type(observe_duration) is not int or observe_duration < 0 or observe_duration > max_duration:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: observe_duration must be an int in "
+                f"[0, {max_duration}]; got {observe_duration!r}."
+            )
+
+        if generated_slot.tool == return_tool.full_name and observe_duration != 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return tool must use duration 0; "
+                f"got {observe_duration!r}."
+            )
+
+        if type(description) is not str:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: description must be a string; "
+                f"got {type(description).__name__!r}."
+            )
+
+        description = description.strip()
 
         if generated_slot.step != prefix_len:
             raise ToolAgentError(
@@ -3082,8 +3524,10 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"got status={generated_slot.status!r}."
             )
 
-        # Persist the run-local ReAct message transcript only after successful generation.
-        state.messages = working_messages
+        # A successful generation turn consumed any raw results that were visible.
+        for obs_idx, turns_left in enumerate(state.observables):
+            if turns_left > 0:
+                state.observables[obs_idx] = turns_left - 1
 
         # ------------------------------------------------------------------ #
         # 3) Fill the next slot of the preallocated running blackboard
@@ -3112,10 +3556,18 @@ class ReActAgent(ToolAgent[ReActRunState]):
         slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
         slot.status = "prepared"
 
+        # Store this step's future raw-result visibility duration.
+        # The result is not available until after the base execute loop runs this step,
+        # so this duration is not decremented in the current prepare turn.
+        state.observables[prefix_len] = observe_duration
+
+        # Store this step's description for richer future running-plan context.
+        state.descriptions[prefix_len] = description
+
         # prepared_steps is what the base execute() will run next (list-of-one).
         state.prepared_steps = [prefix_len]
 
-        # Used for observation injection at the start of the next prepare() call.
+        # Used for lightweight ReAct bookkeeping at the start of the next prepare() call.
         # The base ToolAgent loop executes this prepared step before preparing again.
         state.latest_executed = [prefix_len]
 
