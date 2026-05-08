@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 import asyncio
+import json
 
 import pytest
 
@@ -23,12 +24,17 @@ from atomic_agentic.core.Exceptions import (
     ToolRegistrationError,
 )
 from atomic_agentic.core.sentinels import NO_VAL
-from atomic_agentic.agents.data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot
+from atomic_agentic.agents.data_classes import (
+    AgentTurn,
+    ToolAgentTurn,
+    BlackboardSlot,
+    ConstantSpec,
+)
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.tools import Tool
 
 
-ROLE_TEMPLATE = "Tools:\n{TOOLS}\nLimit: {TOOL_CALLS_LIMIT}"
+ROLE_TEMPLATE = "Tools:\n{TOOLS}\nLimit: {TOOL_CALLS_LIMIT}\nConstants:\n{CONSTANTS}"
 
 
 class EchoLLMEngine(LLMEngine):
@@ -171,6 +177,30 @@ def join_text(prefix: str, value: Any) -> str:
 
 def fail_tool() -> str:
     raise RuntimeError("intentional failure")
+
+
+def react_step_json(
+    *,
+    tool: str,
+    args: Any,
+    step: int | None = 0,
+    duration: int = 0,
+    description: str = "Run the next tool call needed for the current test task.",
+    **extra: Any,
+) -> str:
+    payload: dict[str, Any] = {}
+    if step is not None:
+        payload["step"] = step
+    payload.update(
+        {
+            "tool": tool,
+            "args": args,
+            "duration": duration,
+            "description": description,
+        }
+    )
+    payload.update(extra)
+    return json.dumps(payload)
 
 
 @dataclass(slots=True)
@@ -362,7 +392,7 @@ class TestToolAgentConstruction:
         assert agent.has_tool(return_tool.full_name)
         assert agent.get_tool(return_tool.full_name) is return_tool
 
-    def test_role_prompt_renders_tools_and_limit(self) -> None:
+    def test_role_prompt_renders_tools_limit_and_constants(self) -> None:
         agent = make_agent(tool_calls_limit=3)
         keys = register_math_tools(agent)
 
@@ -370,32 +400,44 @@ class TestToolAgentConstruction:
 
         assert "Limit: 3" in rendered
         assert keys["add"] in rendered
+        assert "No constants registered." in rendered
         assert "{TOOLS}" not in rendered
         assert "{TOOL_CALLS_LIMIT}" not in rendered
+        assert "{CONSTANTS}" not in rendered
 
     def test_role_prompt_missing_tools_placeholder_raises(self) -> None:
         with pytest.raises(ToolAgentError, match="TOOLS"):
-            ScriptedToolAgent._validate_role_prompt_template("Limit: {TOOL_CALLS_LIMIT}")
+            ScriptedToolAgent._validate_role_prompt_template(
+                "Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS}"
+            )
 
     def test_role_prompt_missing_tool_calls_limit_placeholder_raises(self) -> None:
         with pytest.raises(ToolAgentError, match="TOOL_CALLS_LIMIT"):
-            ScriptedToolAgent._validate_role_prompt_template("Tools: {TOOLS}")
+            ScriptedToolAgent._validate_role_prompt_template(
+                "Tools: {TOOLS} Constants: {CONSTANTS}"
+            )
+
+    def test_role_prompt_missing_constants_placeholder_raises(self) -> None:
+        with pytest.raises(ToolAgentError, match="CONSTANTS"):
+            ScriptedToolAgent._validate_role_prompt_template(
+                "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT}"
+            )
 
     def test_role_prompt_extra_simple_placeholder_is_allowed(self) -> None:
         assert ScriptedToolAgent._validate_role_prompt_template(
-            "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Extra: {EXTRA}"
-        ) == "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Extra: {EXTRA}"
+            "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS} Extra: {EXTRA}"
+        ) == "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS} Extra: {EXTRA}"
 
     def test_role_prompt_positional_placeholder_raises(self) -> None:
         with pytest.raises(ToolAgentError, match="positional fields"):
             ScriptedToolAgent._validate_role_prompt_template(
-                "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} {}"
+                "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS} {}"
             )
 
     def test_role_prompt_field_expression_raises(self) -> None:
         with pytest.raises(ToolAgentError, match="unsupported field expression"):
             ScriptedToolAgent._validate_role_prompt_template(
-                "Tools: {TOOLS.name} Limit: {TOOL_CALLS_LIMIT}"
+                "Tools: {TOOLS.name} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS}"
             )
 
     @pytest.mark.parametrize("value", [None, 0, 1, 5])
@@ -570,6 +612,185 @@ class TestToolRegistration:
         context = agent.actions_context()
 
         assert key in context
+
+
+class TestConstantRegistration:
+    def test_register_constant_adds_normalized_spec(self) -> None:
+        agent = make_agent()
+
+        name = agent.register_constant(
+            " USER_CONTEXT ",
+            {"user": "Ada"},
+            "Current user context.",
+            inline_limit=12,
+        )
+
+        assert name == "USER_CONTEXT"
+        assert agent.has_constant("USER_CONTEXT") is True
+        spec = agent.get_constant("USER_CONTEXT")
+        assert isinstance(spec, ConstantSpec)
+        assert spec.name == "USER_CONTEXT"
+        assert spec.value == {"user": "Ada"}
+        assert spec.description == "Current user context."
+        assert spec.inline_limit == 12
+        assert spec.type == "dict"
+
+    def test_constants_property_returns_shallow_copy(self) -> None:
+        agent = make_agent()
+        agent.register_constant("VALUE", 1)
+
+        constants = agent.constants
+        constants.clear()
+
+        assert len(agent.constants) == 1
+        assert agent.has_constant("VALUE") is True
+
+    def test_register_constant_duplicate_raises(self) -> None:
+        agent = make_agent()
+        agent.register_constant("VALUE", 1)
+
+        with pytest.raises(ToolAgentError, match="constant already registered"):
+            agent.register_constant("VALUE", 2)
+
+    @pytest.mark.parametrize(
+        "name",
+        ["", " ", "1VALUE", "bad-name", "bad name"],
+    )
+    def test_register_constant_invalid_name_raises(self, name: str) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="invalid constant spec"):
+            agent.register_constant(name, 1)
+
+    def test_batch_register_constants_adds_all_specs_atomically(self) -> None:
+        agent = make_agent()
+
+        names = agent.batch_register_constants(
+            A=(1,),
+            B=("two", "Second value."),
+            C=((1, 2), "Coordinates.", 8),
+        )
+
+        assert names == ["A", "B", "C"]
+        assert agent.get_constant("A").value == 1
+        assert agent.get_constant("B").description == "Second value."
+        assert agent.get_constant("C").value == (1, 2)
+        assert agent.get_constant("C").inline_limit == 8
+
+    def test_batch_register_constants_rejects_empty_batch(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="expects at least one constant"):
+            agent.batch_register_constants()
+
+    @pytest.mark.parametrize(
+        "payload",
+        [1, [1], (1, 2, 3, 4)],
+    )
+    def test_batch_register_constants_rejects_malformed_payload(self, payload: Any) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="constant 'VALUE'"):
+            agent.batch_register_constants(VALUE=payload)  # type: ignore[arg-type]
+
+    def test_batch_register_constants_rejects_duplicates_before_mutating(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="duplicate constant name in batch"):
+            agent.batch_register_constants(**{" VALUE ": (1,), "VALUE": (2,)})
+
+        assert agent.constants == []
+
+    def test_batch_register_constants_rejects_existing_constant_before_mutating(self) -> None:
+        agent = make_agent()
+        agent.register_constant("EXISTING", 1)
+
+        with pytest.raises(ToolAgentError, match="constant already registered"):
+            agent.batch_register_constants(NEW=(2,), EXISTING=(3,))
+
+        assert agent.has_constant("NEW") is False
+        assert agent.get_constant("EXISTING").value == 1
+
+    def test_remove_and_clear_constants(self) -> None:
+        agent = make_agent()
+        agent.batch_register_constants(A=(1,), B=(2,))
+
+        assert agent.remove_constant("A") is True
+        assert agent.remove_constant("A") is False
+        assert agent.has_constant("A") is False
+        assert agent.has_constant("B") is True
+
+        agent.clear_constants()
+
+        assert agent.constants == []
+
+    def test_get_constant_unknown_or_invalid_name_raises(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ToolAgentError, match="constant name"):
+            agent.get_constant(" ")
+
+        with pytest.raises(ToolAgentError, match="unknown constant"):
+            agent.get_constant("MISSING")
+
+    def test_constants_context_hides_values_and_renders_metadata(self) -> None:
+        agent = make_agent()
+        agent.register_constant("SECRET", "super-secret-value", "Sensitive value.")
+        agent.register_constant("UNLABELED", 3)
+
+        context = agent.constants_context()
+
+        assert "SECRET" in context
+        assert "Type: str" in context
+        assert "Description: Sensitive value." in context
+        assert "UNLABELED" in context
+        assert "Description: No description provided." in context
+        assert "super-secret-value" not in context
+
+    def test_role_prompt_renders_registered_constants_context(self) -> None:
+        agent = make_agent()
+        agent.register_constant("THRESHOLD", 0.9, "Decision threshold.")
+
+        rendered = agent.role_prompt
+
+        assert "THRESHOLD" in rendered
+        assert "Type: float" in rendered
+        assert "Decision threshold." in rendered
+        assert "0.9" not in rendered
+        assert "{CONSTANTS}" not in rendered
+
+    def test_resolve_exact_constant_placeholder_preserves_type(self) -> None:
+        agent = make_agent()
+        value = {"items": [1, 2]}
+        agent.register_constant("PAYLOAD", value)
+        state = make_state()
+
+        resolved = agent._resolve_placeholders(
+            {"payload": "<<__k.PAYLOAD__>>"},
+            state=state,
+        )
+
+        assert resolved == {"payload": value}
+        assert resolved["payload"] is value
+
+    def test_resolve_inline_constant_placeholder_renders_repr_with_inline_limit(self) -> None:
+        agent = make_agent()
+        agent.register_constant("LONG_TEXT", "abcdef", inline_limit=5)
+        state = make_state()
+
+        resolved = agent._resolve_placeholders(
+            {"message": "Value is <<__k.LONG_TEXT__>>."},
+            state=state,
+        )
+
+        assert resolved == {"message": "Value is 'abcd."}
+
+    def test_resolve_unknown_constant_placeholder_raises(self) -> None:
+        agent = make_agent()
+        state = make_state()
+
+        with pytest.raises(ToolAgentError, match="unknown constant reference"):
+            agent._resolve_placeholders("<<__k.MISSING__>>", state=state)
 
 
 class TestPlaceholderResolution:
@@ -1651,9 +1872,24 @@ class TestReActAgent:
     def test_invokes_step_by_step_until_return(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}',
-                '{"step": 1, "tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 10}}',
-                f'{{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}',
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args={"x": 2, "y": 3},
+                    description="Add the two input numbers for the current calculation.",
+                ),
+                react_step_json(
+                    step=1,
+                    tool="Tool.tests.multiply",
+                    args={"x": "<<__s0__>>", "y": 10},
+                    description="Multiply the addition result by ten for the current calculation.",
+                ),
+                react_step_json(
+                    step=2,
+                    tool=return_tool.full_name,
+                    args={"val": "<<__s1__>>"},
+                    description="Return the final multiplied value because the current calculation is complete.",
+                ),
             ],
             tool_calls_limit=2,
         )
@@ -1662,11 +1898,22 @@ class TestReActAgent:
 
         assert result == 50
 
-    def test_injects_observation_after_first_step(self) -> None:
+    def test_injects_running_plan_after_first_step(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}',
-                f'{{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}',
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args={"x": 2, "y": 3},
+                    duration=1,
+                    description="Add the two input numbers so the result can be returned.",
+                ),
+                react_step_json(
+                    step=1,
+                    tool=return_tool.full_name,
+                    args={"val": "<<__s0__>>"},
+                    description="Return the addition result because the current task is complete.",
+                ),
             ],
             tool_calls_limit=1,
         )
@@ -1678,15 +1925,61 @@ class TestReActAgent:
         assert isinstance(engine, ScriptedLLMEngine)
         assert len(engine.calls) == 2
         second_call_text = "\n".join(message["content"] for message in engine.calls[1])
-        assert "Most recently executed steps and results" in second_call_text
+        assert "RUNNING PLAN STEPS 0-0 SO FAR" in second_call_text
+        assert "Add the two input numbers so the result can be returned." in second_call_text
         assert "Tool.tests.add" in second_call_text
+        assert "result_ref" in second_call_text
+        assert "<<__s0__>>" in second_call_text
+        assert "observable_result" in second_call_text
         assert "5" in second_call_text
 
     @pytest.mark.parametrize(
         "raw_response, match",
         [
-            ('{"step": 0, "args": {}}', "missing required keys"),
-            ('{"step": 0, "tool": "Tool.tests.add"}', "missing required keys"),
+            (
+                json.dumps(
+                    {
+                        "step": 0,
+                        "tool": "Tool.tests.add",
+                        "args": {},
+                        "description": "Try to run a step with no duration for validation.",
+                    }
+                ),
+                "missing required key 'duration'",
+            ),
+            (
+                json.dumps(
+                    {
+                        "step": 0,
+                        "tool": "Tool.tests.add",
+                        "args": {},
+                        "duration": 0,
+                    }
+                ),
+                "missing required key 'description'",
+            ),
+            (
+                json.dumps(
+                    {
+                        "step": 0,
+                        "args": {},
+                        "duration": 0,
+                        "description": "Try to run an incomplete step for validation.",
+                    }
+                ),
+                "missing required keys",
+            ),
+            (
+                json.dumps(
+                    {
+                        "step": 0,
+                        "tool": "Tool.tests.add",
+                        "duration": 0,
+                        "description": "Try to run an incomplete step for validation.",
+                    }
+                ),
+                "missing required keys",
+            ),
         ],
     )
     def test_rejects_missing_required_step_keys(
@@ -1699,10 +1992,51 @@ class TestReActAgent:
         with pytest.raises(ToolAgentError, match=match):
             agent.invoke({"prompt": "run react"})
 
+    @pytest.mark.parametrize("duration", [-1, 4, 1.5, True, "1"])
+    def test_rejects_invalid_duration(self, duration: Any) -> None:
+        agent = make_react_agent(
+            [
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args={"x": 1, "y": 2},
+                    duration=duration,
+                    description="Add the two numbers for the current calculation.",
+                ),
+            ],
+            tool_calls_limit=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="duration"):
+            agent.invoke({"prompt": "run react"})
+
+    @pytest.mark.parametrize("description", ["", "   ", 1, None])
+    def test_rejects_invalid_description(self, description: Any) -> None:
+        agent = make_react_agent(
+            [
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args={"x": 1, "y": 2},
+                    duration=0,
+                    description=description,
+                ),
+            ],
+            tool_calls_limit=1,
+        )
+
+        with pytest.raises(ToolAgentError, match="description"):
+            agent.invoke({"prompt": "run react"})
+
     def test_accepts_missing_step_key_and_uses_expected_step(self) -> None:
         agent = make_react_agent(
             [
-                '{"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}',
+                react_step_json(
+                    step=None,
+                    tool="Tool.tests.add",
+                    args={"x": 1, "y": 2},
+                    description="Add the two test numbers for this ReAct step.",
+                ),
             ],
             tool_calls_limit=1,
         )
@@ -1717,11 +2051,18 @@ class TestReActAgent:
         assert slot.step == 0
         assert slot.tool == "Tool.tests.add"
         assert slot.resolved_args == {"x": 1, "y": 2}
+        assert updated.descriptions[0] == "Add the two test numbers for this ReAct step."
 
     def test_rejects_extra_step_keys(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 0, "tool": "Tool.tests.add", "args": {}, "extra": true}',
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args={},
+                    description="Attempt a step with an unsupported extra key.",
+                    extra=True,
+                ),
             ],
             tool_calls_limit=1,
         )
@@ -1732,7 +2073,12 @@ class TestReActAgent:
     def test_rejects_non_dict_args(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 0, "tool": "Tool.tests.add", "args": []}',
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args=[],
+                    description="Attempt a step whose args are the wrong shape.",
+                ),
             ],
             tool_calls_limit=1,
         )
@@ -1743,7 +2089,12 @@ class TestReActAgent:
     def test_accepts_mismatched_step_index_and_overrides_with_expected_step(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 99, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}',
+                react_step_json(
+                    step=99,
+                    tool="Tool.tests.add",
+                    args={"x": 1, "y": 2},
+                    description="Add the two test numbers despite the advisory step mismatch.",
+                ),
             ],
             tool_calls_limit=1,
         )
@@ -1762,7 +2113,12 @@ class TestReActAgent:
     def test_rejects_future_step_dependency(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}}',
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args={"x": "<<__s0__>>", "y": 2},
+                    description="Attempt to use the current step as its own input dependency.",
+                ),
             ],
             tool_calls_limit=1,
         )
@@ -1773,7 +2129,12 @@ class TestReActAgent:
     def test_rejects_unknown_tool(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 0, "tool": "Tool.tests.missing", "args": {}}',
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.missing",
+                    args={},
+                    description="Attempt to call an unregistered tool.",
+                ),
             ],
             tool_calls_limit=1,
         )
@@ -1784,8 +2145,18 @@ class TestReActAgent:
     def test_rejects_when_next_step_exceeds_capacity(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}}',
-                '{"step": 1, "tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 3}}',
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args={"x": 1, "y": 2},
+                    description="Add the two numbers as the only permitted non-return call.",
+                ),
+                react_step_json(
+                    step=1,
+                    tool="Tool.tests.multiply",
+                    args={"x": "<<__s0__>>", "y": 3},
+                    description="Attempt to multiply after the non-return tool budget is exhausted.",
+                ),
             ],
             tool_calls_limit=1,
         )
@@ -1796,7 +2167,13 @@ class TestReActAgent:
     def test_prepare_next_batch_records_slot_metadata(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}',
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args={"x": 2, "y": 3},
+                    duration=2,
+                    description="Add the two numbers and keep the result visible for later branching.",
+                ),
             ],
             tool_calls_limit=1,
         )
@@ -1813,11 +2190,18 @@ class TestReActAgent:
         assert slot.step_dependencies == ()
         assert slot.await_step is NO_VAL
         assert slot.resolved_args == {"x": 2, "y": 3}
+        assert updated.observables[0] == 2
+        assert updated.descriptions[0] == "Add the two numbers and keep the result visible for later branching."
 
     def test_prepare_next_batch_records_step_dependencies(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 1, "tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 10}}',
+                react_step_json(
+                    step=1,
+                    tool="Tool.tests.multiply",
+                    args={"x": "<<__s0__>>", "y": 10},
+                    description="Multiply the prior addition result by ten for the current calculation.",
+                ),
             ],
             tool_calls_limit=2,
         )
@@ -1826,6 +2210,7 @@ class TestReActAgent:
         )
         state.next_step_index = 1
         state.running_blackboard[0] = executed_slot(0, 5)
+        state.descriptions[0] = "Add the two numbers for the current calculation."
 
         updated = agent._prepare_next_batch(state)
 
@@ -1834,13 +2219,29 @@ class TestReActAgent:
         assert slot.step_dependencies == (0,)
         assert slot.await_step is NO_VAL
         assert slot.resolved_args == {"x": 5, "y": 10}
+        assert updated.descriptions[1] == "Multiply the prior addition result by ten for the current calculation."
 
     def test_async_invoke_executes_step_by_step_until_return(self) -> None:
         agent = make_react_agent(
             [
-                '{"step": 0, "tool": "Tool.tests.add", "args": {"x": 2, "y": 3}}',
-                '{"step": 1, "tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 10}}',
-                f'{{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}',
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args={"x": 2, "y": 3},
+                    description="Add the two input numbers for the current calculation.",
+                ),
+                react_step_json(
+                    step=1,
+                    tool="Tool.tests.multiply",
+                    args={"x": "<<__s0__>>", "y": 10},
+                    description="Multiply the addition result by ten for the current calculation.",
+                ),
+                react_step_json(
+                    step=2,
+                    tool=return_tool.full_name,
+                    args={"val": "<<__s1__>>"},
+                    description="Return the final multiplied value because the current calculation is complete.",
+                ),
             ],
             tool_calls_limit=2,
         )

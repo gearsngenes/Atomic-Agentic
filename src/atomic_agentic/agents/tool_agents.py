@@ -3452,7 +3452,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 "role": "user",
                 "content": "Produce the NEXT BEST single tool call dictionary for the current task. "
                            "If the running plan has completed all needed work, call Tool.ToolAgents.return. "
-                           "Output ONE JSON object with keys {step, tool, args, duration}. "
+                           "Output ONE JSON object with keys {step, tool, args, duration, description}. "
                            "Use placeholders greedily: use '<<__sN__>>' for prior running-step results, "
                            "'<<__cN__>>' for cached results, and '<<__k.NAME__>>' for registered constants. "
                            "All placeholders must be quoted JSON strings. "
