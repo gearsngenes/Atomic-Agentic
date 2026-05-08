@@ -144,7 +144,7 @@ Emit exactly ONE JSON object with EXACTLY AND ONLY these keys:
 - "step": <int>                       (next run-local step index)
 - "tool": "<Type>.<namespace>.<name>" (use a tool id verbatim)
 - "args": {{ ... }}                   (JSON object)
-- "duration": <int>                   (0, 1, 2, or 3)
+- "duration": <int>                   (0 up to remaining future step-generation turns)
 - "description": <str>                (one sentence describing this step)
 
 Step index rule:
@@ -179,12 +179,14 @@ Wrong:
 "duration" controls how many future step-generation turns may see this step's raw result as observable_result:
 - 0: hide raw result; pass by placeholder only
 - 1: show raw result for the next planning turn
-- 2 or 3: keep raw result visible for a later branching/tool-choice decision
+- >1: keep raw result visible for a later branching/tool-choice decision
 
 Use duration 0 by default.
 Use duration > 0 only when you must inspect this raw result to decide which tool to call next.
 Example: if this result determines whether the next tool should be B or C, use duration 1.
 Use duration > 1 only if you expect that branching decision to happen farther than the immediate next step.
+duration MUST NOT exceed the number of future step-generation turns remaining in this run.
+If max non-return tool calls is M and this output step is i, duration MUST be <= M - i.
 Use duration 0 when the result only needs to be passed forward, printed, returned, or reused by placeholder.
 The return tool MUST use duration 0.
 

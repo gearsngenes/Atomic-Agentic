@@ -3166,14 +3166,16 @@ class ReActAgent(ToolAgent[ReActRunState]):
         1. Generate raw LLM text from the provided messages.
         2. Extract the largest JSON array/object from the raw text.
         3. Validate that the extracted value is a mapping.
-        4. Extract and validate "duration" as an int in [0, 3].
+        4. Extract and validate "duration" as an int within the remaining future
+           step-generation capacity.
         5. Extract and validate "description" as a non-empty string.
         6. Normalize the remaining raw step dict using expected_step as authoritative.
         7. Convert the normalized mapping into a planned BlackboardSlot.
         8. Validate tool existence.
-        9. Validate cache references against cache_blackboard.
-        10. Validate step dependencies are prior-only.
-        11. Return the planned slot, duration, and description.
+        9. Validate return-tool duration is 0.
+        10. Validate cache references against cache_blackboard.
+        11. Validate step dependencies are prior-only.
+        12. Return the planned slot, duration, and description.
 
         Parameters
         ----------
@@ -3217,6 +3219,13 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"got {expected_step!r}."
             )
 
+        if self._tool_calls_limit is None or type(self._tool_calls_limit) is not int or self._tool_calls_limit < 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: ReActAgent requires tool_calls_limit to be an int >= 0."
+            )
+
+        max_duration = max(0, self._tool_calls_limit - expected_step)
+
         raw_text = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
         parsed = self._extract_from_json_string(raw_text)
 
@@ -3234,10 +3243,10 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"{type(self).__name__}.{self.name}: next step missing required key 'duration'."
             )
 
-        if type(duration) is not int or duration < 0 or duration > 3:
+        if type(duration) is not int or duration < 0 or duration > max_duration:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step 'duration' must be an int in [0, 3]; "
-                f"got {duration!r}."
+                f"{type(self).__name__}.{self.name}: next step 'duration' must be an int in "
+                f"[0, {max_duration}] for expected_step={expected_step}; got {duration!r}."
             )
 
         description = step_payload.pop("description", NO_VAL)
@@ -3274,6 +3283,12 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         # Validate tool exists before this slot is later stamped into run state.
         self.get_tool(slot.tool)
+
+        if slot.tool == return_tool.full_name and duration != 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return tool must use duration 0; "
+                f"got {duration!r}."
+            )
 
         cache_len = len(cache_blackboard)
         cache_refs = extract_dependencies(slot.args, placeholder_pattern=_CACHE_TOKEN)
@@ -3355,10 +3370,11 @@ class ReActAgent(ToolAgent[ReActRunState]):
             )
 
         for obs_idx, turns_left in enumerate(state.observables):
-            if type(turns_left) is not int or turns_left < 0 or turns_left > 3:
+            max_turns_left = len(state.running_blackboard) - obs_idx - 1
+            if type(turns_left) is not int or turns_left < 0 or turns_left > max_turns_left:
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: observables[{obs_idx}] must be an int in [0, 3]; "
-                    f"got {turns_left!r}."
+                    f"{type(self).__name__}.{self.name}: observables[{obs_idx}] must be an int in "
+                    f"[0, {max_turns_left}]; got {turns_left!r}."
                 )
 
         if not isinstance(state.descriptions, list):
@@ -3446,20 +3462,17 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 "When steps execute, their results will be available by result_ref placeholders like <<__s0__>>."
             )
 
+        max_duration = len(state.running_blackboard) - prefix_len - 1
+
         working_messages.append({"role": "assistant", "content": running_text})
         working_messages.append(
             {
                 "role": "user",
-                "content": "Produce the NEXT BEST single tool call dictionary for the current task. "
-                           "If the running plan has completed all needed work, call Tool.ToolAgents.return. "
-                           "Output ONE JSON object with keys {step, tool, args, duration, description}. "
-                           "Use placeholders greedily: use '<<__sN__>>' for prior running-step results, "
-                           "'<<__cN__>>' for cached results, and '<<__k.NAME__>>' for registered constants. "
-                           "All placeholders must be quoted JSON strings. "
-                           "DO NOT copy raw values shown in observable_result fields into args. "
-                           "Use duration 0 unless this step's raw result must be observed to decide a future tool choice. "
-                           "Use duration 1 for an immediate next-tool branch, and duration 2 or 3 only when that "
-                           "branching decision is expected farther down the run.",
+                "content": "Produce the NEXT BEST single tool call for the current task. "
+                           "Pick the return tool if the running plan has completed all needed work. "
+                           "Output exactly one JSON object with keys {step, tool, args, duration, description}. "
+                           "Preserve symbolic dataflow with quoted placeholders; do not copy observable_result values into args. "
+                           f"For this output step, duration must be an int from 0 to {max_duration}.",
             }
         )
 
@@ -3479,9 +3492,15 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"{type(generated_slot).__name__!r}."
             )
 
-        if type(observe_duration) is not int or observe_duration < 0 or observe_duration > 3:
+        if type(observe_duration) is not int or observe_duration < 0 or observe_duration > max_duration:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: observe_duration must be an int in [0, 3]; "
+                f"{type(self).__name__}.{self.name}: observe_duration must be an int in "
+                f"[0, {max_duration}]; got {observe_duration!r}."
+            )
+
+        if generated_slot.tool == return_tool.full_name and observe_duration != 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return tool must use duration 0; "
                 f"got {observe_duration!r}."
             )
 

@@ -68,7 +68,7 @@ orchestrator = ReActAgent(
     llm_engine=llm,
     history_window=10,
     tool_calls_limit=10,
-    context_enabled=False,
+    context_enabled=True,
     preview_limit=100,
 )
 
@@ -90,13 +90,16 @@ task = (
 
 result = orchestrator.invoke({"prompt": task})
 
-print("\n=== Final Result ===\n")
-print(result)
+from pprint import pformat, pprint
+pprint(orchestrator.blackboard)
 
 from pathlib import Path
 
 out_dir = Path("examples/output_markdowns")
 out_dir.mkdir(exist_ok=True)
-filepath = out_dir / "ReAct_Code.txt"
+filepath = out_dir / "ReAct_Code.py"
 filepath.write_text(result, encoding="utf-8")
-print(f"\n✓ Story saved to: {filepath.resolve()}")
+print(f"\n✓ Final Draft code saved to: {filepath.resolve()}")
+filepath = out_dir / "ReAct_Blackboard.txt"
+filepath.write_text(pformat(orchestrator.blackboard), encoding="utf-8")
+print(f"\n✓ Blackboard content saved to: {filepath.resolve()}")
