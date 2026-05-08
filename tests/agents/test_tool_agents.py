@@ -2175,7 +2175,7 @@ class TestReActAgent:
                     description="Add the two numbers and keep the result visible for later branching.",
                 ),
             ],
-            tool_calls_limit=1,
+            tool_calls_limit=2,
         )
         state = agent._initialize_run_state(
             messages=[{"role": "user", "content": "react"}]
