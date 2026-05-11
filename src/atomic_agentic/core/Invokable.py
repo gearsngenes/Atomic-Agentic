@@ -520,3 +520,127 @@ class AtomicInvokable(ABC):
             inputs[varkwarg_spec.name] = extra_keywords
 
         return inputs
+
+    def _dict_to_args_kwargs(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[tuple[Any, ...], Dict[str, Any]]:
+        """
+        Convert dict-first inputs into Python call-style (*args, **kwargs).
+
+        Behavior
+        --------
+        - Inputs are normalized through filter_inputs().
+        - POSITIONAL_ONLY parameters are appended to args.
+        - POSITIONAL_OR_KEYWORD parameters are appended to args when an explicit
+        VAR_POSITIONAL payload is present; otherwise they are placed in kwargs.
+        - VAR_POSITIONAL payloads extend args.
+        - KEYWORD_ONLY parameters are placed in kwargs.
+        - VAR_KEYWORD payloads update kwargs.
+        - Missing required non-variadic parameters raise TypeError.
+        - Missing optional non-variadic parameters use their declared defaults.
+        - VAR_POSITIONAL and VAR_KEYWORD parameters do not receive defaults; absence
+        means no additional positional or keyword arguments.
+        """
+        if not isinstance(inputs, Mapping):
+            raise TypeError(
+                f"{type(self).__name__}._dict_to_args_kwargs: inputs must be a mapping, "
+                f"got {type(inputs)!r}"
+            )
+
+        data = self.filter_inputs(inputs)
+        parameters = self.parameters
+
+        vararg_spec = next(
+            (param for param in parameters if param.kind == ParamSpec.VAR_POSITIONAL),
+            None,
+        )
+        has_explicit_varargs = (
+            vararg_spec is not None and vararg_spec.name in data
+        )
+
+        args: list[Any] = []
+        kwargs: Dict[str, Any] = {}
+        missing: list[str] = []
+
+        for param in parameters:
+            if param.kind == ParamSpec.POSITIONAL_ONLY:
+                if param.name in data:
+                    args.append(data[param.name])
+                elif param.default is not NO_VAL:
+                    args.append(param.default)
+                else:
+                    missing.append(param.name)
+                continue
+
+            if param.kind == ParamSpec.POSITIONAL_OR_KEYWORD:
+                if param.name in data:
+                    value = data[param.name]
+                elif param.default is not NO_VAL:
+                    value = param.default
+                else:
+                    missing.append(param.name)
+                    continue
+
+                if has_explicit_varargs:
+                    args.append(value)
+                else:
+                    kwargs[param.name] = value
+                continue
+
+            if param.kind == ParamSpec.VAR_POSITIONAL:
+                if param.name not in data:
+                    continue
+
+                value = data[param.name]
+                if not isinstance(value, (list, tuple)):
+                    raise TypeError(
+                        f"{self.full_name}: VAR_POSITIONAL input {param.name!r} "
+                        f"must be a list or tuple, got {type(value)!r}"
+                    )
+
+                args.extend(value)
+                continue
+
+            if param.kind == ParamSpec.KEYWORD_ONLY:
+                if param.name in data:
+                    kwargs[param.name] = data[param.name]
+                elif param.default is not NO_VAL:
+                    kwargs[param.name] = param.default
+                else:
+                    missing.append(param.name)
+                continue
+
+            if param.kind == ParamSpec.VAR_KEYWORD:
+                if param.name not in data:
+                    continue
+
+                value = data[param.name]
+                if not isinstance(value, Mapping):
+                    raise TypeError(
+                        f"{self.full_name}: VAR_KEYWORD input {param.name!r} "
+                        f"must be a mapping, got {type(value)!r}"
+                    )
+
+                overlapping_keys = set(kwargs).intersection(value)
+                if overlapping_keys:
+                    raise TypeError(
+                        f"{self.full_name}: VAR_KEYWORD input {param.name!r} "
+                        f"would overwrite bound keyword argument(s): "
+                        f"{sorted(overlapping_keys)!r}"
+                    )
+
+                kwargs.update(value)
+                continue
+
+            raise TypeError(
+                f"{self.full_name}: unsupported parameter kind {param.kind!r} "
+                f"for parameter {param.name!r}"
+            )
+
+        if missing:
+            raise TypeError(
+                f"{self.full_name}: missing required argument(s): {missing!r}"
+            )
+
+        return tuple(args), kwargs
