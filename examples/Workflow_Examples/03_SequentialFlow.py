@@ -15,6 +15,7 @@ from pprint import pprint
 from atomic_agentic.tools import toolify
 from atomic_agentic.workflows import SequentialFlow
 from atomic_agentic import StructuredInvokable
+from atomic_agentic.tools import Tool
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -39,19 +40,19 @@ def to_message(value: int) -> str:
 def main() -> None:
     # Wrap each function as a Tool, then as a StructuredInvokable with explicit output schema
     step1 = StructuredInvokable(
-        component=add_and_carry,
+        component=Tool(add_and_carry),
         name="add_and_carry",
         description="Add x+y and carry factor forward",
         output_schema=["value", "factor"]
     )
     step2 = StructuredInvokable(
-        component=multiply,
+        component=Tool(multiply),
         name="multiply",
         description="Multiply value by factor",
         output_schema=["value"]
     )
     step3 = StructuredInvokable(
-        component=to_message,
+        component=Tool(to_message),
         name="to_message",
         description="Format value as a message",
         output_schema=["message"]

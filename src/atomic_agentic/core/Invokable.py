@@ -296,11 +296,12 @@ class AtomicInvokable(ABC):
         --------
         - Inputs must be a Mapping.
         - Known parameter keys are retained.
-        - Unknown keys are dropped when filtering is enabled unless **kwargs exists.
-        - Unknown keys are retained when filtering is disabled and no **kwargs exists.
         - Explicit *args payloads must be list or tuple.
         - Explicit **kwargs payloads must be a Mapping.
-        - Extra unknown keys are merged into the **kwargs payload when present.
+        - Unknown keys are merged into the **kwargs payload when VAR_KEYWORD exists.
+        - Unknown keys are dropped when no VAR_KEYWORD exists and filtering is enabled.
+        - Unknown keys raise when no VAR_KEYWORD exists and filtering is disabled.
+        - Explicit **kwargs payload keys may not overlap with loose unknown input keys.
         """
         if not isinstance(inputs, Mapping):
             raise TypeError(
@@ -351,11 +352,21 @@ class AtomicInvokable(ABC):
 
         if varkwarg_name is not None:
             explicit = filtered.get(varkwarg_name, {})
+            overlapping_keys = set(explicit).intersection(extras)
+            if overlapping_keys:
+                raise TypeError(
+                    f"{self.full_name}: explicit VAR_KEYWORD input "
+                    f"{varkwarg_name!r} and extra input keys overlap: "
+                    f"{sorted(overlapping_keys)!r}"
+                )
+
             merged = dict(explicit)
             merged.update(extras)
             filtered[varkwarg_name] = merged
-        elif not self._filter_extraneous_inputs:
-            filtered.update(extras)
+        elif extras and not self._filter_extraneous_inputs:
+            raise TypeError(
+                f"{self.full_name}: unexpected input key(s): {sorted(extras)!r}"
+            )
 
         return filtered
 
