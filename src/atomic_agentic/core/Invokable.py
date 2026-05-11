@@ -406,7 +406,7 @@ class AtomicInvokable(ABC):
         Allows the invokable to be called like a regular function
         Check for varargs/kwargs parameters and construct the inputs dict accordingly before invoking.
         """
-        inputs = self._to_dict_input_conversion(*args, **kwargs)
+        inputs = self._args_kwargs_to_dict(*args, **kwargs)
         return self.invoke(inputs)
     
     async def async_call(self, *args: Any, **kwargs: Any) -> Any:
@@ -415,19 +415,28 @@ class AtomicInvokable(ABC):
         bind normal call-style args/kwargs into the dict-first inputs shape,
         then delegate to async_invoke().
         """
-        inputs = self._to_dict_input_conversion(*args, **kwargs)
+        inputs = self._args_kwargs_to_dict(*args, **kwargs)
 
         return await self.async_invoke(inputs)
     
-    def _to_dict_input_conversion(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    def _args_kwargs_to_dict(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """
         Convert Python call-style (*args, **kwargs) into the dict-first input shape.
 
-        This method is intentionally Python-call-like:
-        - extra positional arguments populate VAR_POSITIONAL
-        - unknown keyword arguments populate VAR_KEYWORD
-        - explicit VAR_POSITIONAL / VAR_KEYWORD field names are not accepted as
-        keyword arguments in call-style mode; use invoke({...}) for that.
+        Behavior
+        --------
+        - Positional arguments bind to POSITIONAL_ONLY and POSITIONAL_OR_KEYWORD
+        parameters in declaration order.
+        - Extra positional arguments populate VAR_POSITIONAL when available.
+        - Too many positional arguments raise when no VAR_POSITIONAL exists.
+        - Keyword arguments matching POSITIONAL_OR_KEYWORD or KEYWORD_ONLY parameters
+        bind directly.
+        - Keyword arguments matching POSITIONAL_ONLY parameters raise.
+        - Keyword arguments not matching non-variadic keyword-bindable parameters
+        populate VAR_KEYWORD when available.
+        - Unhandled keyword arguments raise when no VAR_KEYWORD exists.
+        - VAR_POSITIONAL and VAR_KEYWORD parameter names receive no special keyword
+        treatment; as keywords, they are ordinary extra keywords.
         """
         positional_values = list(args)
         keyword_values = dict(kwargs)
@@ -465,12 +474,6 @@ class AtomicInvokable(ABC):
             None,
         )
 
-        vararg_name = vararg_spec.name if vararg_spec is not None else None
-        varkwarg_name = varkwarg_spec.name if varkwarg_spec is not None else None
-        variadic_field_names = {
-            name for name in (vararg_name, varkwarg_name) if name is not None
-        }
-
         inputs: dict[str, Any] = {}
 
         positional_count = len(positional_capable)
@@ -496,13 +499,6 @@ class AtomicInvokable(ABC):
                 raise TypeError(
                     f"{self.full_name} got positional-only argument {key!r} "
                     "passed as keyword"
-                )
-
-            if key in variadic_field_names:
-                raise TypeError(
-                    f"{self.full_name} got variadic parameter field {key!r} as a keyword; "
-                    "pass variadic values positionally or use invoke({...}) for explicit "
-                    "dict-first payloads"
                 )
 
             if key in keyword_bindable_names:
