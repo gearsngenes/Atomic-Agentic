@@ -7,11 +7,12 @@ Server: ensure it runs Streamable-HTTP and is mounted at /mcp (or provide a full
 """
 from typing import Any, Mapping
 import json
-from atomic_agentic.tools import MCPProxyTool, list_mcp_tools 
+from atomic_agentic.tools.mcp import MCPProxyTool
+from atomic_agentic.mcp import MCPClientHub
 from atomic_agentic.core.Exceptions import ToolInvocationError
 
 
-SERVER_URL  = "http://127.0.0.1:8000/"   # we'll normalize to /mcp if path missing
+SERVER_URL  = "http://127.0.0.1:8000/mcp"   # we'll normalize to /mcp if path missing
 SERVER_NAME = "Mathematics_Server"
 HEADERS     = None  # e.g., {"Authorization": "Bearer ..."} if your server needs auth
 
@@ -23,8 +24,12 @@ EXAMPLE_INPUTS: dict[str, dict[str, Any]] = {
     "derivative": {"func": "x**2 + 2*x + 1", "x": 3.0},
 }
 
+client = MCPClientHub(
+    endpoint=SERVER_URL,
+    transport_mode="streamable_http",
+    headers=HEADERS)
+
 def _show_plan(proxy: MCPProxyTool) -> None:
-    meta = proxy.to_dict()
     print(f"\n-- {proxy.full_name} --")
     print("from:", proxy.namespace)
     print("signature:", proxy.signature)
@@ -43,11 +48,11 @@ def _invoke(proxy: MCPProxyTool, inputs: Mapping[str, Any]) -> None:
 
 def main() -> None:
     print("Connecting to:", SERVER_URL)
-    tool_names = list_mcp_tools(server_url=SERVER_URL, headers=HEADERS)
+    tool_names = client.list_tools()
     print("Discovered tools:", tool_names.keys())
 
     for name in tool_names:
-        proxy = MCPProxyTool(tool_name=name, namespace=SERVER_NAME, server_url=SERVER_URL, headers=HEADERS)
+        proxy = MCPProxyTool(remote_name=name, client_hub=client)
         _show_plan(proxy)
 
         inputs = EXAMPLE_INPUTS.get(name)

@@ -146,7 +146,7 @@ class TestToolBindingBasic:
             description="Add values.",
         )
 
-        with pytest.raises(ToolInvocationError, match="missing required"):
+        with pytest.raises(TypeError, match="missing required"):
             tool.invoke({"a": 1})
 
     def test_unknown_input_raises_when_filtering_disabled(self) -> None:
@@ -158,7 +158,7 @@ class TestToolBindingBasic:
             filter_extraneous_inputs=False,
         )
 
-        with pytest.raises(ToolInvocationError, match="unknown parameters"):
+        with pytest.raises(TypeError, match="unexpected input key"):
             tool.invoke({"a": 1, "b": 2, "extra": 3})
 
     def test_filter_extraneous_inputs_true_filters_unknown_inputs(self) -> None:
@@ -262,7 +262,7 @@ class TestToolBindingPositionalKinds:
             description="Collect kwargs.",
         )
 
-        with pytest.raises(ToolInvocationError, match="duplicate key"):
+        with pytest.raises(TypeError, match="would overwrite bound keyword"):
             tool.invoke({"a": 1, "extras": {"a": 99}})
 
     def test_unknown_inputs_are_collected_into_varkwargs_by_filter_inputs(self) -> None:

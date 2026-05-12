@@ -296,11 +296,12 @@ class AtomicInvokable(ABC):
         --------
         - Inputs must be a Mapping.
         - Known parameter keys are retained.
-        - Unknown keys are dropped when filtering is enabled unless **kwargs exists.
-        - Unknown keys are retained when filtering is disabled and no **kwargs exists.
         - Explicit *args payloads must be list or tuple.
         - Explicit **kwargs payloads must be a Mapping.
-        - Extra unknown keys are merged into the **kwargs payload when present.
+        - Unknown keys are merged into the **kwargs payload when VAR_KEYWORD exists.
+        - Unknown keys are dropped when no VAR_KEYWORD exists and filtering is enabled.
+        - Unknown keys raise when no VAR_KEYWORD exists and filtering is disabled.
+        - Explicit **kwargs payload keys may not overlap with loose unknown input keys.
         """
         if not isinstance(inputs, Mapping):
             raise TypeError(
@@ -351,11 +352,21 @@ class AtomicInvokable(ABC):
 
         if varkwarg_name is not None:
             explicit = filtered.get(varkwarg_name, {})
+            overlapping_keys = set(explicit).intersection(extras)
+            if overlapping_keys:
+                raise TypeError(
+                    f"{self.full_name}: explicit VAR_KEYWORD input "
+                    f"{varkwarg_name!r} and extra input keys overlap: "
+                    f"{sorted(overlapping_keys)!r}"
+                )
+
             merged = dict(explicit)
             merged.update(extras)
             filtered[varkwarg_name] = merged
-        elif not self._filter_extraneous_inputs:
-            filtered.update(extras)
+        elif extras and not self._filter_extraneous_inputs:
+            raise TypeError(
+                f"{self.full_name}: unexpected input key(s): {sorted(extras)!r}"
+            )
 
         return filtered
 
@@ -395,7 +406,7 @@ class AtomicInvokable(ABC):
         Allows the invokable to be called like a regular function
         Check for varargs/kwargs parameters and construct the inputs dict accordingly before invoking.
         """
-        inputs = self._to_dict_input_conversion(*args, **kwargs)
+        inputs = self._args_kwargs_to_dict(*args, **kwargs)
         return self.invoke(inputs)
     
     async def async_call(self, *args: Any, **kwargs: Any) -> Any:
@@ -404,19 +415,28 @@ class AtomicInvokable(ABC):
         bind normal call-style args/kwargs into the dict-first inputs shape,
         then delegate to async_invoke().
         """
-        inputs = self._to_dict_input_conversion(*args, **kwargs)
+        inputs = self._args_kwargs_to_dict(*args, **kwargs)
 
         return await self.async_invoke(inputs)
     
-    def _to_dict_input_conversion(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    def _args_kwargs_to_dict(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """
         Convert Python call-style (*args, **kwargs) into the dict-first input shape.
 
-        This method is intentionally Python-call-like:
-        - extra positional arguments populate VAR_POSITIONAL
-        - unknown keyword arguments populate VAR_KEYWORD
-        - explicit VAR_POSITIONAL / VAR_KEYWORD field names are not accepted as
-        keyword arguments in call-style mode; use invoke({...}) for that.
+        Behavior
+        --------
+        - Positional arguments bind to POSITIONAL_ONLY and POSITIONAL_OR_KEYWORD
+        parameters in declaration order.
+        - Extra positional arguments populate VAR_POSITIONAL when available.
+        - Too many positional arguments raise when no VAR_POSITIONAL exists.
+        - Keyword arguments matching POSITIONAL_OR_KEYWORD or KEYWORD_ONLY parameters
+        bind directly.
+        - Keyword arguments matching POSITIONAL_ONLY parameters raise.
+        - Keyword arguments not matching non-variadic keyword-bindable parameters
+        populate VAR_KEYWORD when available.
+        - Unhandled keyword arguments raise when no VAR_KEYWORD exists.
+        - VAR_POSITIONAL and VAR_KEYWORD parameter names receive no special keyword
+        treatment; as keywords, they are ordinary extra keywords.
         """
         positional_values = list(args)
         keyword_values = dict(kwargs)
@@ -454,12 +474,6 @@ class AtomicInvokable(ABC):
             None,
         )
 
-        vararg_name = vararg_spec.name if vararg_spec is not None else None
-        varkwarg_name = varkwarg_spec.name if varkwarg_spec is not None else None
-        variadic_field_names = {
-            name for name in (vararg_name, varkwarg_name) if name is not None
-        }
-
         inputs: dict[str, Any] = {}
 
         positional_count = len(positional_capable)
@@ -487,13 +501,6 @@ class AtomicInvokable(ABC):
                     "passed as keyword"
                 )
 
-            if key in variadic_field_names:
-                raise TypeError(
-                    f"{self.full_name} got variadic parameter field {key!r} as a keyword; "
-                    "pass variadic values positionally or use invoke({...}) for explicit "
-                    "dict-first payloads"
-                )
-
             if key in keyword_bindable_names:
                 if key in inputs:
                     raise TypeError(
@@ -513,3 +520,127 @@ class AtomicInvokable(ABC):
             inputs[varkwarg_spec.name] = extra_keywords
 
         return inputs
+
+    def _dict_to_args_kwargs(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[tuple[Any, ...], Dict[str, Any]]:
+        """
+        Convert dict-first inputs into Python call-style (*args, **kwargs).
+
+        Behavior
+        --------
+        - Inputs are normalized through filter_inputs().
+        - POSITIONAL_ONLY parameters are appended to args.
+        - POSITIONAL_OR_KEYWORD parameters are appended to args when an explicit
+        VAR_POSITIONAL payload is present; otherwise they are placed in kwargs.
+        - VAR_POSITIONAL payloads extend args.
+        - KEYWORD_ONLY parameters are placed in kwargs.
+        - VAR_KEYWORD payloads update kwargs.
+        - Missing required non-variadic parameters raise TypeError.
+        - Missing optional non-variadic parameters use their declared defaults.
+        - VAR_POSITIONAL and VAR_KEYWORD parameters do not receive defaults; absence
+        means no additional positional or keyword arguments.
+        """
+        if not isinstance(inputs, Mapping):
+            raise TypeError(
+                f"{type(self).__name__}._dict_to_args_kwargs: inputs must be a mapping, "
+                f"got {type(inputs)!r}"
+            )
+
+        data = self.filter_inputs(inputs)
+        parameters = self.parameters
+
+        vararg_spec = next(
+            (param for param in parameters if param.kind == ParamSpec.VAR_POSITIONAL),
+            None,
+        )
+        has_explicit_varargs = (
+            vararg_spec is not None and vararg_spec.name in data
+        )
+
+        args: list[Any] = []
+        kwargs: Dict[str, Any] = {}
+        missing: list[str] = []
+
+        for param in parameters:
+            if param.kind == ParamSpec.POSITIONAL_ONLY:
+                if param.name in data:
+                    args.append(data[param.name])
+                elif param.default is not NO_VAL:
+                    args.append(param.default)
+                else:
+                    missing.append(param.name)
+                continue
+
+            if param.kind == ParamSpec.POSITIONAL_OR_KEYWORD:
+                if param.name in data:
+                    value = data[param.name]
+                elif param.default is not NO_VAL:
+                    value = param.default
+                else:
+                    missing.append(param.name)
+                    continue
+
+                if has_explicit_varargs:
+                    args.append(value)
+                else:
+                    kwargs[param.name] = value
+                continue
+
+            if param.kind == ParamSpec.VAR_POSITIONAL:
+                if param.name not in data:
+                    continue
+
+                value = data[param.name]
+                if not isinstance(value, (list, tuple)):
+                    raise TypeError(
+                        f"{self.full_name}: VAR_POSITIONAL input {param.name!r} "
+                        f"must be a list or tuple, got {type(value)!r}"
+                    )
+
+                args.extend(value)
+                continue
+
+            if param.kind == ParamSpec.KEYWORD_ONLY:
+                if param.name in data:
+                    kwargs[param.name] = data[param.name]
+                elif param.default is not NO_VAL:
+                    kwargs[param.name] = param.default
+                else:
+                    missing.append(param.name)
+                continue
+
+            if param.kind == ParamSpec.VAR_KEYWORD:
+                if param.name not in data:
+                    continue
+
+                value = data[param.name]
+                if not isinstance(value, Mapping):
+                    raise TypeError(
+                        f"{self.full_name}: VAR_KEYWORD input {param.name!r} "
+                        f"must be a mapping, got {type(value)!r}"
+                    )
+
+                overlapping_keys = set(kwargs).intersection(value)
+                if overlapping_keys:
+                    raise TypeError(
+                        f"{self.full_name}: VAR_KEYWORD input {param.name!r} "
+                        f"would overwrite bound keyword argument(s): "
+                        f"{sorted(overlapping_keys)!r}"
+                    )
+
+                kwargs.update(value)
+                continue
+
+            raise TypeError(
+                f"{self.full_name}: unsupported parameter kind {param.kind!r} "
+                f"for parameter {param.name!r}"
+            )
+
+        if missing:
+            raise TypeError(
+                f"{self.full_name}: missing required argument(s): {missing!r}"
+            )
+
+        return tuple(args), kwargs

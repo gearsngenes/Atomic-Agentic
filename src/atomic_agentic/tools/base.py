@@ -212,141 +212,20 @@ class Tool(AtomicInvokable):
         """
         Map dict-first inputs to (*args, **kwargs) for the wrapped callable.
 
-        Binding policy
-        --------------
-        Normal mode (no explicit varargs payload present):
-        - POSITIONAL_ONLY parameters -> args
-        - POSITIONAL_OR_KEYWORD and KEYWORD_ONLY parameters -> kwargs
+        This base Tool implementation delegates the canonical dict-to-call binding
+        policy to AtomicInvokable._dict_to_args_kwargs(). Subclasses may override
+        this method when their execution transport is intentionally dict-first
+        rather than Python-call-style, such as AdapterTool, MCPProxyTool, or
+        PyA2AtomicTool.
 
-        Varargs mode (explicit VAR_POSITIONAL payload present):
-        - POSITIONAL_ONLY and POSITIONAL_OR_KEYWORD parameters -> args
-        - then append the explicit varargs payload
-        - KEYWORD_ONLY parameters -> kwargs
-
-        Common rules
-        ------------
-        - Unknown input keys raise.
-        - Explicit VAR_POSITIONAL payload must be a non-string sequence.
-        - Explicit VAR_KEYWORD payload must be a mapping.
-        - Duplicate keys introduced by explicit **kwargs raise.
+        Raises
+        ------
+        TypeError
+            If the input mapping cannot be bound to this tool's declared parameter
+            contract.
         """
-
-        if not isinstance(inputs, Mapping):
-            raise ToolInvocationError(f"{self.full_name}: inputs must be a mapping")
-
-        data: Dict[str, Any] = dict(inputs)
-        param_specs = self._parameters
-        param_names = {spec.name for spec in param_specs}
-
-        vararg_spec = next((p for p in param_specs if p.kind == "VAR_POSITIONAL"), None)
-        varkw_spec = next((p for p in param_specs if p.kind == "VAR_KEYWORD"), None)
-
-        positional_only = [p for p in param_specs if p.kind == "POSITIONAL_ONLY"]
-        pos_or_kw = [p for p in param_specs if p.kind == "POSITIONAL_OR_KEYWORD"]
-        kw_only = [p for p in param_specs if p.kind == "KEYWORD_ONLY"]
-
-        has_explicit_varargs = vararg_spec is not None and vararg_spec.name in data
-
-        # ------------------------------------------------------------------
-        # Reject unknown keys
-        # ------------------------------------------------------------------
-        unknown_keys = sorted(set(data.keys()) - param_names)
-        if unknown_keys:
-            raise ToolInvocationError(
-                f"{self.full_name}: unknown parameters: {unknown_keys}"
-            )
-
-        args: List[Any] = []
-        kwargs: Dict[str, Any] = {}
-        missing: List[str] = []
-
-        # ------------------------------------------------------------------
-        # Phase 1: POSITIONAL_ONLY -> args
-        # ------------------------------------------------------------------
-        for spec in positional_only:
-            if spec.name in data:
-                args.append(data[spec.name])
-            elif spec.default is not NO_VAL:
-                args.append(spec.default)
-            else:
-                missing.append(spec.name)
-
-        # ------------------------------------------------------------------
-        # Phase 2: POSITIONAL_OR_KEYWORD binding
-        # ------------------------------------------------------------------
-        if has_explicit_varargs:
-            for spec in pos_or_kw:
-                if spec.name in data:
-                    args.append(data[spec.name])
-                elif spec.default is not NO_VAL:
-                    args.append(spec.default)
-                else:
-                    missing.append(spec.name)
-        else:
-            for spec in pos_or_kw:
-                if spec.name in data:
-                    kwargs[spec.name] = data[spec.name]
-                elif spec.default is not NO_VAL:
-                    kwargs[spec.name] = spec.default
-                else:
-                    missing.append(spec.name)
-
-        # ------------------------------------------------------------------
-        # Phase 3: KEYWORD_ONLY -> kwargs
-        # ------------------------------------------------------------------
-        for spec in kw_only:
-            if spec.name in data:
-                kwargs[spec.name] = data[spec.name]
-            elif spec.default is not NO_VAL:
-                kwargs[spec.name] = spec.default
-            else:
-                missing.append(spec.name)
-
-        if missing:
-            raise ToolInvocationError(
-                f"{self.full_name}: missing required parameters: {missing}"
-            )
-
-        # ------------------------------------------------------------------
-        # Phase 4: explicit *args payload
-        # ------------------------------------------------------------------
-        if has_explicit_varargs:
-            raw_varargs = data[vararg_spec.name]
-
-            if isinstance(raw_varargs, (str, bytes, bytearray)):
-                raise ToolInvocationError(
-                    f"{self.full_name}: var-positional parameter '{vararg_spec.name}' "
-                    "must be a non-string sequence"
-                )
-
-            if not isinstance(raw_varargs, (list, tuple)):
-                raise ToolInvocationError(
-                    f"{self.full_name}: var-positional parameter '{vararg_spec.name}' "
-                    "must be a list or tuple"
-                )
-
-            args.extend(raw_varargs)
-
-        # ------------------------------------------------------------------
-        # Phase 5: explicit **kwargs payload
-        # ------------------------------------------------------------------
-        if varkw_spec is not None and varkw_spec.name in data:
-            raw_varkw = data[varkw_spec.name]
-
-            if not isinstance(raw_varkw, Mapping):
-                raise ToolInvocationError(
-                    f"{self.full_name}: var-keyword parameter '{varkw_spec.name}' "
-                    "must be a mapping if provided"
-                )
-
-            for key, value in raw_varkw.items():
-                if key in kwargs:
-                    raise ToolInvocationError(
-                        f"{self.full_name}: duplicate key '{key}' in explicit **kwargs mapping"
-                    )
-                kwargs[key] = value
-
-        return tuple(args), kwargs
+        args, kwargs = self._dict_to_args_kwargs(inputs)
+        return args, kwargs
 
     def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
         """Execute the underlying callable.
