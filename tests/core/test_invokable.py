@@ -221,15 +221,14 @@ class TestAtomicInvokableFiltering:
 
         assert result == {"x": 1}
 
-    def test_extraneous_inputs_are_retained_when_filtering_disabled_without_varkwargs(self) -> None:
+    def test_extraneous_inputs_raise_when_filtering_disabled_without_varkwargs(self) -> None:
         invokable = make_invokable(
             parameters=[make_param("x", 0)],
             filter_extraneous_inputs=False,
         )
 
-        result = invokable.invoke({"x": 1, "unused": 2})
-
-        assert result == {"x": 1, "unused": 2}
+        with pytest.raises(TypeError, match="unexpected input key"):
+            invokable.invoke({"x": 1, "unused": 2})
 
     def test_extraneous_inputs_merge_into_varkwargs(self) -> None:
         invokable = make_invokable(parameters=[
@@ -432,25 +431,25 @@ class TestAtomicInvokableCallBinding:
         with pytest.raises(TypeError, match="positional-only"):
             invokable(x=1)
 
-    def test_call_rejects_explicit_varargs_field_as_keyword(self) -> None:
+    def test_call_treats_varargs_field_keyword_as_unknown_keyword_without_varkwargs(self) -> None:
         invokable = make_invokable(parameters=[
             make_param("x", 0),
             make_param("args", 1, ParamSpec.VAR_POSITIONAL),
         ])
 
-        with pytest.raises(TypeError, match="variadic parameter field"):
+        with pytest.raises(TypeError, match="unexpected keyword"):
             invokable(1, args=(2, 3))
 
-    def test_call_rejects_explicit_varkwargs_field_as_keyword(self) -> None:
+    def test_call_treats_varargs_field_keyword_as_unknown_keyword_without_varkwargs(self) -> None:
         invokable = make_invokable(parameters=[
             make_param("x", 0),
-            make_param("extras", 1, ParamSpec.VAR_KEYWORD),
+            make_param("args", 1, ParamSpec.VAR_POSITIONAL),
         ])
 
-        with pytest.raises(TypeError, match="variadic parameter field"):
-            invokable(1, extras={"debug": True})
+        with pytest.raises(TypeError, match="unexpected keyword"):
+            invokable(1, args=(2, 3))
 
-    def test_call_collects_unknown_keywords_but_rejects_varkwarg_field_name(self) -> None:
+    def test_call_collects_unknown_keywords_and_varkwarg_field_name_into_varkwargs(self) -> None:
         invokable = make_invokable(parameters=[
             make_param("x", 0),
             make_param("extras", 1, ParamSpec.VAR_KEYWORD),
@@ -458,10 +457,19 @@ class TestAtomicInvokableCallBinding:
 
         result = invokable(1, debug=True)
 
-        assert result == {"x": 1, "extras": {"debug": True}}
+        assert result == {
+            "x": 1,
+            "extras": {"debug": True},
+        }
 
-        with pytest.raises(TypeError, match="variadic parameter field"):
-            invokable(1, extras={"debug": True})
+        result = invokable(1, extras={"debug": True})
+
+        assert result == {
+            "x": 1,
+            "extras": {
+                "extras": {"debug": True},
+            },
+        }
 
 
 class TestAtomicInvokableAsync:
