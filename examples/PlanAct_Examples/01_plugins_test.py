@@ -29,9 +29,9 @@ agent.register_constant("PI", math.pi, "Mathematical constant `pi`")
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
-1) Compute the area of a circle with a radius of 5.
+1) Compute the area of a circle with a radius of 5 [A(r) = pi * r^2].
 2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
-3) Compute the volume of a cylinder with radius of 2 and height of 10.
+3) Compute the volume of a cylinder with radius of 2 and height of 10 [V(r, h) = pi * r^2 * h].
 
 Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN ORDER ABOVE.
 """
