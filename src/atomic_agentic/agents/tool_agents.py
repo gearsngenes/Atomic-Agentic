@@ -393,6 +393,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
+        post_result_key: Optional[str] = None,
+        passthrough_inputs: Optional[list[str]] = None,
         history_window: Optional[int] = None,
     ) -> None:
         template = self._validate_role_prompt_template(role_prompt)
@@ -414,6 +416,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             context_enabled=context_enabled,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
+            post_result_key=post_result_key,
+            passthrough_inputs=passthrough_inputs,
             history_window=history_window,
             response_preview_limit=response_preview_limit,
         )
@@ -2285,6 +2289,8 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         preview_limit: Optional[int] = None,
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
+        post_result_key: Optional[str] = None,
+        passthrough_inputs: Optional[list[str]] = None,
         history_window: int | None = None,
     ) -> None:
         super().__init__(
@@ -2301,6 +2307,8 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             preview_limit=preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
+            post_result_key=post_result_key,
+            passthrough_inputs=passthrough_inputs,
             history_window=history_window,
         )
 
@@ -3075,6 +3083,8 @@ class ReActAgent(ToolAgent[ReActRunState]):
         preview_limit: Optional[int] = None,
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
+        post_result_key: Optional[str] = None,
+        passthrough_inputs: Optional[list[str]] = None,
         history_window: int | None = None,
     ) -> None:
         super().__init__(
@@ -3091,6 +3101,8 @@ class ReActAgent(ToolAgent[ReActRunState]):
             preview_limit=preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
+            post_result_key=post_result_key,
+            passthrough_inputs=passthrough_inputs,
             history_window=history_window,
         )
 

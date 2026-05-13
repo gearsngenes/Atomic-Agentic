@@ -34,7 +34,7 @@ orchestrator.register_constant("PI", math.pi, "Mathematical constant `PI`")
 # 4) Task (schema-first: mapping with 'prompt')
 task = """
 Complete the following problem:
-1. Compute the volume of a cylinder with a radius of 2 and a height of 10 (PI * r^2 * h).
+1. Compute the volume of a cylinder with a radius of 2 and a height of 10 [V(r, h) = pi * r^2 * h].
 2. Then print the result in the format "The volume of the cylinder is: <result>".
 Return None.
 """

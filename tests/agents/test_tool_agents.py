@@ -122,6 +122,9 @@ def make_planact_agent(
     preview_limit: int | None = None,
     response_preview_limit: int | None = None,
     blackboard_preview_limit: int | None = None,
+    post_invoke: Any = None,
+    post_result_key: str | None = None,
+    passthrough_inputs: list[str] | None = None,
 ) -> PlanActAgent:
     agent = PlanActAgent(
         name="planact_agent",
@@ -133,6 +136,9 @@ def make_planact_agent(
         preview_limit=preview_limit,
         response_preview_limit=response_preview_limit,
         blackboard_preview_limit=blackboard_preview_limit,
+        post_invoke=post_invoke,
+        post_result_key=post_result_key,
+        passthrough_inputs=passthrough_inputs,
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
@@ -147,6 +153,9 @@ def make_react_agent(
     preview_limit: int | None = None,
     response_preview_limit: int | None = None,
     blackboard_preview_limit: int | None = None,
+    post_invoke: Any = None,
+    post_result_key: str | None = None,
+    passthrough_inputs: list[str] | None = None,
 ) -> ReActAgent:
     agent = ReActAgent(
         name="react_agent",
@@ -158,6 +167,9 @@ def make_react_agent(
         preview_limit=preview_limit,
         response_preview_limit=response_preview_limit,
         blackboard_preview_limit=blackboard_preview_limit,
+        post_invoke=post_invoke,
+        post_result_key=post_result_key,
+        passthrough_inputs=passthrough_inputs,
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
@@ -177,6 +189,10 @@ def join_text(prefix: str, value: Any) -> str:
 
 def fail_tool() -> str:
     raise RuntimeError("intentional failure")
+
+
+def package_tool_result(result: Any, label: str) -> dict[str, Any]:
+    return {"label": label, "result": result}
 
 
 def react_step_json(
@@ -223,6 +239,9 @@ class ScriptedToolAgent(ToolAgent[ScriptedRunState]):
         preview_limit: int | None = None,
         response_preview_limit: int | None = None,
         blackboard_preview_limit: int | None = None,
+        post_invoke: Any = None,
+        post_result_key: str | None = None,
+        passthrough_inputs: list[str] | None = None,
     ) -> None:
         super().__init__(
             name="scripted_agent",
@@ -235,6 +254,9 @@ class ScriptedToolAgent(ToolAgent[ScriptedRunState]):
             preview_limit=preview_limit,
             response_preview_limit=response_preview_limit,
             blackboard_preview_limit=blackboard_preview_limit,
+            post_invoke=post_invoke,
+            post_result_key=post_result_key,
+            passthrough_inputs=passthrough_inputs,
         )
         self.script = script or []
 
@@ -324,6 +346,9 @@ def make_agent(
     preview_limit: int | None = None,
     response_preview_limit: int | None = None,
     blackboard_preview_limit: int | None = None,
+    post_invoke: Any = None,
+    post_result_key: str | None = None,
+    passthrough_inputs: list[str] | None = None,
 ) -> ScriptedToolAgent:
     return ScriptedToolAgent(
         context_enabled=context_enabled,
@@ -332,6 +357,9 @@ def make_agent(
         preview_limit=preview_limit,
         response_preview_limit=response_preview_limit,
         blackboard_preview_limit=blackboard_preview_limit,
+        post_invoke=post_invoke,
+        post_result_key=post_result_key,
+        passthrough_inputs=passthrough_inputs,
     )
 
 
@@ -509,6 +537,63 @@ class TestToolAgentConstruction:
 
         with pytest.raises(ToolAgentError, match="blackboard_preview_limit"):
             agent.blackboard_preview_limit = value  # type: ignore[assignment]
+
+
+class TestToolAgentPostInvokeRouting:
+    def test_scripted_tool_agent_forwards_post_routing_to_base_agent(self) -> None:
+        agent = make_agent(
+            post_invoke=package_tool_result,
+            passthrough_inputs=["label"],
+        )
+        agent.set_script(
+            [[{"tool": return_tool.full_name, "args": {"val": 5}}]]
+        )
+
+        result = agent.invoke({"prompt": "run", "label": "scripted"})
+
+        assert result == {"label": "scripted", "result": 5}
+        assert agent.post_result_key == "result"
+        assert agent.passthrough_inputs == ["label"]
+
+    def test_planact_agent_supports_post_invoke_passthrough(self) -> None:
+        agent = make_planact_agent(
+            [
+                json.dumps(
+                    [
+                        {
+                            "step": 0,
+                            "tool": return_tool.full_name,
+                            "args": {"val": 5},
+                        }
+                    ]
+                )
+            ],
+            post_invoke=package_tool_result,
+            passthrough_inputs=["label"],
+        )
+
+        result = agent.invoke({"prompt": "run plan", "label": "planact"})
+
+        assert result == {"label": "planact", "result": 5}
+
+    def test_react_agent_supports_post_invoke_passthrough(self) -> None:
+        agent = make_react_agent(
+            [
+                react_step_json(
+                    tool=return_tool.full_name,
+                    args={"val": 7},
+                    duration=0,
+                    description="Return the final literal value for the test task.",
+                )
+            ],
+            tool_calls_limit=1,
+            post_invoke=package_tool_result,
+            passthrough_inputs=["label"],
+        )
+
+        result = agent.invoke({"prompt": "run react", "label": "react"})
+
+        assert result == {"label": "react", "result": 7}
 
 
 class TestToolRegistration:

@@ -54,6 +54,15 @@ Rules:
 4) Placeholders may be used as full values or embedded inside strings.
 5) Do NOT use natural-language references like "the previous result". Use placeholders.
 6) Do NOT do inline computation inside args (no math/expressions/function calls). Use tools.
+7) When embedding a placeholder inside text, put it directly inside ONE quoted JSON string.
+   Do NOT use string concatenation, f-strings, template expressions, or code-like interpolation inside args.
+
+Correct:
+{{ "value": "Area result: <<__s1__>>" }}
+
+Wrong:
+{{ "value": "Area result: " + "<<__s1__>>" }}
+{{ "value": f"Area result: <<__s1__>>" }}
 
 Constants:
 - <<__k.NAME__>> may only reference constant names listed in AVAILABLE CONSTANTS.
@@ -167,13 +176,18 @@ Rules:
 7) Never copy observable_result values into args.
 8) Never manually approximate registered constants; use <<__k.NAME__>>.
 9) Do NOT do inline computation inside args. Use tools.
+10) When embedding a placeholder inside text, put it directly inside ONE quoted JSON string.
+    Do NOT use string concatenation, f-strings, template expressions, or code-like interpolation inside args.
 
 Correct:
 {{"x":"<<__s5__>>"}}
 {{"a":"<<__s0__>>","b":"<<__k.PI__>>"}}
+{{"value":"Area result: <<__s1__>>"}}
+
 Wrong:
 {{"x":<<__s5__>>}}
 {{"a":25,"b":3.14159}}
+{{"value":"Area result: " + "<<__s1__>>"}}
 
 # DURATION
 "duration" controls how many future step-generation turns may see this step's raw result as observable_result:
