@@ -80,9 +80,10 @@ class Agent(AtomicInvokable):
     Inputs and schema
     -----------------
     - Inputs are always a mapping (`Mapping[str, Any]`).
-    - The schema is defined by the `pre_invoke` Tool, which:
-    - validates and normalizes the incoming mapping,
-    - converts it into a prompt string.
+    - The schema is derived from the `pre_invoke` Tool plus selected
+      `post_invoke` passthrough parameters.
+    - The `pre_invoke` Tool validates and normalizes the pre-invoke subset,
+      then converts it into a prompt string.
 
     History and context
     -------------------
@@ -118,10 +119,10 @@ class Agent(AtomicInvokable):
     post_result_key : Optional[str], default None
         Name of the post_invoke parameter that receives the raw `_invoke` result.
         Defaults to the first declared post_invoke parameter.
-    passthrough_inputs : Optional[list[str] or dict[str, str]], default None
-        Post-invoke passthrough mapping from filtered Agent inputs into post_invoke.
-        A list maps names to themselves; a dict maps source input keys to destination
-        post_invoke keys.
+    passthrough_inputs : Optional[list[str]], default None
+        Post-invoke parameter names to expose as Agent inputs and pass through by name.
+        Names must refer to post_invoke parameters and must not include post_result_key.
+        Post-only passthrough parameters are grafted into the Agent schema as keyword-only parameters.
     response_preview_limit : Optional[int], default None
         Optional character limit applied only when rendering stored assistant responses
         into future LLM-facing message history. Stored turn values are not mutated.
@@ -140,10 +141,10 @@ class Agent(AtomicInvokable):
     history : List[Dict[str, str]] (deprecated rendered message view)
     turn_history : List[AgentTurn] (read-only canonical turn view)
     attachments : Dict[str, Dict[str, Any]] (read-only view)
-    pre_invoke : Tool (read-write)
-    post_invoke : Tool (read-write)
+    pre_invoke : Tool (read-only)
+    post_invoke : Tool (read-only)
     post_result_key : str (read-only)
-    passthrough_inputs : Dict[str, str] (read-only)
+    passthrough_inputs : List[str] (read-only)
     """
 
     # ------------------------------------------------------------------ #
@@ -161,13 +162,13 @@ class Agent(AtomicInvokable):
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
         post_result_key: Optional[str] = None,
-        passthrough_inputs: Optional[list[str] | dict[str, str]] = None,
+        passthrough_inputs: Optional[list[str]] = None,
         history_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
 
-        # Prepare pre_invoke
+        # Prepare pre_invoke Tool.
         if not pre_invoke:
             pre_tool = identity_pre_tool
         else:
@@ -178,26 +179,24 @@ class Agent(AtomicInvokable):
         if pre_tool.return_type.lower() not in {"any", "str"}:
             raise AgentError("Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke")
 
-        # Prepare post_invoke
-        post_tool, resolved_post_result_key, resolved_passthrough_inputs, legacy_post_param_name = (
-            self._prepare_post_invoke_config(
+        # Prepare post_invoke Tool, passthrough config, and composed Agent schema.
+        post_tool, resolved_post_result_key, resolved_passthrough_inputs, agent_parameters = (
+            self._prepare_agent_lifecycle_config(
                 candidate=post_invoke,
                 agent_name=name,
                 pre_parameters=pre_tool.parameters,
                 post_result_key=post_result_key,
                 passthrough_inputs=passthrough_inputs,
-                use_shared_default=True,
             )
         )
 
-        # Set Pre/Post invoke
+        # Store lifecycle components and post-processing configuration.
         self._pre_invoke = pre_tool
         self._post_invoke = post_tool
         self._post_result_key = resolved_post_result_key
-        self._passthrough_input_map = resolved_passthrough_inputs
-        self._post_param_name = legacy_post_param_name
+        self._passthrough_inputs = resolved_passthrough_inputs
 
-        # Set the agent-specific attributes
+        # Store Agent runtime configuration.
         self._llm_engine: LLMEngine = llm_engine
         self._role_prompt: str = "You are a helpful AI assistant"
         if role_prompt is not None and role_prompt.strip():
@@ -213,103 +212,50 @@ class Agent(AtomicInvokable):
         # We never trim storage; we only limit what we *send* to the engine.
         self._history: List[AgentTurn] = []
 
+        # Store history-rendering controls.
         self.response_preview_limit = response_preview_limit
         self.assistant_response_source = assistant_response_source
 
         filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else pre_tool.filter_extraneous_inputs
-        # Build schema directly from pre_invoke and post_invoke, then delegate to parent
+
+        # Delegate to parent with the composed Agent schema.
         super().__init__(name=name,
                         description=description,
-                        parameters=self._pre_invoke.parameters,
+                        parameters=agent_parameters,
                         return_type=self._post_invoke.return_type,
                         filter_extraneous_inputs=filter,)
 
-    @staticmethod
-    def _normalize_passthrough_inputs(
-        passthrough_inputs: Optional[list[str] | dict[str, str]],
-    ) -> dict[str, str]:
-        """
-        Normalize post-invoke passthrough input configuration.
-
-        Accepted forms:
-        - None -> {}
-        - list[str] -> {name: name}
-        - dict[str, str] -> {source_input_name: post_invoke_destination_name}
-
-        The normalized mapping is always:
-            source input key -> post-invoke destination key
-        """
-        if passthrough_inputs is None:
-            return {}
-
-        if isinstance(passthrough_inputs, list):
-            normalized: dict[str, str] = {}
-            for index, name in enumerate(passthrough_inputs):
-                if not isinstance(name, str) or not name.strip():
-                    raise TypeError(
-                        f"passthrough_inputs[{index}] must be a non-empty string."
-                    )
-                cleaned = name.strip()
-                normalized[cleaned] = cleaned
-            return normalized
-
-        if isinstance(passthrough_inputs, dict):
-            normalized = {}
-            for source, destination in passthrough_inputs.items():
-                if not isinstance(source, str) or not source.strip():
-                    raise TypeError(
-                        "passthrough_inputs keys must be non-empty strings."
-                    )
-                if not isinstance(destination, str) or not destination.strip():
-                    raise TypeError(
-                        "passthrough_inputs values must be non-empty strings."
-                    )
-                normalized[source.strip()] = destination.strip()
-
-            destination_keys = list(normalized.values())
-            if len(destination_keys) != len(set(destination_keys)):
-                raise ValueError(
-                    "passthrough_inputs must be one-to-one; duplicate destination "
-                    "keys are not allowed."
-                )
-
-            return normalized
-
-        raise TypeError(
-            "passthrough_inputs must be None, list[str], or dict[str, str]."
-        )
-
-
     @classmethod
-    def _prepare_post_invoke_config(
+    def _prepare_agent_lifecycle_config(
         cls,
         *,
         candidate: Optional[Union[Callable, AtomicInvokable]],
         agent_name: str,
         pre_parameters: list[ParamSpec],
         post_result_key: Optional[str],
-        passthrough_inputs: Optional[list[str] | dict[str, str]],
-        use_shared_default: bool,
-    ) -> tuple[Tool, str, dict[str, str], str]:
+        passthrough_inputs: Optional[list[str]],
+    ) -> tuple[Tool, str, tuple[str, ...], list[ParamSpec], str]:
         """
-        Create and validate post-invoke configuration.
+        Create and validate post-invoke configuration and composed Agent parameters.
 
         post_invoke must have at least one parameter. Required post_invoke
         parameters must be satisfiable by post_result_key, passthrough input
-        destination keys, or callable defaults.
+        names, or callable defaults.
 
         Returns
         -------
-        tuple[Tool, str, dict[str, str], str]
+        tuple[Tool, str, tuple[str, ...], list[ParamSpec], str]
             - post Tool
             - resolved post_result_key
-            - normalized passthrough input map
+            - normalized passthrough input names
+            - composed Agent parameters
             - legacy post parameter name retained for compatibility
         """
-        if use_shared_default and candidate is None:
+        # Build post_invoke Tool.
+        if candidate is None:
             post_tool = identity_post_tool
         else:
-            post_tool = toolify(candidate or identity_post,
+            post_tool = toolify(candidate,
                             name="post_invoke",
                             namespace=agent_name,
                             description=f"The tool that postprocesses outputs of Agent {agent_name}")
@@ -318,10 +264,39 @@ class Agent(AtomicInvokable):
         if len(post_params) == 0:
             raise AgentError("Agent.post_invoke must expect at least 1 argument")
 
-        passthrough_input_map = cls._normalize_passthrough_inputs(passthrough_inputs)
+        # Normalize passthrough input names.
+        if passthrough_inputs is None:
+            resolved_passthrough_inputs: tuple[str, ...] = ()
+        elif isinstance(passthrough_inputs, list):
+            cleaned_passthrough_inputs: list[str] = []
+            for index, name in enumerate(passthrough_inputs):
+                if not isinstance(name, str) or not name.strip():
+                    raise AgentError(
+                        f"passthrough_inputs[{index}] must be a non-empty string."
+                    )
+                cleaned_passthrough_inputs.append(name.strip())
 
-        declared_pre_param_names = {param.name for param in pre_parameters}
-        declared_post_param_names = {param.name for param in post_params}
+            duplicate_passthrough_inputs = sorted({
+                name
+                for name in cleaned_passthrough_inputs
+                if cleaned_passthrough_inputs.count(name) > 1
+            })
+            if duplicate_passthrough_inputs:
+                raise AgentError(
+                    "passthrough_inputs must not contain duplicate names; "
+                    f"got {duplicate_passthrough_inputs!r}."
+                )
+
+            resolved_passthrough_inputs = tuple(cleaned_passthrough_inputs)
+        else:
+            raise AgentError("passthrough_inputs must be a list of strings or None.")
+
+        # Build parameter lookup maps.
+        pre_param_map = {param.name: param for param in pre_parameters}
+        post_param_map = {param.name: param for param in post_params}
+        declared_post_param_names = set(post_param_map)
+
+        # Resolve and validate post_result_key.
         resolved_post_result_key = (
             post_result_key.strip()
             if isinstance(post_result_key, str) and post_result_key.strip()
@@ -339,32 +314,75 @@ class Agent(AtomicInvokable):
                 f"got {resolved_post_result_key!r}."
             )
 
-        passthrough_sources = set(passthrough_input_map.keys())
-        unknown_sources = passthrough_sources - declared_pre_param_names
-        if unknown_sources:
+        if resolved_post_result_key in resolved_passthrough_inputs:
             raise AgentError(
-                "passthrough_inputs source key(s) must name pre_invoke parameters; "
-                f"got unknown source key(s): {sorted(unknown_sources)!r}."
+                "post_result_key must not be one of the passthrough input names."
             )
 
-        passthrough_destinations = set(passthrough_input_map.values())
-        unknown_destinations = passthrough_destinations - declared_post_param_names
-        if unknown_destinations:
+        # Validate passthrough names against post_invoke parameters.
+        unknown_passthrough_inputs = set(resolved_passthrough_inputs) - declared_post_param_names
+        if unknown_passthrough_inputs:
             raise AgentError(
-                "passthrough_inputs destination key(s) must name post_invoke parameters; "
-                f"got unknown destination key(s): {sorted(unknown_destinations)!r}."
+                "passthrough_inputs must name post_invoke parameters; "
+                f"got unknown passthrough input(s): {sorted(unknown_passthrough_inputs)!r}."
             )
 
-        if resolved_post_result_key in passthrough_destinations:
-            raise AgentError(
-                "post_result_key must not be one of the passthrough input destination keys."
-            )
+        # Validate overlap, variadic compatibility, and type compatibility.
+        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
+        any_types = {"any", "typing.any"}
 
-        provided_post_keys = {resolved_post_result_key} | passthrough_destinations
+        for name in resolved_passthrough_inputs:
+            post_param = post_param_map[name]
+            pre_param = pre_param_map.get(name)
+            post_is_variadic = post_param.kind in variadic_kinds
+
+            # Raise an error if a passthrough input is post-only and variadic.
+            if pre_param is None:
+                if post_is_variadic:
+                    raise AgentError(
+                        "Post-only passthrough inputs must be non-variadic; "
+                        f"got {name!r} with kind {post_param.kind!r}."
+                    )
+                continue
+
+            # Raise an error if overlapping fields have incompatible variadic status.
+            pre_is_variadic = pre_param.kind in variadic_kinds
+            if pre_is_variadic != post_is_variadic:
+                raise AgentError(
+                    "Overlapping passthrough inputs must both be non-variadic or "
+                    "both be the same variadic kind; "
+                    f"got {name!r} as {pre_param.kind!r} and {post_param.kind!r}."
+                )
+            if pre_is_variadic and pre_param.kind != post_param.kind:
+                raise AgentError(
+                    "Overlapping variadic passthrough inputs must have the same kind; "
+                    f"got {name!r} as {pre_param.kind!r} and {post_param.kind!r}."
+                )
+
+            # Raise a type compatibility error if both sides declare different
+            # concrete types and neither side is generic.
+            pre_type = (pre_param.type or "").strip()
+            post_type = (post_param.type or "").strip()
+            if (
+                pre_type
+                and post_type
+                and pre_type != post_type
+                and pre_type.lower() not in any_types
+                and post_type.lower() not in any_types
+            ):
+                raise AgentError(
+                    "Overlapping passthrough input type mismatch for "
+                    f"{name!r}: pre_invoke has {pre_type!r}, post_invoke has {post_type!r}."
+                )
+
+        # Validate required post_invoke parameters are reachable.
+        # Variadic parameters are open collectors, not required named inputs.
+        provided_post_keys = {resolved_post_result_key} | set(resolved_passthrough_inputs)
         required_post_keys = {
             param.name
             for param in post_params
-            if param.default is NO_VAL
+            if param.kind not in variadic_kinds
+            and param.default is NO_VAL
         }
         missing_required = required_post_keys - provided_post_keys
         if missing_required:
@@ -374,13 +392,54 @@ class Agent(AtomicInvokable):
                 f"{sorted(missing_required)!r}"
             )
 
-        legacy_post_param_name = resolved_post_result_key
+        # Compose Agent parameters with keyword-only passthrough grafts.
+        composed_parameters = list(pre_parameters)
+        grafted_parameters = [
+            ParamSpec(
+                name=post_param_map[name].name,
+                index=0,
+                kind=ParamSpec.KEYWORD_ONLY,
+                type=post_param_map[name].type,
+                default=post_param_map[name].default,
+            )
+            for name in resolved_passthrough_inputs
+            if name not in pre_param_map
+        ]
+
+        if grafted_parameters:
+            varkw_index = next(
+                (
+                    index
+                    for index, param in enumerate(composed_parameters)
+                    if param.kind == ParamSpec.VAR_KEYWORD
+                ),
+                None,
+            )
+            if varkw_index is None:
+                composed_parameters.extend(grafted_parameters)
+            else:
+                composed_parameters = (
+                    composed_parameters[:varkw_index]
+                    + grafted_parameters
+                    + composed_parameters[varkw_index:]
+                )
+
+        composed_parameters = [
+            ParamSpec(
+                name=param.name,
+                index=index,
+                kind=param.kind,
+                type=param.type,
+                default=param.default,
+            )
+            for index, param in enumerate(composed_parameters)
+        ]
 
         return (
             post_tool,
             resolved_post_result_key,
-            passthrough_input_map,
-            legacy_post_param_name,
+            resolved_passthrough_inputs,
+            composed_parameters,
         )
 
     # ------------------------------------------------------------------ #
@@ -395,16 +454,13 @@ class Agent(AtomicInvokable):
 
 
     @property
-    def passthrough_inputs(self) -> dict[str, str]:
+    def passthrough_inputs(self) -> list[str]:
         """
-        Post-invoke passthrough mapping from Agent input keys to post_invoke keys.
-
-        The returned mapping is:
-            source input key -> post-invoke destination key
+        Post-invoke parameter names accepted as Agent inputs and passed through by name.
 
         A shallow copy is returned to prevent external mutation of Agent state.
         """
-        return dict(self._passthrough_input_map)
+        return list(self._passthrough_inputs)
 
     @property
     def role_prompt(self) -> str:
@@ -526,57 +582,10 @@ class Agent(AtomicInvokable):
             {"prompt": <str>}
         and returns that string.
 
-        You can set this to any Tool instance that:
-        - accepts a Mapping[str, Any]-like object, and
-        - returns a `str` when invoked.
-
-        For convenience, setting it to a plain callable will wrap it in a Tool.
+        This is configured at construction time. A plain callable provided to the
+        constructor is wrapped in a Tool.
         """
         return self._pre_invoke
-
-    @pre_invoke.setter
-    def pre_invoke(self, candidate: Optional[Union[Callable, AtomicInvokable]]) -> None:
-        """
-        Set the pre-invoke Tool.
-
-        Parameters
-        ----------
-        candidate : Atomic-Invokable or callable
-            - If a Tool, it is used as-is.
-            - If a callable, it is wrapped as a Tool with a simple signature.
-
-        Behaviour:
-        - Use the centralized helper to create/validate the candidate Tool.
-        - Rebuild the Agent's schema based on the candidate pre_invoke Tool.
-        - If the Tool does not return 'str' or 'any', raise `AgentError`.
-        """
-        # Prepare pre_invoke
-        pre_tool = toolify(candidate or identity_pre,
-                           name="pre_invoke",
-                           namespace=self.name,
-                           description=f"The tool that preprocesses inputs into a string for Agent {self.name}")
-        if pre_tool.return_type.lower() not in {"any", "str"}:
-            raise AgentError("Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke")
-
-        post_tool, resolved_post_result_key, resolved_passthrough_inputs, legacy_post_param_name = (
-            self._prepare_post_invoke_config(
-                candidate=self._post_invoke,
-                agent_name=self.name,
-                pre_parameters=pre_tool.parameters,
-                post_result_key=self._post_result_key,
-                passthrough_inputs=self._passthrough_input_map,
-                use_shared_default=False,
-            )
-        )
-
-        # Apply the candidate and rebuild schema from components
-        self._pre_invoke = pre_tool
-        self._post_invoke = post_tool
-        self._post_result_key = resolved_post_result_key
-        self._passthrough_input_map = resolved_passthrough_inputs
-        self._post_param_name = legacy_post_param_name
-        self._parameters = self._pre_invoke.parameters
-        self._return_type = self._post_invoke.return_type
 
     @property
     def post_invoke(self) -> Tool:
@@ -590,62 +599,9 @@ class Agent(AtomicInvokable):
         """
         return self._post_invoke
 
-
-    @post_invoke.setter
-    def post_invoke(self, candidate: Optional[Union[Callable, AtomicInvokable]]) -> None:
-        """
-        Set the post-invoke Tool.
-
-        Parameters
-        ----------
-        tool : Tool or callable
-            - If a Tool, it is used as-is.
-            - If a callable, it is wrapped as a Tool with a simple signature.
-
-        Behaviour:
-        - Use the centralized helper to create the candidate Tool.
-        - Rebuild the Agent's return type based on the candidate post_invoke Tool.
-        - Preserve the current post_result_key and passthrough_inputs configuration.
-        - The Tool must remain compatible with the current post-invoke configuration.
-        - If validation fails, raise `AgentError`.
-        """
-        post_tool, resolved_post_result_key, resolved_passthrough_inputs, legacy_post_param_name = (
-            self._prepare_post_invoke_config(
-                candidate=candidate,
-                agent_name=self.name,
-                pre_parameters=self._pre_invoke.parameters,
-                post_result_key=self._post_result_key,
-                passthrough_inputs=self._passthrough_input_map,
-                use_shared_default=False,
-            )
-        )
-
-        # Apply the candidate and rebuild schema from components
-        self._post_invoke = post_tool
-        self._post_result_key = resolved_post_result_key
-        self._passthrough_input_map = resolved_passthrough_inputs
-        self._post_param_name = legacy_post_param_name
-        self._return_type = self._post_invoke.return_type
-
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
-    def _build_post_inputs(
-        self,
-        *,
-        raw_result: Any,
-        inputs: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """Build the post_invoke input mapping from raw result and passthrough inputs."""
-        post_inputs: dict[str, Any] = {}
-
-        for source_key, destination_key in self._passthrough_input_map.items():
-            if source_key in inputs:
-                post_inputs[destination_key] = inputs[source_key]
-
-        post_inputs[self._post_result_key] = raw_result
-        return post_inputs
-
     def build_messages(self, prompt: str) -> List[Dict[str, str]]:
         """Build LLM-facing message dicts from role prompt, rendered prior turns, and current prompt.
 
@@ -726,6 +682,41 @@ class Agent(AtomicInvokable):
             raw_response=raw_response,
             final_response=final_response,
         )
+
+    def _split_inputs(
+        self,
+        inputs: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """
+        Split already-filtered Agent inputs into pre_invoke inputs and post_invoke
+        passthrough inputs.
+
+        This method assumes `filter_inputs(...)` has already run. It materializes
+        defaults from the composed Agent schema before splitting so overlapping
+        pre/post passthrough parameters use the Agent-visible default.
+        """
+        inputs = dict(inputs)
+
+        for param in self.parameters:
+            if param.kind in {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}:
+                continue
+            if param.name not in inputs and param.default is not NO_VAL:
+                inputs[param.name] = param.default
+
+        pre_param_names = {param.name for param in self._pre_invoke.parameters}
+        pre_inputs = {
+            key: value
+            for key, value in inputs.items()
+            if key in pre_param_names
+        }
+
+        passthrough_inputs = {
+            name: inputs[name]
+            for name in self._passthrough_inputs
+            if name in inputs
+        }
+
+        return pre_inputs, passthrough_inputs
 
     async def _ainvoke(self, messages: List[Dict[str, str]]) -> Tuple[Any, Mapping[str, Any]]:
         """Async internal call path used by `async_invoke`.
@@ -863,10 +854,11 @@ class Agent(AtomicInvokable):
         logger.info(f"[Async {self.full_name} started]")
 
         inputs = self.filter_inputs(inputs)
+        pre_inputs, post_inputs = self._split_inputs(inputs)
 
         try:
             logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
-            prompt = await self._pre_invoke.async_invoke(inputs)
+            prompt = await self._pre_invoke.async_invoke(pre_inputs)
         except ToolInvocationError:
             raise
         except Exception as e:  # pragma: no cover
@@ -890,10 +882,7 @@ class Agent(AtomicInvokable):
 
         try:
             logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
-            post_inputs = self._build_post_inputs(
-                raw_result=raw_result,
-                inputs=inputs,
-            )
+            post_inputs[self._post_result_key] = raw_result
             result = await self._post_invoke.async_invoke(post_inputs)
         except ToolInvocationError:
             raise
@@ -921,15 +910,15 @@ class Agent(AtomicInvokable):
         -----
         1) Validate ``inputs`` is a :class:`~collections.abc.Mapping`.
         2) ``prompt = pre_invoke.invoke(inputs)`` → must be a ``str``.
-           - If the Tool raises :class:`ToolInvocationError`, it propagates unchanged.
-           - Other exceptions are wrapped as :class:`AgentInvocationError`.
+        - If the Tool raises :class:`ToolInvocationError`, it propagates unchanged.
+        - Other exceptions are wrapped as :class:`AgentInvocationError`.
         3) Build the messages list from the optional role prompt, the windowed
-           history, and the current user ``prompt``.
+        history, and the current user ``prompt``.
         4) Delegate to :meth:`_invoke`, which performs the actual engine call and
-           returns the raw result plus turn metadata for this run.
+        returns the raw result plus turn metadata for this run.
         5) Run ``post_invoke`` on the raw result and configured passthrough inputs to obtain the final output.
         6) If ``context_enabled`` is True, construct and commit the newest turn
-           into persistent history.
+        into persistent history.
         7) Return the final output.
 
         Parameters
@@ -959,10 +948,12 @@ class Agent(AtomicInvokable):
             logger.info(f"[{self.full_name} started]")
             # Filter inputs
             inputs = self.filter_inputs(inputs)
+            pre_inputs, post_inputs = self._split_inputs(inputs)
+
             # Preprocess inputs to prompt string
             try:
                 logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
-                prompt = self._pre_invoke.invoke(inputs)
+                prompt = self._pre_invoke.invoke(pre_inputs)
             except ToolInvocationError:
                 raise
             except Exception as e:  # pragma: no cover
@@ -989,10 +980,7 @@ class Agent(AtomicInvokable):
             # Postprocess raw result
             try:
                 logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
-                post_inputs = self._build_post_inputs(
-                    raw_result=raw_result,
-                    inputs=inputs,
-                )
+                post_inputs[self._post_result_key] = raw_result
                 result = self._post_invoke.invoke(post_inputs)
             except ToolInvocationError:
                 raise

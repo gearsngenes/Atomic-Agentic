@@ -18,15 +18,11 @@ def build_prompt(
     *,
     prompt: str,
     audience: str = "general reader",
-    output_label: str = "answer",
-    include_metadata: bool = True,
 ) -> str:
     """
     pre_invoke hook.
 
-    Only `prompt` and `audience` are used to build the LLM-facing prompt.
-    `output_label` and `include_metadata` are declared here so they are part of
-    the Agent input schema and can be passed through to post_invoke.
+    `prompt` and `audience` are used to build the LLM-facing prompt.
     """
     return (
         f"Answer the following for a {audience}.\n\n"
