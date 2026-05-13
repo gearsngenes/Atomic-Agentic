@@ -7,7 +7,7 @@ import asyncio
 
 from atomic_agentic.tools import Tool
 from atomic_agentic.agents.base import Agent
-from atomic_agentic.core.Exceptions import AgentError, AgentInvocationError
+from atomic_agentic.core.Exceptions import AgentError, AgentInvocationError, ToolInvocationError
 from atomic_agentic.core.sentinels import NO_VAL
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.agents.data_classes import AgentTurn
@@ -107,6 +107,34 @@ def post_one_required_plus_default(result: str, suffix: str = "!") -> str:
     return f"{result}{suffix}"
 
 
+def post_with_suffix(result: str, suffix: str) -> str:
+    return f"{result}{suffix}"
+
+
+def post_with_custom_key(raw: str, suffix: str = "!") -> str:
+    return f"{raw}{suffix}"
+
+
+def post_with_overlap(result: str, tone: str = "post-default") -> dict[str, str]:
+    return {"result": result, "tone": tone}
+
+
+def post_with_type_mismatch(result: str, tone: int) -> str:
+    return f"{result}|tone={tone}"
+
+
+def post_with_args(*items: Any) -> tuple[Any, ...]:
+    return items
+
+
+def post_with_kwargs(**items: Any) -> dict[str, Any]:
+    return dict(items)
+
+
+def post_with_post_only_args(result: str, *extras: Any) -> str:
+    return f"{result}|extras={extras!r}"
+
+
 class NonStringAsyncLLMEngine(StatefulEchoLLMEngine):
     async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
         return 123
@@ -118,6 +146,8 @@ def make_agent(
     history_window: int | None = None,
     pre_invoke: Any = build_prompt,
     post_invoke: Any = package_response,
+    post_result_key: str | None = None,
+    passthrough_inputs: list[str] | None = None,
     role_prompt: str = ROLE_PROMPT,
 ) -> Agent:
     return Agent(
@@ -129,6 +159,8 @@ def make_agent(
         history_window=history_window,
         pre_invoke=pre_invoke,
         post_invoke=post_invoke,
+        post_result_key=post_result_key,
+        passthrough_inputs=passthrough_inputs,
     )
 
 
@@ -183,7 +215,7 @@ class TestAgentPipeline:
             {"role": "user", "content": "Hello from identity."},
         ]
 
-    def test_agent_schema_is_derived_from_pre_and_post_invoke(self) -> None:
+    def test_agent_schema_defaults_to_pre_invoke_parameters_without_passthroughs(self) -> None:
         agent = make_agent()
 
         assert [(param.name, param.kind, param.default) for param in agent.parameters] == [
@@ -191,6 +223,177 @@ class TestAgentPipeline:
             ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
         ]
         assert agent.return_type == "dict[str, Any]"
+
+
+class TestAgentSchemaComposition:
+    def test_post_only_passthrough_is_added_as_keyword_only_parameter(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_suffix,
+            passthrough_inputs=["suffix"],
+        )
+
+        assert [(param.name, param.kind, param.default) for param in agent.parameters] == [
+            ("topic", "POSITIONAL_OR_KEYWORD", NO_VAL),
+            ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
+            ("suffix", "KEYWORD_ONLY", NO_VAL),
+        ]
+
+    def test_post_only_passthrough_preserves_post_default(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_custom_key,
+            post_result_key="raw",
+            passthrough_inputs=["suffix"],
+        )
+
+        suffix_param = next(param for param in agent.parameters if param.name == "suffix")
+
+        assert suffix_param.kind == "KEYWORD_ONLY"
+        assert suffix_param.default == "!"
+
+    def test_overlapping_passthrough_preserves_pre_invoke_default(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_overlap,
+            passthrough_inputs=["tone"],
+        )
+
+        tone_param = next(param for param in agent.parameters if param.name == "tone")
+        result = agent.invoke({"topic": "pytest"})
+
+        assert tone_param.default == "neutral"
+        assert result == {
+            "result": "ECHO: Write about pytest in a neutral tone.",
+            "tone": "neutral",
+        }
+
+    def test_overlapping_passthrough_type_mismatch_does_not_raise(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_type_mismatch,
+            passthrough_inputs=["tone"],
+        )
+
+        assert agent.invoke({"topic": "pytest", "tone": "strict"}) == (
+            "ECHO: Write about pytest in a strict tone.|tone=strict"
+        )
+
+
+class TestAgentPostInvokeRouting:
+    def test_post_invoke_required_passthrough_is_allowed_when_configured(self) -> None:
+        agent = make_agent(
+            post_invoke=bad_post_two_required_args,
+            passthrough_inputs=["suffix"],
+        )
+
+        result = agent.invoke({"topic": "pytest", "tone": "strict", "suffix": "!"})
+
+        assert result == "ECHO: Write about pytest in a strict tone.!"
+
+    def test_missing_required_passthrough_fails_at_post_invoke_time(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_suffix,
+            passthrough_inputs=["suffix"],
+        )
+
+        with pytest.raises(
+            AgentInvocationError,
+            match="post_invoke Tool failed:.*missing required",
+        ):
+            agent.invoke({"topic": "pytest", "tone": "strict"})
+
+    def test_custom_post_result_key_routes_raw_result(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_custom_key,
+            post_result_key="raw",
+            passthrough_inputs=["suffix"],
+        )
+
+        result = agent.invoke({"topic": "pytest", "tone": "strict", "suffix": "?"})
+
+        assert agent.post_result_key == "raw"
+        assert result == "ECHO: Write about pytest in a strict tone.?"
+
+    def test_post_result_key_defaults_to_first_post_parameter(self) -> None:
+        agent = make_agent(post_invoke=post_with_custom_key)
+
+        assert agent.post_result_key == "raw"
+
+    def test_empty_post_result_key_raises(self) -> None:
+        with pytest.raises(AgentError, match="post_result_key"):
+            make_agent(post_invoke=post_with_custom_key, post_result_key="  ")
+
+    def test_unknown_post_result_key_raises(self) -> None:
+        with pytest.raises(AgentError, match="post_result_key"):
+            make_agent(post_invoke=post_with_custom_key, post_result_key="missing")
+
+    def test_post_result_key_cannot_also_be_passthrough(self) -> None:
+        with pytest.raises(AgentError, match="post_result_key"):
+            make_agent(
+                post_invoke=post_with_custom_key,
+                post_result_key="raw",
+                passthrough_inputs=["raw"],
+            )
+
+    def test_passthrough_inputs_none_defaults_to_empty_copy(self) -> None:
+        agent = make_agent()
+        passthroughs = agent.passthrough_inputs
+        passthroughs.append("mutated")
+
+        assert agent.passthrough_inputs == []
+
+    def test_passthrough_inputs_must_be_list(self) -> None:
+        with pytest.raises(AgentError, match="passthrough_inputs"):
+            make_agent(
+                post_invoke=post_with_suffix,
+                passthrough_inputs=("suffix",),  # type: ignore[arg-type]
+            )
+
+    def test_passthrough_inputs_rejects_empty_name(self) -> None:
+        with pytest.raises(AgentError, match="passthrough_inputs"):
+            make_agent(post_invoke=post_with_suffix, passthrough_inputs=[" "])
+
+    def test_passthrough_inputs_strips_names(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_suffix,
+            passthrough_inputs=[" suffix "],
+        )
+
+        assert agent.passthrough_inputs == ["suffix"]
+
+    def test_passthrough_inputs_rejects_duplicates_after_stripping(self) -> None:
+        with pytest.raises(AgentError, match="duplicate"):
+            make_agent(
+                post_invoke=post_with_suffix,
+                passthrough_inputs=["suffix", " suffix "],
+            )
+
+    def test_passthrough_input_must_name_post_parameter(self) -> None:
+        with pytest.raises(AgentError, match="passthrough_inputs"):
+            make_agent(
+                post_invoke=post_with_suffix,
+                passthrough_inputs=["missing"],
+            )
+
+    def test_post_only_variadic_passthrough_raises(self) -> None:
+        with pytest.raises(AgentError, match="Post-only passthrough"):
+            make_agent(
+                post_invoke=post_with_post_only_args,
+                passthrough_inputs=["extras"],
+            )
+
+    def test_variadic_post_result_key_is_allowed_for_args(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_args,
+            post_result_key="items",
+        )
+
+        assert agent.post_result_key == "items"
+
+    def test_variadic_post_result_key_is_allowed_for_kwargs(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_kwargs,
+            post_result_key="items",
+        )
+
+        assert agent.post_result_key == "items"
 
 
 class TestAgentContext:
@@ -365,8 +568,8 @@ class TestAgentValidation:
 
         assert result == "ECHO: WRITE ABOUT PYTEST IN A STRICT TONE."
 
-    def test_post_invoke_with_two_required_arguments_raises(self) -> None:
-        with pytest.raises(AgentError, match="exactly 1 required argument"):
+    def test_post_invoke_required_passthrough_not_configured_raises(self) -> None:
+        with pytest.raises(AgentError, match="required parameter"):
             make_agent(post_invoke=bad_post_two_required_args)
 
     def test_context_enabled_setter_rejects_non_bool(self) -> None:
@@ -415,8 +618,22 @@ class TestAgentSerialization:
 
         assert data["pre_invoke"]["name"] == "pre_invoke"
         assert data["post_invoke"]["name"] == "post_invoke"
+        assert data["post_result_key"] == agent.post_result_key
+        assert data["passthrough_inputs"] == agent.passthrough_inputs
         assert data["llm"]["type"] == "StatefulEchoLLMEngine"
         assert "secret" not in str(data)
+
+    def test_to_dict_includes_custom_post_routing_configuration(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_custom_key,
+            post_result_key="raw",
+            passthrough_inputs=["suffix"],
+        )
+
+        data = agent.to_dict()
+
+        assert data["post_result_key"] == "raw"
+        assert data["passthrough_inputs"] == ["suffix"]
 
     def test_history_property_returns_copy(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -509,6 +726,18 @@ class TestAgentAsyncInvoke:
         with pytest.raises(AgentInvocationError, match="engine returned non-string"):
             asyncio.run(agent.async_invoke({"topic": "pytest", "tone": "strict"}))
 
+    def test_async_invoke_passes_passthrough_inputs_to_post_invoke(self) -> None:
+        agent = make_agent(
+            post_invoke=post_with_suffix,
+            passthrough_inputs=["suffix"],
+        )
+
+        result = asyncio.run(
+            agent.async_invoke({"topic": "pytest", "tone": "strict", "suffix": "!"})
+        )
+
+        assert result == "ECHO: Write about pytest in a strict tone.!"
+
 
 class TestAgentAttachmentDelegation:
     def test_attach_delegates_to_engine_and_exposes_attachments(self, tmp_path: Any) -> None:
@@ -551,7 +780,7 @@ class TestAgentAttachmentDelegation:
         assert agent.attachments == {}
 
 
-class TestAgentPropertySetters:
+class TestAgentMutableRuntimeProperties:
     def test_role_prompt_setter_rejects_non_string(self) -> None:
         agent = make_agent()
 
@@ -565,10 +794,17 @@ class TestAgentPropertySetters:
 
         assert agent.role_prompt == "New role prompt."
 
-    def test_pre_invoke_setter_rebuilds_parameters(self) -> None:
+    def test_pre_and_post_invoke_are_read_only_lifecycle_references(self) -> None:
         agent = make_agent()
 
-        agent.pre_invoke = pre_with_two_fields
+        with pytest.raises(AttributeError):
+            agent.pre_invoke = build_prompt  # type: ignore[misc]
+
+        with pytest.raises(AttributeError):
+            agent.post_invoke = package_response  # type: ignore[misc]
+
+    def test_constructor_with_custom_pre_invoke_builds_parameters(self) -> None:
+        agent = make_agent(pre_invoke=pre_with_two_fields)
 
         assert [param.name for param in agent.parameters] == ["subject", "style"]
         assert agent.invoke({"subject": "pytest", "style": "direct"}) == {
@@ -577,47 +813,37 @@ class TestAgentPropertySetters:
             "was_postprocessed": True,
         }
 
-    def test_pre_invoke_setter_rejects_non_string_return_type(self) -> None:
-        agent = make_agent()
-
+    def test_constructor_rejects_pre_invoke_non_string_return_type(self) -> None:
         with pytest.raises(AgentError, match="pre_invoke"):
-            agent.pre_invoke = pre_returns_int
+            make_agent(pre_invoke=pre_returns_int)
 
-    def test_post_invoke_setter_rebuilds_return_type(self) -> None:
-        agent = make_agent()
-
-        agent.post_invoke = defaulted_post_invoke
+    def test_constructor_with_custom_post_invoke_sets_return_type(self) -> None:
+        agent = make_agent(post_invoke=defaulted_post_invoke)
 
         assert agent.return_type == "str"
         assert agent.invoke({"topic": "pytest", "tone": "strict"}) == (
             "ECHO: WRITE ABOUT PYTEST IN A STRICT TONE."
         )
 
-    def test_post_invoke_setter_rejects_zero_parameter_callable(self) -> None:
-        agent = make_agent()
-
+    def test_constructor_rejects_zero_parameter_post_invoke(self) -> None:
         with pytest.raises(AgentError, match="post_invoke"):
-            agent.post_invoke = post_zero_args
+            make_agent(post_invoke=post_zero_args)
 
-    def test_post_invoke_setter_accepts_one_required_plus_defaults(self) -> None:
-        agent = make_agent()
-
-        agent.post_invoke = post_one_required_plus_default
+    def test_constructor_accepts_post_invoke_one_required_plus_defaults(self) -> None:
+        agent = make_agent(post_invoke=post_one_required_plus_default)
 
         assert agent.invoke({"topic": "pytest", "tone": "strict"}) == (
             "ECHO: Write about pytest in a strict tone.!"
         )
 
-    def test_pre_invoke_setter_accepts_tool_instance(self) -> None:
-        agent = make_agent()
+    def test_constructor_accepts_pre_invoke_tool_instance(self) -> None:
         tool = Tool(
             function=pre_with_two_fields,
             name="custom_pre",
             namespace="tests",
             description="Custom preprocessor.",
         )
-
-        agent.pre_invoke = tool
+        agent = make_agent(pre_invoke=tool)
 
         assert agent.pre_invoke is tool
         assert [param.name for param in agent.parameters] == ["subject", "style"]
