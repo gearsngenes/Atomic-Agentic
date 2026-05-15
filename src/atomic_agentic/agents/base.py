@@ -954,9 +954,9 @@ class Agent(AtomicInvokable):
     def build_messages(self, system_prompt: str, turns: List[AgentTurn], prompt: str) -> List[Dict[str, str]]:
         """Build LLM-facing message dicts from a system prompt, rendered turns, and current prompt.
 
-        This method does not mutate stored memory. Agent Turns are provided by the caller
-        and rendered through `render_turn(...)`, allowing subclasses to
-        control how their canonical turn records become provider-facing messages.
+        This method is stateless and does not depend on or mutate any internal Agent state.
+        Agent Turns are provided by the caller and rendered through `render_turn(...)`,
+        allowing subclasses to control how their canonical turn records become provider-facing messages.
         """
         messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
@@ -1198,9 +1198,10 @@ class Agent(AtomicInvokable):
         """Async analog of `Agent.invoke`.
 
         This version awaits async-capable pre/post tools and the engine instead of pushing
-        the entire sync invoke path into a worker thread. It follows the same memory
-        pipeline as `invoke`: build messages, get a raw response plus metadata, run
-        post-processing, and commit a canonical turn if `context_enabled=True`.
+        the entire sync invoke path into a worker thread. It follows the same lifecycle
+        as `invoke`: filter and preprocess inputs, select the appropriate turn history window,
+        delegate to `_ainvoke` to build messages and invoke the engine, post-process the
+        result, and commit a canonical turn if `context_enabled=True`.
 
         Concurrent calls to the same stateful agent instance may interleave unless the
         caller serializes them externally or the class is later configured with an async
@@ -1274,10 +1275,9 @@ class Agent(AtomicInvokable):
         2) ``prompt = pre_invoke.invoke(inputs)`` → must be a ``str``.
         - If the Tool raises :class:`ToolInvocationError`, it propagates unchanged.
         - Other exceptions are wrapped as :class:`AgentInvocationError`.
-        3) Build the messages list from the optional role prompt, the windowed
-        history, and the current user ``prompt``.
-        4) Delegate to :meth:`_invoke`, which performs the actual engine call and
-        returns the raw result plus turn metadata for this run.
+        3) Select the appropriate turn history window according to ``history_window`` and ``context_enabled``.
+        4) Delegate to :meth:`_invoke`, which builds the messages list, invokes the engine,
+        and returns the raw result plus turn metadata for this run.
         5) Run ``post_invoke`` on the raw result and configured passthrough inputs to obtain the final output.
         6) If ``context_enabled`` is True, construct and commit the newest turn
         into persistent history.
