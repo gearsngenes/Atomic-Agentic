@@ -951,24 +951,18 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
-    def build_messages(self, prompt: str) -> List[Dict[str, str]]:
-        """Build LLM-facing message dicts from role prompt, rendered prior turns, and current prompt.
+    def build_messages(self, system_prompt: str, turns: List[AgentTurn], prompt: str) -> List[Dict[str, str]]:
+        """Build LLM-facing message dicts from a system prompt, rendered turns, and current prompt.
 
-        This method does not mutate stored memory. Prior turns are selected according to
-        `history_window` and rendered through `render_turn(...)`, allowing subclasses to
+        This method does not mutate stored memory. Agent Turns are provided by the caller
+        and rendered through `render_turn(...)`, allowing subclasses to
         control how their canonical turn records become provider-facing messages.
         """
-        messages: List[Dict[str, str]] = [{"role": "system", "content": self.role_prompt}]
+        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
-        if self._context_enabled and self._history:
-            if self._history_window is None:
-                prior = self._history
-            elif self._history_window == 0:
-                prior = []
-            else:
-                prior = self._history[-self._history_window:]
 
-            for turn in prior:
+        if turns:
+            for turn in turns:
                 messages.extend(self.render_turn(turn))
 
         user_msg = {"role": "user", "content": prompt}
@@ -1077,7 +1071,7 @@ class Agent(AtomicInvokable):
 
         return pre_inputs, passthrough_inputs
 
-    async def _ainvoke(self, messages: List[Dict[str, str]]) -> Tuple[Any, Mapping[str, Any]]:
+    async def _ainvoke(self, turns: List[AgentTurn], prompt: str) -> Tuple[Any, Mapping[str, Any]]:
         """Async internal call path used by `async_invoke`.
 
         Default implementation delegates to the engine's async interface and returns the
@@ -1089,6 +1083,7 @@ class Agent(AtomicInvokable):
         """
         try:
             logger.debug(f"[Agent - {self.name}]._ainvoke: Invoking LLM asynchronously")
+            messages = self.build_messages(self.role_prompt, turns, prompt)
             text = await self._llm_engine.async_invoke({"messages": messages})
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine async invocation failed: {e}") from e
@@ -1100,7 +1095,7 @@ class Agent(AtomicInvokable):
 
         return text, {}
 
-    def _invoke(self, messages: List[Dict[str, str]]) -> Tuple[Any, Mapping[str, Any]]:
+    def _invoke(self, turns: List[AgentTurn], prompt: str) -> Tuple[Any, Mapping[str, Any]]:
         """Internal call path used by :meth:`invoke`.
 
         This base implementation:
@@ -1116,6 +1111,7 @@ class Agent(AtomicInvokable):
         # 1) Call engine (attachments are managed by the engine itself)
         try:
             logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
+            messages = self.build_messages(self.role_prompt, turns, prompt)
             text = self._llm_engine.invoke({"messages": messages})
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine invocation failed: {e}") from e
@@ -1228,11 +1224,18 @@ class Agent(AtomicInvokable):
                 f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
             )
 
-        logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
-        messages = self.build_messages(prompt)
+        # Construct the set of Turns to pass to _ainvoke
+        logger.debug(f"Agent.{self.name} selecting turns for class '{type(self).__name__}'")
+        turns = []
+        if self._context_enabled:
+            if self._history_window is None:
+                turns = self._history
+            else:
+                turns = self._history[-self._history_window :] if self._history_window > 0 else []
 
+        # Pass the turns and produced prompt to _ainvoke
         logger.debug(f"Agent.{self.name} performing async logic for class '{type(self).__name__}'")
-        raw_result, turn_metadata = await self._ainvoke(messages=messages)
+        raw_result, turn_metadata = await self._ainvoke(turns=turns, prompt=prompt)
 
         if not isinstance(turn_metadata, Mapping):
             raise AgentInvocationError(
@@ -1323,13 +1326,21 @@ class Agent(AtomicInvokable):
                     f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
                 )
 
-            # Build messages
-            logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
-            messages = self.build_messages(prompt)
+            # Construct the set of Turns to pass to _ainvoke
+            logger.debug(f"Agent.{self.name} selecting turns for class '{type(self).__name__}'")
+            turns = []
+            if self._context_enabled:
+                if self._history_window is None:
+                    turns = self._history
+                else:
+                    turns = self._history[-self._history_window :] if self._history_window > 0 else []
+
+            # Pass the turns and produced prompt to _ainvoke
+            logger.debug(f"Agent.{self.name} performing async logic for class '{type(self).__name__}'")
 
             # Invoke core logic
             logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
-            raw_result, turn_metadata = self._invoke(messages=messages)
+            raw_result, turn_metadata = self._invoke(turns=turns, prompt=prompt)
 
             if not isinstance(turn_metadata, Mapping):
                 raise AgentInvocationError(
