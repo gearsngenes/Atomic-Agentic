@@ -315,18 +315,23 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
     Template-Method Loop
     --------------------
-    The ``_invoke(messages=...)`` method (FINAL; do not override) orchestrates::
+    The ``_invoke(turns, prompt)`` and ``_ainvoke(turns, prompt)`` methods are
+    FINAL; subclasses should not override them. They receive the selected
+    canonical turns and current prompt from the base ``Agent`` lifecycle, render a
+    provider-facing message list once with ``build_messages(...)``, and then run
+    the existing ToolAgent template loop::
 
-    1. state = _initialize_run_state(messages=messages)  [subclass hook]
-    2. while not state.is_done:
-        state = _prepare_next_batch(state)             [subclass hook]
-        state = _execute_prepared_batch(state)         [base implementation]
+    1. messages = build_messages(role_prompt, turns, prompt)
+    2. state = _initialize_run_state(messages=messages)  [subclass hook]
+    3. while not state.is_done:
+        state = _prepare_next_batch(state)              [subclass hook]
+        state = _execute_prepared_batch(state)          [base implementation]
         [completion check: if return tool executed, is_done=True]
-    3. if context_enabled:
+    4. if context_enabled:
         blackboard_start = len(self._blackboard)
         state = update_blackboard(state)
         blackboard_end = len(self._blackboard)
-    4. return state.return_value, {"blackboard_start": ..., "blackboard_end": ...}
+    5. return state.return_value, {"blackboard_start": ..., "blackboard_end": ...}
 
     The returned metadata is consumed by ``_make_turn(...)`` to construct a
     ``ToolAgentTurn``. The turn stores the half-open blackboard span produced by the
@@ -1594,14 +1599,27 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     # ------------------------------------------------------------------ #
     # Template Method (FINAL)
     # ------------------------------------------------------------------ #
-    def _invoke(self, *, messages: list[dict[str, str]]) -> tuple[Any, Mapping[str, Any]]:
+    def _invoke(self, turns: List[AgentTurn], prompt: str) -> tuple[Any, Mapping[str, Any]]:
         """
-        FINAL template method (do not override in subclasses).
+        FINAL sync ToolAgent template method.
 
-        Requires subclasses to implement:
-        - _initialize_run_state(...)
-        - _prepare_next_batch(...)
+        Receives selected canonical turns and the current prompt from the base
+        ``Agent.invoke(...)`` lifecycle. This method renders those values into a
+        provider-facing message list once, then runs the existing ToolAgent
+        message-based template loop.
+
+        Subclasses should not override this method. They should implement:
+        - ``_initialize_run_state(messages=...)``
+        - ``_prepare_next_batch(state)``
+
+        Returns
+        -------
+        tuple[Any, Mapping[str, Any]]
+            The raw return-tool value and turn metadata consumed by
+            ``_make_turn(...)``.
         """
+        messages = self.build_messages(self.role_prompt, turns, prompt)
+
         if not messages:
             raise ToolAgentError("ToolAgent._invoke requires a non-empty messages list.")
 
@@ -1645,33 +1663,40 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             "blackboard_start": blackboard_start,
             "blackboard_end": blackboard_end,
         }
-        # Add any additional run metadata from the run state
+        # Add any additional run metadata from the run state.
         turn_metadata.update(state.run_metadata)
 
         return state.return_value, turn_metadata
 
     async def _ainvoke(
         self,
-        *,
-        messages: list[dict[str, str]],
+        turns: List[AgentTurn],
+        prompt: str,
     ) -> tuple[Any, Mapping[str, Any]]:
         """
-        Async ToolAgent template method.
+        FINAL async ToolAgent template method.
 
-        Mirrors the sync `_invoke(...)` loop, but offloads the current sync planning hooks
-        to worker threads and awaits the async batch executor for tool execution.
+        Receives selected canonical turns and the current prompt from the base
+        ``Agent.async_invoke(...)`` lifecycle. This method renders those values
+        into a provider-facing message list once, then runs the existing
+        ToolAgent message-based template loop.
 
-        Subclasses keep the same minimal contract:
-        - `_initialize_run_state(...)` stays sync
-        - `_prepare_next_batch(...)` stays sync
-        - only the execution phase is natively async
+        Mirrors the sync ``_invoke(...)`` loop, but offloads the current sync
+        planning hooks to worker threads and awaits the async batch executor for
+        tool execution.
+
+        Subclasses should not override this method. They should implement:
+        - ``_initialize_run_state(messages=...)``
+        - ``_prepare_next_batch(state)``
 
         Returns
         -------
         tuple[Any, Mapping[str, Any]]
-            The raw return-tool value and metadata containing `blackboard_start` and
-            `blackboard_end`.
+            The raw return-tool value and metadata containing ``blackboard_start``
+            and ``blackboard_end``.
         """
+        messages = self.build_messages(self.role_prompt, turns, prompt)
+
         if not messages:
             raise ToolAgentError("ToolAgent._ainvoke requires a non-empty messages list.")
 
@@ -1719,7 +1744,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             "blackboard_start": blackboard_start,
             "blackboard_end": blackboard_end,
         }
-        # Add any additional run metadata from the run state
+        # Add any additional run metadata from the run state.
         turn_metadata.update(state.run_metadata)
 
         return state.return_value, turn_metadata

@@ -72,7 +72,9 @@ def main() -> None:
 
     print("\n=== Messages that would be sent on the next invoke ===")
     next_messages = agent.build_messages(
-        "Now explain why turn-native memory is useful."
+        system_prompt = agent.role_prompt,
+        turns = agent.turn_history,
+        prompt = "Now explain why turn-native memory is useful."
     )
     pprint.pp(next_messages)
 

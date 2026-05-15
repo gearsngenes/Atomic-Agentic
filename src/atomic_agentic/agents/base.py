@@ -65,9 +65,9 @@ class Agent(AtomicInvokable):
     Schema-driven LLM Agent.
 
     An Agent is a stateful software unit that points to an LLM engine and carries
-    a persona/system role prompt. It accepts a single input mapping and uses a
-    pre-invoke Tool to convert a subset of that mapping into a prompt string
-    before invoking the engine.
+    a system/role prompt. It accepts a single input mapping and uses a
+    pre-invoke Tool to convert a subset of that mapping into the current prompt
+    string for the protected invocation path.
 
     Core behavior
     -------------
@@ -76,16 +76,20 @@ class Agent(AtomicInvokable):
     1) Filter the caller-provided input mapping through the Agent's composed
        ``AtomicInvokable`` input contract.
     2) Split the filtered mapping into:
-       - ``pre_invoke`` inputs, used to build the prompt.
+       - ``pre_invoke`` inputs, used to produce the current prompt.
        - post-invoke passthrough inputs, copied by configured name.
     3) ``pre_invoke.invoke(pre_inputs) -> str``.
-    4) Build messages from role prompt, rendered prior turns, and current prompt.
-    5) Delegate to ``_invoke(messages)`` to obtain a raw response plus turn metadata.
-    6) Assemble post-invoke inputs from:
+    4) Select prior ``AgentTurn`` records according to ``context_enabled`` and
+       ``history_window``.
+    5) Delegate ``turns`` and ``prompt`` to ``_invoke(...)`` or ``_ainvoke(...)``
+       to obtain a raw response plus turn metadata.
+    6) The protected invocation path owns any provider-facing message rendering
+       it needs, usually through ``build_messages(...)``.
+    7) Assemble post-invoke inputs from:
        - the raw response under ``post_result_key``.
        - configured passthrough inputs.
-    7) ``post_invoke.invoke(post_inputs) -> final output``.
-    8) Record a canonical turn if ``context_enabled``; return the final output.
+    8) ``post_invoke.invoke(post_inputs) -> final output``.
+    9) Record a canonical turn if ``context_enabled``; return the final output.
 
     Inputs and schema
     -----------------
@@ -109,7 +113,9 @@ class Agent(AtomicInvokable):
     -------------------
     - The Agent keeps an in-memory history of ``AgentTurn`` objects.
     - ``history_window`` controls how many turns from the tail of stored history
-      are rendered into future LLM-facing messages.
+      are selected for the protected invocation path.
+    - Selected turns are rendered into provider-facing messages only when an
+      invocation path calls ``build_messages(...)`` or equivalent rendering logic.
     - Stored history is append-only; no trimming or summarization is performed by
       default.
     - ``history`` is currently a deprecated rendered compatibility view.
@@ -127,11 +133,12 @@ class Agent(AtomicInvokable):
     filter_extraneous_inputs : Optional[bool], default None
         Agent-level filtering policy. If None, inherits from ``pre_invoke``.
     role_prompt : Optional[str], default None
-        Optional system persona. If None or empty, a default assistant persona is
+        Optional system prompt. If None or empty, a default assistant prompt is
         used.
     context_enabled : bool, default True
-        If True, the agent renders prior turns and records new turns. If False,
-        no prior turns are sent and no new turns are recorded.
+        If True, prior turns are selected for the protected invocation path and
+        completed invocations are stored as canonical turns. If False, no prior
+        turns are selected and no new turns are recorded.
     pre_invoke : Optional[Tool or Callable], default None
         Tool that converts pre-invoke inputs into a prompt string. If None, a
         strict identity Tool is used that accepts ``{"prompt": str}``.
@@ -149,8 +156,8 @@ class Agent(AtomicInvokable):
         ``post_result_key``. Post-only passthrough parameters are grafted into
         the Agent schema as keyword-only parameters.
     history_window : Optional[int], default None
-        Send-window measured in turns. None sends all stored turns; 0 sends no
-        prior turns. Stored history is never trimmed.
+        Turn-selection window. None selects all stored turns; 0 selects no prior
+        turns. Stored history is never trimmed.
     response_preview_limit : Optional[int], default None
         Optional character limit applied only when rendering stored assistant
         responses into future LLM-facing message history. Stored turn values are
@@ -239,13 +246,13 @@ class Agent(AtomicInvokable):
             self._role_prompt = role_prompt.strip()
         self._context_enabled: bool = context_enabled
 
-        # history_window: strict int semantics (>= 0). None means send-all mode.
+        # history_window: strict int semantics (>= 0). None means select all stored turns.
         if history_window is not None and (not type(history_window) is int or history_window < 0):
             raise AgentError("history_window must be an int >= 0 or be 'None'.")
         self._history_window: Optional[int] = history_window
 
         # Stored turn history.
-        # We never trim storage; we only limit what we send to the engine.
+        # We never trim storage; we only limit which turns are selected per invocation.
         self._history: List[AgentTurn] = []
 
         # Store history-rendering controls.
@@ -809,7 +816,7 @@ class Agent(AtomicInvokable):
 
     @property
     def role_prompt(self) -> str:
-        """System persona rendered as the first message."""
+        """Base system prompt supplied when provider-facing messages are rendered."""
         return self._role_prompt
 
     @role_prompt.setter
@@ -838,11 +845,11 @@ class Agent(AtomicInvokable):
     @property
     def context_enabled(self) -> bool:
         """
-        Whether the agent uses memory context.
+        Whether the agent uses turn memory.
 
-        If True, prior turns are rendered into future messages and completed
-        invocations are stored as turns. If False, no prior turns are sent and
-        no new turns are recorded.
+        If True, prior turns are selected for the protected invocation path and
+        completed invocations are stored as canonical turns. If False, no prior
+        turns are selected and no new turns are recorded.
         """
         return self._context_enabled
 
@@ -855,10 +862,12 @@ class Agent(AtomicInvokable):
     @property
     def history_window(self) -> Optional[int]:
         """
-        Number of turns to include from the tail of stored turn history.
+        Number of stored turns to select from the tail of turn history.
 
-        None sends all stored turns. 0 sends no prior turns. Stored history is
-        never trimmed by this setting.
+        None selects all stored turns. 0 selects no prior turns. Stored history is
+        never trimmed by this setting. Selected turns may later be rendered into
+        provider-facing messages by ``_invoke(...)``, ``_ainvoke(...)``, or
+        subclass-specific logic.
         """
         return self._history_window
 
@@ -951,24 +960,27 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
-    def build_messages(self, prompt: str) -> List[Dict[str, str]]:
-        """Build LLM-facing message dicts from role prompt, rendered prior turns, and current prompt.
+    def build_messages(self, system_prompt: str, turns: List[AgentTurn], prompt: str) -> List[Dict[str, str]]:
+        """Render provider-facing message dicts from canonical turn inputs.
 
-        This method does not mutate stored memory. Prior turns are selected according to
-        `history_window` and rendered through `render_turn(...)`, allowing subclasses to
-        control how their canonical turn records become provider-facing messages.
+        This method is the default rendering boundary between Agent-native
+        memory and LLM-engine-facing chat messages. It does not select turns and
+        does not mutate internal history; callers provide the exact turn window
+        to render.
+
+        Each supplied turn is rendered through ``render_turn(...)``, allowing
+        subclasses to preserve richer canonical turn records while customizing
+        their provider-facing representation. The current prompt is appended as
+        the final user message.
+
+        Subclasses may call this method multiple times with different system
+        prompts, turn windows, or current prompts when a more complex invocation
+        requires multiple model calls.
         """
-        messages: List[Dict[str, str]] = [{"role": "system", "content": self.role_prompt}]
+        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
-        if self._context_enabled and self._history:
-            if self._history_window is None:
-                prior = self._history
-            elif self._history_window == 0:
-                prior = []
-            else:
-                prior = self._history[-self._history_window:]
-
-            for turn in prior:
+        if turns:
+            for turn in turns:
                 messages.extend(self.render_turn(turn))
 
         user_msg = {"role": "user", "content": prompt}
@@ -977,12 +989,15 @@ class Agent(AtomicInvokable):
         return messages
 
     def render_turn(self, turn: AgentTurn) -> List[Dict[str, str]]:
-        """Render one stored AgentTurn into an LLM-facing user/assistant message pair.
+        """Render one canonical AgentTurn into LLM-facing messages.
 
-        The assistant content is selected from either `turn.raw_response` or
-        `turn.final_response` according to `assistant_response_source`. The optional
-        `response_preview_limit` is applied only to the rendered text; stored turn values
-        are never mutated.
+        The assistant content is selected from either ``turn.raw_response`` or
+        ``turn.final_response`` according to ``assistant_response_source``. The
+        optional ``response_preview_limit`` is applied only to the rendered text;
+        stored turn values are never mutated.
+
+        Subclasses can override this method to preserve richer canonical turn
+        records while controlling their provider-facing representation.
         """
         if not isinstance(turn, AgentTurn):
             raise AgentInvocationError(
@@ -1017,9 +1032,12 @@ class Agent(AtomicInvokable):
     ) -> AgentTurn:
         """Construct the canonical stored turn for one completed invocation.
 
-        Base Agent turns accept no extra metadata. Subclasses that return metadata from
-        `_invoke(...)` or `_ainvoke(...)` should override this method and consume that
-        metadata explicitly.
+        Base Agent turns accept no extra metadata. Subclasses that return
+        metadata from ``_invoke(...)`` or ``_ainvoke(...)`` should override this
+        method and consume that metadata explicitly.
+
+        Protected invocation methods should return metadata for this method to
+        consume rather than mutating ``self._history`` directly.
         """
         if metadata:
             raise AgentInvocationError(
@@ -1077,18 +1095,24 @@ class Agent(AtomicInvokable):
 
         return pre_inputs, passthrough_inputs
 
-    async def _ainvoke(self, messages: List[Dict[str, str]]) -> Tuple[Any, Mapping[str, Any]]:
-        """Async internal call path used by `async_invoke`.
+    async def _ainvoke(self, turns: List[AgentTurn], prompt: str) -> Tuple[Any, Mapping[str, Any]]:
+        """Async internal call path used by ``async_invoke``.
 
-        Default implementation delegates to the engine's async interface and returns the
-        raw engine response plus a metadata mapping for `_make_turn(...)`.
+        The protected async contract receives the selected canonical turns plus
+        the current prompt string. This base implementation renders those values
+        into provider-facing messages with ``build_messages(...)``, delegates to
+        the engine's async interface, and returns the raw engine response plus a
+        metadata mapping for ``_make_turn(...)``.
 
-        Subclasses may override this method to implement more complex async behavior, but
-        must not mutate `self._history` directly. Memory is committed by `async_invoke`
-        after post-processing has produced the final response.
+        Subclasses may override this method to implement more complex async
+        behavior, including delayed rendering, multiple model calls, or alternate
+        system prompts. They must not mutate ``self._history`` directly; memory
+        is committed by ``async_invoke`` after post-processing has produced the
+        final response.
         """
         try:
             logger.debug(f"[Agent - {self.name}]._ainvoke: Invoking LLM asynchronously")
+            messages = self.build_messages(self.role_prompt, turns, prompt)
             text = await self._llm_engine.async_invoke({"messages": messages})
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine async invocation failed: {e}") from e
@@ -1100,22 +1124,25 @@ class Agent(AtomicInvokable):
 
         return text, {}
 
-    def _invoke(self, messages: List[Dict[str, str]]) -> Tuple[Any, Mapping[str, Any]]:
-        """Internal call path used by :meth:`invoke`.
+    def _invoke(self, turns: List[AgentTurn], prompt: str) -> Tuple[Any, Mapping[str, Any]]:
+        """Internal call path used by ``invoke``.
 
-        This base implementation:
-        - Invokes the configured LLM engine with the provided ``messages``.
-        - Returns the raw engine response plus turn metadata.
+        The protected sync contract receives the selected canonical turns plus
+        the current prompt string. This base implementation renders those values
+        into provider-facing messages with ``build_messages(...)``, delegates to
+        the configured LLM engine, and returns the raw engine response plus a
+        metadata mapping for ``_make_turn(...)``.
 
         Subclasses may override this method to implement more complex behavior,
-        but **must not** mutate ``self._history`` directly. Instead, they should
-        return:
-        - a raw response
-        - a metadata mapping consumed by :meth:`_make_turn`
+        including delayed rendering, multiple model calls, or alternate system
+        prompts. They must not mutate ``self._history`` directly; memory is
+        committed by ``invoke`` after post-processing has produced the final
+        response.
         """
         # 1) Call engine (attachments are managed by the engine itself)
         try:
             logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
+            messages = self.build_messages(self.role_prompt, turns, prompt)
             text = self._llm_engine.invoke({"messages": messages})
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine invocation failed: {e}") from e
@@ -1199,12 +1226,20 @@ class Agent(AtomicInvokable):
         self._history.clear()
 
     async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
-        """Async analog of `Agent.invoke`.
+        """Async analog of ``Agent.invoke``.
 
-        This version awaits async-capable pre/post tools and the engine instead of pushing
-        the entire sync invoke path into a worker thread. It follows the same memory
-        pipeline as `invoke`: build messages, get a raw response plus metadata, run
-        post-processing, and commit a canonical turn if `context_enabled=True`.
+        This version awaits async-capable pre/post tools and the engine instead
+        of pushing the entire sync invoke path into a worker thread. It follows
+        the same lifecycle as ``invoke``:
+
+        1) Filter and split inputs.
+        2) Run ``pre_invoke`` to produce the current prompt string.
+        3) Select the appropriate turn window according to ``history_window`` and
+           ``context_enabled``.
+        4) Delegate ``turns`` and ``prompt`` to ``_ainvoke(...)``, which owns any
+           provider-facing rendering and async generation work.
+        5) Run ``post_invoke`` on the raw result and configured passthrough inputs.
+        6) Commit a canonical turn if ``context_enabled=True``.
 
         Concurrent calls to the same stateful agent instance may interleave unless the
         caller serializes them externally or the class is later configured with an async
@@ -1228,11 +1263,18 @@ class Agent(AtomicInvokable):
                 f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
             )
 
-        logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
-        messages = self.build_messages(prompt)
+        # Select prior turns for the protected invocation path.
+        logger.debug(f"Agent.{self.name} selecting turns for class '{type(self).__name__}'")
+        turns = []
+        if self._context_enabled:
+            if self._history_window is None:
+                turns = self._history
+            else:
+                turns = self._history[-self._history_window :] if self._history_window > 0 else []
 
+        # Delegate selected turns and current prompt to the protected core logic.
         logger.debug(f"Agent.{self.name} performing async logic for class '{type(self).__name__}'")
-        raw_result, turn_metadata = await self._ainvoke(messages=messages)
+        raw_result, turn_metadata = await self._ainvoke(turns=turns, prompt=prompt)
 
         if not isinstance(turn_metadata, Mapping):
             raise AgentInvocationError(
@@ -1263,22 +1305,25 @@ class Agent(AtomicInvokable):
         return result
 
     def invoke(self, inputs: Mapping[str, Any]) -> Any:
-        """Invoke the Agent with a single **input mapping**.
+        """Invoke the Agent with a single input mapping.
 
         Steps
         -----
-        1) Validate ``inputs`` is a :class:`~collections.abc.Mapping`.
-        2) ``prompt = pre_invoke.invoke(inputs)`` → must be a ``str``.
-        - If the Tool raises :class:`ToolInvocationError`, it propagates unchanged.
-        - Other exceptions are wrapped as :class:`AgentInvocationError`.
-        3) Build the messages list from the optional role prompt, the windowed
-        history, and the current user ``prompt``.
-        4) Delegate to :meth:`_invoke`, which performs the actual engine call and
-        returns the raw result plus turn metadata for this run.
-        5) Run ``post_invoke`` on the raw result and configured passthrough inputs to obtain the final output.
-        6) If ``context_enabled`` is True, construct and commit the newest turn
-        into persistent history.
-        7) Return the final output.
+        1) Filter the caller-provided mapping through the Agent's input contract.
+        2) Split filtered inputs into ``pre_invoke`` inputs and post-invoke
+           passthrough inputs.
+        3) Run ``pre_invoke(pre_inputs)`` to produce the current prompt string.
+           If the Tool raises ``ToolInvocationError``, it propagates unchanged.
+           Other exceptions are wrapped as ``AgentInvocationError``.
+        4) Select the appropriate turn window according to ``history_window`` and
+           ``context_enabled``.
+        5) Delegate ``turns`` and ``prompt`` to ``_invoke(...)``, which owns any
+           provider-facing rendering and sync generation work.
+        6) Run ``post_invoke`` on the raw result and configured passthrough inputs
+           to obtain the final output.
+        7) If ``context_enabled`` is True, construct and commit the newest
+           canonical turn into persistent history.
+        8) Return the final output.
 
         Parameters
         ----------
@@ -1305,11 +1350,11 @@ class Agent(AtomicInvokable):
         # main invoke lock
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
-            # Filter inputs
+            # Filter inputs.
             inputs = self.filter_inputs(inputs)
             pre_inputs, post_inputs = self._split_inputs(inputs)
 
-            # Preprocess inputs to prompt string
+            # Preprocess inputs to prompt string.
             try:
                 logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
                 prompt = self._pre_invoke.invoke(pre_inputs)
@@ -1323,20 +1368,25 @@ class Agent(AtomicInvokable):
                     f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
                 )
 
-            # Build messages
-            logger.debug(f"Agent.{self.name} building messages for class '{type(self).__name__}'")
-            messages = self.build_messages(prompt)
+            # Select prior turns for the protected invocation path.
+            logger.debug(f"Agent.{self.name} selecting turns for class '{type(self).__name__}'")
+            turns = []
+            if self._context_enabled:
+                if self._history_window is None:
+                    turns = self._history
+                else:
+                    turns = self._history[-self._history_window :] if self._history_window > 0 else []
 
-            # Invoke core logic
+            # Delegate selected turns and current prompt to the protected core logic.
             logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
-            raw_result, turn_metadata = self._invoke(messages=messages)
+            raw_result, turn_metadata = self._invoke(turns=turns, prompt=prompt)
 
             if not isinstance(turn_metadata, Mapping):
                 raise AgentInvocationError(
                     f"_invoke returned non-mapping metadata (type={type(turn_metadata)!r})"
                 )
 
-            # Postprocess raw result
+            # Postprocess raw result.
             try:
                 logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
                 post_inputs[self._post_result_key] = raw_result
@@ -1346,7 +1396,7 @@ class Agent(AtomicInvokable):
             except Exception as e:  # pragma: no cover
                 raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
 
-            # Update history if enabled
+            # Update history if enabled.
             if self._context_enabled:
                 logger.debug(f"Agent.{self.name} updating history")
                 turn = self._make_turn(
@@ -1357,7 +1407,7 @@ class Agent(AtomicInvokable):
                 )
                 self._history.append(turn)
 
-            # Final logging and return
+            # Final logging and return.
             logger.info(f"[{self.full_name} finished]")
             return result
 
