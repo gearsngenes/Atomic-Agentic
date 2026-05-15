@@ -851,7 +851,8 @@ class TestAgentMutableRuntimeProperties:
 class UnexpectedMetadataAgent(Agent):
     def _invoke(
         self,
-        messages: list[dict[str, str]],
+        turns: list[AgentTurn],
+        prompt: str,
     ) -> tuple[Any, Mapping[str, Any]]:
         return "raw metadata response", {"unexpected": True}
 
@@ -859,7 +860,8 @@ class UnexpectedMetadataAgent(Agent):
 class NonMappingMetadataAgent(Agent):
     def _invoke(
         self,
-        messages: list[dict[str, str]],
+        turns: list[AgentTurn],
+        prompt: str,
     ) -> tuple[Any, Any]:
         return "raw metadata response", []
 
@@ -867,7 +869,8 @@ class NonMappingMetadataAgent(Agent):
 class AsyncUnexpectedMetadataAgent(Agent):
     async def _ainvoke(
         self,
-        messages: list[dict[str, str]],
+        turns: list[AgentTurn],
+        prompt: str,
     ) -> tuple[Any, Mapping[str, Any]]:
         return "raw async metadata response", {"unexpected": True}
 
@@ -875,7 +878,8 @@ class AsyncUnexpectedMetadataAgent(Agent):
 class AsyncNonMappingMetadataAgent(Agent):
     async def _ainvoke(
         self,
-        messages: list[dict[str, str]],
+        turns: list[AgentTurn],
+        prompt: str,
     ) -> tuple[Any, Any]:
         return "raw async metadata response", []
 
