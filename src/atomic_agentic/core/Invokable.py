@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import Any, Mapping, Dict
-import re
 import threading
 import asyncio
 from uuid import uuid4
 
-from .sentinels import NO_VAL
+from .Constants import IDENTIFIER_PATTERN, NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order
 
 # Canonical mapping of parameter name -> ParamSpec (legacy, for backward compat)
@@ -16,9 +15,6 @@ ParameterMap = dict[str, ParamSpec]
 # Legacy aliases for backward compatibility
 ArgumentMap = ParameterMap  # Deprecated: use ParameterMap instead
 ArgSpec = ParamSpec  # Deprecated: use ParamSpec instead
-
-# Valid name: like a Python identifier (letters, digits, underscores), must not start with a digit
-_VALID_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class AtomicInvokable(ABC):
@@ -114,7 +110,7 @@ class AtomicInvokable(ABC):
                 raise TypeError(
                     f"{type(self).__name__}: parameter names must be non-empty strings"
                 )
-            if not _VALID_NAME.match(p.name):
+            if not IDENTIFIER_PATTERN.fullmatch(p.name):
                 raise ValueError(
                     f"{type(self).__name__}: parameter name {p.name!r} is not a valid identifier"
                 )
@@ -155,7 +151,7 @@ class AtomicInvokable(ABC):
     def name(self, value: str) -> None:
         if not isinstance(value, str) or not value.strip():
             raise ValueError("name must be a non-empty string")
-        if not _VALID_NAME.match(value):
+        if not IDENTIFIER_PATTERN.fullmatch(value):
             raise ValueError(
                 f"name must be alphanumeric/underscore and not start with a digit; got {value!r}"
             )
@@ -197,12 +193,12 @@ class AtomicInvokable(ABC):
     @property
     def has_varargs(self) -> bool:
         """Whether this invokable accepts variable positional arguments (*args)."""
-        return any(p.kind == "VAR_POSITIONAL" for p in self._parameters)
+        return any(p.kind == ParamSpec.VAR_POSITIONAL for p in self._parameters)
 
     @property
     def has_varkwargs(self) -> bool:
         """Whether this invokable accepts variable keyword arguments (**kwargs)."""
-        return any(p.kind == "VAR_KEYWORD" for p in self._parameters)
+        return any(p.kind == ParamSpec.VAR_KEYWORD for p in self._parameters)
 
     @property
     def return_type(self) -> str:
@@ -257,9 +253,9 @@ class AtomicInvokable(ABC):
             if spec.default is not NO_VAL:
                 default_marker = f" = {spec.default!r}"
             
-            if spec.kind == "VAR_POSITIONAL":
+            if spec.kind == ParamSpec.VAR_POSITIONAL:
                 params.append(f"*{spec.name}: {ptype}{default_marker}")
-            elif spec.kind == "VAR_KEYWORD":
+            elif spec.kind == ParamSpec.VAR_KEYWORD:
                 params.append(f"**{spec.name}: {ptype}{default_marker}")
             else:
                 params.append(f"{spec.name}: {ptype}{default_marker}")

@@ -6,7 +6,7 @@ from atomic_agentic.tools.adapter import AdapterTool
 """
 from dotenv import load_dotenv
 from atomic_agentic.tools import Tool, AdapterTool
-from atomic_agentic.core.Exceptions import ToolInvocationError
+from atomic_agentic.core.Exceptions import ToolInvocationError, AgentInvocationError
 from atomic_agentic.agents import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 import json
@@ -53,7 +53,7 @@ def run_case(label: str, tool: Tool, inputs: dict) -> None:
     try:
         result = tool.invoke(inputs)
         print("OK:", result)
-    except (ToolInvocationError, ValueError, TypeError) as e:
+    except (ToolInvocationError, ValueError, TypeError, AgentInvocationError) as e:
         print("ERR:", e)
 
 
@@ -76,13 +76,14 @@ if __name__ == "__main__":
     )
 
     # Common mistakes to see strict errors
+    agent_tool_strict = AdapterTool(agent, filter_extraneous_inputs=False)
     run_case(
         "invoke: missing required 'topic'",
-        agent_tool,
+        agent_tool_strict,
         {"style": "formal", "audience": "execs"},
     )
     run_case(
         "invoke: unknown key",
-        agent_tool,
+        agent_tool_strict,
         {"topic": "refactoring", "style": "guide", "extra": 123},
     )
