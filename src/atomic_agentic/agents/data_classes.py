@@ -5,11 +5,9 @@ import re
 from typing import Any, ClassVar, Dict, Mapping
 
 from ..core.sentinels import NO_VAL
+from ..core.constants import IDENTIFIER_PATTERN
 
 __all__ = ["AgentTurn", "ToolAgentTurn", "BlackboardSlot", "ConstantSpec"]
-
-
-_VALID_CONSTANT_NAME: re.Pattern[str] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +51,7 @@ class ConstantSpec:
             raise ValueError("ConstantSpec.name must be a non-empty string.")
 
         normalized_name = self.name.strip()
-        if not _VALID_CONSTANT_NAME.fullmatch(normalized_name):
+        if not IDENTIFIER_PATTERN.fullmatch(normalized_name):
             raise ValueError(
                 "ConstantSpec.name must be alphanumeric/underscore and not start "
                 f"with a digit; got {self.name!r}."
@@ -182,12 +180,17 @@ class BlackboardSlot:
         Optional explicit scheduling barrier from a planner ``"await"`` field.
         Defaults to ``NO_VAL`` when no await barrier is present.
     """
+    EMPTY = "empty"
+    PLANNED = "planned"
+    PREPARED = "prepared"
+    EXECUTED = "executed"
+    FAILED = "failed"
     VALID_STATUSES: ClassVar[set[str]] = {
-        "empty",
-        "planned",
-        "prepared",
-        "executed",
-        "failed",
+        EMPTY,
+        PLANNED,
+        PREPARED,
+        EXECUTED,
+        FAILED,
     }
 
     step: int
@@ -254,19 +257,19 @@ class BlackboardSlot:
             raise ValueError("BlackboardSlot.await_step must be NO_VAL or an int >= 0.")
 
     def is_empty(self) -> bool:
-        return self.status == "empty"
+        return self.status == self.EMPTY
 
     def is_planned(self) -> bool:
-        return self.status == "planned"
+        return self.status == self.PLANNED
 
     def is_prepared(self) -> bool:
-        return self.status == "prepared"
+        return self.status == self.PREPARED
 
     def is_executed(self) -> bool:
-        return self.status == "executed"
+        return self.status == self.EXECUTED
 
     def is_failed(self) -> bool:
-        return self.status == "failed"
+        return self.status == self.FAILED
 
     def copy(self) -> "BlackboardSlot":
         """Return a shallow copy of this blackboard slot."""
