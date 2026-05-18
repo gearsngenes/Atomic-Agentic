@@ -7,9 +7,11 @@ import json
 
 import pytest
 
+from atomic_agentic.agents.constants import (
+    STEP_REF_PATTERN,
+    CACHE_REF_PATTERN,
+)
 from atomic_agentic.agents.tool_agents import (
-    _CACHE_TOKEN,
-    _STEP_TOKEN,
     ToolAgent,
     ToolAgentRunState,
     extract_dependencies,
@@ -309,7 +311,7 @@ class ScriptedToolAgent(ToolAgent[ScriptedRunState]):
             slot.result = NO_VAL
             slot.error = NO_VAL
             slot.step_dependencies = tuple(
-                sorted(extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN))
+                sorted(extract_dependencies(obj=args, placeholder_pattern=STEP_REF_PATTERN))
             )
             slot.await_step = NO_VAL
             slot.status = "prepared"
@@ -987,8 +989,8 @@ class TestPlaceholderResolution:
     def test_extract_dependencies_finds_nested_placeholders(self) -> None:
         obj = {"a": "<<__s0__>>", "b": ["prefix <<__s1__>>"], "<<__s2__>>": "key"}
 
-        assert extract_dependencies(obj, _STEP_TOKEN) == {0, 1, 2}
-        assert extract_dependencies(obj, _CACHE_TOKEN) == set()
+        assert extract_dependencies(obj, STEP_REF_PATTERN) == {0, 1, 2}
+        assert extract_dependencies(obj, CACHE_REF_PATTERN) == set()
 
 
 class TestExecutePreparedBatch:

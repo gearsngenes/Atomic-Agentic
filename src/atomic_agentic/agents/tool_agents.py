@@ -113,11 +113,18 @@ import pprint
 
 from .base import Agent
 from .constants import (
+    REQUIRED_PROMPT_FIELDS,
+    LIMIT_FIELD,
+    CONSTANTS_FIELD,
+    TOOLS_FIELD,
     ORCHESTRATOR_PROMPT,
     PLANNER_PROMPT,
     RETURN_TOOL_DESCRIPTION,
     RETURN_TOOL_NAME,
     RETURN_TOOL_NAMESPACE,
+    STEP_REF_PATTERN,
+    CACHE_REF_PATTERN,
+    CONST_REF_PATTERN,
 )
 from .data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot, ConstantSpec
 from ..core.Exceptions import (
@@ -136,14 +143,6 @@ from ..a2a import PyA2AtomicClient
 
 logger = logging.getLogger(__name__)
 
-# Canonical placeholders:
-#   <<__si__>>      : result of plan-local step i (0-based within the running plan)
-#   <<__ci__>>      : result of cache entry i (0-based within persisted cache)
-#   <<__k.NAME__>>  : registered ToolAgent constant named NAME
-_STEP_TOKEN: re.Pattern[str] = re.compile(r"<<__s(\d+)__>>")
-_CACHE_TOKEN: re.Pattern[str] = re.compile(r"<<__c(\d+)__>>")
-_CONSTANT_TOKEN: re.Pattern[str] = re.compile(r"<<__k\.([A-Za-z_][A-Za-z0-9_]*)__>>")
-
 def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:
     """
     Recursively extract all placeholder references from an object.
@@ -159,8 +158,8 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
         (lists, tuples, dicts, sets, scalars).
     placeholder_pattern : re.Pattern[str]
         Compiled regex pattern matching placeholders. Usually:
-        - ``_STEP_TOKEN`` for step refs (``<<__sN__>>``)
-        - ``_CACHE_TOKEN`` for cache refs (``<<__cN__>>``)
+        - ``STEP_REF_PATTERN`` for step refs (``<<__sN__>>``)
+        - ``CACHE_REF_PATTERN`` for cache refs (``<<__cN__>>``)
 
     Returns
     -------
@@ -178,7 +177,7 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
 
     Examples
     --------
-    >>> pattern = _STEP_TOKEN  # Matches <<__sN__>>
+    >>> pattern = STEP_REF_PATTERN  # Matches <<__sN__>>
     >>> obj = {\"query\": \"<<__s0__>>\", \"context\": [\"<<__s1__>>\", \"<<__s0__>>\"]}
     >>> extract_dependencies(obj, pattern)
     {0, 1}
@@ -459,11 +458,12 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         template = self._role_prompt
         limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
         try:
-            return template.format(
-                TOOLS=self.actions_context(),
-                TOOL_CALLS_LIMIT=limit_text,
-                CONSTANTS=self.constants_context(),
-            )
+            format_values = {
+                TOOLS_FIELD: self.actions_context(),
+                LIMIT_FIELD: limit_text,
+                CONSTANTS_FIELD: self.constants_context(),
+            }
+            return template.format(**format_values)
         except Exception as exc:  # pragma: no cover
             raise ToolAgentError(f"Failed to format ToolAgent role_prompt template: {exc}") from exc
 
@@ -599,8 +599,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 )
             fields.add(field_name)
 
-        required = {"TOOLS", "TOOL_CALLS_LIMIT", "CONSTANTS"}
-        missing = required - fields
+        missing = REQUIRED_PROMPT_FIELDS - fields
         if missing:
             raise ToolAgentError(
                 f"ToolAgent role_prompt template missing required placeholder(s): {', '.join(sorted(missing))}."
@@ -1012,16 +1011,16 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         }
 
         needed_cache: set[int] = set(
-            extract_dependencies(obj, placeholder_pattern=_CACHE_TOKEN)
+            extract_dependencies(obj, placeholder_pattern=CACHE_REF_PATTERN)
         )
         needed_steps: set[int] = set(
-            extract_dependencies(obj, placeholder_pattern=_STEP_TOKEN)
+            extract_dependencies(obj, placeholder_pattern=STEP_REF_PATTERN)
         )
         needed_constants: set[str] = set()
 
         def collect_constant_refs(x: Any) -> None:
             if isinstance(x, str):
-                for match in _CONSTANT_TOKEN.finditer(x):
+                for match in CONST_REF_PATTERN.finditer(x):
                     needed_constants.add(match.group(1))
                 return
             if isinstance(x, dict):
@@ -1077,15 +1076,15 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         def resolve_str(s: str) -> Any:
             # Exact placeholder -> preserve type
-            m_cache = _CACHE_TOKEN.fullmatch(s)
+            m_cache = CACHE_REF_PATTERN.fullmatch(s)
             if m_cache:
                 return cache[int(m_cache.group(1))].result
 
-            m_step = _STEP_TOKEN.fullmatch(s)
+            m_step = STEP_REF_PATTERN.fullmatch(s)
             if m_step:
                 return running[int(m_step.group(1))].result
 
-            m_constant = _CONSTANT_TOKEN.fullmatch(s)
+            m_constant = CONST_REF_PATTERN.fullmatch(s)
             if m_constant:
                 return constants_by_name[m_constant.group(1)].value
 
@@ -1105,9 +1104,9 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                     inline_limit=spec.inline_limit,
                 )
 
-            out = _CACHE_TOKEN.sub(repl_cache, s)
-            out = _STEP_TOKEN.sub(repl_step, out)
-            out = _CONSTANT_TOKEN.sub(repl_constant, out)
+            out = CACHE_REF_PATTERN.sub(repl_cache, s)
+            out = STEP_REF_PATTERN.sub(repl_step, out)
+            out = CONST_REF_PATTERN.sub(repl_constant, out)
             return out
 
         def resolve(x: Any) -> Any:
@@ -1553,7 +1552,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                     j = int(m.group(1))
                     return f"<<__c{base_len + j}__>>"
 
-                return _STEP_TOKEN.sub(repl, obj)
+                return STEP_REF_PATTERN.sub(repl, obj)
 
             if isinstance(obj, list):
                 return [rewrite_step_to_cache_placeholders(v) for v in obj]
@@ -2145,7 +2144,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             )
 
         deps: set[int] = set(
-            extract_dependencies(obj=args, placeholder_pattern=_STEP_TOKEN)
+            extract_dependencies(obj=args, placeholder_pattern=STEP_REF_PATTERN)
         )
 
         try:
@@ -2547,7 +2546,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         cache_len = len(cache_blackboard)
 
         for i, slot in enumerate(planned_slots):
-            cache_refs = extract_dependencies(slot.args, placeholder_pattern=_CACHE_TOKEN)
+            cache_refs = extract_dependencies(slot.args, placeholder_pattern=CACHE_REF_PATTERN)
             bad_cache = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
             if bad_cache:
                 raise ToolAgentError(
@@ -3331,7 +3330,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
             )
 
         cache_len = len(cache_blackboard)
-        cache_refs = extract_dependencies(slot.args, placeholder_pattern=_CACHE_TOKEN)
+        cache_refs = extract_dependencies(slot.args, placeholder_pattern=CACHE_REF_PATTERN)
         bad_cache = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
         if bad_cache:
             raise ToolAgentError(
