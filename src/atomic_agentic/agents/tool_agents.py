@@ -120,8 +120,10 @@ from .constants import (
     ORCHESTRATOR_PROMPT,
     PLANNER_PROMPT,
     RETURN_TOOL_DESCRIPTION,
+    RETURN_TOOL_FULL_NAME,
     RETURN_TOOL_NAME,
     RETURN_TOOL_NAMESPACE,
+    RETURN_VALUE_FIELD,
     STEP_REF_PATTERN,
     CACHE_REF_PATTERN,
     CONST_REF_PATTERN,
@@ -213,6 +215,8 @@ def _return(val: Any) -> Any:
     return val
 
 
+# The executable Tool instance lives in this module; RETURN_TOOL_FULL_NAME is
+# used for canonical runtime identity checks.
 return_tool = Tool(
     function=_return,
     name=RETURN_TOOL_NAME,
@@ -1245,7 +1249,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                     f"{type(self).__name__}.{self.name}: slot {idx} has invalid tool name: {tool_name!r}."
                 )
 
-            if tool_name == return_tool.full_name:
+            if tool_name == RETURN_TOOL_FULL_NAME:
                 return_indices.append(idx)
             else:
                 non_return_planned += 1
@@ -1397,7 +1401,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             # Validate existence early so failures happen before gather starts.
             self.get_tool(tool_name)
 
-            if tool_name == return_tool.full_name:
+            if tool_name == RETURN_TOOL_FULL_NAME:
                 return_indices.append(idx)
             else:
                 non_return_planned += 1
@@ -1467,7 +1471,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         state.prepared_steps = []
 
         for idx in reversed(indices):
-            if board[idx].tool == return_tool.full_name:
+            if board[idx].tool == RETURN_TOOL_FULL_NAME:
                 if state.return_value is not NO_VAL:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: return tool executed more than once."
@@ -2041,7 +2045,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                     f"{type(self).__name__}.{self.name}: {context} 'await' must be an int >= 0."
                 )
 
-            if tool == return_tool.full_name:
+            if tool == RETURN_TOOL_FULL_NAME:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: return step must not include 'await'."
                 )
@@ -2138,7 +2142,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 )
             await_step = data["await"]
 
-        if await_step is not NO_VAL and tool == return_tool.full_name:
+        if await_step is not NO_VAL and tool == RETURN_TOOL_FULL_NAME:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: return step must not include 'await'."
             )
@@ -2389,7 +2393,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                 )
             slots.append(slot.copy())
 
-        return_name = return_tool.full_name
+        return_name = RETURN_TOOL_FULL_NAME
         return_positions = [
             i for i, slot in enumerate(slots)
             if slot.tool == return_name
@@ -2409,7 +2413,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                 BlackboardSlot(
                     step=len(slots),
                     tool=return_name,
-                    args={"val": None},
+                    args={RETURN_VALUE_FIELD: None},
                     resolved_args=NO_VAL,
                     result=NO_VAL,
                     error=NO_VAL,
@@ -2480,7 +2484,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                 f"{type(self).__name__}.{self.name}: cache_blackboard must be a list."
             )
 
-        return_name = return_tool.full_name
+        return_name = RETURN_TOOL_FULL_NAME
         return_idx = len(planned_slots) - 1
 
         for i, slot in enumerate(planned_slots):
@@ -2746,7 +2750,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             )
 
         return_idx = len(planned_slots) - 1
-        if planned_slots[return_idx].tool != return_tool.full_name:
+        if planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: internal error: generated plan does not end with return tool."
             )
@@ -2794,7 +2798,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 
         if (
             return_idx != len(planned_slots) - 1
-            or planned_slots[return_idx].tool != return_tool.full_name
+            or planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME
         ):
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: internal error: return_idx mismatch during batch compilation."
@@ -3323,7 +3327,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         # Validate tool exists before this slot is later stamped into run state.
         self.get_tool(slot.tool)
 
-        if slot.tool == return_tool.full_name and duration != 0:
+        if slot.tool == RETURN_TOOL_FULL_NAME and duration != 0:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: return tool must use duration 0; "
                 f"got {duration!r}."
@@ -3537,7 +3541,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"[0, {max_duration}]; got {observe_duration!r}."
             )
 
-        if generated_slot.tool == return_tool.full_name and observe_duration != 0:
+        if generated_slot.tool == RETURN_TOOL_FULL_NAME and observe_duration != 0:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: return tool must use duration 0; "
                 f"got {observe_duration!r}."
