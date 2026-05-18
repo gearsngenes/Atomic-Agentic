@@ -24,6 +24,7 @@ from ..core.Parameters import ParamSpec
 from ..core.sentinels import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool, toolify
+from .constants import DEFAULT_ROLE_PROMPT
 from .data_classes import AgentTurn
 
 logger = logging.getLogger(__name__)
@@ -241,9 +242,15 @@ class Agent(AtomicInvokable):
 
         # Store Agent runtime configuration.
         self._llm_engine: LLMEngine = llm_engine
-        self._role_prompt: str = "You are a helpful AI assistant"
-        if role_prompt is not None and role_prompt.strip():
-            self._role_prompt = role_prompt.strip()
+        self._role_prompt: str = DEFAULT_ROLE_PROMPT
+        if role_prompt is not None:
+            if not isinstance(role_prompt, str):
+                raise TypeError(
+                    f"role_prompt must be of type 'str' or 'None', but got {type(role_prompt).__name__}"
+                )
+            cleaned_role_prompt = role_prompt.strip()
+            if cleaned_role_prompt:
+                self._role_prompt = cleaned_role_prompt
         self._context_enabled: bool = context_enabled
 
         # history_window: strict int semantics (>= 0). None means select all stored turns.
@@ -822,14 +829,14 @@ class Agent(AtomicInvokable):
     @role_prompt.setter
     def role_prompt(self, value: Optional[str]) -> None:
         if value is None:
-            self._role_prompt = "You are a helpful AI assistant"
+            self._role_prompt = DEFAULT_ROLE_PROMPT
             return
         if not isinstance(value, str):
             raise TypeError(
                 f"role_prompt must be of type 'str' or 'None', but got {type(value).__name__}"
             )
         cleaned = value.strip()
-        self._role_prompt = cleaned or "You are a helpful AI assistant"
+        self._role_prompt = cleaned or DEFAULT_ROLE_PROMPT
 
     @property
     def llm_engine(self) -> LLMEngine:
