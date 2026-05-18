@@ -112,6 +112,13 @@ from typing import Any, Callable, Dict, Generic, Mapping, Optional, Sequence, Li
 import pprint
 
 from .base import Agent
+from .constants import (
+    ORCHESTRATOR_PROMPT,
+    PLANNER_PROMPT,
+    RETURN_TOOL_DESCRIPTION,
+    RETURN_TOOL_NAME,
+    RETURN_TOOL_NAMESPACE,
+)
 from .data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot, ConstantSpec
 from ..core.Exceptions import (
     ToolAgentError,
@@ -123,8 +130,6 @@ from ..core.Invokable import AtomicInvokable
 from ..core.sentinels import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool, toolify, batch_toolify
-from ..core.Prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
-from ..core.Exceptions import ToolAgentError
 from ..mcp import MCPClientHub
 from ..a2a import PyA2AtomicClient
 
@@ -211,11 +216,9 @@ def _return(val: Any) -> Any:
 
 return_tool = Tool(
     function=_return,
-    name="return",
-    namespace="ToolAgents",
-    description=(
-        "Returns the passed-in value. Tool agents should use this to signal completion."
-    ),
+    name=RETURN_TOOL_NAME,
+    namespace=RETURN_TOOL_NAMESPACE,
+    description=RETURN_TOOL_DESCRIPTION,
 )
 
 
