@@ -76,6 +76,8 @@ class RoutingFlow(Workflow[RoutingFlowRunMetadata]):
       A ``ChildRunRecord`` describing the chosen branch execution.
     """
 
+    BRANCH_SELECTION = "branch_selection"
+
     def __init__(
         self,
         name: str,
@@ -101,7 +103,7 @@ class RoutingFlow(Workflow[RoutingFlowRunMetadata]):
 
         structured_router = StructuredInvokable(
             component=router,
-            output_schema=["branch_selection"],
+            output_schema=[RoutingFlow.BRANCH_SELECTION],
             map_single_fields=True,
             map_extras=True,
             ignore_unhandled=True,
@@ -204,7 +206,7 @@ class RoutingFlow(Workflow[RoutingFlowRunMetadata]):
         router_result: FlowResultDict,
     ) -> int:
         """Extract and validate the routing decision from a router result."""
-        selected_index = router_result.get("branch_selection", NO_VAL)
+        selected_index = router_result.get(RoutingFlow.BRANCH_SELECTION, NO_VAL)
         if selected_index is NO_VAL:
             raise ValidationError(
                 f"{self.full_name}: router result did not contain 'branch_selection'"

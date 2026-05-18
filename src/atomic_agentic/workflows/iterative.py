@@ -109,6 +109,7 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         - ``judge_run_id``: judge workflow run id for that iteration
         - ``judge_decision``: boolean decision for that iteration
     """
+    JUDGE_DECISION = "judge_decision"
 
     def __init__(
         self,
@@ -196,7 +197,7 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
 
         structured_judge = StructuredInvokable(
             component=resolved_judge,
-            output_schema=["judge_decision"],
+            output_schema=[IterativeFlow.JUDGE_DECISION],
             map_single_fields=True,
             map_extras=True,
             ignore_unhandled=True,
@@ -282,7 +283,7 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         judge_result: FlowResultDict,
     ) -> bool:
         """Extract and validate the boolean decision from a judge result."""
-        decision = judge_result.get("judge_decision", NO_VAL)
+        decision = judge_result.get(IterativeFlow.JUDGE_DECISION, NO_VAL)
         if decision is NO_VAL:
             raise ValidationError(
                 f"{self.full_name}: judge result did not contain 'judge_decision'"
