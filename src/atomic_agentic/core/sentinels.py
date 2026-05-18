@@ -10,6 +10,6 @@ This module remains intentionally small so existing imports such as:
 continue to resolve to the same singleton object used by the rest of the package.
 """
 
-from .Constants import NO_VAL
+from .constants import NO_VAL
 
 __all__ = ["NO_VAL"]

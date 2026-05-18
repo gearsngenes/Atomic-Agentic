@@ -10,7 +10,7 @@ from __future__ import annotations
 import inspect
 from typing import Any, Callable, Mapping, Optional, get_args, get_origin, get_type_hints
 
-from .Constants import IDENTIFIER_PATTERN, NO_VAL
+from .constants import IDENTIFIER_PATTERN, NO_VAL
 from .Exceptions import SchemaError
 
 __all__ = ["ParamSpec", "extract_io", "to_paramspec_list", "is_valid_parameter_order"]

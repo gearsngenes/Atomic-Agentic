@@ -6,7 +6,7 @@ import threading
 import asyncio
 from uuid import uuid4
 
-from .Constants import IDENTIFIER_PATTERN, NO_VAL
+from .constants import IDENTIFIER_PATTERN, NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order
 
 # Canonical mapping of parameter name -> ParamSpec (legacy, for backward compat)
