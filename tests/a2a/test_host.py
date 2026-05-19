@@ -5,7 +5,11 @@ from typing import Any, Mapping
 
 import pytest
 
-from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost, PYA2A_RESULT_KEY
+from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
+from atomic_agentic.a2a.constants import (
+    PYA2A_RESULT_KEY,
+    GET_INVOKABLE_METADATA_FUNCTION,
+    LIST_INVOKABLES_FUNCTION,)
 from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.core.Parameters import ParamSpec
 
@@ -251,13 +255,13 @@ class TestPyA2AtomicHostMessageHandling:
             description="Test host.",
         )
         message = make_message(
-            make_function_call_content(PyA2AtomicHost.LIST_INVOKABLES_FUNCTION)
+            make_function_call_content(LIST_INVOKABLES_FUNCTION)
         )
 
         response = host.handle_message(message)
 
         assert response.content.type == "function_response"
-        assert response.content.name == PyA2AtomicHost.LIST_INVOKABLES_FUNCTION
+        assert response.content.name == LIST_INVOKABLES_FUNCTION
         assert response.content.response["echo"]["name"] == "echo"
 
     def test_handle_get_invokable_metadata_function_call(self) -> None:
@@ -268,7 +272,7 @@ class TestPyA2AtomicHostMessageHandling:
         )
         message = make_message(
             make_function_call_content(
-                PyA2AtomicHost.GET_INVOKABLE_METADATA_FUNCTION,
+                GET_INVOKABLE_METADATA_FUNCTION,
                 [make_param_content("name", "echo")],
             )
         )

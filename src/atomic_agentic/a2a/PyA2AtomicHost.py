@@ -14,12 +14,15 @@ from python_a2a import (
 )
 
 from ..core.Invokable import AtomicInvokable
+from .constants import (
+    GET_INVOKABLE_METADATA_FUNCTION,
+    LIST_INVOKABLES_FUNCTION,
+    PYA2A_RESULT_KEY,
+)
 
-__all__ = ["PyA2AtomicHost", "PYA2A_RESULT_KEY"]
+__all__ = ["PyA2AtomicHost"]
 
 logger = logging.getLogger(__name__)
-
-PYA2A_RESULT_KEY = "__py_a2a_result__"
 
 
 class PyA2AtomicHost(A2AServer):
@@ -49,9 +52,6 @@ class PyA2AtomicHost(A2AServer):
         "function_name": <requested function name>,
       }
     """
-
-    LIST_INVOKABLES_FUNCTION = "list_invokables"
-    GET_INVOKABLE_METADATA_FUNCTION = "get_invokable_metadata"
 
     def __init__(
         self,
@@ -168,8 +168,8 @@ class PyA2AtomicHost(A2AServer):
             return self._make_text_response(
                 text=(
                     "This host expects function calls. Reserved functions: "
-                    f"{self.LIST_INVOKABLES_FUNCTION!r}, "
-                    f"{self.GET_INVOKABLE_METADATA_FUNCTION!r}. "
+                    f"{LIST_INVOKABLES_FUNCTION!r}, "
+                    f"{GET_INVOKABLE_METADATA_FUNCTION!r}. "
                     "Any other function name is treated as a registered AtomicInvokable name."
                 ),
                 message=message,
@@ -196,14 +196,14 @@ class PyA2AtomicHost(A2AServer):
                     raise ValueError(f"Duplicate parameter name {param!r} found in parameters.")
                 params[param_name] = param.value
 
-            if function_name == self.LIST_INVOKABLES_FUNCTION:
+            if function_name == LIST_INVOKABLES_FUNCTION:
                 payload = self._list_invokables_payload()
 
-            elif function_name == self.GET_INVOKABLE_METADATA_FUNCTION:
+            elif function_name == GET_INVOKABLE_METADATA_FUNCTION:
                 raw_name = params.get("name")
                 if not isinstance(raw_name, str) or not raw_name.strip():
                     raise ValueError(
-                        f"{self.GET_INVOKABLE_METADATA_FUNCTION!r} requires a non-empty 'name' parameter."
+                        f"{GET_INVOKABLE_METADATA_FUNCTION!r} requires a non-empty 'name' parameter."
                     )
                 payload = self._get_invokable_metadata_payload(raw_name.strip())
 

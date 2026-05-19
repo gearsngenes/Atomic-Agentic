@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-from typing import Any
+"""Backward-compatible import path for the shared ``NO_VAL`` sentinel.
 
+The canonical sentinel definition lives in :mod:`atomic_agentic.core.Constants`.
+This module remains intentionally small so existing imports such as:
 
-class _NoValSentinel:
-    """Shared sentinel to represent an absent value (NO_VAL).
+    from atomic_agentic.core.sentinels import NO_VAL
 
-    This object is intentionally opaque and single-instanced. Use `is NO_VAL`
-    to test for absence.
-    """
-    __slots__ = ()
+continue to resolve to the same singleton object used by the rest of the package.
+"""
 
-    def __repr__(self) -> str:  # pragma: no cover - trivial
-        return "NO_VAL"
-
-
-NO_VAL: Any = _NoValSentinel()
+from .constants import NO_VAL
 
 __all__ = ["NO_VAL"]

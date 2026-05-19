@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import inspect
 from typing import Any, Callable, Mapping, Optional, get_args, get_origin, get_type_hints
-import re
 
-from .sentinels import NO_VAL
+from .constants import IDENTIFIER_PATTERN, NO_VAL
 from .Exceptions import SchemaError
 
 __all__ = ["ParamSpec", "extract_io", "to_paramspec_list", "is_valid_parameter_order"]
@@ -35,7 +34,7 @@ class ParamSpec(dict):
       - Instances are intentionally immutable (attempts to set items will raise).
       - Use :meth:`to_dict()` for an explicit dict representation.
     """
-    
+
     POSITIONAL_ONLY = "POSITIONAL_ONLY"
     POSITIONAL_OR_KEYWORD = "POSITIONAL_OR_KEYWORD"
     VAR_POSITIONAL = "VAR_POSITIONAL"
@@ -45,10 +44,11 @@ class ParamSpec(dict):
     __slots__ = ("_name", "_index", "_kind", "_type", "_default")
 
     def __init__(self, name: str, index: int, kind: str, type: str, default: Any = NO_VAL) -> None:
-        # Initialize both mapping contents and attribute storage
+        # Initialize both mapping contents and attribute storage.
         dict.__init__(self, name=name, index=index, kind=kind, type=type)
         if default is not NO_VAL:
             dict.__setitem__(self, "default", default)
+
         self._name = name
         self._index = index
         self._kind = kind
@@ -77,16 +77,21 @@ class ParamSpec(dict):
         return self._default
 
     # Read-only mapping (prevent mutation)
-    def __setitem__(self, key, value):  # pragma: no cover - trivial immutability
+    def __setitem__(self, key: str, value: Any) -> None:  # pragma: no cover - trivial immutability
         raise TypeError("ParamSpec is immutable")
 
-    def __delitem__(self, key):  # pragma: no cover - trivial immutability
+    def __delitem__(self, key: str) -> None:  # pragma: no cover - trivial immutability
         raise TypeError("ParamSpec is immutable")
 
     # Convenience
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable dict representation of this ParamSpec."""
-        d = {"name": self._name, "index": self._index, "kind": self._kind, "type": self._type}
+        d: dict[str, Any] = {
+            "name": self._name,
+            "index": self._index,
+            "kind": self._kind,
+            "type": self._type,
+        }
         if self._default is not NO_VAL:
             d["default"] = self._default
         return d
@@ -95,47 +100,62 @@ class ParamSpec(dict):
     def from_dict(cls, d: Mapping[str, Any]) -> "ParamSpec":
         """Create a ParamSpec from a mapping produced by :meth:`to_dict()`.
 
-        The mapping must contain ``name`` (str), ``index`` (int), ``kind`` (str), and ``type`` (str).
-        ``default`` is optional and treated as an explicit default when present.
+        The mapping must contain ``name`` (str), ``index`` (int), ``kind`` (str),
+        and ``type`` (str). ``default`` is optional and treated as an explicit
+        default when present.
         """
         if not isinstance(d, Mapping):
             raise TypeError("ParamSpec.from_dict expects a mapping")
+
         name = d.get("name")
         idx = d.get("index")
         kind = d.get("kind")
         type_str = d.get("type")
-        if not all(isinstance(v, t) for v, t in [(name, str), (idx, int), (kind, str), (type_str, str)]):
-            raise TypeError("ParamSpec.from_dict expects 'name' (str), 'index' (int), 'kind' (str), and 'type' (str)")
+
+        if not all(
+            isinstance(v, t)
+            for v, t in [
+                (name, str),
+                (idx, int),
+                (kind, str),
+                (type_str, str),
+            ]
+        ):
+            raise TypeError(
+                "ParamSpec.from_dict expects 'name' (str), 'index' (int), "
+                "'kind' (str), and 'type' (str)"
+            )
+
         default = d.get("default", NO_VAL)
         return cls(name=name, index=idx, kind=kind, type=type_str, default=default)
 
 
 def _format_annotation(ann: Any) -> str:
     """Convert a type annotation into a readable string representation.
-    
+
     This internal helper normalizes type annotations from function signatures
     into human-readable strings suitable for serialization and display.
-    
+
     Handles all annotation styles including plain types, forward references,
     PEP 585 generic types (e.g. ``dict[str, int]``), and ``typing`` module types
     (e.g. ``List[Dict[str, int]]``).
-    
+
     Parameters
     ----------
     ann : Any
         A type annotation object (from inspect.signature or typing module).
-    
+
     Returns
     -------
     str
         Human-readable type string. Behavior:
-        
+
         - ``'Any'`` – if annotation is missing or empty (``inspect._empty`` or None)
         - string as-is – if annotation is already a string (forward reference)
         - nested structure – for parameterized types (e.g. ``List[str]`` → ``\"list[str]\"``)
         - class name – for plain classes (e.g. ``int`` → ``\"int\"``, ``MyClass`` → ``\"MyClass\"``)
         - best-effort ``str(ann)`` – fallback for unknown types
-    
+
     Examples
     --------
     >>> _format_annotation(str)
@@ -157,7 +177,7 @@ def _format_annotation(ann: Any) -> str:
     # typing / generic / PEP 585 parameterized types
     origin = get_origin(ann)
     if origin is not None:
-        # Recursively format origin and args
+        # Recursively format origin and args.
         origin_str = _format_annotation(origin)
         args = get_args(ann)
         if not args:
@@ -172,14 +192,14 @@ def _format_annotation(ann: Any) -> str:
         # int, str, dict, list, etc.
         return name
     if name:
-        # Custom or library class
+        # Custom or library class.
         return name
 
-    # Fallback: best-effort string representation
+    # Fallback: best-effort string representation.
     return str(ann)
 
 
-def extract_io(function: Callable) -> tuple[list[ParamSpec], str]:
+def extract_io(function: Callable[..., Any]) -> tuple[list[ParamSpec], str]:
     """Extract parameter specifications and return type from a callable.
 
     This is a universal, reusable function that builds an ordered list of ParamSpec
@@ -227,10 +247,10 @@ def extract_io(function: Callable) -> tuple[list[ParamSpec], str]:
 
         type_str = _format_annotation(raw_type)
 
-        # Handle default value
+        # Handle default value.
         default_val = default if default is not inspect._empty else NO_VAL
 
-        # Create self-sufficient ParamSpec with name
+        # Create self-sufficient ParamSpec with name.
         spec = ParamSpec(
             name=name,
             index=index,
@@ -240,7 +260,7 @@ def extract_io(function: Callable) -> tuple[list[ParamSpec], str]:
         )
         parameters.append(spec)
 
-    # Return type: annotation if present, else 'Any'
+    # Return type: annotation if present, else 'Any'.
     ret_ann = sig.return_annotation
     return_type = _format_annotation(ret_ann)
 
@@ -377,7 +397,11 @@ def is_valid_parameter_order(parameters: list[ParamSpec]) -> bool:
                     "a defaulted positional parameter"
                 )
 
-        elif kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.KEYWORD_ONLY, ParamSpec.VAR_KEYWORD):
+        elif kind in (
+            ParamSpec.VAR_POSITIONAL,
+            ParamSpec.KEYWORD_ONLY,
+            ParamSpec.VAR_KEYWORD,
+        ):
             # Separate section; no positional trailing-default rule applies here.
             continue
 
@@ -394,9 +418,6 @@ def _is_typed_dict_class(obj: Any) -> bool:
     )
 
 
-_VALID_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
 def _validate_schema_name(name: str) -> str:
     """Validate and normalize one parameter name from a string schema."""
     if not isinstance(name, str):
@@ -408,7 +429,7 @@ def _validate_schema_name(name: str) -> str:
     if not cleaned:
         raise SchemaError("Schema parameter names must be non-empty strings")
 
-    if not _VALID_NAME.match(cleaned):
+    if not IDENTIFIER_PATTERN.fullmatch(cleaned):
         raise SchemaError(
             f"Schema parameter name {cleaned!r} is not a valid identifier"
         )
@@ -446,7 +467,9 @@ def _paramspec_list_from_strings(items: list[str]) -> list[ParamSpec]:
             if saw_slash:
                 raise SchemaError("String schema may contain '/' at most once")
             if keyword_only_mode or saw_varargs or saw_bare_star or saw_varkwargs:
-                raise SchemaError("'/' marker must appear before keyword-only or variadic markers")
+                raise SchemaError(
+                    "'/' marker must appear before keyword-only or variadic markers"
+                )
             if not normalized:
                 raise SchemaError("'/' marker requires at least one preceding parameter")
 
@@ -471,7 +494,9 @@ def _paramspec_list_from_strings(items: list[str]) -> list[ParamSpec]:
 
         if item == "*":
             if saw_bare_star or saw_varargs:
-                raise SchemaError("String schema may contain only one '*' or '*args' marker")
+                raise SchemaError(
+                    "String schema may contain only one '*' or '*args' marker"
+                )
             if saw_varkwargs:
                 raise SchemaError("'*' marker cannot appear after '**kwargs'")
             saw_bare_star = True
@@ -480,9 +505,13 @@ def _paramspec_list_from_strings(items: list[str]) -> list[ParamSpec]:
 
         if item.startswith("**"):
             if saw_varkwargs:
-                raise SchemaError("String schema may contain only one '**kwargs' parameter")
+                raise SchemaError(
+                    "String schema may contain only one '**kwargs' parameter"
+                )
             if raw_index != len(items) - 1:
-                raise SchemaError("'**kwargs' style parameter must be the final schema item")
+                raise SchemaError(
+                    "'**kwargs' style parameter must be the final schema item"
+                )
 
             name = _validate_schema_name(item[2:])
             normalized.append(
@@ -499,9 +528,13 @@ def _paramspec_list_from_strings(items: list[str]) -> list[ParamSpec]:
 
         if item.startswith("*"):
             if saw_bare_star or saw_varargs:
-                raise SchemaError("String schema may contain only one '*' or '*args' marker")
+                raise SchemaError(
+                    "String schema may contain only one '*' or '*args' marker"
+                )
             if saw_varkwargs:
-                raise SchemaError("'*args' style parameter cannot appear after '**kwargs'")
+                raise SchemaError(
+                    "'*args' style parameter cannot appear after '**kwargs'"
+                )
 
             name = _validate_schema_name(item[1:])
             normalized.append(
@@ -541,7 +574,9 @@ def _paramspec_list_from_strings(items: list[str]) -> list[ParamSpec]:
         )
 
     if saw_bare_star and not saw_keyword_only_name_after_bare_star:
-        raise SchemaError("Bare '*' marker must be followed by at least one keyword-only parameter")
+        raise SchemaError(
+            "Bare '*' marker must be followed by at least one keyword-only parameter"
+        )
 
     return normalized
 

@@ -11,7 +11,11 @@ from python_a2a import (
     MessageRole,
 )
 
-from .PyA2AtomicHost import PyA2AtomicHost, PYA2A_RESULT_KEY
+from .constants import (
+    GET_INVOKABLE_METADATA_FUNCTION,
+    LIST_INVOKABLES_FUNCTION,
+    PYA2A_RESULT_KEY,
+)
 
 __all__ = ["PyA2AtomicClient"]
 
@@ -87,12 +91,12 @@ class PyA2AtomicClient:
     # ------------------------------------------------------------------ #
     def list_invokables(self) -> dict[str, dict[str, Any]]:
         payload = self._send_function_call(
-            function_name=PyA2AtomicHost.LIST_INVOKABLES_FUNCTION,
+            function_name=LIST_INVOKABLES_FUNCTION,
             parameters={},
         )
         self._raise_if_error_payload(
             payload=payload,
-            function_name=PyA2AtomicHost.LIST_INVOKABLES_FUNCTION,
+            function_name=LIST_INVOKABLES_FUNCTION,
         )
 
         result: dict[str, dict[str, Any]] = {}
@@ -113,12 +117,12 @@ class PyA2AtomicClient:
             raise ValueError("remote_name must be a non-empty string.")
 
         payload = self._send_function_call(
-            function_name=PyA2AtomicHost.GET_INVOKABLE_METADATA_FUNCTION,
+            function_name=GET_INVOKABLE_METADATA_FUNCTION,
             parameters={"name": resolved_remote_name},
         )
         self._raise_if_error_payload(
             payload=payload,
-            function_name=PyA2AtomicHost.GET_INVOKABLE_METADATA_FUNCTION,
+            function_name=GET_INVOKABLE_METADATA_FUNCTION,
         )
 
         required_keys = {
