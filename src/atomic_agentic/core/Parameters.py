@@ -55,6 +55,32 @@ class ParamSpec(dict):
         self._type = type
         self._default = default
 
+    def __post_init__(self) -> None:
+        # Validate that kind is one of the expected values.
+        valid_kinds = {
+            self.POSITIONAL_ONLY,
+            self.POSITIONAL_OR_KEYWORD,
+            self.VAR_POSITIONAL,
+            self.KEYWORD_ONLY,
+            self.VAR_KEYWORD,
+        }
+        if self._kind not in valid_kinds:
+            raise ValueError(f"Invalid parameter kind: {self._kind!r}")
+
+        # Validate that type is a valid Python type name.
+        if not IDENTIFIER_PATTERN.match(self._type):
+            raise ValueError(f"Invalid parameter type: {self._type!r}")
+
+        field_types = {
+            "name": str,
+            "index": int,
+            "kind": str,
+            "type": str,
+            "default": (Any, type(NO_VAL))
+        }
+        if any(not isinstance(self.get(field), field_type) for field, field_type in field_types.items()):
+            raise TypeError("ParamSpec fields must be of correct types: " + str(field_types))
+
     # Attribute accessors
     @property
     def name(self) -> str:
