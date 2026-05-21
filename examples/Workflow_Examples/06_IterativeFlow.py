@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from atomic_agentic.agents import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.tools import toolify
-from atomic_agentic.workflows.StructuredInvokable import StructuredInvokable
+from atomic_agentic import StructuredInvokable
 from atomic_agentic.workflows import IterativeFlow
 
 load_dotenv()

@@ -8,7 +8,7 @@ Demonstrates running multiple analysis branches on the same input in parallel, w
 from __future__ import annotations
 from pprint import pprint
 from atomic_agentic.tools import Tool
-from atomic_agentic.workflows.StructuredInvokable import StructuredInvokable
+from atomic_agentic import StructuredInvokable
 from atomic_agentic.workflows import ParallelFlow
 
 # ──────────────────────────────────────────────────────────────
