@@ -646,6 +646,200 @@ class AtomicInvokable(ABC):
 
         return tuple(args), kwargs
 
+
+class Command(AtomicInvokable):
+    """
+    No-input command wrapper around one AtomicInvokable and one fixed input mapping.
+
+    `Command` implements the command pattern for AtomicInvokable instances:
+
+    - construction receives a wrapped executor and a fixed input mapping;
+    - the fixed input mapping is validated through the executor's own
+      `filter_inputs(...)` path and then shallow-copied;
+    - the Command itself exposes no parameters;
+    - caller-provided runtime inputs are never accepted;
+    - invocation delegates to the wrapped executor with the fixed input mapping.
+
+    This is useful when an invokable should be registered, stored, composed, or
+    passed around as a zero-argument executable action.
+    """
+
+    def __init__(
+        self,
+        executor: AtomicInvokable,
+        fixed_inputs: Mapping[str, Any],
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> None:
+        if not isinstance(executor, AtomicInvokable):
+            raise TypeError(
+                f"{type(self).__name__}: executor must be an AtomicInvokable, "
+                f"got {type(executor)!r}"
+            )
+
+        if not isinstance(fixed_inputs, Mapping):
+            raise TypeError(
+                f"{type(self).__name__}: fixed_inputs must be a mapping, "
+                f"got {type(fixed_inputs)!r}"
+            )
+
+        # Validate and normalize the fixed inputs through the executor's own
+        # input-filtering contract. This rejects bad shapes and invalid extras
+        # according to the executor's declared parameter policy.
+        filtered_fixed_inputs = executor.filter_inputs(fixed_inputs)
+
+        # `filter_inputs(...)` normalizes shape/extras, but missing required
+        # parameters are normally rejected later by dict-to-call binding.
+        # Validate that here so invalid commands fail at construction time.
+        self._validate_fixed_inputs_bindable(
+            executor=executor,
+            inputs=filtered_fixed_inputs,
+        )
+
+        self._executor: AtomicInvokable = executor
+        self._fixed_inputs: Dict[str, Any] = dict(filtered_fixed_inputs)
+
+        resolved_name = name or f"{executor.name}_command"
+        resolved_description = (
+            description
+            or f"Command wrapper for {executor.full_name} with fixed inputs."
+        )
+
+        super().__init__(
+            name=resolved_name,
+            description=resolved_description,
+            parameters=[],
+            return_type=executor.return_type,
+            filter_extraneous_inputs=False,
+        )
+
+    # ---------------------------------------------------------------- #
+    # Command properties
+    # ---------------------------------------------------------------- #
+    @property
+    def executor(self) -> AtomicInvokable:
+        """The wrapped invokable executed by this command."""
+        return self._executor
+
+    @property
+    def fixed_inputs(self) -> Dict[str, Any]:
+        """A shallow copy of the fixed executor input mapping."""
+        return dict(self._fixed_inputs)
+
+    @property
+    def filter_extraneous_inputs(self) -> bool:
+        """
+        Commands always reject runtime caller inputs.
+
+        This property is intentionally fixed to False so that the empty
+        parameter list means "no inputs accepted", not "drop all inputs".
+        """
+        return self._filter_extraneous_inputs
+
+    @filter_extraneous_inputs.setter
+    def filter_extraneous_inputs(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError(
+                f"{type(self).__name__}.filter_extraneous_inputs must be a bool, "
+                f"got {type(value)!r}"
+            )
+        if value is not False:
+            raise ValueError(
+                f"{type(self).__name__}.filter_extraneous_inputs is fixed to False."
+            )
+        self._filter_extraneous_inputs = False
+
+    # ---------------------------------------------------------------- #
+    # Construction validation
+    # ---------------------------------------------------------------- #
+    @staticmethod
+    def _validate_fixed_inputs_bindable(
+        *,
+        executor: AtomicInvokable,
+        inputs: Mapping[str, Any],
+    ) -> None:
+        """
+        Validate that the fixed inputs are complete enough to invoke the executor.
+
+        `AtomicInvokable.filter_inputs(...)` owns mapping-shape validation,
+        extraneous-key policy, and variadic payload normalization. Required
+        non-variadic parameters are checked here so an invalid Command fails
+        during construction rather than first invocation.
+        """
+        missing: list[str] = []
+
+        for spec in executor.parameters:
+            if spec.kind in {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}:
+                continue
+            if spec.default is not NO_VAL:
+                continue
+            if spec.name not in inputs:
+                missing.append(spec.name)
+
+        if missing:
+            raise TypeError(
+                f"{type(executor).__name__}.{executor.name}: command fixed_inputs "
+                f"missing required input key(s): {missing!r}"
+            )
+
+    # ---------------------------------------------------------------- #
+    # Invocation
+    # ---------------------------------------------------------------- #
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """
+        Invoke the wrapped executor with this command's fixed input mapping.
+
+        Runtime inputs must be an empty mapping. The validation is routed through
+        `self.filter_inputs(inputs)` so errors remain consistent with the base
+        AtomicInvokable contract.
+        """
+        with self._invoke_lock:
+            logger.info("[%s started]", self.full_name)
+
+            self.filter_inputs(inputs)
+            result = self.executor.invoke(dict(self._fixed_inputs))
+
+            logger.info("[%s finished]", self.full_name)
+            return result
+
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+        """
+        Async command invocation.
+
+        This delegates to the wrapped executor's native async path instead of
+        relying on AtomicInvokable's default sync-to-thread wrapper.
+        """
+        logger.info("[%s started]", self.full_name)
+
+        self.filter_inputs(inputs)
+        fixed_inputs = dict(self._fixed_inputs)
+
+        result = await self.executor.async_invoke(fixed_inputs)
+
+        logger.info("[%s finished]", self.full_name)
+        return result
+
+    # ---------------------------------------------------------------- #
+    # Serialization
+    # ---------------------------------------------------------------- #
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Return a metadata/debug snapshot for this command.
+
+        `fixed_inputs` are included directly as a shallow dictionary. This is
+        useful for introspection, but callers should avoid storing secrets in
+        fixed inputs if serialized metadata may be logged or persisted.
+        """
+        data = super().to_dict()
+        data.update(
+            {
+                "executor": self.executor.to_dict(),
+                "fixed_inputs": dict(self._fixed_inputs),
+            }
+        )
+        return data
+
+
 class StructuredResultDict(dict[str, Any]):
     """Dict-like packaged result with a non-item ``raw_result`` attribute."""
 

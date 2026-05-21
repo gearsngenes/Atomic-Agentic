@@ -9,6 +9,7 @@ from .core.sentinels import NO_VAL
 from .core.Parameters import ParamSpec, to_paramspec_list, extract_io, is_valid_parameter_order
 from .core.Invokable import (
     AtomicInvokable,
+    Command,
     StructuredInvokable,
     StructuredResultDict,
     ParameterMap, # to be removed
@@ -26,6 +27,8 @@ __all__ = [
     "is_valid_parameter_order",
     # Invokable core types
     "AtomicInvokable",
+    # Command invokable type
+    "Command",
     # Structured invokable types
     "StructuredInvokable",
     "StructuredResultDict",
