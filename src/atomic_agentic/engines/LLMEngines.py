@@ -58,14 +58,42 @@ class LLMEngine(AtomicInvokable, ABC):
     Base template-method primitive for LLM provider adapters.
 
     Engines are stateless with respect to conversation history: the Agent owns
-    the message history. An engine instance represents a particular provider +
+    message history. An engine instance represents a particular provider +
     model configuration plus a persistent set of attachments.
 
     Public contract
     ---------------
-    - `invoke(messages: list[{"role": str, "content": str}]) -> str`
-      is the *only* required public entrypoint for making a call.
-    - Attachments are managed via `attach` / `detach` / `clear_attachments`.
+    `LLMEngine` is an `AtomicInvokable`, so its public invocation entrypoint is
+    dict-first:
+
+        invoke({"messages": list[{"role": str, "content": str}]}) -> str
+
+    The declared invokable schema exposes one input parameter named
+    ``messages``. The value must be a non-empty list of chat-message mappings
+    containing string ``role`` and ``content`` fields.
+
+    Engine lifecycle
+    ----------------
+    The provider-call lifecycle lives in ``invoke_messages(messages)``:
+
+    1. Normalize and validate the input messages.
+    2. Snapshot current attachments.
+    3. Ask the subclass to build a provider-specific payload.
+    4. Call the provider with retries/timeouts.
+    5. Extract and normalize the assistant text.
+
+    Subclasses should not override ``invoke`` or ``invoke_messages`` unless they
+    are deliberately replacing the base lifecycle. Provider-specific behavior
+    should normally be implemented through the protected template hooks:
+
+    - ``_build_provider_payload``
+    - ``_call_provider``
+    - ``_extract_text``
+    - ``_prepare_attachment``
+    - ``_on_detach``
+
+    Attachments are managed separately via ``attach`` / ``detach`` /
+    ``clear_attachments`` and are snapshotted for each call.
     """
 
     # Attachment policy defaults
@@ -858,7 +886,8 @@ class GeminiEngine(LLMEngine):
     1) Engine-level attachments are prepared via `attach(path)`:
        - `_prepare_attachment` uploads supported files via `client.files.upload`.
        - Attachment metadata stores the returned File object and its resource name.
-    2) `invoke(messages)` (from the base `LLMEngine`) will:
+    2) `invoke({"messages": messages})` delegates to `invoke_messages(messages)`,
+       which will:
        - normalize chat messages (role/content pairs),
        - snapshot current attachments,
        - call `_build_provider_payload` to construct:
