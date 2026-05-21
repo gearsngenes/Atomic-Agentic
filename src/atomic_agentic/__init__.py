@@ -7,8 +7,14 @@ except PackageNotFoundError:  # pragma: no cover
 
 from .core.sentinels import NO_VAL
 from .core.Parameters import ParamSpec, to_paramspec_list, extract_io, is_valid_parameter_order
-from .core.Invokable import AtomicInvokable, ParameterMap, ArgumentMap, ArgSpec
-from .workflows.StructuredInvokable import StructuredInvokable, StructuredResultDict
+from .core.Invokable import (
+    AtomicInvokable,
+    StructuredInvokable,
+    StructuredResultDict,
+    ParameterMap, # to be removed
+    ArgumentMap, # to be removed
+    ArgSpec, # to be removed
+)
 
 __all__ = [
     # Sentinels

@@ -5,9 +5,8 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 from ..core.Exceptions import ValidationError
-from ..core.Invokable import AtomicInvokable
+from ..core.Invokable import AtomicInvokable, StructuredInvokable
 from ..core.sentinels import NO_VAL
-from .StructuredInvokable import StructuredInvokable
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
 from .metadata import ChildRunRecord, RoutingFlowRunMetadata

@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.tools.base import Tool
-from atomic_agentic.workflows.StructuredInvokable import StructuredInvokable
+from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.workflows.base import FlowResultDict
 from atomic_agentic.workflows.iterative import IterativeFlow
 from atomic_agentic.workflows.parallel import ParallelFlow

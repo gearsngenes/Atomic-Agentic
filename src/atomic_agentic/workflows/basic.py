@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 from ..core.Exceptions import ValidationError
-from .StructuredInvokable import StructuredInvokable, StructuredResultDict
+from ..core.Invokable import StructuredInvokable, StructuredResultDict
 from .base import FlowResultDict, Workflow
 from .metadata import BasicFlowRunMetadata, NO_VAL
 
