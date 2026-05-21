@@ -207,7 +207,7 @@ Atomic-Agentic uses `StructuredInvokable` to transform and validate outputs from
 **Minimal Example:**
 
 ```python
-from atomic_agentic.workflows import StructuredInvokable
+from atomic_agentic import StructuredInvokable
 from atomic_agentic.tools import Tool
 
 def raw_tool(x, y):

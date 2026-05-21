@@ -11,7 +11,7 @@ from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
 from atomic_agentic.core.Parameters import ParamSpec
 from atomic_agentic.core.sentinels import NO_VAL
 from atomic_agentic.tools.base import Tool
-from atomic_agentic.workflows.StructuredInvokable import (
+from atomic_agentic.core.Invokable import (
     StructuredInvokable,
     StructuredResultDict,
 )

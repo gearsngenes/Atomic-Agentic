@@ -6,7 +6,6 @@ from .sequential import SequentialFlow
 from .iterative import IterativeFlow
 from .parallel import ParallelFlow
 from .routing import RoutingFlow
-from .StructuredInvokable import StructuredInvokable
 
 __all__ = ["Workflow",
            "BasicFlow",
@@ -14,5 +13,4 @@ __all__ = ["Workflow",
            "IterativeFlow",
            "ParallelFlow",
            "RoutingFlow",
-           "StructuredInvokable",
            ]

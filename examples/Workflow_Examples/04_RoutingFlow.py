@@ -9,7 +9,7 @@ from __future__ import annotations
 from pprint import pprint
 from dotenv import load_dotenv
 from atomic_agentic.tools import Tool
-from atomic_agentic.workflows.StructuredInvokable import StructuredInvokable
+from atomic_agentic import StructuredInvokable
 from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.routing import RoutingFlow
 

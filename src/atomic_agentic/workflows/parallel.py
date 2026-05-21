@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
-from .StructuredInvokable import StructuredInvokable
+from ..core.Invokable import StructuredInvokable
 from ..core.Exceptions import ValidationError
 from ..core.Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from ..core.sentinels import NO_VAL

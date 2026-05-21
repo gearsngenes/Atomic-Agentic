@@ -4,7 +4,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from .StructuredInvokable import StructuredInvokable
+from ..core.Invokable import StructuredInvokable
 from ..core.Exceptions import ValidationError
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow

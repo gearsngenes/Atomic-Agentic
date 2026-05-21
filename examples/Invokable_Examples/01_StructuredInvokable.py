@@ -5,7 +5,7 @@ This script demonstrates how to wrap a basic tool with StructuredInvokable,
 showing how to transform raw outputs (scalars, tuples, lists) into schema-enforced dicts.
 It also highlights how to configure packaging controls for different use-cases.
 """
-from atomic_agentic.workflows import StructuredInvokable
+from atomic_agentic import StructuredInvokable
 from atomic_agentic.tools.base import Tool
 
 # --- Example 1: Scalar output to single-field dict ---
