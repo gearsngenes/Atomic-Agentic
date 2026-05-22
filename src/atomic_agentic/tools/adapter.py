@@ -17,6 +17,14 @@ from ..core.Parameters import ParamSpec
 # Adapter Tool
 # ───────────────────────────────────────────────────────────────────────────────
 class AdapterTool(Tool):
+    """Adapts any AtomicInvokable into a Tool.
+
+    Compatibility note
+    ------------------
+    AdapterTool remains supported in v1.x. In a future v2.0.0 release, this
+    adapter behavior may be consolidated into Tool/toolify while preserving the
+    ability to expose AtomicInvokable components as tools.
+    """
     # ------------------------------------------------------------------ #
     # Construction
     # ------------------------------------------------------------------ #

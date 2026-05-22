@@ -8,6 +8,8 @@ This module provides:
 from __future__ import annotations
 
 import inspect
+import warnings
+from collections.abc import ItemsView, Iterator, KeysView, ValuesView
 from typing import Any, Callable, Mapping, Optional, get_args, get_origin, get_type_hints
 
 from .constants import IDENTIFIER_PATTERN, NO_VAL
@@ -19,9 +21,10 @@ __all__ = ["ParamSpec", "extract_io", "to_paramspec_list", "is_valid_parameter_o
 class ParamSpec(dict):
     """Typed parameter specification for callable parameters.
 
-    Behaves like a read-only mapping and a self-contained typed container. This design
-    makes ``ParamSpec`` instances JSON-serializable by default (they are dicts),
-    while also exposing convenient attribute access for internal code.
+    Behaves like a read-only mapping and a self-contained typed container. This
+    design keeps ``ParamSpec`` instances JSON-serializable by default in v1.x
+    because they are still dict subclasses, while also exposing convenient
+    attribute access for internal code.
 
     Each ParamSpec is a complete, self-sufficient atom of information containing:
       - name: str (parameter name)
@@ -30,9 +33,14 @@ class ParamSpec(dict):
       - type: str (human-readable type name)
       - default: Any or ``NO_VAL`` sentinel when no default is present
 
-    Notes:
-      - Instances are intentionally immutable (attempts to set items will raise).
-      - Use :meth:`to_dict()` for an explicit dict representation.
+    Compatibility note:
+      - Mapping-style access is retained for v1.x compatibility, but emits a
+        ``FutureWarning`` because ``ParamSpec`` is planned to become a dataclass
+        in v2.0.0.
+      - Prefer attribute access such as ``spec.name`` / ``spec.kind``.
+      - Use :meth:`to_dict()` when an explicit dictionary representation is
+        needed.
+      - Instances are intentionally immutable.
     """
 
     POSITIONAL_ONLY = "POSITIONAL_ONLY"
@@ -47,6 +55,13 @@ class ParamSpec(dict):
         VAR_POSITIONAL,
         KEYWORD_ONLY,
         VAR_KEYWORD,
+    )
+
+    _MAPPING_DEPRECATION_MESSAGE = (
+        "ParamSpec mapping-style access is deprecated and will be removed in "
+        "atomic-agentic v2.0.0 when ParamSpec becomes a dataclass. Use attribute "
+        "access such as spec.name/spec.kind, or call spec.to_dict() when a real "
+        "dictionary is needed."
     )
 
     __slots__ = ("_name", "_index", "_kind", "_type", "_default")
@@ -97,7 +112,7 @@ class ParamSpec(dict):
         """Validate and normalize constructor fields before state is written."""
         if not isinstance(name, str):
             raise TypeError(
-                f"ParamSpec.name must be a str, got {type(name).__name__}"
+                f"ParamSpec.name must be a str, got {name.__class__.__name__}"
             )
 
         cleaned_name = name.strip()
@@ -111,7 +126,7 @@ class ParamSpec(dict):
 
         if not isinstance(index, int) or isinstance(index, bool):
             raise TypeError(
-                f"ParamSpec.index must be an int, got {type(index).__name__}"
+                f"ParamSpec.index must be an int, got {index.__class__.__name__}"
             )
 
         if index < 0:
@@ -119,7 +134,7 @@ class ParamSpec(dict):
 
         if not isinstance(kind, str):
             raise TypeError(
-                f"ParamSpec.kind must be a str, got {type(kind).__name__}"
+                f"ParamSpec.kind must be a str, got {kind.__class__.__name__}"
             )
 
         if kind not in cls._VALID_KINDS:
@@ -130,7 +145,7 @@ class ParamSpec(dict):
 
         if not isinstance(type, str):
             raise TypeError(
-                f"ParamSpec.type must be a str, got {type(type).__name__}"
+                f"ParamSpec.type must be a str, got {type.__class__.__name__}"
             )
 
         cleaned_type = type.strip()
@@ -138,6 +153,15 @@ class ParamSpec(dict):
             raise ValueError("ParamSpec.type must be a non-empty string")
 
         return cleaned_name, index, kind, cleaned_type
+
+    @classmethod
+    def _warn_mapping_access(cls) -> None:
+        """Warn that live mapping-style access is a v1.x compatibility path."""
+        warnings.warn(
+            cls._MAPPING_DEPRECATION_MESSAGE,
+            FutureWarning,
+            stacklevel=3,
+        )
 
     # Attribute accessors
     @property
@@ -160,7 +184,36 @@ class ParamSpec(dict):
     def default(self) -> Any:
         return self._default
 
-    # Read-only mapping (prevent mutation)
+    # Read-only mapping compatibility
+    def __getitem__(self, key: str) -> Any:
+        self._warn_mapping_access()
+        return dict.__getitem__(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        self._warn_mapping_access()
+        return dict.get(self, key, default)
+
+    def __contains__(self, key: object) -> bool:
+        self._warn_mapping_access()
+        return dict.__contains__(self, key)
+
+    def __iter__(self) -> Iterator[str]:
+        self._warn_mapping_access()
+        return dict.__iter__(self)
+
+    def keys(self) -> KeysView[str]:
+        self._warn_mapping_access()
+        return dict.keys(self)
+
+    def items(self) -> ItemsView[str, Any]:
+        self._warn_mapping_access()
+        return dict.items(self)
+
+    def values(self) -> ValuesView[Any]:
+        self._warn_mapping_access()
+        return dict.values(self)
+
+    # Read-only mapping mutation guards
     def __setitem__(self, key: str, value: Any) -> None:  # pragma: no cover - trivial immutability
         raise TypeError("ParamSpec is immutable")
 
