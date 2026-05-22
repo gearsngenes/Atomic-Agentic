@@ -21,7 +21,8 @@ from typing import Any, Optional
 from ..core.Exceptions import ValidationError
 from ..core.Invokable import StructuredInvokable, StructuredResultDict
 from .base import FlowResultDict, Workflow
-from .metadata import BasicFlowRunMetadata, NO_VAL
+from .metadata import BasicFlowRunMetadata
+from ..core.constants import NO_VAL
 
 logger = logging.getLogger(__name__)
 
