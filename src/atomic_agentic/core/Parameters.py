@@ -41,45 +41,103 @@ class ParamSpec(dict):
     KEYWORD_ONLY = "KEYWORD_ONLY"
     VAR_KEYWORD = "VAR_KEYWORD"
 
+    _VALID_KINDS: tuple[str, ...] = (
+        POSITIONAL_ONLY,
+        POSITIONAL_OR_KEYWORD,
+        VAR_POSITIONAL,
+        KEYWORD_ONLY,
+        VAR_KEYWORD,
+    )
+
     __slots__ = ("_name", "_index", "_kind", "_type", "_default")
 
-    def __init__(self, name: str, index: int, kind: str, type: str, default: Any = NO_VAL) -> None:
+    def __init__(
+        self,
+        name: str,
+        index: int,
+        kind: str,
+        type: str,
+        default: Any = NO_VAL,
+    ) -> None:
+        cleaned_name, validated_index, validated_kind, cleaned_type = (
+            self._validate_init_args(
+                name=name,
+                index=index,
+                kind=kind,
+                type=type,
+            )
+        )
+
         # Initialize both mapping contents and attribute storage.
-        dict.__init__(self, name=name, index=index, kind=kind, type=type)
+        dict.__init__(
+            self,
+            name=cleaned_name,
+            index=validated_index,
+            kind=validated_kind,
+            type=cleaned_type,
+        )
         if default is not NO_VAL:
             dict.__setitem__(self, "default", default)
 
-        self._name = name
-        self._index = index
-        self._kind = kind
-        self._type = type
+        self._name = cleaned_name
+        self._index = validated_index
+        self._kind = validated_kind
+        self._type = cleaned_type
         self._default = default
 
-    def __post_init__(self) -> None:
-        # Validate that kind is one of the expected values.
-        valid_kinds = {
-            self.POSITIONAL_ONLY,
-            self.POSITIONAL_OR_KEYWORD,
-            self.VAR_POSITIONAL,
-            self.KEYWORD_ONLY,
-            self.VAR_KEYWORD,
-        }
-        if self._kind not in valid_kinds:
-            raise ValueError(f"Invalid parameter kind: {self._kind!r}")
+    @classmethod
+    def _validate_init_args(
+        cls,
+        *,
+        name: str,
+        index: int,
+        kind: str,
+        type: str,
+    ) -> tuple[str, int, str, str]:
+        """Validate and normalize constructor fields before state is written."""
+        if not isinstance(name, str):
+            raise TypeError(
+                f"ParamSpec.name must be a str, got {type(name).__name__}"
+            )
 
-        # Validate that type is a valid Python type name.
-        if not IDENTIFIER_PATTERN.match(self._type):
-            raise ValueError(f"Invalid parameter type: {self._type!r}")
+        cleaned_name = name.strip()
+        if not cleaned_name:
+            raise ValueError("ParamSpec.name must be a non-empty string")
 
-        field_types = {
-            "name": str,
-            "index": int,
-            "kind": str,
-            "type": str,
-            "default": (Any, type(NO_VAL))
-        }
-        if any(not isinstance(self.get(field), field_type) for field, field_type in field_types.items()):
-            raise TypeError("ParamSpec fields must be of correct types: " + str(field_types))
+        if not IDENTIFIER_PATTERN.fullmatch(cleaned_name):
+            raise ValueError(
+                f"ParamSpec.name {cleaned_name!r} is not a valid identifier"
+            )
+
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise TypeError(
+                f"ParamSpec.index must be an int, got {type(index).__name__}"
+            )
+
+        if index < 0:
+            raise ValueError("ParamSpec.index must be >= 0")
+
+        if not isinstance(kind, str):
+            raise TypeError(
+                f"ParamSpec.kind must be a str, got {type(kind).__name__}"
+            )
+
+        if kind not in cls._VALID_KINDS:
+            raise ValueError(
+                "ParamSpec.kind must be one of: "
+                f"{', '.join(cls._VALID_KINDS)}; got {kind!r}"
+            )
+
+        if not isinstance(type, str):
+            raise TypeError(
+                f"ParamSpec.type must be a str, got {type(type).__name__}"
+            )
+
+        cleaned_type = type.strip()
+        if not cleaned_type:
+            raise ValueError("ParamSpec.type must be a non-empty string")
+
+        return cleaned_name, index, kind, cleaned_type
 
     # Attribute accessors
     @property

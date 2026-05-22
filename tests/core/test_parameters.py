@@ -256,13 +256,14 @@ class TestParameterOrderValidation:
         with pytest.raises(SchemaError, match="Duplicate"):
             is_valid_parameter_order(parameters)
 
-    def test_rejects_unknown_parameter_kind(self) -> None:
-        parameters = [
-            make_param("x", 0, "UNKNOWN_KIND"),
-        ]
-
-        with pytest.raises(SchemaError, match="Unknown parameter kind"):
-            is_valid_parameter_order(parameters)
+    def test_paramspec_rejects_unknown_parameter_kind(self) -> None:
+        with pytest.raises(ValueError, match="ParamSpec.kind"):
+            ParamSpec(
+                name="x",
+                index=0,
+                kind="UNKNOWN",
+                type="Any",
+            )
 
     def test_rejects_out_of_order_kinds(self) -> None:
         parameters = [
