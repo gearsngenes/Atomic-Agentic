@@ -516,7 +516,7 @@ class TestToolifyPyA2AtomicClient:
 
 class TestToolifyInvalidInputs:
     def test_toolify_none_raises_tool_definition_error(self) -> None:
-        with pytest.raises(ToolDefinitionError, match="expected either"):
+        with pytest.raises(ToolDefinitionError, match="expected a non-empty"):
             toolify(None)  # type: ignore[arg-type]
 
     def test_toolify_unsupported_component_type_raises(self) -> None:

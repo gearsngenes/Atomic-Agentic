@@ -62,7 +62,7 @@ def toolify(
 
     if component is None:
         raise ToolDefinitionError(
-            "toolify: expected either a local `component` or a non-empty `a2a_endpoint`."
+            "toolify: expected a non-empty `component`."
         )
 
     # 1) Existing Tool -> mutate in place and return same instance
@@ -155,8 +155,7 @@ def toolify(
         )
 
     raise ToolDefinitionError(
-        "toolify: unsupported `component` type. Expected Tool | AtomicInvokable | Callable | MCPClientHub, "
-        "or use `a2a_endpoint` for A2A proxy construction."
+        "toolify: unsupported `component` type. Expected Tool | AtomicInvokable | Callable | MCPClientHub | PyA2AtomicClient."
     )
 
 

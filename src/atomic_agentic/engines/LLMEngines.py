@@ -16,9 +16,6 @@ from typing import (
     Mapping,
     Optional,)
 import mimetypes
-import os
-import random
-import time
 
 # ~~~Provider SDKs~~~
 # OpenAI
@@ -1202,7 +1199,7 @@ class MistralEngine(LLMEngine):
        - PDFs  → upload + sign → `{ "kind": "pdf", "signed_url": ... }`
        - Images → upload + sign → `{ "kind": "image", "signed_url": ... }`
        - Text/code → read + inline → `{ "kind": "text", "inlined_text": ... }`
-    2) `invoke(messages)` (from the base `LLMEngine`) will:
+    2) `invoke({'messages': ...})` (from the base `LLMEngine`) will:
        - normalize chat messages (role/content strings),
        - snapshot current attachments,
        - call `_build_provider_payload` to:
@@ -1765,8 +1762,9 @@ class LlamaCppEngine(LLMEngine):
             "use plain text in messages instead."
         )
 
-    def _on_detach():
-        pass
+    def _on_detach(self, meta: Mapping[str, Any]) -> None:
+        """No-op detach hook for llama.cpp (attachments unsupported)."""
+        return None
 
     # ------------------------------------------------------------------ #
     # Introspection
