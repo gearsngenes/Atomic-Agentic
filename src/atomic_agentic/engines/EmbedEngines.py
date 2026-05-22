@@ -66,7 +66,7 @@ class EmbedEngine(ABC):
         warnings.warn(
             (
                 "EmbedEngine and its provider subclasses are deprecated as of "
-                "atomic-agentic v1.0.2 and are planned for removal in later versions. "
+                "atomic-agentic v1.0.2 and are planned for removal in versions 2.0.0. "
                 "Prefer wrapping embedding functions as Tools, or migrate to a future "
                 "SemanticStore/VectorStore retrieval abstraction."
             ),

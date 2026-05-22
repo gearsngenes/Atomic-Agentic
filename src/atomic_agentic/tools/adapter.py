@@ -1,42 +1,70 @@
 from __future__ import annotations
+
 from typing import (
     Any,
     Callable,
     Dict,
     Mapping,
-    Optional,)
+    Optional,
+)
+
 from .base import Tool
 from ..core.Invokable import AtomicInvokable
-from ..core.Parameters import ParamSpec, extract_io
-from ..core.Exceptions import ToolInvocationError
+from ..core.Parameters import ParamSpec
 
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Adapter Tool
 # ───────────────────────────────────────────────────────────────────────────────
 class AdapterTool(Tool):
+    """Adapts any AtomicInvokable into a Tool.
+
+    Compatibility note
+    ------------------
+    AdapterTool remains supported in v1.x. In a future v2.0.0 release, this
+    adapter behavior may be consolidated into Tool/toolify while preserving the
+    ability to expose AtomicInvokable components as tools.
+    """
     # ------------------------------------------------------------------ #
     # Construction
     # ------------------------------------------------------------------ #
-    def __init__(self, component: AtomicInvokable,
-                 name: str|None = None,
-                 namespace: str|None = None,
-                 description: str|None = None,
-                 filter_extraneous_inputs: Optional[bool] = None):
+    def __init__(
+        self,
+        component: AtomicInvokable,
+        name: str | None = None,
+        namespace: str | None = None,
+        description: str | None = None,
+        filter_extraneous_inputs: Optional[bool] = None,
+    ) -> None:
+        if not isinstance(component, AtomicInvokable):
+            raise TypeError(
+                f"{type(self).__name__}.component must be an AtomicInvokable, "
+                f"got {type(component)!r}"
+            )
+
         # set private variable
         self._component = component
-        resolved_filter = filter_extraneous_inputs if filter_extraneous_inputs is not None else component.filter_extraneous_inputs
+
+        resolved_filter = (
+            filter_extraneous_inputs
+            if filter_extraneous_inputs is not None
+            else component.filter_extraneous_inputs
+        )
         resolved_name = name if name else component.name
         resolved_description = description if description else component.description
         resolved_namespace = namespace
+
         if isinstance(component, Tool):
             resolved_namespace = f"wrapped_{component.namespace}"
+
         # set core attributes
-        super().__init__(component.invoke,
-                         resolved_name,
-                         resolved_namespace,
-                         resolved_description,
-                         resolved_filter,)
+        super().__init__(
+            component.invoke,
+            resolved_name,
+            resolved_namespace,
+            resolved_description,
+            resolved_filter,
+        )
 
     # ------------------------------------------------------------------ #
     # Tool Properties
@@ -53,15 +81,26 @@ class AdapterTool(Tool):
         return self._component
     
     @component.setter
-    def component(self, value: AtomicInvokable)-> None:
+    def component(self, value: AtomicInvokable) -> None:
+        if not isinstance(value, AtomicInvokable):
+            raise TypeError(
+                f"{type(self).__name__}.component must be an AtomicInvokable, "
+                f"got {type(value)!r}"
+            )
+
+        function = value.invoke
+        name = value.name
+        description = value.description
+        module, qualname = self._get_mod_qual(function)
+        parameters = value.parameters
+        return_type = value.return_type
+
         self._component = value
-        self._function = self._component.invoke
-        self._name = self._component.name
-        self._description = value.description
-        # Identity in import space (may be overridden by subclasses)
-        self._module, self._qualname = self._get_mod_qual(self.function)
-        # Rebuild signature from the component
-        parameters, return_type = self._build_tool_signature()
+        self._function = function
+        self._name = name
+        self._description = description
+        self._module = module
+        self._qualname = qualname
         self._parameters = parameters
         self._return_type = return_type
 
@@ -106,7 +145,7 @@ class AdapterTool(Tool):
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
-    def to_dict(self)-> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         base = super().to_dict()
         base.update({
             "component": self.component.to_dict()

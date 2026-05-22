@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping, Optional, TypedDict
+from typing import Any, Mapping, Optional, TypedDict
 
 import pytest
 
@@ -12,6 +12,9 @@ from atomic_agentic.core.Parameters import (
     to_paramspec_list,
 )
 from atomic_agentic.core.sentinels import NO_VAL
+
+
+PARAMSPEC_MAPPING_WARNING = "ParamSpec mapping-style access"
 
 
 def make_param(
@@ -32,7 +35,7 @@ def make_param(
 
 
 class TestParamSpec:
-    def test_paramspec_exposes_mapping_and_attribute_views(self) -> None:
+    def test_paramspec_attribute_view_is_warning_free(self) -> None:
         spec = ParamSpec(
             name="x",
             index=0,
@@ -41,16 +44,57 @@ class TestParamSpec:
             default=NO_VAL,
         )
 
-        assert spec["name"] == "x"
-        assert spec["index"] == 0
-        assert spec["kind"] == ParamSpec.POSITIONAL_OR_KEYWORD
-        assert spec["type"] == "int"
-
         assert spec.name == "x"
         assert spec.index == 0
         assert spec.kind == ParamSpec.POSITIONAL_OR_KEYWORD
         assert spec.type == "int"
         assert spec.default is NO_VAL
+
+    def test_paramspec_mapping_getitem_is_supported_with_future_warning(self) -> None:
+        spec = ParamSpec(
+            name="x",
+            index=0,
+            kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+            type="int",
+            default=NO_VAL,
+        )
+
+        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
+            assert spec["name"] == "x"
+            assert spec["index"] == 0
+            assert spec["kind"] == ParamSpec.POSITIONAL_OR_KEYWORD
+            assert spec["type"] == "int"
+
+    def test_paramspec_mapping_helpers_are_supported_with_future_warning(self) -> None:
+        spec = make_param("x", 0, type_="int")
+
+        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
+            assert spec.get("name") == "x"
+
+        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
+            assert "default" not in spec
+
+        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
+            assert list(spec) == ["name", "index", "kind", "type"]
+
+        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
+            assert list(spec.keys()) == ["name", "index", "kind", "type"]
+
+        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
+            assert list(spec.items()) == [
+                ("name", "x"),
+                ("index", 0),
+                ("kind", ParamSpec.POSITIONAL_OR_KEYWORD),
+                ("type", "int"),
+            ]
+
+        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
+            assert list(spec.values()) == [
+                "x",
+                0,
+                ParamSpec.POSITIONAL_OR_KEYWORD,
+                "int",
+            ]
 
     def test_paramspec_stores_default_when_present(self) -> None:
         spec = ParamSpec(
@@ -61,13 +105,13 @@ class TestParamSpec:
             default=10,
         )
 
-        assert spec["default"] == 10
+        assert spec.to_dict()["default"] == 10
         assert spec.default == 10
 
     def test_paramspec_omits_default_key_when_default_is_no_val(self) -> None:
         spec = make_param("x", 0)
 
-        assert "default" not in spec
+        assert "default" not in spec.to_dict()
         assert spec.default is NO_VAL
 
     def test_paramspec_is_mapping_immutable_via_setitem(self) -> None:
@@ -256,13 +300,14 @@ class TestParameterOrderValidation:
         with pytest.raises(SchemaError, match="Duplicate"):
             is_valid_parameter_order(parameters)
 
-    def test_rejects_unknown_parameter_kind(self) -> None:
-        parameters = [
-            make_param("x", 0, "UNKNOWN_KIND"),
-        ]
-
-        with pytest.raises(SchemaError, match="Unknown parameter kind"):
-            is_valid_parameter_order(parameters)
+    def test_paramspec_rejects_unknown_parameter_kind(self) -> None:
+        with pytest.raises(ValueError, match="ParamSpec.kind"):
+            ParamSpec(
+                name="x",
+                index=0,
+                kind="UNKNOWN",
+                type="Any",
+            )
 
     def test_rejects_out_of_order_kinds(self) -> None:
         parameters = [

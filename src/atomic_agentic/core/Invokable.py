@@ -857,9 +857,11 @@ class StructuredResultDict(dict[str, Any]):
 class StructuredInvokable(AtomicInvokable):
     """Wrap an invokable and package its raw output into a mapping."""
 
-    RAISE = "raise"
-    DROP = "drop"
-    FILL = "fill"
+    RAISE = "RAISE"
+    DROP = "DROP"
+    FILL = "FILL"
+
+    _ABSENT_VALUE_MODES: frozenset[str] = frozenset({RAISE, DROP, FILL})
 
     PASSTHROUGH = [ParamSpec(
         name="__passthrough_mapping__",
@@ -1039,21 +1041,22 @@ class StructuredInvokable(AtomicInvokable):
 
     @property
     def absent_value_mode(self) -> str:
-        """The missing-value policy."""
+        """The canonical uppercase missing-value policy."""
         return self._absent_value_mode
 
     @absent_value_mode.setter
     def absent_value_mode(self, value: str) -> None:
-        """Validate and set the missing-value policy."""
+        """Validate, normalize, and set the missing-value policy."""
         if not isinstance(value, str):
             raise TypeError(
                 f"absent_value_mode must be a string, got {type(value).__name__}"
             )
 
         normalized = value.strip().upper()
-        if normalized not in {"RAISE", "DROP", "FILL"}:
+        if normalized not in self._ABSENT_VALUE_MODES:
             raise ValueError(
-                "absent_value_mode must be one of: 'RAISE', 'DROP', 'FILL'"
+                "absent_value_mode must be one of: 'RAISE', 'DROP', 'FILL' "
+                "(case-insensitive)"
             )
 
         self._absent_value_mode = normalized
@@ -1506,7 +1509,7 @@ class StructuredInvokable(AtomicInvokable):
         return packaged
 
     def handle_missing_values(self, packaged: Mapping[str, Any]) -> dict[str, Any]:
-        """Apply the configured missing-value policy to packaged output."""
+        """Apply the configured missing-value policy to unresolved ``NO_VAL`` fields."""
         resolved = dict(packaged)
         missing_keys = [key for key, value in resolved.items() if value is NO_VAL]
 
@@ -1515,17 +1518,17 @@ class StructuredInvokable(AtomicInvokable):
 
         mode = self.absent_value_mode
 
-        if mode == "RAISE":
+        if mode == self.RAISE:
             raise ValueError(
                 f"{self.full_name}: packaged output is missing required field(s): {missing_keys}"
             )
 
-        if mode == "DROP":
+        if mode == self.DROP:
             for key in missing_keys:
                 resolved.pop(key, None)
             return resolved
 
-        if mode == "FILL":
+        if mode == self.FILL:
             for key in missing_keys:
                 resolved[key] = self.default_absent_value
             return resolved

@@ -94,11 +94,9 @@ class TestAtomicInvokableConstruction:
         with pytest.raises(TypeError):
             make_invokable(parameters=params)
 
-    def test_invalid_parameter_name_raises(self) -> None:
-        params = [make_param("bad-name", 0)]
-
-        with pytest.raises(ValueError):
-            make_invokable(parameters=params)
+    def test_invalid_parameter_name_is_rejected_by_paramspec(self) -> None:
+        with pytest.raises(ValueError, match="ParamSpec.name"):
+            make_param("bad-name", 0)
 
     def test_mismatched_parameter_index_raises(self) -> None:
         params = [make_param("x", 1)]

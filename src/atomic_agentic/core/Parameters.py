@@ -8,6 +8,8 @@ This module provides:
 from __future__ import annotations
 
 import inspect
+import warnings
+from collections.abc import ItemsView, Iterator, KeysView, ValuesView
 from typing import Any, Callable, Mapping, Optional, get_args, get_origin, get_type_hints
 
 from .constants import IDENTIFIER_PATTERN, NO_VAL
@@ -19,9 +21,10 @@ __all__ = ["ParamSpec", "extract_io", "to_paramspec_list", "is_valid_parameter_o
 class ParamSpec(dict):
     """Typed parameter specification for callable parameters.
 
-    Behaves like a read-only mapping and a self-contained typed container. This design
-    makes ``ParamSpec`` instances JSON-serializable by default (they are dicts),
-    while also exposing convenient attribute access for internal code.
+    Behaves like a read-only mapping and a self-contained typed container. This
+    design keeps ``ParamSpec`` instances JSON-serializable by default in v1.x
+    because they are still dict subclasses, while also exposing convenient
+    attribute access for internal code.
 
     Each ParamSpec is a complete, self-sufficient atom of information containing:
       - name: str (parameter name)
@@ -30,9 +33,14 @@ class ParamSpec(dict):
       - type: str (human-readable type name)
       - default: Any or ``NO_VAL`` sentinel when no default is present
 
-    Notes:
-      - Instances are intentionally immutable (attempts to set items will raise).
-      - Use :meth:`to_dict()` for an explicit dict representation.
+    Compatibility note:
+      - Mapping-style access is retained for v1.x compatibility, but emits a
+        ``FutureWarning`` because ``ParamSpec`` is planned to become a dataclass
+        in v2.0.0.
+      - Prefer attribute access such as ``spec.name`` / ``spec.kind``.
+      - Use :meth:`to_dict()` when an explicit dictionary representation is
+        needed.
+      - Instances are intentionally immutable.
     """
 
     POSITIONAL_ONLY = "POSITIONAL_ONLY"
@@ -41,45 +49,119 @@ class ParamSpec(dict):
     KEYWORD_ONLY = "KEYWORD_ONLY"
     VAR_KEYWORD = "VAR_KEYWORD"
 
+    _VALID_KINDS: tuple[str, ...] = (
+        POSITIONAL_ONLY,
+        POSITIONAL_OR_KEYWORD,
+        VAR_POSITIONAL,
+        KEYWORD_ONLY,
+        VAR_KEYWORD,
+    )
+
+    _MAPPING_DEPRECATION_MESSAGE = (
+        "ParamSpec mapping-style access is deprecated and will be removed in "
+        "atomic-agentic v2.0.0 when ParamSpec becomes a dataclass. Use attribute "
+        "access such as spec.name/spec.kind, or call spec.to_dict() when a real "
+        "dictionary is needed."
+    )
+
     __slots__ = ("_name", "_index", "_kind", "_type", "_default")
 
-    def __init__(self, name: str, index: int, kind: str, type: str, default: Any = NO_VAL) -> None:
+    def __init__(
+        self,
+        name: str,
+        index: int,
+        kind: str,
+        type: str,
+        default: Any = NO_VAL,
+    ) -> None:
+        cleaned_name, validated_index, validated_kind, cleaned_type = (
+            self._validate_init_args(
+                name=name,
+                index=index,
+                kind=kind,
+                type=type,
+            )
+        )
+
         # Initialize both mapping contents and attribute storage.
-        dict.__init__(self, name=name, index=index, kind=kind, type=type)
+        dict.__init__(
+            self,
+            name=cleaned_name,
+            index=validated_index,
+            kind=validated_kind,
+            type=cleaned_type,
+        )
         if default is not NO_VAL:
             dict.__setitem__(self, "default", default)
 
-        self._name = name
-        self._index = index
-        self._kind = kind
-        self._type = type
+        self._name = cleaned_name
+        self._index = validated_index
+        self._kind = validated_kind
+        self._type = cleaned_type
         self._default = default
 
-    def __post_init__(self) -> None:
-        # Validate that kind is one of the expected values.
-        valid_kinds = {
-            self.POSITIONAL_ONLY,
-            self.POSITIONAL_OR_KEYWORD,
-            self.VAR_POSITIONAL,
-            self.KEYWORD_ONLY,
-            self.VAR_KEYWORD,
-        }
-        if self._kind not in valid_kinds:
-            raise ValueError(f"Invalid parameter kind: {self._kind!r}")
+    @classmethod
+    def _validate_init_args(
+        cls,
+        *,
+        name: str,
+        index: int,
+        kind: str,
+        type: str,
+    ) -> tuple[str, int, str, str]:
+        """Validate and normalize constructor fields before state is written."""
+        if not isinstance(name, str):
+            raise TypeError(
+                f"ParamSpec.name must be a str, got {name.__class__.__name__}"
+            )
 
-        # Validate that type is a valid Python type name.
-        if not IDENTIFIER_PATTERN.match(self._type):
-            raise ValueError(f"Invalid parameter type: {self._type!r}")
+        cleaned_name = name.strip()
+        if not cleaned_name:
+            raise ValueError("ParamSpec.name must be a non-empty string")
 
-        field_types = {
-            "name": str,
-            "index": int,
-            "kind": str,
-            "type": str,
-            "default": (Any, type(NO_VAL))
-        }
-        if any(not isinstance(self.get(field), field_type) for field, field_type in field_types.items()):
-            raise TypeError("ParamSpec fields must be of correct types: " + str(field_types))
+        if not IDENTIFIER_PATTERN.fullmatch(cleaned_name):
+            raise ValueError(
+                f"ParamSpec.name {cleaned_name!r} is not a valid identifier"
+            )
+
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise TypeError(
+                f"ParamSpec.index must be an int, got {index.__class__.__name__}"
+            )
+
+        if index < 0:
+            raise ValueError("ParamSpec.index must be >= 0")
+
+        if not isinstance(kind, str):
+            raise TypeError(
+                f"ParamSpec.kind must be a str, got {kind.__class__.__name__}"
+            )
+
+        if kind not in cls._VALID_KINDS:
+            raise ValueError(
+                "ParamSpec.kind must be one of: "
+                f"{', '.join(cls._VALID_KINDS)}; got {kind!r}"
+            )
+
+        if not isinstance(type, str):
+            raise TypeError(
+                f"ParamSpec.type must be a str, got {type.__class__.__name__}"
+            )
+
+        cleaned_type = type.strip()
+        if not cleaned_type:
+            raise ValueError("ParamSpec.type must be a non-empty string")
+
+        return cleaned_name, index, kind, cleaned_type
+
+    @classmethod
+    def _warn_mapping_access(cls) -> None:
+        """Warn that live mapping-style access is a v1.x compatibility path."""
+        warnings.warn(
+            cls._MAPPING_DEPRECATION_MESSAGE,
+            FutureWarning,
+            stacklevel=3,
+        )
 
     # Attribute accessors
     @property
@@ -102,7 +184,36 @@ class ParamSpec(dict):
     def default(self) -> Any:
         return self._default
 
-    # Read-only mapping (prevent mutation)
+    # Read-only mapping compatibility
+    def __getitem__(self, key: str) -> Any:
+        self._warn_mapping_access()
+        return dict.__getitem__(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        self._warn_mapping_access()
+        return dict.get(self, key, default)
+
+    def __contains__(self, key: object) -> bool:
+        self._warn_mapping_access()
+        return dict.__contains__(self, key)
+
+    def __iter__(self) -> Iterator[str]:
+        self._warn_mapping_access()
+        return dict.__iter__(self)
+
+    def keys(self) -> KeysView[str]:
+        self._warn_mapping_access()
+        return dict.keys(self)
+
+    def items(self) -> ItemsView[str, Any]:
+        self._warn_mapping_access()
+        return dict.items(self)
+
+    def values(self) -> ValuesView[Any]:
+        self._warn_mapping_access()
+        return dict.values(self)
+
+    # Read-only mapping mutation guards
     def __setitem__(self, key: str, value: Any) -> None:  # pragma: no cover - trivial immutability
         raise TypeError("ParamSpec is immutable")
 
