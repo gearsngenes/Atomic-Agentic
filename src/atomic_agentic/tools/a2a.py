@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable, Dict, Mapping, Optional
 
+from atomic_agentic.core.Invokable import AtomicInvokable
+
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Parameters import ParamSpec
 from ..core.sentinels import NO_VAL
@@ -102,6 +104,11 @@ class PyA2AtomicTool(Tool):
             description=resolved_description,
             filter_extraneous_inputs=filter_extraneous_inputs,
         )
+
+    @property
+    def function(self) -> AtomicInvokable | Callable[..., Any]:
+        """Remote proxy call binding. Rebuilt through refresh(), not reassigned directly."""
+        return self._function
 
     # ------------------------------------------------------------------ #
     # Proxy properties

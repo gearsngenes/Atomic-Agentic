@@ -10,6 +10,7 @@ from typing import (
     Optional,
 )
 
+from ..core.Invokable import AtomicInvokable
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Parameters import ParamSpec
 from ..core.sentinels import NO_VAL
@@ -103,6 +104,11 @@ class MCPProxyTool(Tool):
             description=resolved_description,
             filter_extraneous_inputs=filter_extraneous_inputs,
         )
+
+    @property
+    def function(self) -> AtomicInvokable | Callable[..., Any]:
+        """Remote proxy call binding. Rebuilt through refresh(), not reassigned directly."""
+        return self._function
 
     @property
     def client_hub(self) -> MCPClientHub:

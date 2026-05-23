@@ -1,20 +1,22 @@
-# Environment requirements
-python-dotenv
-# LLM providers
-openai
-llama-cpp-python
-huggingface-hub
-google-genai
-mistralai
-# A2A and MCP/O requirements
-python-a2a
-mcp
-uv
-uvicorn
-mcpo
-requests
-# langchain and tools
-pydantic
-langchain-tavily
-# Streamlit demo
-streamlit
+# Minimal, pinned runtime dependencies (kept aligned with pyproject.toml)
+mcp>=1.25,<2
+python-a2a>=0.5.10,<0.6
+httpx>=0.28.1,<0.29
+openai>=2.15,<3
+google-genai>=1.64,<2
+mistralai>=1.12,<2
+
+# Utilities
+python-dotenv>=1.0.0,<2
+requests>=2.28.2,<3
+
+# Async server / CLI
+uvicorn>=0.21.1,<1
+
+# Optional: local/LLM model support — install only if needed
+llama-cpp-python>=0.3.16,<0.4
+huggingface-hub>=1.5,<2
+
+# Dev / test (kept here for convenience; consider using dev extras instead)
+pytest>=9,<10
+pytest-cov>=7,<8
