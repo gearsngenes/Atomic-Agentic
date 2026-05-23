@@ -12,6 +12,7 @@ from typing import (
     Optional,
     TypeVar,
 )
+import threading
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Invokable import AtomicInvokable
@@ -155,17 +156,35 @@ class Tool(AtomicInvokable):
         self._namespace: str = namespace or "default"
         self._module, self._qualname = self._get_mod_qual(function)
 
-        inferred_name = name if name is not None else None
-        inferred_description = description if description is not None else None
+        inferred_name = (
+            name.strip()
+            if isinstance(name, str) and name.strip()
+            else None
+        )
+        inferred_description = (
+            description.strip()
+            if isinstance(description, str) and description.strip()
+            else None
+        )
 
         # Prepare name and description. AtomicInvokable parent validation
         # requires both to resolve to non-empty strings.
         if isinstance(function, AtomicInvokable):
-            inferred_name = function.name if inferred_name is None else inferred_name
-            inferred_description = function.description if inferred_description is None else inferred_description
+            inferred_name = inferred_name or function.name
+            inferred_description = inferred_description or function.description
         else:
-            inferred_name = inferred_name or getattr(function, "__name__", "unnamed_callable")
-            inferred_description = inferred_description or getattr(function, "__doc__", "No description available.").strip()
+            inferred_name = (
+                inferred_name
+                or getattr(function, "__name__", None)
+                or "unnamed_callable"
+            )
+
+            doc = getattr(function, "__doc__", None)
+            inferred_description = inferred_description or (
+                doc.strip()
+                if isinstance(doc, str) and doc.strip()
+                else "No description available."
+            )
 
         # Build tool signature (template method)
         parameters, return_type = self._build_tool_signature()
@@ -205,18 +224,23 @@ class Tool(AtomicInvokable):
         """Update the execution target and refresh schema/import metadata."""
         if not callable(func):
             raise ToolDefinitionError(f"Tool function must be callable, got {type(func)!r}")
-        self._function = func
-        self._module, self._qualname = self._get_mod_qual(func)
 
-        # Rebuild and validate the parameter schema
-        parameters, return_type = self._build_tool_signature()
-        
+        module, qualname = self._get_mod_qual(func)
+
+        if isinstance(func, AtomicInvokable):
+            parameters = list(func.parameters)
+            return_type = func.return_type
+        else:
+            parameters, return_type = extract_io(func)
+
         if not isinstance(return_type, str):
             raise TypeError(
                 f"{type(self).__name__}.return_type must be str, got {type(return_type)!r}"
             )
 
-        # Update internal state
+        self._function = func
+        self._module = module
+        self._qualname = qualname
         self._parameters = parameters
         self._return_type = return_type
 
@@ -407,11 +431,8 @@ class Tool(AtomicInvokable):
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
-            # Filter inputs
             inputs = self.filter_inputs(inputs)
-            # Separate positional and keyword arguments according to the tool's parameter schema
             args, kwargs = self.to_arg_kwarg(inputs)
-            # Execute and return result
             result = self.execute(args, kwargs)
             logger.info(f"[{self.full_name} finished]")
             return result
