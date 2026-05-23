@@ -1,23 +1,31 @@
+# Ignore Python virtual environments
 .venv/
 .venv2/
+
+# Ignore Python Example outputs and caches
 examples/output_markdowns
 examples/*/__pycache__/
 output_markdowns/
 modules/__pycache__/
 test_code/
-.env
 *.json
 
+# Ignore build artifacts
 dist/
+atomic_agentic-*/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
 src/atomic_agentic/_version.py
-atomic_ui.py
 
+# Ignore compiled Python files
 tests/*/__pycache__/
 tests/__pycache__/
 src/atomic_agentic/__pycache__/
 src/atomic_agentic/*/__pycache__/
 
+# Ignore coverage reports
 .coverage
+
+# Ignore environment variable files
+.env
