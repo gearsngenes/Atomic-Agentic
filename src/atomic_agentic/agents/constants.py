@@ -9,6 +9,12 @@ from __future__ import annotations
 #
 # These fields are centralized because ToolAgent prompt contracts and parser/
 # validator code need to agree on the same LLM-output protocol.
+#
+# Important runtime contract:
+# - "tool" and "args" are the minimum required fields for executable tool calls.
+# - "step" is allowed but advisory. Runtime owns the authoritative step index.
+#   Prompts may still strongly instruct the LLM to include "step" because that
+#   improves output regularity, but parser/runtime code must tolerate omission.
 
 
 STEP_FIELD = "step"
@@ -20,36 +26,41 @@ DESCRIPTION_FIELD = "description"
 
 RETURN_VALUE_FIELD = "val"
 
-PLAN_FIELDS = frozenset(
+
+BASE_STEP_FIELDS = frozenset(
     {
         STEP_FIELD,
         TOOL_FIELD,
         ARGS_FIELD,
+    }
+)
+
+REQUIRED_BASE_STEP_FIELDS = frozenset(
+    {
+        TOOL_FIELD,
+        ARGS_FIELD,
+    }
+)
+
+
+PLAN_FIELDS = BASE_STEP_FIELDS | frozenset(
+    {
         AWAIT_FIELD,
     }
 )
 
-REQUIRED_PLAN_FIELDS = frozenset(
-    {
-        TOOL_FIELD,
-        ARGS_FIELD,
-    }
-)
+REQUIRED_PLAN_FIELDS = REQUIRED_BASE_STEP_FIELDS
 
-REACT_FIELDS = frozenset(
+
+REACT_FIELDS = BASE_STEP_FIELDS | frozenset(
     {
-        STEP_FIELD,
-        TOOL_FIELD,
-        ARGS_FIELD,
         DURATION_FIELD,
         DESCRIPTION_FIELD,
     }
 )
 
-REQUIRED_REACT_FIELDS = frozenset(
+REQUIRED_REACT_FIELDS = REQUIRED_BASE_STEP_FIELDS | frozenset(
     {
-        TOOL_FIELD,
-        ARGS_FIELD,
         DURATION_FIELD,
         DESCRIPTION_FIELD,
     }
@@ -348,6 +359,8 @@ __all__ = [
     "DESCRIPTION_FIELD",
     "RETURN_VALUE_FIELD",
     # LLM step schemas
+    "BASE_STEP_FIELDS",
+    "REQUIRED_BASE_STEP_FIELDS",
     "PLAN_FIELDS",
     "REQUIRED_PLAN_FIELDS",
     "REACT_FIELDS",
