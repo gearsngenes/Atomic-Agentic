@@ -7,7 +7,6 @@ from typing import Any
 # Sentinel / absence
 # =============================================================================
 # Used by:
-# - core/sentinels.py: backwards-compatible NO_VAL re-export
 # - core/Parameters.py: ParamSpec defaults
 # - core/Invokable.py: signature/default rendering and input filtering
 #
