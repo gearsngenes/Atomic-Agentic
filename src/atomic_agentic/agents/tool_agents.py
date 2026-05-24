@@ -2151,15 +2151,14 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         )
 
         try:
-            return BlackboardSlot.from_dict(
-                {
-                    STEP_FIELD: step,
-                    TOOL_FIELD: tool,
-                    ARGS_FIELD: args,
-                    "status": "planned",
-                    "step_dependencies": tuple(sorted(deps)),
-                    "await_step": await_step,
-                }
+            return BlackboardSlot(
+                step=step,
+                tool=tool,
+                args=args,
+                resolved_args=NO_VAL,
+                status="planned",
+                step_dependencies=tuple(sorted(deps)),
+                await_step=await_step,
             )
         except Exception as exc:
             raise ToolAgentError(
