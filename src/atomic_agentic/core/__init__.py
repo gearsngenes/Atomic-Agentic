@@ -1,4 +1,4 @@
-from .Invokable import AtomicInvokable, Command, StructuredInvokable, ParameterMap, ArgumentMap, ArgSpec
+from .Invokable import AtomicInvokable, Command, StructuredInvokable
 from .Parameters import ParamSpec, extract_io, is_valid_parameter_order
 from .constants import NO_VAL
 
@@ -7,9 +7,6 @@ __all__ = [
     "Command",
     "StructuredInvokable",
     "ParamSpec",
-    "ParameterMap",
-    "ArgumentMap",  # deprecated alias
-    "ArgSpec",  # deprecated alias
     "extract_io",
     "is_valid_parameter_order",
     "NO_VAL",

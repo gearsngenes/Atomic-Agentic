@@ -12,9 +12,6 @@ from .core.Invokable import (
     Command,
     StructuredInvokable,
     StructuredResultDict,
-    ParameterMap, # to be removed
-    ArgumentMap, # to be removed
-    ArgSpec, # to be removed
 )
 
 __all__ = [
@@ -32,8 +29,5 @@ __all__ = [
     # Structured invokable types
     "StructuredInvokable",
     "StructuredResultDict",
-    # Legacy aliases for backward compatibility
-    "ArgSpec",  # Deprecated: use ParamSpec instead
-    "ArgumentMap",  # Deprecated: use ParameterMap instead
-    "ParameterMap", # Deprecated: no longer used 
+    # Legacy aliases removed in v2
     ]

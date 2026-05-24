@@ -14,12 +14,7 @@ from .Exceptions import PackagingError
 
 logger = logging.getLogger(__name__)
 
-# Canonical mapping of parameter name -> ParamSpec (legacy, for backward compat)
-ParameterMap = dict[str, ParamSpec]
-
-# Legacy aliases for backward compatibility
-ArgumentMap = ParameterMap  # Deprecated: use ParameterMap instead
-ArgSpec = ParamSpec  # Deprecated: use ParamSpec instead
+# Deprecated aliases removed in v2: use `ParamSpec` and the `parameters` property.
 
 
 class AtomicInvokable(ABC):
@@ -76,9 +71,9 @@ class AtomicInvokable(ABC):
     - The class intentionally does not expose a human-readable ``signature`` string
       inside ``to_dict()`` to minimize churn when persisting metadata; use the
       ``signature`` property for logging and UIs.
-    - **Backward Compatibility**: Legacy aliases ``ArgumentMap`` and ``ArgSpec`` are
-      defined module-level but **DEPRECATED**. Use ``ParameterMap`` and ``ParamSpec``
-      in new code.
+        - **Backward Compatibility**: Legacy aliases (previously ``ParameterMap``,
+            ``ArgumentMap``, and ``ArgSpec``) have been removed in v2; prefer
+            ``ParamSpec`` and the `parameters` property on invokable instances.
     """
 
     def __init__(
@@ -228,18 +223,13 @@ class AtomicInvokable(ABC):
     # Legacy backward compatibility properties
     # ---------------------------------------------------------------- #
     @property
-    def parameters_map(self) -> ParameterMap:
+    def parameters_map(self) -> dict[str, ParamSpec]:
         """Legacy alternative viewing mechanism: parameters as a dict mapping name -> ParamSpec.
 
-        This property is provided for backward compatibility. New code should prefer
-        the ``parameters`` property which provides the ordered list directly.
+        This property is retained temporarily during the v2 migration. New code should
+        prefer the ``parameters`` property, which provides the ordered list directly.
         """
         return {spec.name: spec for spec in self._parameters}
-
-    @property
-    def arguments_map(self) -> ArgumentMap:
-        """Deprecated legacy property. Use ``parameters_map`` or ``parameters`` instead."""
-        return self.parameters_map
 
     # ---------------------------------------------------------------- #
     # Signature helper
