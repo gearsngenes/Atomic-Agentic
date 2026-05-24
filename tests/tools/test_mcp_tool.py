@@ -9,7 +9,7 @@ from atomic_agentic.core.Exceptions import ToolDefinitionError, ToolInvocationEr
 from atomic_agentic.core.Parameters import ParamSpec
 from atomic_agentic.mcp.MCPClientHub import MCPClientHub
 from atomic_agentic.tools.mcp import MCPProxyTool
-from atomic_agentic.core.sentinels import NO_VAL
+from atomic_agentic.core.constants import NO_VAL
 
 def param(
     name: str,

@@ -33,7 +33,7 @@ except: Llama = None
 
 # Import Exceptions
 from ..core.Invokable import AtomicInvokable
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 from ..core.Parameters import ParamSpec
 from ..core.Exceptions import LLMEngineError
 

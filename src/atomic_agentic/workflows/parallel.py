@@ -10,7 +10,7 @@ from typing import Any, Optional
 from ..core.Invokable import StructuredInvokable
 from ..core.Exceptions import ValidationError
 from ..core.Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
 from .metadata import ChildRunRecord, OutputTopology, ParallelFlowRunMetadata

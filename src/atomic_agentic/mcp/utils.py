@@ -13,7 +13,7 @@ from typing import (
 from mcp import types as mcp_types
 
 from ..core.Parameters import ParamSpec
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 
 MCPExtractionMode = Literal["extract_result", "structured_content", "content_blocks"]
 

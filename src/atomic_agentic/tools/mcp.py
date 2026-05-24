@@ -13,7 +13,7 @@ from typing import (
 from ..core.Invokable import AtomicInvokable
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Parameters import ParamSpec
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 from ..mcp.MCPClientHub import MCPClientHub
 from .base import Tool
 

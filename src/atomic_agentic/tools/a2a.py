@@ -7,7 +7,7 @@ from atomic_agentic.core.Invokable import AtomicInvokable
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Parameters import ParamSpec
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 from .base import Tool
 from ..a2a.PyA2AtomicClient import PyA2AtomicClient
 

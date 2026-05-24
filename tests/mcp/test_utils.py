@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.core.sentinels import NO_VAL
+from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.mcp.utils import (
     _build_mcp_tool_metadata,
     _infer_mcp_extraction_mode,

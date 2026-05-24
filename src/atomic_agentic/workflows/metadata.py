@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Generic, TypeVar, ClassVar
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 
 __all__ = [
     "WorkflowRunMetadata",

@@ -11,7 +11,7 @@ from atomic_agentic.core.Parameters import (
     is_valid_parameter_order,
     to_paramspec_list,
 )
-from atomic_agentic.core.sentinels import NO_VAL
+from atomic_agentic.core.constants import NO_VAL
 
 
 PARAMSPEC_MAPPING_WARNING = "ParamSpec mapping-style access"

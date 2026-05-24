@@ -130,7 +130,7 @@ from ..core.Exceptions import (
 )
 from ..core.constants import IDENTIFIER_PATTERN_TEXT
 from ..core.Invokable import AtomicInvokable
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool, toolify, batch_toolify
 from ..mcp import MCPClientHub

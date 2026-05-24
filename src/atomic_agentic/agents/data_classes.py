@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 import re
 from typing import Any, ClassVar, Dict, Mapping
 
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 from ..core.constants import IDENTIFIER_PATTERN
 
 __all__ = ["AgentTurn", "ToolAgentTurn", "BlackboardSlot", "ConstantSpec"]
