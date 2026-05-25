@@ -2644,6 +2644,38 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         """
         Generate, normalize, and validate a complete PlanAct running blackboard.
 
+        This is the PlanAct generation hook. It is intentionally single-shot and
+        fail-fast: no retry logic is performed here.
+
+        Lifecycle
+        ---------
+        1. Generate raw LLM text from the provided messages.
+        2. Extract the largest JSON array/object from the raw text.
+        3. Validate that the extracted value is a non-empty list of mappings.
+        4. Convert each mapping into a planned BlackboardSlot.
+        5. Normalize the planned slot list.
+        6. Validate the final planned slot list.
+        7. Return the final list of planned slots.
+
+        Parameters
+        ----------
+        messages : list[dict[str, str]]
+            LLM-facing messages already built by the base Agent message pipeline.
+
+        cache_blackboard : list[BlackboardSlot]
+            Snapshot of persisted blackboard entries available to this invoke.
+            Used for validating cache placeholder references.
+
+        Returns
+        -------
+        list[BlackboardSlot]
+            Fully normalized and validated planned slots for the running blackboard.
+
+        Raises
+        ------
+        ToolAgentError
+            If generation output cannot be parsed, converted, normalized, or validated.
+
         PlanAct raw step schema:
         - allowed: PLAN_FIELDS
         - required: REQUIRED_PLAN_FIELDS
@@ -3231,6 +3263,52 @@ class ReActAgent(ToolAgent[ReActRunState]):
         """
         Generate and validate one ReAct tool step as a planned BlackboardSlot plus
         observation duration and description.
+
+        This is the ReAct generation hook. It is intentionally single-shot and
+        fail-fast: no retry logic is performed here.
+
+        Lifecycle
+        ---------
+        1. Generate raw LLM text from the provided messages.
+        2. Extract the largest JSON array/object from the raw text.
+        3. Validate that the extracted value is a mapping.
+        4. Extract and validate "duration" as an int within the remaining future
+           step-generation capacity.
+        5. Extract and validate "description" as a non-empty string.
+        6. Normalize the remaining raw step dict using expected_step as authoritative.
+        7. Convert the normalized mapping into a planned BlackboardSlot.
+        8. Validate tool existence.
+        9. Validate return-tool duration is 0.
+        10. Validate cache references against cache_blackboard.
+        11. Validate step dependencies are prior-only.
+        12. Return the planned slot, duration, and description.
+
+        Parameters
+        ----------
+        messages : list[dict[str, str]]
+            LLM-facing messages for this ReAct step.
+
+        cache_blackboard : list[BlackboardSlot]
+            Snapshot of persisted blackboard entries available to this invoke.
+            Used for validating cache placeholder references.
+
+        expected_step : int
+            Authoritative plan-local step index for the generated slot. The raw
+            LLM-produced "step" value is optional/advisory and is overwritten.
+
+        Returns
+        -------
+        tuple[BlackboardSlot, int, str]
+            Planned single-step slot, observation duration, and step description.
+            The slot is not inserted into the running blackboard and placeholders
+            are not resolved here. The duration controls how many future successful
+            step-generation turns may render this step's raw result as observable_result.
+
+        Raises
+        ------
+        ToolAgentError
+            If generation output cannot be parsed, converted, or validated.
+
 
         ReAct raw step schema:
         - allowed: REACT_FIELDS
