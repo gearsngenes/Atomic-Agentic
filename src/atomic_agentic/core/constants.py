@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, TypeAlias, TypeVar
+
 
 # =============================================================================
 # Sentinel / absence
@@ -53,6 +54,21 @@ IDENTIFIER_PATTERN: re.Pattern[str] = re.compile(
 
 
 # =============================================================================
+# Shared utility typing
+# =============================================================================
+# Used by:
+# - core/utils.py: generic sync/async bridge and header normalization
+#
+# Keep this section intentionally small. These names support narrow shared
+# utilities and should not become a dumping ground for module-specific type aliases.
+
+
+T = TypeVar("T")
+
+HeaderValue: TypeAlias = str | int | float | bool | bytes | bytearray
+
+
+# =============================================================================
 # Explicit public export list
 # =============================================================================
 # Keep this explicit so adding local helper names or imports cannot accidentally
@@ -64,4 +80,6 @@ __all__ = [
     "NO_VAL",
     "IDENTIFIER_PATTERN_TEXT",
     "IDENTIFIER_PATTERN",
+    "T",
+    "HeaderValue",
 ]
