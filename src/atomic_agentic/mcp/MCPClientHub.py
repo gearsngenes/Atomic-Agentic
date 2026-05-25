@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import AsyncExitStack
-from types import MappingProxyType
 from typing import (
     Any,
     Awaitable,
@@ -17,12 +16,12 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
+from ..core.constants import HeaderValue, T
 from ..core.utils import run_coro_sync, normalize_headers
-from ..core.constants import T
 from .utils import (
     _build_mcp_tool_metadata,
     _normalize_mcp_call_result,
-    ) 
+)
 
 
 __all__ = ["MCPClientHub"]
@@ -50,7 +49,7 @@ class MCPClientHub:
         endpoint: str | None = None,
         command: str | None = None,
         args: list[str] | None = None,
-        headers: Mapping[str, str] | None = None,
+        headers: Mapping[str, HeaderValue] | None = None,
     ) -> None:
         mode = str(transport_mode).strip()
         if mode not in {"stdio", "sse", "streamable_http"}:
@@ -110,7 +109,7 @@ class MCPClientHub:
         return self._headers
 
     @headers.setter
-    def headers(self, value: Mapping[str, str] | None) -> None:
+    def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
         self._headers = normalize_headers(value)
 
     def to_dict(self) -> Dict[str, Any]:

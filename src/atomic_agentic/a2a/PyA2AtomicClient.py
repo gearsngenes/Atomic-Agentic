@@ -10,6 +10,7 @@ from python_a2a import (
     MessageRole,
 )
 
+from ..core.constants import HeaderValue
 from ..core.utils import normalize_headers
 from .constants import (
     GET_INVOKABLE_METADATA_FUNCTION,
@@ -37,7 +38,7 @@ class PyA2AtomicClient:
     def __init__(
         self,
         url: str,
-        headers: Mapping[str, str] | None = None,
+        headers: Mapping[str, HeaderValue] | None = None,
     ) -> None:
         if not isinstance(url, str) or not url.strip():
             raise ValueError("url must be a non-empty string.")
@@ -61,7 +62,7 @@ class PyA2AtomicClient:
         return self._headers
 
     @headers.setter
-    def headers(self, value: Mapping[str, str] | None) -> None:
+    def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
         self._headers = normalize_headers(value)
         self._rebuild_client()
 

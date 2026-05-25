@@ -13,7 +13,7 @@ from typing import (
 from ..core.Invokable import AtomicInvokable
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Parameters import ParamSpec
-from ..core.constants import NO_VAL
+from ..core.constants import HeaderValue, NO_VAL
 from ..mcp.MCPClientHub import MCPClientHub
 from .base import Tool
 
@@ -38,7 +38,7 @@ class MCPProxyTool(Tool):
         endpoint: str | None = None,
         command: str | None = None,
         args: list[str] | None = None,
-        headers: Mapping[str, str] | None = None,
+        headers: Mapping[str, HeaderValue] | None = None,
         filter_extraneous_inputs: bool = True,
     ) -> None:
         resolved_remote_name = str(remote_name).strip()
@@ -284,7 +284,7 @@ class MCPProxyTool(Tool):
             f"{self.full_name}: remote MCP tool reported isError=True. Payload: {payload!r}"
         )
 
-    def refresh(self, headers: Any = NO_VAL) -> None:
+    def refresh(self, headers: Mapping[str, HeaderValue] | None = NO_VAL) -> None:
         """
         Re-fetch remote metadata and rebuild the local MCP binding.
 
