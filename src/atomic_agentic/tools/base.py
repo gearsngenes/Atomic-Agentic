@@ -5,58 +5,20 @@ import inspect
 import logging
 from typing import (
     Any,
-    Awaitable,
     Callable,
     Dict,
     Mapping,
     Optional,
-    TypeVar,
 )
-import threading
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Invokable import AtomicInvokable
 from ..core.Parameters import ParamSpec, extract_io
+from ..core.utils import run_coro_sync
 
 
 logger = logging.getLogger(__name__)
 
-
-T = TypeVar("T")
-
-def _run_coro_sync(coro: Awaitable[T]) -> T:
-    """
-    Run an async coroutine from sync code, even if a loop is already running
-    in the current thread.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    result_box: list[T] = []
-    error_box: list[BaseException] = []
-
-    def runner() -> None:
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            result_box.append(loop.run_until_complete(coro))
-        except BaseException as exc:  # noqa: BLE001
-            error_box.append(exc)
-        finally:
-            loop.close()
-
-    thread = threading.Thread(target=runner, daemon=True)
-    thread.start()
-    thread.join()
-
-    if error_box:
-        raise error_box[0]
-    if not result_box:
-        raise RuntimeError("Coroutine completed without producing a result.")
-
-    return result_box[0]
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Tool Invokable
@@ -357,7 +319,7 @@ class Tool(AtomicInvokable):
             result = self._function(*args, **kwargs)
 
             if inspect.isawaitable(result):
-                result = _run_coro_sync(result)
+                result = run_coro_sync(result)
 
         except ToolInvocationError:
             raise

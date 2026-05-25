@@ -5,16 +5,13 @@ try:  # populated when installed or when a wheel is built
 except PackageNotFoundError:  # pragma: no cover
     __version__ = "0.0.0"
 
-from .core.sentinels import NO_VAL
+from .core.constants import NO_VAL
 from .core.Parameters import ParamSpec, to_paramspec_list, extract_io, is_valid_parameter_order
 from .core.Invokable import (
     AtomicInvokable,
     Command,
     StructuredInvokable,
     StructuredResultDict,
-    ParameterMap, # to be removed
-    ArgumentMap, # to be removed
-    ArgSpec, # to be removed
 )
 
 __all__ = [
@@ -32,8 +29,5 @@ __all__ = [
     # Structured invokable types
     "StructuredInvokable",
     "StructuredResultDict",
-    # Legacy aliases for backward compatibility
-    "ArgSpec",  # Deprecated: use ParamSpec instead
-    "ArgumentMap",  # Deprecated: use ParameterMap instead
-    "ParameterMap", # Deprecated: no longer used 
+    # Legacy aliases removed in v2
     ]

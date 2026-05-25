@@ -59,6 +59,34 @@ def latest_fake_client(factory: FakeA2AClientFactory) -> FakeA2AClient:
 
 
 class TestPyA2AtomicClientConstruction:
+    def test_scalar_header_values_are_normalized(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient(
+            "http://example.test/a2a",
+            headers={
+                "X-Int": 1,
+                "X-Float": 1.5,
+                "X-Bool": True,
+                "X-Bytes": b"abc",
+                "X-ByteArray": bytearray(b"xyz"),
+            },  # type: ignore[arg-type]
+        )
+
+        expected = {
+            "X-Int": "1",
+            "X-Float": "1.5",
+            "X-Bool": "true",
+            "X-Bytes": "abc",
+            "X-ByteArray": "xyz",
+        }
+
+        fake = latest_fake_client(fake_client_factory)
+
+        assert client.headers == expected
+        assert fake.headers == expected
+
     def test_valid_construction_fetches_agent_card(
         self,
         fake_client_factory: FakeA2AClientFactory,
@@ -124,15 +152,21 @@ class TestPyA2AtomicClientConstruction:
         assert latest_fake_client(fake_client_factory).headers == {"X-Test": "yes"}
 
     @pytest.mark.parametrize(
-        "headers",
+        ("headers", "match"),
         [
-            "bad",
-            {"ok": 1},
-            {1: "ok"},
+            ("bad", "headers must be a mapping"),
+            ({1: "ok"}, "header names must be strings"),
+            ({"bad": None}, "must not be None"),
+            ({"bad": {"nested": "value"}}, "must not be a mapping"),
+            ({"bad": ["value"]}, "must not be a collection"),
+            ({"bad": object()}, "must be str, int, float, bool, bytes, or bytearray"),
+            ({"bad": b"\xff"}, "ASCII-decodable"),
+            ({"bad\n": "value"}, "forbidden character"),
+            ({"bad": "line\nbreak"}, "forbidden character"),
         ],
     )
-    def test_invalid_headers_raise(self, headers: object) -> None:
-        with pytest.raises(ValueError, match="headers"):
+    def test_invalid_headers_raise(self, headers: object, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
             PyA2AtomicClient(
                 "http://example.test/a2a",
                 headers=headers,  # type: ignore[arg-type]

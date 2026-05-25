@@ -102,25 +102,45 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import asyncio
-from dataclasses import asdict, dataclass, field
+from collections.abc import Collection
+from dataclasses import dataclass, field
 import logging
 import re
 import string
 import json
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Generic, Mapping, Optional, Sequence, List, TypeVar, Iterable
+from typing import (
+    Any,
+    Callable,
+    Generic,
+    Mapping,
+    Optional,
+    List,
+    TypeVar,
+)
 import pprint
 
 from .base import Agent
 from .constants import (
+    ARGS_FIELD,
+    AWAIT_FIELD,
+    BASE_STEP_FIELDS,
+    DESCRIPTION_FIELD,
+    DURATION_FIELD,
     ORCHESTRATOR_PROMPT,
+    PLAN_FIELDS,
     PLANNER_PROMPT,
+    REACT_FIELDS,
+    REQUIRED_PLAN_FIELDS,
+    REQUIRED_REACT_FIELDS,
     RETURN_TOOL_DESCRIPTION,
     RETURN_TOOL_FULL_NAME,
     RETURN_TOOL_NAME,
     RETURN_TOOL_NAMESPACE,
     RETURN_VALUE_FIELD,
+    STEP_FIELD,
+    TOOL_FIELD,
 )
+
 from .data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot, ConstantSpec
 from ..core.Exceptions import (
     ToolAgentError,
@@ -130,7 +150,7 @@ from ..core.Exceptions import (
 )
 from ..core.constants import IDENTIFIER_PATTERN_TEXT
 from ..core.Invokable import AtomicInvokable
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool, toolify, batch_toolify
 from ..mcp import MCPClientHub
@@ -217,6 +237,19 @@ return_tool = Tool(
     namespace=RETURN_TOOL_NAMESPACE,
     description=RETURN_TOOL_DESCRIPTION,
 )
+
+if return_tool.full_name != RETURN_TOOL_FULL_NAME:
+    raise RuntimeError(
+        f"return_tool.full_name mismatch: expected {RETURN_TOOL_FULL_NAME!r}, "
+        f"got {return_tool.full_name!r}."
+    )
+
+_return_param_names = [spec.name for spec in return_tool.parameters]
+if _return_param_names != [RETURN_VALUE_FIELD]:
+    raise RuntimeError(
+        f"return_tool parameter mismatch: expected {[RETURN_VALUE_FIELD]!r}, "
+        f"got {_return_param_names!r}."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -514,8 +547,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         else:
             dicts = [slot.to_dict() for slot in self._blackboard]
             for _dict in dicts:
-                _dict.pop("resolved_args")
-                _dict.pop("result")
+                _dict.pop(BlackboardSlot.RESOLVED_ARGS_FIELD)
+                _dict.pop(BlackboardSlot.RESULT_FIELD)
                 result.append(_dict)
             
         return result
@@ -1312,14 +1345,14 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
                 if isinstance(raw_error, ToolInvocationError):
                     board[idx].error = raw_error
-                    board[idx].status = "failed"
+                    board[idx].status = BlackboardSlot.FAILED
                     raise raw_error
 
                 wrapped = ToolAgentError(
                     f"{type(self).__name__}.{self.name}: tool call failed at step {idx} for {board[idx].tool!r}: {raw_error}"
                 )
                 board[idx].error = wrapped
-                board[idx].status = "failed"
+                board[idx].status = BlackboardSlot.FAILED
                 raise wrapped from raw_error
 
             return [(idx, result) for idx, result in zip(indices, raw_results)]
@@ -1329,7 +1362,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         for idx, result in results:
             board[idx].result = result
             board[idx].error = NO_VAL
-            board[idx].status = "executed"
+            board[idx].status = BlackboardSlot.EXECUTED
 
         # Post-execution bookkeeping
         for idx in indices:
@@ -1465,7 +1498,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
             if isinstance(raw_error, ToolInvocationError):
                 board[idx].error = raw_error
-                board[idx].status = "failed"
+                board[idx].status = BlackboardSlot.FAILED
                 raise raw_error
 
             wrapped = ToolAgentError(
@@ -1473,13 +1506,13 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 f"for {board[idx].tool!r}: {raw_error}"
             )
             board[idx].error = wrapped
-            board[idx].status = "failed"
+            board[idx].status = BlackboardSlot.FAILED
             raise wrapped from raw_error
 
         for idx, result in zip(indices, raw_results):
             board[idx].result = result
             board[idx].error = NO_VAL
-            board[idx].status = "executed"
+            board[idx].status = BlackboardSlot.EXECUTED
             state.executed_steps.add(idx)
 
         state.tool_calls_used += non_return_planned
@@ -1599,7 +1632,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 resolved_args = slot.resolved_args,
                 result = slot.result,
                 error = slot.error,
-                status = "executed",
+                status = BlackboardSlot.EXECUTED,
                 step_dependencies = slot.step_dependencies,
                 await_step = slot.await_step,
             )
@@ -1848,9 +1881,9 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         extracted: list[dict[str, Any]] = []
         for slot in self._blackboard[start:end]:
             step: dict[str, Any] = {
-                "step": slot.step,
-                "tool": slot.tool,
-                "args": slot.args,
+                STEP_FIELD: slot.step,
+                TOOL_FIELD: slot.tool,
+                ARGS_FIELD: slot.args,
             }
             if self.peek_at_cache:
                 step["result"] = self._preview_blackboard_result(slot.result)
@@ -1946,49 +1979,60 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     # ------------------------------------------------------------------ #
     # Dictionary Validation & Conversion Helpers
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _normalize_step_field_set(
+        fields: Collection[str],
+        *,
+        name: str,
+        require_non_empty: bool,
+    ) -> frozenset[str]:
+        """
+        Normalize and validate a ToolAgent step-field schema set.
+
+        This helper treats schema arguments as programmer-supplied bounds, not
+        LLM output. It rejects strings as a whole because a single string is
+        technically a collection of characters, but never a valid field set.
+        """
+        if isinstance(fields, str) or not isinstance(fields, Collection):
+            raise ToolAgentError(
+                f"{name} must be a collection of field-name strings; "
+                f"got {type(fields).__name__!r}."
+            )
+
+        normalized: set[str] = set()
+        for field_name in fields:
+            if not isinstance(field_name, str) or not field_name:
+                raise ToolAgentError(
+                    f"{name} must contain only non-empty strings; got {field_name!r}."
+                )
+            normalized.add(field_name)
+
+        if require_non_empty and not normalized:
+            raise ToolAgentError(f"{name} must not be empty.")
+
+        return frozenset(normalized)
+
     def _validate_tool_step_dict(
         self,
         data: Mapping[str, Any],
         *,
         expected_step: int,
-        allow_await: bool,
+        allowed_fields: Collection[str],
+        required_fields: Collection[str],
         context: str,
     ) -> dict[str, Any]:
         """
-        Validate and normalize one raw LLM-produced tool-step mapping.
+        Validate and normalize one raw LLM-produced ToolAgent step mapping.
 
-        This helper is strategy-neutral enough to be shared by PlanAct and ReAct:
-        - PlanAct should call it with allow_await=True.
-        - ReAct should call it with allow_await=False.
+        The caller provides explicit field bounds:
+        - ``allowed_fields`` is the maximum allowed key set.
+        - ``required_fields`` is the minimum required key set.
 
-        The raw LLM-produced step number is treated as advisory. The caller-provided
-        expected_step is authoritative, so the returned dict always has "step" set to
-        expected_step.
+        ``context`` is only for error messages. This method does not infer PlanAct,
+        ReAct, or base-step behavior from context.
 
-        Parameters
-        ----------
-        data : Mapping[str, Any]
-            Raw parsed JSON object representing one tool step.
-
-        expected_step : int
-            Authoritative run-local step index to assign to the returned dict.
-
-        allow_await : bool
-            Whether the planner-facing "await" scheduling barrier is allowed.
-
-        context : str
-            Human-readable label used in error messages, such as "plan step" or
-            "next step".
-
-        Returns
-        -------
-        dict[str, Any]
-            Shallow normalized dict with "step" set to expected_step.
-
-        Raises
-        ------
-        ToolAgentError
-            If the raw step shape is invalid.
+        Runtime owns the authoritative step index. Any LLM-provided ``step`` value
+        is advisory and is always overwritten with ``expected_step``.
         """
         if type(expected_step) is not int or expected_step < 0:
             raise ToolAgentError(
@@ -1996,15 +2040,27 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 f"got {expected_step!r}."
             )
 
-        if type(allow_await) is not bool:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} allow_await must be a bool; "
-                f"got {type(allow_await).__name__!r}."
-            )
-
         if not isinstance(context, str) or not context.strip():
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: context must be a non-empty string."
+            )
+
+        allowed = self._normalize_step_field_set(
+            allowed_fields,
+            name="allowed_fields",
+            require_non_empty=True,
+        )
+        required = self._normalize_step_field_set(
+            required_fields,
+            name="required_fields",
+            require_non_empty=False,
+        )
+
+        required_not_allowed = required - allowed
+        if required_not_allowed:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: required_fields must be a subset of "
+                f"allowed_fields; invalid required field(s): {sorted(required_not_allowed)!r}."
             )
 
         if not isinstance(data, Mapping):
@@ -2013,19 +2069,16 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 f"got {type(data).__name__!r}."
             )
 
-        allowed = {"step", "tool", "args"}
-        if allow_await:
-            allowed.add("await")
+        data_keys = set(data)
 
-        extra = set(data.keys()) - allowed
+        extra = data_keys - allowed
         if extra:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: {context} contains unsupported keys: "
                 f"{sorted(extra)!r}."
             )
 
-        required = {"tool", "args"}
-        missing = required - set(data.keys())
+        missing = required - data_keys
         if missing:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: {context} missing required keys: "
@@ -2033,36 +2086,41 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             )
 
         normalized = dict(data)
-        normalized["step"] = expected_step
 
-        tool = normalized["tool"]
-        if not isinstance(tool, str) or not tool.strip():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} 'tool' must be a non-empty string."
-            )
+        # Advisory/fallback behavior:
+        # - If the LLM omitted "step", fill it.
+        # - If the LLM supplied a wrong/non-sequential "step", ignore it.
+        # Runtime order is authoritative.
+        normalized[STEP_FIELD] = expected_step
 
-        args = normalized["args"]
-        if not isinstance(args, dict):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} 'args' must be a dict; "
-                f"got {type(args).__name__!r}."
-            )
-
-        if "await" in normalized:
-            if not allow_await:
+        tool = normalized.get(TOOL_FIELD, NO_VAL)
+        if TOOL_FIELD in normalized or TOOL_FIELD in required:
+            if not isinstance(tool, str) or not tool.strip():
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: {context} must not include 'await'."
+                    f"{type(self).__name__}.{self.name}: {context} {TOOL_FIELD!r} "
+                    "must be a non-empty string."
                 )
 
-            await_step = normalized["await"]
+        args = normalized.get(ARGS_FIELD, NO_VAL)
+        if ARGS_FIELD in normalized or ARGS_FIELD in required:
+            if not isinstance(args, dict):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: {context} {ARGS_FIELD!r} "
+                    f"must be a dict; got {type(args).__name__!r}."
+                )
+
+        if AWAIT_FIELD in normalized:
+            await_step = normalized[AWAIT_FIELD]
             if type(await_step) is not int or await_step < 0:
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: {context} 'await' must be an int >= 0."
+                    f"{type(self).__name__}.{self.name}: {context} {AWAIT_FIELD!r} "
+                    "must be an int >= 0."
                 )
 
             if tool == RETURN_TOOL_FULL_NAME:
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: return step must not include 'await'."
+                    f"{type(self).__name__}.{self.name}: return step must not include "
+                    f"{AWAIT_FIELD!r}."
                 )
 
         return normalized
@@ -2072,45 +2130,18 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         data: Mapping[str, Any],
         *,
         step: int,
-        allow_await: bool,
+        allowed_fields: Collection[str],
         context: str,
     ) -> BlackboardSlot:
         """
         Convert a normalized tool-step mapping into a planned BlackboardSlot.
 
-        This helper does not validate plan chronology or cache-reference bounds.
-        Subclasses remain responsible for validating dependencies against their own
-        lifecycle constraints.
+        This method is a conversion guard, not the primary raw-LLM schema
+        validator. It rejects fields outside ``allowed_fields`` and validates the
+        executable slot fields needed to construct a BlackboardSlot.
 
-        Dependency semantics
-        --------------------
-        - step_dependencies stores data dependencies extracted from <<__sN__>> args.
-        - await_step stores the explicit planner-facing "await" barrier separately.
-        - await_step is not folded into step_dependencies here.
-
-        Parameters
-        ----------
-        data : Mapping[str, Any]
-            Normalized step mapping, typically returned by _validate_tool_step_dict(...).
-
-        step : int
-            Authoritative run-local step index for the slot.
-
-        allow_await : bool
-            Whether to preserve an "await" scheduling barrier from data.
-
-        context : str
-            Human-readable label used in error messages.
-
-        Returns
-        -------
-        BlackboardSlot
-            Planned blackboard slot with unresolved args and extracted data dependencies.
-
-        Raises
-        ------
-        ToolAgentError
-            If slot construction fails.
+        Required-field validation should already have happened in
+        ``_validate_tool_step_dict(...)``.
         """
         if type(step) is not int or step < 0:
             raise ToolAgentError(
@@ -2118,16 +2149,16 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 f"got {step!r}."
             )
 
-        if type(allow_await) is not bool:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} allow_await must be a bool; "
-                f"got {type(allow_await).__name__!r}."
-            )
-
         if not isinstance(context, str) or not context.strip():
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: context must be a non-empty string."
             )
+
+        allowed = self._normalize_step_field_set(
+            allowed_fields,
+            name="allowed_fields",
+            require_non_empty=True,
+        )
 
         if not isinstance(data, Mapping):
             raise ToolAgentError(
@@ -2135,31 +2166,41 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 f"got {type(data).__name__!r}."
             )
 
-        tool = data.get("tool", NO_VAL)
-        args = data.get("args", NO_VAL)
+        extra = set(data) - allowed
+        if extra:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: {context} contains unsupported keys: "
+                f"{sorted(extra)!r}."
+            )
+
+        tool = data.get(TOOL_FIELD, NO_VAL)
+        args = data.get(ARGS_FIELD, NO_VAL)
 
         if not isinstance(tool, str) or not tool.strip():
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} 'tool' must be a non-empty string."
+                f"{type(self).__name__}.{self.name}: {context} {TOOL_FIELD!r} "
+                "must be a non-empty string."
             )
 
         if not isinstance(args, dict):
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} 'args' must be a dict; "
-                f"got {type(args).__name__!r}."
+                f"{type(self).__name__}.{self.name}: {context} {ARGS_FIELD!r} "
+                f"must be a dict; got {type(args).__name__!r}."
             )
 
         await_step = NO_VAL
-        if "await" in data:
-            if not allow_await:
+        if AWAIT_FIELD in data:
+            await_step = data[AWAIT_FIELD]
+            if type(await_step) is not int or await_step < 0:
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: {context} must not include 'await'."
+                    f"{type(self).__name__}.{self.name}: {context} {AWAIT_FIELD!r} "
+                    "must be an int >= 0."
                 )
-            await_step = data["await"]
 
         if await_step is not NO_VAL and tool == RETURN_TOOL_FULL_NAME:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return step must not include 'await'."
+                f"{type(self).__name__}.{self.name}: return step must not include "
+                f"{AWAIT_FIELD!r}."
             )
 
         deps: set[int] = set(
@@ -2167,15 +2208,14 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         )
 
         try:
-            return BlackboardSlot.from_dict(
-                {
-                    "step": step,
-                    "tool": tool,
-                    "args": args,
-                    "status": "planned",
-                    "step_dependencies": tuple(sorted(deps)),
-                    "await_step": await_step,
-                }
+            return BlackboardSlot(
+                step=step,
+                tool=tool,
+                args=args,
+                resolved_args=NO_VAL,
+                status=BlackboardSlot.PLANNED,
+                step_dependencies=tuple(sorted(deps)),
+                await_step=await_step,
             )
         except Exception as exc:
             raise ToolAgentError(
@@ -2432,7 +2472,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                     resolved_args=NO_VAL,
                     result=NO_VAL,
                     error=NO_VAL,
-                    status="planned",
+                    status=BlackboardSlot.PLANNED,
                     step_dependencies=tuple(),
                     await_step=NO_VAL,
                 )
@@ -2443,7 +2483,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             slot.resolved_args = NO_VAL
             slot.result = NO_VAL
             slot.error = NO_VAL
-            slot.status = "planned"
+            slot.status = BlackboardSlot.PLANNED
 
         return_idx = len(slots) - 1
         return_slot = slots[return_idx]
@@ -2459,7 +2499,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         # isolates return as the final batch.
         return_slot.step_dependencies = tuple(range(return_idx))
         return_slot.await_step = NO_VAL
-        return_slot.status = "planned"
+        return_slot.status = BlackboardSlot.PLANNED
 
         return slots
 
@@ -2635,6 +2675,13 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         ------
         ToolAgentError
             If generation output cannot be parsed, converted, normalized, or validated.
+
+        PlanAct raw step schema:
+        - allowed: PLAN_FIELDS
+        - required: REQUIRED_PLAN_FIELDS
+
+        The LLM-provided ``step`` field is advisory. JSON array position is
+        authoritative and is passed as ``expected_step``.
         """
         if not messages:
             raise ToolAgentError(
@@ -2661,13 +2708,14 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             step_dict = self._validate_tool_step_dict(
                 item,
                 expected_step=i,
-                allow_await=True,
+                allowed_fields=PLAN_FIELDS,
+                required_fields=REQUIRED_PLAN_FIELDS,
                 context="plan step",
             )
             slot = self._tool_step_dict_to_slot(
                 step_dict,
                 step=i,
-                allow_await=True,
+                allowed_fields=PLAN_FIELDS,
                 context="plan step",
             )
             planned_slots.append(slot)
@@ -2969,7 +3017,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                 )
 
             slot.error = NO_VAL
-            slot.status = "prepared"
+            slot.status = BlackboardSlot.PREPARED
 
         state.prepared_steps = sorted(batch)
         state.batch_index += 1
@@ -3260,6 +3308,14 @@ class ReActAgent(ToolAgent[ReActRunState]):
         ------
         ToolAgentError
             If generation output cannot be parsed, converted, or validated.
+
+
+        ReAct raw step schema:
+        - allowed: REACT_FIELDS
+        - required: REQUIRED_REACT_FIELDS
+
+        ``step`` is allowed but advisory. Runtime normalizes it to
+        ``expected_step``.
         """
         if not messages:
             raise ToolAgentError(
@@ -3293,49 +3349,60 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"got {type(parsed).__name__!r}."
             )
 
-        step_payload = dict(parsed)
+        raw_payload = dict(parsed)
 
-        duration = step_payload.pop("duration", NO_VAL)
-        if duration is NO_VAL:
+        # Preserve the existing ReAct error order/wording for unsupported keys and
+        # required ReAct metadata fields while still delegating schema-bound validation
+        # to _validate_tool_step_dict below.
+        extra = set(raw_payload) - REACT_FIELDS
+        if extra:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step missing required key 'duration'."
+                f"{type(self).__name__}.{self.name}: next step contains unsupported keys: "
+                f"{sorted(extra)!r}."
             )
 
+        if DURATION_FIELD not in raw_payload:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step missing required key {DURATION_FIELD!r}."
+            )
+
+        if DESCRIPTION_FIELD not in raw_payload:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step missing required key {DESCRIPTION_FIELD!r}."
+            )
+
+        step_payload = self._validate_tool_step_dict(
+            raw_payload,
+            expected_step=expected_step,
+            allowed_fields=REACT_FIELDS,
+            required_fields=REQUIRED_REACT_FIELDS,
+            context="next step",
+        )
+
+        duration = step_payload.pop(DURATION_FIELD)
         if type(duration) is not int or duration < 0 or duration > max_duration:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step 'duration' must be an int in "
+                f"{type(self).__name__}.{self.name}: next step {DURATION_FIELD!r} must be an int in "
                 f"[0, {max_duration}] for expected_step={expected_step}; got {duration!r}."
             )
 
-        description = step_payload.pop("description", NO_VAL)
-        if description is NO_VAL:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step missing required key 'description'."
-            )
-
+        description = step_payload.pop(DESCRIPTION_FIELD)
         if type(description) is not str:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step 'description' must be a string; "
+                f"{type(self).__name__}.{self.name}: next step {DESCRIPTION_FIELD!r} must be a string; "
                 f"got {type(description).__name__!r}."
             )
 
         description = description.strip()
         if not description:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step 'description' cannot be empty."
+                f"{type(self).__name__}.{self.name}: next step {DESCRIPTION_FIELD!r} cannot be empty."
             )
 
-        step_dict = self._validate_tool_step_dict(
-            step_payload,
-            expected_step=expected_step,
-            allow_await=False,
-            context="next step",
-        )
-
         slot = self._tool_step_dict_to_slot(
-            step_dict,
+            step_payload,
             step=expected_step,
-            allow_await=False,
+            allowed_fields=BASE_STEP_FIELDS,
             context="next step",
         )
 
@@ -3344,7 +3411,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         if slot.tool == RETURN_TOOL_FULL_NAME and duration != 0:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return tool must use duration 0; "
+                f"{type(self).__name__}.{self.name}: return tool must use {DURATION_FIELD!r} 0; "
                 f"got {duration!r}."
             )
 
@@ -3491,10 +3558,10 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 continue
 
             record: dict[str, Any] = {
-                "step": slot.step,
-                "description": state.descriptions[idx],
-                "tool": slot.tool,
-                "args": slot.args,
+                STEP_FIELD: slot.step,
+                DESCRIPTION_FIELD: state.descriptions[idx],
+                TOOL_FIELD: slot.tool,
+                ARGS_FIELD: slot.args,
                 "result_ref": f"<<__s{idx}__>>",
             }
 
@@ -3612,7 +3679,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         # Resolve placeholders after stamping the planned slot into the running state.
         # The base resolver validates that referenced cache/running slots are executed.
         slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
-        slot.status = "prepared"
+        slot.status = BlackboardSlot.PREPARED
 
         # Store this step's future raw-result visibility duration.
         # The result is not available until after the base execute loop runs this step,

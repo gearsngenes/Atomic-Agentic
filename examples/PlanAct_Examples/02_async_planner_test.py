@@ -32,7 +32,8 @@ async_tester.register(
 )
 
 if __name__ == "__main__":
-    sequentially = True
+    choice = input("Run steps sequentially? (y/n): ").strip().lower()
+    sequentially = choice == "y"
     prompt = (
         f"Call 'DelayPrint' EXACTLY FIVE TIMES, but call them {"SEQUENTIALLY" if sequentially else "CONCURRENTLY"}.\n"
     )

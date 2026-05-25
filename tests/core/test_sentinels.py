@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from atomic_agentic.core.sentinels import NO_VAL
+from atomic_agentic.core.constants import NO_VAL
 
 
 class TestNoValSentinel:
@@ -8,7 +8,7 @@ class TestNoValSentinel:
         assert repr(NO_VAL) == "NO_VAL"
 
     def test_no_val_is_singleton_import_identity(self) -> None:
-        from atomic_agentic.core.sentinels import NO_VAL as imported_again
+        from atomic_agentic.core.constants import NO_VAL as imported_again
 
         assert imported_again is NO_VAL
 

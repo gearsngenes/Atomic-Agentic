@@ -8,7 +8,7 @@ from ..core.Invokable import StructuredInvokable
 from .sequential import SequentialFlow
 from ..core.Exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
 from .metadata import IterationRecord, IterativeFlowRunMetadata

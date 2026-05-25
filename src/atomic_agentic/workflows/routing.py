@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from ..core.Exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable, StructuredInvokable
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
 from .metadata import ChildRunRecord, RoutingFlowRunMetadata

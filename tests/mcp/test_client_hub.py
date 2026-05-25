@@ -100,6 +100,26 @@ class TestMCPClientHubConstruction:
 
 
 class TestMCPClientHubHeaders:
+    def test_scalar_header_values_are_normalized(self) -> None:
+        hub = MCPClientHub(
+            "sse",
+            endpoint="http://localhost:8000/sse",
+            headers={
+                "X-Int": 1,
+                "X-Float": 1.5,
+                "X-Bool": True,
+                "X-Bytes": b"abc",
+                "X-ByteArray": bytearray(b"xyz"),
+            },  # type: ignore[arg-type]
+        )
+
+        assert hub.headers == {
+            "X-Int": "1",
+            "X-Float": "1.5",
+            "X-Bool": "true",
+            "X-Bytes": "abc",
+            "X-ByteArray": "xyz",
+        }
     def test_headers_are_normalized_and_hidden_in_to_dict(self) -> None:
         hub = MCPClientHub(
             "sse",
@@ -132,15 +152,21 @@ class TestMCPClientHubHeaders:
         assert hub.headers == {"X-Test": "yes"}
 
     @pytest.mark.parametrize(
-        "headers",
+        ("headers", "match"),
         [
-            "bad",
-            {"ok": 1},
-            {1: "ok"},
+            ("bad", "headers must be a mapping"),
+            ({1: "ok"}, "header names must be strings"),
+            ({"bad": None}, "must not be None"),
+            ({"bad": {"nested": "value"}}, "must not be a mapping"),
+            ({"bad": ["value"]}, "must not be a collection"),
+            ({"bad": object()}, "must be str, int, float, bool, bytes, or bytearray"),
+            ({"bad": b"\xff"}, "ASCII-decodable"),
+            ({"bad\n": "value"}, "forbidden character"),
+            ({"bad": "line\nbreak"}, "forbidden character"),
         ],
     )
-    def test_invalid_headers_raise(self, headers: object) -> None:
-        with pytest.raises(ValueError, match="headers"):
+    def test_invalid_headers_raise(self, headers: object, match: str) -> None:
+        with pytest.raises(ValueError, match=match):
             MCPClientHub(
                 "sse",
                 endpoint="http://localhost:8000/sse",

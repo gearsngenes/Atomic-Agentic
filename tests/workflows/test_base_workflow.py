@@ -8,7 +8,7 @@ import pytest
 
 from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
 from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.core.sentinels import NO_VAL
+from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.workflows.base import FlowResultDict, Workflow
 from atomic_agentic.workflows.metadata import WorkflowRunMetadata
 

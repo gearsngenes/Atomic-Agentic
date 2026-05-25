@@ -20,7 +20,7 @@ from ..core.Exceptions import (
 )
 from ..core.Invokable import AtomicInvokable
 from ..core.Parameters import ParamSpec
-from ..core.sentinels import NO_VAL
+from ..core.constants import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..tools import Tool, toolify
 from .data_classes import AgentTurn

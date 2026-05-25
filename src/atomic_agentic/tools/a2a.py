@@ -7,7 +7,7 @@ from atomic_agentic.core.Invokable import AtomicInvokable
 
 from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Parameters import ParamSpec
-from ..core.sentinels import NO_VAL
+from ..core.constants import HeaderValue, NO_VAL
 from .base import Tool
 from ..a2a.PyA2AtomicClient import PyA2AtomicClient
 
@@ -47,7 +47,7 @@ class PyA2AtomicTool(Tool):
         *,
         client: PyA2AtomicClient | None = None,
         url: str | None = None,
-        headers: Mapping[str, str] | None = None,
+        headers: Mapping[str, HeaderValue] | None = None,
         filter_extraneous_inputs: bool = True,
     ) -> None:
         resolved_remote_name = str(remote_name).strip()
@@ -130,7 +130,7 @@ class PyA2AtomicTool(Tool):
         return self._client.headers
 
     @headers.setter
-    def headers(self, value: Mapping[str, str] | None) -> None:
+    def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
         self._client.headers = value
         self.refresh()
 
@@ -214,7 +214,7 @@ class PyA2AtomicTool(Tool):
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    def refresh(self, headers: Any = NO_VAL) -> None:
+    def refresh(self, headers: Mapping[str, HeaderValue] | None = NO_VAL) -> None:
         """
         Re-fetch remote metadata and rebuild the local binding.
 
