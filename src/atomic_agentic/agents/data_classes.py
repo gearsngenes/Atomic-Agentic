@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-import re
 from typing import Any, ClassVar, Dict, Mapping
-
-from ..core.constants import NO_VAL
-from ..core.constants import IDENTIFIER_PATTERN
+from ..core.constants import IDENTIFIER_PATTERN, NO_VAL
 
 __all__ = ["AgentTurn", "ToolAgentTurn", "BlackboardSlot", "ConstantSpec"]
 

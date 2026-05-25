@@ -1345,14 +1345,14 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
                 if isinstance(raw_error, ToolInvocationError):
                     board[idx].error = raw_error
-                    board[idx].status = "failed"
+                    board[idx].status = BlackboardSlot.FAILED
                     raise raw_error
 
                 wrapped = ToolAgentError(
                     f"{type(self).__name__}.{self.name}: tool call failed at step {idx} for {board[idx].tool!r}: {raw_error}"
                 )
                 board[idx].error = wrapped
-                board[idx].status = "failed"
+                board[idx].status = BlackboardSlot.FAILED
                 raise wrapped from raw_error
 
             return [(idx, result) for idx, result in zip(indices, raw_results)]
@@ -1362,7 +1362,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         for idx, result in results:
             board[idx].result = result
             board[idx].error = NO_VAL
-            board[idx].status = "executed"
+            board[idx].status = BlackboardSlot.EXECUTED
 
         # Post-execution bookkeeping
         for idx in indices:
@@ -1498,7 +1498,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
             if isinstance(raw_error, ToolInvocationError):
                 board[idx].error = raw_error
-                board[idx].status = "failed"
+                board[idx].status = BlackboardSlot.FAILED
                 raise raw_error
 
             wrapped = ToolAgentError(
@@ -1506,13 +1506,13 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 f"for {board[idx].tool!r}: {raw_error}"
             )
             board[idx].error = wrapped
-            board[idx].status = "failed"
+            board[idx].status = BlackboardSlot.FAILED
             raise wrapped from raw_error
 
         for idx, result in zip(indices, raw_results):
             board[idx].result = result
             board[idx].error = NO_VAL
-            board[idx].status = "executed"
+            board[idx].status = BlackboardSlot.EXECUTED
             state.executed_steps.add(idx)
 
         state.tool_calls_used += non_return_planned
@@ -1632,7 +1632,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 resolved_args = slot.resolved_args,
                 result = slot.result,
                 error = slot.error,
-                status = "executed",
+                status = BlackboardSlot.EXECUTED,
                 step_dependencies = slot.step_dependencies,
                 await_step = slot.await_step,
             )
@@ -2213,7 +2213,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 tool=tool,
                 args=args,
                 resolved_args=NO_VAL,
-                status="planned",
+                status=BlackboardSlot.PLANNED,
                 step_dependencies=tuple(sorted(deps)),
                 await_step=await_step,
             )
@@ -2472,7 +2472,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                     resolved_args=NO_VAL,
                     result=NO_VAL,
                     error=NO_VAL,
-                    status="planned",
+                    status=BlackboardSlot.PLANNED,
                     step_dependencies=tuple(),
                     await_step=NO_VAL,
                 )
@@ -2483,7 +2483,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             slot.resolved_args = NO_VAL
             slot.result = NO_VAL
             slot.error = NO_VAL
-            slot.status = "planned"
+            slot.status = BlackboardSlot.PLANNED
 
         return_idx = len(slots) - 1
         return_slot = slots[return_idx]
@@ -2499,7 +2499,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         # isolates return as the final batch.
         return_slot.step_dependencies = tuple(range(return_idx))
         return_slot.await_step = NO_VAL
-        return_slot.status = "planned"
+        return_slot.status = BlackboardSlot.PLANNED
 
         return slots
 
@@ -2985,7 +2985,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                 )
 
             slot.error = NO_VAL
-            slot.status = "prepared"
+            slot.status = BlackboardSlot.PREPARED
 
         state.prepared_steps = sorted(batch)
         state.batch_index += 1
@@ -3601,7 +3601,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         # Resolve placeholders after stamping the planned slot into the running state.
         # The base resolver validates that referenced cache/running slots are executed.
         slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
-        slot.status = "prepared"
+        slot.status = BlackboardSlot.PREPARED
 
         # Store this step's future raw-result visibility duration.
         # The result is not available until after the base execute loop runs this step,
