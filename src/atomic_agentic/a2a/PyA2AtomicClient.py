@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from types import MappingProxyType
 from typing import Any, Mapping
 
 from python_a2a import (
@@ -11,6 +10,7 @@ from python_a2a import (
     MessageRole,
 )
 
+from ..core.utils import normalize_headers
 from .constants import (
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,
@@ -34,23 +34,6 @@ class PyA2AtomicClient:
     connection failures surface immediately.
     """
 
-    @staticmethod
-    def _normalize_headers(
-        value: Mapping[str, str] | None,
-    ) -> Mapping[str, str] | None:
-        if value is None:
-            return None
-        if not isinstance(value, Mapping):
-            raise ValueError("headers must be a mapping of strings to strings.")
-
-        normalized: dict[str, str] = {}
-        for key, item in value.items():
-            if not isinstance(key, str) or not isinstance(item, str):
-                raise ValueError("headers must be a mapping of strings to strings.")
-            normalized[key] = item
-
-        return MappingProxyType(normalized)
-
     def __init__(
         self,
         url: str,
@@ -60,7 +43,7 @@ class PyA2AtomicClient:
             raise ValueError("url must be a non-empty string.")
 
         self._url: str = url.strip()
-        self._headers: Mapping[str, str] | None = self._normalize_headers(headers)
+        self._headers: Mapping[str, str] | None = normalize_headers(headers)
         self._client: A2AClient
         self._agent_card: Any
 
@@ -79,7 +62,7 @@ class PyA2AtomicClient:
 
     @headers.setter
     def headers(self, value: Mapping[str, str] | None) -> None:
-        self._headers = self._normalize_headers(value)
+        self._headers = normalize_headers(value)
         self._rebuild_client()
 
     @property

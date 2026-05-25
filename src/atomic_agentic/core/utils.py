@@ -110,12 +110,14 @@ def normalize_headers(
         if not isinstance(raw_key, str):
             raise ValueError("header names must be strings.")
 
+        if _contains_forbidden_header_char(raw_key):
+            raise ValueError(
+                f"header name {raw_key!r} contains a forbidden character."
+            )
+
         key = raw_key.strip()
         if not key:
             raise ValueError("header names must be non-empty strings.")
-
-        if _contains_forbidden_header_char(key):
-            raise ValueError(f"header name {key!r} contains a forbidden character.")
 
         header_value = _normalize_header_value(raw_value, key=key)
 

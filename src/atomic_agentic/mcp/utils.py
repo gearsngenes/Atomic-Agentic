@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-import threading
 from typing import (
     Any,
-    Awaitable,
     Dict,
     Mapping,
     Literal,
-    TypeVar,
 )
 from mcp import types as mcp_types
 
@@ -16,42 +12,6 @@ from ..core.Parameters import ParamSpec
 from ..core.constants import NO_VAL
 
 MCPExtractionMode = Literal["extract_result", "structured_content", "content_blocks"]
-
-T = TypeVar("T")
-
-def _run_coro_sync(coro: Awaitable[T]) -> T:
-    """
-    Run an async coroutine from sync code, even if a loop is already running
-    in the current thread.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    result_box: list[T] = []
-    error_box: list[BaseException] = []
-
-    def runner() -> None:
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            result_box.append(loop.run_until_complete(coro))
-        except BaseException as exc:  # noqa: BLE001
-            error_box.append(exc)
-        finally:
-            loop.close()
-
-    thread = threading.Thread(target=runner, daemon=True)
-    thread.start()
-    thread.join()
-
-    if error_box:
-        raise error_box[0]
-    if not result_box:
-        raise RuntimeError("Coroutine completed without producing a result.")
-
-    return result_box[0]
 
 
 def _json_schema_type_to_str(schema: Mapping[str, Any]) -> str:

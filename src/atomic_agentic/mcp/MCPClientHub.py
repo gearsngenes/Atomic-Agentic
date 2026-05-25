@@ -17,12 +17,13 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
+from ..core.utils import run_coro_sync, normalize_headers
+from ..core.constants import T
 from .utils import (
-    _run_coro_sync,
     _build_mcp_tool_metadata,
     _normalize_mcp_call_result,
-    T,
     ) 
+
 
 __all__ = ["MCPClientHub"]
 
@@ -42,23 +43,6 @@ class MCPClientHub:
     Mutable request state:
     - headers
     """
-
-    @staticmethod
-    def _normalize_headers(
-        value: Mapping[str, str] | None,
-    ) -> Mapping[str, str] | None:
-        if value is None:
-            return None
-        if not isinstance(value, Mapping):
-            raise ValueError("headers must be a mapping of strings to strings.")
-
-        normalized: dict[str, str] = {}
-        for key, item in value.items():
-            if not isinstance(key, str) or not isinstance(item, str):
-                raise ValueError("headers must be a mapping of strings to strings.")
-            normalized[key] = item
-
-        return MappingProxyType(normalized)
 
     def __init__(
         self,
@@ -92,7 +76,7 @@ class MCPClientHub:
                 raise ValueError("args must be a list of strings when provided.")
             normalized_args = tuple(args)
 
-        normalized_headers = self._normalize_headers(headers)
+        normalized_headers = normalize_headers(headers)
 
         if mode == "stdio" and not normalized_command:
             raise ValueError("stdio transport requires a non-empty command string.")
@@ -127,7 +111,7 @@ class MCPClientHub:
 
     @headers.setter
     def headers(self, value: Mapping[str, str] | None) -> None:
-        self._headers = self._normalize_headers(value)
+        self._headers = normalize_headers(value)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -140,7 +124,7 @@ class MCPClientHub:
         }
 
     def list_tools(self) -> Dict[str, Dict[str, Any]]:
-        return _run_coro_sync(self._alist_tools())
+        return run_coro_sync(self._alist_tools())
 
     def call_tool(
         self,
@@ -153,7 +137,7 @@ class MCPClientHub:
         if not isinstance(inputs, Mapping):
             raise RuntimeError("inputs must be a mapping.")
 
-        return _run_coro_sync(self._acall_tool(resolved_remote_name, inputs))
+        return run_coro_sync(self._acall_tool(resolved_remote_name, inputs))
 
     def _unpack_transport_streams(self, transport: Any) -> tuple[Any, Any]:
         if isinstance(transport, tuple):

@@ -6,6 +6,7 @@ from typing import Any
 
 from atomic_agentic.core.Parameters import ParamSpec
 from atomic_agentic.core.constants import NO_VAL
+from atomic_agentic.core.utils import run_coro_sync
 from atomic_agentic.mcp.utils import (
     _build_mcp_tool_metadata,
     _infer_mcp_extraction_mode,
@@ -13,7 +14,6 @@ from atomic_agentic.mcp.utils import (
     _json_schema_type_to_str,
     _normalize_mcp_call_result,
     _plain_mcp_value,
-    _run_coro_sync,
 )
 
 
@@ -27,14 +27,14 @@ class TestRunCoroSync:
         async def sample() -> int:
             return 42
 
-        assert _run_coro_sync(sample()) == 42
+        assert run_coro_sync(sample()) == 42
 
     def test_run_coro_sync_works_when_event_loop_is_already_running(self) -> None:
         async def outer() -> str:
             async def inner() -> str:
                 return "ok"
 
-            return _run_coro_sync(inner())
+            return run_coro_sync(inner())
 
         assert asyncio.run(outer()) == "ok"
 
