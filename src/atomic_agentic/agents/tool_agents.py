@@ -547,8 +547,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         else:
             dicts = [slot.to_dict() for slot in self._blackboard]
             for _dict in dicts:
-                _dict.pop("resolved_args")
-                _dict.pop("result")
+                _dict.pop(BlackboardSlot.RESOLVED_ARGS_FIELD)
+                _dict.pop(BlackboardSlot.RESULT_FIELD)
                 result.append(_dict)
             
         return result

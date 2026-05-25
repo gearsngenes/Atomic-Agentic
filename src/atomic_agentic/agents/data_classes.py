@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Dict, Mapping
+
+from .constants import (
+    ARGS_FIELD,
+    AWAIT_FIELD,
+    STEP_FIELD,
+    TOOL_FIELD,
+)
 from ..core.constants import IDENTIFIER_PATTERN, NO_VAL
 
 __all__ = ["AgentTurn", "ToolAgentTurn", "BlackboardSlot", "ConstantSpec"]
@@ -177,18 +184,43 @@ class BlackboardSlot:
         Optional explicit scheduling barrier from a planner ``"await"`` field.
         Defaults to ``NO_VAL`` when no await barrier is present.
     """
-    EMPTY = "empty"
-    PLANNED = "planned"
-    PREPARED = "prepared"
-    EXECUTED = "executed"
-    FAILED = "failed"
-    VALID_STATUSES: ClassVar[set[str]] = {
-        EMPTY,
-        PLANNED,
-        PREPARED,
-        EXECUTED,
-        FAILED,
-    }
+    EMPTY: ClassVar[str] = "empty"
+    PLANNED: ClassVar[str] = "planned"
+    PREPARED: ClassVar[str] = "prepared"
+    EXECUTED: ClassVar[str] = "executed"
+    FAILED: ClassVar[str] = "failed"
+
+    VALID_STATUSES: ClassVar[frozenset[str]] = frozenset(
+        {
+            EMPTY,
+            PLANNED,
+            PREPARED,
+            EXECUTED,
+            FAILED,
+        }
+    )
+
+    RESOLVED_ARGS_FIELD: ClassVar[str] = "resolved_args"
+    RESULT_FIELD: ClassVar[str] = "result"
+    ERROR_FIELD: ClassVar[str] = "error"
+    STATUS_FIELD: ClassVar[str] = "status"
+    STEP_DEPENDENCIES_FIELD: ClassVar[str] = "step_dependencies"
+    AWAIT_STEP_FIELD: ClassVar[str] = "await_step"
+
+    FROM_DICT_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            STEP_FIELD,
+            TOOL_FIELD,
+            ARGS_FIELD,
+            RESOLVED_ARGS_FIELD,
+            RESULT_FIELD,
+            ERROR_FIELD,
+            STATUS_FIELD,
+            STEP_DEPENDENCIES_FIELD,
+            AWAIT_FIELD,
+            AWAIT_STEP_FIELD,
+        }
+    )
 
     step: int
 
@@ -197,7 +229,7 @@ class BlackboardSlot:
     resolved_args: Any = NO_VAL
     result: Any = NO_VAL
     error: Any = NO_VAL
-    status: str = "empty"
+    status: str = EMPTY
     step_dependencies: tuple[int, ...] = ()
     await_step: int | Any = NO_VAL
 
@@ -283,7 +315,7 @@ class BlackboardSlot:
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "BlackboardSlot":
+    def from_dict(cls, data: Mapping[str, Any]) -> BlackboardSlot:
         """
         Construct a blackboard slot from a mapping.
 
@@ -297,56 +329,49 @@ class BlackboardSlot:
                 f"BlackboardSlot.from_dict requires a mapping; got {type(data).__name__!r}."
             )
 
-        allowed = {
-            "step",
-            "tool",
-            "args",
-            "resolved_args",
-            "result",
-            "error",
-            "status",
-            "step_dependencies",
-            "await",
-            "await_step",
-        }
-        extra = set(data.keys()) - allowed
+        extra = set(data.keys()) - cls.FROM_DICT_FIELDS
         if extra:
             raise ValueError(
                 f"BlackboardSlot.from_dict received unsupported keys: {sorted(extra)!r}."
             )
 
-        if "step" not in data:
-            raise ValueError("BlackboardSlot.from_dict missing required key: 'step'.")
-
-        if "await" in data and "await_step" in data:
+        if STEP_FIELD not in data:
             raise ValueError(
-                "BlackboardSlot.from_dict received both 'await' and 'await_step'; "
-                "provide only one."
+                f"BlackboardSlot.from_dict missing required key: {STEP_FIELD!r}."
             )
 
-        await_step = data.get("await_step", data.get("await", NO_VAL))
+        if AWAIT_FIELD in data and cls.AWAIT_STEP_FIELD in data:
+            raise ValueError(
+                f"BlackboardSlot.from_dict received both {AWAIT_FIELD!r} and "
+                f"{cls.AWAIT_STEP_FIELD!r}; provide only one."
+            )
+
+        await_step = data.get(
+            cls.AWAIT_STEP_FIELD,
+            data.get(AWAIT_FIELD, NO_VAL),
+        )
 
         return cls(
-            step=data["step"],
-            tool=data.get("tool", NO_VAL),
-            args=data.get("args", NO_VAL),
-            resolved_args=data.get("resolved_args", NO_VAL),
-            result=data.get("result", NO_VAL),
-            error=data.get("error", NO_VAL),
-            status=data.get("status", "empty"),
-            step_dependencies=data.get("step_dependencies", tuple()),
+            step=data[STEP_FIELD],
+            tool=data.get(TOOL_FIELD, NO_VAL),
+            args=data.get(ARGS_FIELD, NO_VAL),
+            resolved_args=data.get(cls.RESOLVED_ARGS_FIELD, NO_VAL),
+            result=data.get(cls.RESULT_FIELD, NO_VAL),
+            error=data.get(cls.ERROR_FIELD, NO_VAL),
+            status=data.get(cls.STATUS_FIELD, cls.EMPTY),
+            step_dependencies=data.get(cls.STEP_DEPENDENCIES_FIELD, tuple()),
             await_step=await_step,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "step": self.step,
-            "tool": self.tool,
-            "args": self.args,
-            "resolved_args": self.resolved_args,
-            "result": self.result,
-            "error": self.error,
-            "status": self.status,
-            "step_dependencies": self.step_dependencies,
-            "await_step": self.await_step,
+            STEP_FIELD: self.step,
+            TOOL_FIELD: self.tool,
+            ARGS_FIELD: self.args,
+            self.RESOLVED_ARGS_FIELD: self.resolved_args,
+            self.RESULT_FIELD: self.result,
+            self.ERROR_FIELD: self.error,
+            self.STATUS_FIELD: self.status,
+            self.STEP_DEPENDENCIES_FIELD: self.step_dependencies,
+            self.AWAIT_STEP_FIELD: self.await_step,
         }
