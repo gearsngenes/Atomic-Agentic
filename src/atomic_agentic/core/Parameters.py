@@ -1,16 +1,30 @@
 """Parameter specification and input/output schema extraction for callables.
 
 This module provides:
-- ParamSpec: A self-contained specification of a single callable parameter
+- ParamSpec: A frozen dataclass specification of a single callable parameter
 - extract_io: Universal function to extract parameters and return type from any callable
+- to_paramspec_list: Schema normalization helper for user-provided parameter schemas
+- is_valid_parameter_order: Validator for Python-compatible parameter ordering
+
+ParamSpec is intentionally object-first in v2: live instances expose attribute
+access and explicit to_dict()/from_dict() serialization, but no longer behave as
+dict or Mapping instances.
 """
 
 from __future__ import annotations
 
 import inspect
-import warnings
-from collections.abc import ItemsView, Iterator, KeysView, ValuesView
-from typing import Any, Callable, Mapping, Optional, get_args, get_origin, get_type_hints
+from dataclasses import dataclass
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Mapping,
+    Optional,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from .constants import IDENTIFIER_PATTERN, NO_VAL
 from .Exceptions import SchemaError
@@ -18,38 +32,43 @@ from .Exceptions import SchemaError
 __all__ = ["ParamSpec", "extract_io", "to_paramspec_list", "is_valid_parameter_order"]
 
 
-class ParamSpec(dict):
+@dataclass(frozen=True, slots=True)
+class ParamSpec:
     """Typed parameter specification for callable parameters.
 
-    Behaves like a read-only mapping and a self-contained typed container. This
-    design keeps ``ParamSpec`` instances JSON-serializable by default in v1.x
-    because they are still dict subclasses, while also exposing convenient
-    attribute access for internal code.
+    ``ParamSpec`` is the canonical schema atom used by AtomicInvokable, Tool,
+    Agent, and Workflow objects to describe one declared input parameter.
 
-    Each ParamSpec is a complete, self-sufficient atom of information containing:
-      - name: str (parameter name)
-      - index: int (parameter position in signature order)
-      - kind: str (parameter kind, e.g. POSITIONAL_ONLY, KEYWORD_ONLY)
-      - type: str (human-readable type name)
-      - default: Any or ``NO_VAL`` sentinel when no default is present
+    Each instance is self-sufficient and contains:
 
-    Compatibility note:
-      - Mapping-style access is retained for v1.x compatibility, but emits a
-        ``FutureWarning`` because ``ParamSpec`` is planned to become a dataclass
-        in v2.0.0.
-      - Prefer attribute access such as ``spec.name`` / ``spec.kind``.
-      - Use :meth:`to_dict()` when an explicit dictionary representation is
-        needed.
-      - Instances are intentionally immutable.
+    - ``name``: parameter name
+    - ``index``: parameter position in signature order
+    - ``kind``: parameter kind, e.g. ``POSITIONAL_ONLY`` or ``KEYWORD_ONLY``
+    - ``type``: human-readable type annotation string
+    - ``default``: explicit default value, or ``NO_VAL`` when no default exists
+
+    Contract
+    --------
+    ``ParamSpec`` is a frozen dataclass in v2. It supports attribute access:
+
+        spec.name
+        spec.index
+        spec.kind
+        spec.type
+        spec.default
+
+    It does not support mapping-style access. Use :meth:`to_dict` when a concrete
+    dictionary representation is needed, and :meth:`from_dict` when rebuilding a
+    ``ParamSpec`` from serialized metadata.
     """
 
-    POSITIONAL_ONLY = "POSITIONAL_ONLY"
-    POSITIONAL_OR_KEYWORD = "POSITIONAL_OR_KEYWORD"
-    VAR_POSITIONAL = "VAR_POSITIONAL"
-    KEYWORD_ONLY = "KEYWORD_ONLY"
-    VAR_KEYWORD = "VAR_KEYWORD"
+    POSITIONAL_ONLY: ClassVar[str] = "POSITIONAL_ONLY"
+    POSITIONAL_OR_KEYWORD: ClassVar[str] = "POSITIONAL_OR_KEYWORD"
+    VAR_POSITIONAL: ClassVar[str] = "VAR_POSITIONAL"
+    KEYWORD_ONLY: ClassVar[str] = "KEYWORD_ONLY"
+    VAR_KEYWORD: ClassVar[str] = "VAR_KEYWORD"
 
-    _VALID_KINDS: tuple[str, ...] = (
+    _VALID_KINDS: ClassVar[tuple[str, ...]] = (
         POSITIONAL_ONLY,
         POSITIONAL_OR_KEYWORD,
         VAR_POSITIONAL,
@@ -57,48 +76,27 @@ class ParamSpec(dict):
         VAR_KEYWORD,
     )
 
-    _MAPPING_DEPRECATION_MESSAGE = (
-        "ParamSpec mapping-style access is deprecated and will be removed in "
-        "atomic-agentic v2.0.0 when ParamSpec becomes a dataclass. Use attribute "
-        "access such as spec.name/spec.kind, or call spec.to_dict() when a real "
-        "dictionary is needed."
-    )
+    name: str
+    index: int
+    kind: str
+    type: str
+    default: Any = NO_VAL
 
-    __slots__ = ("_name", "_index", "_kind", "_type", "_default")
-
-    def __init__(
-        self,
-        name: str,
-        index: int,
-        kind: str,
-        type: str,
-        default: Any = NO_VAL,
-    ) -> None:
+    def __post_init__(self) -> None:
+        """Validate and normalize dataclass fields after initialization."""
         cleaned_name, validated_index, validated_kind, cleaned_type = (
             self._validate_init_args(
-                name=name,
-                index=index,
-                kind=kind,
-                type=type,
+                name=self.name,
+                index=self.index,
+                kind=self.kind,
+                type=self.type,
             )
         )
 
-        # Initialize both mapping contents and attribute storage.
-        dict.__init__(
-            self,
-            name=cleaned_name,
-            index=validated_index,
-            kind=validated_kind,
-            type=cleaned_type,
-        )
-        if default is not NO_VAL:
-            dict.__setitem__(self, "default", default)
-
-        self._name = cleaned_name
-        self._index = validated_index
-        self._kind = validated_kind
-        self._type = cleaned_type
-        self._default = default
+        object.__setattr__(self, "name", cleaned_name)
+        object.__setattr__(self, "index", validated_index)
+        object.__setattr__(self, "kind", validated_kind)
+        object.__setattr__(self, "type", cleaned_type)
 
     @classmethod
     def _validate_init_args(
@@ -109,7 +107,7 @@ class ParamSpec(dict):
         kind: str,
         type: str,
     ) -> tuple[str, int, str, str]:
-        """Validate and normalize constructor fields before state is written."""
+        """Validate and normalize constructor fields before state is finalized."""
         if not isinstance(name, str):
             raise TypeError(
                 f"ParamSpec.name must be a str, got {name.__class__.__name__}"
@@ -154,92 +152,25 @@ class ParamSpec(dict):
 
         return cleaned_name, index, kind, cleaned_type
 
-    @classmethod
-    def _warn_mapping_access(cls) -> None:
-        """Warn that live mapping-style access is a v1.x compatibility path."""
-        warnings.warn(
-            cls._MAPPING_DEPRECATION_MESSAGE,
-            FutureWarning,
-            stacklevel=3,
-        )
-
-    # Attribute accessors
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def index(self) -> int:
-        return self._index
-
-    @property
-    def kind(self) -> str:
-        return self._kind
-
-    @property
-    def type(self) -> str:
-        return self._type
-
-    @property
-    def default(self) -> Any:
-        return self._default
-
-    # Read-only mapping compatibility
-    def __getitem__(self, key: str) -> Any:
-        self._warn_mapping_access()
-        return dict.__getitem__(self, key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        self._warn_mapping_access()
-        return dict.get(self, key, default)
-
-    def __contains__(self, key: object) -> bool:
-        self._warn_mapping_access()
-        return dict.__contains__(self, key)
-
-    def __iter__(self) -> Iterator[str]:
-        self._warn_mapping_access()
-        return dict.__iter__(self)
-
-    def keys(self) -> KeysView[str]:
-        self._warn_mapping_access()
-        return dict.keys(self)
-
-    def items(self) -> ItemsView[str, Any]:
-        self._warn_mapping_access()
-        return dict.items(self)
-
-    def values(self) -> ValuesView[Any]:
-        self._warn_mapping_access()
-        return dict.values(self)
-
-    # Read-only mapping mutation guards
-    def __setitem__(self, key: str, value: Any) -> None:  # pragma: no cover - trivial immutability
-        raise TypeError("ParamSpec is immutable")
-
-    def __delitem__(self, key: str) -> None:  # pragma: no cover - trivial immutability
-        raise TypeError("ParamSpec is immutable")
-
-    # Convenience
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable dict representation of this ParamSpec."""
+        """Return the explicit serialized dictionary representation."""
         d: dict[str, Any] = {
-            "name": self._name,
-            "index": self._index,
-            "kind": self._kind,
-            "type": self._type,
+            "name": self.name,
+            "index": self.index,
+            "kind": self.kind,
+            "type": self.type,
         }
-        if self._default is not NO_VAL:
-            d["default"] = self._default
+        if self.default is not NO_VAL:
+            d["default"] = self.default
         return d
 
     @classmethod
-    def from_dict(cls, d: Mapping[str, Any]) -> "ParamSpec":
-        """Create a ParamSpec from a mapping produced by :meth:`to_dict()`.
+    def from_dict(cls, d: Mapping[str, Any]) -> ParamSpec:
+        """Create a ParamSpec from a serialized mapping.
 
         The mapping must contain ``name`` (str), ``index`` (int), ``kind`` (str),
         and ``type`` (str). ``default`` is optional and treated as an explicit
-        default when present.
+        default only when present.
         """
         if not isinstance(d, Mapping):
             raise TypeError("ParamSpec.from_dict expects a mapping")
@@ -248,6 +179,7 @@ class ParamSpec(dict):
         idx = d.get("index")
         kind = d.get("kind")
         type_str = d.get("type")
+        default = d.get("default", NO_VAL)
 
         if not all(
             isinstance(v, t)
@@ -263,7 +195,6 @@ class ParamSpec(dict):
                 "'kind' (str), and 'type' (str)"
             )
 
-        default = d.get("default", NO_VAL)
         return cls(name=name, index=idx, kind=kind, type=type_str, default=default)
 
 

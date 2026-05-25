@@ -50,7 +50,7 @@ class TestParamSpec:
         assert spec.type == "int"
         assert spec.default is NO_VAL
 
-    def test_paramspec_mapping_getitem_is_supported_with_future_warning(self) -> None:
+    def test_paramspec_mapping_getitem_is_not_supported(self) -> None:
         spec = ParamSpec(
             name="x",
             index=0,
@@ -59,42 +59,29 @@ class TestParamSpec:
             default=NO_VAL,
         )
 
-        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
-            assert spec["name"] == "x"
-            assert spec["index"] == 0
-            assert spec["kind"] == ParamSpec.POSITIONAL_OR_KEYWORD
-            assert spec["type"] == "int"
+        with pytest.raises(TypeError):
+            _ = spec["name"]  # type: ignore[index]
 
-    def test_paramspec_mapping_helpers_are_supported_with_future_warning(self) -> None:
+    def test_paramspec_mapping_helpers_are_not_supported(self) -> None:
         spec = make_param("x", 0, type_="int")
 
-        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
-            assert spec.get("name") == "x"
+        with pytest.raises(AttributeError):
+            spec.get("name")  # type: ignore[attr-defined]
 
-        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
-            assert "default" not in spec
+        with pytest.raises(TypeError):
+            _ = "default" in spec  # type: ignore[operator]
 
-        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
-            assert list(spec) == ["name", "index", "kind", "type"]
+        with pytest.raises(TypeError):
+            list(spec)  # type: ignore[arg-type]
 
-        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
-            assert list(spec.keys()) == ["name", "index", "kind", "type"]
+        with pytest.raises(AttributeError):
+            spec.keys()  # type: ignore[attr-defined]
 
-        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
-            assert list(spec.items()) == [
-                ("name", "x"),
-                ("index", 0),
-                ("kind", ParamSpec.POSITIONAL_OR_KEYWORD),
-                ("type", "int"),
-            ]
+        with pytest.raises(AttributeError):
+            spec.items()  # type: ignore[attr-defined]
 
-        with pytest.warns(FutureWarning, match=PARAMSPEC_MAPPING_WARNING):
-            assert list(spec.values()) == [
-                "x",
-                0,
-                ParamSpec.POSITIONAL_OR_KEYWORD,
-                "int",
-            ]
+        with pytest.raises(AttributeError):
+            spec.values()  # type: ignore[attr-defined]
 
     def test_paramspec_stores_default_when_present(self) -> None:
         spec = ParamSpec(
