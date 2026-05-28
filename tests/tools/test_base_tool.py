@@ -103,9 +103,10 @@ class AddInvokable(AtomicInvokable):
 
 
 class AsyncTrackingInvokable(AddInvokable):
-    """Invokable that records whether Tool.async_execute used async_call()."""
+    """Invokable that records whether Tool.async_execute used async_invoke()."""
 
     def __init__(self, *, fail_async: bool = False) -> None:
+        self.async_invoke_used = False
         self.async_call_used = False
         self.call_used = False
         self.fail_async = fail_async
@@ -120,9 +121,13 @@ class AsyncTrackingInvokable(AddInvokable):
 
     async def async_call(self, *args: Any, **kwargs: Any) -> Any:
         self.async_call_used = True
+        return await super().async_call(*args, **kwargs)
+
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+        self.async_invoke_used = True
         if self.fail_async:
             raise RuntimeError("async invokable boom")
-        return await super().async_call(*args, **kwargs)
+        return await super().async_invoke(inputs)
 
 
 class TestToolConstruction:
@@ -242,14 +247,14 @@ class TestToolInvokableBacking:
         assert "b" in tool.signature
         assert "inputs" not in tool.signature
 
-    def test_invokable_tool_sync_invoke_uses_call_path(self) -> None:
+    def test_invokable_tool_sync_invoke_uses_dict_first_path(self) -> None:
         invokable = AddInvokable()
         tool = Tool(function=invokable)
 
         assert tool.invoke({"a": 2, "b": 3}) == 5
         assert invokable.last_inputs == {"a": 2, "b": 3}
 
-    def test_invokable_tool_applies_defaults_through_call_binding(self) -> None:
+    def test_invokable_tool_applies_defaults_before_dict_first_invoke(self) -> None:
         invokable = AddInvokable()
         tool = Tool(function=invokable)
 
@@ -504,24 +509,26 @@ class TestToolExecution:
         with pytest.raises(ToolInvocationError, match="invocation failed"):
             asyncio.run(tool.async_invoke({}))
 
-    def test_async_invoke_uses_invokable_async_call(self) -> None:
+    def test_async_invoke_uses_invokable_async_invoke(self) -> None:
         invokable = AsyncTrackingInvokable()
         tool = Tool(function=invokable)
 
         result = asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
 
         assert result == 5
-        assert invokable.async_call_used is True
+        assert invokable.async_invoke_used is True
+        assert invokable.async_call_used is False
         assert invokable.call_used is False
 
-    def test_async_invoke_wraps_invokable_async_exception(self) -> None:
+    def test_async_invoke_wraps_invokable_async_invoke_exception(self) -> None:
         invokable = AsyncTrackingInvokable(fail_async=True)
         tool = Tool(function=invokable)
 
         with pytest.raises(ToolInvocationError, match="invocation failed"):
             asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
 
-        assert invokable.async_call_used is True
+        assert invokable.async_invoke_used is True
+        assert invokable.async_call_used is False
         assert invokable.call_used is False
 
 

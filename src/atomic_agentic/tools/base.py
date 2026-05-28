@@ -15,6 +15,7 @@ from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Invokable import AtomicInvokable
 from ..core.Parameters import ParamSpec, extract_io
 from ..core.utils import run_coro_sync
+from ..core.constants import NO_VAL
 
 
 logger = logging.getLogger(__name__)
@@ -290,10 +291,10 @@ class Tool(AtomicInvokable):
         ``(*args, **kwargs)`` using ``AtomicInvokable._dict_to_args_kwargs()``.
 
         Invokable-backed tools preserve the dict-first contract by returning an
-        empty positional tuple and a shallow dictionary copy of the filtered
-        inputs. ``execute(...)`` and ``async_execute(...)`` then pass that
-        mapping directly to the wrapped invokable's ``invoke(...)`` or
-        ``async_invoke(...)`` method.
+        empty positional tuple and a shallow dictionary payload. Declared
+        non-variadic defaults are materialized into that payload before
+        execution so the wrapped invokable receives the same explicit defaulted
+        inputs that the old call-binding path produced.
 
         Subclasses may override this method when their execution transport has
         a different binding shape, such as MCP-backed or A2A-backed proxy tools.
@@ -305,7 +306,15 @@ class Tool(AtomicInvokable):
             parameter contract for callable-backed execution.
         """
         if self.wraps_invokable:
-            return tuple(), dict(inputs)
+            payload: Dict[str, Any] = dict(inputs)
+
+            for spec in self.parameters:
+                if spec.kind in {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}:
+                    continue
+                if spec.name not in payload and spec.default is not NO_VAL:
+                    payload[spec.name] = spec.default
+
+            return tuple(), payload
 
         args, kwargs = self._dict_to_args_kwargs(inputs)
         return args, kwargs
