@@ -60,10 +60,14 @@ class Tool(AtomicInvokable):
 
     Execution
     ---------
-    Sync execution calls the stored function target. For invokable-backed tools,
-    this uses the wrapped invokable's ``__call__`` path. Async execution calls
-    ``async_call(...)`` for invokable-backed tools, awaits native async callables
-    directly, and offloads sync callables to a worker thread.
+    Plain callable-backed tools bind filtered dict-first inputs into ordinary
+    Python call-style ``(*args, **kwargs)`` before calling the stored callable.
+
+    Invokable-backed tools keep execution dict-first: filtered inputs are passed
+    directly to the wrapped invokable's ``invoke(...)`` or ``async_invoke(...)``
+    method. This keeps ``Tool`` aligned with the core ``AtomicInvokable``
+    contract and avoids routing wrapped invokables through their call-style
+    convenience API.
 
     Serialization
     -------------
@@ -92,7 +96,7 @@ class Tool(AtomicInvokable):
 
             - Plain callables are introspected with ``extract_io(...)``.
             - Invokable-backed tools reuse the invokable's declared schema and
-              call through the invokable's normal call-style API.
+              call through the invokable's dict-first invocation API.
 
         name:
             Optional Tool name override. If omitted, plain callables use
@@ -280,43 +284,54 @@ class Tool(AtomicInvokable):
         return module, qualname
 
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
-        """Map dict-first inputs to normal call-style ``(*args, **kwargs)``.
+        """Map filtered dict-first inputs into execution arguments.
 
-        The base implementation delegates binding to
-        ``AtomicInvokable._dict_to_args_kwargs()``. For plain callables, the
-        resulting args/kwargs are passed directly to the callable. For
-        invokable-backed tools, they are passed to the wrapped invokable's
-        ``__call__`` path.
+        Plain callable-backed tools bind inputs into normal Python call-style
+        ``(*args, **kwargs)`` using ``AtomicInvokable._dict_to_args_kwargs()``.
 
-        Subclasses may override this method when their execution transport is
-        intentionally dict-first rather than Python-call-style, such as
-        ``AdapterTool``, ``MCPProxyTool``, or ``PyA2AtomicTool``.
+        Invokable-backed tools preserve the dict-first contract by returning an
+        empty positional tuple and a shallow dictionary copy of the filtered
+        inputs. ``execute(...)`` and ``async_execute(...)`` then pass that
+        mapping directly to the wrapped invokable's ``invoke(...)`` or
+        ``async_invoke(...)`` method.
+
+        Subclasses may override this method when their execution transport has
+        a different binding shape, such as MCP-backed or A2A-backed proxy tools.
 
         Raises
         ------
         TypeError
             If the input mapping cannot be bound to this tool's declared
-            parameter contract.
+            parameter contract for callable-backed execution.
         """
+        if self.wraps_invokable:
+            return tuple(), dict(inputs)
+
         args, kwargs = self._dict_to_args_kwargs(inputs)
         return args, kwargs
 
     def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
         """Synchronously execute the underlying target.
 
-        Plain callable-backed tools call the stored callable directly.
-        Invokable-backed tools call the wrapped invokable's ``__call__`` path,
-        which converts call-style args/kwargs back into the invokable's
-        dict-first ``invoke(...)`` contract.
+        Plain callable-backed tools call the stored callable directly with
+        ``(*args, **kwargs)``.
+
+        Invokable-backed tools call the wrapped invokable's dict-first
+        ``invoke(...)`` method directly with ``kwargs`` as the input mapping.
+        The positional ``args`` tuple is ignored for invokable-backed execution
+        because ``to_arg_kwarg(...)`` returns an empty tuple for that path.
 
         Subclasses may override this to change *how* a tool is executed, such
         as by making a remote MCP call or invoking a transport client.
 
         If the target returns an awaitable, the sync path runs it to completion
-        using a private event-loop bridge.
+        using the shared sync-over-async bridge.
         """
         try:
-            result = self._function(*args, **kwargs)
+            if self.wraps_invokable:
+                result = self._function.invoke(kwargs)
+            else:
+                result = self._function(*args, **kwargs)
 
             if inspect.isawaitable(result):
                 result = run_coro_sync(result)
@@ -337,15 +352,15 @@ class Tool(AtomicInvokable):
 
         Execution dispatch:
 
-        - Invokable-backed tools call the wrapped invokable's
-          ``async_call(*args, **kwargs)`` path.
+        - Invokable-backed tools call the wrapped invokable's dict-first
+          ``async_invoke(...)`` path.
         - Native async callables are awaited directly.
         - Sync callables are offloaded to a worker thread.
         - Awaitable results are awaited before returning.
         """
         try:
             if self.wraps_invokable:
-                result = await self._function.async_call(*args, **kwargs)
+                result = await self._function.async_invoke(kwargs)
             elif inspect.iscoroutinefunction(self._function):
                 result = await self._function(*args, **kwargs)
             else:
@@ -370,7 +385,8 @@ class Tool(AtomicInvokable):
         Mirrors the sync ``invoke(...)`` flow:
 
         1. Filter inputs.
-        2. Bind dict-first inputs to call-style args/kwargs.
+        2. Convert filtered inputs into the execution shape through
+           ``to_arg_kwarg(...)``.
         3. Dispatch through ``async_execute(...)``.
 
         ``async_execute(...)`` owns the distinction between invokable-backed
