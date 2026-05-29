@@ -1,11 +1,8 @@
 """
 Base Tool demo: wrapping an Agent directly as a Tool.
 
-This mirrors the to-be-deprecated AdapterTool example, but uses the v1.4-style base Tool support
+This mirrors the deprecated AdapterTool from v1.x example, but uses the v1.4-style base Tool support
 for AtomicInvokable objects.
-
-Adjust the import path to your project layout if needed:
-from atomic_agentic.tools import Tool
 """
 
 from dotenv import load_dotenv
