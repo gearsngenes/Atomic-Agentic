@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import (
     Any,
     Callable,
@@ -17,14 +18,25 @@ from ..core.Parameters import ParamSpec
 # Adapter Tool
 # ───────────────────────────────────────────────────────────────────────────────
 class AdapterTool(Tool):
-    """Adapts any AtomicInvokable into a Tool.
+    """Deprecated compatibility adapter for exposing AtomicInvokables as Tools.
 
     Compatibility note
     ------------------
-    AdapterTool remains supported in v1.x. In a future v2.0.0 release, this
-    adapter behavior may be consolidated into Tool/toolify while preserving the
-    ability to expose AtomicInvokable components as tools.
+    ``AdapterTool`` is deprecated in the v2.0.0 development line. Base
+    ``Tool`` now supports wrapping ``AtomicInvokable`` instances directly while
+    preserving dict-first invocation semantics.
+
+    Prefer one of the following:
+
+        Tool(function=component, ...)
+        toolify(component, ...)
+
+    ``AdapterTool`` remains temporarily available as a compatibility shim so
+    older imports fail gradually instead of immediately. It should not be used
+    by new v2 code and is expected to be removed after the AdapterTool
+    consolidation cleanup is complete.
     """
+
     # ------------------------------------------------------------------ #
     # Construction
     # ------------------------------------------------------------------ #
@@ -41,6 +53,16 @@ class AdapterTool(Tool):
                 f"{type(self).__name__}.component must be an AtomicInvokable, "
                 f"got {type(component)!r}"
             )
+
+        warnings.warn(
+            (
+                "AdapterTool is deprecated in Atomic-Agentic v2.0.0 and will be "
+                "removed in a future v2 release. Use Tool(function=component, ...) "
+                "or toolify(component, ...) instead."
+            ),
+            FutureWarning,
+            stacklevel=2,
+        )
 
         # set private variable
         self._component = component
@@ -79,7 +101,7 @@ class AdapterTool(Tool):
     @property
     def component(self) -> AtomicInvokable:
         return self._component
-    
+
     @component.setter
     def component(self, value: AtomicInvokable) -> None:
         if not isinstance(value, AtomicInvokable):
@@ -110,8 +132,9 @@ class AdapterTool(Tool):
     def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
         """Extract signature from the wrapped component.
 
-        For AdapterTool, the signature comes from the component's parameters and return type.
-        This allows AdapterTool to expose the wrapped component's interface.
+        For AdapterTool, the signature comes from the component's parameters
+        and return type. This allows AdapterTool to expose the wrapped
+        component's interface.
         """
         return self.component.parameters, self.component.return_type
 
@@ -121,8 +144,8 @@ class AdapterTool(Tool):
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         """Map input dict to args/kwargs for the wrapped component.
 
-        For AdapterTool, we only ever pass dictionary inputs to the `.invoke`
-        method so we return an empty tuple & the original inputs.
+        For AdapterTool, we only ever pass dictionary inputs to the ``invoke``
+        method, so we return an empty tuple and the original inputs.
         """
         return tuple([]), dict(inputs)
 
@@ -137,8 +160,9 @@ class AdapterTool(Tool):
     async def async_execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
         """Asynchronously execute the wrapped component.
 
-        The component is invoked via its async_invoke() method with the kwargs dict.
-        The args tuple is ignored since components expect dict-based inputs.
+        The component is invoked via its async_invoke() method with the kwargs
+        dict. The args tuple is ignored since components expect dict-based
+        inputs.
         """
         return await self.component.async_invoke(inputs=kwargs)
 

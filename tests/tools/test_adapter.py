@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from atomic_agentic.tools.adapter import AdapterTool
 from atomic_agentic.tools.base import Tool
 
@@ -25,10 +27,15 @@ def make_base_tool() -> Tool:
     )
 
 
+def make_adapter_tool(component: Tool) -> AdapterTool:
+    with pytest.warns(FutureWarning, match="AdapterTool is deprecated"):
+        return AdapterTool(component)
+
+
 class TestAdapterTool:
     def test_wraps_concrete_tool_and_exposes_component_schema(self) -> None:
         base_tool = make_base_tool()
-        adapter = AdapterTool(base_tool)
+        adapter = make_adapter_tool(base_tool)
 
         assert adapter.component is base_tool
         assert adapter.name == "add"
@@ -40,13 +47,13 @@ class TestAdapterTool:
 
     def test_invoke_forwards_dict_inputs_to_component(self) -> None:
         base_tool = make_base_tool()
-        adapter = AdapterTool(base_tool)
+        adapter = make_adapter_tool(base_tool)
 
         assert adapter.invoke({"a": 2, "b": 3}) == 5
 
     def test_async_invoke_forwards_to_component_async_invoke(self) -> None:
         base_tool = make_base_tool()
-        adapter = AdapterTool(base_tool)
+        adapter = make_adapter_tool(base_tool)
 
         result = asyncio.run(adapter.async_invoke({"a": 2, "b": 3}))
 
@@ -60,7 +67,7 @@ class TestAdapterTool:
             namespace="math",
             description="Multiply values.",
         )
-        adapter = AdapterTool(base_tool)
+        adapter = make_adapter_tool(base_tool)
 
         adapter.component = replacement
 
@@ -73,7 +80,7 @@ class TestAdapterTool:
 
     def test_to_dict_includes_nested_component(self) -> None:
         base_tool = make_base_tool()
-        adapter = AdapterTool(base_tool)
+        adapter = make_adapter_tool(base_tool)
 
         data = adapter.to_dict()
 
