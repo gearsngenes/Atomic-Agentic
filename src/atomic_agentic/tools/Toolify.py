@@ -121,7 +121,7 @@ def toolify(
 
     # 2) Non-tool AtomicInvokable.
     #
-    # Base Tool now owns the old AdapterTool job: reuse the invokable's declared
+    # Base Tool now owns the invokable and can reuse the invokable's declared
     # schema and call through the invokable's dict-first invoke/async_invoke path.
     if isinstance(component, AtomicInvokable):
         if remote_name_provided:

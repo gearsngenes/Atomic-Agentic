@@ -49,8 +49,6 @@ agent_tool = Tool(
     description="Base Tool wrapping the Writer Agent directly.",
 )
 
-# Unlike AdapterTool, this is not a specialized adapter class.
-# It is a normal Tool whose function target is an AtomicInvokable.
 assert agent_tool.wraps_invokable is True
 
 
