@@ -117,7 +117,7 @@ def invoke_with_inputs(t: Tool, inputs: Mapping[str, Any] | None = None) -> None
 
 
 def main() -> None:
-    print("\n[1] Agent -> AdapterTool via toolify(agent)")
+    print("\n[1] Agent -> Nested Tool via toolify(agent)")
     agent_tool = toolify(agent)
     show_plan(agent_tool)
     invoke_with_inputs(
