@@ -1,7 +1,7 @@
 """
 Base Tool demo: wrapping an Agent directly as a Tool.
 
-This mirrors the AdapterTool example, but uses the v1.4-style base Tool support
+This mirrors the to-be-deprecated AdapterTool example, but uses the v1.4-style base Tool support
 for AtomicInvokable objects.
 
 Adjust the import path to your project layout if needed:

@@ -836,7 +836,7 @@ class TestAgentMutableRuntimeProperties:
             "ECHO: Write about pytest in a strict tone.!"
         )
 
-    def test_constructor_accepts_pre_invoke_tool_instance(self) -> None:
+    def test_constructor_wraps_pre_invoke_tool_instance_with_lifecycle_identity(self) -> None:
         tool = Tool(
             function=pre_with_two_fields,
             name="custom_pre",
@@ -845,8 +845,27 @@ class TestAgentMutableRuntimeProperties:
         )
         agent = make_agent(pre_invoke=tool)
 
-        assert agent.pre_invoke is tool
+        assert agent.pre_invoke is not tool
+        assert isinstance(agent.pre_invoke, Tool)
+        assert agent.pre_invoke.function is tool
+        assert agent.pre_invoke.wraps_invokable is True
+
+        assert agent.pre_invoke.name == "pre_invoke"
+        assert agent.pre_invoke.namespace == "writer_agent"
+        assert agent.pre_invoke.description == (
+            "The tool that preprocesses inputs into a string for Agent writer_agent"
+        )
+
+        assert tool.name == "custom_pre"
+        assert tool.namespace == "tests"
+        assert tool.description == "Custom preprocessor."
+
         assert [param.name for param in agent.parameters] == ["subject", "style"]
+        assert agent.invoke({"subject": "pytest", "style": "direct"}) == {
+            "final": "ECHO: pytest:direct",
+            "length": len("ECHO: pytest:direct"),
+            "was_postprocessed": True,
+        }
 
 class UnexpectedMetadataAgent(Agent):
     def _invoke(

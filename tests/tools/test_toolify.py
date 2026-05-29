@@ -11,7 +11,6 @@ from atomic_agentic.core.Parameters import ParamSpec
 from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.mcp.MCPClientHub import MCPClientHub
 from atomic_agentic.tools.Toolify import batch_toolify, toolify
-from atomic_agentic.tools.adapter import AdapterTool
 from atomic_agentic.tools.a2a import PyA2AtomicTool
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.tools.mcp import MCPProxyTool
@@ -338,6 +337,10 @@ class TestToolifyCallable:
         with pytest.raises(ToolDefinitionError, match="name"):
             toolify(CallableWithEmptyName())
 
+    def test_toolify_callable_rejects_remote_name(self) -> None:
+        with pytest.raises(ToolDefinitionError, match="remote_name"):
+            toolify(add, remote_name="remote_add")
+
 
 class TestToolifyExistingTool:
     def test_existing_tool_returns_same_instance(self) -> None:
@@ -352,7 +355,7 @@ class TestToolifyExistingTool:
 
         assert result is original
 
-    def test_existing_tool_mutates_explicit_overrides_only(self) -> None:
+    def test_existing_tool_with_overrides_returns_wrapper_without_mutating_original(self) -> None:
         original = Tool(
             function=add,
             name="add",
@@ -369,12 +372,24 @@ class TestToolifyExistingTool:
             filter_extraneous_inputs=False,
         )
 
-        assert result is original
-        assert original.name == "sum_values"
-        assert original.namespace == "math"
-        assert original.description == "Sum values."
-        assert original.filter_extraneous_inputs is False
-        assert original.full_name == "Tool.math.sum_values"
+        assert result is not original
+        assert type(result) is Tool
+        assert result.function is original
+        assert result.wraps_invokable is True
+
+        assert result.name == "sum_values"
+        assert result.namespace == "math"
+        assert result.description == "Sum values."
+        assert result.filter_extraneous_inputs is False
+        assert result.full_name == "Tool.math.sum_values"
+
+        assert original.name == "add"
+        assert original.namespace == "tests"
+        assert original.description == "Add values."
+        assert original.filter_extraneous_inputs is True
+        assert original.full_name == "Tool.tests.add"
+
+        assert result.invoke({"a": 2, "b": 3}) == 5
 
     def test_existing_tool_without_overrides_preserves_metadata(self) -> None:
         original = Tool(
@@ -393,15 +408,50 @@ class TestToolifyExistingTool:
         assert original.description == "Add values."
         assert original.filter_extraneous_inputs is False
 
+    def test_existing_tool_wrapper_preserves_omitted_metadata(self) -> None:
+        original = Tool(
+            function=add,
+            name="add",
+            namespace="tests",
+            description="Add values.",
+            filter_extraneous_inputs=False,
+        )
+
+        result = toolify(original, name="sum_values")
+
+        assert result is not original
+        assert result.function is original
+        assert result.name == "sum_values"
+        assert result.namespace == "tests"
+        assert result.description == "Add values."
+        assert result.filter_extraneous_inputs is False
+
+        assert original.name == "add"
+        assert original.namespace == "tests"
+        assert original.description == "Add values."
+        assert original.filter_extraneous_inputs is False
+
+    def test_existing_tool_rejects_remote_name(self) -> None:
+        original = Tool(
+            function=add,
+            name="add",
+            namespace="tests",
+            description="Add values.",
+        )
+
+        with pytest.raises(ToolDefinitionError, match="remote_name"):
+            toolify(original, remote_name="remote_add")
+
 
 class TestToolifyAtomicInvokable:
-    def test_atomic_invokable_becomes_adapter_tool(self) -> None:
+    def test_atomic_invokable_becomes_base_tool_wrapper(self) -> None:
         invokable = EchoInvokable()
 
         tool = toolify(invokable)
 
-        assert isinstance(tool, AdapterTool)
-        assert tool.component is invokable
+        assert type(tool) is Tool
+        assert tool.function is invokable
+        assert tool.wraps_invokable is True
         assert tool.name == "echo_invokable"
         assert tool.description == "Echo invokable."
         assert tool.invoke({"value": 123}) == {"value": 123}
@@ -425,11 +475,26 @@ class TestToolifyAtomicInvokable:
             filter_extraneous_inputs=True,
         )
 
-        assert isinstance(tool, AdapterTool)
+        assert type(tool) is Tool
+        assert tool.function is invokable
+        assert tool.wraps_invokable is True
         assert tool.name == "local_echo"
         assert tool.namespace == "wrapped"
         assert tool.description == "Wrapped echo."
         assert tool.filter_extraneous_inputs is True
+
+    def test_atomic_invokable_inherits_filter_policy_when_not_overridden(self) -> None:
+        invokable = EchoInvokable(filter_extraneous_inputs=False)
+
+        tool = toolify(invokable)
+
+        assert tool.filter_extraneous_inputs is False
+
+    def test_atomic_invokable_rejects_remote_name(self) -> None:
+        invokable = EchoInvokable()
+
+        with pytest.raises(ToolDefinitionError, match="remote_name"):
+            toolify(invokable, remote_name="remote_echo")
 
 
 class TestToolifyMCPClientHub:
@@ -536,9 +601,11 @@ class TestBatchToolifyLocalSources:
 
         assert len(tools) == 2
         assert type(tools[0]) is Tool
-        assert isinstance(tools[1], AdapterTool)
+        assert type(tools[1]) is Tool
+        assert tools[1].function is invokable
+        assert tools[1].wraps_invokable is True
         assert tools[0].full_name == "Tool.batch.add"
-        assert tools[1].full_name == "AdapterTool.batch.echo_invokable"
+        assert tools[1].full_name == "Tool.batch.echo_invokable"
 
     def test_batch_toolify_applies_batch_namespace_to_local_tools(self) -> None:
         tools = batch_toolify([add, multiply], batch_namespace="math")
@@ -552,6 +619,22 @@ class TestBatchToolifyLocalSources:
         tools = batch_toolify([add, EchoInvokable()], batch_filter_inputs=False)
 
         assert [tool.filter_extraneous_inputs for tool in tools] == [False, False]
+
+    def test_batch_toolify_existing_tool_namespace_override_wraps_without_mutating_original(self) -> None:
+        original = Tool(
+            function=add,
+            name="add",
+            namespace="tests",
+            description="Add values.",
+        )
+
+        tools = batch_toolify([original], batch_namespace="batch")
+
+        assert len(tools) == 1
+        assert tools[0] is not original
+        assert tools[0].function is original
+        assert tools[0].full_name == "Tool.batch.add"
+        assert original.full_name == "Tool.tests.add"
 
 
 class TestBatchToolifyRemoteExpansion:
