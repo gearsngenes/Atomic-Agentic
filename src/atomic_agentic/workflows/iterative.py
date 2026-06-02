@@ -4,10 +4,9 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from ..core.Invokable import StructuredInvokable
+from ..core.Invokable import AtomicInvokable, StructuredInvokable
 from .sequential import SequentialFlow
 from ..core.Exceptions import ValidationError
-from ..core.Invokable import AtomicInvokable
 from ..core.constants import NO_VAL
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
@@ -45,7 +44,7 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
 
     Construction contract
     ---------------------
-    - ``body_steps`` must be a non-empty ``list[Workflow | StructuredInvokable]``.
+    - ``body_steps`` must be a non-empty ``list[Workflow | AtomicInvokable]``.
     - The body is always normalized inline into a private ``SequentialFlow``.
     - The normalized loop body topology is fixed at construction.
     - The normalized loop body is exposed read-only via :attr:`loop_body`.

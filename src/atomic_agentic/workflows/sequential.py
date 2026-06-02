@@ -19,17 +19,17 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
     Step normalization
     ------------------
     - Existing ``Workflow`` instances are kept as-is.
-    - ``StructuredInvokable`` instances are wrapped once in ``BasicFlow``.
+    - Non-workflow ``AtomicInvokable`` instances are wrapped once in ``BasicFlow``.
 
     Construction contract
     ---------------------
-    - ``steps`` must be a non-empty ``list[Workflow | StructuredInvokable]``.
+    - ``steps`` must be a non-empty ``list[Workflow | AtomicInvokable]``.
     - The topology is fixed at construction.
     - The configured step instances are fixed at construction.
     - No post-construction step mutation API is provided.
     - ``return_index`` selects which executed step result becomes the outer
-      workflow result. This is selection-only mutability; it does not alter
-      topology or execution order.
+    workflow result. This is selection-only mutability; it does not alter
+    topology or execution order.
 
     Runtime contract
     ----------------
@@ -37,8 +37,8 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
     - Each step's mapping result is passed directly to the next step.
     - All configured steps execute on every run.
     - The step selected by ``return_index`` determines the final step result
-      returned to the workflow base, which then wraps it in the outer
-      ``FlowResultDict`` and records the sequential checkpoint.
+    returned to the workflow base, which then wraps it in the outer
+    ``FlowResultDict`` and records the sequential checkpoint.
 
     Metadata
     --------
@@ -55,12 +55,12 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
     Retrieval helpers
     -----------------
     - ``get_step_records(run_id)`` returns the stored typed child step records
-      for a parent sequential run, or ``None`` if the parent run is not found.
+    for a parent sequential run, or ``None`` if the parent run is not found.
     - ``get_step_results(run_id)`` resolves those records back into child step
-      checkpoint results and returns ``list[result | None]``. ``None`` is used
-      when the child run id no longer resolves to a retained child checkpoint.
+    checkpoint results and returns ``list[result | None]``. ``None`` is used
+    when the child run id no longer resolves to a retained child checkpoint.
     - ``get_step_result(run_id, step_index)`` is a convenience wrapper over
-      ``get_step_results(run_id)``.
+    ``get_step_results(run_id)``.
 
     Notes
     -----

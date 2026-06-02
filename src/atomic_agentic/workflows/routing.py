@@ -29,7 +29,7 @@ class RoutingFlow(Workflow[RoutingFlowRunMetadata]):
 
     Construction contract
     ---------------------
-    - ``branches`` must be a non-empty ``list[Workflow | StructuredInvokable]``.
+    - ``branches`` must be a non-empty ``list[Workflow | AtomicInvokable]``.
     - Branch topology is fixed at construction and exposed read-only via
       :attr:`branches`.
     - ``router`` is required and must be an ``AtomicInvokable``.
