@@ -831,7 +831,12 @@ class Command(AtomicInvokable):
 
 
 class StructuredResultDict(dict[str, Any]):
-    """Dict-like packaged result with a non-item ``raw_result`` attribute."""
+    """Deprecated compatibility carrier for older structured-output callers.
+
+    `StructuredInvokable` no longer returns this type in active v2 workflow
+    runtime behavior. It is retained temporarily so stale imports fail less
+    abruptly during the alpha migration line.
+    """
 
     __slots__ = ("raw_result",)
 
@@ -899,7 +904,7 @@ class StructuredInvokable(AtomicInvokable):
             name=name or component.name,
             description=description or component.description,
             parameters=component.parameters,
-            return_type="StructuredResultDict[str, Any]",
+            return_type="dict[str, Any]",
             filter_extraneous_inputs=resolved_filter,
         )
 
@@ -1103,17 +1108,17 @@ class StructuredInvokable(AtomicInvokable):
             )
         self._ignore_unhandled = value
 
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
-        """Synchronously invoke the wrapped component and return a structured result.
+    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
+        """Synchronously invoke the wrapped component and return a plain mapping.
 
         The wrapped component is invoked with filtered dict-first inputs. Its raw
-        output is then packaged into a mapping according to this wrapper's output
+        output is then packaged into a dictionary according to this wrapper's output
         schema and packaging policies. Missing-value handling is applied before the
         final result is returned.
 
-        The returned object is a ``StructuredResult``: its mapping items are the
-        final packaged output, while its non-item ``raw_result`` attribute preserves
-        the wrapped component's original raw return value.
+        `StructuredInvokable` owns output shaping. It no longer returns a
+        `StructuredResultDict` carrier or exposes the wrapped component's raw result
+        through the active runtime return value.
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
@@ -1124,18 +1129,18 @@ class StructuredInvokable(AtomicInvokable):
             final_output = self.handle_missing_values(packaged)
 
             logger.info(f"[{self.full_name} finished]")
-            return StructuredResultDict(final_output, raw_result=raw_result)
+            return dict(final_output)
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
-        """Asynchronously invoke the wrapped component and return a structured result.
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
+        """Asynchronously invoke the wrapped component and return a plain mapping.
 
         This is the async analog of :meth:`invoke`. The wrapped component is awaited
         through its async invocation path, then the raw result is packaged and
         missing-value handling is applied exactly as in the sync path.
 
-        The returned object is a ``StructuredResult``: its mapping items are the
-        final packaged output, while its non-item ``raw_result`` attribute preserves
-        the wrapped component's original raw return value.
+        `StructuredInvokable` owns output shaping. It no longer returns a
+        `StructuredResultDict` carrier or exposes the wrapped component's raw result
+        through the active runtime return value.
         """
         logger.info(f"[Async {self.full_name} started]")
 
@@ -1145,7 +1150,7 @@ class StructuredInvokable(AtomicInvokable):
         final_output = self.handle_missing_values(packaged)
 
         logger.info(f"[Async {self.full_name} finished]")
-        return StructuredResultDict(final_output, raw_result=raw_result)
+        return dict(final_output)
 
     def package(self, raw: Any) -> dict[str, Any]:
         """Package a raw result into the normalized mapping output.

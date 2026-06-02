@@ -4,7 +4,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from ..core.Invokable import StructuredInvokable
+from ..core.Invokable import AtomicInvokable
 from ..core.Exceptions import ValidationError
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
@@ -73,14 +73,14 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
         self,
         name: str,
         description: str,
-        steps: list[Workflow | StructuredInvokable],
+        steps: list[Workflow | AtomicInvokable],
         *,
         return_index: int = -1,
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         if not isinstance(steps, list):
             raise TypeError(
-                f"steps must be a non-empty list[Workflow | StructuredInvokable], got {type(steps)!r}"
+                f"steps must be a non-empty list[Workflow | AtomicInvokable], got {type(steps)!r}"
             )
         if not steps:
             raise ValueError("steps must not be empty")
@@ -128,14 +128,14 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
     # Internal helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _normalize_step(step: Workflow | StructuredInvokable) -> Workflow:
+    def _normalize_step(step: Workflow | AtomicInvokable) -> Workflow:
         """Normalize one configured step into a workflow-shaped step."""
         if isinstance(step, Workflow):
             return step
-        if isinstance(step, StructuredInvokable):
+        if isinstance(step, AtomicInvokable):
             return BasicFlow(component=step)
         raise TypeError(
-            "SequentialFlow steps must be Workflow or StructuredInvokable, "
+            "SequentialFlow steps must be Workflow or AtomicInvokable, "
             f"got {type(step)!r}"
         )
 
