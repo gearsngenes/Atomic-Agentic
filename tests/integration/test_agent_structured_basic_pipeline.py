@@ -200,13 +200,8 @@ class TestAgentStructuredBasicPipeline:
 
         metadata = checkpoint.metadata
 
-        assert metadata.kind == "basic"
         assert metadata.child_is_workflow is False
         assert metadata.child_id == structured_agent.instance_id
-        assert metadata.child_full_name == structured_agent.full_name
-        assert metadata.has_child_raw_result is True
-        assert metadata.child_raw_result == dict(result)
-        assert metadata.child_raw_result_type == "dict"
         assert agent.history == []
 
     def test_structured_agent_can_feed_sequential_flow_step(self) -> None:

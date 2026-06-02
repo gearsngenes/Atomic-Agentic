@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.core.Invokable import Command, StructuredInvokable, StructuredResultDict
+from atomic_agentic.core.Invokable import StructuredInvokable, Command
 from atomic_agentic.tools.base import Tool
 
 
@@ -309,7 +309,7 @@ class TestCommandComposition:
 
         result = wrapper.invoke({})
 
-        assert isinstance(result, StructuredResultDict)
+        assert type(result) is dict
         assert result == {"value": 5}
-        assert result.raw_result == 5
+        assert not hasattr(result, "raw_result")
         assert wrapper.parameters == []

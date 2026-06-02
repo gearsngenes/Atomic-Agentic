@@ -11,7 +11,7 @@ from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
 from atomic_agentic.core.Parameters import ParamSpec
 from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.tools.base import Tool
-from atomic_agentic.core.Invokable import StructuredInvokable
+from atomic_agentic.core.Invokable import AtomicInvokable, StructuredInvokable
 from atomic_agentic.workflows.base import FlowResultDict, Workflow
 from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.iterative import IterativeFlow
@@ -175,7 +175,7 @@ def make_raising_judge() -> Tool:
 
 def make_flow(
     *,
-    body_steps: list[Workflow | StructuredInvokable] | None = None,
+    body_steps: list[Workflow | AtomicInvokable] | None = None,
     judge: Tool | None = None,
     max_iterations: int = 3,
     return_index: int = -1,
@@ -221,14 +221,14 @@ class RecordingWorkflow(Workflow[WorkflowRunMetadata]):
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="recording"), {"value": inputs["value"] + 1}
+        return WorkflowRunMetadata(), {"value": inputs["value"] + 1}
 
     async def _async_run(
         self,
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="async_recording"), {"value": inputs["value"] + 1}
+        return WorkflowRunMetadata(), {"value": inputs["value"] + 1}
 
 
 class TestIterativeFlowConstruction:
@@ -253,7 +253,7 @@ class TestIterativeFlowConstruction:
             IterativeFlow(
                 name="iterative_flow",
                 description="Iterative flow.",
-                body_steps=[make_raw_tool()],  # type: ignore[list-item]
+                body_steps=[object()],  # type: ignore[list-item]
             )
 
     def test_constructor_rejects_non_atomic_judge(self) -> None:

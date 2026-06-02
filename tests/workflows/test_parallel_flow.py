@@ -11,7 +11,7 @@ from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
 from atomic_agentic.core.Parameters import ParamSpec
 from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.tools.base import Tool
-from atomic_agentic.core.Invokable import StructuredInvokable
+from atomic_agentic.core.Invokable import AtomicInvokable, StructuredInvokable
 from atomic_agentic.workflows.base import FlowResultDict, Workflow
 from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.metadata import OutputTopology, WorkflowRunMetadata
@@ -98,7 +98,7 @@ def make_branch_component(
 
 def make_two_branch_flow(
     *,
-    branches: list[Workflow | StructuredInvokable] | None = None,
+    branches: list[Workflow | AtomicInvokable] | None = None,
     parameters: type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec] | None = None,
     output_names: list[str] | None = None,
     output_indices: list[int] | None = None,
@@ -130,7 +130,7 @@ def make_two_branch_flow(
 
 def make_flattened_flow(
     *,
-    branches: list[Workflow | StructuredInvokable] | None = None,
+    branches: list[Workflow | AtomicInvokable] | None = None,
     duplicate_key_policy: str = ParallelFlow.RAISE,
     output_indices: list[int] | None = None,
 ) -> ParallelFlow:
@@ -174,14 +174,14 @@ class EchoWorkflow(Workflow[WorkflowRunMetadata]):
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="echo"), {"value": inputs["value"]}
+        return WorkflowRunMetadata(), {"value": inputs["value"]}
 
     async def _async_run(
         self,
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="async_echo"), {"value": inputs["value"]}
+        return WorkflowRunMetadata(), {"value": inputs["value"]}
 
 
 def raising_branch(value: Any) -> dict[str, Any]:
@@ -210,12 +210,12 @@ class TestParallelFlowConstruction:
                 output_names=[],
             )
 
-    def test_constructor_rejects_raw_tool_branch(self) -> None:
-        with pytest.raises(TypeError, match="Workflow or StructuredInvokable"):
+    def test_constructor_rejects_non_invokable_branch(self) -> None:
+        with pytest.raises(TypeError, match="Workflow or AtomicInvokable"):
             ParallelFlow(
                 name="bad_flow",
                 description="Bad flow.",
-                branches=[make_raw_tool()],  # type: ignore[list-item]
+                branches=[object()],  # type: ignore[list-item]
                 parameters=["value"],
                 output_names=["only"],
             )

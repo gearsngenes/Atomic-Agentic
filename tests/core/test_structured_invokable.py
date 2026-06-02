@@ -181,7 +181,7 @@ class TestStructuredInvokableConstruction:
         assert "Return a mapping." in wrapper.description
         assert wrapper.parameters == component.parameters
         assert wrapper.filter_extraneous_inputs is False
-        assert wrapper.return_type == "StructuredResultDict[str, Any]"
+        assert wrapper.return_type == "dict[str, Any]"
 
     def test_explicit_identity_and_filter_override_component(self) -> None:
         component = Tool(
@@ -650,7 +650,7 @@ class TestStructuredInvokableMissingValues:
 
 
 class TestStructuredInvokableInvoke:
-    def test_invoke_returns_structured_result_and_preserves_raw_result(self) -> None:
+    def test_invoke_returns_plain_dict_result(self) -> None:
         component = Tool(
             function=return_mapping,
             name="return_mapping",
@@ -661,9 +661,9 @@ class TestStructuredInvokableInvoke:
 
         result = wrapper.invoke({"value": 10})
 
-        assert isinstance(result, StructuredResultDict)
+        assert type(result) is dict
         assert result == {"a": 10, "b": 2}
-        assert result.raw_result == {"a": 10, "b": 2}
+        assert not hasattr(result, "raw_result")
 
     def test_invoke_applies_missing_value_handling(self) -> None:
         component = Tool(
@@ -682,8 +682,9 @@ class TestStructuredInvokableInvoke:
 
         result = wrapper.invoke({})
 
+        assert type(result) is dict
         assert result == {"a": "filled", "b": 2}
-        assert result.raw_result == {"a": None, "b": 2}
+        assert not hasattr(result, "raw_result")
 
     def test_invoke_filters_inputs_before_calling_component(self) -> None:
         component = RecordingInvokable(raw_result={"value": 123})
@@ -700,9 +701,9 @@ class TestStructuredInvokableInvoke:
 
         result = asyncio.run(wrapper.async_invoke({"value": 123, "extra": "ignored"}))
 
-        assert isinstance(result, StructuredResultDict)
+        assert type(result) is dict
         assert result == {"value": 123}
-        assert result.raw_result == {"value": 123}
+        assert not hasattr(result, "raw_result")
         assert component.async_calls == [{"value": 123}]
 
     def test_component_sync_exception_propagates(self) -> None:

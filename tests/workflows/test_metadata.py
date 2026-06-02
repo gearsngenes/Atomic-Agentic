@@ -40,11 +40,6 @@ def iteration_record(iteration: int = 0, *, decision: bool = False) -> Iteration
 
 
 class TestMetadataDataclassConstruction:
-    def test_workflow_run_metadata_stores_kind(self) -> None:
-        metadata = WorkflowRunMetadata(kind="custom")
-
-        assert metadata.kind == "custom"
-
     def test_child_run_record_stores_slot_identity_name_and_run_id(self) -> None:
         record = child_record(slot=2, run_id="run_2")
 
@@ -85,16 +80,6 @@ class TestMetadataDataclassConstruction:
         assert record.body_run_id == "body_3"
         assert record.judge_run_id == "judge_3"
         assert record.judge_decision is True
-
-    def test_basic_flow_run_metadata_defaults_kind_to_basic(self) -> None:
-        metadata = BasicFlowRunMetadata(
-            child_is_workflow=True,
-            child_id="child",
-            child_full_name="Workflow.child",
-            child_run_id="run_1",
-        )
-
-        assert metadata.kind == "basic"
 
     def test_sequential_flow_run_metadata_defaults_kind_to_sequential(self) -> None:
         metadata = SequentialFlowRunMetadata(
@@ -175,7 +160,7 @@ class TestMetadataImmutabilityAndSlots:
             child_record(),
             iteration_record(),
             OutputTopology(topology="nested", indices=(0,), names=("only",)),
-            BasicFlowRunMetadata(child_is_workflow=False, child_id="id", child_full_name="full"),
+            BasicFlowRunMetadata(child_is_workflow=False, child_id="id"),
         ],
     )
     def test_metadata_records_do_not_have_instance_dict(self, record: Any) -> None:
@@ -189,7 +174,7 @@ class TestMetadataImmutabilityAndSlots:
             elapsed_s=0.1,
             inputs={"value": 1},
             result={"value": 2},
-            metadata=WorkflowRunMetadata(kind="test"),
+            metadata=WorkflowRunMetadata(),
         )
 
         with pytest.raises(FrozenInstanceError):
@@ -203,44 +188,26 @@ class TestMetadataImmutabilityAndSlots:
             elapsed_s=0.1,
             inputs={"value": 1},
             result={"value": 2},
-            metadata=WorkflowRunMetadata(kind="test"),
+            metadata=WorkflowRunMetadata(),
         )
 
         assert not hasattr(checkpoint, "__dict__")
 
 
 class TestMetadataNoValDefaults:
-    def test_basic_metadata_workflow_child_defaults_raw_result_to_no_val(self) -> None:
+    def test_basic_metadata_workflow_child_stores_child_run_id(self) -> None:
         metadata = BasicFlowRunMetadata(
             child_is_workflow=True,
             child_id="child",
-            child_full_name="Workflow.child",
             child_run_id="run_1",
         )
 
-        assert metadata.child_raw_result is NO_VAL
-        assert metadata.has_child_raw_result is False
-        assert metadata.child_raw_result_type == "Any"
-
-    def test_basic_metadata_structured_child_can_store_raw_result(self) -> None:
-        metadata = BasicFlowRunMetadata(
-            child_is_workflow=False,
-            child_id="child",
-            child_full_name="Structured.child",
-            child_raw_result={"raw": True},
-            has_child_raw_result=True,
-            child_raw_result_type="dict",
-        )
-
-        assert metadata.child_raw_result == {"raw": True}
-        assert metadata.has_child_raw_result is True
-        assert metadata.child_raw_result_type == "dict"
+        assert metadata.child_run_id == "run_1"
 
     def test_basic_metadata_default_child_run_id_is_no_val(self) -> None:
         metadata = BasicFlowRunMetadata(
             child_is_workflow=False,
             child_id="child",
-            child_full_name="Structured.child",
         )
 
         assert metadata.child_run_id is NO_VAL
@@ -249,16 +216,14 @@ class TestMetadataNoValDefaults:
         metadata = BasicFlowRunMetadata(
             child_is_workflow=False,
             child_id="child",
-            child_full_name="Structured.child",
         )
 
         assert metadata.child_run_id is NO_VAL
-        assert metadata.child_raw_result is NO_VAL
 
 
 class TestWorkflowCheckpointMetadataCarrier:
     def test_workflow_checkpoint_stores_inputs_result_and_metadata(self) -> None:
-        metadata = WorkflowRunMetadata(kind="test")
+        metadata = WorkflowRunMetadata()
         checkpoint = WorkflowCheckpoint(
             run_id="run_1",
             started_at=datetime.now(timezone.utc),
@@ -306,7 +271,7 @@ class TestWorkflowCheckpointMetadataCarrier:
             elapsed_s=0.25,
             inputs={},
             result={},
-            metadata=WorkflowRunMetadata(kind="test"),
+            metadata=WorkflowRunMetadata(),
         )
 
         assert checkpoint.started_at is started_at
