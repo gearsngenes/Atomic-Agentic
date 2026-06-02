@@ -81,14 +81,14 @@ class RoutingFlow(Workflow[RoutingFlowRunMetadata]):
         self,
         name: str,
         description: str,
-        branches: list[Workflow | StructuredInvokable],
+        branches: list[Workflow | AtomicInvokable],
         router: AtomicInvokable,
         *,
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         if not isinstance(branches, list):
             raise TypeError(
-                f"branches must be a non-empty list[Workflow | StructuredInvokable], got {type(branches)!r}"
+                f"branches must be a non-empty list[Workflow | AtomicInvokable], got {type(branches)!r}"
             )
         if not branches:
             raise ValueError("branches must not be empty")
@@ -186,14 +186,14 @@ class RoutingFlow(Workflow[RoutingFlowRunMetadata]):
     # Internal normalization helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _normalize_branch(branch: Workflow | StructuredInvokable) -> Workflow:
+    def _normalize_branch(branch: Workflow | AtomicInvokable) -> Workflow:
         """Normalize one configured branch into a workflow-shaped node."""
         if isinstance(branch, Workflow):
             return branch
-        if isinstance(branch, StructuredInvokable):
+        if isinstance(branch, AtomicInvokable):
             return BasicFlow(component=branch)
         raise TypeError(
-            "RoutingFlow branches must be Workflow or StructuredInvokable, "
+            "RoutingFlow branches must be Workflow or AtomicInvokable, "
             f"got {type(branch)!r}"
         )
 
