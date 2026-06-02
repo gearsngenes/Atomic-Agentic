@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
-from ..core.Invokable import StructuredInvokable
+from ..core.Invokable import AtomicInvokable
 from ..core.Exceptions import ValidationError
 from ..core.Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from ..core.constants import NO_VAL, IDENTIFIER_PATTERN
@@ -93,7 +93,7 @@ class ParallelFlow(Workflow[ParallelFlowRunMetadata]):
         self,
         name: str,
         description: str,
-        branches: list[Workflow | StructuredInvokable],
+        branches: list[Workflow | AtomicInvokable],
         *,
         input_shape: str = BROADCAST,
         parameters: type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec] | None = None,
@@ -106,7 +106,7 @@ class ParallelFlow(Workflow[ParallelFlowRunMetadata]):
     ) -> None:
         if not isinstance(branches, list):
             raise TypeError(
-                f"branches must be a non-empty list[Workflow | StructuredInvokable], got {type(branches)!r}"
+                f"branches must be a non-empty list[Workflow | AtomicInvokable], got {type(branches)!r}"
             )
         if not branches:
             raise ValueError("branches must not be empty")
@@ -306,14 +306,14 @@ class ParallelFlow(Workflow[ParallelFlowRunMetadata]):
     # Internal normalization helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _normalize_branch(branch: Workflow | StructuredInvokable) -> Workflow:
+    def _normalize_branch(branch: Workflow | AtomicInvokable) -> Workflow:
         """Normalize one configured branch into a workflow-shaped node."""
         if isinstance(branch, Workflow):
             return branch
-        if isinstance(branch, StructuredInvokable):
+        if isinstance(branch, AtomicInvokable):
             return BasicFlow(component=branch)
         raise TypeError(
-            "ParallelFlow branches must be Workflow or StructuredInvokable, "
+            "ParallelFlow branches must be Workflow or AtomicInvokable, "
             f"got {type(branch)!r}"
         )
 

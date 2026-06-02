@@ -12,7 +12,7 @@ from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
 from atomic_agentic.core.Parameters import ParamSpec
 from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.tools.base import Tool
-from atomic_agentic.core.Invokable import StructuredInvokable
+from atomic_agentic.core.Invokable import AtomicInvokable, StructuredInvokable
 from atomic_agentic.workflows.base import FlowResultDict, Workflow
 from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.metadata import WorkflowRunMetadata
@@ -159,7 +159,7 @@ class RecordingBranchWorkflow(Workflow[WorkflowRunMetadata]):
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind=f"branch_{self.label}"), {
+        return WorkflowRunMetadata(), {
             "branch": self.label,
             "value": inputs["value"],
         }
@@ -169,7 +169,7 @@ class RecordingBranchWorkflow(Workflow[WorkflowRunMetadata]):
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind=f"async_branch_{self.label}"), {
+        return WorkflowRunMetadata(), {
             "branch": self.label,
             "value": inputs["value"],
         }
@@ -179,7 +179,7 @@ def make_flow(
     selection: Any = 0,
     *,
     router: Tool | None = None,
-    branches: list[Workflow | StructuredInvokable] | None = None,
+    branches: list[Workflow | AtomicInvokable] | None = None,
     filter_extraneous_inputs: bool | None = None,
 ) -> RoutingFlow:
     kwargs: dict[str, Any] = {}
@@ -216,12 +216,12 @@ class TestRoutingFlowConstruction:
                 router=make_router(0),
             )
 
-    def test_constructor_rejects_raw_tool_branch(self) -> None:
-        with pytest.raises(TypeError, match="Workflow or StructuredInvokable"):
+    def test_constructor_rejects_non_invokable_branch(self) -> None:
+        with pytest.raises(TypeError, match="Workflow or AtomicInvokable"):
             RoutingFlow(
                 name="routing_flow",
                 description="Routing flow.",
-                branches=[make_raw_tool()],  # type: ignore[list-item]
+                branches=[object()],  # type: ignore[list-item]
                 router=make_router(0),
             )
 
