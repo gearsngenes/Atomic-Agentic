@@ -21,13 +21,12 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class WorkflowRunMetadata:
-    """Base class for typed workflow checkpoint metadata.
+    """Marker base class for typed workflow checkpoint metadata.
 
-    Every concrete workflow metadata record should inherit from this class and
-    provide a stable ``kind`` discriminator.
+    Concrete workflow metadata records may define their own discriminator fields
+    when useful, but the base workflow runtime only requires metadata objects to
+    be instances of this base class.
     """
-
-    kind: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,31 +91,20 @@ class IterationRecord:
 
 @dataclass(frozen=True, slots=True)
 class BasicFlowRunMetadata(WorkflowRunMetadata):
-    """Typed metadata for a basic wrapper workflow run.
+    """Typed metadata for a BasicFlow wrapper run.
 
-    Interpretation rules
-    --------------------
-    - If ``child_is_workflow`` is ``True``:
-        - ``child_run_id`` should contain the child workflow run id
-        - ``child_raw_result`` should be ``NO_VAL``
-        - ``has_child_raw_result`` should be ``False``
-    - If ``child_is_workflow`` is ``False``:
-        - ``child_run_id`` should be ``NO_VAL``
-        - ``child_raw_result`` should contain the wrapped structured child's raw result
-        - ``has_child_raw_result`` should be ``True``
+    BasicFlow records only the delegated child's identity and, when that child is
+    itself a Workflow, the child workflow run id that can be used to inspect the
+    child's own checkpoint history.
 
-    ``child_raw_result_type`` should describe the meaningful child-level result
-    payload, not merely the outer wrapper carrier.
+    For non-workflow AtomicInvokable children, ``child_run_id`` is ``NO_VAL``.
+    A later AtomicResult integration can make run ids universal across all
+    AtomicInvokable children.
     """
 
     child_is_workflow: bool
     child_id: str
-    child_full_name: str
     child_run_id: str | Any = NO_VAL
-    child_raw_result: Any = NO_VAL
-    has_child_raw_result: bool = False
-    child_raw_result_type: str = "Any"
-    kind: str = field(default="basic", init=False)
 
 
 @dataclass(frozen=True, slots=True)

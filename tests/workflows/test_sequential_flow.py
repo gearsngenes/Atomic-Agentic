@@ -97,14 +97,14 @@ class EchoWorkflow(Workflow[WorkflowRunMetadata]):
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="echo"), {"value": inputs["value"]}
+        return WorkflowRunMetadata(), {"value": inputs["value"]}
 
     async def _async_run(
         self,
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="async_echo"), {"value": inputs["value"]}
+        return WorkflowRunMetadata(), {"value": inputs["value"]}
 
 
 def first_step(value: int) -> dict[str, int]:
@@ -164,12 +164,12 @@ class TestSequentialFlowConstruction:
                 steps=[],
             )
 
-    def test_constructor_rejects_raw_tool_step(self) -> None:
-        with pytest.raises(TypeError, match="Workflow or StructuredInvokable"):
+    def test_constructor_rejects_non_invokable_step(self) -> None:
+        with pytest.raises(TypeError, match="Workflow or AtomicInvokable"):
             SequentialFlow(
                 name="bad_flow",
                 description="Bad flow.",
-                steps=[make_raw_tool()],  # type: ignore[list-item]
+                steps=[object()],  # type: ignore[list-item]
             )
 
     def test_constructor_preserves_workflow_steps(self) -> None:

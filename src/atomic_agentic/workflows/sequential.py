@@ -4,7 +4,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from ..core.Invokable import StructuredInvokable
+from ..core.Invokable import AtomicInvokable
 from ..core.Exceptions import ValidationError
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
@@ -19,17 +19,17 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
     Step normalization
     ------------------
     - Existing ``Workflow`` instances are kept as-is.
-    - ``StructuredInvokable`` instances are wrapped once in ``BasicFlow``.
+    - Non-workflow ``AtomicInvokable`` instances are wrapped once in ``BasicFlow``.
 
     Construction contract
     ---------------------
-    - ``steps`` must be a non-empty ``list[Workflow | StructuredInvokable]``.
+    - ``steps`` must be a non-empty ``list[Workflow | AtomicInvokable]``.
     - The topology is fixed at construction.
     - The configured step instances are fixed at construction.
     - No post-construction step mutation API is provided.
     - ``return_index`` selects which executed step result becomes the outer
-      workflow result. This is selection-only mutability; it does not alter
-      topology or execution order.
+    workflow result. This is selection-only mutability; it does not alter
+    topology or execution order.
 
     Runtime contract
     ----------------
@@ -37,8 +37,8 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
     - Each step's mapping result is passed directly to the next step.
     - All configured steps execute on every run.
     - The step selected by ``return_index`` determines the final step result
-      returned to the workflow base, which then wraps it in the outer
-      ``FlowResultDict`` and records the sequential checkpoint.
+    returned to the workflow base, which then wraps it in the outer
+    ``FlowResultDict`` and records the sequential checkpoint.
 
     Metadata
     --------
@@ -55,12 +55,12 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
     Retrieval helpers
     -----------------
     - ``get_step_records(run_id)`` returns the stored typed child step records
-      for a parent sequential run, or ``None`` if the parent run is not found.
+    for a parent sequential run, or ``None`` if the parent run is not found.
     - ``get_step_results(run_id)`` resolves those records back into child step
-      checkpoint results and returns ``list[result | None]``. ``None`` is used
-      when the child run id no longer resolves to a retained child checkpoint.
+    checkpoint results and returns ``list[result | None]``. ``None`` is used
+    when the child run id no longer resolves to a retained child checkpoint.
     - ``get_step_result(run_id, step_index)`` is a convenience wrapper over
-      ``get_step_results(run_id)``.
+    ``get_step_results(run_id)``.
 
     Notes
     -----
@@ -73,14 +73,14 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
         self,
         name: str,
         description: str,
-        steps: list[Workflow | StructuredInvokable],
+        steps: list[Workflow | AtomicInvokable],
         *,
         return_index: int = -1,
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         if not isinstance(steps, list):
             raise TypeError(
-                f"steps must be a non-empty list[Workflow | StructuredInvokable], got {type(steps)!r}"
+                f"steps must be a non-empty list[Workflow | AtomicInvokable], got {type(steps)!r}"
             )
         if not steps:
             raise ValueError("steps must not be empty")
@@ -128,14 +128,14 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
     # Internal helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _normalize_step(step: Workflow | StructuredInvokable) -> Workflow:
+    def _normalize_step(step: Workflow | AtomicInvokable) -> Workflow:
         """Normalize one configured step into a workflow-shaped step."""
         if isinstance(step, Workflow):
             return step
-        if isinstance(step, StructuredInvokable):
+        if isinstance(step, AtomicInvokable):
             return BasicFlow(component=step)
         raise TypeError(
-            "SequentialFlow steps must be Workflow or StructuredInvokable, "
+            "SequentialFlow steps must be Workflow or AtomicInvokable, "
             f"got {type(step)!r}"
         )
 

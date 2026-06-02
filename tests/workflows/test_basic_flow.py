@@ -11,10 +11,7 @@ from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
 from atomic_agentic.core.Parameters import ParamSpec
 from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.tools.base import Tool
-from atomic_agentic.core.Invokable import (
-    StructuredInvokable,
-    StructuredResultDict,
-)
+from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.workflows.base import FlowResultDict, Workflow
 from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.metadata import WorkflowRunMetadata
@@ -81,14 +78,14 @@ class EchoWorkflow(Workflow[WorkflowRunMetadata]):
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="echo"), {"value": inputs["value"]}
+        return WorkflowRunMetadata(), {"value": inputs["value"]}
 
     async def _async_run(
         self,
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="async_echo"), {"value": inputs["value"]}
+        return WorkflowRunMetadata(), {"value": inputs["value"]}
 
 
 class TestBasicFlowConstruction:
@@ -110,16 +107,9 @@ class TestBasicFlowConstruction:
         assert flow.name == component.name
         assert flow.parameters == component.parameters
 
-    def test_constructor_rejects_raw_tool(self) -> None:
-        tool = Tool(
-            function=return_mapping,
-            name="return_mapping",
-            namespace="tests",
-            description="Return mapping.",
-        )
-
-        with pytest.raises(TypeError, match="StructuredInvokable or Workflow"):
-            BasicFlow(component=tool)  # type: ignore[arg-type]
+    def test_constructor_rejects_non_invokable_component(self) -> None:
+        with pytest.raises(TypeError, match="AtomicInvokable"):
+            BasicFlow(component=object())  # type: ignore[arg-type]
 
     def test_inherits_component_metadata_and_filter_flag_by_default(self) -> None:
         component = EchoWorkflow(filter_extraneous_inputs=False)
@@ -160,21 +150,16 @@ class TestBasicFlowStructuredChild:
         assert result.run_id == flow.latest_run
         assert len(flow.checkpoints) == 1
 
-    def test_structured_child_metadata_records_raw_result(self) -> None:
+    def test_structured_child_metadata_records_child_identity(self) -> None:
         component = make_structured_component()
         flow = BasicFlow(component=component)
 
         result = flow.invoke({"value": 123})
         metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
 
-        assert metadata.kind == "basic"
         assert metadata.child_is_workflow is False
         assert metadata.child_id == component.instance_id
-        assert metadata.child_full_name == component.full_name
         assert metadata.child_run_id is NO_VAL
-        assert metadata.child_raw_result == 123
-        assert metadata.has_child_raw_result is True
-        assert metadata.child_raw_result_type == "int"
 
     def test_structured_child_async_metadata_mirrors_sync_path(self) -> None:
         component = make_structured_component()
@@ -185,8 +170,8 @@ class TestBasicFlowStructuredChild:
 
         assert result == {"value": 123}
         assert metadata.child_is_workflow is False
-        assert metadata.child_raw_result == 123
-        assert metadata.has_child_raw_result is True
+        assert metadata.child_id == component.instance_id
+        assert metadata.child_run_id is NO_VAL
 
 
 class TestBasicFlowWorkflowChild:
@@ -212,14 +197,9 @@ class TestBasicFlowWorkflowChild:
         child_result = child.checkpoints[0]
         metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
 
-        assert metadata.kind == "basic"
         assert metadata.child_is_workflow is True
         assert metadata.child_id == child.instance_id
-        assert metadata.child_full_name == child.full_name
         assert metadata.child_run_id == child_result.run_id
-        assert metadata.child_raw_result is NO_VAL
-        assert metadata.has_child_raw_result is False
-        assert metadata.child_raw_result_type == "Any"
 
     def test_workflow_child_async_metadata_mirrors_sync_path(self) -> None:
         child = EchoWorkflow()
@@ -231,8 +211,8 @@ class TestBasicFlowWorkflowChild:
         assert result == {"value": 123}
         assert child.async_run_inputs == [{"value": 123}]
         assert metadata.child_is_workflow is True
+        assert metadata.child_id == child.instance_id
         assert metadata.child_run_id == child.checkpoints[0].run_id
-        assert metadata.child_raw_result is NO_VAL
 
 
 class TestBasicFlowValidationAndErrors:
@@ -245,7 +225,7 @@ class TestBasicFlowValidationAndErrors:
 
         monkeypatch.setattr(component, "invoke", lambda inputs: 123)
 
-        with pytest.raises(ValidationError, match="non-mapping result"):
+        with pytest.raises(ValidationError, match="mapping-shaped result"):
             flow._run({"value": 123})
 
     def test_public_invoke_wraps_run_validation_error_as_execution_error(
@@ -276,31 +256,15 @@ class TestBasicFlowValidationAndErrors:
             MethodType(bad_async_invoke, component),
         )
 
-        with pytest.raises(ValidationError, match="non-mapping async result"):
+        with pytest.raises(ValidationError, match="mapping-shaped result"):
             asyncio.run(flow._async_run({"value": 123}))
 
-    def test_build_metadata_rejects_plain_dict_result(self) -> None:
-        component = make_structured_component()
-        flow = BasicFlow(component=component)
-
-        with pytest.raises(ValidationError, match="expected StructuredResultDict or FlowResultDict"):
-            flow._build_metadata({"value": 123})
-
-    def test_build_metadata_rejects_flow_result_from_structured_child(self) -> None:
-        component = make_structured_component()
-        flow = BasicFlow(component=component)
-
-        with pytest.raises(ValidationError, match="wrapped structured child"):
-            flow._build_metadata(FlowResultDict({"value": 123}, run_id="child_run"))
-
-    def test_build_metadata_rejects_structured_result_from_workflow_child(self) -> None:
+    def test_build_metadata_rejects_plain_dict_result_from_workflow_child(self) -> None:
         child = EchoWorkflow()
         flow = BasicFlow(component=child)
 
-        with pytest.raises(ValidationError, match="wrapped workflow child"):
-            flow._build_metadata(
-                StructuredResultDict({"value": 123}, raw_result=123)
-            )
+        with pytest.raises(ValidationError, match="expected FlowResultDict"):
+            flow._build_metadata({"value": 123})
 
 
 class TestBasicFlowSerialization:

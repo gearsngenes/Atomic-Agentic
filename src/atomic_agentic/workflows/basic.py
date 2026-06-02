@@ -1,15 +1,18 @@
 """Workflow wrappers.
 
-This module contains thin workflow adapters around already-structured nodes.
+This module contains thin workflow adapters around executable nodes.
 
-`BasicFlow` wraps either:
-- a `StructuredInvokable`, or
-- another `Workflow`
+`BasicFlow` wraps any `AtomicInvokable` and exposes it as a workflow-shaped node.
+Its responsibilities are limited to:
 
-and exposes it as a workflow node whose responsibilities are limited to:
-- delegating sync/async execution,
-- preserving the wrapped component's input parameters,
+- delegating sync/async execution;
+- preserving the wrapped component's input parameters;
+- validating that the child result is mapping-shaped;
 - emitting lightweight metadata for checkpointing.
+
+`BasicFlow` does not reshape arbitrary outputs. Components that do not naturally
+return mapping-shaped values should be wrapped in `StructuredInvokable` or a
+future approved output adapter before entering a workflow.
 """
 
 from __future__ import annotations
@@ -19,10 +22,10 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 from ..core.Exceptions import ValidationError
-from ..core.Invokable import StructuredInvokable, StructuredResultDict
+from ..core.Invokable import AtomicInvokable
+from ..core.constants import NO_VAL
 from .base import FlowResultDict, Workflow
 from .metadata import BasicFlowRunMetadata
-from ..core.constants import NO_VAL
 
 logger = logging.getLogger(__name__)
 
@@ -30,29 +33,33 @@ __all__ = ["BasicFlow"]
 
 
 class BasicFlow(Workflow[BasicFlowRunMetadata]):
-    """Thin workflow adapter for structured invokables and workflows.
+    """Thin workflow adapter for mapping-returning AtomicInvokable children.
 
-    `BasicFlow` does not perform any output packaging of its own. The wrapped
-    component is expected to already return a mapping-shaped result:
+    `BasicFlow` delegates directly to its wrapped component. The wrapped
+    component may be another Workflow or any other AtomicInvokable.
 
-    - `StructuredInvokable` -> `StructuredResultDict`
-    - `Workflow` -> `FlowResultDict`
+    Runtime result contract:
 
-    The outer workflow layer then records its own checkpoint and wraps the final
-    mapping in a fresh outer `FlowResultDict`.
+    - Workflow children must return the workflow-owned `FlowResultDict` carrier.
+      Its `run_id` is recorded as the child workflow run id.
+    - Non-workflow AtomicInvokable children must return a mapping-shaped result.
+      No child run id exists yet for those children, so metadata stores `NO_VAL`.
+
+    The outer Workflow base then records this BasicFlow's checkpoint and wraps
+    the final mapping in a fresh outer `FlowResultDict`.
     """
 
     def __init__(
         self,
-        component: StructuredInvokable | Workflow,
+        component: AtomicInvokable,
         *,
         name: Optional[str] = None,
         description: Optional[str] = None,
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
-        if not isinstance(component, (StructuredInvokable, Workflow)):
+        if not isinstance(component, AtomicInvokable):
             raise TypeError(
-                "BasicFlow.component must be a StructuredInvokable or Workflow, "
+                "BasicFlow.component must be an AtomicInvokable, "
                 f"got {type(component)!r}"
             )
 
@@ -75,43 +82,28 @@ class BasicFlow(Workflow[BasicFlowRunMetadata]):
     # BasicFlow properties
     # ------------------------------------------------------------------ #
     @property
-    def component(self) -> StructuredInvokable | Workflow:
-        """The wrapped structured component."""
+    def component(self) -> AtomicInvokable:
+        """The wrapped executable component."""
         return self._component
 
     # ------------------------------------------------------------------ #
     # Metadata helpers
     # ------------------------------------------------------------------ #
     def _build_metadata(self, result: Mapping[str, Any]) -> BasicFlowRunMetadata:
-        """Build typed checkpoint metadata from the wrapped component and result carrier."""
-        if not isinstance(result, StructuredResultDict) and not isinstance(result, FlowResultDict):
-            raise ValidationError(
-                f"{type(self).__name__}.{self.name}: wrapped component returned "
-                f"{type(result)!r}, expected StructuredResultDict or FlowResultDict"
-            )
+        """Build typed checkpoint metadata for the delegated child."""
         child_is_workflow = isinstance(self.component, Workflow)
-        if child_is_workflow and isinstance(result, StructuredResultDict):
+
+        if child_is_workflow and not isinstance(result, FlowResultDict):
             raise ValidationError(
-                f"{type(self).__name__}.{self.name}: wrapped workflow child returned "
-                f"{type(result)!r}, expected FlowResultDict"
+                f"{type(self).__name__}.{self.name}: wrapped workflow child "
+                f"returned {type(result)!r}, expected FlowResultDict."
             )
-        elif not child_is_workflow and isinstance(result, FlowResultDict):
-            raise ValidationError(
-                f"{type(self).__name__}.{self.name}: wrapped structured child returned "
-                f"{type(result)!r}, expected StructuredResultDict"
-            )
-        raw_result = result.raw_result if not child_is_workflow else NO_VAL
-        raw_result_type = type(raw_result).__name__ if raw_result is not NO_VAL else "Any"
 
         return BasicFlowRunMetadata(
-                child_is_workflow=child_is_workflow,
-                child_id=self.component.instance_id,
-                child_full_name=self.component.full_name,
-                child_run_id=result.run_id if child_is_workflow else NO_VAL,
-                child_raw_result=raw_result,
-                has_child_raw_result=not child_is_workflow,
-                child_raw_result_type=raw_result_type,
-            )
+            child_is_workflow=child_is_workflow,
+            child_id=self.component.instance_id,
+            child_run_id=result.run_id if child_is_workflow else NO_VAL,
+        )
 
     # ------------------------------------------------------------------ #
     # Workflow run hooks
@@ -125,8 +117,9 @@ class BasicFlow(Workflow[BasicFlowRunMetadata]):
 
         if not isinstance(result, Mapping):
             raise ValidationError(
-                f"{type(self).__name__}.{self.name}: wrapped component returned "
-                f"a non-mapping result: {type(result)!r}"
+                f"{type(self).__name__}.{self.name}: wrapped component must "
+                f"return a mapping-shaped result for workflow handoff; "
+                f"got {type(result)!r}."
             )
 
         return self._build_metadata(result), result
@@ -140,8 +133,9 @@ class BasicFlow(Workflow[BasicFlowRunMetadata]):
 
         if not isinstance(result, Mapping):
             raise ValidationError(
-                f"{type(self).__name__}.{self.name}: wrapped component returned "
-                f"a non-mapping async result: {type(result)!r}"
+                f"{type(self).__name__}.{self.name}: wrapped component must "
+                f"return a mapping-shaped result for async workflow handoff; "
+                f"got {type(result)!r}."
             )
 
         return self._build_metadata(result), result

@@ -45,7 +45,7 @@ class EchoWorkflow(Workflow[WorkflowRunMetadata]):
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="echo"), {"value": inputs["value"]}
+        return WorkflowRunMetadata(), {"value": inputs["value"]}
 
 
 class NativeAsyncEchoWorkflow(EchoWorkflow):
@@ -54,7 +54,7 @@ class NativeAsyncEchoWorkflow(EchoWorkflow):
         inputs: Mapping[str, Any],
     ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
         self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(kind="async_echo"), {"value": inputs["value"]}
+        return WorkflowRunMetadata(), {"value": inputs["value"]}
 
 
 class ConfigurableWorkflow(Workflow[WorkflowRunMetadata]):
@@ -73,7 +73,7 @@ class ConfigurableWorkflow(Workflow[WorkflowRunMetadata]):
             filter_extraneous_inputs=True,
         )
         self.metadata = (
-            WorkflowRunMetadata(kind="configurable")
+            WorkflowRunMetadata()
             if metadata is None
             else metadata
         )
@@ -159,7 +159,6 @@ class TestWorkflowSyncInvoke:
         assert checkpoint.run_id == result.run_id
         assert checkpoint.inputs == {"value": 123}
         assert checkpoint.result == {"value": 123}
-        assert checkpoint.metadata.kind == "echo"
         assert checkpoint.started_at <= checkpoint.ended_at
         assert checkpoint.elapsed_s >= 0
 
@@ -230,7 +229,6 @@ class TestWorkflowAsyncInvoke:
         assert workflow.async_run_inputs == [{"value": 123}]
         assert len(workflow.checkpoints) == 1
         assert workflow.checkpoints[0].run_id == result.run_id
-        assert workflow.checkpoints[0].metadata.kind == "async_echo"
 
     def test_default_async_run_dispatches_to_sync_run(self) -> None:
         workflow = EchoWorkflow()

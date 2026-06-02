@@ -4,10 +4,9 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from ..core.Invokable import StructuredInvokable
+from ..core.Invokable import AtomicInvokable, StructuredInvokable
 from .sequential import SequentialFlow
 from ..core.Exceptions import ValidationError
-from ..core.Invokable import AtomicInvokable
 from ..core.constants import NO_VAL
 from .base import FlowResultDict, Workflow
 from .basic import BasicFlow
@@ -45,7 +44,7 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
 
     Construction contract
     ---------------------
-    - ``body_steps`` must be a non-empty ``list[Workflow | StructuredInvokable]``.
+    - ``body_steps`` must be a non-empty ``list[Workflow | AtomicInvokable]``.
     - The body is always normalized inline into a private ``SequentialFlow``.
     - The normalized loop body topology is fixed at construction.
     - The normalized loop body is exposed read-only via :attr:`loop_body`.
@@ -115,7 +114,7 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         self,
         name: str,
         description: str,
-        body_steps: list[Workflow | StructuredInvokable],
+        body_steps: list[Workflow | AtomicInvokable],
         judge: AtomicInvokable | None = None,
         max_iterations: int = 1,
         *,
@@ -153,15 +152,15 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         """
         if not isinstance(body_steps, list):
             raise TypeError(
-                f"body_steps must be a list[Workflow | StructuredInvokable], got {type(body_steps)!r}"
+                f"body_steps must be a list[Workflow | AtomicInvokable], got {type(body_steps)!r}"
             )
         if not body_steps:
             raise ValueError("body_steps must not be empty")
 
         for index, step in enumerate(body_steps):
-            if not isinstance(step, (Workflow, StructuredInvokable)):
+            if not isinstance(step, AtomicInvokable):
                 raise TypeError(
-                    "body_steps items must be Workflow or StructuredInvokable, "
+                    "body_steps items must be Workflow or AtomicInvokable, "
                     f"got {type(step)!r} at index {index}"
                 )
 

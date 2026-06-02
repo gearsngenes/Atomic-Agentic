@@ -128,11 +128,7 @@ class TestLiveAgentStructuredBasicPipeline:
         checkpoint = flow.get_checkpoint(result.run_id)
         assert checkpoint is not None
         assert checkpoint.result == dict(result)
-        assert checkpoint.metadata.kind == "basic"
         assert checkpoint.metadata.child_is_workflow is False
-        assert checkpoint.metadata.has_child_raw_result is True
-        assert checkpoint.metadata.child_raw_result == dict(result)
-        assert checkpoint.metadata.child_raw_result_type == "dict"
 
     def test_live_openai_structured_agent_basic_flow_async_pipeline(
         self,
@@ -150,7 +146,6 @@ class TestLiveAgentStructuredBasicPipeline:
         checkpoint = flow.get_checkpoint(result.run_id)
         assert checkpoint is not None
         assert checkpoint.result == dict(result)
-        assert checkpoint.metadata.kind == "basic"
         assert checkpoint.metadata.child_is_workflow is False
 
     def test_live_openai_composed_pipeline_to_dict_does_not_expose_secrets(
