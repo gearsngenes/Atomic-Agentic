@@ -115,7 +115,7 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         self,
         name: str,
         description: str,
-        body_steps: list[Workflow | StructuredInvokable],
+        body_steps: list[Workflow | AtomicInvokable],
         judge: AtomicInvokable | None = None,
         max_iterations: int = 1,
         *,
@@ -153,15 +153,15 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         """
         if not isinstance(body_steps, list):
             raise TypeError(
-                f"body_steps must be a list[Workflow | StructuredInvokable], got {type(body_steps)!r}"
+                f"body_steps must be a list[Workflow | AtomicInvokable], got {type(body_steps)!r}"
             )
         if not body_steps:
             raise ValueError("body_steps must not be empty")
 
         for index, step in enumerate(body_steps):
-            if not isinstance(step, (Workflow, StructuredInvokable)):
+            if not isinstance(step, AtomicInvokable):
                 raise TypeError(
-                    "body_steps items must be Workflow or StructuredInvokable, "
+                    "body_steps items must be Workflow or AtomicInvokable, "
                     f"got {type(step)!r} at index {index}"
                 )
 
