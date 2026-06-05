@@ -1,65 +1,293 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any
 
 from .atomic import AtomicResult
 
-__all__ = ["LLMUsage", "LLMGenerationResult"]
+__all__ = [
+    "TokenUsage",
+    "OpenAITokenUsage",
+    "GeminiTokenUsage",
+    "MistralTokenUsage",
+    "LlamaCppTokenUsage",
+    "LLMModelData",
+    "RemoteLLMModelData",
+    "LocalLLMModelData",
+    "LlamaCppModelData",
+    "LLMResult",
+]
 
 
+# --------------------------------------------------------------------------- #
+# Shared validation / serialization helpers
+# --------------------------------------------------------------------------- #
+def _validate_token_count(field_name: str, value: int) -> None:
+    """Validate one required token-count field."""
+    if type(value) is not int:
+        raise TypeError(
+            f"{field_name} must be an int, got {type(value).__name__}."
+        )
+    if value < 0:
+        raise ValueError(f"{field_name} must be >= 0.")
+
+
+def _validate_optional_token_count(field_name: str, value: int | None) -> None:
+    """Validate one optional provider-specific token-count field."""
+    if value is None:
+        return
+    _validate_token_count(field_name, value)
+
+
+def _normalize_required_string(field_name: str, value: str) -> str:
+    """Validate and normalize a required non-empty string field."""
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{field_name} must be a str, got {type(value).__name__}."
+        )
+
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} must be a non-empty string.")
+
+    return normalized
+
+
+def _normalize_optional_string(field_name: str, value: str | None) -> str | None:
+    """Validate and normalize an optional string field.
+
+    Empty or whitespace-only strings are normalized to None.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{field_name} must be a str or None, got {type(value).__name__}."
+        )
+
+    return value.strip() or None
+
+
+def _dataclass_record_to_dict(record: Any) -> dict[str, Any]:
+    """Serialize a dataclass record including its concrete class name."""
+    data = {field.name: getattr(record, field.name) for field in fields(record)}
+    return {"type": type(record).__name__, **data}
+
+
+# --------------------------------------------------------------------------- #
+# Token usage records
+# --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
-class LLMUsage:
+class TokenUsage:
     """
-    Minimal normalized token-usage record for an LLM generation.
+    Normalized base token-usage record for one LLM generation.
 
-    Provider-specific usage payloads are intentionally not stored here. Add
-    normalized fields only when they are stable across supported providers.
+    The base record contains only token metrics that are consistently available
+    across the currently supported providers, either as native usage fields or
+    by exact derivation from native usage fields.
+
+    Fields
+    ------
+    input_tokens:
+        Tokens consumed from the initial prompt/messages/input context.
+
+    generated_tokens:
+        All non-input tokens counted by the provider for the generation side.
+        This may include visible response tokens plus hidden reasoning/thought,
+        prediction, tool-use, or other provider-specific generated-side tokens.
+
+    total_tokens:
+        Total usage count. Must equal ``input_tokens + generated_tokens``.
     """
 
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    total_tokens: int | None = None
+    input_tokens: int
+    generated_tokens: int
+    total_tokens: int
 
     def __post_init__(self) -> None:
-        self._validate_token_count("input_tokens", self.input_tokens)
-        self._validate_token_count("output_tokens", self.output_tokens)
-        self._validate_token_count("total_tokens", self.total_tokens)
+        _validate_token_count("input_tokens", self.input_tokens)
+        _validate_token_count("generated_tokens", self.generated_tokens)
+        _validate_token_count("total_tokens", self.total_tokens)
 
-    @staticmethod
-    def _validate_token_count(field_name: str, value: int | None) -> None:
-        """Validate one optional token-count field."""
-        if value is None:
-            return
-        if type(value) is not int:
-            raise TypeError(
-                f"{field_name} must be an int or None, got {type(value).__name__}."
+        expected_total = self.input_tokens + self.generated_tokens
+        if self.total_tokens != expected_total:
+            raise ValueError(
+                "total_tokens must equal input_tokens + generated_tokens; "
+                f"expected {expected_total}, got {self.total_tokens}."
             )
-        if value < 0:
-            raise ValueError(f"{field_name} must be >= 0.")
 
-    def to_dict(self) -> dict[str, int | None]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
-        return {
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "total_tokens": self.total_tokens,
-        }
+        return _dataclass_record_to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
-class LLMGenerationResult(AtomicResult):
+class OpenAITokenUsage(TokenUsage):
     """
-    Successful string-only LLM generation result.
+    OpenAI Responses API token-usage details.
 
-    ``LLMGenerationResult.result`` is always the generated text string. This
-    class does not model structured generation, parsed output, or provider raw
-    responses.
+    ``response_tokens`` is derived from ``generated_tokens`` minus known hidden
+    reasoning tokens. ``cached_tokens`` is an input-token subset and is not
+    additive to ``input_tokens``.
+    """
+
+    response_tokens: int | None = None
+    cached_tokens: int | None = None
+    reasoning_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        TokenUsage.__post_init__(self)
+        _validate_optional_token_count("response_tokens", self.response_tokens)
+        _validate_optional_token_count("cached_tokens", self.cached_tokens)
+        _validate_optional_token_count("reasoning_tokens", self.reasoning_tokens)
+
+
+@dataclass(frozen=True, slots=True)
+class GeminiTokenUsage(TokenUsage):
+    """
+    Gemini token-usage details preserved from GenerateContent usage metadata.
+    """
+
+    candidates_token_count: int | None = None
+    thoughts_token_count: int | None = None
+    tool_use_prompt_token_count: int | None = None
+    cached_content_token_count: int | None = None
+
+    def __post_init__(self) -> None:
+        TokenUsage.__post_init__(self)
+        _validate_optional_token_count(
+            "candidates_token_count",
+            self.candidates_token_count,
+        )
+        _validate_optional_token_count("thoughts_token_count", self.thoughts_token_count)
+        _validate_optional_token_count(
+            "tool_use_prompt_token_count",
+            self.tool_use_prompt_token_count,
+        )
+        _validate_optional_token_count(
+            "cached_content_token_count",
+            self.cached_content_token_count,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MistralTokenUsage(TokenUsage):
+    """Mistral token-usage details preserved from chat completion usage."""
+
+    response_tokens: int | None = None
+    cached_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        TokenUsage.__post_init__(self)
+        _validate_optional_token_count("response_tokens", self.response_tokens)
+        _validate_optional_token_count("cached_tokens", self.cached_tokens)
+
+
+@dataclass(frozen=True, slots=True)
+class LlamaCppTokenUsage(TokenUsage):
+    """llama-cpp-python token-usage details preserved from chat completion usage."""
+
+    response_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        TokenUsage.__post_init__(self)
+        _validate_optional_token_count("response_tokens", self.response_tokens)
+
+
+# --------------------------------------------------------------------------- #
+# Model data records
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class LLMModelData:
+    """
+    Base model-identity record for an LLM generation.
+
+    ``provider`` is the framework-facing provider/backend identifier, such as
+    ``"openai"``, ``"gemini"``, ``"mistral"``, or ``"llama_cpp"``.
     """
 
     provider: str
-    model: str
-    usage: LLMUsage | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "provider",
+            _normalize_required_string("provider", self.provider),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation."""
+        return _dataclass_record_to_dict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteLLMModelData(LLMModelData):
+    """Model data for hosted/provider API-backed LLMs."""
+
+    model_name: str
+
+    def __post_init__(self) -> None:
+        LLMModelData.__post_init__(self)
+        object.__setattr__(
+            self,
+            "model_name",
+            _normalize_required_string("model_name", self.model_name),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LocalLLMModelData(LLMModelData):
+    """Base model data for local/backend-loaded LLMs."""
+
+
+@dataclass(frozen=True, slots=True)
+class LlamaCppModelData(LocalLLMModelData):
+    """Model data for llama-cpp-python backed local models."""
+
+    model_path: str | None = None
+    repo_id: str | None = None
+    filename: str | None = None
+
+    def __post_init__(self) -> None:
+        LocalLLMModelData.__post_init__(self)
+        normalized_model_path = _normalize_optional_string(
+            "model_path",
+            self.model_path,
+        )
+        normalized_repo_id = _normalize_optional_string("repo_id", self.repo_id)
+        normalized_filename = _normalize_optional_string("filename", self.filename)
+
+        if (normalized_repo_id is None) != (normalized_filename is None):
+            raise ValueError(
+                "repo_id and filename must either both be provided or both be None."
+            )
+
+        if normalized_model_path is None and normalized_repo_id is None:
+            raise ValueError(
+                "LlamaCppModelData requires either model_path or repo_id + filename."
+            )
+
+        object.__setattr__(self, "model_path", normalized_model_path)
+        object.__setattr__(self, "repo_id", normalized_repo_id)
+        object.__setattr__(self, "filename", normalized_filename)
+
+
+# --------------------------------------------------------------------------- #
+# LLM result record
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class LLMResult(AtomicResult):
+    """
+    Successful string-only LLM generation result.
+
+    ``LLMResult.result`` is always the generated text string. Token accounting
+    and configured model identity are stored as explicit nested result records.
+    This class does not model structured generation, parsed output, or provider
+    raw responses.
+    """
+
+    token_usage: TokenUsage
+    model_data: LLMModelData
 
     def __post_init__(self) -> None:
         if not isinstance(self.result, str):
@@ -67,46 +295,27 @@ class LLMGenerationResult(AtomicResult):
                 f"result must be a str, got {type(self.result).__name__}."
             )
 
-        normalized_provider = self._normalize_non_empty_string(
-            field_name="provider",
-            value=self.provider,
-        )
-        normalized_model = self._normalize_non_empty_string(
-            field_name="model",
-            value=self.model,
-        )
-
-        if self.usage is not None and not isinstance(self.usage, LLMUsage):
+        if not isinstance(self.token_usage, TokenUsage):
             raise TypeError(
-                f"usage must be an LLMUsage or None, got {type(self.usage).__name__}."
+                "token_usage must be a TokenUsage instance, "
+                f"got {type(self.token_usage).__name__}."
+            )
+
+        if not isinstance(self.model_data, LLMModelData):
+            raise TypeError(
+                "model_data must be an LLMModelData instance, "
+                f"got {type(self.model_data).__name__}."
             )
 
         AtomicResult.__post_init__(self)
-        object.__setattr__(self, "provider", normalized_provider)
-        object.__setattr__(self, "model", normalized_model)
-
-    @staticmethod
-    def _normalize_non_empty_string(*, field_name: str, value: str) -> str:
-        """Validate and normalize a required non-empty string field."""
-        if not isinstance(value, str):
-            raise TypeError(
-                f"{field_name} must be a str, got {type(value).__name__}."
-            )
-
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError(f"{field_name} must be a non-empty string.")
-
-        return normalized
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         data = AtomicResult.to_dict(self)
         data.update(
             {
-                "provider": self.provider,
-                "model": self.model,
-                "usage": self.usage.to_dict() if self.usage is not None else None,
+                "token_usage": self.token_usage.to_dict(),
+                "model_data": self.model_data.to_dict(),
             }
         )
         return data

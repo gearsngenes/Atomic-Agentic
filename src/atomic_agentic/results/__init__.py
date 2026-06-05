@@ -2,13 +2,32 @@ from __future__ import annotations
 
 from .atomic import AtomicResult
 from .commands import CommandResult
-from .llm import LLMGenerationResult, LLMUsage
+from .llm import (
+    GeminiTokenUsage,
+    LlamaCppModelData,
+    LlamaCppTokenUsage,
+    LLMModelData,
+    LLMResult,
+    LocalLLMModelData,
+    MistralTokenUsage,
+    OpenAITokenUsage,
+    RemoteLLMModelData,
+    TokenUsage,
+)
 from .tools import ToolResult
 
 __all__ = [
     "AtomicResult",
     "ToolResult",
-    "LLMUsage",
-    "LLMGenerationResult",
     "CommandResult",
+    "TokenUsage",
+    "OpenAITokenUsage",
+    "GeminiTokenUsage",
+    "MistralTokenUsage",
+    "LlamaCppTokenUsage",
+    "LLMModelData",
+    "RemoteLLMModelData",
+    "LocalLLMModelData",
+    "LlamaCppModelData",
+    "LLMResult",
 ]

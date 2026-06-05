@@ -1150,7 +1150,7 @@ class Agent(AtomicInvokable):
         try:
             logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
             messages = self.build_messages(self.role_prompt, turns, prompt)
-            text = self._llm_engine.invoke({"messages": messages})
+            text = self._llm_engine.invoke_messages(messages)
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine invocation failed: {e}") from e
 

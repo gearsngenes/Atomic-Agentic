@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-# LLMEngines.py
-# Engines are stateless adapters around provider SDKs.
-# The Agent owns conversation history; engines map messages + attachments
-# to provider-specific requests.
+# ~~~Standard Library Imports~~~
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 import logging
+import mimetypes
 import os
 import random
 import time
@@ -14,10 +13,11 @@ from typing import (
     Dict,
     List,
     Mapping,
-    Optional,)
-import mimetypes
+    Optional,
+)
+import warnings
 
-# ~~~Provider SDKs~~~
+# ~~~Provider SDK Imports~~~
 # OpenAI
 try: from openai import OpenAI
 except: OpenAI = None
@@ -31,11 +31,18 @@ except: Mistral = None
 try: from llama_cpp import Llama
 except: Llama = None
 
-# Import Exceptions
+# ~~~Local Imports~~~
 from ..core.Invokable import AtomicInvokable
 from ..core.constants import NO_VAL
 from ..core.Parameters import ParamSpec
 from ..core.Exceptions import LLMEngineError
+from ..results import (
+    LLMModelData,
+    LLMResult,
+    OpenAITokenUsage,
+    RemoteLLMModelData,
+    TokenUsage,
+)
 
 __all__ = [
     "GeminiEngine",
@@ -60,32 +67,47 @@ class LLMEngine(AtomicInvokable, ABC):
 
     Public contract
     ---------------
-    `LLMEngine` is an `AtomicInvokable`, so its public invocation entrypoint is
-    dict-first:
+    ``LLMEngine`` is an ``AtomicInvokable``, so its canonical public invocation
+    entrypoint is dict-first:
 
-        invoke({"messages": list[{"role": str, "content": str}]}) -> str
+        invoke({"messages": list[{"role": str, "content": str}]}) -> LLMResult
+
+    ``LLMResult.result`` is the generated assistant text string. The declared
+    invokable ``return_type`` remains ``"str"`` because ``return_type`` describes
+    the caller-facing payload stored inside ``AtomicResult.result``, not the
+    result envelope class.
 
     The declared invokable schema exposes one input parameter named
     ``messages``. The value must be a non-empty list of chat-message mappings
     containing string ``role`` and ``content`` fields.
 
+    Deprecated compatibility
+    ------------------------
+    ``invoke_messages(messages) -> str`` is retained as a deprecated text-only
+    compatibility wrapper during the v2 migration. Prefer:
+
+        invoke({"messages": messages}).result
+
     Engine lifecycle
     ----------------
-    The provider-call lifecycle lives in ``invoke_messages(messages)``:
+    The canonical result-envelope lifecycle lives in ``invoke(inputs)``:
 
-    1. Normalize and validate the input messages.
-    2. Snapshot current attachments.
-    3. Ask the subclass to build a provider-specific payload.
-    4. Call the provider with retries/timeouts.
-    5. Extract and normalize the assistant text.
+    1. Filter dict-first inputs.
+    2. Validate and normalize ``messages``.
+    3. Snapshot current attachments.
+    4. Ask the subclass to build a provider-specific payload.
+    5. Call the provider with retries/timeouts.
+    6. Extract assistant text, token usage, and configured model data.
+    7. Construct and return an ``LLMResult``.
 
-    Subclasses should not override ``invoke`` or ``invoke_messages`` unless they
-    are deliberately replacing the base lifecycle. Provider-specific behavior
-    should normally be implemented through the protected template hooks:
+    Provider-specific behavior should normally be implemented through the
+    protected template hooks:
 
     - ``_build_provider_payload``
     - ``_call_provider``
     - ``_extract_text``
+    - ``_extract_token_usage``
+    - ``_get_model_data``
     - ``_prepare_attachment``
     - ``_on_detach``
 
@@ -230,23 +252,23 @@ class LLMEngine(AtomicInvokable, ABC):
 
     def invoke_messages(self, messages: List[Dict[str, str]]) -> str:
         """
-        Template method that defines the engine invocation lifecycle.
+        Deprecated text-only compatibility wrapper.
 
-        Steps:
-        1. Normalize and validate the input `messages`.
-        2. Snapshot current attachments.
-        3. Ask the subclass to build a provider-specific payload.
-        4. Call the provider with retries/timeouts.
-        5. Extract and normalize the assistant text.
-
-        Subclasses **must not** override this method; they customize behavior
-        via the protected hooks documented below.
+        Prefer ``invoke({"messages": messages}).result`` so callers use the
+        canonical ``LLMResult`` envelope path.
         """
+        warnings.warn(
+            (
+                "LLMEngine.invoke_messages(...) is deprecated and will be removed "
+                "in a future v2 release. Use "
+                "LLMEngine.invoke({'messages': messages}).result instead."
+            ),
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         try:
-            normalized = self._normalize_messages(messages)
-            attachments = dict(self._attachments)
-            payload = self._build_provider_payload(normalized, attachments)
-            response = self._call_with_retries(payload)
+            response = self._call_model(messages)
             text = self._extract_text(response)
 
             if not isinstance(text, str):
@@ -254,27 +276,144 @@ class LLMEngine(AtomicInvokable, ABC):
                     f"{type(self).__name__}._extract_text must return str; "
                     f"got {type(text)!r}"
                 )
+
             return text.strip()
         except LLMEngineError:
-            # Already normalized; bubble up unchanged.
             raise
         except Exception as exc:
-            raise LLMEngineError(f"{self.name}.invoke failed") from exc
-    
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+            raise LLMEngineError(f"{self.name}.invoke_messages failed") from exc
+
+    def invoke(self, inputs: Mapping[str, Any]) -> LLMResult:
+        """
+        Invoke this engine through the canonical v2 result-envelope path.
+
+        Returns
+        -------
+        LLMResult
+            Result envelope whose ``.result`` field contains the generated
+            assistant text string.
+        """
         with self._invoke_lock:
-            logger.info(f"[{self.full_name} started]")
-            inputs = self.filter_inputs(inputs)
-            messages = inputs.get("messages")
-            if not isinstance(messages, list):
-                raise LLMEngineError("LLMEngine.invoke: 'messages' input must be a list")
-            result = self.invoke_messages(messages)
-            logger.info(f"[{self.full_name} finished]")
-            return result
+            logger.info("[%s started]", self.full_name)
+            started_at = datetime.now(timezone.utc)
+
+            try:
+                filtered_inputs = self.filter_inputs(inputs)
+                messages = filtered_inputs.get("messages")
+                if not isinstance(messages, list):
+                    raise LLMEngineError(
+                        "LLMEngine.invoke: 'messages' input must be a list"
+                    )
+
+                response = self._call_model(messages)
+                text, token_usage, model_data = self.extract(response)
+                ended_at = datetime.now(timezone.utc)
+
+                result = self.make_result(
+                    result=text,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    token_usage=token_usage,
+                    model_data=model_data,
+                )
+
+                logger.info("[%s finished]", self.full_name)
+                return result
+
+            except LLMEngineError:
+                raise
+            except Exception as exc:
+                raise LLMEngineError(f"{self.name}.invoke failed") from exc
 
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+    def _call_model(self, messages: List[Dict[str, Any]]) -> Any:
+        """
+        Normalize messages, snapshot current attachments, build the provider
+        payload, and return the raw provider response.
+
+        This helper owns only the shared provider-call sequence. It does not
+        extract text, extract token usage, construct results, capture timing, or
+        emit deprecation warnings.
+        """
+        normalized = self._normalize_messages(messages)
+        attachments = dict(self._attachments)
+        payload = self._build_provider_payload(normalized, attachments)
+        return self._call_with_retries(payload)
+
+    def extract(self, response: Any) -> tuple[str, TokenUsage, LLMModelData]:
+        """
+        Extract normalized generated text, token usage, and configured model
+        data from one provider response.
+
+        This method coordinates result-path extraction only. It does not call
+        the provider, capture timestamps, or construct ``LLMResult``.
+        """
+        text = self._extract_text(response)
+        if not isinstance(text, str):
+            raise LLMEngineError(
+                f"{type(self).__name__}._extract_text must return str; "
+                f"got {type(text)!r}"
+            )
+
+        token_usage = self._extract_token_usage(response)
+        if not isinstance(token_usage, TokenUsage):
+            raise LLMEngineError(
+                f"{type(self).__name__}._extract_token_usage must return "
+                f"TokenUsage, got {type(token_usage)!r}."
+            )
+
+        model_data = self._get_model_data()
+        if not isinstance(model_data, LLMModelData):
+            raise LLMEngineError(
+                f"{type(self).__name__}._get_model_data must return "
+                f"LLMModelData, got {type(model_data)!r}."
+            )
+
+        return text.strip(), token_usage, model_data
+
+    def make_result(
+        self,
+        result: str,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> LLMResult:
+        """
+        Construct this engine's ``LLMResult`` envelope.
+
+        ``result`` is the caller-facing generated text payload stored in
+        ``LLMResult.result``. Token usage and configured model data are stored as
+        explicit LLM-specific result fields.
+        """
+        unexpected = set(result_kwargs) - {"token_usage", "model_data"}
+        if unexpected:
+            raise LLMEngineError(
+                f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
+            )
+
+        token_usage = result_kwargs.get("token_usage")
+        model_data = result_kwargs.get("model_data")
+
+        if not isinstance(token_usage, TokenUsage):
+            raise LLMEngineError(
+                "make_result: token_usage must be a TokenUsage instance."
+            )
+
+        if not isinstance(model_data, LLMModelData):
+            raise LLMEngineError(
+                "make_result: model_data must be an LLMModelData instance."
+            )
+
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=LLMResult,
+            token_usage=token_usage,
+            model_data=model_data,
+        )
     def _normalize_messages(
         self, messages: List[Dict[str, Any]]
     ) -> List[Dict[str, str]]:
@@ -408,6 +547,26 @@ class LLMEngine(AtomicInvokable, ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        """
+        Extract normalized token usage from a provider response object.
+
+        Implementations must return a ``TokenUsage``-family record, not a raw
+        provider usage dictionary or SDK object.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _get_model_data(self) -> LLMModelData:
+        """
+        Return configured model identity data for this engine.
+
+        Model data is derived from engine configuration, not from a provider
+        response object.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         """
         Prepare a local path for reuse with this engine.
@@ -436,6 +595,9 @@ class LLMEngine(AtomicInvokable, ABC):
     def to_dict(self) -> Dict[str, Any]:
         """
         Shallow, non-secret configuration snapshot for debugging / logging.
+
+        Invocation result data such as token usage and model data belongs to
+        ``LLMResult``, not to engine metadata serialization.
         """
         d = super().to_dict()
         d.update({
@@ -450,7 +612,7 @@ class LLMEngine(AtomicInvokable, ABC):
 
 
 
-# ── OPENAI (Responses API + Chat fallback) ─────────────────────────────────────
+# ── OPENAI (Responses API) ─────────────────────────────────────────────────────
 class OpenAIEngine(LLMEngine):
     """
     OpenAI adapter using the Responses API.
@@ -459,16 +621,30 @@ class OpenAIEngine(LLMEngine):
     -----------
     Attachments are persistent engine state:
 
-    - PDFs    → uploaded once via Files API; attached as `{ "type": "input_file", "file_id": ... }`
-    - Images  → uploaded once via Files API; attached as `{ "type": "input_image", "file_id": ... }`
-    - Text/Code → read and inlined as `{ "type": "input_text", "text": ... }`
-      (with a configurable character cutoff).
+    - PDFs    → uploaded once via Files API; attached as
+      ``{"type": "input_file", "file_id": ...}``
+    - Images  → uploaded once via Files API; attached as
+      ``{"type": "input_image", "file_id": ...}``
+    - Text/Code → read and inlined as
+      ``{"type": "input_text", "text": ...}``
+      with a configurable character cutoff.
 
-    Unsupported file classes (audio/video, obviously binary types, etc.) are
-    rejected at `attach` time.
+    Unsupported file classes such as audio, video, archives, executables,
+    databases, model weights, and obviously binary files are rejected at
+    ``attach`` time.
 
-    System messages are carried via the `instructions` field; non-system messages
-    are encoded as `input_text` or `output_text` blocks.
+    Invocation
+    ----------
+    This engine uses ``client.responses.create(...)`` in ``_call_provider``.
+    System messages are carried via the Responses API ``instructions`` field;
+    non-system messages are encoded as ``input_text`` or ``output_text`` blocks.
+
+    Result extraction
+    -----------------
+    ``_extract_text`` reads the generated assistant text from the Responses API
+    response. ``_extract_token_usage`` maps Responses API usage fields into an
+    ``OpenAITokenUsage`` record. ``_get_model_data`` returns configured model
+    identity from ``self.model``.
     """
 
     # Image extensions that map to `input_image`
@@ -673,6 +849,54 @@ class OpenAIEngine(LLMEngine):
         Returns the empty string when no text is present (does not raise).
         """
         return (getattr(response, "output_text", None) or "").strip()
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        """
+        Extract OpenAI Responses API token usage into an OpenAITokenUsage record.
+
+        OpenAI Responses usage reports:
+
+        - input_tokens: prompt/input-side tokens
+        - output_tokens: generated-side tokens
+        - total_tokens: total input + generated tokens
+        - input_tokens_details.cached_tokens: cached input-token subset
+        - output_tokens_details.reasoning_tokens: hidden reasoning-token subset
+          counted inside output_tokens
+
+        ``response_tokens`` is derived as ``output_tokens - reasoning_tokens``.
+        """
+        usage = response.usage
+        if usage is None:
+            raise LLMEngineError("OpenAI response did not include usage.")
+
+        reasoning_tokens = usage.output_tokens_details.reasoning_tokens
+        response_tokens = usage.output_tokens - reasoning_tokens
+        if response_tokens < 0:
+            raise LLMEngineError(
+                "OpenAI response usage produced a negative response token count "
+                "after subtracting reasoning_tokens from output_tokens."
+            )
+
+        return OpenAITokenUsage(
+            input_tokens=usage.input_tokens,
+            generated_tokens=usage.output_tokens,
+            total_tokens=usage.total_tokens,
+            response_tokens=response_tokens,
+            cached_tokens=usage.input_tokens_details.cached_tokens,
+            reasoning_tokens=reasoning_tokens,
+        )
+
+    def _get_model_data(self) -> LLMModelData:
+        """
+        Return configured OpenAI model identity data for this engine.
+
+        Model data is derived from engine configuration, not from the provider
+        response object.
+        """
+        return RemoteLLMModelData(
+            provider="openai",
+            model_name=self.model,
+        )
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         """
