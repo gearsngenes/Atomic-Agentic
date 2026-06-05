@@ -1259,7 +1259,8 @@ class Agent(AtomicInvokable):
 
         try:
             logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
-            prompt = await self._pre_invoke.async_invoke(pre_inputs)
+            pre_result = await self._pre_invoke.async_invoke(pre_inputs)
+            prompt = pre_result.result
         except ToolInvocationError:
             raise
         except Exception as e:  # pragma: no cover
@@ -1364,7 +1365,8 @@ class Agent(AtomicInvokable):
             # Preprocess inputs to prompt string.
             try:
                 logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
-                prompt = self._pre_invoke.invoke(pre_inputs)
+                pre_result = self._pre_invoke.invoke(pre_inputs)
+                prompt = pre_result.result
             except ToolInvocationError:
                 raise
             except Exception as e:  # pragma: no cover
