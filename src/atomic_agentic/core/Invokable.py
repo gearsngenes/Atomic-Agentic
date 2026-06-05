@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Mapping, Dict, Sequence, Optional
+from datetime import datetime
+from typing import Any, Mapping, Dict, Sequence, Optional, TypeVar
 import threading
 import asyncio
 from uuid import uuid4
@@ -10,9 +11,11 @@ import logging
 from .constants import IDENTIFIER_PATTERN, NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from .Exceptions import PackagingError
+from ..results import AtomicResult
 
 
 logger = logging.getLogger(__name__)
+_R = TypeVar("_R", bound=AtomicResult)
 
 # Deprecated aliases removed in v2: use `ParamSpec` and the `parameters` property.
 
@@ -27,27 +30,29 @@ class AtomicInvokable(ABC):
     executable primitives in this codebase must satisfy. It standardises:
 
     - **identity**: validated `name` and `description` (human-friendly strings).
-    - **interface**: a single execution entrypoint ``invoke(inputs: Mapping[str, Any])``.
+    - **interface**: a single execution entrypoint
+      ``invoke(inputs: Mapping[str, Any])`` returning an ``AtomicResult``-family
+      successful-invocation envelope.
     - **parameters & return type**: declared at construction time as concrete
       `parameters: list[ParamSpec]` and `return_type: str`.
     - **metadata serialization**: default ``to_dict()`` implementation for
       persisting metadata.
-    
+
     Parameters and Schema
     ---------------------
     Parameters are declared as a list of ``ParamSpec`` objects at construction time.
     Each ``ParamSpec`` is self-sufficient and contains:
-    
+
       - ``name`` (str): parameter name; must be a valid Python identifier
       - ``index`` (int): position in the parameter sequence (0-based)
       - ``kind`` (str): parameter classification—one of:
-        
+
         - ``POSITIONAL_ONLY``: cannot be passed by name (``/``-style)
         - ``POSITIONAL_OR_KEYWORD``: may be passed by name or position
         - ``KEYWORD_ONLY``: must be passed by name (``*``-style)
         - ``VAR_POSITIONAL``: accepts ``*args`` (unnamed)
         - ``VAR_KEYWORD``: accepts ``**kwargs`` (named)
-      
+
       - ``type`` (str): human-readable type annotation, e.g. ``"int"`` or ``"List[str]"``
       - ``default`` (Any): default value if parameter is optional; ``NO_VAL`` if required
 
@@ -59,21 +64,28 @@ class AtomicInvokable(ABC):
     ``invoke(inputs)`` accepts a ``Mapping[str, Any]`` where keys correspond to
     parameter names. The contract is "dict-first": callers provide a mapping, not
     ``(*args, **kwargs)``. Implementations (subclasses) are responsible for:
-    
+
       - Validating required parameters are present
       - Handling default values
-      - Converting the dict to appropriate ``(*args, **kwargs)`` for execution
+      - Converting the dict to appropriate execution arguments or provider payloads
       - Raising clear, typed exceptions on invalid inputs (use
         ``ToolInvocationError``, ``AgentInvocationError``, etc.)
+      - Returning an ``AtomicResult``-family object whose ``.result`` field contains
+        the caller-facing payload
+
+    Return Type Contract
+    --------------------
+    ``return_type`` describes the caller-facing payload stored in
+    ``AtomicResult.result``. It does not describe the result envelope class itself.
 
     Architecture Notes
     -------------------
     - The class intentionally does not expose a human-readable ``signature`` string
       inside ``to_dict()`` to minimize churn when persisting metadata; use the
       ``signature`` property for logging and UIs.
-        - **Backward Compatibility**: Legacy aliases (previously ``ParameterMap``,
-            ``ArgumentMap``, and ``ArgSpec``) have been removed in v2; prefer
-            ``ParamSpec`` and the `parameters` property on invokable instances.
+    - **Backward Compatibility**: Legacy aliases (previously ``ParameterMap``,
+      ``ArgumentMap``, and ``ArgSpec``) have been removed in v2; prefer
+      ``ParamSpec`` and the `parameters` property on invokable instances.
     """
 
     def __init__(
@@ -202,7 +214,7 @@ class AtomicInvokable(ABC):
 
     @property
     def return_type(self) -> str:
-        """Return type (string) of this invokable."""
+        """Payload return type stored inside ``AtomicResult.result``."""
         return self._return_type
 
     @property
@@ -262,11 +274,11 @@ class AtomicInvokable(ABC):
     # Abstract contract
     # ---------------------------------------------------------------- #
     @abstractmethod
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
-        """Perform work."""
+    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
+        """Perform work and return an AtomicResult-family envelope."""
         raise NotImplementedError
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
         """
         Default async compatibility wrapper.
 
@@ -274,6 +286,59 @@ class AtomicInvokable(ABC):
         `invoke(inputs)` in a worker thread.
         """
         return await asyncio.to_thread(self.invoke, inputs)
+
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> AtomicResult:
+        """
+        Construct this invokable's default AtomicResult-family envelope.
+
+        Subclasses may override this hook to choose a more specific result class
+        or add subclass-specific result fields while preserving the public
+        invocation template.
+        """
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            **result_kwargs,
+        )
+
+    def _make_result(
+        self,
+        *,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        result_cls: type[_R] = AtomicResult,
+        **result_kwargs: Any,
+    ) -> _R:
+        """
+        Construct an AtomicResult-family object for this invokable.
+
+        This helper only centralizes the common envelope construction details:
+        injecting this invokable's ``instance_id`` as ``invoker_id`` and passing
+        through caller-provided timing values and explicit subclass fields.
+
+        It intentionally does not capture time, wrap exceptions, record traces,
+        manage lifecycle state, or choose result classes from instance-level
+        registry/configuration.
+        """
+        if not isinstance(result_cls, type) or not issubclass(result_cls, AtomicResult):
+            raise TypeError(
+                f"result_cls must be a subclass of AtomicResult, got {result_cls!r}"
+            )
+        return result_cls(
+            result=result,
+            invoker_id=self.instance_id,
+            started_at=started_at,
+            ended_at=ended_at,
+            **result_kwargs,
+        )
 
     # ---------------------------------------------------------------- #
     # Input Filtering and Validation
@@ -392,24 +457,43 @@ class AtomicInvokable(ABC):
     # ---------------------------------------------------------------- #
     # callable contract
     # ---------------------------------------------------------------- #
-    def __call__(self, *args, **kwargs)-> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> AtomicResult:
         """
-        Allows the invokable to be called like a regular function
-        Check for varargs/kwargs parameters and construct the inputs dict accordingly before invoking.
+        Allows the invokable to be called like a regular function.
+
+        Check for varargs/kwargs parameters and construct the inputs dict
+        accordingly before invoking. The return value mirrors ``invoke(...)``:
+        an AtomicResult-family envelope whose ``.result`` field contains the
+        caller-facing payload.
         """
         inputs = self._args_kwargs_to_dict(*args, **kwargs)
         return self.invoke(inputs)
-    
-    async def async_call(self, *args: Any, **kwargs: Any) -> Any:
+
+    async def async_call(self, *args: Any, **kwargs: Any) -> AtomicResult:
         """
-        Async analog of __call__:
-        bind normal call-style args/kwargs into the dict-first inputs shape,
-        then delegate to async_invoke().
+        Async analog of __call__.
+
+        Bind normal call-style args/kwargs into the dict-first inputs shape,
+        then delegate to async_invoke(). The return value mirrors
+        ``async_invoke(...)``.
         """
         inputs = self._args_kwargs_to_dict(*args, **kwargs)
 
         return await self.async_invoke(inputs)
-    
+
+    @staticmethod
+    def _unwrap_result_payload(value: Any) -> Any:
+        """
+        Return the caller-facing payload from an AtomicResult-family value.
+
+        During staged result integration, some child invokables may already
+        return AtomicResult-family objects while others still return raw payloads.
+        This helper gives migrated callers one narrow compatibility rule.
+        """
+        if isinstance(value, AtomicResult):
+            return value.result
+        return value
+
     def _args_kwargs_to_dict(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """
         Convert Python call-style (*args, **kwargs) into the dict-first input shape.
