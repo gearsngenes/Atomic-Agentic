@@ -37,6 +37,7 @@ from ..core.constants import NO_VAL
 from ..core.Parameters import ParamSpec
 from ..core.Exceptions import LLMEngineError
 from ..results import (
+    GeminiTokenUsage,
     LLMModelData,
     LLMResult,
     OpenAITokenUsage,
@@ -848,7 +849,7 @@ class OpenAIEngine(LLMEngine):
 
         Returns the empty string when no text is present (does not raise).
         """
-        return (getattr(response, "output_text", None) or "").strip()
+        return response.output_text
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """
@@ -1104,22 +1105,35 @@ class GeminiEngine(LLMEngine):
 
     Flow per call
     -------------
-    1) Engine-level attachments are prepared via `attach(path)`:
-       - `_prepare_attachment` uploads supported files via `client.files.upload`.
-       - Attachment metadata stores the returned File object and its resource name.
-    2) `invoke({"messages": messages})` delegates to `invoke_messages(messages)`,
-       which will:
-       - normalize chat messages (role/content pairs),
-       - snapshot current attachments,
-       - call `_build_provider_payload` to construct:
-           * `system_instruction` from system messages
-           * a flat `contents` list:
-             - File objects for uploaded attachments
-             - plain strings for non-system turns
-       - call `_call_with_retries` → `_call_provider`
-       - call `_extract_text` to normalize the response.
-    3) `detach(path)` calls `_on_detach` for best-effort file deletion via
-       `client.files.delete`.
+    1) Engine-level attachments are prepared via ``attach(path)``:
+       - ``_prepare_attachment`` uploads supported files via
+         ``client.files.upload``.
+       - Attachment metadata stores the returned File object and its resource
+         name.
+
+    2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
+       lifecycle:
+       - normalize chat messages;
+       - snapshot current attachments;
+       - build the Gemini provider payload;
+       - call ``client.models.generate_content(...)``;
+       - extract assistant text, token usage, and configured model data;
+       - return ``LLMResult``.
+
+    3) ``detach(path)`` calls ``_on_detach`` for best-effort file deletion via
+       ``client.files.delete``.
+
+    Token usage
+    -----------
+    ``_extract_token_usage`` maps ``response.usage_metadata`` into
+    ``GeminiTokenUsage``. The base ``generated_tokens`` value is derived as
+    ``total_token_count - prompt_token_count`` so it captures all non-prompt
+    usage counted by Gemini, including candidate, thoughts, and tool-use prompt
+    tokens when present.
+
+    Model data
+    ----------
+    ``_get_model_data`` returns configured model identity from ``self.model``.
     """
 
     # Extra illegal extensions for this provider (merged with base `illegal_attachment_exts`)
@@ -1350,6 +1364,63 @@ class GeminiEngine(LLMEngine):
         The SDK exposes a `.text` convenience property for text responses.
         """
         return response.text
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        """
+        Extract Gemini GenerateContent token usage into a GeminiTokenUsage record.
+
+        Gemini usage metadata reports:
+
+        - prompt_token_count: prompt/input-side tokens
+        - candidates_token_count: candidate response tokens, when present
+        - total_token_count: total request usage
+        - thoughts_token_count: generated thinking/reasoning tokens, when present
+        - tool_use_prompt_token_count: tool-use prompt tokens, when present
+        - cached_content_token_count: cached input-token subset, when present
+
+        ``generated_tokens`` is derived as
+        ``total_token_count - prompt_token_count``.
+        """
+        usage = response.usage_metadata
+        if usage is None:
+            raise LLMEngineError("Gemini response did not include usage_metadata.")
+
+        input_tokens = usage.prompt_token_count
+        total_tokens = usage.total_token_count
+
+        if input_tokens is None:
+            raise LLMEngineError("Gemini usage_metadata missing prompt_token_count.")
+        if total_tokens is None:
+            raise LLMEngineError("Gemini usage_metadata missing total_token_count.")
+
+        generated_tokens = total_tokens - input_tokens
+        if generated_tokens < 0:
+            raise LLMEngineError(
+                "Gemini usage_metadata total_token_count is less than "
+                "prompt_token_count."
+            )
+
+        return GeminiTokenUsage(
+            input_tokens=input_tokens,
+            generated_tokens=generated_tokens,
+            total_tokens=total_tokens,
+            candidates_token_count=usage.candidates_token_count,
+            thoughts_token_count=usage.thoughts_token_count,
+            tool_use_prompt_token_count=usage.tool_use_prompt_token_count,
+            cached_content_token_count=usage.cached_content_token_count,
+        )
+
+    def _get_model_data(self) -> LLMModelData:
+        """
+        Return configured Gemini model identity data for this engine.
+
+        Model data is derived from engine configuration, not from the provider
+        response object.
+        """
+        return RemoteLLMModelData(
+            provider="gemini",
+            model_name=self.model,
+        )
 
     # ------------------------------------------------------------------ #
     # Gemini-specific helpers (not part of the template surface)
