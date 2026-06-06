@@ -14,6 +14,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Union,
 )
 import warnings
 
@@ -30,6 +31,9 @@ except: Mistral = None
 # Llama-CPP-Python
 try: from llama_cpp import Llama
 except: Llama = None
+# Hugging Face Hub
+try: from huggingface_hub import hf_hub_download
+except: hf_hub_download = None
 
 # ~~~Local Imports~~~
 from ..core.Invokable import AtomicInvokable
@@ -1955,6 +1959,17 @@ class LlamaCppEngine(LLMEngine):
     This engine wraps a local GGUF/GGML model via ``llama_cpp.Llama`` and plugs
     into the shared ``LLMEngine`` template.
 
+    Model source
+    ------------
+    A model may be loaded from either:
+
+    - ``model_path``: a direct path to an existing local GGUF/GGML file.
+    - ``repo_id`` + ``filename``: a Hugging Face Hub file reference resolved
+      through ``hf_hub_download(...)`` into a concrete local file path.
+
+    In both cases, ``self.model_path`` stores the concrete local path loaded by
+    ``Llama(model_path=...)``.
+
     Flow per call
     -------------
     1) Conversation turns are passed through as an OpenAI-compatible
@@ -1979,8 +1994,8 @@ class LlamaCppEngine(LLMEngine):
 
     Model data
     ----------
-    ``_get_model_data`` returns configured local model identity from
-    ``self.model_path`` or ``self.repo_id`` + ``self.filename``.
+    ``_get_model_data`` returns the concrete local model path loaded by
+    llama.cpp.
     """
 
     def __init__(
@@ -1988,52 +2003,102 @@ class LlamaCppEngine(LLMEngine):
         model_path: Optional[str] = None,
         repo_id: Optional[str] = None,
         filename: Optional[str] = None,
+        revision: Optional[str] = None,
+        cache_dir: Optional[str] = None,
+        local_dir: Optional[str] = None,
+        local_files_only: bool = False,
+        hf_token: Optional[Union[str, bool]] = None,
+        force_download: bool = False,
         n_ctx: int = 2048,
         n_threads: Optional[int] = None,
         n_threads_batch: Optional[int] = None,
+        n_gpu_layers: Optional[int] = None,
+        chat_format: Optional[str] = None,
         verbose: bool = False,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        stop: Optional[Union[str, List[str]]] = None,
         *,
         name: Optional[str] = None,
         description: str = "Llama.cpp LLM Engine",
         filter_extraneous_inputs: bool = True,
-        max_retries = 2,
-        retry_backoff_base = 0.5,
-        retry_backoff_max = 8
+        timeout_seconds: float = 30.0,
+        max_retries: int = 2,
+        retry_backoff_base: float = 0.5,
+        retry_backoff_max: float = 8.0,
     ) -> None:
         """
         Parameters
         ----------
         model_path:
-            Path to a local GGUF/GGML model file. Required if `repo_id`/`filename`
-            are not provided.
+            Direct path to a local GGUF/GGML model file. If provided, no
+            Hugging Face download is performed.
         repo_id:
-            Optional Hugging Face repo ID for `Llama.from_pretrained(...)`.
-            Must be used together with `filename` when `model_path` is omitted.
+            Optional Hugging Face repo ID used with ``filename`` when
+            ``model_path`` is omitted.
         filename:
-            Model filename within the given `repo_id` for `from_pretrained`.
+            Model filename within ``repo_id`` when resolving from Hugging Face.
+        revision:
+            Optional Hugging Face branch, tag, or commit hash to resolve.
+        cache_dir:
+            Optional Hugging Face cache root. Keeps Hugging Face cache layout.
+        local_dir:
+            Optional human-readable local directory where the model file should
+            be materialized.
+        local_files_only:
+            If True, resolve only from local cache/files and do not download.
+        hf_token:
+            Optional Hugging Face auth token. ``True`` means use the locally
+            configured Hugging Face token.
+        force_download:
+            If True, re-download the file even if a cached copy exists.
+
         n_ctx:
             Context window size to configure on the llama.cpp model.
         n_threads:
             Optional number of CPU threads to use for token generation.
         n_threads_batch:
-            Optional number of threads to use for batching.
+            Optional number of threads to use for batching/prompt processing.
+        n_gpu_layers:
+            Optional number of model layers to offload to GPU.
+        chat_format:
+            Optional llama-cpp-python chat format name used to serialize
+            role/content messages for local inference.
         verbose:
             If True, enable verbose logging from the underlying llama.cpp runtime.
+
+        temperature:
+            Optional default sampling temperature for chat completions.
+        max_tokens:
+            Optional default maximum generated-token count.
+        top_p:
+            Optional default nucleus sampling value.
+        stop:
+            Optional default stop sequence or stop-sequence list.
+
         name:
-            Optional human-friendly engine name; defaults to `"llama_cpp"`.
+            Optional human-friendly engine name; defaults to ``"llama_cpp"``.
         description:
             Human-friendly description for this engine instance.
         filter_extraneous_inputs:
-            Whether to filter extraneous inputs.
+            Whether to filter extraneous dict-first inputs.
+        timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
+            Shared ``LLMEngine`` retry/introspection configuration.
         """
-        sanitized_name = (name or "llama_cpp").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
+        sanitized_name = (
+            name or "llama_cpp"
+        ).replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
+
         super().__init__(
             name=sanitized_name,
             description=description or "Llama.cpp LLM Engine",
             filter_extraneous_inputs=filter_extraneous_inputs,
+            timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max)
+            retry_backoff_max=retry_backoff_max,
+        )
 
         if Llama is None:
             raise RuntimeError("LlamaCppEngine requires the `llama-cpp-python` package.")
@@ -2046,16 +2111,29 @@ class LlamaCppEngine(LLMEngine):
             llama_kwargs["n_threads"] = int(n_threads)
         if n_threads_batch is not None:
             llama_kwargs["n_threads_batch"] = int(n_threads_batch)
+        if n_gpu_layers is not None:
+            llama_kwargs["n_gpu_layers"] = int(n_gpu_layers)
+        if chat_format is not None:
+            llama_kwargs["chat_format"] = chat_format
 
         if model_path:
-            # Local file path.
-            self.llm = Llama(model_path=model_path, **llama_kwargs)
+            resolved_model_path = model_path
         elif repo_id and filename:
-            # Hugging Face repo/filename.
-            self.llm = Llama.from_pretrained(
+            if hf_hub_download is None:
+                raise RuntimeError(
+                    "LlamaCppEngine requires the `huggingface_hub` package when "
+                    "`repo_id` and `filename` are used."
+                )
+
+            resolved_model_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,
-                **llama_kwargs,
+                revision=revision,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+                local_files_only=bool(local_files_only),
+                token=hf_token,
+                force_download=bool(force_download),
             )
         else:
             raise LLMEngineError(
@@ -2063,11 +2141,31 @@ class LlamaCppEngine(LLMEngine):
                 "`repo_id` and `filename`."
             )
 
-        self.n_ctx = int(n_ctx)
-        self.verbose = bool(verbose)
-        self.model_path = model_path
+        self.model_path = str(resolved_model_path)
         self.repo_id = repo_id
         self.filename = filename
+        self.revision = revision
+        self.cache_dir = cache_dir
+        self.local_dir = local_dir
+        self.local_files_only = bool(local_files_only)
+        self.force_download = bool(force_download)
+        self._has_hf_token = hf_token is not None
+
+        self.n_ctx = int(n_ctx)
+        self.n_threads = int(n_threads) if n_threads is not None else None
+        self.n_threads_batch = (
+            int(n_threads_batch) if n_threads_batch is not None else None
+        )
+        self.n_gpu_layers = int(n_gpu_layers) if n_gpu_layers is not None else None
+        self.chat_format = chat_format
+        self.verbose = bool(verbose)
+
+        self.temperature = float(temperature) if temperature is not None else None
+        self.max_tokens = int(max_tokens) if max_tokens is not None else None
+        self.top_p = float(top_p) if top_p is not None else None
+        self.stop = stop
+
+        self.llm = Llama(model_path=self.model_path, **llama_kwargs)
 
     # ------------------------------------------------------------------ #
     # LLMEngine template hooks
@@ -2096,7 +2194,21 @@ class LlamaCppEngine(LLMEngine):
         """
         if getattr(self, "llm", None) is None:
             raise LLMEngineError("LlamaCppEngine: model is not loaded.")
-        return self.llm.create_chat_completion(messages=payload["messages"])
+
+        chat_kwargs: Dict[str, Any] = {}
+        if self.temperature is not None:
+            chat_kwargs["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            chat_kwargs["max_tokens"] = self.max_tokens
+        if self.top_p is not None:
+            chat_kwargs["top_p"] = self.top_p
+        if self.stop is not None:
+            chat_kwargs["stop"] = self.stop
+
+        return self.llm.create_chat_completion(
+            messages=payload["messages"],
+            **chat_kwargs,
+        )
 
     def _extract_text(self, response: Any) -> str:
         """
@@ -2159,14 +2271,12 @@ class LlamaCppEngine(LLMEngine):
         """
         Return configured llama.cpp model identity data for this engine.
 
-        Model data is derived from engine configuration, not from the response
-        dictionary returned by llama-cpp-python.
+        Model data is derived from the concrete local path loaded by
+        llama-cpp-python.
         """
         return LlamaCppModelData(
             provider="llama_cpp",
             model_path=self.model_path,
-            repo_id=self.repo_id,
-            filename=self.filename,
         )
 
     # ------------------------------------------------------------------ #
@@ -2194,17 +2304,32 @@ class LlamaCppEngine(LLMEngine):
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Diagnostic snapshot for LlamaCppEngine (no secrets).
+        Diagnostic snapshot for LlamaCppEngine.
 
-        Includes `n_ctx`, `verbose`, and model loading parameters.
+        Includes non-secret model source, model-load, compute, and generation
+        defaults. The Hugging Face token value is never serialized.
         """
         base = super().to_dict()
         base.update({
             "model_path": self.model_path,
             "repo_id": self.repo_id,
             "filename": self.filename,
+            "revision": self.revision,
+            "cache_dir": self.cache_dir,
+            "local_dir": self.local_dir,
+            "local_files_only": self.local_files_only,
+            "force_download": self.force_download,
+            "has_hf_token": self._has_hf_token,
             "n_ctx": self.n_ctx,
-            "verbose": self.verbose
+            "n_threads": self.n_threads,
+            "n_threads_batch": self.n_threads_batch,
+            "n_gpu_layers": self.n_gpu_layers,
+            "chat_format": self.chat_format,
+            "verbose": self.verbose,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "top_p": self.top_p,
+            "stop": self.stop,
         })
         return base
 

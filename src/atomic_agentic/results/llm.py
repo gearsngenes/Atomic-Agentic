@@ -53,21 +53,6 @@ def _normalize_required_string(field_name: str, value: str) -> str:
     return normalized
 
 
-def _normalize_optional_string(field_name: str, value: str | None) -> str | None:
-    """Validate and normalize an optional string field.
-
-    Empty or whitespace-only strings are normalized to None.
-    """
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise TypeError(
-            f"{field_name} must be a str or None, got {type(value).__name__}."
-        )
-
-    return value.strip() or None
-
-
 def _dataclass_record_to_dict(record: Any) -> dict[str, Any]:
     """Serialize a dataclass record including its concrete class name."""
     data = {field.name: getattr(record, field.name) for field in fields(record)}
@@ -242,34 +227,17 @@ class LocalLLMModelData(LLMModelData):
 
 @dataclass(frozen=True, slots=True)
 class LlamaCppModelData(LocalLLMModelData):
-    """Model data for llama-cpp-python backed local models."""
+    """Model data for a llama-cpp-python backed local model."""
 
-    model_path: str | None = None
-    repo_id: str | None = None
-    filename: str | None = None
+    model_path: str
 
     def __post_init__(self) -> None:
         LocalLLMModelData.__post_init__(self)
-        normalized_model_path = _normalize_optional_string(
+        object.__setattr__(
+            self,
             "model_path",
-            self.model_path,
+            _normalize_required_string("model_path", self.model_path),
         )
-        normalized_repo_id = _normalize_optional_string("repo_id", self.repo_id)
-        normalized_filename = _normalize_optional_string("filename", self.filename)
-
-        if (normalized_repo_id is None) != (normalized_filename is None):
-            raise ValueError(
-                "repo_id and filename must either both be provided or both be None."
-            )
-
-        if normalized_model_path is None and normalized_repo_id is None:
-            raise ValueError(
-                "LlamaCppModelData requires either model_path or repo_id + filename."
-            )
-
-        object.__setattr__(self, "model_path", normalized_model_path)
-        object.__setattr__(self, "repo_id", normalized_repo_id)
-        object.__setattr__(self, "filename", normalized_filename)
 
 
 # --------------------------------------------------------------------------- #
