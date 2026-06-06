@@ -27,7 +27,7 @@ except: genai = None
 # Mistral
 try: from mistralai import Mistral
 except: Mistral = None
-# Lamma-CPP-Python
+# Llama-CPP-Python
 try: from llama_cpp import Llama
 except: Llama = None
 
@@ -38,6 +38,8 @@ from ..core.Parameters import ParamSpec
 from ..core.Exceptions import LLMEngineError
 from ..results import (
     GeminiTokenUsage,
+    LlamaCppModelData,
+    LlamaCppTokenUsage,
     LLMModelData,
     LLMResult,
     MistralTokenUsage,
@@ -1948,18 +1950,37 @@ class MistralEngine(LLMEngine):
 # ── LLAMA.CPP (local; no remote file store) ────────────────────────────────────
 class LlamaCppEngine(LLMEngine):
     """
-    Local llama.cpp adapter using `llama-cpp-python`.
+    Local llama.cpp adapter using ``llama-cpp-python``.
 
-    This engine wraps a local GGUF/GGML model via `llama_cpp.Llama` and plugs
-    into the shared `LLMEngine` template:
+    This engine wraps a local GGUF/GGML model via ``llama_cpp.Llama`` and plugs
+    into the shared ``LLMEngine`` template.
 
-    - Conversation turns are passed through as an OpenAI-style `messages` list.
-    - Attachments are **not supported**; any attempt to attach a file will
-      fail with an `LLMEngineError`.
-    - `invoke(...)` is inherited from `LLMEngine` and must not be overridden.
-      Provider-specific behavior is implemented via the template hooks:
-        `_build_provider_payload`, `_call_provider`, `_extract_text`,
-        `_prepare_attachment`.
+    Flow per call
+    -------------
+    1) Conversation turns are passed through as an OpenAI-compatible
+       ``messages`` list.
+
+    2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
+       lifecycle:
+       - normalize chat messages;
+       - build the llama.cpp provider payload;
+       - call ``llm.create_chat_completion(...)``;
+       - extract assistant text, token usage, and configured model data;
+       - return ``LLMResult``.
+
+    3) Attachments are not supported. Any attempt to call ``attach(path)`` fails
+       with ``LLMEngineError``.
+
+    Token usage
+    -----------
+    ``_extract_token_usage`` maps the OpenAI-compatible response
+    ``response["usage"]`` dictionary into ``LlamaCppTokenUsage`` using prompt,
+    completion, and total token counts.
+
+    Model data
+    ----------
+    ``_get_model_data`` returns configured local model identity from
+    ``self.model_path`` or ``self.repo_id`` + ``self.filename``.
     """
 
     def __init__(
@@ -2096,6 +2117,57 @@ class LlamaCppEngine(LLMEngine):
                 "LlamaCppEngine._extract_text: unexpected response shape"
             ) from exc
         return str(content).strip()
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        """
+        Extract llama-cpp-python chat-completion usage into a LlamaCppTokenUsage
+        record.
+
+        The default ``create_chat_completion(...)`` path returns an
+        OpenAI-compatible dictionary response whose ``usage`` mapping contains
+        prompt, completion, and total token counts.
+        """
+        try:
+            usage = response["usage"]
+        except Exception as exc:
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_token_usage: response missing usage."
+            ) from exc
+
+        if not isinstance(usage, Mapping):
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_token_usage: usage must be a mapping."
+            )
+
+        try:
+            input_tokens = usage["prompt_tokens"]
+            generated_tokens = usage["completion_tokens"]
+            total_tokens = usage["total_tokens"]
+        except Exception as exc:
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_token_usage: unexpected usage shape."
+            ) from exc
+
+        return LlamaCppTokenUsage(
+            input_tokens=input_tokens,
+            generated_tokens=generated_tokens,
+            total_tokens=total_tokens,
+            response_tokens=generated_tokens,
+        )
+
+    def _get_model_data(self) -> LLMModelData:
+        """
+        Return configured llama.cpp model identity data for this engine.
+
+        Model data is derived from engine configuration, not from the response
+        dictionary returned by llama-cpp-python.
+        """
+        return LlamaCppModelData(
+            provider="llama_cpp",
+            model_path=self.model_path,
+            repo_id=self.repo_id,
+            filename=self.filename,
+        )
 
     # ------------------------------------------------------------------ #
     # Attachments: explicitly unsupported
