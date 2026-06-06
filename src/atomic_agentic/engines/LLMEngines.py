@@ -40,6 +40,7 @@ from ..results import (
     GeminiTokenUsage,
     LLMModelData,
     LLMResult,
+    MistralTokenUsage,
     OpenAITokenUsage,
     RemoteLLMModelData,
     TokenUsage,
@@ -1537,32 +1538,36 @@ class MistralEngine(LLMEngine):
         retry_backoff_max: float = 8.0,
     ) -> None:
         """
-        Parameters
+        Mistral adapter using the chat completion API.
+
+        Flow per call
+        -------------
+        1) Attachments are prepared via ``attach(path)``:
+        - PDFs/images upload through the Mistral Files API, are signed, and are
+            attached to the last user message as URL parts.
+        - Text/code files are read and inlined into the last user message.
+
+        2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
+        lifecycle:
+        - normalize chat messages;
+        - snapshot current attachments;
+        - build the Mistral provider payload;
+        - call ``client.chat.complete(...)``;
+        - extract assistant text, token usage, and configured model data;
+        - return ``LLMResult``.
+
+        3) ``detach(path)`` triggers best-effort deletion of uploaded files via
+        ``_on_detach``, which calls ``client.files.delete(file_id=...)``.
+
+        Token usage
+        -----------
+        ``_extract_token_usage`` maps ``response.usage`` into
+        ``MistralTokenUsage`` using prompt, completion, total, and optional cached
+        prompt-token details.
+
+        Model data
         ----------
-        model:
-            Mistral chat model identifier (e.g. "mistral-small-latest").
-        api_key:
-            API key for the Mistral service. If omitted, `MISTRAL_API_KEY` is used.
-        temperature:
-            Sampling temperature for generation.
-        inline_cutoff_chars:
-            Soft cap for total inlined text across all attachments. Once exceeded,
-            additional text attachments are truncated with a marker.
-        extra_illegal_exts:
-            Optional extra file extensions to treat as unsupported/illegal on top of
-            the base `illegal_attachment_exts`.
-        name:
-            Optional human-friendly name for this engine instance. Defaults to
-            `"mistral:{model}"`.
-        description:
-            Human-friendly description for this engine instance.
-        filter_extraneous_inputs:
-            Whether to filter extraneous inputs.
-        timeout_seconds:
-            Suggested timeout per completion call. Used to configure the underlying
-            `httpx.Client` passed into the Mistral SDK.
-        max_retries, retry_backoff_base, retry_backoff_max:
-            Passed through to the shared `LLMEngine` retry handler for the chat call.
+        ``_get_model_data`` returns configured model identity from ``self.model``.
         """
         if Mistral is None:
             raise RuntimeError(
@@ -1786,6 +1791,56 @@ class MistralEngine(LLMEngine):
                 c.get("text", "") if isinstance(c, dict) else str(c) for c in msg
             )
         return (msg or "").strip()
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        """
+        Extract Mistral chat-completion token usage into a MistralTokenUsage record.
+
+        Mistral chat-completion usage reports:
+
+        - prompt_tokens: prompt/input-side tokens
+        - completion_tokens: generated response tokens
+        - total_tokens: total prompt + completion tokens
+        - prompt_tokens_details.cached_tokens: cached prompt-token subset, when present
+        """
+        usage = response.usage
+        if usage is None:
+            raise LLMEngineError("Mistral response did not include usage.")
+
+        if usage.prompt_tokens is None:
+            raise LLMEngineError("Mistral usage missing prompt_tokens.")
+        if usage.completion_tokens is None:
+            raise LLMEngineError("Mistral usage missing completion_tokens.")
+        if usage.total_tokens is None:
+            raise LLMEngineError("Mistral usage missing total_tokens.")
+
+        cached_tokens = None
+        prompt_tokens_details = usage.prompt_tokens_details
+        if prompt_tokens_details is not None:
+            if isinstance(prompt_tokens_details, Mapping):
+                cached_tokens = prompt_tokens_details.get("cached_tokens")
+            else:
+                cached_tokens = prompt_tokens_details.cached_tokens
+
+        return MistralTokenUsage(
+            input_tokens=usage.prompt_tokens,
+            generated_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            response_tokens=usage.completion_tokens,
+            cached_tokens=cached_tokens,
+        )
+
+    def _get_model_data(self) -> LLMModelData:
+        """
+        Return configured Mistral model identity data for this engine.
+
+        Model data is derived from engine configuration, not from the provider
+        response object.
+        """
+        return RemoteLLMModelData(
+            provider="mistral",
+            model_name=self.model,
+        )
 
     # ------------------------------------------------------------------ #
     # Mistral-specific helpers (not part of the template surface)
