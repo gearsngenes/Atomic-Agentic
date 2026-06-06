@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .atomic import AtomicResult
 from .commands import CommandResult
+from .agents import AgentResult
 from .llm import (
     GeminiTokenUsage,
     LlamaCppModelData,
@@ -30,4 +31,5 @@ __all__ = [
     "LocalLLMModelData",
     "LlamaCppModelData",
     "LLMResult",
+    "AgentResult",
 ]

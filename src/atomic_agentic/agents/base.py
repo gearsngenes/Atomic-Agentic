@@ -1120,7 +1120,8 @@ class Agent(AtomicInvokable):
         try:
             logger.debug(f"[Agent - {self.name}]._ainvoke: Invoking LLM asynchronously")
             messages = self.build_messages(self.role_prompt, turns, prompt)
-            text = await self._llm_engine.async_invoke({"messages": messages})
+            engine_result = await self._llm_engine.async_invoke({"messages": messages})
+            text = engine_result.result
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine async invocation failed: {e}") from e
 
@@ -1150,7 +1151,8 @@ class Agent(AtomicInvokable):
         try:
             logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
             messages = self.build_messages(self.role_prompt, turns, prompt)
-            text = self._llm_engine.invoke_messages(messages)
+            engine_result = self._llm_engine.invoke({"messages": messages})
+            text = engine_result.result
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine invocation failed: {e}") from e
 
