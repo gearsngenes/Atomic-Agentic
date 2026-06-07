@@ -56,9 +56,9 @@ def main() -> None:
     for i, turn in enumerate(agent.turn_history):
         print(f"\nTurn {i}")
         print("prompt:")
-        pprint.pp(turn.prompt)
+        pprint.pp(turn.user_prompt)
         print("raw_response:")
-        pprint.pp(turn.raw_response)
+        pprint.pp(turn.generated_response)
         print("final_response:")
         pprint.pp(turn.final_response)
 
