@@ -1409,7 +1409,7 @@ class Agent(AtomicInvokable):
         ended_at = datetime.now(timezone.utc)
 
         return self.make_result(
-            result=result,
+            result=final_response,
             started_at=started_at,
             ended_at=ended_at,
             run_id=draft.run_id,
@@ -1548,7 +1548,7 @@ class Agent(AtomicInvokable):
             ended_at = datetime.now(timezone.utc)
 
             return self.make_result(
-                result=result,
+                result=final_response,
                 started_at=started_at,
                 ended_at=ended_at,
                 run_id=draft.run_id,
