@@ -31,8 +31,9 @@ class AtomicResult:
         Timezone-aware invocation end timestamp. Stored normalized to UTC.
 
     run_id:
-        Result-owned unique run identifier. Generated during construction using
-        ``uuid4().hex``.
+        Result-owned unique run identifier. If omitted or None, generated during
+        construction using ``uuid4().hex``. If provided, validated and normalized
+        before storage.
 
     elapsed_s:
         Invocation duration in seconds, derived from ``ended_at - started_at``.
@@ -43,7 +44,7 @@ class AtomicResult:
     started_at: datetime
     ended_at: datetime
 
-    run_id: str = field(init=False)
+    run_id: str | None = field(default=None, kw_only=True)
     elapsed_s: float = field(init=False)
 
     def __post_init__(self) -> None:
@@ -60,10 +61,13 @@ class AtomicResult:
         if normalized_ended_at < normalized_started_at:
             raise ValueError("ended_at must be greater than or equal to started_at.")
 
+        raw_run_id = uuid4().hex if self.run_id is None else self.run_id
+        normalized_run_id = self._normalize_run_id(raw_run_id)
+
         object.__setattr__(self, "invoker_id", normalized_invoker_id)
         object.__setattr__(self, "started_at", normalized_started_at)
         object.__setattr__(self, "ended_at", normalized_ended_at)
-        object.__setattr__(self, "run_id", uuid4().hex)
+        object.__setattr__(self, "run_id", normalized_run_id)
         object.__setattr__(
             self,
             "elapsed_s",
@@ -81,6 +85,20 @@ class AtomicResult:
         normalized = value.strip()
         if not normalized:
             raise ValueError("invoker_id must be a non-empty string.")
+
+        return normalized
+
+    @staticmethod
+    def _normalize_run_id(value: str) -> str:
+        """Validate and normalize a result run identifier."""
+        if not isinstance(value, str):
+            raise TypeError(
+                f"run_id must be a str or None, got {type(value).__name__}."
+            )
+
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("run_id must be a non-empty string when provided.")
 
         return normalized
 
