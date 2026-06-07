@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 import pytest
@@ -10,7 +11,8 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.core.Exceptions import AgentError, AgentInvocationError, ToolInvocationError
 from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.engines.LLMEngines import LLMEngine
-from atomic_agentic.agents.data_classes import AgentTurn
+from atomic_agentic.agents.data_classes import AgentRecord, LLMRecord
+from atomic_agentic.results import LLMModelData, LLMResult, TokenUsage
 
 
 ROLE_PROMPT = "You are a deterministic test writer."
@@ -60,6 +62,12 @@ class StatefulEchoLLMEngine(LLMEngine):
 
     def _extract_text(self, response: Any) -> str:
         return f"{self.prefix}: {response['latest_user']}"
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        return TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
+
+    def _get_model_data(self) -> LLMModelData:
+        return LLMModelData(provider="stateful-echo")
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         return {"path": path}
@@ -135,9 +143,16 @@ def post_with_post_only_args(result: str, *extras: Any) -> str:
     return f"{result}|extras={extras!r}"
 
 
+class _NonStringEngineEnvelope:
+    """Stub mimicking the AtomicResult `.result` access without LLMResult's str constraint."""
+
+    def __init__(self, result: Any) -> None:
+        self.result = result
+
+
 class NonStringAsyncLLMEngine(StatefulEchoLLMEngine):
     async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
-        return 123
+        return _NonStringEngineEnvelope(123)
 
 def make_agent(
     *,
@@ -174,7 +189,7 @@ class TestAgentPipeline:
         expected_prompt = "Write about pytest in a strict tone."
         expected_raw = f"ECHO: {expected_prompt}"
 
-        assert result == {
+        assert result.result == {
             "final": expected_raw,
             "length": len(expected_raw),
             "was_postprocessed": True,
@@ -209,7 +224,7 @@ class TestAgentPipeline:
 
         result = agent.invoke({"prompt": "Hello from identity."})
 
-        assert result == "ECHO: Hello from identity."
+        assert result.result == "ECHO: Hello from identity."
         assert engine.calls[0] == [
             {"role": "system", "content": ROLE_PROMPT},
             {"role": "user", "content": "Hello from identity."},
@@ -260,7 +275,7 @@ class TestAgentSchemaComposition:
         result = agent.invoke({"topic": "pytest"})
 
         assert tone_param.default == "neutral"
-        assert result == {
+        assert result.result == {
             "result": "ECHO: Write about pytest in a neutral tone.",
             "tone": "neutral",
         }
@@ -271,7 +286,7 @@ class TestAgentSchemaComposition:
             passthrough_inputs=["tone"],
         )
 
-        assert agent.invoke({"topic": "pytest", "tone": "strict"}) == (
+        assert agent.invoke({"topic": "pytest", "tone": "strict"}).result == (
             "ECHO: Write about pytest in a strict tone.|tone=strict"
         )
 
@@ -285,7 +300,7 @@ class TestAgentPostInvokeRouting:
 
         result = agent.invoke({"topic": "pytest", "tone": "strict", "suffix": "!"})
 
-        assert result == "ECHO: Write about pytest in a strict tone.!"
+        assert result.result == "ECHO: Write about pytest in a strict tone.!"
 
     def test_missing_required_passthrough_fails_at_post_invoke_time(self) -> None:
         agent = make_agent(
@@ -309,7 +324,7 @@ class TestAgentPostInvokeRouting:
         result = agent.invoke({"topic": "pytest", "tone": "strict", "suffix": "?"})
 
         assert agent.post_result_key == "raw"
-        assert result == "ECHO: Write about pytest in a strict tone.?"
+        assert result.result == "ECHO: Write about pytest in a strict tone.?"
 
     def test_post_result_key_defaults_to_first_post_parameter(self) -> None:
         agent = make_agent(post_invoke=post_with_custom_key)
@@ -404,8 +419,8 @@ class TestAgentContext:
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
         second = agent.invoke({"topic": "agents", "tone": "concise"})
 
-        assert first["final"] == "ECHO: Write about pytest in a strict tone."
-        assert second["final"] == "ECHO: Write about agents in a concise tone."
+        assert first.result["final"] == "ECHO: Write about pytest in a strict tone."
+        assert second.result["final"] == "ECHO: Write about agents in a concise tone."
         assert agent.history == []
 
         assert len(engine.calls) == 2
@@ -421,8 +436,8 @@ class TestAgentContext:
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
         second = agent.invoke({"topic": "agents", "tone": "concise"})
 
-        assert first["final"] == "ECHO: Write about pytest in a strict tone."
-        assert second["final"] == "ECHO: Write about agents in a concise tone."
+        assert first.result["final"] == "ECHO: Write about pytest in a strict tone."
+        assert second.result["final"] == "ECHO: Write about agents in a concise tone."
 
         assert [message["role"] for message in agent.history] == [
             "user",
@@ -566,7 +581,7 @@ class TestAgentValidation:
 
         result = agent.invoke({"topic": "pytest", "tone": "strict"})
 
-        assert result == "ECHO: WRITE ABOUT PYTEST IN A STRICT TONE."
+        assert result.result == "ECHO: WRITE ABOUT PYTEST IN A STRICT TONE."
 
     def test_post_invoke_required_passthrough_not_configured_raises(self) -> None:
         with pytest.raises(AgentError, match="required parameter"):
@@ -658,7 +673,7 @@ class TestAgentAsyncInvoke:
         expected_prompt = "Write about pytest in a strict tone."
         expected_raw = f"ECHO: {expected_prompt}"
 
-        assert result == {
+        assert result.result == {
             "final": expected_raw,
             "length": len(expected_raw),
             "was_postprocessed": True,
@@ -681,8 +696,8 @@ class TestAgentAsyncInvoke:
             agent.async_invoke({"topic": "agents", "tone": "concise"})
         )
 
-        assert first["final"] == "ECHO: Write about pytest in a strict tone."
-        assert second["final"] == "ECHO: Write about agents in a concise tone."
+        assert first.result["final"] == "ECHO: Write about pytest in a strict tone."
+        assert second.result["final"] == "ECHO: Write about agents in a concise tone."
         assert [message["role"] for message in agent.history] == [
             "user",
             "assistant",
@@ -736,7 +751,7 @@ class TestAgentAsyncInvoke:
             agent.async_invoke({"topic": "pytest", "tone": "strict", "suffix": "!"})
         )
 
-        assert result == "ECHO: Write about pytest in a strict tone.!"
+        assert result.result == "ECHO: Write about pytest in a strict tone.!"
 
 
 class TestAgentAttachmentDelegation:
@@ -807,7 +822,7 @@ class TestAgentMutableRuntimeProperties:
         agent = make_agent(pre_invoke=pre_with_two_fields)
 
         assert [param.name for param in agent.parameters] == ["subject", "style"]
-        assert agent.invoke({"subject": "pytest", "style": "direct"}) == {
+        assert agent.invoke({"subject": "pytest", "style": "direct"}).result == {
             "final": "ECHO: pytest:direct",
             "length": len("ECHO: pytest:direct"),
             "was_postprocessed": True,
@@ -821,7 +836,7 @@ class TestAgentMutableRuntimeProperties:
         agent = make_agent(post_invoke=defaulted_post_invoke)
 
         assert agent.return_type == "str"
-        assert agent.invoke({"topic": "pytest", "tone": "strict"}) == (
+        assert agent.invoke({"topic": "pytest", "tone": "strict"}).result == (
             "ECHO: WRITE ABOUT PYTEST IN A STRICT TONE."
         )
 
@@ -832,7 +847,7 @@ class TestAgentMutableRuntimeProperties:
     def test_constructor_accepts_post_invoke_one_required_plus_defaults(self) -> None:
         agent = make_agent(post_invoke=post_one_required_plus_default)
 
-        assert agent.invoke({"topic": "pytest", "tone": "strict"}) == (
+        assert agent.invoke({"topic": "pytest", "tone": "strict"}).result == (
             "ECHO: Write about pytest in a strict tone.!"
         )
 
@@ -861,87 +876,107 @@ class TestAgentMutableRuntimeProperties:
         assert tool.description == "Custom preprocessor."
 
         assert [param.name for param in agent.parameters] == ["subject", "style"]
-        assert agent.invoke({"subject": "pytest", "style": "direct"}) == {
+        assert agent.invoke({"subject": "pytest", "style": "direct"}).result == {
             "final": "ECHO: pytest:direct",
             "length": len("ECHO: pytest:direct"),
             "was_postprocessed": True,
         }
 
-class UnexpectedMetadataAgent(Agent):
+class StringDraftAgent(Agent):
     def _invoke(
         self,
-        turns: list[AgentTurn],
+        turns: list[AgentRecord],
         prompt: str,
-    ) -> tuple[Any, Mapping[str, Any]]:
-        return "raw metadata response", {"unexpected": True}
+    ) -> Any:
+        return "raw response, not a draft AgentRecord"
 
 
-class NonMappingMetadataAgent(Agent):
+class MappingDraftAgent(Agent):
     def _invoke(
         self,
-        turns: list[AgentTurn],
+        turns: list[AgentRecord],
         prompt: str,
-    ) -> tuple[Any, Any]:
-        return "raw metadata response", []
+    ) -> Any:
+        return {"generated_response": "raw response", "final_response": NO_VAL}
 
 
-class AsyncUnexpectedMetadataAgent(Agent):
+class AsyncStringDraftAgent(Agent):
     async def _ainvoke(
         self,
-        turns: list[AgentTurn],
+        turns: list[AgentRecord],
         prompt: str,
-    ) -> tuple[Any, Mapping[str, Any]]:
-        return "raw async metadata response", {"unexpected": True}
+    ) -> Any:
+        return "raw async response, not a draft AgentRecord"
 
 
-class AsyncNonMappingMetadataAgent(Agent):
+class AsyncMappingDraftAgent(Agent):
     async def _ainvoke(
         self,
-        turns: list[AgentTurn],
+        turns: list[AgentRecord],
         prompt: str,
-    ) -> tuple[Any, Any]:
-        return "raw async metadata response", []
+    ) -> Any:
+        return {"generated_response": "raw async response", "final_response": NO_VAL}
 
 
-class TestAgentTurnHistory:
-    def test_context_enabled_stores_agent_turn_objects(self) -> None:
+def make_mutation_record(*, user_prompt: str = "mutated") -> AgentRecord:
+    token_usage = TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
+    model_data = LLMModelData(provider="test-provider")
+    started = datetime.now(timezone.utc)
+    ended = started + timedelta(seconds=1)
+    llm_result = LLMResult(
+        result="mutated",
+        invoker_id="engine-1",
+        started_at=started,
+        ended_at=ended,
+        token_usage=token_usage,
+        model_data=model_data,
+        run_id="llm-run-id",
+    )
+    llm_record = LLMRecord(user_prompt=user_prompt, llm_result=llm_result)
+    return AgentRecord(
+        user_prompt=user_prompt,
+        generated_response="mutated",
+        final_response="mutated",
+        llm_records=(llm_record,),
+        run_id="mutation-run-id",
+    )
+
+
+class TestAgentRecordHistory:
+    def test_context_enabled_stores_agent_record_objects(self) -> None:
         engine = StatefulEchoLLMEngine()
         agent = make_agent(engine=engine, context_enabled=True)
 
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
         second = agent.invoke({"topic": "agents", "tone": "concise"})
 
-        assert first["final"] == "ECHO: Write about pytest in a strict tone."
-        assert second["final"] == "ECHO: Write about agents in a concise tone."
+        assert first.result["final"] == "ECHO: Write about pytest in a strict tone."
+        assert second.result["final"] == "ECHO: Write about agents in a concise tone."
 
         turns = agent.turn_history
 
         assert len(turns) == 2
-        assert all(isinstance(turn, AgentTurn) for turn in turns)
+        assert all(isinstance(turn, AgentRecord) for turn in turns)
 
-        assert turns[0].prompt == "Write about pytest in a strict tone."
-        assert turns[0].raw_response == "ECHO: Write about pytest in a strict tone."
-        assert turns[0].final_response == first
+        assert turns[0].user_prompt == "Write about pytest in a strict tone."
+        assert turns[0].generated_response == "ECHO: Write about pytest in a strict tone."
+        assert turns[0].final_response == first.result
+        assert turns[0].run_id == first.run_id
 
-        assert turns[1].prompt == "Write about agents in a concise tone."
-        assert turns[1].raw_response == "ECHO: Write about agents in a concise tone."
-        assert turns[1].final_response == second
+        assert turns[1].user_prompt == "Write about agents in a concise tone."
+        assert turns[1].generated_response == "ECHO: Write about agents in a concise tone."
+        assert turns[1].final_response == second.result
+        assert turns[1].run_id == second.run_id
 
     def test_turn_history_returns_shallow_copy(self) -> None:
         agent = make_agent(context_enabled=True)
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
         snapshot = agent.turn_history
-        snapshot.append(
-            AgentTurn(
-                prompt="mutated",
-                raw_response="mutated",
-                final_response="mutated",
-            )
-        )
+        snapshot.append(make_mutation_record())
 
         assert len(snapshot) == len(agent.turn_history) + 1
-        assert all(turn.prompt != "mutated" for turn in agent.turn_history)
+        assert all(turn.user_prompt != "mutated" for turn in agent.turn_history)
 
     def test_response_preview_limit_only_affects_rendered_history(self) -> None:
         engine = StatefulEchoLLMEngine()
@@ -963,9 +998,10 @@ class TestAgentTurnHistory:
 
         turn = agent.turn_history[0]
 
-        assert turn.prompt == expected_prompt
-        assert turn.raw_response == expected_raw
-        assert turn.final_response == result
+        assert turn.user_prompt == expected_prompt
+        assert turn.generated_response == expected_raw
+        assert turn.final_response == result.result
+        assert turn.run_id == result.run_id
 
         with pytest.warns(DeprecationWarning):
             rendered_history = agent.history
@@ -984,7 +1020,7 @@ class TestAgentTurnHistory:
         assert rendered_history[1]["content"] == "ECHO: Write about pytest in a strict tone."
 
 
-class TestAgentTurnRendering:
+class TestAgentRecordRendering:
     def test_rendered_history_uses_raw_response_by_default(self) -> None:
         agent = Agent(
             name="raw_render_agent",
@@ -1024,47 +1060,59 @@ class TestAgentTurnRendering:
         assert "ECHO: Write about pytest in a strict tone." in rendered_history[1]["content"]
 
 
-class TestAgentTurnMetadataContract:
-    def test_base_make_turn_rejects_unexpected_metadata(self) -> None:
-        agent = UnexpectedMetadataAgent(
-            name="unexpected_metadata_agent",
-            description="Unexpected metadata test agent.",
+class TestAgentDraftRecordContract:
+    def test_invoke_rejects_string_draft(self) -> None:
+        agent = StringDraftAgent(
+            name="string_draft_agent",
+            description="String draft test agent.",
             llm_engine=StatefulEchoLLMEngine(),
             context_enabled=True,
         )
 
-        with pytest.raises(AgentInvocationError, match="unexpected metadata"):
+        with pytest.raises(
+            AgentInvocationError,
+            match=r"_invoke returned non-AgentRecord draft \(type=<class 'str'>\)",
+        ):
             agent.invoke({"prompt": "run"})
 
-    def test_invoke_rejects_non_mapping_metadata(self) -> None:
-        agent = NonMappingMetadataAgent(
-            name="non_mapping_metadata_agent",
-            description="Non-mapping metadata test agent.",
+    def test_invoke_rejects_mapping_draft(self) -> None:
+        agent = MappingDraftAgent(
+            name="mapping_draft_agent",
+            description="Mapping draft test agent.",
             llm_engine=StatefulEchoLLMEngine(),
             context_enabled=True,
         )
 
-        with pytest.raises(AgentInvocationError, match="_invoke returned non-mapping metadata"):
+        with pytest.raises(
+            AgentInvocationError,
+            match=r"_invoke returned non-AgentRecord draft \(type=<class 'dict'>\)",
+        ):
             agent.invoke({"prompt": "run"})
 
-    def test_async_base_make_turn_rejects_unexpected_metadata(self) -> None:
-        agent = AsyncUnexpectedMetadataAgent(
-            name="async_unexpected_metadata_agent",
-            description="Async unexpected metadata test agent.",
+    def test_async_invoke_rejects_string_draft(self) -> None:
+        agent = AsyncStringDraftAgent(
+            name="async_string_draft_agent",
+            description="Async string draft test agent.",
             llm_engine=StatefulEchoLLMEngine(),
             context_enabled=True,
         )
 
-        with pytest.raises(AgentInvocationError, match="unexpected metadata"):
+        with pytest.raises(
+            AgentInvocationError,
+            match=r"_ainvoke returned non-AgentRecord draft \(type=<class 'str'>\)",
+        ):
             asyncio.run(agent.async_invoke({"prompt": "run"}))
 
-    def test_async_invoke_rejects_non_mapping_metadata(self) -> None:
-        agent = AsyncNonMappingMetadataAgent(
-            name="async_non_mapping_metadata_agent",
-            description="Async non-mapping metadata test agent.",
+    def test_async_invoke_rejects_mapping_draft(self) -> None:
+        agent = AsyncMappingDraftAgent(
+            name="async_mapping_draft_agent",
+            description="Async mapping draft test agent.",
             llm_engine=StatefulEchoLLMEngine(),
             context_enabled=True,
         )
 
-        with pytest.raises(AgentInvocationError, match="_ainvoke returned non-mapping metadata"):
+        with pytest.raises(
+            AgentInvocationError,
+            match=r"_ainvoke returned non-AgentRecord draft \(type=<class 'dict'>\)",
+        ):
             asyncio.run(agent.async_invoke({"prompt": "run"}))
