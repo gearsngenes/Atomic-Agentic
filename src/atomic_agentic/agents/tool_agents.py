@@ -15,14 +15,14 @@ interactive execution loop:
 3. **Run state updates**: Results are stored in the invocation's running blackboard
 4. **Loop continues**: The LLM observes results and decides next steps, or terminates
 5. **Memory persists**: If `context_enabled=True`, completed tool slots are merged into
-   the persisted blackboard and the completed invocation is stored as a ToolAgentTurn
+   the persisted blackboard and the completed invocation is stored as a ToolAgentRecord
 
 The canonical memory model separates storage from rendering:
 
-- Agent memory is stored as turn objects (`AgentTurn` / `ToolAgentTurn`)
+- Agent memory is stored as memory records (`AgentRecord` / `ToolAgentRecord`)
 - Tool execution results are stored as blackboard slots
-- A ToolAgentTurn stores the half-open blackboard span produced by one invocation
-- Future LLM-facing messages are rendered from turns and their associated blackboard spans
+- A ToolAgentRecord stores the half-open blackboard span produced by one invocation
+- Future LLM-facing messages are rendered from records and their associated blackboard spans
 
 Execution Persistence
 ---------------------
@@ -108,6 +108,7 @@ import logging
 import re
 import string
 import json
+from uuid import uuid4
 from typing import (
     Any,
     Callable,
@@ -141,7 +142,7 @@ from .constants import (
     TOOL_FIELD,
 )
 
-from .data_classes import AgentTurn, ToolAgentTurn, BlackboardSlot, ConstantSpec
+from .data_classes import AgentRecord, ToolAgentRecord, LLMRecord, BlackboardSlot, ConstantSpec
 from ..core.Exceptions import (
     ToolAgentError,
     ToolDefinitionError,
@@ -310,6 +311,14 @@ class ToolAgentRunState:
     **return_value** : Any | NO_VAL
         Agent's raw final output. Set when the return tool executes. This becomes the
         raw response passed into the base Agent post-processing and turn pipeline.
+
+    **llm_records** : list[LLMRecord]
+        Accumulator for every LLM generation made while producing this invocation's
+        result. Seeded at construction time — non-empty for subclasses that generate
+        up front (e.g. PlanAct's one-shot plan), empty for subclasses that generate
+        lazily during the loop (e.g. ReAct's per-step planning) — and appended to as
+        further generations occur. Read exactly once, at loop-close, to populate the
+        draft ``ToolAgentRecord``'s ``llm_records`` tuple.
     """
     messages: list[dict[str, str]]
 
@@ -324,13 +333,11 @@ class ToolAgentRunState:
 
     # Bookkeeping:
     tool_calls_used: int = 0  # non-return calls executed in this run
+    llm_records: list[LLMRecord] = field(default_factory=list)
 
     # Completion:
     is_done: bool = False
     return_value: Any = NO_VAL  # NO_VAL by default; set once return tool executes
-
-    # Run metadata:
-    run_metadata: dict[str, Any] = field(default_factory=dict)
 
 RS = TypeVar("RS", bound=ToolAgentRunState)
 
@@ -355,20 +362,27 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     the existing ToolAgent template loop::
 
     1. messages = build_messages(role_prompt, turns, prompt)
-    2. state = _initialize_run_state(messages=messages)  [subclass hook]
-    3. while not state.is_done:
+    2. run_id = uuid4().hex                              [minted internally]
+    3. state = _initialize_run_state(messages=messages)  [subclass hook]
+    4. while not state.is_done:
         state = _prepare_next_batch(state)              [subclass hook]
         state = _execute_prepared_batch(state)          [base implementation]
         [completion check: if return tool executed, is_done=True]
-    4. if context_enabled:
+       (each LLM generation made along the way is captured as an LLMRecord
+       and accumulated onto state.llm_records)
+    5. if context_enabled:
         blackboard_start = len(self._blackboard)
         state = update_blackboard(state)
         blackboard_end = len(self._blackboard)
-    5. return state.return_value, {"blackboard_start": ..., "blackboard_end": ...}
+    6. return a draft ToolAgentRecord (final_response=NO_VAL) carrying
+       state.return_value, run_id, tuple(state.llm_records),
+       blackboard_start, and blackboard_end
 
-    The returned metadata is consumed by ``_make_turn(...)`` to construct a
-    ``ToolAgentTurn``. The turn stores the half-open blackboard span produced by the
-    invocation. Future LLM-facing messages are rendered by ``render_turn(...)``.
+    The draft is complete except for ``final_response``, which post-processing
+    has not produced yet — ``invoke``/``async_invoke`` complete it in place via
+    ``dataclasses.replace(draft, final_response=...)`` and use it to derive the
+    invocation's ``AgentResult``. Future LLM-facing messages are rendered from
+    the stored ``ToolAgentRecord`` by ``render_turn(...)``.
 
     Subclass Responsibilities
     -------------------------
@@ -407,7 +421,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
     **Context Persistence**: If ``context_enabled=True``, the completed run blackboard
         is merged into ``self._blackboard`` and the produced span is stored on the
-        ToolAgentTurn for future rendering.
+        ToolAgentRecord for future rendering.
 
     Generic Type Parameter
     ~~~~~~~~~~~~~~~~~~~~~~
@@ -1047,7 +1061,11 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         -------
         Any
             Resolved object with all placeholders replaced. Structure is preserved;
-            only placeholder tokens are replaced.
+            only placeholder tokens are replaced. Step/cache placeholders always
+            resolve to the unwrapped ``AtomicResult.result`` payload of the
+            referenced slot — never the envelope itself — since readiness
+            validation (above) guarantees those slots are executed before
+            substitution runs.
 
         Raises
         ------
@@ -1130,11 +1148,11 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             # Exact placeholder -> preserve type
             m_cache = self.CACHE_REF_PATTERN.fullmatch(s)
             if m_cache:
-                return cache[int(m_cache.group(1))].result
+                return cache[int(m_cache.group(1))].result.result
 
             m_step = self.STEP_REF_PATTERN.fullmatch(s)
             if m_step:
-                return running[int(m_step.group(1))].result
+                return running[int(m_step.group(1))].result.result
 
             m_constant = self.CONST_REF_PATTERN.fullmatch(s)
             if m_constant:
@@ -1143,11 +1161,11 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             # Inline substitution
             def repl_cache(m: re.Match[str]) -> str:
                 idx = int(m.group(1))
-                return render_inline(cache[idx].result)
+                return render_inline(cache[idx].result.result)
 
             def repl_step(m: re.Match[str]) -> str:
                 idx = int(m.group(1))
-                return render_inline(running[idx].result)
+                return render_inline(running[idx].result.result)
 
             def repl_constant(m: re.Match[str]) -> str:
                 spec = constants_by_name[m.group(1)]
@@ -1214,7 +1232,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         4. Execute concurrently via ``asyncio.gather(..., return_exceptions=True)``
         5. If any gathered result is an exception, identify the first such step,
         store the error on that slot, mark it failed, and raise
-        6. Otherwise, store results in ``slot.result`` and mark slots executed
+        6. Otherwise, store each ``ToolResult`` envelope whole in ``slot.result``
+        and mark slots executed
         7. If return tool executed: set ``state.return_value`` and ``state.is_done = True``
         8. Update ``state.executed_steps``, ``state.tool_calls_used``
         9. Clear ``prepared_steps`` (consumed)
@@ -1238,7 +1257,12 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         Side Effects
         ~~~~~~~~~~~~
-        - ``state.running_blackboard[idx].result`` is set for executed steps
+        - ``state.running_blackboard[idx].result`` is set to the whole
+          ``ToolResult`` envelope (an ``AtomicResult``) for executed steps —
+          preserved for richer tracing. Consumers that need the caller-facing
+          value (placeholder resolution, previews, ``return_value``) read
+          ``result.result``; those sites are always reached only after the
+          slot is confirmed executed
         - ``state.running_blackboard[idx].error`` is set on failure
         - ``state.running_blackboard[idx].status`` is updated to executed/failed
         - ``state.executed_steps`` is updated with executed indices
@@ -1359,8 +1383,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         results = asyncio.run(run_batch())
 
-        for idx, result in results:
-            board[idx].result = result
+        for idx, tool_result in results:
+            board[idx].result = tool_result
             board[idx].error = NO_VAL
             board[idx].status = BlackboardSlot.EXECUTED
 
@@ -1373,7 +1397,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
 
         if return_indices:
             ret_idx = return_indices[0]
-            state.return_value = board[ret_idx].result
+            state.return_value = board[ret_idx].result.result
             state.is_done = True
 
         return state
@@ -1383,8 +1407,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Async analog of ``_execute_prepared_batch(...)``.
 
         Executes all currently prepared steps concurrently using each tool's
-        ``async_invoke(...)`` path, records results into the running blackboard,
-        and updates return/completion bookkeeping.
+        ``async_invoke(...)`` path, stores each ``ToolResult`` envelope whole
+        in the running blackboard, and updates return/completion bookkeeping.
 
         This method intentionally preserves the current compact gather-based
         semantics rather than introducing stricter cancellation machinery.
@@ -1509,8 +1533,8 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             board[idx].status = BlackboardSlot.FAILED
             raise wrapped from raw_error
 
-        for idx, result in zip(indices, raw_results):
-            board[idx].result = result
+        for idx, tool_result in zip(indices, raw_results):
+            board[idx].result = tool_result
             board[idx].error = NO_VAL
             board[idx].status = BlackboardSlot.EXECUTED
             state.executed_steps.add(idx)
@@ -1524,7 +1548,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: return tool executed more than once."
                     )
-                state.return_value = board[idx].result
+                state.return_value = board[idx].result.result
                 state.is_done = True
                 break
 
@@ -1653,29 +1677,34 @@ class ToolAgent(Agent, ABC, Generic[RS]):
     # ------------------------------------------------------------------ #
     # Template Method (FINAL)
     # ------------------------------------------------------------------ #
-    def _invoke(self, turns: List[AgentTurn], prompt: str) -> tuple[Any, Mapping[str, Any]]:
+    def _invoke(self, turns: List[AgentRecord], prompt: str) -> AgentRecord:
         """
         FINAL sync ToolAgent template method.
 
         Receives selected canonical turns and the current prompt from the base
         ``Agent.invoke(...)`` lifecycle. This method renders those values into a
         provider-facing message list once, then runs the existing ToolAgent
-        message-based template loop.
+        message-based template loop, and returns a **draft** ``ToolAgentRecord``
+        for this invocation: every field is final except ``final_response``,
+        which is still ``NO_VAL`` because post-processing has not run yet.
+
+        The draft already carries its own ``run_id`` (minted here, not passed
+        in) and the full ``LLMRecord`` envelope for every LLM generation made
+        while producing it (accumulated on ``state.llm_records`` across the
+        planning loop) — ``invoke`` later completes the draft in place via
+        ``dataclasses.replace(draft, final_response=...)`` and uses it to
+        derive the invocation's ``AgentResult``.
 
         Subclasses should not override this method. They should implement:
         - ``_initialize_run_state(messages=...)``
         - ``_prepare_next_batch(state)``
-
-        Returns
-        -------
-        tuple[Any, Mapping[str, Any]]
-            The raw return-tool value and turn metadata consumed by
-            ``_make_turn(...)``.
         """
         messages = self.build_messages(self.role_prompt, turns, prompt)
 
         if not messages:
             raise ToolAgentError("ToolAgent._invoke requires a non-empty messages list.")
+
+        run_id = uuid4().hex
 
         state = self._initialize_run_state(messages=messages)
 
@@ -1712,28 +1741,33 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             state = self.update_blackboard(state)
             blackboard_end = len(self._blackboard)
 
-        # Collect the final turn metadata.
-        turn_metadata = {
-            "blackboard_start": blackboard_start,
-            "blackboard_end": blackboard_end,
-        }
-        # Add any additional run metadata from the run state.
-        turn_metadata.update(state.run_metadata)
-
-        return state.return_value, turn_metadata
+        # Return the draft ToolAgentRecord: complete except for final_response,
+        # which post-processing has not produced yet.
+        return ToolAgentRecord(
+            user_prompt=prompt,
+            generated_response=state.return_value,
+            final_response=NO_VAL,
+            llm_records=tuple(state.llm_records),
+            run_id=run_id,
+            blackboard_start=blackboard_start,
+            blackboard_end=blackboard_end,
+        )
 
     async def _ainvoke(
         self,
-        turns: List[AgentTurn],
+        turns: List[AgentRecord],
         prompt: str,
-    ) -> tuple[Any, Mapping[str, Any]]:
+    ) -> AgentRecord:
         """
         FINAL async ToolAgent template method.
 
         Receives selected canonical turns and the current prompt from the base
         ``Agent.async_invoke(...)`` lifecycle. This method renders those values
         into a provider-facing message list once, then runs the existing
-        ToolAgent message-based template loop.
+        ToolAgent message-based template loop, and returns a **draft**
+        ``ToolAgentRecord`` for this invocation, exactly mirroring the sync
+        ``_invoke(...)`` contract — see its docstring for the draft-record and
+        ``run_id``/``llm_records`` accumulation details.
 
         Mirrors the sync ``_invoke(...)`` loop, but offloads the current sync
         planning hooks to worker threads and awaits the async batch executor for
@@ -1742,17 +1776,13 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         Subclasses should not override this method. They should implement:
         - ``_initialize_run_state(messages=...)``
         - ``_prepare_next_batch(state)``
-
-        Returns
-        -------
-        tuple[Any, Mapping[str, Any]]
-            The raw return-tool value and metadata containing ``blackboard_start``
-            and ``blackboard_end``.
         """
         messages = self.build_messages(self.role_prompt, turns, prompt)
 
         if not messages:
             raise ToolAgentError("ToolAgent._ainvoke requires a non-empty messages list.")
+
+        run_id = uuid4().hex
 
         state = await asyncio.to_thread(self._initialize_run_state, messages=messages)
 
@@ -1793,64 +1823,20 @@ class ToolAgent(Agent, ABC, Generic[RS]):
             state = self.update_blackboard(state)
             blackboard_end = len(self._blackboard)
 
-        # Collect the final turn metadata.
-        turn_metadata = {
-            "blackboard_start": blackboard_start,
-            "blackboard_end": blackboard_end,
-        }
-        # Add any additional run metadata from the run state.
-        turn_metadata.update(state.run_metadata)
-
-        return state.return_value, turn_metadata
-
-    def _make_turn(
-        self,
-        *,
-        prompt: str,
-        raw_response: Any,
-        final_response: Any,
-        **metadata: Any,
-    ) -> ToolAgentTurn:
-        """Construct the stored ToolAgentTurn for one completed invocation.
-
-        Consumes the blackboard span metadata returned by `_invoke(...)` or `_ainvoke(...)`.
-        The span is half-open: `blackboard_start` is inclusive and `blackboard_end` is
-        exclusive.
-        """
-        allowed = {"blackboard_start", "blackboard_end"}
-        extra = set(metadata) - allowed
-        if extra:
-            raise ToolAgentError(
-                f"{type(self).__name__}._make_turn received unexpected metadata: "
-                f"{sorted(extra)!r}"
-            )
-
-        blackboard_start = metadata.get("blackboard_start")
-        blackboard_end = metadata.get("blackboard_end")
-
-        if blackboard_start is None or blackboard_end is None:
-            if blackboard_start is not None or blackboard_end is not None:
-                raise ToolAgentError(
-                    "blackboard_start and blackboard_end must both be None or both be integers."
-                )
-        else:
-            if type(blackboard_start) is not int or type(blackboard_end) is not int:
-                raise ToolAgentError("blackboard_start and blackboard_end must be integers or None.")
-            if blackboard_start < 0 or blackboard_end < blackboard_start:
-                raise ToolAgentError(
-                    "blackboard_start and blackboard_end must satisfy 0 <= start <= end."
-                )
-
-        return ToolAgentTurn(
-            prompt=prompt,
-            raw_response=raw_response,
-            final_response=final_response,
+        # Return the draft ToolAgentRecord: complete except for final_response,
+        # which post-processing has not produced yet.
+        return ToolAgentRecord(
+            user_prompt=prompt,
+            generated_response=state.return_value,
+            final_response=NO_VAL,
+            llm_records=tuple(state.llm_records),
+            run_id=run_id,
             blackboard_start=blackboard_start,
             blackboard_end=blackboard_end,
         )
 
-    def render_turn(self, turn: AgentTurn) -> list[dict[str, str]]:
-        """Render one stored ToolAgentTurn into LLM-facing user/assistant messages.
+    def render_turn(self, turn: AgentRecord) -> list[dict[str, str]]:
+        """Render one stored ToolAgentRecord into LLM-facing user/assistant messages.
 
         The base assistant response is rendered through `Agent.render_turn(...)`, preserving
         `assistant_response_source` and `response_preview_limit` behavior. If the turn has
@@ -1858,9 +1844,9 @@ class ToolAgent(Agent, ABC, Generic[RS]):
         each produced step's unresolved args. Result previews are included only when
         `peek_at_cache=True` and are bounded by `blackboard_preview_limit`.
         """
-        if not isinstance(turn, ToolAgentTurn):
+        if not isinstance(turn, ToolAgentRecord):
             raise ToolAgentError(
-                f"render_turn expected ToolAgentTurn, got {type(turn)!r}"
+                f"render_turn expected ToolAgentRecord, got {type(turn)!r}"
             )
 
         messages = super().render_turn(turn)
@@ -1886,7 +1872,7 @@ class ToolAgent(Agent, ABC, Generic[RS]):
                 ARGS_FIELD: slot.args,
             }
             if self.peek_at_cache:
-                step["result"] = self._preview_blackboard_result(slot.result)
+                step["result"] = self._preview_blackboard_result(slot.result.result)
             extracted.append(step)
 
         newest_dump = pprint.pformat(extracted, indent=2, width=160, sort_dicts=False)
@@ -2640,7 +2626,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         *,
         messages: list[dict[str, str]],
         cache_blackboard: list[BlackboardSlot],
-    ) -> list[BlackboardSlot]:
+    ) -> tuple[list[BlackboardSlot], LLMRecord]:
         """
         Generate, normalize, and validate a complete PlanAct running blackboard.
 
@@ -2649,13 +2635,15 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 
         Lifecycle
         ---------
-        1. Generate raw LLM text from the provided messages.
-        2. Extract the largest JSON array/object from the raw text.
+        1. Generate raw LLM output from the provided messages, capturing the full
+           LLMResult and wrapping it (with the prompt that produced it) in an
+           LLMRecord for the run's accumulated LLM history.
+        2. Extract the largest JSON array/object from the generated text.
         3. Validate that the extracted value is a non-empty list of mappings.
         4. Convert each mapping into a planned BlackboardSlot.
         5. Normalize the planned slot list.
         6. Validate the final planned slot list.
-        7. Return the final list of planned slots.
+        7. Return the final list of planned slots together with the LLMRecord.
 
         Parameters
         ----------
@@ -2668,8 +2656,10 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
 
         Returns
         -------
-        list[BlackboardSlot]
-            Fully normalized and validated planned slots for the running blackboard.
+        tuple[list[BlackboardSlot], LLMRecord]
+            Fully normalized and validated planned slots for the running
+            blackboard, plus the LLMRecord capturing the single generation that
+            produced them.
 
         Raises
         ------
@@ -2688,8 +2678,9 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
                 f"{type(self).__name__}.{self.name}: messages must be non-empty."
             )
 
-        raw_plan = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
-        parsed = self._extract_from_json_string(raw_plan)
+        engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
+        llm_record = LLMRecord(user_prompt=messages[-1]["content"], llm_result=engine_result)
+        parsed = self._extract_from_json_string(engine_result.result)
 
         if not isinstance(parsed, list) or not parsed:
             raise ToolAgentError(
@@ -2727,7 +2718,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             cache_blackboard=cache_blackboard,
         )
 
-        return planned_slots
+        return planned_slots, llm_record
 
     def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> PlanActRunState:
         """
@@ -2802,7 +2793,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
         for i, slot in enumerate(cache_blackboard):
             slot.step = i
 
-        planned_slots = self._generate_plan(
+        planned_slots, llm_record = self._generate_plan(
             messages=working_messages,
             cache_blackboard=cache_blackboard,
         )
@@ -2830,6 +2821,7 @@ class PlanActAgent(ToolAgent[PlanActRunState]):
             executed_steps=set(),
             prepared_steps=[],
             tool_calls_used=0,
+            llm_records=[llm_record],
             is_done=False,
             return_value=NO_VAL,
             batches=batches,
@@ -3245,6 +3237,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
             executed_steps=set(),
             prepared_steps=[],
             tool_calls_used=0,
+            llm_records=[],
             is_done=False,
             return_value=NO_VAL,
             next_step_index=0,
@@ -3259,7 +3252,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         messages: list[dict[str, str]],
         cache_blackboard: list[BlackboardSlot],
         expected_step: int,
-    ) -> tuple[BlackboardSlot, int, str]:
+    ) -> tuple[BlackboardSlot, int, str, LLMRecord]:
         """
         Generate and validate one ReAct tool step as a planned BlackboardSlot plus
         observation duration and description.
@@ -3269,8 +3262,10 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         Lifecycle
         ---------
-        1. Generate raw LLM text from the provided messages.
-        2. Extract the largest JSON array/object from the raw text.
+        1. Generate raw LLM output from the provided messages, capturing the full
+           LLMResult and wrapping it (with the prompt that produced it) in an
+           LLMRecord for the run's accumulated LLM history.
+        2. Extract the largest JSON array/object from the generated text.
         3. Validate that the extracted value is a mapping.
         4. Extract and validate "duration" as an int within the remaining future
            step-generation capacity.
@@ -3281,7 +3276,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         9. Validate return-tool duration is 0.
         10. Validate cache references against cache_blackboard.
         11. Validate step dependencies are prior-only.
-        12. Return the planned slot, duration, and description.
+        12. Return the planned slot, duration, description, and LLMRecord.
 
         Parameters
         ----------
@@ -3298,8 +3293,9 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         Returns
         -------
-        tuple[BlackboardSlot, int, str]
-            Planned single-step slot, observation duration, and step description.
+        tuple[BlackboardSlot, int, str, LLMRecord]
+            Planned single-step slot, observation duration, step description, and
+            the LLMRecord capturing the single generation that produced them.
             The slot is not inserted into the running blackboard and placeholders
             are not resolved here. The duration controls how many future successful
             step-generation turns may render this step's raw result as observable_result.
@@ -3340,8 +3336,9 @@ class ReActAgent(ToolAgent[ReActRunState]):
 
         max_duration = max(0, self._tool_calls_limit - expected_step)
 
-        raw_text = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
-        parsed = self._extract_from_json_string(raw_text)
+        engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
+        llm_record = LLMRecord(user_prompt=messages[-1]["content"], llm_result=engine_result)
+        parsed = self._extract_from_json_string(engine_result.result)
 
         if not isinstance(parsed, Mapping):
             raise ToolAgentError(
@@ -3434,7 +3431,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
                 f"{sorted(set(bad_step_deps))!r}; deps must be < {expected_step}."
             )
 
-        return slot, duration, description
+        return slot, duration, description, llm_record
 
     def _prepare_next_batch(self, state: ReActRunState) -> ReActRunState:
         """
@@ -3566,7 +3563,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
             }
 
             if state.observables[idx] > 0:
-                record["observable_result"] = self._preview_blackboard_result(slot.result)
+                record["observable_result"] = self._preview_blackboard_result(slot.result.result)
 
             running_records.append(record)
 
@@ -3604,7 +3601,7 @@ class ReActAgent(ToolAgent[ReActRunState]):
         # ------------------------------------------------------------------ #
         # 2) Generate and validate the next planned slot
         # ------------------------------------------------------------------ #
-        generated_slot, observe_duration, description = self._generate_next_step(
+        generated_slot, observe_duration, description, llm_record = self._generate_next_step(
             messages=working_messages,
             cache_blackboard=state.cache_blackboard,
             expected_step=prefix_len,
@@ -3613,9 +3610,11 @@ class ReActAgent(ToolAgent[ReActRunState]):
         if not isinstance(generated_slot, BlackboardSlot):
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: _generate_next_step must return "
-                f"(BlackboardSlot, observe_duration, description); got first item "
-                f"{type(generated_slot).__name__!r}."
+                f"(BlackboardSlot, observe_duration, description, LLMRecord); got first "
+                f"item {type(generated_slot).__name__!r}."
             )
+
+        state.llm_records.append(llm_record)
 
         if type(observe_duration) is not int or observe_duration < 0 or observe_duration > max_duration:
             raise ToolAgentError(

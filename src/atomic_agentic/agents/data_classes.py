@@ -11,9 +11,15 @@ from .constants import (
     TOOL_FIELD,
 )
 from ..core.constants import IDENTIFIER_PATTERN, NO_VAL
-from ..results import LLMResult
+from ..results import AtomicResult, LLMResult
 
-__all__ = ["AgentRecord", "LLMRecord", "ToolAgentTurn", "BlackboardSlot", "ConstantSpec"]
+__all__ = [
+    "AgentRecord",
+    "LLMRecord",
+    "ToolAgentRecord",
+    "BlackboardSlot",
+    "ConstantSpec",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,11 +240,11 @@ class AgentRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolAgentTurn(AgentRecord):
+class ToolAgentRecord(AgentRecord):
     """
     Canonical memory record for one completed ToolAgent invocation.
 
-    In addition to the base AgentRecord lifecycle artifacts, a ToolAgentTurn
+    In addition to the base AgentRecord lifecycle artifacts, a ToolAgentRecord
     stores the half-open span of persisted blackboard entries produced by
     the invocation. The ToolAgent renders that span into future LLM-facing
     context when building messages.
@@ -294,9 +300,14 @@ class BlackboardSlot:
         Arguments after placeholder resolution. Created at prepare time by
         ``_resolve_placeholders(args, state=...)``. Passed to ``tool.invoke()``.
 
-    result : Any | NO_VAL
-        Tool execution result. Set by ``_execute_prepared_batch()`` on success.
-        Used for placeholder resolution in dependent steps.
+    result : AtomicResult | NO_VAL
+        Full result envelope (``ToolResult``, an ``AtomicResult`` subclass)
+        produced by a successful tool invocation — preserved whole for richer
+        tracing (timing, run identity, invoker). Set by
+        ``_execute_prepared_batch()``. Consumers that need the caller-facing
+        value (placeholder resolution, previews, ``return_value``) read
+        ``result.result`` directly; every such site is already gated by an
+        ``is_executed()`` check, so the envelope is guaranteed present there.
 
     error : Any | NO_VAL
         Exception captured during execution (if any). Set only on failure.
@@ -357,7 +368,7 @@ class BlackboardSlot:
     tool: str | Any = NO_VAL
     args: Any = NO_VAL
     resolved_args: Any = NO_VAL
-    result: Any = NO_VAL
+    result: AtomicResult | Any = NO_VAL
     error: Any = NO_VAL
     status: str = EMPTY
     step_dependencies: tuple[int, ...] = ()
