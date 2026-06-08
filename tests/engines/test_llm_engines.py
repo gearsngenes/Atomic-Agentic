@@ -18,6 +18,7 @@ from atomic_agentic.engines.LLMEngines import (
     MistralEngine,
     OpenAIEngine,
 )
+from atomic_agentic.results import LLMModelData, LLMResult, TokenUsage
 
 
 class FakeLLMEngine(LLMEngine):
@@ -61,6 +62,12 @@ class FakeLLMEngine(LLMEngine):
 
     def _extract_text(self, response: Any) -> Any:
         return response["text"]
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        return TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
+
+    def _get_model_data(self) -> LLMModelData:
+        return LLMModelData(provider="fake")
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         self.prepare_calls.append(path)
@@ -120,7 +127,8 @@ class TestLLMEngineMessagesAndInvoke:
             }
         )
 
-        assert result == "hello"
+        assert isinstance(result, LLMResult)
+        assert result.result == "hello"
         assert engine.payloads == [
             {
                 "messages": [{"role": "user", "content": "Hello"}],
@@ -179,7 +187,7 @@ class TestLLMEngineMessagesAndInvoke:
     def test_unexpected_provider_error_is_wrapped_by_invoke_messages(self) -> None:
         engine = FakeLLMEngine(provider_results=[ValueError("provider failed")])
 
-        with pytest.raises(LLMEngineError, match="invoke failed"):
+        with pytest.raises(LLMEngineError, match="invoke_messages failed"):
             engine.invoke_messages([{"role": "user", "content": "Hello"}])
 
 
@@ -239,7 +247,7 @@ class TestLLMEngineRetries:
             provider_results=[ValueError("bad request")],
         )
 
-        with pytest.raises(LLMEngineError, match="invoke failed"):
+        with pytest.raises(LLMEngineError, match="invoke_messages failed"):
             engine.invoke_messages([{"role": "user", "content": "Hello"}])
 
         assert engine.call_count == 1
@@ -429,7 +437,7 @@ class TestOpenAIEngine:
 
         fake = FakeOpenAIClient.instances[-1]
 
-        assert engine._extract_text(response) == "openai text"
+        assert engine._extract_text(response) == " openai text "
         assert fake.response_calls[-1]["model"] == "gpt-4o-mini"
         assert fake.response_calls[-1]["instructions"] == "system"
         assert fake.response_calls[-1]["temperature"] == 0.25
@@ -775,17 +783,11 @@ class TestMistralEngine:
 
 class FakeLlama:
     instances: list["FakeLlama"] = []
-    pretrained_calls: list[dict[str, Any]] = []
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.chat_completion_calls: list[dict[str, Any]] = []
         FakeLlama.instances.append(self)
-
-    @classmethod
-    def from_pretrained(cls, **kwargs: Any) -> "FakeLlama":
-        cls.pretrained_calls.append(kwargs)
-        return cls(**kwargs)
 
     def create_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
         self.chat_completion_calls.append(kwargs)
@@ -835,19 +837,35 @@ class TestLlamaCppEngine:
         assert fake.kwargs["n_threads"] == 4
         assert fake.kwargs["verbose"] is True
 
-    def test_constructor_uses_from_pretrained(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        FakeLlama.pretrained_calls.clear()
+    def test_constructor_resolves_repo_and_filename_via_hf_hub_download(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        FakeLlama.instances.clear()
         monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+
+        download_calls: list[dict[str, Any]] = []
+        resolved_path = "/cache/org/repo/model.gguf"
+
+        def fake_hf_hub_download(**kwargs: Any) -> str:
+            download_calls.append(kwargs)
+            return resolved_path
+
+        monkeypatch.setattr(llm_module, "hf_hub_download", fake_hf_hub_download)
 
         engine = LlamaCppEngine(
             repo_id="org/repo",
             filename="model.gguf",
         )
 
+        fake = FakeLlama.instances[-1]
+
         assert engine.repo_id == "org/repo"
         assert engine.filename == "model.gguf"
-        assert FakeLlama.pretrained_calls[-1]["repo_id"] == "org/repo"
-        assert FakeLlama.pretrained_calls[-1]["filename"] == "model.gguf"
+        assert engine.model_path == resolved_path
+        assert download_calls[-1]["repo_id"] == "org/repo"
+        assert download_calls[-1]["filename"] == "model.gguf"
+        assert fake.kwargs["model_path"] == resolved_path
 
     def test_llama_payload_call_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeLlama.instances.clear()

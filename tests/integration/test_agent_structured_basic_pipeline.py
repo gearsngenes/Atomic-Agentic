@@ -10,6 +10,7 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
+from atomic_agentic.results import LLMModelData, TokenUsage
 from atomic_agentic.workflows.base import FlowResultDict
 from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.sequential import SequentialFlow
@@ -64,6 +65,12 @@ class StatefulEchoLLMEngine(LLMEngine):
 
     def _extract_text(self, response: Any) -> str:
         return f"{self.prefix}: {response['latest_user']}"
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        return TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
+
+    def _get_model_data(self) -> LLMModelData:
+        return LLMModelData(provider="stateful-echo")
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         return {"path": path}

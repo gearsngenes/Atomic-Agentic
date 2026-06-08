@@ -18,6 +18,7 @@ from atomic_agentic.engines.LLMEngines import (
     MistralEngine,
     OpenAIEngine,
 )
+from atomic_agentic.results import LLMResult
 
 
 pytestmark = [
@@ -125,7 +126,8 @@ def test_live_llm_engine_returns_non_empty_text(
 
     result = engine.invoke({"messages": _messages()})
 
-    _assert_live_text_response(result)
+    assert isinstance(result, LLMResult)
+    _assert_live_text_response(result.result)
 
 
 @pytest.mark.parametrize("provider,build_engine", ENGINE_BUILDERS)
