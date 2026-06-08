@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .atomic import AtomicResult
 from .commands import CommandResult
+from .structured import StructuredResult
 from .agents import AgentResult
 from .llm import (
     GeminiTokenUsage,
@@ -21,6 +22,7 @@ __all__ = [
     "AtomicResult",
     "ToolResult",
     "CommandResult",
+    "StructuredResult",
     "TokenUsage",
     "OpenAITokenUsage",
     "GeminiTokenUsage",

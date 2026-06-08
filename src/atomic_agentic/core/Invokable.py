@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Mapping, Dict, Sequence, Optional, TypeVar
 import threading
 import asyncio
@@ -11,7 +11,7 @@ import logging
 from .constants import IDENTIFIER_PATTERN, NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from .Exceptions import PackagingError
-from ..results import AtomicResult
+from ..results import AtomicResult, StructuredResult
 
 
 logger = logging.getLogger(__name__)
@@ -1192,49 +1192,121 @@ class StructuredInvokable(AtomicInvokable):
             )
         self._ignore_unhandled = value
 
-    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        """Synchronously invoke the wrapped component and return a plain mapping.
+    def make_result(
+        self,
+        result: dict[str, Any],
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> StructuredResult:
+        """
+        Construct this wrapper's ``StructuredResult`` envelope.
 
-        The wrapped component is invoked with filtered dict-first inputs. Its raw
-        output is then packaged into a dictionary according to this wrapper's output
-        schema and packaging policies. Missing-value handling is applied before the
-        final result is returned.
+        ``result`` is the packaged, missing-value-resolved output mapping stored
+        in ``StructuredResult.result``. Packaging diagnostics gathered during the
+        invocation — the pre-packaging payload, unresolved named fields, and the
+        wrapped component's run identity — are stored as explicit
+        StructuredInvokable-specific result fields. Mirrors
+        ``LLMEngine.make_result``'s validate-then-delegate shape: this hook
+        validates the kwargs ``invoke``/``async_invoke`` assemble, then fixes
+        ``result_cls=StructuredResult`` and delegates to ``_make_result``.
+        """
+        unexpected = set(result_kwargs) - {"unpackaged_result", "missing_keys", "component_run_id"}
+        if unexpected:
+            raise PackagingError(
+                f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
+            )
 
-        `StructuredInvokable` owns output shaping. It no longer returns a
-        `StructuredResultDict` carrier or exposes the wrapped component's raw result
-        through the active runtime return value.
+        if "unpackaged_result" not in result_kwargs:
+            raise PackagingError("StructuredInvokable.make_result: unpackaged_result is required.")
+        unpackaged_result = result_kwargs["unpackaged_result"]
+
+        missing_keys = result_kwargs.get("missing_keys", ())
+        if not isinstance(missing_keys, tuple) or not all(isinstance(k, str) for k in missing_keys):
+            raise PackagingError(
+                "StructuredInvokable.make_result: missing_keys must be a tuple of str."
+            )
+
+        component_run_id = result_kwargs.get("component_run_id")
+        if component_run_id is not None and not isinstance(component_run_id, str):
+            raise PackagingError(
+                "StructuredInvokable.make_result: component_run_id must be a str or None."
+            )
+
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=StructuredResult,
+            unpackaged_result=unpackaged_result,
+            missing_keys=missing_keys,
+            component_run_id=component_run_id,
+        )
+
+    def invoke(self, inputs: Mapping[str, Any]) -> StructuredResult:
+        """Synchronously invoke the wrapped component and return a StructuredResult.
+
+        1) Filter caller inputs through this wrapper's input contract.
+        2) Invoke the wrapped component — its return is an AtomicResult-family
+           object; this method extracts ``.result``/``.run_id`` from it before
+           packaging (every AtomicInvokable returns an AtomicResult).
+        3) Package the unwrapped payload according to the output schema and
+           packaging policies, then resolve unresolved named fields per
+           ``absent_value_mode``.
+        4) Assemble and return this invocation's StructuredResult via
+           ``make_result(...)``, carrying the packaged output plus packaging
+           diagnostics (unpackaged_result, missing_keys, component_run_id).
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
+            started_at = datetime.now(timezone.utc)
 
             filtered_inputs = self.filter_inputs(inputs)
-            raw_result = self.component.invoke(filtered_inputs)
-            packaged = self.package(raw_result)
+            component_result = self.component.invoke(filtered_inputs)
+            unpackaged_result = component_result.result
+            component_run_id = component_result.run_id
+
+            packaged = self.package(unpackaged_result)
+            missing_keys = tuple(key for key, value in packaged.items() if value is NO_VAL)
             final_output = self.handle_missing_values(packaged)
 
+            ended_at = datetime.now(timezone.utc)
             logger.info(f"[{self.full_name} finished]")
-            return dict(final_output)
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        """Asynchronously invoke the wrapped component and return a plain mapping.
+            return self.make_result(
+                result=dict(final_output),
+                started_at=started_at,
+                ended_at=ended_at,
+                unpackaged_result=unpackaged_result,
+                missing_keys=missing_keys,
+                component_run_id=component_run_id,
+            )
 
-        This is the async analog of :meth:`invoke`. The wrapped component is awaited
-        through its async invocation path, then the raw result is packaged and
-        missing-value handling is applied exactly as in the sync path.
-
-        `StructuredInvokable` owns output shaping. It no longer returns a
-        `StructuredResultDict` carrier or exposes the wrapped component's raw result
-        through the active runtime return value.
-        """
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> StructuredResult:
+        """Asynchronous analog of :meth:`invoke` — see its docstring for the lifecycle."""
         logger.info(f"[Async {self.full_name} started]")
+        started_at = datetime.now(timezone.utc)
 
         filtered_inputs = self.filter_inputs(inputs)
-        raw_result = await self.component.async_invoke(filtered_inputs)
-        packaged = self.package(raw_result)
+        component_result = await self.component.async_invoke(filtered_inputs)
+        unpackaged_result = component_result.result
+        component_run_id = component_result.run_id
+
+        packaged = self.package(unpackaged_result)
+        missing_keys = tuple(key for key, value in packaged.items() if value is NO_VAL)
         final_output = self.handle_missing_values(packaged)
 
+        ended_at = datetime.now(timezone.utc)
         logger.info(f"[Async {self.full_name} finished]")
-        return dict(final_output)
+
+        return self.make_result(
+            result=dict(final_output),
+            started_at=started_at,
+            ended_at=ended_at,
+            unpackaged_result=unpackaged_result,
+            missing_keys=missing_keys,
+            component_run_id=component_run_id,
+        )
 
     def package(self, raw: Any) -> dict[str, Any]:
         """Package a raw result into the normalized mapping output.
