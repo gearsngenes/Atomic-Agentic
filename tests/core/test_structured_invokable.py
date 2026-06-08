@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import namedtuple
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -11,6 +12,7 @@ from atomic_agentic.core.Exceptions import PackagingError
 from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.core.Parameters import ParamSpec
 from atomic_agentic.core.constants import NO_VAL
+from atomic_agentic.results import AtomicResult, StructuredResult
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import (
     StructuredInvokable,
@@ -108,18 +110,28 @@ class RecordingInvokable(AtomicInvokable):
         self.raise_async = raise_async
         self.calls: list[dict[str, Any]] = []
         self.async_calls: list[dict[str, Any]] = []
+        self.results: list[AtomicResult] = []
+        self.async_results: list[AtomicResult] = []
 
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
         self.calls.append(dict(inputs))
         if self.raise_sync is not None:
             raise self.raise_sync
-        return self.raw_result
+        started_at = datetime.now(timezone.utc)
+        ended_at = datetime.now(timezone.utc)
+        result = self.make_result(result=self.raw_result, started_at=started_at, ended_at=ended_at)
+        self.results.append(result)
+        return result
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
         self.async_calls.append(dict(inputs))
         if self.raise_async is not None:
             raise self.raise_async
-        return self.raw_result
+        started_at = datetime.now(timezone.utc)
+        ended_at = datetime.now(timezone.utc)
+        result = self.make_result(result=self.raw_result, started_at=started_at, ended_at=ended_at)
+        self.async_results.append(result)
+        return result
 
 
 class ModelDumpObject:
@@ -650,7 +662,7 @@ class TestStructuredInvokableMissingValues:
 
 
 class TestStructuredInvokableInvoke:
-    def test_invoke_returns_plain_dict_result(self) -> None:
+    def test_invoke_returns_structured_result_with_packaged_payload(self) -> None:
         component = Tool(
             function=return_mapping,
             name="return_mapping",
@@ -661,9 +673,11 @@ class TestStructuredInvokableInvoke:
 
         result = wrapper.invoke({"value": 10})
 
-        assert type(result) is dict
-        assert result == {"a": 10, "b": 2}
-        assert not hasattr(result, "raw_result")
+        assert isinstance(result, StructuredResult)
+        assert result.result == {"a": 10, "b": 2}
+        assert result.unpackaged_result == {"a": 10, "b": 2}
+        assert result.missing_keys == ()
+        assert result.invoker_id == wrapper.instance_id
 
     def test_invoke_applies_missing_value_handling(self) -> None:
         component = Tool(
@@ -682,9 +696,10 @@ class TestStructuredInvokableInvoke:
 
         result = wrapper.invoke({})
 
-        assert type(result) is dict
-        assert result == {"a": "filled", "b": 2}
-        assert not hasattr(result, "raw_result")
+        assert isinstance(result, StructuredResult)
+        assert result.result == {"a": "filled", "b": 2}
+        assert result.unpackaged_result == {"a": None, "b": 2}
+        assert result.missing_keys == ("a",)
 
     def test_invoke_filters_inputs_before_calling_component(self) -> None:
         component = RecordingInvokable(raw_result={"value": 123})
@@ -692,7 +707,10 @@ class TestStructuredInvokableInvoke:
 
         result = wrapper.invoke({"value": 123, "extra": "ignored"})
 
-        assert result == {"value": 123}
+        assert isinstance(result, StructuredResult)
+        assert result.result == {"value": 123}
+        assert result.unpackaged_result == {"value": 123}
+        assert result.component_run_id == component.results[-1].run_id
         assert component.calls == [{"value": 123}]
 
     def test_async_invoke_mirrors_sync_contract(self) -> None:
@@ -701,9 +719,10 @@ class TestStructuredInvokableInvoke:
 
         result = asyncio.run(wrapper.async_invoke({"value": 123, "extra": "ignored"}))
 
-        assert type(result) is dict
-        assert result == {"value": 123}
-        assert not hasattr(result, "raw_result")
+        assert isinstance(result, StructuredResult)
+        assert result.result == {"value": 123}
+        assert result.unpackaged_result == {"value": 123}
+        assert result.component_run_id == component.async_results[-1].run_id
         assert component.async_calls == [{"value": 123}]
 
     def test_component_sync_exception_propagates(self) -> None:

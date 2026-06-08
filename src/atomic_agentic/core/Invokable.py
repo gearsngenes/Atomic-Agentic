@@ -11,7 +11,7 @@ import logging
 from .constants import IDENTIFIER_PATTERN, NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from .Exceptions import PackagingError
-from ..results import AtomicResult, StructuredResult
+from ..results import AtomicResult, CommandResult, StructuredResult
 
 
 logger = logging.getLogger(__name__)
@@ -857,41 +857,79 @@ class Command(AtomicInvokable):
             )
 
     # ---------------------------------------------------------------- #
+    # Result construction
+    # ---------------------------------------------------------------- #
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> CommandResult:
+        """Construct a CommandResult envelope for this command's invocation."""
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=CommandResult,
+            **result_kwargs,
+        )
+
+    # ---------------------------------------------------------------- #
     # Invocation
     # ---------------------------------------------------------------- #
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+    def invoke(self, inputs: Mapping[str, Any]) -> CommandResult:
         """
         Invoke the wrapped executor with this command's fixed input mapping.
 
         Runtime inputs must be an empty mapping. The validation is routed through
         `self.filter_inputs(inputs)` so errors remain consistent with the base
-        AtomicInvokable contract.
+        AtomicInvokable contract. The executor's returned AtomicResult is
+        unwrapped — `executor_result.result` becomes this command's payload,
+        and `executor_result.run_id` plus the executor's `instance_id` are
+        carried forward for cross-envelope tracing.
         """
         with self._invoke_lock:
             logger.info("[%s started]", self.full_name)
+            started_at = datetime.now(timezone.utc)
 
             self.filter_inputs(inputs)
-            result = self.executor.invoke(dict(self._fixed_inputs))
+            executor_result = self.executor.invoke(dict(self._fixed_inputs))
 
+            ended_at = datetime.now(timezone.utc)
             logger.info("[%s finished]", self.full_name)
-            return result
+            return self.make_result(
+                result=executor_result.result,
+                started_at=started_at,
+                ended_at=ended_at,
+                executor_run_id=executor_result.run_id,
+                executor_id=self.executor.instance_id,
+            )
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> CommandResult:
         """
-        Async command invocation.
+        Async command invocation — see `invoke` for the unwrap/lifecycle contract.
 
         This delegates to the wrapped executor's native async path instead of
         relying on AtomicInvokable's default sync-to-thread wrapper.
         """
         logger.info("[%s started]", self.full_name)
+        started_at = datetime.now(timezone.utc)
 
         self.filter_inputs(inputs)
         fixed_inputs = dict(self._fixed_inputs)
 
-        result = await self.executor.async_invoke(fixed_inputs)
+        executor_result = await self.executor.async_invoke(fixed_inputs)
 
+        ended_at = datetime.now(timezone.utc)
         logger.info("[%s finished]", self.full_name)
-        return result
+        return self.make_result(
+            result=executor_result.result,
+            started_at=started_at,
+            ended_at=ended_at,
+            executor_run_id=executor_result.run_id,
+            executor_id=self.executor.instance_id,
+        )
 
     # ---------------------------------------------------------------- #
     # Serialization
