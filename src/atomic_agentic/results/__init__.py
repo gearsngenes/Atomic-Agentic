@@ -17,6 +17,14 @@ from .llm import (
     TokenUsage,
 )
 from .tools import ToolResult
+from .workflow import (
+    WorkflowResult,
+    BasicWorkflowResult,
+    SequentialWorkflowResult,
+    RoutingWorkflowResult,
+    IterativeWorkflowResult,
+    ParallelWorkflowResult,
+)
 
 __all__ = [
     "AtomicResult",
@@ -34,4 +42,10 @@ __all__ = [
     "LlamaCppModelData",
     "LLMResult",
     "AgentResult",
+    "WorkflowResult",
+    "BasicWorkflowResult",
+    "SequentialWorkflowResult",
+    "RoutingWorkflowResult",
+    "IterativeWorkflowResult",
+    "ParallelWorkflowResult",
 ]
