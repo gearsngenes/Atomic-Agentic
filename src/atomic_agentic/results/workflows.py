@@ -11,7 +11,7 @@ __all__ = [
     "IterationRecord",
     "WorkflowResult",
     "BasicFlowResult",
-    "SequentialWorkflowResult",
+    "SequentialFlowResult",
     "RoutingWorkflowResult",
     "IterativeWorkflowResult",
     "ParallelWorkflowResult",
@@ -118,11 +118,23 @@ class BasicFlowResult(WorkflowResult):
 
 
 @dataclass(frozen=True, slots=True)
-class SequentialWorkflowResult(WorkflowResult):
-    """Result for a SequentialFlow run."""
+class SequentialFlowResult(WorkflowResult):
+    """Result for a SequentialFlow run.
 
-    step_records: tuple[ChildRunRecord, ...]
-    return_child_run_id: str
+    Fields
+    ------
+    step_runs:
+        Tuple of child run ids, one per executed step, in step order.
+        ``step_runs[i]`` corresponds to ``SequentialFlow.steps[i]`` and can
+        be used with ``steps[i].get_checkpoint(step_runs[i])`` to retrieve
+        that step's own checkpoint.
+    return_index:
+        The fixed step index whose result became this result's ``result``
+        payload (i.e. ``result == steps[return_index]``'s checkpoint result).
+    """
+
+    step_runs: tuple[str, ...]
+    return_index: int
 
 
 @dataclass(frozen=True, slots=True)

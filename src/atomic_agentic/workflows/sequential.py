@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, Optional
 
-from ..core.Invokable import AtomicInvokable
 from ..core.Exceptions import ValidationError
-from .base import FlowResultDict, Workflow
+from ..core.Invokable import AtomicInvokable
+from ..results.workflows import SequentialFlowResult, WorkflowResult
+from .base import Workflow
 from .basic import BasicFlow
-from .metadata import ChildRunRecord, SequentialFlowRunMetadata
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["SequentialFlow"]
 
-class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
+
+class SequentialFlow(Workflow):
     """Execute a fixed ordered sequence of workflow-shaped steps.
 
     Step normalization
@@ -28,39 +31,40 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
     - The configured step instances are fixed at construction.
     - No post-construction step mutation API is provided.
     - ``return_index`` selects which executed step result becomes the outer
-    workflow result. This is selection-only mutability; it does not alter
-    topology or execution order.
+      workflow result. It is resolved once at construction and is fixed
+      thereafter:
+        - ``None`` (default) resolves to the last step.
+        - An explicit ``int`` must satisfy ``0 <= return_index < len(steps)``;
+          out-of-range or negative values raise ``IndexError``. There is no
+          negative-index wraparound.
 
     Runtime contract
     ----------------
     - Inputs are passed to the first step.
-    - Each step's mapping result is passed directly to the next step.
+    - Each step's result is invoked with the previous step's result payload.
     - All configured steps execute on every run.
-    - The step selected by ``return_index`` determines the final step result
-    returned to the workflow base, which then wraps it in the outer
-    ``FlowResultDict`` and records the sequential checkpoint.
+    - Every step except the last must produce a mapping-shaped result
+      (``result.result``), since it is passed as the next step's inputs.
+    - The step selected by ``return_index`` determines the final result
+      payload returned to the workflow base.
 
-    Metadata
-    --------
-    Per-run metadata contains:
+    Result
+    ------
+    Per-run result fields (see ``SequentialFlowResult``):
 
-    - ``step_records``:
-        ``tuple[ChildRunRecord, ...]`` containing one typed child execution
-        record per executed step.
-    - ``return_child_index``:
-        The resolved absolute step index selected for return.
-    - ``return_child_run_id``:
-        The child step run id whose result became the outer sequential result.
+    - ``step_run_ids``:
+        ``tuple[str, ...]`` containing one child run id per executed step, in
+        step order.
+    - ``return_index``:
+        The fixed step index whose result became the outer result payload.
 
     Retrieval helpers
     -----------------
-    - ``get_step_records(run_id)`` returns the stored typed child step records
-    for a parent sequential run, or ``None`` if the parent run is not found.
-    - ``get_step_results(run_id)`` resolves those records back into child step
-    checkpoint results and returns ``list[result | None]``. ``None`` is used
-    when the child run id no longer resolves to a retained child checkpoint.
+    - ``get_step_results(run_id)`` resolves each step's result object (an
+      ``AtomicResult``-family instance) for a parent sequential run, returning
+      ``list[Any | None]``, or ``None`` if the parent run is not found.
     - ``get_step_result(run_id, step_index)`` is a convenience wrapper over
-    ``get_step_results(run_id)``.
+      ``get_step_results(run_id)``.
 
     Notes
     -----
@@ -75,7 +79,7 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
         description: str,
         steps: list[Workflow | AtomicInvokable],
         *,
-        return_index: int = -1,
+        return_index: Optional[int] = None,
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         if not isinstance(steps, list):
@@ -87,6 +91,20 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
 
         normalized_steps = tuple(self._normalize_step(step) for step in steps)
 
+        if return_index is None:
+            resolved_return_index = len(normalized_steps) - 1
+        elif isinstance(return_index, int):
+            if not (0 <= return_index < len(normalized_steps)):
+                raise IndexError(
+                    f"return_index {return_index} out of range for "
+                    f"{len(normalized_steps)} configured step(s)"
+                )
+            resolved_return_index = return_index
+        else:
+            raise TypeError(
+                f"return_index must be an int or None, got {type(return_index)!r}"
+            )
+
         resolved_filter = (
             filter_extraneous_inputs
             if filter_extraneous_inputs is not None
@@ -97,11 +115,12 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
             name=name,
             description=description,
             parameters=normalized_steps[0].parameters,
+            return_type=normalized_steps[resolved_return_index].return_type,
             filter_extraneous_inputs=resolved_filter,
         )
 
         self._steps: tuple[Workflow, ...] = normalized_steps
-        self.return_index = return_index
+        self._return_index: int = resolved_return_index
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -113,16 +132,8 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
 
     @property
     def return_index(self) -> int:
-        """Configured step index whose result becomes the outer flow result."""
+        """Fixed step index whose result becomes the outer flow result."""
         return self._return_index
-
-    @return_index.setter
-    def return_index(self, value: int) -> None:
-        """Validate and store the configured return step index."""
-        if not isinstance(value, int):
-            raise TypeError(f"return_index must be an int, got {type(value)!r}")
-        self._resolve_step_index(value)
-        self._return_index = value
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -155,81 +166,40 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
     # ------------------------------------------------------------------ #
     # Run-oriented retrieval
     # ------------------------------------------------------------------ #
-    def get_step_records(
-        self,
-        run_id: str,
-    ) -> Optional[tuple[ChildRunRecord, ...]]:
-        """Return the stored typed child step records for one sequential run.
+    def get_step_results(self, run_id: str) -> Optional[list[WorkflowResult]]:
+        """Return all child step result objects for one sequential run.
 
-        Returns ``None`` when the parent sequential checkpoint is not found.
+        Returns
+        -------
+        Optional[list[WorkflowResult]]
+            - ``None`` if the parent sequential run is not found
+            - otherwise, one entry per configured step, in order
+            - each entry is the step's result object (an ``AtomicResult``-family
+              instance, ``child_checkpoint.result``), or ``None`` if that
+              step's run id no longer resolves to a retained child checkpoint
         """
         checkpoint = self.get_checkpoint(run_id)
         if checkpoint is None:
             return None
 
-        return tuple(checkpoint.metadata.step_records)
+        results: list[Any] = []
+        for step, step_run_id in zip(self._steps, checkpoint.result.step_runs):
+            child_checkpoint = step.get_checkpoint(step_run_id)
+            results.append(child_checkpoint.result if child_checkpoint else None)
 
-    def get_step_results(
-        self,
-        run_id: str,
-    ) -> Optional[list[dict[str, Any] | None]]:
-        """Return child step results for one sequential run.
+        return results
 
-        This method uses :meth:`get_step_records` as the source of truth.
-
-        Returns
-        -------
-        Optional[list[dict[str, Any] | None]]
-            - ``None`` if the parent sequential run is not found
-            - otherwise, one entry per stored step record
-            - each entry is the child step checkpoint result dict, or ``None`` if
-              that child run id no longer resolves to a retained child checkpoint
-        """
-        step_records = self.get_step_records(run_id)
-        if step_records is None:
-            return None
-
-        step_results: list[dict[str, Any] | None] = []
-
-        for record_index, record in enumerate(step_records):
-            step_index = record.slot
-            if step_index >= len(self._steps):
-                raise ValidationError(
-                    f"{self.full_name}: step_records[{record_index}] references step index "
-                    f"{step_index}, but only {len(self._steps)} configured steps exist"
-                )
-
-            step: Workflow = self._steps[step_index]
-
-            recorded_instance_id = record.instance_id
-            if step.instance_id != recorded_instance_id:
-                raise ValidationError(
-                    f"{self.full_name}: step_records[{record_index}] instance_id mismatch for "
-                    f"step {step_index}: recorded {recorded_instance_id!r}, current {step.instance_id!r}"
-                )
-
-            child_checkpoint = step.get_checkpoint(record.run_id)
-            if child_checkpoint is None:
-                step_results.append(None)
-            else:
-                step_results.append(dict(child_checkpoint.result))
-
-        return step_results
-
-    def get_step_result(
-        self,
-        run_id: str,
-        step_index: int,
-    ) -> Optional[dict[str, Any]]:
-        """Return one child step result for one sequential run.
+    def get_step_result(self, run_id: str, step_index: int) -> Optional[WorkflowResult]:
+        """Return one child step's result object for one sequential run.
 
         This method uses :meth:`get_step_results` as its source of truth.
 
         Returns
         -------
-        Optional[dict[str, Any]]
+        Optional[Any]
             - ``None`` if the parent sequential run is not found
-            - the resolved child result dict for the requested step
+            - the resolved child step's result object (an ``AtomicResult``-family
+              instance)
             - ``None`` if the child checkpoint for that recorded step run id is
               no longer available
 
@@ -242,73 +212,62 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
         """
         resolved_index = self._resolve_step_index(step_index)
 
-        step_results = self.get_step_results(run_id)
-        if step_results is None:
+        results = self.get_step_results(run_id)
+        if results is None:
             return None
 
-        return step_results[resolved_index]
+        return results[resolved_index]
+
+    # ------------------------------------------------------------------ #
+    # Result construction
+    # ------------------------------------------------------------------ #
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> SequentialFlowResult:
+        """Construct a SequentialFlowResult envelope for this workflow's invocation."""
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=SequentialFlowResult,
+            **result_kwargs,
+        )
 
     # ------------------------------------------------------------------ #
     # Workflow run hooks
     # ------------------------------------------------------------------ #
-    def _run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[SequentialFlowRunMetadata, Mapping[str, Any]]:
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
         """Synchronously execute all configured steps and return the selected step result."""
-        if not self._steps:
-            raise ValidationError(
-                f"{self.full_name}: cannot execute an empty SequentialFlow"
-            )
-
-        running_result: Mapping[str, Any] = inputs
-        step_records: list[ChildRunRecord] = []
-        step_results: list[FlowResultDict] = []
+        running_inputs: Mapping[str, Any] = inputs
+        step_results = []
 
         for index, step in enumerate(self._steps):
             logger.info("%s: invoking step %d (%s)", self.full_name, index, step.full_name)
-            result = step.invoke(running_result)
-
-            if not isinstance(result, FlowResultDict):
-                raise ValidationError(
-                    f"{self.full_name}: step {index} ({step.full_name}) returned "
-                    f"{type(result)!r}, expected FlowResultDict"
-                )
-
-            step_records.append(
-                ChildRunRecord(
-                    slot=index,
-                    instance_id=step.instance_id,
-                    full_name=step.full_name,
-                    run_id=result.run_id,
-                )
-            )
+            result = step.invoke(running_inputs)
             step_results.append(result)
-            running_result = result
 
-        resolved_return_step = self._resolve_step_index(self._return_index)
-        returned_result = step_results[resolved_return_step]
+            if index < len(self._steps) - 1:
+                if not isinstance(result.result, Mapping):
+                    raise ValidationError(
+                        f"{self.full_name}: step {index} ({step.full_name}) returned "
+                        f"non-mapping result ({type(result.result)!r}); only the "
+                        f"final step's result may be a non-mapping type"
+                    )
+                running_inputs = result.result
 
-        metadata = SequentialFlowRunMetadata(
-            step_records=tuple(step_records),
-            return_child_index=resolved_return_step,
-            return_child_run_id=step_records[resolved_return_step].run_id,
-        )
-        return metadata, returned_result
+        return step_results[self._return_index].result, {
+            "step_runs": tuple(r.run_id for r in step_results),
+            "return_index": self._return_index,
+        }
 
-    async def _async_run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[SequentialFlowRunMetadata, Mapping[str, Any]]:
+    async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
         """Asynchronously execute all configured steps and return the selected step result."""
-        if not self._steps:
-            raise ValidationError(
-                f"{self.full_name}: cannot execute an empty SequentialFlow"
-            )
-
-        running_result: Mapping[str, Any] = inputs
-        step_records: list[ChildRunRecord] = []
-        step_results: list[FlowResultDict] = []
+        running_inputs: Mapping[str, Any] = inputs
+        step_results = []
 
         for index, step in enumerate(self._steps):
             logger.info(
@@ -317,34 +276,22 @@ class SequentialFlow(Workflow[SequentialFlowRunMetadata]):
                 index,
                 step.full_name,
             )
-            result = await step.async_invoke(running_result)
-
-            if not isinstance(result, FlowResultDict):
-                raise ValidationError(
-                    f"{self.full_name}: async step {index} ({step.full_name}) returned "
-                    f"{type(result)!r}, expected FlowResultDict"
-                )
-
-            step_records.append(
-                ChildRunRecord(
-                    slot=index,
-                    instance_id=step.instance_id,
-                    full_name=step.full_name,
-                    run_id=result.run_id,
-                )
-            )
+            result = await step.async_invoke(running_inputs)
             step_results.append(result)
-            running_result = result
 
-        resolved_return_step = self._resolve_step_index(self._return_index)
-        returned_result = step_results[resolved_return_step]
+            if index < len(self._steps) - 1:
+                if not isinstance(result.result, Mapping):
+                    raise ValidationError(
+                        f"{self.full_name}: async step {index} ({step.full_name}) returned "
+                        f"non-mapping result ({type(result.result)!r}); only the "
+                        f"final step's result may be a non-mapping type"
+                    )
+                running_inputs = result.result
 
-        metadata = SequentialFlowRunMetadata(
-            step_records=tuple(step_records),
-            return_child_index=resolved_return_step,
-            return_child_run_id=step_records[resolved_return_step].run_id,
-        )
-        return metadata, returned_result
+        return step_results[self._return_index].result, {
+            "step_runs": tuple(r.run_id for r in step_results),
+            "return_index": self._return_index,
+        }
 
     # ------------------------------------------------------------------ #
     # Serialization

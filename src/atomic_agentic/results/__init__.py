@@ -20,7 +20,7 @@ from .tools import ToolResult
 from .workflows import (
     WorkflowResult,
     BasicFlowResult,
-    SequentialWorkflowResult,
+    SequentialFlowResult,
     RoutingWorkflowResult,
     IterativeWorkflowResult,
     ParallelWorkflowResult,
@@ -44,7 +44,7 @@ __all__ = [
     "AgentResult",
     "WorkflowResult",
     "BasicFlowResult",
-    "SequentialWorkflowResult",
+    "SequentialFlowResult",
     "RoutingWorkflowResult",
     "IterativeWorkflowResult",
     "ParallelWorkflowResult",

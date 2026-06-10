@@ -1,13 +1,13 @@
-
 """
-03_SequentialFlow.py
+02_SequentialFlow.py
 
 Beginner-friendly SequentialFlow example.
-Each step is a StructuredInvokable (schema-wrapped Tool), ensuring clear data flow and output contracts.
+Step 1 wraps a tuple-returning function in StructuredInvokable to adapt it
+into a mapping-shaped result. Steps 2 and 3 are plain Tools whose functions
+already return dicts with the keys the next step (or the caller) expects.
 """
 
 from __future__ import annotations
-
 
 from pprint import pprint
 
@@ -16,45 +16,23 @@ from atomic_agentic import StructuredInvokable
 from atomic_agentic.tools import Tool
 
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Plain callables (toolified into Tools)
-# ───────────────────────────────────────────────────────────────────────────────
-
-
 def add_and_carry(x: int, y: int, factor: int = 10) -> tuple[int, int]:
     """Step 1: Add x + y, carry forward 'factor'"""
-    return x + y, factor
+    return {"value": x + y, "factor": factor}
 
-def multiply(value: int, factor: int) -> int:
-    """Step 2: Multiply value by factor"""
-    return value * factor
+def multiply(value: int, factor: int) -> dict:
+    """Step 2: Multiply value by factor, return as a dict"""
+    return {"value": value * factor}
 
-def to_message(value: int) -> str:
-    """Step 3: Format value as a message"""
-    return f"Final computed value = {value}"
-
+def to_message(value: int) -> dict:
+    """Step 3: Format value as a message dict"""
+    return {"message": f"Final computed value = {value}"}
 
 
 def main() -> None:
-    # Wrap each function as a Tool, then as a StructuredInvokable with explicit output schema
-    step1 = StructuredInvokable(
-        component=Tool(add_and_carry),
-        name="add_and_carry",
-        description="Add x+y and carry factor forward",
-        output_schema=["value", "factor"]
-    )
-    step2 = StructuredInvokable(
-        component=Tool(multiply),
-        name="multiply",
-        description="Multiply value by factor",
-        output_schema=["value"]
-    )
-    step3 = StructuredInvokable(
-        component=Tool(to_message),
-        name="to_message",
-        description="Format value as a message",
-        output_schema=["message"]
-    )
+    step1 = Tool(add_and_carry)
+    step2 = Tool(multiply)
+    step3 = Tool(to_message)
 
     flow = SequentialFlow(
         name="demo_sequential",
@@ -66,19 +44,27 @@ def main() -> None:
     inputs = {"x": 2, "y": 3}
     final_result = flow.invoke(inputs)
 
-    print("\n=== Final packaged result ===")
-    pprint(dict(final_result))
+    print("\n=== Final result ===")
+    pprint(final_result.result)
 
     print("\n=== SequentialFlow run_id ===")
     print(final_result.run_id)
+
+    print("\n=== step_runs / return_index ===")
+    print("step_runs:", final_result.step_runs)
+    print("return_index:", final_result.return_index)
+
+    print("\n=== Per-step results (get_step_results) ===")
+    for i, step_result in enumerate(flow.get_step_results(final_result.run_id)):
+        print(f"Step {i}: run_id={step_result.run_id}, result={step_result.result}")
 
     print("\n=== Checkpoints ===")
     for i, step in enumerate(flow.steps):
         print(f"\nStep {i}: {step.component.name}")
         for ckpt in step.checkpoints:
-            print(f"  run_id: {ckpt.run_id}")
+            print(f"  run_id: {ckpt.result.run_id}")
             print(f"  inputs: {ckpt.inputs}")
-            print(f"  result: {dict(ckpt.result)}")
+            print(f"  result: {ckpt.result.result}")
 
     print("\nAll steps and outputs complete.")
 
