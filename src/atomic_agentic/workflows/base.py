@@ -5,38 +5,23 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any, Dict, Generic, Optional
-from uuid import uuid4
+from typing import Any, Dict, Optional
 
-from ..core.Exceptions import ExecutionError, ValidationError
+from ..core.Exceptions import ExecutionError
 from ..core.Invokable import AtomicInvokable
 from ..core.Parameters import ParamSpec
-from .metadata import M, WorkflowCheckpoint, WorkflowRunMetadata
+from ..results.workflows import WorkflowResult
+from .metadata import WorkflowCheckpoint
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "FlowResultDict",
     "WorkflowCheckpoint",
     "Workflow",
 ]
 
 
-class FlowResultDict(dict[str, Any]):
-    """Dict-like workflow result carrying a non-item ``run_id`` attribute."""
-
-    __slots__ = ("run_id",)
-
-    def __init__(self, *args: Any, run_id: str, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.run_id = run_id
-
-    def copy(self) -> FlowResultDict:
-        """Return a shallow copy preserving ``run_id``."""
-        return type(self)(self, run_id=self.run_id)
-
-
-class Workflow(AtomicInvokable, ABC, Generic[M]):
+class Workflow(AtomicInvokable, ABC):
     """
     Base workflow primitive focused on orchestration and checkpointing.
 
@@ -44,11 +29,12 @@ class Workflow(AtomicInvokable, ABC, Generic[M]):
     --------
     - Inputs are dict-first and filtered through ``AtomicInvokable.filter_inputs()``.
     - Subclasses implement ``_run()`` and may optionally override ``_async_run()``.
-    - Both run hooks must return ``(metadata, result)`` where:
-        * ``metadata`` is a typed ``WorkflowRunMetadata`` record
-        * ``result`` is a mapping
-    - Public ``invoke()`` / ``async_invoke()`` wrap the final mapping in
-      ``FlowResultDict`` and record a checkpoint.
+    - Both run hooks must return ``(payload, result_kwargs)`` where:
+        * ``payload`` is the caller-facing result value (any type)
+        * ``result_kwargs`` is a dict of per-kind extra fields forwarded to
+          the result subclass constructor via ``make_result()``
+    - Public ``invoke()`` / ``async_invoke()`` wrap the payload in a
+      ``WorkflowResult``-family envelope and record a ``WorkflowCheckpoint``.
     """
 
     def __init__(
@@ -56,6 +42,7 @@ class Workflow(AtomicInvokable, ABC, Generic[M]):
         name: str,
         description: str,
         parameters: list[ParamSpec],
+        return_type: str,
         *,
         filter_extraneous_inputs: bool = True,
     ) -> None:
@@ -63,195 +50,157 @@ class Workflow(AtomicInvokable, ABC, Generic[M]):
             name=name,
             description=description,
             parameters=parameters,
-            return_type="FlowResultDict[str, Any]",
+            return_type=return_type,
             filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
-        self._checkpoints: list[WorkflowCheckpoint[M]] = []
+        self._checkpoints: list[WorkflowCheckpoint] = []
 
     # ------------------------------------------------------------------ #
     # Checkpoint properties
     # ------------------------------------------------------------------ #
     @property
-    def checkpoints(self) -> list[WorkflowCheckpoint[M]]:
+    def checkpoints(self) -> list[WorkflowCheckpoint]:
         """Return a shallow copy of recorded checkpoints."""
         return list(self._checkpoints)
-
-    @property
-    def latest_run(self) -> Optional[str]:
-        """Return the most recent checkpoint run id, if any."""
-        return self._checkpoints[-1].run_id if self._checkpoints else None
 
     # ------------------------------------------------------------------ #
     # Subclass run hooks
     # ------------------------------------------------------------------ #
     @abstractmethod
-    def _run(self, inputs: Mapping[str, Any]) -> tuple[M, Mapping[str, Any]]:
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
         """
         Execute the workflow's core synchronous logic.
 
         Returns
         -------
-        tuple[M, Mapping[str, Any]]
-            ``(metadata, result)`` where:
-            - ``metadata`` is the typed checkpoint metadata for this run
-            - ``result`` is the final mapping-shaped workflow output
+        tuple[Any, dict[str, Any]]
+            ``(payload, result_kwargs)`` where:
+            - ``payload`` is the caller-facing workflow output (any type)
+            - ``result_kwargs`` is a plain dict of per-kind extra fields
+              forwarded to the ``WorkflowResult`` subclass constructor
         """
         raise NotImplementedError
 
     async def _async_run(
         self,
         inputs: Mapping[str, Any],
-    ) -> tuple[M, Mapping[str, Any]]:
-        """
-        Default async compatibility wrapper around ``_run()``.
-
-        Subclasses with true native async orchestration should override this.
-        """
+    ) -> tuple[Any, dict[str, Any]]:
+        """Default async compatibility wrapper around ``_run()``."""
         return await asyncio.to_thread(self._run, inputs)
 
     # ------------------------------------------------------------------ #
-    # Validation / normalization helpers
+    # Result construction
     # ------------------------------------------------------------------ #
-    def _normalize_run_output(
+    def make_result(
         self,
-        *,
-        metadata: M,
-        result: Mapping[str, Any],
-        run_id: str,
-    ) -> tuple[M, FlowResultDict]:
-        """
-        Snapshot validated run outputs into stable base-owned containers.
-        """
-        if not isinstance(metadata, WorkflowRunMetadata):
-            raise ValidationError(
-                f"{type(self).__name__}._run returned invalid metadata type: {type(metadata)!r}"
-            )
-
-        if not isinstance(result, Mapping):
-            raise ValidationError(
-                f"{type(self).__name__}._run returned non-mapping result: {type(result)!r}"
-            )
-
-        result_dict = FlowResultDict(dict(result), run_id=run_id)
-        return metadata, result_dict
-
-    def _checkpoint(
-        self,
-        *,
-        run_id: str,
+        result: Any,
         started_at: datetime,
         ended_at: datetime,
-        inputs: Mapping[str, Any],
-        result: Mapping[str, Any],
-        metadata: M,
-    ) -> WorkflowCheckpoint[M]:
-        """
-        Construct and append one checkpoint record.
+        **result_kwargs: Any,
+    ) -> WorkflowResult:
+        """Construct a WorkflowResult envelope for this workflow's invocation.
 
-        This is base-owned and shared by sync + async invoke paths.
+        Subclasses override this to fix their own ``result_cls``. This base
+        override is required — without it the fallback is
+        ``AtomicInvokable.make_result()`` which hardcodes ``result_cls=AtomicResult``.
         """
-        checkpoint = WorkflowCheckpoint(
-            run_id=run_id,
+        return self._make_result(
+            result=result,
             started_at=started_at,
             ended_at=ended_at,
-            elapsed_s=(ended_at - started_at).total_seconds(),
-            inputs=dict(inputs),
-            result=dict(result),
-            metadata=metadata,
+            result_cls=WorkflowResult,
+            **result_kwargs,
         )
-        self._checkpoints.append(checkpoint)
-        return checkpoint
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    def get_checkpoint(self, run_id: str) -> Optional[WorkflowCheckpoint[M]]:
-        """Return the checkpoint matching the given run id, if any."""
+    def get_checkpoint(
+        self, key: int | str | WorkflowResult
+    ) -> Optional[WorkflowCheckpoint]:
+        """Return the checkpoint matching the given key.
+
+        Parameters
+        ----------
+        key:
+            - ``int`` — positional index into the checkpoint list. Raises
+              ``IndexError`` naturally for out-of-range access.
+            - ``WorkflowResult`` — identity match on ``checkpoint.result``.
+              Returns the first match or ``None``.
+            - ``str`` — run id match on ``checkpoint.result.run_id``.
+              Returns the first match or ``None``.
+        """
+        if isinstance(key, int):
+            return self._checkpoints[key]
+        if isinstance(key, WorkflowResult):
+            for checkpoint in self._checkpoints:
+                if checkpoint.result is key:
+                    return checkpoint
+            return None
         for checkpoint in self._checkpoints:
-            if checkpoint.run_id == run_id:
+            if checkpoint.result.run_id == key:
                 return checkpoint
         return None
 
-    def invoke(self, inputs: Mapping[str, Any]) -> FlowResultDict:
-        """
-        Synchronously invoke the workflow.
-
-        Lifecycle
-        ---------
-        1. Filter inputs.
-        2. Record timing + run id.
-        3. Execute ``_run()``.
-        4. Normalize metadata/result.
-        5. Record checkpoint.
-        6. Return ``FlowResultDict``.
-        """
+    def invoke(self, inputs: Mapping[str, Any]) -> WorkflowResult:
+        """Synchronously invoke the workflow."""
         with self._invoke_lock:
             logger.info("[%s started]", self.full_name)
 
-            filtered_inputs = self.filter_inputs(inputs)
             started_at = datetime.now(timezone.utc)
-            run_id = uuid4().hex
+            filtered_inputs = self.filter_inputs(inputs)
 
             try:
-                metadata, result = self._run(filtered_inputs)
+                payload, result_kwargs = self._run(filtered_inputs)
             except Exception as exc:
-                raise ExecutionError(f"{type(self).__name__}._run failed: {exc}") from exc
-
-            metadata_obj, flow_result = self._normalize_run_output(
-                metadata=metadata,
-                result=result,
-                run_id=run_id,
-            )
+                raise ExecutionError(
+                    f"{type(self).__name__}._run failed: {exc}"
+                ) from exc
 
             ended_at = datetime.now(timezone.utc)
-            self._checkpoint(
-                run_id=run_id,
+            workflow_result = self.make_result(
+                result=payload,
                 started_at=started_at,
                 ended_at=ended_at,
-                inputs=filtered_inputs,
-                result=flow_result,
-                metadata=metadata_obj,
+                **result_kwargs,
+            )
+
+            self._checkpoints.append(
+                WorkflowCheckpoint(result=workflow_result, inputs=dict(filtered_inputs))
             )
 
             logger.info("[%s finished]", self.full_name)
-            return flow_result
+            return workflow_result
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> FlowResultDict:
-        """
-        Asynchronously invoke the workflow.
-
-        This mirrors ``invoke()`` but dispatches through ``_async_run()``.
-        """
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> WorkflowResult:
+        """Asynchronously invoke the workflow."""
         logger.info("[Async %s started]", self.full_name)
 
-        filtered_inputs = self.filter_inputs(inputs)
         started_at = datetime.now(timezone.utc)
-        run_id = uuid4().hex
+        filtered_inputs = self.filter_inputs(inputs)
 
         try:
-            metadata, result = await self._async_run(filtered_inputs)
+            payload, result_kwargs = await self._async_run(filtered_inputs)
         except Exception as exc:
-            raise ExecutionError(f"{type(self).__name__}._async_run failed") from exc
-
-        metadata_obj, flow_result = self._normalize_run_output(
-            metadata=metadata,
-            result=result,
-            run_id=run_id,
-        )
+            raise ExecutionError(
+                f"{type(self).__name__}._async_run failed: {exc}"
+            ) from exc
 
         ended_at = datetime.now(timezone.utc)
-        self._checkpoint(
-            run_id=run_id,
+        workflow_result = self.make_result(
+            result=payload,
             started_at=started_at,
             ended_at=ended_at,
-            inputs=filtered_inputs,
-            result=flow_result,
-            metadata=metadata_obj,
+            **result_kwargs,
+        )
+
+        self._checkpoints.append(
+            WorkflowCheckpoint(result=workflow_result, inputs=dict(filtered_inputs))
         )
 
         logger.info("[Async %s finished]", self.full_name)
-        return flow_result
+        return workflow_result
 
     # ------------------------------------------------------------------ #
     # Memory / serialization
@@ -261,16 +210,14 @@ class Workflow(AtomicInvokable, ABC, Generic[M]):
         self._checkpoints.clear()
 
     def to_dict(self) -> Dict[str, Any]:
-        """
-        Minimal diagnostic snapshot.
-
-        Checkpoints are intentionally omitted here to keep the base snapshot light.
-        """
+        """Minimal diagnostic snapshot."""
         data = super().to_dict()
         data.update(
             {
                 "checkpoint_count": len(self._checkpoints),
-                "runs": [checkpoint.run_id for checkpoint in self._checkpoints],
+                "runs": [
+                    checkpoint.result.run_id for checkpoint in self._checkpoints
+                ],
             }
         )
         return data

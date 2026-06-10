@@ -1,35 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Generic, TypeVar, ClassVar
+from dataclasses import dataclass
+from typing import Any, ClassVar
 
-from ..results.workflows import WorkflowResult
-from ..core.constants import NO_VAL
+from .atomic import AtomicResult
 
 __all__ = [
-    "WorkflowRunMetadata",
     "ChildRunRecord",
     "OutputTopology",
     "IterationRecord",
-    "BasicFlowRunMetadata",
-    "SequentialFlowRunMetadata",
-    "RoutingFlowRunMetadata",
-    "IterativeFlowRunMetadata",
-    "ParallelFlowRunMetadata",
-    "WorkflowCheckpoint",
+    "WorkflowResult",
+    "BasicFlowResult",
+    "SequentialWorkflowResult",
+    "RoutingWorkflowResult",
+    "IterativeWorkflowResult",
+    "ParallelWorkflowResult",
 ]
 
 
-@dataclass(frozen=True, slots=True)
-class WorkflowRunMetadata:
-    """Marker base class for typed workflow checkpoint metadata.
-
-    Concrete workflow metadata records may define their own discriminator fields
-    when useful, but the base workflow runtime only requires metadata objects to
-    be instances of this base class.
-    """
-
+# ------------------------------------------------------------------ #
+# Value types (used as fields on WorkflowResult subclasses)
+# ------------------------------------------------------------------ #
 
 @dataclass(frozen=True, slots=True)
 class ChildRunRecord:
@@ -91,48 +82,62 @@ class IterationRecord:
     judge_decision: bool
 
 
+# ------------------------------------------------------------------ #
+# WorkflowResult hierarchy
+# ------------------------------------------------------------------ #
+
 @dataclass(frozen=True, slots=True)
-class BasicFlowRunMetadata(WorkflowRunMetadata):
-    """Typed metadata for a BasicFlow wrapper run.
+class WorkflowResult(AtomicResult):
+    """Base successful Workflow invocation result."""
 
-    BasicFlow records only the delegated child's identity and, when that child is
-    itself a Workflow, the child workflow run id that can be used to inspect the
-    child's own checkpoint history.
 
-    For non-workflow AtomicInvokable children, ``child_run_id`` is ``NO_VAL``.
-    A later AtomicResult integration can make run ids universal across all
-    AtomicInvokable children.
+@dataclass(frozen=True, slots=True)
+class BasicFlowResult(WorkflowResult):
+    """Result for a BasicFlow run.
+
+    ``result`` holds the unwrapped child payload (``child_result.result``),
+    not the child's AtomicResult envelope.
+
+    Fields
+    ------
+    child_id:
+        ``child_result.invoker_id`` — instance identifier of the wrapped
+        component that executed.
+    child_type:
+        ``type(component).__name__`` — the wrapped component's class name.
+    child_run_id:
+        ``child_result.run_id`` — run identifier of the wrapped component's
+        invocation, usable to correlate against the component's own history
+        (e.g. ``Agent._history`` or a child ``Workflow``'s checkpoints), when
+        the component retains one.
     """
 
-    child_is_workflow: bool
     child_id: str
-    child_run_id: str | Any = NO_VAL
+    child_type: str
+    child_run_id: str
 
 
 @dataclass(frozen=True, slots=True)
-class SequentialFlowRunMetadata(WorkflowRunMetadata):
-    """Typed metadata for a sequential workflow run."""
+class SequentialWorkflowResult(WorkflowResult):
+    """Result for a SequentialFlow run."""
 
     step_records: tuple[ChildRunRecord, ...]
-    return_child_index: int
     return_child_run_id: str
-    kind: str = field(default="sequential", init=False)
 
 
 @dataclass(frozen=True, slots=True)
-class RoutingFlowRunMetadata(WorkflowRunMetadata):
-    """Typed metadata for a routing workflow run."""
+class RoutingWorkflowResult(WorkflowResult):
+    """Result for a RoutingFlow run."""
 
-    router_run_id: str
-    router_instance_id: str
     chosen_index: int
     chosen_branch_record: ChildRunRecord
-    kind: str = field(default="routing", init=False)
+    router_run_id: str
+    router_instance_id: str
 
 
 @dataclass(frozen=True, slots=True)
-class IterativeFlowRunMetadata(WorkflowRunMetadata):
-    """Typed metadata for an iterative workflow run."""
+class IterativeWorkflowResult(WorkflowResult):
+    """Result for an IterativeFlow run."""
 
     iterations_completed: int
     max_iterations: int
@@ -141,24 +146,12 @@ class IterativeFlowRunMetadata(WorkflowRunMetadata):
     handoff_step_index: int
     evaluate_step_index: int
     iteration_records: tuple[IterationRecord, ...]
-    kind: str = field(default="iterative", init=False)
 
 
 @dataclass(frozen=True, slots=True)
-class ParallelFlowRunMetadata(WorkflowRunMetadata):
-    """Typed metadata for a parallel workflow run."""
+class ParallelWorkflowResult(WorkflowResult):
+    """Result for a ParallelFlow run."""
+
     branch_records: tuple[ChildRunRecord, ...]
     output_topology: OutputTopology
     output_count: int
-    kind: str = field(default="parallel", init=False)
-
-
-M = TypeVar("M", bound=WorkflowRunMetadata)
-
-
-@dataclass(frozen=True, slots=True)
-class WorkflowCheckpoint(Generic[M]):
-    """A single typed workflow invocation record."""
-
-    inputs: dict[str, Any]
-    result: WorkflowResult

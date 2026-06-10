@@ -17,9 +17,9 @@ from .llm import (
     TokenUsage,
 )
 from .tools import ToolResult
-from .workflow import (
+from .workflows import (
     WorkflowResult,
-    BasicWorkflowResult,
+    BasicFlowResult,
     SequentialWorkflowResult,
     RoutingWorkflowResult,
     IterativeWorkflowResult,
@@ -43,7 +43,7 @@ __all__ = [
     "LLMResult",
     "AgentResult",
     "WorkflowResult",
-    "BasicWorkflowResult",
+    "BasicFlowResult",
     "SequentialWorkflowResult",
     "RoutingWorkflowResult",
     "IterativeWorkflowResult",
