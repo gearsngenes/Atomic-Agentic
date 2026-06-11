@@ -29,3 +29,6 @@ src/atomic_agentic/*/__pycache__/
 
 # Ignore environment variable files
 .env
+
+# local workspace
+workspace/
