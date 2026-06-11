@@ -31,4 +31,4 @@ src/atomic_agentic/*/__pycache__/
 .env
 
 # local workspace
-workspace/
+.claude/
