@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Generic, TypeVar, ClassVar
+from typing import Any, Generic, TypeVar
 
 from ..results.workflows import WorkflowResult
 from ..core.constants import NO_VAL
@@ -10,13 +10,11 @@ from ..core.constants import NO_VAL
 __all__ = [
     "WorkflowRunMetadata",
     "ChildRunRecord",
-    "OutputTopology",
     "IterationRecord",
     "BasicFlowRunMetadata",
     "SequentialFlowRunMetadata",
     "RoutingFlowRunMetadata",
     "IterativeFlowRunMetadata",
-    "ParallelFlowRunMetadata",
     "WorkflowCheckpoint",
 ]
 
@@ -51,34 +49,6 @@ class ChildRunRecord:
     instance_id: str
     full_name: str
     run_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class OutputTopology:
-    """Resolved output projection description for a parallel workflow run.
-
-    Fields
-    ------
-    topology:
-        Effective outward arrangement mode. Expected current values are
-        typically ``"nested"`` or ``"flattened"``.
-    indices:
-        Ordered resolved child indices included in the outward projection.
-    names:
-        Output names used for nested projection, or ``None`` for flattened
-        projection.
-    duplicate_key_policy:
-        Duplicate-key behavior used for flattened projection, or ``None`` when
-        not applicable.
-    """
-
-    NESTED: ClassVar[str] = "nested"
-    FLATTENED: ClassVar[str] = "flattened"
-
-    topology: str
-    indices: tuple[int, ...]
-    names: tuple[str, ...] | None = None
-    duplicate_key_policy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,15 +112,6 @@ class IterativeFlowRunMetadata(WorkflowRunMetadata):
     evaluate_step_index: int
     iteration_records: tuple[IterationRecord, ...]
     kind: str = field(default="iterative", init=False)
-
-
-@dataclass(frozen=True, slots=True)
-class ParallelFlowRunMetadata(WorkflowRunMetadata):
-    """Typed metadata for a parallel workflow run."""
-    branch_records: tuple[ChildRunRecord, ...]
-    output_topology: OutputTopology
-    output_count: int
-    kind: str = field(default="parallel", init=False)
 
 
 M = TypeVar("M", bound=WorkflowRunMetadata)

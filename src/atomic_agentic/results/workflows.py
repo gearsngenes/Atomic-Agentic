@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar
 
 from .atomic import AtomicResult
 
 __all__ = [
     "ChildRunRecord",
-    "OutputTopology",
     "IterationRecord",
     "WorkflowResult",
     "BasicFlowResult",
     "SequentialFlowResult",
     "RoutingWorkflowResult",
     "IterativeWorkflowResult",
-    "ParallelWorkflowResult",
+    "ParallelFlowResult",
 ]
 
 
@@ -42,34 +40,6 @@ class ChildRunRecord:
     instance_id: str
     full_name: str
     run_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class OutputTopology:
-    """Resolved output projection description for a parallel workflow run.
-
-    Fields
-    ------
-    topology:
-        Effective outward arrangement mode. Expected current values are
-        typically ``"nested"`` or ``"flattened"``.
-    indices:
-        Ordered resolved child indices included in the outward projection.
-    names:
-        Output names used for nested projection, or ``None`` for flattened
-        projection.
-    duplicate_key_policy:
-        Duplicate-key behavior used for flattened projection, or ``None`` when
-        not applicable.
-    """
-
-    NESTED: ClassVar[str] = "nested"
-    FLATTENED: ClassVar[str] = "flattened"
-
-    topology: str
-    indices: tuple[int, ...]
-    names: tuple[str, ...] | None = None
-    duplicate_key_policy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,9 +131,23 @@ class IterativeWorkflowResult(WorkflowResult):
 
 
 @dataclass(frozen=True, slots=True)
-class ParallelWorkflowResult(WorkflowResult):
-    """Result for a ParallelFlow run."""
+class ParallelFlowResult(WorkflowResult):
+    """Result for a ParallelFlow run.
 
-    branch_records: tuple[ChildRunRecord, ...]
-    output_topology: OutputTopology
-    output_count: int
+    Fields
+    ------
+    branch_runs:
+        Tuple of child run ids, one per executed branch, in branch order.
+        ``branch_runs[i]`` corresponds to ``ParallelFlow.branches[i]`` and can
+        be used with ``branches[i].get_checkpoint(branch_runs[i])`` to
+        retrieve that branch's own checkpoint.
+    output_indices:
+        Tuple of branch indices, in projection order, whose payloads were
+        combined into ``result``. ``output_indices[k]`` indexes into
+        ``branch_runs``/``ParallelFlow.branches``. For ``output_type``
+        ``"list"``/``"tuple"``, this is the order of ``result``'s elements
+        (``result[k]`` came from branch ``output_indices[k]``).
+    """
+
+    branch_runs: tuple[str, ...]
+    output_indices: tuple[int, ...]
