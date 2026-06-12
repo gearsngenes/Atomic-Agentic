@@ -108,7 +108,7 @@ class SequentialFlow(Workflow):
         resolved_filter = (
             filter_extraneous_inputs
             if filter_extraneous_inputs is not None
-            else normalized_steps[0].filter_extraneous_inputs
+            else True
         )
 
         super().__init__(

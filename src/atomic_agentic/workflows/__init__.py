@@ -4,17 +4,17 @@ from .base import(
 from .basic import BasicFlow
 from .sequential import SequentialFlow
 from .parallel import ParallelFlow
+from .routing import RoutingFlow
 
-# Stopgap: IterativeFlow and RoutingFlow still reference the removed
-# FlowResultDict / Workflow[*RunMetadata] generic contract (pre-Phase-K).
-# Re-enable once they're migrated (K.4).
+# Stopgap: IterativeFlow still references the removed FlowResultDict /
+# Workflow[*RunMetadata] generic contract (pre-Phase-K). Re-enable once
+# it's migrated (K.4b).
 # from .iterative import IterativeFlow
-# from .routing import RoutingFlow
 
 __all__ = ["Workflow",
            "BasicFlow",
            "SequentialFlow",
            "ParallelFlow",
+           "RoutingFlow",
            # "IterativeFlow",
-           # "RoutingFlow",
            ]

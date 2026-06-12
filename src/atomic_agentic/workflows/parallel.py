@@ -84,7 +84,7 @@ class ParallelFlow(Workflow):
         resolved_filter = (
             filter_extraneous_inputs
             if filter_extraneous_inputs is not None
-            else normalized_branches[0].filter_extraneous_inputs
+            else True
         )
 
         resolved_output_type, resolved_indices, resolved_names, resolved_return_type = self._configure_output(

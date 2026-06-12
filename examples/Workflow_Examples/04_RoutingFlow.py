@@ -1,20 +1,18 @@
 """
-05_RoutingFlow.py
+04_RoutingFlow.py
 
 Beginner-friendly RoutingFlow example.
-Demonstrates routing support requests to different branches based on topic and urgency, with clear output and metadata inspection.
+Demonstrates routing support requests to different branches based on topic and urgency, with clear output and result inspection.
 """
 
 from __future__ import annotations
 from pprint import pprint
 from dotenv import load_dotenv
 from atomic_agentic.tools import Tool
-from atomic_agentic import StructuredInvokable
-from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.routing import RoutingFlow
 
 # ──────────────────────────────────────────────────────────────
-# Router function: returns the branch index to use
+# Router functions: return the selector used to pick a branch
 # ──────────────────────────────────────────────────────────────
 def choose_branch(topic: str, urgency: int = 0) -> int:
     """Return the branch index to use for the given request."""
@@ -24,6 +22,15 @@ def choose_branch(topic: str, urgency: int = 0) -> int:
     if any(word in normalized for word in ("bill", "refund", "payment", "invoice")):
         return 0  # billing path
     return 1  # general support path
+
+def choose_branch_key(topic: str, urgency: int = 0) -> str:
+    """Return the branch key to use for the given request."""
+    normalized = topic.strip().lower()
+    if urgency >= 8:
+        return "escalation"
+    if any(word in normalized for word in ("bill", "refund", "payment", "invoice")):
+        return "billing"
+    return "general"
 
 # ──────────────────────────────────────────────────────────────
 # Branch functions: each returns a string response
@@ -53,7 +60,7 @@ def handle_escalation(topic: str, urgency: int = 0) -> str:
     )
 
 # ──────────────────────────────────────────────────────────────
-# Build router tool and branch flows
+# Build router tools and branch tools
 # ──────────────────────────────────────────────────────────────
 router_tool = Tool(
     function=choose_branch,
@@ -62,56 +69,55 @@ router_tool = Tool(
     description="Return the branch index for the incoming support request.",
 )
 
-billing_branch = BasicFlow(
-    component=StructuredInvokable(
-        component=Tool(
-            function=handle_billing,
-            name="handle_billing",
-            namespace="support",
-            description="Handle billing-related issues.",
-        ),
-        name="billing_branch_component",
-        description="Structured billing branch output.",
-        output_schema=["response"],
-    )
+router_tool_by_key = Tool(
+    function=choose_branch_key,
+    name="choose_branch_key",
+    namespace="support",
+    description="Return the branch key for the incoming support request.",
 )
 
-general_branch = BasicFlow(
-    component=StructuredInvokable(
-        component=Tool(
-            function=handle_general_support,
-            name="handle_general_support",
-            namespace="support",
-            description="Handle general support issues.",
-        ),
-        name="general_branch_component",
-        description="Structured general support branch output.",
-        output_schema=["response"],
-    )
+billing_tool = Tool(
+    function=handle_billing,
+    name="handle_billing",
+    namespace="support",
+    description="Handle billing-related issues.",
 )
 
-escalation_branch = BasicFlow(
-    component=StructuredInvokable(
-        component=Tool(
-            function=handle_escalation,
-            name="handle_escalation",
-            namespace="support",
-            description="Handle urgent escalations.",
-        ),
-        name="escalation_branch_component",
-        description="Structured escalation branch output.",
-        output_schema=["response"],
-    )
+general_tool = Tool(
+    function=handle_general_support,
+    name="handle_general_support",
+    namespace="support",
+    description="Handle general support issues.",
+)
+
+escalation_tool = Tool(
+    function=handle_escalation,
+    name="handle_escalation",
+    namespace="support",
+    description="Handle urgent escalations.",
 )
 
 # ──────────────────────────────────────────────────────────────
-# Build the RoutingFlow
+# Build the RoutingFlows
 # ──────────────────────────────────────────────────────────────
+# List-configured branches: router returns an int index into branches.
 flow = RoutingFlow(
     name="support_router",
     description="Route support requests to one fixed branch based on router output.",
     router=router_tool,
-    branches=[billing_branch, general_branch, escalation_branch],
+    branches=[billing_tool, general_tool, escalation_tool],
+)
+
+# Dict-configured branches: router returns a key into branches.
+flow_by_key = RoutingFlow(
+    name="support_router_by_key",
+    description="Route support requests to one fixed branch keyed by router output.",
+    router=router_tool_by_key,
+    branches={
+        "billing": billing_tool,
+        "general": general_tool,
+        "escalation": escalation_tool,
+    },
 )
 
 # ──────────────────────────────────────────────────────────────
@@ -123,17 +129,29 @@ examples = [
     {"topic": "Production outage affecting all customers", "urgency": 10},
 ]
 
+print("\n########## List-configured branches (int selector) ##########")
 for i, payload in enumerate(examples, start=1):
     result = flow.invoke(payload)
     print(f"\n=== Run {i} ===")
     print("Inputs:", payload)
     print("Run ID:", result.run_id)
-    print("Selected index:", flow.get_router_decision(result.run_id))
-    print("Result:", dict(result))
-    checkpoint = flow.get_checkpoint(result.run_id)
-    if checkpoint is not None:
-        print("Checkpoint metadata:")
-        pprint(checkpoint.metadata)
+    print("Result:", result.result)
+    print("Selected index:", result.selected_key)
+    print("Chosen branch run:", result.chosen_branch_run)
+    print("Router run:", result.router_run_id)
+    print("Router decision:", flow.get_router_decision(result.run_id))
 
-print("\n=== Flow snapshot ===")
+print("\n########## Dict-configured branches (key selector) ##########")
+for i, payload in enumerate(examples, start=1):
+    result = flow_by_key.invoke(payload)
+    print(f"\n=== Run {i} ===")
+    print("Inputs:", payload)
+    print("Run ID:", result.run_id)
+    print("Result:", result.result)
+    print("Selected key:", result.selected_key)
+    print("Chosen branch run:", result.chosen_branch_run)
+    print("Router run:", result.router_run_id)
+    print("Router decision:", flow_by_key.get_router_decision(result.run_id))
+
+print("\n=== Flow snapshot (list-configured) ===")
 pprint(flow.to_dict())
