@@ -2,742 +2,414 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import replace
-from types import MethodType
 from typing import Any
 
 import pytest
 
 from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
+from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.core.constants import NO_VAL
+from atomic_agentic.results.workflows import RoutingFlowResult
 from atomic_agentic.tools.base import Tool
-from atomic_agentic.core.Invokable import AtomicInvokable, StructuredInvokable
-from atomic_agentic.workflows.base import FlowResultDict, Workflow
+from atomic_agentic.workflows.base import Workflow
 from atomic_agentic.workflows.basic import BasicFlow
-from atomic_agentic.workflows.metadata import WorkflowRunMetadata
 from atomic_agentic.workflows.routing import RoutingFlow
 
 
-def value_param() -> ParamSpec:
+def make_value_param() -> ParamSpec:
     return ParamSpec(
         name="value",
         index=0,
         kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-        type="Any",
-        default=NO_VAL,
+        type="int",
     )
 
 
-def return_mapping(value: Any) -> dict[str, Any]:
-    """Return a structured mapping."""
-    return {"value": value}
+class EchoWorkflow(Workflow):
+    """_run(inputs) -> ({**inputs, "branch": self._tag}, {})."""
 
-
-def raise_from_router(value: Any) -> int:
-    """Raise from a router tool."""
-    raise RuntimeError("router boom")
-
-
-def raise_from_branch(value: Any) -> dict[str, Any]:
-    """Raise from a branch tool."""
-    raise RuntimeError("branch boom")
-
-
-def make_router(
-    selection: Any,
-    *,
-    filter_extraneous_inputs: bool = True,
-    events: list[str] | None = None,
-) -> Tool:
-    def route_constant(value: Any) -> Any:
-        if events is not None:
-            events.append("router")
-        return selection
-
-    return Tool(
-        function=route_constant,
-        name="route_constant",
-        namespace="tests",
-        description="Return a constant branch selection.",
-        filter_extraneous_inputs=filter_extraneous_inputs,
-    )
-
-
-def make_value_router(*, filter_extraneous_inputs: bool = True) -> Tool:
-    def route_by_value(value: Any) -> int:
-        return 0 if value == "left" else 1
-
-    return Tool(
-        function=route_by_value,
-        name="route_by_value",
-        namespace="tests",
-        description="Route left-like values to branch 0 and everything else to branch 1.",
-        filter_extraneous_inputs=filter_extraneous_inputs,
-    )
-
-
-def make_raising_router() -> Tool:
-    return Tool(
-        function=raise_from_router,
-        name="raise_from_router",
-        namespace="tests",
-        description="Router that raises.",
-    )
-
-
-def make_raw_tool() -> Tool:
-    return Tool(
-        function=return_mapping,
-        name="return_mapping",
-        namespace="tests",
-        description="Return a mapping.",
-    )
-
-
-def make_structured_branch(
-    label: str,
-    *,
-    filter_extraneous_inputs: bool = True,
-    events: list[str] | None = None,
-) -> StructuredInvokable:
-    def branch(value: Any) -> dict[str, Any]:
-        if events is not None:
-            events.append(label)
-        return {"branch": label, "value": value}
-
-    tool = Tool(
-        function=branch,
-        name=f"branch_{label}",
-        namespace="tests",
-        description=f"Return the {label} branch result.",
-        filter_extraneous_inputs=filter_extraneous_inputs,
-    )
-    return StructuredInvokable(
-        component=tool,
-        output_schema=["branch", "value"],
-        name=f"structured_branch_{label}",
-        description=f"Structured {label} branch.",
-    )
-
-
-def make_raising_branch() -> StructuredInvokable:
-    tool = Tool(
-        function=raise_from_branch,
-        name="raise_from_branch",
-        namespace="tests",
-        description="Branch that raises.",
-    )
-    return StructuredInvokable(
-        component=tool,
-        output_schema=["branch", "value"],
-        name="structured_raising_branch",
-        description="Structured raising branch.",
-    )
-
-
-class RecordingBranchWorkflow(Workflow[WorkflowRunMetadata]):
     def __init__(
         self,
+        tag: str,
         *,
-        label: str,
         name: str | None = None,
+        description: str | None = None,
+        return_type: str = "dict[str, Any]",
         filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
-            name=name or f"recording_branch_{label}",
-            description=f"Recording branch {label}.",
-            parameters=[value_param()],
+            name=name or f"echo_{tag}",
+            description=description or f"Echo workflow {tag}.",
+            parameters=[make_value_param()],
+            return_type=return_type,
             filter_extraneous_inputs=filter_extraneous_inputs,
         )
-        self.label = label
-        self.run_inputs: list[dict[str, Any]] = []
-        self.async_run_inputs: list[dict[str, Any]] = []
+        self._tag = tag
 
-    def _run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
-        self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(), {
-            "branch": self.label,
-            "value": inputs["value"],
-        }
-
-    async def _async_run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
-        self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(), {
-            "branch": self.label,
-            "value": inputs["value"],
-        }
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {**inputs, "branch": self._tag}, {}
 
 
-def make_flow(
-    selection: Any = 0,
-    *,
-    router: Tool | None = None,
-    branches: list[Workflow | AtomicInvokable] | None = None,
-    filter_extraneous_inputs: bool | None = None,
-) -> RoutingFlow:
-    kwargs: dict[str, Any] = {}
-    if filter_extraneous_inputs is not None:
-        kwargs["filter_extraneous_inputs"] = filter_extraneous_inputs
+def make_branch(tag: str, **kwargs: Any) -> EchoWorkflow:
+    return EchoWorkflow(tag, **kwargs)
 
+
+def make_structured_router(selector: Any) -> StructuredInvokable:
+    """Router whose .invoke(inputs).result == selector (the raw selector)."""
+
+    def select(value: Any) -> Any:
+        return selector
+
+    tool = Tool(
+        function=select,
+        name="select_constant",
+        namespace="tests",
+        description="Return a constant selector.",
+    )
+    return StructuredInvokable(
+        component=tool,
+        output_schema=None,
+        name="structured_router",
+        description="Structured router returning a raw selector.",
+    )
+
+
+class RouterWorkflow(Workflow):
+    """_run(inputs) -> (selector, {}) — router whose raw result IS the selector."""
+
+    def __init__(self, selector: Any, *, raise_error: bool = False) -> None:
+        super().__init__(
+            name="router_workflow",
+            description="Router workflow returning a constant selector.",
+            parameters=[make_value_param()],
+            return_type="Any",
+            filter_extraneous_inputs=True,
+        )
+        self._selector = selector
+        self._raise_error = raise_error
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        if self._raise_error:
+            raise RuntimeError("router boom")
+        return self._selector, {}
+
+
+def make_router(selector: Any, **kwargs: Any) -> RouterWorkflow:
+    return RouterWorkflow(selector, **kwargs)
+
+
+class RaisingBranch(Workflow):
+    """_run(inputs) raises RuntimeError unconditionally."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="raising_branch",
+            description="Branch that always raises.",
+            parameters=[make_value_param()],
+            return_type="dict[str, Any]",
+            filter_extraneous_inputs=True,
+        )
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        raise RuntimeError("branch boom")
+
+
+class UnhashableSelectorRouter(Workflow):
+    """_run(inputs) -> ([1, 2], {}) — an unhashable selector."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="unhashable_router",
+            description="Router returning an unhashable selector.",
+            parameters=[make_value_param()],
+            return_type="Any",
+            filter_extraneous_inputs=True,
+        )
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return [1, 2], {}
+
+
+def make_list_routing_flow(selector: Any, **router_kwargs: Any) -> RoutingFlow:
     return RoutingFlow(
         name="routing_flow",
-        description="Routing flow under test.",
-        branches=branches
-        if branches is not None
-        else [make_structured_branch("left"), make_structured_branch("right")],
-        router=router if router is not None else make_router(selection),
-        **kwargs,
+        description="Routing test flow.",
+        branches=[make_branch("a"), make_branch("b"), make_branch("c")],
+        router=make_router(selector, **router_kwargs),
+    )
+
+
+def make_dict_routing_flow(selector: Any) -> RoutingFlow:
+    return RoutingFlow(
+        name="routing_flow",
+        description="Routing test flow.",
+        branches={"left": make_branch("left"), "right": make_branch("right")},
+        router=make_router(selector),
     )
 
 
 class TestRoutingFlowConstruction:
-    def test_constructor_rejects_non_list_branches(self) -> None:
-        with pytest.raises(TypeError, match="branches must be"):
-            RoutingFlow(
-                name="routing_flow",
-                description="Routing flow.",
-                branches=(make_structured_branch("left"),),  # type: ignore[arg-type]
-                router=make_router(0),
-            )
-
-    def test_constructor_rejects_empty_branches(self) -> None:
+    def test_branches_must_be_non_empty_list_tuple_or_dict(self) -> None:
         with pytest.raises(ValueError, match="branches must not be empty"):
             RoutingFlow(
-                name="routing_flow",
-                description="Routing flow.",
+                name="bad_flow",
+                description="Bad flow.",
                 branches=[],
                 router=make_router(0),
             )
 
-    def test_constructor_rejects_non_invokable_branch(self) -> None:
-        with pytest.raises(TypeError, match="Workflow or AtomicInvokable"):
+        with pytest.raises(TypeError, match="branches must be"):
             RoutingFlow(
-                name="routing_flow",
-                description="Routing flow.",
-                branches=[object()],  # type: ignore[list-item]
+                name="bad_flow",
+                description="Bad flow.",
+                branches="x",  # type: ignore[arg-type]
                 router=make_router(0),
             )
 
+    def test_list_branches_normalized_to_basic_flow(self) -> None:
+        component = make_structured_router(0)
+        flow = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
+            branches=[component, make_branch("b")],
+            router=make_router(0),
+        )
+
+        assert isinstance(flow.branches[0], BasicFlow)
+        assert flow.branches[0].component is component  # type: ignore[attr-defined]
+        assert isinstance(flow.branches[1], EchoWorkflow)
+
+    def test_dict_branches_normalized_per_value(self) -> None:
+        component = make_structured_router(0)
+        flow = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
+            branches={"a": component, "b": make_branch("b")},
+            router=make_router("a"),
+        )
+
+        assert isinstance(flow.branches["a"], BasicFlow)
+        assert flow.branches["a"].component is component  # type: ignore[attr-defined]
+        assert isinstance(flow.branches["b"], EchoWorkflow)
+
+    def test_router_normalized_workflow_kept_as_is_other_wrapped(self) -> None:
+        router = make_router(0)
+        flow = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
+            branches=[make_branch("a"), make_branch("b")],
+            router=router,
+        )
+        assert flow.router is router
+
+        component_router = make_structured_router(0)
+        flow2 = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
+            branches=[make_branch("a"), make_branch("b")],
+            router=component_router,
+        )
+        assert isinstance(flow2.router, BasicFlow)
+        assert flow2.router.component is component_router  # type: ignore[attr-defined]
+
     def test_constructor_rejects_non_atomic_router(self) -> None:
-        with pytest.raises(TypeError, match="router must be an AtomicInvokable"):
+        with pytest.raises(TypeError, match="Workflow or AtomicInvokable"):
             RoutingFlow(
-                name="routing_flow",
-                description="Routing flow.",
-                branches=[make_structured_branch("left")],
+                name="bad_flow",
+                description="Bad flow.",
+                branches=[make_branch("a"), make_branch("b")],
                 router=object(),  # type: ignore[arg-type]
             )
 
-    def test_constructor_preserves_workflow_branches(self) -> None:
-        left = RecordingBranchWorkflow(label="left")
-        right = RecordingBranchWorkflow(label="right")
-
-        flow = make_flow(branches=[left, right])
-
-        assert flow.branches == (left, right)
-
-    def test_constructor_wraps_structured_branches_in_basic_flow(self) -> None:
-        left = make_structured_branch("left")
-        right = make_structured_branch("right")
-
-        flow = make_flow(branches=[left, right])
-
-        assert all(isinstance(branch, BasicFlow) for branch in flow.branches)
-        assert flow.branches[0].component is left  # type: ignore[attr-defined]
-        assert flow.branches[1].component is right  # type: ignore[attr-defined]
-
-    def test_constructor_normalizes_router_to_basic_flow(self) -> None:
+    def test_parameters_default_to_router_parameters(self) -> None:
         router = make_router(0)
-
-        flow = make_flow(router=router)
-
-        assert isinstance(flow.router, BasicFlow)
-        assert isinstance(flow.router.component, StructuredInvokable)
-        assert flow.router.component.component is router
-
-    def test_router_structured_schema_is_branch_selection(self) -> None:
-        flow = make_flow(selection=0)
-        router_component = flow.router.component
-
-        assert isinstance(router_component, StructuredInvokable)
-        assert [spec.name for spec in router_component.output_schema] == [
-            "branch_selection"
-        ]
-
-    def test_constructor_uses_router_parameters_as_outer_parameters(self) -> None:
-        flow = make_flow(router=make_value_router())
-
-        assert flow.parameters == flow.router.parameters
-        assert [param.name for param in flow.parameters] == ["value"]
-
-    def test_constructor_inherits_router_filter_flag_by_default(self) -> None:
-        flow = make_flow(router=make_router(0, filter_extraneous_inputs=False))
-
-        assert flow.filter_extraneous_inputs is False
-
-    def test_constructor_allows_filter_flag_override(self) -> None:
-        flow = make_flow(
-            router=make_router(0, filter_extraneous_inputs=False),
-            filter_extraneous_inputs=True,
+        flow = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
+            branches=[make_branch("a"), make_branch("b")],
+            router=router,
         )
 
-        assert flow.filter_extraneous_inputs is True
+        assert flow.parameters == router.parameters
 
+    def test_return_type_is_shared_or_union_of_branch_return_types(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
+            branches=[make_branch("a"), make_branch("b")],
+            router=make_router(0),
+        )
+        assert flow.return_type == "dict[str, Any]"
 
-class TestRoutingFlowSyncInvoke:
-    def test_invoke_routes_to_branch_zero(self) -> None:
-        flow = make_flow(selection=0)
-
-        result = flow.invoke({"value": 10})
-
-        assert isinstance(result, FlowResultDict)
-        assert result == {"branch": "left", "value": 10}
-
-    def test_invoke_routes_to_branch_one(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
-
-        assert isinstance(result, FlowResultDict)
-        assert result == {"branch": "right", "value": 10}
-
-    def test_invoke_runs_router_before_branch(self) -> None:
-        events: list[str] = []
-        flow = make_flow(
-            router=make_router(1, events=events),
+        flow2 = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
             branches=[
-                make_structured_branch("left", events=events),
-                make_structured_branch("right", events=events),
+                make_branch("a", return_type="dict[str, Any]"),
+                make_branch("b", return_type="str"),
             ],
+            router=make_router(0),
         )
-
-        result = flow.invoke({"value": 10})
-
-        assert result == {"branch": "right", "value": 10}
-        assert events == ["router", "right"]
-
-    def test_invoke_runs_exactly_one_branch(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
-
-        assert result == {"branch": "right", "value": 10}
-        assert len(flow.branches[0].checkpoints) == 0
-        assert len(flow.branches[1].checkpoints) == 1
-
-    def test_selected_branch_receives_original_filtered_inputs(self) -> None:
-        left = RecordingBranchWorkflow(label="left")
-        right = RecordingBranchWorkflow(label="right")
-        flow = make_flow(selection=1, branches=[left, right])
-
-        result = flow.invoke({"value": 10, "extra": "ignored"})
-
-        assert result == {"branch": "right", "value": 10}
-        assert left.run_inputs == []
-        assert right.run_inputs == [{"value": 10}]
-
-    def test_router_result_is_not_handed_to_branch(self) -> None:
-        left = RecordingBranchWorkflow(label="left")
-        right = RecordingBranchWorkflow(label="right")
-        flow = make_flow(selection=1, branches=[left, right])
-
-        flow.invoke({"value": 10})
-
-        assert right.run_inputs == [{"value": 10}]
-        assert "branch_selection" not in right.run_inputs[0]
-
-    def test_invoke_returns_outer_flow_result_with_parent_run_id(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert isinstance(result, FlowResultDict)
-        assert result.run_id == flow.latest_run
-        assert result.run_id != metadata.router_run_id
-        assert result.run_id != metadata.chosen_branch_record.run_id
-
-    def test_parent_checkpoint_records_outer_inputs_and_selected_result(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10, "extra": "ignored"})
-        checkpoint = flow.get_checkpoint(result.run_id)
-
-        assert checkpoint is not None
-        assert checkpoint.inputs == {"value": 10}
-        assert checkpoint.result == {"branch": "right", "value": 10}
+        assert flow2.return_type == "dict[str, Any] | str"
 
 
-class TestRoutingFlowRouterDecisionValidation:
-    def test_run_raises_if_router_result_missing_branch_selection(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_flow(selection=0)
-        monkeypatch.setattr(
-            flow.router,
-            "invoke",
-            lambda inputs: FlowResultDict({"other": 0}, run_id="router_run"),
-        )
+class TestRoutingFlowSyncInvokeListBranches:
+    def test_invoke_routes_to_int_selected_branch(self) -> None:
+        flow = make_list_routing_flow(1)
 
-        with pytest.raises(ValidationError, match="branch_selection"):
-            flow._run({"value": 10})
+        result = flow.invoke({"value": 5})
 
-    def test_run_raises_if_branch_selection_is_string(self) -> None:
-        flow = make_flow(selection="1")
+        assert result.result == {"value": 5, "branch": "b"}
 
-        with pytest.raises(ValidationError, match="branch_selection must be an int"):
-            flow._run({"value": 10})
+    def test_routing_flow_result_fields(self) -> None:
+        flow = make_list_routing_flow(1)
 
-    def test_run_raises_if_branch_selection_is_none(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_flow(selection=0)
-        monkeypatch.setattr(
-            flow.router,
-            "invoke",
-            lambda inputs: FlowResultDict(
-                {"branch_selection": None},
-                run_id="router_run",
-            ),
-        )
+        result = flow.invoke({"value": 5})
 
-        with pytest.raises(ValidationError, match="branch_selection must be an int"):
-            flow._run({"value": 10})
+        assert isinstance(result, RoutingFlowResult)
+        assert result.selected_key == 1
+        assert result.chosen_branch_run == flow.branches[1].checkpoints[-1].result.run_id
+        assert isinstance(result.router_run_id, str)
 
-    def test_run_raises_if_branch_selection_is_negative(self) -> None:
-        flow = make_flow(selection=-1)
+    def test_get_router_decision_returns_raw_selector(self) -> None:
+        flow = make_list_routing_flow(1)
 
-        with pytest.raises(ValidationError, match="out of range"):
-            flow._run({"value": 10})
-
-    def test_run_raises_if_branch_selection_is_out_of_range(self) -> None:
-        flow = make_flow(selection=2)
-
-        with pytest.raises(ValidationError, match="out of range"):
-            flow._run({"value": 10})
-
-    def test_run_rejects_bool_branch_selection_intentionally_fails_until_patch(
-        self,
-    ) -> None:
-        flow = make_flow(selection=True)
-
-        with pytest.raises(ValidationError, match="branch_selection"):
-            flow._run({"value": 10})
-
-    def test_public_invoke_wraps_invalid_router_decision_as_execution_error(
-        self,
-    ) -> None:
-        flow = make_flow(selection="bad")
-
-        with pytest.raises(ExecutionError, match="_run failed"):
-            flow.invoke({"value": 10})
-
-
-class TestRoutingFlowMetadata:
-    def test_metadata_kind_is_routing(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.kind == "routing"
-
-    def test_metadata_records_router_run_id(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.router_run_id == flow.router.latest_run
-
-    def test_metadata_records_router_instance_id(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.router_instance_id == flow.router.instance_id
-
-    def test_metadata_records_chosen_index(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.chosen_index == 1
-
-    def test_metadata_chosen_branch_record_matches_selected_branch(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-        record = metadata.chosen_branch_record
-        selected_branch = flow.branches[1]
-
-        assert record.slot == 1
-        assert record.instance_id == selected_branch.instance_id
-        assert record.full_name == selected_branch.full_name
-        assert record.run_id == selected_branch.latest_run
-
-    def test_metadata_does_not_record_unchosen_branch(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.chosen_branch_record.slot == 1
-        assert len(flow.branches[0].checkpoints) == 0
-        assert len(flow.branches[1].checkpoints) == 1
-
-
-class TestRoutingFlowRetrieval:
-    def test_get_router_decision_returns_none_for_unknown_run(self) -> None:
-        flow = make_flow(selection=1)
-
-        assert flow.get_router_decision("missing") is None
-
-    def test_get_router_decision_returns_chosen_index(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
+        result = flow.invoke({"value": 5})
 
         assert flow.get_router_decision(result.run_id) == 1
 
-    def test_get_router_decision_raises_if_stored_metadata_decision_is_not_int(
-        self,
-    ) -> None:
-        flow = make_flow(selection=1)
-        result = flow.invoke({"value": 10})
-        checkpoint = flow.get_checkpoint(result.run_id)
-        assert checkpoint is not None
+    def test_get_router_decision_returns_none_for_unknown_run_id(self) -> None:
+        flow = make_list_routing_flow(1)
 
-        bad_metadata = replace(checkpoint.metadata, chosen_index="bad")  # type: ignore[arg-type]
-        flow._checkpoints[0] = replace(checkpoint, metadata=bad_metadata)  # type: ignore[attr-defined]
+        flow.invoke({"value": 5})
 
-        with pytest.raises(ValidationError, match="chosen_index"):
-            flow.get_router_decision(result.run_id)
-
-    def test_get_router_decision_after_multiple_runs_returns_per_run_decision(
-        self,
-    ) -> None:
-        flow = make_flow(router=make_value_router())
-
-        left = flow.invoke({"value": "left"})
-        right = flow.invoke({"value": "right"})
-
-        assert flow.get_router_decision(left.run_id) == 0
-        assert flow.get_router_decision(right.run_id) == 1
+        assert flow.get_router_decision("nope") is None
 
 
-class TestRoutingFlowAsyncInvoke:
-    def test_async_invoke_routes_to_branch_zero(self) -> None:
-        flow = make_flow(selection=0)
+class TestRoutingFlowSyncInvokeDictBranches:
+    def test_invoke_routes_to_dict_selected_branch(self) -> None:
+        flow = make_dict_routing_flow("right")
 
-        result = asyncio.run(flow.async_invoke({"value": 10}))
+        result = flow.invoke({"value": 5})
 
-        assert isinstance(result, FlowResultDict)
-        assert result == {"branch": "left", "value": 10}
+        assert result.result == {"value": 5, "branch": "right"}
+        assert result.selected_key == "right"
 
-    def test_async_invoke_routes_to_branch_one(self) -> None:
-        flow = make_flow(selection=1)
+    def test_dict_branch_selector_must_be_present_key(self) -> None:
+        flow = make_dict_routing_flow("missing")
 
-        result = asyncio.run(flow.async_invoke({"value": 10}))
+        with pytest.raises(ExecutionError, match="_run failed") as exc_info:
+            flow.invoke({"value": 5})
 
-        assert isinstance(result, FlowResultDict)
-        assert result == {"branch": "right", "value": 10}
+        assert isinstance(exc_info.value.__cause__, ValidationError)
+        assert "not among configured branch keys" in str(exc_info.value.__cause__)
 
-    def test_async_invoke_runs_exactly_one_branch(self) -> None:
-        flow = make_flow(selection=1)
+    def test_dict_branch_selector_must_be_hashable(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
+            branches={"left": make_branch("left"), "right": make_branch("right")},
+            router=UnhashableSelectorRouter(),
+        )
 
-        result = asyncio.run(flow.async_invoke({"value": 10}))
+        with pytest.raises(ExecutionError, match="_run failed") as exc_info:
+            flow.invoke({"value": 5})
 
-        assert result == {"branch": "right", "value": 10}
-        assert len(flow.branches[0].checkpoints) == 0
-        assert len(flow.branches[1].checkpoints) == 1
-
-    def test_async_selected_branch_receives_original_filtered_inputs(self) -> None:
-        left = RecordingBranchWorkflow(label="left")
-        right = RecordingBranchWorkflow(label="right")
-        flow = make_flow(selection=1, branches=[left, right])
-
-        result = asyncio.run(flow.async_invoke({"value": 10, "extra": "ignored"}))
-
-        assert result == {"branch": "right", "value": 10}
-        assert left.async_run_inputs == []
-        assert right.async_run_inputs == [{"value": 10}]
-
-    def test_async_metadata_records_router_and_chosen_branch(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = asyncio.run(flow.async_invoke({"value": 10}))
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-        selected_branch = flow.branches[1]
-
-        assert metadata.kind == "routing"
-        assert metadata.router_run_id == flow.router.latest_run
-        assert metadata.router_instance_id == flow.router.instance_id
-        assert metadata.chosen_index == 1
-        assert metadata.chosen_branch_record.run_id == selected_branch.latest_run
-
-    def test_async_invalid_router_decision_public_call_wraps_execution_error(
-        self,
-    ) -> None:
-        flow = make_flow(selection="bad")
-
-        with pytest.raises(ExecutionError, match="_async_run failed"):
-            asyncio.run(flow.async_invoke({"value": 10}))
+        assert isinstance(exc_info.value.__cause__, ValidationError)
+        assert "not a valid (hashable) branch key" in str(exc_info.value.__cause__)
 
 
 class TestRoutingFlowValidationAndErrors:
-    def test_run_raises_validation_error_if_router_returns_non_flow_result(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_flow(selection=0)
-        monkeypatch.setattr(flow.router, "invoke", lambda inputs: {"branch_selection": 0})
+    @pytest.mark.parametrize("make_flow", [make_list_routing_flow, make_dict_routing_flow])
+    def test_bool_selector_always_rejected(self, make_flow: Any) -> None:
+        flow = make_flow(True)
 
-        with pytest.raises(ValidationError, match="router returned"):
-            flow._run({"value": 10})
+        with pytest.raises(ExecutionError, match="_run failed") as exc_info:
+            flow.invoke({"value": 5})
 
-    def test_public_invoke_wraps_router_non_flow_result_as_execution_error(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_flow(selection=0)
-        monkeypatch.setattr(flow.router, "invoke", lambda inputs: {"branch_selection": 0})
+        assert isinstance(exc_info.value.__cause__, ValidationError)
+        assert "must not be a bool" in str(exc_info.value.__cause__)
 
-        with pytest.raises(ExecutionError, match="_run failed"):
-            flow.invoke({"value": 10})
+    def test_int_selector_out_of_range_for_list_branches(self) -> None:
+        flow = make_list_routing_flow(5)
 
-    def test_run_raises_validation_error_if_selected_branch_returns_non_flow_result(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_flow(selection=0)
-        monkeypatch.setattr(flow.branches[0], "invoke", lambda inputs: {"branch": "left"})
+        with pytest.raises(ExecutionError, match="_run failed") as exc_info:
+            flow.invoke({"value": 5})
 
-        with pytest.raises(ValidationError, match="selected branch"):
-            flow._run({"value": 10})
+        assert isinstance(exc_info.value.__cause__, ValidationError)
+        assert "out of range" in str(exc_info.value.__cause__)
 
-    def test_public_invoke_wraps_selected_branch_non_flow_result_as_execution_error(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_flow(selection=0)
-        monkeypatch.setattr(flow.branches[0], "invoke", lambda inputs: {"branch": "left"})
+    def test_non_int_selector_for_list_branches(self) -> None:
+        flow = make_list_routing_flow("x")
 
-        with pytest.raises(ExecutionError, match="_run failed"):
-            flow.invoke({"value": 10})
+        with pytest.raises(ExecutionError, match="_run failed") as exc_info:
+            flow.invoke({"value": 5})
 
-    def test_public_invoke_wraps_router_runtime_error_as_execution_error(self) -> None:
-        flow = make_flow(router=make_raising_router())
+        assert isinstance(exc_info.value.__cause__, ValidationError)
+        assert "must be an int, got" in str(exc_info.value.__cause__)
 
-        with pytest.raises(ExecutionError, match="_run failed"):
-            flow.invoke({"value": 10})
-
-    def test_public_invoke_wraps_selected_branch_runtime_error_as_execution_error(
-        self,
-    ) -> None:
-        flow = make_flow(selection=0, branches=[make_raising_branch(), make_structured_branch("right")])
-
-        with pytest.raises(ExecutionError, match="_run failed"):
-            flow.invoke({"value": 10})
-
-    def test_async_run_raises_validation_error_if_router_returns_non_flow_result(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_flow(selection=0)
-
-        async def bad_async_invoke(self: BasicFlow, inputs: Mapping[str, Any]) -> dict[str, int]:
-            return {"branch_selection": 0}
-
-        monkeypatch.setattr(
-            flow.router,
-            "async_invoke",
-            MethodType(bad_async_invoke, flow.router),
+    def test_router_invoke_failure_wrapped_as_execution_error(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
+            branches=[make_branch("a"), make_branch("b")],
+            router=make_router(0, raise_error=True),
         )
 
-        with pytest.raises(ValidationError, match="async router returned"):
-            asyncio.run(flow._async_run({"value": 10}))
+        with pytest.raises(ExecutionError, match="_run failed"):
+            flow.invoke({"value": 5})
 
-    def test_async_run_raises_validation_error_if_selected_branch_returns_non_flow_result(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_flow(selection=0)
-        branch = flow.branches[0]
-
-        async def bad_async_invoke(self: Workflow, inputs: Mapping[str, Any]) -> dict[str, str]:
-            return {"branch": "left"}
-
-        monkeypatch.setattr(
-            branch,
-            "async_invoke",
-            MethodType(bad_async_invoke, branch),
+    def test_chosen_branch_invoke_failure_wrapped_as_execution_error(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
+            branches=[RaisingBranch(), make_branch("b")],
+            router=make_router(0),
         )
 
-        with pytest.raises(ValidationError, match="async selected branch"):
-            asyncio.run(flow._async_run({"value": 10}))
+        with pytest.raises(ExecutionError, match="_run failed"):
+            flow.invoke({"value": 5})
 
-    def test_public_async_invoke_wraps_router_failure_as_execution_error(self) -> None:
-        flow = make_flow(router=make_raising_router())
+    def test_async_invoke_wraps_invalid_selector_as_execution_error(self) -> None:
+        flow = make_list_routing_flow(5)
+
+        with pytest.raises(ExecutionError, match="_async_run failed") as exc_info:
+            asyncio.run(flow.async_invoke({"value": 5}))
+
+        assert isinstance(exc_info.value.__cause__, ValidationError)
+
+    def test_async_invoke_wraps_branch_failure_as_execution_error(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            description="Routing test flow.",
+            branches=[RaisingBranch(), make_branch("b")],
+            router=make_router(0),
+        )
 
         with pytest.raises(ExecutionError, match="_async_run failed"):
-            asyncio.run(flow.async_invoke({"value": 10}))
-
-    def test_public_async_invoke_wraps_selected_branch_failure_as_execution_error(
-        self,
-    ) -> None:
-        flow = make_flow(selection=0, branches=[make_raising_branch(), make_structured_branch("right")])
-
-        with pytest.raises(ExecutionError, match="_async_run failed"):
-            asyncio.run(flow.async_invoke({"value": 10}))
+            asyncio.run(flow.async_invoke({"value": 5}))
 
 
 class TestRoutingFlowSerialization:
-    def test_to_dict_includes_router_snapshot(self) -> None:
-        flow = make_flow(selection=1)
+    def test_to_dict_includes_router_and_branches_list(self) -> None:
+        flow = make_list_routing_flow(1)
 
+        result = flow.invoke({"value": 5})
         data = flow.to_dict()
 
-        assert data["type"] == "RoutingFlow"
-        assert data["router"]["type"] == "BasicFlow"
-
-    def test_to_dict_includes_branch_snapshots(self) -> None:
-        flow = make_flow(selection=1)
-
-        data = flow.to_dict()
-
-        assert "branches" in data
-        assert len(data["branches"]) == 2
-        assert data["branches"][0]["type"] == "BasicFlow"
-        assert data["branches"][1]["type"] == "BasicFlow"
-
-    def test_to_dict_router_has_structured_branch_selection_component(self) -> None:
-        flow = make_flow(selection=1)
-
-        router_data = flow.to_dict()["router"]
-
-        assert router_data["component"]["type"] == "StructuredInvokable"
-        assert router_data["component"]["output_schema"][0]["name"] == "branch_selection"
-
-    def test_to_dict_after_run_includes_base_checkpoint_summary(self) -> None:
-        flow = make_flow(selection=1)
-
-        result = flow.invoke({"value": 10})
-        data = flow.to_dict()
-
+        assert data["router"] == flow.router.to_dict()
+        assert isinstance(data["branches"], list)
+        assert len(data["branches"]) == 3
         assert data["checkpoint_count"] == 1
         assert data["runs"] == [result.run_id]
-        assert "checkpoints" not in data
-        assert "router" in data
-        assert "branches" in data
+
+    def test_to_dict_includes_branches_dict_for_dict_branches(self) -> None:
+        flow = make_dict_routing_flow("right")
+
+        result = flow.invoke({"value": 5})
+        data = flow.to_dict()
+
+        assert isinstance(data["branches"], dict)
+        assert set(data["branches"].keys()) == {"left", "right"}
+        assert data["checkpoint_count"] == 1
+        assert data["runs"] == [result.run_id]

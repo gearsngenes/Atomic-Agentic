@@ -2,34 +2,26 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from types import MethodType
 from typing import Any
 
 import pytest
 
-from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
-from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.core.constants import NO_VAL
-from atomic_agentic.tools.base import Tool
+from atomic_agentic.core.Exceptions import ExecutionError
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.workflows.base import FlowResultDict, Workflow
+from atomic_agentic.core.Parameters import ParamSpec
+from atomic_agentic.results.workflows import BasicFlowResult
+from atomic_agentic.tools.base import Tool
+from atomic_agentic.workflows.base import Workflow
 from atomic_agentic.workflows.basic import BasicFlow
-from atomic_agentic.workflows.metadata import WorkflowRunMetadata
 
 
-def value_param() -> ParamSpec:
+def make_value_param() -> ParamSpec:
     return ParamSpec(
         name="value",
         index=0,
         kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-        type="Any",
-        default=NO_VAL,
+        type="int",
     )
-
-
-def return_mapping(value: Any) -> dict[str, Any]:
-    """Return a structured mapping."""
-    return {"value": value}
 
 
 def return_scalar(value: Any) -> Any:
@@ -56,7 +48,9 @@ def make_structured_component(
     )
 
 
-class EchoWorkflow(Workflow[WorkflowRunMetadata]):
+class EchoWorkflow(Workflow):
+    """Minimal Workflow: echoes ``inputs["value"]`` back as the payload."""
+
     def __init__(
         self,
         *,
@@ -67,25 +61,13 @@ class EchoWorkflow(Workflow[WorkflowRunMetadata]):
         super().__init__(
             name=name,
             description=description,
-            parameters=[value_param()],
+            parameters=[make_value_param()],
+            return_type="dict[str, Any]",
             filter_extraneous_inputs=filter_extraneous_inputs,
         )
-        self.run_inputs: list[dict[str, Any]] = []
-        self.async_run_inputs: list[dict[str, Any]] = []
 
-    def _run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
-        self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(), {"value": inputs["value"]}
-
-    async def _async_run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
-        self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(), {"value": inputs["value"]}
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"value": inputs["value"]}, {}
 
 
 class TestBasicFlowConstruction:
@@ -137,154 +119,109 @@ class TestBasicFlowConstruction:
 
 
 class TestBasicFlowStructuredChild:
-    def test_invoke_delegates_to_structured_child_and_returns_outer_flow_result(
-        self,
-    ) -> None:
+    def test_invoke_returns_basic_flow_result_with_child_payload(self) -> None:
         component = make_structured_component()
         flow = BasicFlow(component=component)
 
         result = flow.invoke({"value": 123})
 
-        assert isinstance(result, FlowResultDict)
-        assert result == {"value": 123}
-        assert result.run_id == flow.latest_run
-        assert len(flow.checkpoints) == 1
+        assert isinstance(result, BasicFlowResult)
+        assert result.result == {"value": 123}
 
-    def test_structured_child_metadata_records_child_identity(self) -> None:
+    def test_basic_flow_result_records_child_identity(self) -> None:
         component = make_structured_component()
         flow = BasicFlow(component=component)
 
         result = flow.invoke({"value": 123})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
 
-        assert metadata.child_is_workflow is False
-        assert metadata.child_id == component.instance_id
-        assert metadata.child_run_id is NO_VAL
+        assert result.child_id == component.instance_id
+        assert result.child_type == type(component).__name__
+        assert isinstance(result.child_run_id, str)
+        assert result.child_run_id != result.run_id
 
-    def test_structured_child_async_metadata_mirrors_sync_path(self) -> None:
+    def test_checkpoint_matches_returned_result(self) -> None:
+        component = make_structured_component()
+        flow = BasicFlow(component=component)
+
+        result = flow.invoke({"value": 123})
+
+        assert flow.checkpoints[-1].result is result
+        assert flow.checkpoints[-1].inputs == {"value": 123}
+
+    def test_async_invoke_returns_basic_flow_result_with_child_payload(self) -> None:
         component = make_structured_component()
         flow = BasicFlow(component=component)
 
         result = asyncio.run(flow.async_invoke({"value": 123}))
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
 
-        assert result == {"value": 123}
-        assert metadata.child_is_workflow is False
-        assert metadata.child_id == component.instance_id
-        assert metadata.child_run_id is NO_VAL
+        assert isinstance(result, BasicFlowResult)
+        assert result.result == {"value": 123}
+        assert result.child_id == component.instance_id
+        assert result.child_type == type(component).__name__
+        assert isinstance(result.child_run_id, str)
+        assert flow.checkpoints[-1].result is result
 
 
 class TestBasicFlowWorkflowChild:
-    def test_invoke_delegates_to_workflow_child_and_returns_outer_flow_result(
-        self,
-    ) -> None:
+    def test_invoke_delegates_to_workflow_component(self) -> None:
         child = EchoWorkflow()
         flow = BasicFlow(component=child)
 
-        result = flow.invoke({"value": 123})
+        result = flow.invoke({"value": 5})
 
-        assert isinstance(result, FlowResultDict)
-        assert result == {"value": 123}
-        assert child.run_inputs == [{"value": 123}]
-        assert len(child.checkpoints) == 1
-        assert len(flow.checkpoints) == 1
+        assert result.result == {"value": 5}
+        assert result.child_type == "EchoWorkflow"
+        assert result.child_run_id == child.checkpoints[-1].result.run_id
 
-    def test_workflow_child_metadata_records_child_run_id(self) -> None:
+    def test_async_invoke_delegates_to_workflow_component(self) -> None:
         child = EchoWorkflow()
         flow = BasicFlow(component=child)
 
-        result = flow.invoke({"value": 123})
-        child_result = child.checkpoints[0]
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
+        result = asyncio.run(flow.async_invoke({"value": 5}))
 
-        assert metadata.child_is_workflow is True
-        assert metadata.child_id == child.instance_id
-        assert metadata.child_run_id == child_result.run_id
-
-    def test_workflow_child_async_metadata_mirrors_sync_path(self) -> None:
-        child = EchoWorkflow()
-        flow = BasicFlow(component=child)
-
-        result = asyncio.run(flow.async_invoke({"value": 123}))
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert result == {"value": 123}
-        assert child.async_run_inputs == [{"value": 123}]
-        assert metadata.child_is_workflow is True
-        assert metadata.child_id == child.instance_id
-        assert metadata.child_run_id == child.checkpoints[0].run_id
+        assert result.result == {"value": 5}
+        assert result.child_type == "EchoWorkflow"
+        assert result.child_run_id == child.checkpoints[-1].result.run_id
 
 
 class TestBasicFlowValidationAndErrors:
-    def test_run_raises_validation_error_if_component_returns_non_mapping(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_invoke_wraps_component_exception_as_execution_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         component = make_structured_component()
         flow = BasicFlow(component=component)
 
-        monkeypatch.setattr(component, "invoke", lambda inputs: 123)
+        def raise_invoke(inputs: Mapping[str, Any]) -> Any:
+            raise RuntimeError("boom")
 
-        with pytest.raises(ValidationError, match="mapping-shaped result"):
-            flow._run({"value": 123})
-
-    def test_public_invoke_wraps_run_validation_error_as_execution_error(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        component = make_structured_component()
-        flow = BasicFlow(component=component)
-
-        monkeypatch.setattr(component, "invoke", lambda inputs: 123)
+        monkeypatch.setattr(component, "invoke", raise_invoke)
 
         with pytest.raises(ExecutionError, match="_run failed"):
             flow.invoke({"value": 123})
 
-    def test_async_run_raises_validation_error_if_component_returns_non_mapping(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_async_invoke_wraps_component_exception_as_execution_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         component = make_structured_component()
         flow = BasicFlow(component=component)
 
-        async def bad_async_invoke(self: StructuredInvokable, inputs: Mapping[str, Any]) -> int:
-            return 123
+        async def raise_async_invoke(inputs: Mapping[str, Any]) -> Any:
+            raise RuntimeError("boom")
 
-        monkeypatch.setattr(
-            component,
-            "async_invoke",
-            MethodType(bad_async_invoke, component),
-        )
+        monkeypatch.setattr(component, "async_invoke", raise_async_invoke)
 
-        with pytest.raises(ValidationError, match="mapping-shaped result"):
-            asyncio.run(flow._async_run({"value": 123}))
-
-    def test_build_metadata_rejects_plain_dict_result_from_workflow_child(self) -> None:
-        child = EchoWorkflow()
-        flow = BasicFlow(component=child)
-
-        with pytest.raises(ValidationError, match="expected FlowResultDict"):
-            flow._build_metadata({"value": 123})
+        with pytest.raises(ExecutionError, match="_async_run failed"):
+            asyncio.run(flow.async_invoke({"value": 123}))
 
 
 class TestBasicFlowSerialization:
-    def test_to_dict_includes_component_snapshot(self) -> None:
-        component = make_structured_component()
-        flow = BasicFlow(component=component)
-
-        data = flow.to_dict()
-
-        assert data["type"] == "BasicFlow"
-        assert data["component"]["type"] == "StructuredInvokable"
-        assert data["component"]["name"] == component.name
-
-    def test_to_dict_includes_base_checkpoint_summary_after_invocation(self) -> None:
+    def test_to_dict_includes_component_and_checkpoint_summary(self) -> None:
         component = make_structured_component()
         flow = BasicFlow(component=component)
 
         result = flow.invoke({"value": 123})
         data = flow.to_dict()
 
+        assert data["component"] == component.to_dict()
         assert data["checkpoint_count"] == 1
         assert data["runs"] == [result.run_id]
-        assert data["component"]["type"] == "StructuredInvokable"
