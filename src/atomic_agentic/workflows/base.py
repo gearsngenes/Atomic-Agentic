@@ -10,8 +10,9 @@ from typing import Any, Dict, Optional
 from ..core.Exceptions import ExecutionError
 from ..core.Invokable import AtomicInvokable
 from ..core.Parameters import ParamSpec
+from dataclasses import dataclass
+from typing import Any
 from ..results.workflows import WorkflowResult
-from .metadata import WorkflowCheckpoint
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,12 @@ __all__ = [
     "Workflow",
 ]
 
+@dataclass(frozen=True, slots=True)
+class WorkflowCheckpoint:
+    """A single workflow invocation record."""
+
+    inputs: dict[str, Any]
+    result: WorkflowResult
 
 class Workflow(AtomicInvokable, ABC):
     """
