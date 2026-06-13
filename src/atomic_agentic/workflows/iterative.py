@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, Optional
 
-from ..core.Invokable import AtomicInvokable, StructuredInvokable
-from .sequential import SequentialFlow
-from ..core.Exceptions import ValidationError
 from ..core.constants import NO_VAL
-from .base import FlowResultDict, Workflow
+from ..core.Exceptions import ValidationError
+from ..core.Invokable import AtomicInvokable
+from ..results.workflows import IterativeFlowResult, WorkflowResult
+from .base import Workflow
 from .basic import BasicFlow
-from .metadata import IterationRecord, IterativeFlowRunMetadata
+from .sequential import SequentialFlow
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["IterativeFlow"]
 
 
 def _always_false() -> bool:
@@ -31,84 +34,79 @@ def create_fallback_judge_tool():
     )
 
 
-
-class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
+class IterativeFlow(Workflow):
     """Repeat a fixed sequential body up to ``max_iterations``.
 
     Overview
     --------
     ``IterativeFlow`` is a composite workflow that repeatedly invokes a
     normalized sequential body. After each completed body run, a normalized
-    judge inspects one selected body-step result and decides whether the loop
-    should stop early.
+    judge inspects one selected body-step result; the loop exits early once
+    the judge's unwrapped result matches a configured approval value.
 
     Construction contract
-    ---------------------
+    ----------------------
     - ``body_steps`` must be a non-empty ``list[Workflow | AtomicInvokable]``.
     - The body is always normalized inline into a private ``SequentialFlow``.
     - The normalized loop body topology is fixed at construction.
     - The normalized loop body is exposed read-only via :attr:`loop_body`.
-    - ``judge`` accepts any ``AtomicInvokable`` or ``None`` at construction.
-    - Internally, the judge is always a normalized ``BasicFlow`` whose wrapped
-      component is a fresh ``StructuredInvokable`` exposing a single output key
-      named ``"judge_decision"``.
-    - Passing ``None`` installs a shared fallback always-false structured judge.
-    - ``return_index`` is proxied onto the loop body and controls which body
-      step result becomes the body workflow's outer result.
-    - ``handoff_index`` controls which body step result becomes the next
-      iteration's input.
-    - ``evaluate_index`` controls which body step result is passed to the judge.
+    - ``judge`` accepts any ``AtomicInvokable`` or ``None``:
+        - If ``None``, the shared fallback judge (always returns ``False``)
+          is installed, and ``approval_value`` must be left as ``NO_VAL``
+          (raises ``ValueError`` if a value is provided).
+        - Otherwise, the judge is normalized ``_normalize_branch``-style:
+          ``Workflow`` instances are kept as-is, other ``AtomicInvokable``
+          instances are wrapped once in ``BasicFlow``. In this case
+          ``approval_value`` must be provided (raises ``ValueError`` if it
+          is left as ``NO_VAL``).
+    - ``approval_value`` is fixed at construction (read-only thereafter).
+    - ``return_index``, ``handoff_index``, ``evaluate_index`` each default to
+      the last body step when ``None``. Explicit values support normal
+      negative indexing and are resolved once at construction; out-of-range
+      values raise ``IndexError``. All three are fixed thereafter (read-only).
 
     Judge contract
     --------------
-    At runtime, the normalized judge path must yield a mapping-shaped result
-    containing the single key ``"judge_decision"`` whose value must be a
-    ``bool``. If it does not, invocation raises ``ValidationError``.
+    At runtime, the normalized judge is invoked with the mapping-shaped
+    result of the configured ``evaluate_index`` body step. The loop exits
+    early once ``judge_result.result == approval_value``. Any value may be
+    used for ``approval_value`` as long as it supports ``==`` against the
+    judge's unwrapped result.
 
     Loop semantics
     --------------
     - Iteration 0 receives the outer workflow inputs.
     - The loop body executes *all* configured body steps on every iteration.
-    - The loop body's ``return_index`` determines the outer body result.
+    - The loop body's ``return_index`` determines this run's ``result``
+      payload (taken from the most recently completed iteration).
+    - ``evaluate_index`` determines which body step result is passed to the
+      judge.
     - ``handoff_index`` determines which body step result becomes the next
-      iteration's inputs.
-    - ``evaluate_index`` determines which body step result is passed to the judge.
-    - The loop stops early only when the judge decision is ``True``.
-    - Otherwise it continues until ``max_iterations`` is exhausted.
+      iteration's inputs. The handoff result is fetched and validated as
+      mapping-shaped on every iteration, including the last, regardless of
+      whether it is used.
+    - The loop stops early once the judge's result matches ``approval_value``.
+      Otherwise it continues until ``max_iterations`` is exhausted.
 
     Mutability notes
     ----------------
     - The loop body topology is fixed after construction.
-    - The judge is fixed after construction.
-    - This class does not re-expose any loop-body step mutation API.
-    - Only selection policy is mutable post-construction:
-      ``return_index``, ``handoff_index``, ``evaluate_index``, and ``max_iterations``.
+    - The judge and ``approval_value`` are fixed after construction.
+    - ``return_index``, ``handoff_index``, ``evaluate_index`` are fixed after
+      construction.
+    - Only ``max_iterations`` remains mutable post-construction.
 
-    Metadata
-    --------
-    Per-run metadata contains:
+    Result
+    ------
+    See ``IterativeFlowResult`` for per-run fields (``iteration_runs``,
+    ``judge_runs``, ``return_step_index``, ``handoff_step_index``,
+    ``evaluate_step_index``, ``max_iterations``).
 
-    - ``iterations_completed``:
-      Number of completed body iterations.
-    - ``max_iterations``:
-      Maximum number of iterations permitted for this run.
-    - ``judge_approved_early``:
-      ``True`` if the loop stopped early because the judge approved a body
-      iteration; ``False`` if the iteration bound was exhausted.
-    - ``return_step_index``:
-      Resolved absolute body-step index selected for the body return value.
-    - ``handoff_step_index``:
-      Resolved absolute body-step index selected for next-iteration inputs.
-    - ``evaluate_step_index``:
-      Resolved absolute body-step index selected for judge evaluation.
-    - ``iteration_records``:
-      ``tuple[IterationRecord, ...]`` where each record contains:
-        - ``iteration``: zero-based iteration number
-        - ``body_run_id``: loop-body workflow run id for that iteration
-        - ``judge_run_id``: judge workflow run id for that iteration
-        - ``judge_decision``: boolean decision for that iteration
+    Retrieval helpers
+    ------------------
+    - ``get_iteration_results(run_id)`` resolves, for each completed
+      iteration, the ``(body_result, judge_result)`` pair of result objects.
     """
-    JUDGE_DECISION = "judge_decision"
 
     def __init__(
         self,
@@ -118,9 +116,10 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         judge: AtomicInvokable | None = None,
         max_iterations: int = 1,
         *,
-        return_index: int = -1,
-        handoff_index: int = -1,
-        evaluate_index: int = -1,
+        return_index: Optional[int] = None,
+        handoff_index: Optional[int] = None,
+        evaluate_index: Optional[int] = None,
+        approval_value: Any = NO_VAL,
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         """Initialize the iterative workflow.
@@ -137,15 +136,25 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         judge:
             Optional judge invokable. Passing ``None`` installs the shared
             fallback always-false judge, causing the loop to continue until
-            ``max_iterations`` is exhausted unless another failure occurs.
+            ``max_iterations`` is exhausted (``approval_value`` must be left
+            as ``NO_VAL`` in that case).
         max_iterations:
             Maximum number of body iterations to execute per run. Must be > 0.
         return_index:
-            Loop-body return selection. This is proxied onto ``loop_body``.
+            Loop-body return selection, resolved once at construction.
+            Defaults to the last body step.
         handoff_index:
-            Body-step selection whose result becomes the next iteration inputs.
+            Body-step selection whose result becomes the next iteration's
+            inputs, resolved once at construction. Defaults to the last body
+            step.
         evaluate_index:
-            Body-step selection whose result is passed to the judge.
+            Body-step selection whose result is passed to the judge, resolved
+            once at construction. Defaults to the last body step.
+        approval_value:
+            Value compared (via ``==``) against the judge's unwrapped result
+            to determine early exit. Required (must not be ``NO_VAL``) when
+            an explicit ``judge`` is given; must be left as ``NO_VAL`` when
+            ``judge`` is ``None``.
         filter_extraneous_inputs:
             Optional outer workflow input-filter flag. When omitted, inherits
             from the normalized loop body.
@@ -164,16 +173,42 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
                     f"got {type(step)!r} at index {index}"
                 )
 
+        num_steps = len(body_steps)
+        resolved_return_index = self._resolve_body_step_index(return_index, num_steps)
+        resolved_handoff_index = self._resolve_body_step_index(handoff_index, num_steps)
+        resolved_evaluate_index = self._resolve_body_step_index(evaluate_index, num_steps)
+
         self._loop_body = SequentialFlow(
             name=f"{name}_loop_body",
             description=f"Normalized body for iterative workflow {name}",
             steps=body_steps,
-            return_index=return_index,
+            return_index=resolved_return_index,
         )
+        self._handoff_step_index = resolved_handoff_index
+        self._evaluate_step_index = resolved_evaluate_index
 
-        self.handoff_index = handoff_index
-        self.evaluate_index = evaluate_index
-        self.max_iterations = max_iterations
+        if not isinstance(max_iterations, int):
+            raise TypeError(f"max_iterations must be an int, got {type(max_iterations)!r}")
+        if max_iterations <= 0:
+            raise ValueError("max_iterations must be > 0")
+        self._max_iterations = max_iterations
+
+        if judge is None:
+            if approval_value is not NO_VAL:
+                raise ValueError(
+                    f"{name}: approval_value must be NO_VAL when judge is None; "
+                    f"got {approval_value!r}"
+                )
+            resolved_judge: AtomicInvokable = create_fallback_judge_tool()
+        else:
+            if approval_value is NO_VAL:
+                raise ValueError(
+                    f"{name}: approval_value must be provided when an explicit judge is given"
+                )
+            resolved_judge = judge
+
+        self._judge = self._normalize_judge(resolved_judge)
+        self._approval_value = approval_value
 
         resolved_filter = (
             filter_extraneous_inputs
@@ -185,30 +220,8 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
             name=name,
             description=description,
             parameters=self._loop_body.parameters,
+            return_type=self._loop_body.return_type,
             filter_extraneous_inputs=resolved_filter,
-        )
-        resolved_judge = judge if judge is not None else create_fallback_judge_tool()
-
-        if not isinstance(resolved_judge, AtomicInvokable):
-            raise TypeError(
-                f"judge must be an AtomicInvokable or None, got {type(resolved_judge)!r}"
-            )
-
-        structured_judge = StructuredInvokable(
-            component=resolved_judge,
-            output_schema=[IterativeFlow.JUDGE_DECISION],
-            map_single_fields=True,
-            map_extras=True,
-            ignore_unhandled=True,
-            absent_value_mode=StructuredInvokable.RAISE,
-            none_is_absent=True,
-            coerce_to_collection=True,
-        )
-
-        self._judge = BasicFlow(
-            component=structured_judge,
-            name=f"{name}_judge",
-            description=f"Normalized judge for iterative workflow {name}",
         )
 
     # ------------------------------------------------------------------ #
@@ -220,45 +233,29 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         return self._loop_body
 
     @property
-    def judge(self) -> BasicFlow:
-        """The fixed normalized judge wrapper."""
+    def judge(self) -> Workflow:
+        """The fixed normalized judge."""
         return self._judge
 
     @property
-    def return_index(self) -> int:
-        """Proxy onto the loop body's configured return index."""
-        return self._loop_body.return_index
+    def approval_value(self) -> Any:
+        """Fixed value compared against the judge's unwrapped result for early exit."""
+        return self._approval_value
 
-    @return_index.setter
-    def return_index(self, value: int) -> None:
-        """Update the loop body's configured return index."""
-        self._loop_body.return_index = value
+    @property
+    def return_index(self) -> int:
+        """Fixed resolved loop-body return step index."""
+        return self._loop_body.return_index
 
     @property
     def handoff_index(self) -> int:
-        """Configured body-step index whose result becomes next-iteration input."""
-        return self._handoff_index
-
-    @handoff_index.setter
-    def handoff_index(self, value: int) -> None:
-        """Validate and store the configured handoff step index."""
-        if not isinstance(value, int):
-            raise TypeError(f"handoff_index must be an int, got {type(value)!r}")
-        self._loop_body._resolve_step_index(value)
-        self._handoff_index = value
+        """Fixed resolved body-step index whose result becomes next-iteration input."""
+        return self._handoff_step_index
 
     @property
     def evaluate_index(self) -> int:
-        """Configured body-step index whose result is passed to the judge."""
-        return self._evaluate_index
-
-    @evaluate_index.setter
-    def evaluate_index(self, value: int) -> None:
-        """Validate and store the configured evaluation step index."""
-        if not isinstance(value, int):
-            raise TypeError(f"evaluate_index must be an int, got {type(value)!r}")
-        self._loop_body._resolve_step_index(value)
-        self._evaluate_index = value
+        """Fixed resolved body-step index whose result is passed to the judge."""
+        return self._evaluate_step_index
 
     @property
     def max_iterations(self) -> int:
@@ -275,218 +272,192 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
         self._max_iterations = value
 
     # ------------------------------------------------------------------ #
-    # Helpers
+    # Internal helpers
     # ------------------------------------------------------------------ #
-    def _extract_judge_decision(
-        self,
-        judge_result: FlowResultDict,
-    ) -> bool:
-        """Extract and validate the boolean decision from a judge result."""
-        decision = judge_result.get(IterativeFlow.JUDGE_DECISION, NO_VAL)
-        if decision is NO_VAL:
-            raise ValidationError(
-                f"{self.full_name}: judge result did not contain 'judge_decision'"
+    @staticmethod
+    def _resolve_body_step_index(index: Optional[int], num_steps: int) -> int:
+        """Resolve a configured body-step index, defaulting ``None`` to the last step."""
+        if index is None:
+            return num_steps - 1
+        if not isinstance(index, int):
+            raise TypeError(f"step index must be an int or None, got {type(index)!r}")
+        resolved = index if index >= 0 else num_steps + index
+        if not (0 <= resolved < num_steps):
+            raise IndexError(
+                f"step index {index} out of range for {num_steps} configured step(s)"
             )
-        if not isinstance(decision, bool):
-            raise ValidationError(
-                f"{self.full_name}: judge_decision must be bool, got {type(decision)!r}"
-            )
+        return resolved
 
-        return decision
+    @staticmethod
+    def _normalize_judge(judge: AtomicInvokable) -> Workflow:
+        """Normalize the configured judge into a workflow-shaped node."""
+        if isinstance(judge, Workflow):
+            return judge
+        if isinstance(judge, AtomicInvokable):
+            return BasicFlow(component=judge)
+        raise TypeError(
+            f"IterativeFlow judge must be Workflow or AtomicInvokable, got {type(judge)!r}"
+        )
 
-    def _require_body_step_result(
-        self,
-        body_run_id: str,
-        step_index: int,
-        *,
-        purpose: str,
-    ) -> dict[str, Any]:
-        """Strictly resolve one body step result for live orchestration use.
+    # ------------------------------------------------------------------ #
+    # Run-oriented retrieval
+    # ------------------------------------------------------------------ #
+    def get_iteration_results(
+        self, run_id: str
+    ) -> Optional[list[tuple[Optional[WorkflowResult], Optional[WorkflowResult]]]]:
+        """Return ``(body_result, judge_result)`` pairs for one iterative run.
 
-        Unlike the public retrieval helpers, this raises instead of returning
-        ``None`` when the referenced child checkpoint cannot be resolved.
+        Returns
+        -------
+        Optional[list[tuple[Optional[WorkflowResult], Optional[WorkflowResult]]]]
+            - ``None`` if the parent iterative run is not found
+            - otherwise, one ``(body_result, judge_result)`` tuple per
+              completed iteration, in iteration order
+            - either element of a tuple is ``None`` if the corresponding
+              child run id no longer resolves to a retained checkpoint
         """
-        result = self._loop_body.get_step_result(body_run_id, step_index)
-        if result is None:
-            raise ValidationError(
-                f"{self.full_name}: could not resolve {purpose} body step result "
-                f"for body run_id {body_run_id!r} and step index {step_index}"
-            )
+        checkpoint = self.get_checkpoint(run_id)
+        if checkpoint is None:
+            return None
 
-        if not isinstance(result, Mapping):
-            raise ValidationError(
-                f"{self.full_name}: {purpose} body step result must be mapping-shaped, "
-                f"got {type(result)!r}"
-            )
+        pairs: list[tuple[Optional[WorkflowResult], Optional[WorkflowResult]]] = []
+        for body_run_id, judge_run_id in zip(
+            checkpoint.result.iteration_runs, checkpoint.result.judge_runs
+        ):
+            body_checkpoint = self._loop_body.get_checkpoint(body_run_id)
+            judge_checkpoint = self._judge.get_checkpoint(judge_run_id)
+            pairs.append((
+                body_checkpoint.result if body_checkpoint else None,
+                judge_checkpoint.result if judge_checkpoint else None,
+            ))
 
-        return dict(result)
+        return pairs
+
+    # ------------------------------------------------------------------ #
+    # Result construction
+    # ------------------------------------------------------------------ #
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> IterativeFlowResult:
+        """Construct an IterativeFlowResult envelope for this workflow's invocation."""
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=IterativeFlowResult,
+            **result_kwargs,
+        )
 
     # ------------------------------------------------------------------ #
     # Workflow run hooks
     # ------------------------------------------------------------------ #
-    def _run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[IterativeFlowRunMetadata, Mapping[str, Any]]:
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
         """Synchronously execute the iterative loop."""
-        resolved_return_step = self._loop_body._resolve_step_index(self.return_index)
-        resolved_handoff_step = self._loop_body._resolve_step_index(self.handoff_index)
-        resolved_evaluate_step = self._loop_body._resolve_step_index(self.evaluate_index)
-
         current_inputs: Mapping[str, Any] = inputs
-        final_result: Mapping[str, Any] = dict(inputs)
-        iteration_records: list[IterationRecord] = []
-        iterations_completed = 0
-        judge_approved_early = False
-
-        for iteration in range(self.max_iterations):
-            logger.info("%s: iteration %d", self.full_name, iteration)
-            body_result = self._loop_body.invoke(current_inputs)
-
-            if not isinstance(body_result, FlowResultDict):
-                raise ValidationError(
-                    f"{self.full_name}: body returned {type(body_result)!r}, expected FlowResultDict"
-                )
-
-            body_run_id = body_result.run_id
-
-            handoff_result = self._require_body_step_result(
-                body_run_id,
-                resolved_handoff_step,
-                purpose="handoff",
-            )
-            evaluate_result = self._require_body_step_result(
-                body_run_id,
-                resolved_evaluate_step,
-                purpose="evaluate",
-            )
-
-            logger.info("%s: invoking judge for iteration %d", self.full_name, iteration)
-            judge_result = self._judge.invoke(evaluate_result)
-
-            if not isinstance(judge_result, FlowResultDict):
-                raise ValidationError(
-                    f"{self.full_name}: judge returned {type(judge_result)!r}, expected FlowResultDict"
-                )
-
-            judge_decision = self._extract_judge_decision(judge_result)
-
-            iteration_records.append(
-                IterationRecord(
-                    iteration=iteration,
-                    body_run_id=body_run_id,
-                    judge_run_id=judge_result.run_id,
-                    judge_decision=judge_decision,
-                )
-            )
-            iterations_completed += 1
-
-            final_result = body_result
-            current_inputs = handoff_result
-
-            if judge_decision is True:
-                judge_approved_early = True
-                break
-
-        metadata = IterativeFlowRunMetadata(
-            iterations_completed=iterations_completed,
-            max_iterations=self._max_iterations,
-            judge_approved_early=judge_approved_early,
-            return_step_index=resolved_return_step,
-            handoff_step_index=resolved_handoff_step,
-            evaluate_step_index=resolved_evaluate_step,
-            iteration_records=tuple(iteration_records),
-        )
-        return metadata, final_result
-
-    async def _async_run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[IterativeFlowRunMetadata, Mapping[str, Any]]:
-        """Asynchronously execute the iterative loop."""
-        resolved_return_step = self._loop_body._resolve_step_index(self.return_index)
-        resolved_handoff_step = self._loop_body._resolve_step_index(self.handoff_index)
-        resolved_evaluate_step = self._loop_body._resolve_step_index(self.evaluate_index)
-
-        current_inputs: Mapping[str, Any] = inputs
-        final_result: Mapping[str, Any] = dict(inputs)
-        iteration_records: list[IterationRecord] = []
-        iterations_completed = 0
-        judge_approved_early = False
+        final_payload: Any = None
+        iteration_runs: list[str] = []
+        judge_runs: list[str] = []
 
         for iteration in range(self._max_iterations):
-            logger.info(
-                "[Async %s]: invoking body iteration %d",
-                self.full_name,
-                iteration,
-            )
-            body_result = await self._loop_body.async_invoke(current_inputs)
+            logger.info("%s: iteration %d", self.full_name, iteration)
+            body_result = self._loop_body.invoke(current_inputs)
+            iteration_runs.append(body_result.run_id)
+            final_payload = body_result.result
 
-            if not isinstance(body_result, FlowResultDict):
+            evaluate_payload = self._loop_body.get_step_result(
+                body_result.run_id, self._evaluate_step_index
+            ).result
+            if not isinstance(evaluate_payload, Mapping):
                 raise ValidationError(
-                    f"{self.full_name}: async body returned {type(body_result)!r}, expected FlowResultDict"
+                    f"{self.full_name}: evaluate step {self._evaluate_step_index} result "
+                    f"must be mapping-shaped, got {type(evaluate_payload)!r}"
                 )
 
-            body_run_id = body_result.run_id
+            logger.info("%s: invoking judge for iteration %d", self.full_name, iteration)
+            judge_result = self._judge.invoke(evaluate_payload)
+            judge_runs.append(judge_result.run_id)
 
-            handoff_result = self._require_body_step_result(
-                body_run_id,
-                resolved_handoff_step,
-                purpose="handoff",
-            )
-            evaluate_result = self._require_body_step_result(
-                body_run_id,
-                resolved_evaluate_step,
-                purpose="evaluate",
-            )
-
-            logger.info(
-                "[Async %s]: invoking judge for iteration %d",
-                self.full_name,
-                iteration,
-            )
-            judge_result = await self._judge.async_invoke(evaluate_result)
-
-            if not isinstance(judge_result, FlowResultDict):
+            handoff_payload = self._loop_body.get_step_result(
+                body_result.run_id, self._handoff_step_index
+            ).result
+            if not isinstance(handoff_payload, Mapping):
                 raise ValidationError(
-                    f"{self.full_name}: async judge returned {type(judge_result)!r}, expected FlowResultDict"
+                    f"{self.full_name}: handoff step {self._handoff_step_index} result "
+                    f"must be mapping-shaped, got {type(handoff_payload)!r}"
                 )
 
-            judge_decision = self._extract_judge_decision(judge_result)
-
-            iteration_records.append(
-                IterationRecord(
-                    iteration=iteration,
-                    body_run_id=body_run_id,
-                    judge_run_id=judge_result.run_id,
-                    judge_decision=judge_decision,
-                )
-            )
-            iterations_completed += 1
-
-            final_result = body_result
-            current_inputs = handoff_result
-
-            if judge_decision is True:
-                judge_approved_early = True
+            if judge_result.result == self._approval_value:
                 break
 
-        metadata = IterativeFlowRunMetadata(
-            iterations_completed=iterations_completed,
-            max_iterations=self._max_iterations,
-            judge_approved_early=judge_approved_early,
-            return_step_index=resolved_return_step,
-            handoff_step_index=resolved_handoff_step,
-            evaluate_step_index=resolved_evaluate_step,
-            iteration_records=tuple(iteration_records),
-        )
-        return metadata, final_result
+            current_inputs = handoff_payload
+
+        return final_payload, {
+            "iteration_runs": tuple(iteration_runs),
+            "judge_runs": tuple(judge_runs),
+            "return_step_index": self._loop_body.return_index,
+            "handoff_step_index": self._handoff_step_index,
+            "evaluate_step_index": self._evaluate_step_index,
+            "max_iterations": self._max_iterations,
+        }
+
+    async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        """Asynchronously execute the iterative loop."""
+        current_inputs: Mapping[str, Any] = inputs
+        final_payload: Any = None
+        iteration_runs: list[str] = []
+        judge_runs: list[str] = []
+
+        for iteration in range(self._max_iterations):
+            logger.info("[Async %s]: iteration %d", self.full_name, iteration)
+            body_result = await self._loop_body.async_invoke(current_inputs)
+            iteration_runs.append(body_result.run_id)
+            final_payload = body_result.result
+
+            evaluate_payload = self._loop_body.get_step_result(
+                body_result.run_id, self._evaluate_step_index
+            ).result
+            if not isinstance(evaluate_payload, Mapping):
+                raise ValidationError(
+                    f"{self.full_name}: evaluate step {self._evaluate_step_index} result "
+                    f"must be mapping-shaped, got {type(evaluate_payload)!r}"
+                )
+
+            logger.info("[Async %s]: invoking judge for iteration %d", self.full_name, iteration)
+            judge_result = await self._judge.async_invoke(evaluate_payload)
+            judge_runs.append(judge_result.run_id)
+
+            handoff_payload = self._loop_body.get_step_result(
+                body_result.run_id, self._handoff_step_index
+            ).result
+            if not isinstance(handoff_payload, Mapping):
+                raise ValidationError(
+                    f"{self.full_name}: handoff step {self._handoff_step_index} result "
+                    f"must be mapping-shaped, got {type(handoff_payload)!r}"
+                )
+
+            if judge_result.result == self._approval_value:
+                break
+
+            current_inputs = handoff_payload
+
+        return final_payload, {
+            "iteration_runs": tuple(iteration_runs),
+            "judge_runs": tuple(judge_runs),
+            "return_step_index": self._loop_body.return_index,
+            "handoff_step_index": self._handoff_step_index,
+            "evaluate_step_index": self._evaluate_step_index,
+            "max_iterations": self._max_iterations,
+        }
 
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the iterative workflow and its selection policies."""
+        """Serialize the iterative workflow and its fixed selection policy."""
         data = super().to_dict()
         data.update(
             {
@@ -494,8 +465,9 @@ class IterativeFlow(Workflow[IterativeFlowRunMetadata]):
                 "judge": self._judge.to_dict(),
                 "max_iterations": self._max_iterations,
                 "return_index": self.return_index,
-                "handoff_index": self._handoff_index,
-                "evaluate_index": self._evaluate_index,
+                "handoff_index": self._handoff_step_index,
+                "evaluate_index": self._evaluate_step_index,
+                "approval_value": self._approval_value,
             }
         )
         return data

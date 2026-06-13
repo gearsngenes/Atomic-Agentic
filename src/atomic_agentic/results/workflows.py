@@ -6,28 +6,13 @@ from dataclasses import dataclass
 from .atomic import AtomicResult
 
 __all__ = [
-    "IterationRecord",
     "WorkflowResult",
     "BasicFlowResult",
     "SequentialFlowResult",
     "RoutingFlowResult",
-    "IterativeWorkflowResult",
+    "IterativeFlowResult",
     "ParallelFlowResult",
 ]
-
-
-# ------------------------------------------------------------------ #
-# Value types (used as fields on WorkflowResult subclasses)
-# ------------------------------------------------------------------ #
-
-@dataclass(frozen=True, slots=True)
-class IterationRecord:
-    """Record of one completed iterative workflow iteration."""
-
-    iteration: int
-    body_run_id: str
-    judge_run_id: str
-    judge_decision: bool
 
 
 # ------------------------------------------------------------------ #
@@ -112,16 +97,40 @@ class RoutingFlowResult(WorkflowResult):
 
 
 @dataclass(frozen=True, slots=True)
-class IterativeWorkflowResult(WorkflowResult):
-    """Result for an IterativeFlow run."""
+class IterativeFlowResult(WorkflowResult):
+    """Result for an IterativeFlow run.
 
-    iterations_completed: int
-    max_iterations: int
-    judge_approved_early: bool
+    Fields
+    ------
+    iteration_runs:
+        Tuple of loop-body run ids, one per completed iteration, in
+        iteration order. ``iteration_runs[i]`` can be used with
+        ``loop_body.get_checkpoint(iteration_runs[i])`` to retrieve that
+        iteration's body result.
+    judge_runs:
+        Tuple of judge run ids, one per completed iteration, in iteration
+        order, parallel to ``iteration_runs``. ``judge_runs[i]`` can be used
+        with ``judge.get_checkpoint(judge_runs[i])`` to retrieve that
+        iteration's judge result (and, via a retrieval helper, the judge's
+        decision for that iteration).
+    return_step_index:
+        Fixed loop-body step index whose result became this result's
+        ``result`` payload.
+    handoff_step_index:
+        Fixed loop-body step index whose result became the next iteration's
+        inputs.
+    evaluate_step_index:
+        Fixed loop-body step index whose result was passed to the judge.
+    max_iterations:
+        Iteration bound configured for this run.
+    """
+
+    iteration_runs: tuple[str, ...]
+    judge_runs: tuple[str, ...]
     return_step_index: int
     handoff_step_index: int
     evaluate_step_index: int
-    iteration_records: tuple[IterationRecord, ...]
+    max_iterations: int
 
 
 @dataclass(frozen=True, slots=True)
