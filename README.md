@@ -256,6 +256,9 @@ Workflows do not perform output packaging themselves. Always use `StructuredInvo
     │   ├── Tool_Examples/
     │   └── Workflow_Examples/
     │
+    ├── docs/
+    │   └── CHANGELOG.md
+    │
     ├── images/
     │
     ├── src/
@@ -276,3 +279,10 @@ Workflows do not perform output packaging themselves. Always use `StructuredInvo
     ├── README.md
     ├── pyproject.toml
     └── requirements.txt
+
+------------------------------------------------------------------------
+
+## Changelog
+
+See [`docs/CHANGELOG.md`](https://github.com/gearsngenes/Atomic-Agentic/blob/main/docs/CHANGELOG.md)
+for the release history of notable changes.
