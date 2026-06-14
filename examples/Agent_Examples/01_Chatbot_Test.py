@@ -26,5 +26,5 @@ print(f"Chat with {Agent_Atom.name}! To exit the conversation, type 'q' or 'exit
 query = input("YOU: ")
 while query.strip().lower() not in ['q', 'exit']:
     response = Agent_Atom.invoke({"prompt": query})  # <-- UPDATED: dict-first invoke
-    print(f"{Agent_Atom.name.upper()}: {response}")
+    print(f"{Agent_Atom.name.upper()}: {response.result}")
     query = input("YOU: ")

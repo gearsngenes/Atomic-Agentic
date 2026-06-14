@@ -87,5 +87,5 @@ if __name__ == "__main__":
         "Source 1: CRISPR has shown promise in treating genetic diseases (Smith et al., 2020). [URL]",
         "Source 2: Ethical concerns around CRISPR include potential off-target effects and germline editing (Doe, 2021). [URL]",
     ]
-    draft = writer.invoke({"query": query, "sources": sources})
+    draft = writer.invoke({"query": query, "sources": sources}).result
     print("Draft:\n", draft["draft"])

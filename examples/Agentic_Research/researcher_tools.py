@@ -108,6 +108,6 @@ judge = Tool(
 if __name__ == "__main__":
     # Example Tool usage
     query = "What are the main benefits and risks of CRISPR gene editing in medicine?"
-    result = research_tool.invoke({"query": query})
+    result = research_tool.invoke({"query": query}).result
     import json
     print("Result:", json.dumps(result, indent=2))

@@ -1,5 +1,6 @@
-from .base import(
+from .base import (
     Workflow,
+    WorkflowCheckpoint,
 )
 from .basic import BasicFlow
 from .sequential import SequentialFlow
@@ -8,6 +9,7 @@ from .routing import RoutingFlow
 from .iterative import IterativeFlow
 
 __all__ = ["Workflow",
+           "WorkflowCheckpoint",
            "BasicFlow",
            "SequentialFlow",
            "ParallelFlow",

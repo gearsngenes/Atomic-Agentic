@@ -51,7 +51,7 @@ def main() -> None:
     final = flow.invoke(inputs)
 
     print("\n================ FINAL DRAFT (ATOMIC ONLY) ================\n")
-    print(final["draft"])
+    print(final.result["draft"])
 
 
 if __name__ == "__main__":

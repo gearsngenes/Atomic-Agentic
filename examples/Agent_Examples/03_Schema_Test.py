@@ -159,7 +159,7 @@ def main(use_permissive: bool = False) -> None:
 
     # 5) Print the non-deterministic LLM output
     print("\n=== Generated Lesson Plan ===\n")
-    print(lesson_plan)
+    print(lesson_plan.result)
 
 
 if __name__ == "__main__":

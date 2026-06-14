@@ -16,7 +16,6 @@ from atomic_agentic.results import AtomicResult, StructuredResult
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import (
     StructuredInvokable,
-    StructuredResultDict,
 )
 
 
@@ -153,23 +152,6 @@ class PlainObject:
 
 class UnsupportedObject:
     __slots__ = ()
-
-
-class TestStructuredResultDict:
-    def test_copy_preserves_mapping_items_and_raw_result(self) -> None:
-        result = StructuredResultDict({"a": 1}, raw_result={"raw": True})
-
-        copied = result.copy()
-
-        assert copied == {"a": 1}
-        assert copied.raw_result == {"raw": True}
-        assert copied is not result
-
-    def test_raw_result_is_not_mapping_item(self) -> None:
-        result = StructuredResultDict({"a": 1}, raw_result={"raw": True})
-
-        assert "raw_result" not in result
-        assert result.raw_result == {"raw": True}
 
 
 class TestStructuredInvokableConstruction:

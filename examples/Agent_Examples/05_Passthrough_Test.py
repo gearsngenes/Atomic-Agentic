@@ -84,7 +84,7 @@ def main() -> None:
     )
 
     print("\n=== Post-Processed Result ===\n")
-    pprint.pp(result)
+    pprint.pp(result.result)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,6 @@ from .core.Invokable import (
     AtomicInvokable,
     Command,
     StructuredInvokable,
-    StructuredResultDict,
 )
 
 __all__ = [
@@ -28,6 +27,4 @@ __all__ = [
     "Command",
     # Structured invokable types
     "StructuredInvokable",
-    "StructuredResultDict",
-    # Legacy aliases removed in v2
     ]

@@ -21,7 +21,7 @@ structured_scalar = StructuredInvokable(
 
 print("\n--- Scalar to dict ---")
 print("Structured output:")
-pprint(structured_scalar.invoke({"x": 5}))
+pprint(structured_scalar.invoke({"x": 5}).result)
 
 # --- Example 2: Tuple output to named fields ---
 def min_max_sum(x: int, y: int) -> tuple:
@@ -35,7 +35,7 @@ structured_tuple = StructuredInvokable(
 
 print("\n--- Tuple to dict ---")
 print("Structured output:")
-pprint(structured_tuple.invoke({"x": 3, "y": 7}))
+pprint(structured_tuple.invoke({"x": 3, "y": 7}).result)
 
 # --- Example 3: List output with missing fields (absent_value_mode) ---
 def first_two(items: list) -> list:
@@ -58,11 +58,11 @@ structured_list_drop = StructuredInvokable(
 
 print("\n--- List to dict (fill missing) ---")
 print("Structured output (fill):")
-pprint(structured_list_fill.invoke({"items": [1, 2]}))
+pprint(structured_list_fill.invoke({"items": [1, 2]}).result)
 
 print("\n--- List to dict (drop missing) ---")
 print("Structured output (drop):")
-pprint(structured_list_drop.invoke({"items": [1, 2]}))
+pprint(structured_list_drop.invoke({"items": [1, 2]}).result)
 
 
 # --- Example 4: Mapping with extra fields (ignore_unhandled) ---
@@ -88,14 +88,14 @@ print("\n--- Mapping with extras (ignore_unhandled=False, expect error) ---")
 try:
     result = structured_stats_strict.invoke({"x": 5})
     print("Structured output:")
-    pprint(result)
+    pprint(result.result)
 except Exception as e:
     print("Error:", e)
 
 print("\n--- Mapping with extras (ignore_unhandled=True, extras dropped) ---")
 result = structured_stats_ignore.invoke({"x": 5})
 print("Structured output:")
-pprint(result)
+pprint(result.result)
 # There is no .extras field; extras are simply dropped if not handled.
 
 # --- Example 5: None as absent value ---
@@ -113,9 +113,9 @@ structured_none = StructuredInvokable(
 
 print("\n--- None as absent value ---")
 print("Structured output (flag=True):")
-pprint(structured_none.invoke({"flag": True}))
+pprint(structured_none.invoke({"flag": True}).result)
 print("Structured output (flag=False):")
-pprint(structured_none.invoke({"flag": False}))
+pprint(structured_none.invoke({"flag": False}).result)
 
 # --- Example 6: Mismatched keys with map_extras=True ---
 
@@ -142,12 +142,12 @@ structured_mismatch_noextras = StructuredInvokable(
 print("\n--- Mismatched keys (map_extras=True, extras fill schema) ---")
 result = structured_mismatch_extras.invoke({})
 print("Structured output:")
-pprint(result)
+pprint(result.result)
 
 print("\n--- Mismatched keys (map_extras=False, expect error) ---")
 try:
     result = structured_mismatch_noextras.invoke({})
     print("Structured output:")
-    pprint(result)
+    pprint(result.result)
 except Exception as e:
     print("Error:", e)

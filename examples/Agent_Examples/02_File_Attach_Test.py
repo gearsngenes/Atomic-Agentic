@@ -43,7 +43,7 @@ def main():
 
     # 3) Print the summary
     print("\n=== Summary ===\n")
-    print(summary)
+    print(summary.result)
 
     # 4) detach the file if no longer needed
     agent.detach(file_path)

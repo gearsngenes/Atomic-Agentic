@@ -50,7 +50,7 @@ def main() -> None:
     )
 
     print("\n=== Final invoke() result after post_invoke ===")
-    pprint.pp(result)
+    pprint.pp(result.result)
 
     print("\n=== Canonical turn history: agent.turn_history ===")
     for i, turn in enumerate(agent.turn_history):

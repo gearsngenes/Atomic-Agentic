@@ -29,11 +29,11 @@ print(multiply_6_by_7.parameters)
 # []
 
 result = multiply_6_by_7.invoke({})
-pprint(result)
+pprint(result.result)
 # 42
 
 result = multiply_6_by_7()
-pprint(result)
+pprint(result.result)
 # 42
 
 try:

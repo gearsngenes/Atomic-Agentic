@@ -11,7 +11,6 @@ from ..core.Exceptions import ExecutionError
 from ..core.Invokable import AtomicInvokable
 from ..core.Parameters import ParamSpec
 from dataclasses import dataclass
-from typing import Any
 from ..results.workflows import WorkflowResult
 
 logger = logging.getLogger(__name__)

@@ -282,6 +282,7 @@ class AtomicInvokable(ABC):
         """
         Default async compatibility wrapper.
 
+        Returns an AtomicResult-family envelope, mirroring `invoke(...)`.
         This preserves the current sync-first implementation by running
         `invoke(inputs)` in a worker thread.
         """
@@ -950,25 +951,6 @@ class Command(AtomicInvokable):
             }
         )
         return data
-
-
-class StructuredResultDict(dict[str, Any]):
-    """Deprecated compatibility carrier for older structured-output callers.
-
-    `StructuredInvokable` no longer returns this type in active v2 workflow
-    runtime behavior. It is retained temporarily so stale imports fail less
-    abruptly during the alpha migration line.
-    """
-
-    __slots__ = ("raw_result",)
-
-    def __init__(self, *args: Any, raw_result: Any = None, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.raw_result = raw_result
-
-    def copy(self) -> StructuredResultDict:
-        """Return a shallow copy preserving ``raw_result``."""
-        return type(self)(self, raw_result=self.raw_result)
 
 
 class StructuredInvokable(AtomicInvokable):
