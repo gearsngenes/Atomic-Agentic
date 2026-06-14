@@ -144,8 +144,8 @@ def main() -> None:
     print("\n=== INVOKE ===")
     print("inputs:", json.dumps(inputs, indent=2))
     result = tool.invoke(inputs)
-    print("result:", _jsonable(result))
-    print("type  :", type(result).__name__)
+    print("result:", _jsonable(result.result))
+    print("type  :", type(result.result).__name__)
 
 
 if __name__ == "__main__":

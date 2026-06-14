@@ -107,7 +107,7 @@ def invoke_with_inputs(t: Tool, inputs: Mapping[str, Any] | None = None) -> None
     try:
         result = t.invoke(payload)
         print("Result:")
-        print(f"  {_jsonable(result)!r}")
+        print(f"  {_jsonable(result.result)!r}")
     except ToolInvocationError as exc:
         print("Invocation error:")
         print(f"  {exc}")

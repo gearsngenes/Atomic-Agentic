@@ -293,7 +293,7 @@ class TestToolifyCallable:
         assert tool.namespace == "tests"
         assert tool.description == "Add values."
         assert tool.full_name == "Tool.tests.add"
-        assert tool.invoke({"a": 2, "b": 3}) == 5
+        assert tool.invoke({"a": 2, "b": 3}).result == 5
 
     def test_toolify_callable_uses_inferred_name_when_name_missing(self) -> None:
         tool = toolify(add, namespace="tests", description="Add values.")
@@ -389,7 +389,7 @@ class TestToolifyExistingTool:
         assert original.filter_extraneous_inputs is True
         assert original.full_name == "Tool.tests.add"
 
-        assert result.invoke({"a": 2, "b": 3}) == 5
+        assert result.invoke({"a": 2, "b": 3}).result == 5
 
     def test_existing_tool_without_overrides_preserves_metadata(self) -> None:
         original = Tool(
@@ -454,7 +454,7 @@ class TestToolifyAtomicInvokable:
         assert tool.wraps_invokable is True
         assert tool.name == "echo_invokable"
         assert tool.description == "Echo invokable."
-        assert tool.invoke({"value": 123}) == {"value": 123}
+        assert tool.invoke({"value": 123}).result == {"value": 123}
 
     def test_atomic_invokable_uses_schema_and_return_type(self) -> None:
         invokable = EchoInvokable()
@@ -534,7 +534,7 @@ class TestToolifyMCPClientHub:
         hub = FakeMCPClientHub(result={"structuredContent": {"result": "ok"}})
         tool = toolify(hub, remote_name="search")
 
-        assert tool.invoke({"query": "hello"}) == "ok"
+        assert tool.invoke({"query": "hello"}).result == "ok"
         assert hub.calls == [("search", {"query": "hello"})]
 
 
@@ -575,7 +575,7 @@ class TestToolifyPyA2AtomicClient:
         client = FakePyA2AtomicClient(result={"ok": True})
         tool = toolify(client, remote_name="echo")
 
-        assert tool.invoke({"value": 123}) == {"ok": True}
+        assert tool.invoke({"value": 123}).result == {"ok": True}
         assert client.calls == [("echo", {"value": 123})]
 
 
@@ -714,8 +714,8 @@ class TestBatchToolifyRemoteExpansion:
         mcp_tool = tools[0]
         a2a_tool = tools[2]
 
-        assert mcp_tool.invoke({"query": "hello"}) == "mcp ok"
-        assert a2a_tool.invoke({"value": 123}) == {"a2a": "ok"}
+        assert mcp_tool.invoke({"query": "hello"}).result == "mcp ok"
+        assert a2a_tool.invoke({"value": 123}).result == {"a2a": "ok"}
 
         assert hub.calls == [("search", {"query": "hello"})]
         assert client.calls == [("echo", {"value": 123})]

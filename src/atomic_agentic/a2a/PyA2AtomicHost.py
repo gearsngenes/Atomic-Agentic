@@ -43,7 +43,12 @@ class PyA2AtomicHost(A2AServer):
         invokable.invoke(inputs=<parsed parameter dict>)
 
     Direct invocation success payload:
-      { "__py_a2a_result__": <invokable result> }
+      { "__py_a2a_result__": <invokable's AtomicResult.result payload> }
+
+      `invoke()` returns an AtomicResult-family envelope; only its `.result`
+      (the caller-facing payload) crosses the wire under this key. Envelope
+      fields (run_id, started_at/ended_at, elapsed_s, invoker_id) are not
+      included.
 
     Error payload:
       {
@@ -308,7 +313,7 @@ class PyA2AtomicHost(A2AServer):
         invokable = self._invokables.get(name)
         if invokable is None:
             raise KeyError(f"Unknown invokable {name!r}.")
-        return invokable.invoke(dict(inputs))
+        return invokable.invoke(dict(inputs)).result
 
     def _make_function_response(
         self,

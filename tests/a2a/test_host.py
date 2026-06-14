@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Mapping
 
@@ -12,11 +13,23 @@ from atomic_agentic.a2a.constants import (
     LIST_INVOKABLES_FUNCTION,)
 from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.core.Parameters import ParamSpec
+from atomic_agentic.results.atomic import AtomicResult
 
 
 class EchoInvokable(AtomicInvokable):
-    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        return self.filter_inputs(inputs)
+    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
+        started_at = datetime.now(timezone.utc)
+        filtered = self.filter_inputs(inputs)
+        ended_at = datetime.now(timezone.utc)
+        return self.make_result(filtered, started_at, ended_at)
+
+
+class ScalarInvokable(AtomicInvokable):
+    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
+        started_at = datetime.now(timezone.utc)
+        value = inputs.get("value")
+        ended_at = datetime.now(timezone.utc)
+        return self.make_result(value, started_at, ended_at)
 
 
 def make_param(name: str, index: int) -> ParamSpec:
@@ -34,6 +47,15 @@ def make_invokable(name: str = "echo") -> EchoInvokable:
         description="Echo invokable.",
         parameters=[make_param("value", 0)],
         return_type="dict[str, Any]",
+    )
+
+
+def make_scalar_invokable(name: str = "scalar") -> ScalarInvokable:
+    return ScalarInvokable(
+        name=name,
+        description="Scalar invokable.",
+        parameters=[make_param("value", 0)],
+        return_type="int",
     )
 
 
@@ -211,6 +233,15 @@ class TestPyA2AtomicHostPayloads:
         )
 
         assert host._invoke_registered_invokable("echo", {"value": 123}) == {"value": 123}
+
+    def test_invoke_registered_invokable_unwraps_non_dict_result(self) -> None:
+        host = PyA2AtomicHost(
+            [make_scalar_invokable("scalar")],
+            name="test_host",
+            description="Test host.",
+        )
+
+        assert host._invoke_registered_invokable("scalar", {"value": 42}) == 42
 
     def test_invoke_unknown_registered_invokable_raises(self) -> None:
         host = PyA2AtomicHost(
