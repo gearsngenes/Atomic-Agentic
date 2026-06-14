@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover
 from atomic_agentic.agents.base import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.workflows.base import FlowResultDict
+from atomic_agentic.results.workflows import BasicFlowResult
 from atomic_agentic.workflows.basic import BasicFlow
 
 
@@ -103,14 +103,14 @@ def make_live_openai_basic_flow() -> tuple[Agent, StructuredInvokable, BasicFlow
     return agent, structured_agent, flow
 
 
-def _assert_live_structured_result(result: Any) -> None:
-    assert isinstance(result, FlowResultDict)
-    assert set(result.keys()) == {"final", "length", "was_postprocessed"}
-    assert isinstance(result["final"], str)
-    assert result["final"].strip()
-    assert isinstance(result["length"], int)
-    assert result["length"] > 0
-    assert result["was_postprocessed"] is True
+def _assert_live_structured_result(result: BasicFlowResult) -> None:
+    assert isinstance(result, BasicFlowResult)
+    assert set(result.result.keys()) == {"final", "length", "was_postprocessed"}
+    assert isinstance(result.result["final"], str)
+    assert result.result["final"].strip()
+    assert isinstance(result.result["length"], int)
+    assert result.result["length"] > 0
+    assert result.result["was_postprocessed"] is True
 
 
 class TestLiveAgentStructuredBasicPipeline:
@@ -122,13 +122,13 @@ class TestLiveAgentStructuredBasicPipeline:
         result = flow.invoke({"topic": "pytest integration tests", "tone": "clear"})
 
         _assert_live_structured_result(result)
-        assert result.run_id == flow.latest_run
+        assert result.run_id == flow.checkpoints[-1].result.run_id
         assert len(flow.checkpoints) == 1
 
         checkpoint = flow.get_checkpoint(result.run_id)
         assert checkpoint is not None
-        assert checkpoint.result == dict(result)
-        assert checkpoint.metadata.child_is_workflow is False
+        assert checkpoint.result is result
+        assert checkpoint.result.child_type == "StructuredInvokable"
 
     def test_live_openai_structured_agent_basic_flow_async_pipeline(
         self,
@@ -140,13 +140,13 @@ class TestLiveAgentStructuredBasicPipeline:
         )
 
         _assert_live_structured_result(result)
-        assert result.run_id == flow.latest_run
+        assert result.run_id == flow.checkpoints[-1].result.run_id
         assert len(flow.checkpoints) == 1
 
         checkpoint = flow.get_checkpoint(result.run_id)
         assert checkpoint is not None
-        assert checkpoint.result == dict(result)
-        assert checkpoint.metadata.child_is_workflow is False
+        assert checkpoint.result is result
+        assert checkpoint.result.child_type == "StructuredInvokable"
 
     def test_live_openai_composed_pipeline_to_dict_does_not_expose_secrets(
         self,

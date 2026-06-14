@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Mapping, Dict, Sequence, Optional
+from datetime import datetime, timezone
+from typing import Any, Mapping, Dict, Sequence, Optional, TypeVar
 import threading
 import asyncio
 from uuid import uuid4
@@ -10,9 +11,11 @@ import logging
 from .constants import IDENTIFIER_PATTERN, NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from .Exceptions import PackagingError
+from ..results import AtomicResult, CommandResult, StructuredResult
 
 
 logger = logging.getLogger(__name__)
+_R = TypeVar("_R", bound=AtomicResult)
 
 # Deprecated aliases removed in v2: use `ParamSpec` and the `parameters` property.
 
@@ -27,27 +30,29 @@ class AtomicInvokable(ABC):
     executable primitives in this codebase must satisfy. It standardises:
 
     - **identity**: validated `name` and `description` (human-friendly strings).
-    - **interface**: a single execution entrypoint ``invoke(inputs: Mapping[str, Any])``.
+    - **interface**: a single execution entrypoint
+      ``invoke(inputs: Mapping[str, Any])`` returning an ``AtomicResult``-family
+      successful-invocation envelope.
     - **parameters & return type**: declared at construction time as concrete
       `parameters: list[ParamSpec]` and `return_type: str`.
     - **metadata serialization**: default ``to_dict()`` implementation for
       persisting metadata.
-    
+
     Parameters and Schema
     ---------------------
     Parameters are declared as a list of ``ParamSpec`` objects at construction time.
     Each ``ParamSpec`` is self-sufficient and contains:
-    
+
       - ``name`` (str): parameter name; must be a valid Python identifier
       - ``index`` (int): position in the parameter sequence (0-based)
       - ``kind`` (str): parameter classification—one of:
-        
+
         - ``POSITIONAL_ONLY``: cannot be passed by name (``/``-style)
         - ``POSITIONAL_OR_KEYWORD``: may be passed by name or position
         - ``KEYWORD_ONLY``: must be passed by name (``*``-style)
         - ``VAR_POSITIONAL``: accepts ``*args`` (unnamed)
         - ``VAR_KEYWORD``: accepts ``**kwargs`` (named)
-      
+
       - ``type`` (str): human-readable type annotation, e.g. ``"int"`` or ``"List[str]"``
       - ``default`` (Any): default value if parameter is optional; ``NO_VAL`` if required
 
@@ -59,21 +64,28 @@ class AtomicInvokable(ABC):
     ``invoke(inputs)`` accepts a ``Mapping[str, Any]`` where keys correspond to
     parameter names. The contract is "dict-first": callers provide a mapping, not
     ``(*args, **kwargs)``. Implementations (subclasses) are responsible for:
-    
+
       - Validating required parameters are present
       - Handling default values
-      - Converting the dict to appropriate ``(*args, **kwargs)`` for execution
+      - Converting the dict to appropriate execution arguments or provider payloads
       - Raising clear, typed exceptions on invalid inputs (use
         ``ToolInvocationError``, ``AgentInvocationError``, etc.)
+      - Returning an ``AtomicResult``-family object whose ``.result`` field contains
+        the caller-facing payload
+
+    Return Type Contract
+    --------------------
+    ``return_type`` describes the caller-facing payload stored in
+    ``AtomicResult.result``. It does not describe the result envelope class itself.
 
     Architecture Notes
     -------------------
     - The class intentionally does not expose a human-readable ``signature`` string
       inside ``to_dict()`` to minimize churn when persisting metadata; use the
       ``signature`` property for logging and UIs.
-        - **Backward Compatibility**: Legacy aliases (previously ``ParameterMap``,
-            ``ArgumentMap``, and ``ArgSpec``) have been removed in v2; prefer
-            ``ParamSpec`` and the `parameters` property on invokable instances.
+    - **Backward Compatibility**: Legacy aliases (previously ``ParameterMap``,
+      ``ArgumentMap``, and ``ArgSpec``) have been removed in v2; prefer
+      ``ParamSpec`` and the `parameters` property on invokable instances.
     """
 
     def __init__(
@@ -202,7 +214,7 @@ class AtomicInvokable(ABC):
 
     @property
     def return_type(self) -> str:
-        """Return type (string) of this invokable."""
+        """Payload return type stored inside ``AtomicResult.result``."""
         return self._return_type
 
     @property
@@ -262,18 +274,72 @@ class AtomicInvokable(ABC):
     # Abstract contract
     # ---------------------------------------------------------------- #
     @abstractmethod
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
-        """Perform work."""
+    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
+        """Perform work and return an AtomicResult-family envelope."""
         raise NotImplementedError
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
         """
         Default async compatibility wrapper.
 
+        Returns an AtomicResult-family envelope, mirroring `invoke(...)`.
         This preserves the current sync-first implementation by running
         `invoke(inputs)` in a worker thread.
         """
         return await asyncio.to_thread(self.invoke, inputs)
+
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> AtomicResult:
+        """
+        Construct this invokable's default AtomicResult-family envelope.
+
+        Subclasses may override this hook to choose a more specific result class
+        or add subclass-specific result fields while preserving the public
+        invocation template.
+        """
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            **result_kwargs,
+        )
+
+    def _make_result(
+        self,
+        *,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        result_cls: type[_R] = AtomicResult,
+        **result_kwargs: Any,
+    ) -> _R:
+        """
+        Construct an AtomicResult-family object for this invokable.
+
+        This helper only centralizes the common envelope construction details:
+        injecting this invokable's ``instance_id`` as ``invoker_id`` and passing
+        through caller-provided timing values and explicit subclass fields.
+
+        It intentionally does not capture time, wrap exceptions, record traces,
+        manage lifecycle state, or choose result classes from instance-level
+        registry/configuration.
+        """
+        if not isinstance(result_cls, type) or not issubclass(result_cls, AtomicResult):
+            raise TypeError(
+                f"result_cls must be a subclass of AtomicResult, got {result_cls!r}"
+            )
+        return result_cls(
+            result=result,
+            invoker_id=self.instance_id,
+            started_at=started_at,
+            ended_at=ended_at,
+            **result_kwargs,
+        )
 
     # ---------------------------------------------------------------- #
     # Input Filtering and Validation
@@ -392,24 +458,43 @@ class AtomicInvokable(ABC):
     # ---------------------------------------------------------------- #
     # callable contract
     # ---------------------------------------------------------------- #
-    def __call__(self, *args, **kwargs)-> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> AtomicResult:
         """
-        Allows the invokable to be called like a regular function
-        Check for varargs/kwargs parameters and construct the inputs dict accordingly before invoking.
+        Allows the invokable to be called like a regular function.
+
+        Check for varargs/kwargs parameters and construct the inputs dict
+        accordingly before invoking. The return value mirrors ``invoke(...)``:
+        an AtomicResult-family envelope whose ``.result`` field contains the
+        caller-facing payload.
         """
         inputs = self._args_kwargs_to_dict(*args, **kwargs)
         return self.invoke(inputs)
-    
-    async def async_call(self, *args: Any, **kwargs: Any) -> Any:
+
+    async def async_call(self, *args: Any, **kwargs: Any) -> AtomicResult:
         """
-        Async analog of __call__:
-        bind normal call-style args/kwargs into the dict-first inputs shape,
-        then delegate to async_invoke().
+        Async analog of __call__.
+
+        Bind normal call-style args/kwargs into the dict-first inputs shape,
+        then delegate to async_invoke(). The return value mirrors
+        ``async_invoke(...)``.
         """
         inputs = self._args_kwargs_to_dict(*args, **kwargs)
 
         return await self.async_invoke(inputs)
-    
+
+    @staticmethod
+    def _unwrap_result_payload(value: Any) -> Any:
+        """
+        Return the caller-facing payload from an AtomicResult-family value.
+
+        During staged result integration, some child invokables may already
+        return AtomicResult-family objects while others still return raw payloads.
+        This helper gives migrated callers one narrow compatibility rule.
+        """
+        if isinstance(value, AtomicResult):
+            return value.result
+        return value
+
     def _args_kwargs_to_dict(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """
         Convert Python call-style (*args, **kwargs) into the dict-first input shape.
@@ -773,41 +858,79 @@ class Command(AtomicInvokable):
             )
 
     # ---------------------------------------------------------------- #
+    # Result construction
+    # ---------------------------------------------------------------- #
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> CommandResult:
+        """Construct a CommandResult envelope for this command's invocation."""
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=CommandResult,
+            **result_kwargs,
+        )
+
+    # ---------------------------------------------------------------- #
     # Invocation
     # ---------------------------------------------------------------- #
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+    def invoke(self, inputs: Mapping[str, Any]) -> CommandResult:
         """
         Invoke the wrapped executor with this command's fixed input mapping.
 
         Runtime inputs must be an empty mapping. The validation is routed through
         `self.filter_inputs(inputs)` so errors remain consistent with the base
-        AtomicInvokable contract.
+        AtomicInvokable contract. The executor's returned AtomicResult is
+        unwrapped — `executor_result.result` becomes this command's payload,
+        and `executor_result.run_id` plus the executor's `instance_id` are
+        carried forward for cross-envelope tracing.
         """
         with self._invoke_lock:
             logger.info("[%s started]", self.full_name)
+            started_at = datetime.now(timezone.utc)
 
             self.filter_inputs(inputs)
-            result = self.executor.invoke(dict(self._fixed_inputs))
+            executor_result = self.executor.invoke(dict(self._fixed_inputs))
 
+            ended_at = datetime.now(timezone.utc)
             logger.info("[%s finished]", self.full_name)
-            return result
+            return self.make_result(
+                result=executor_result.result,
+                started_at=started_at,
+                ended_at=ended_at,
+                executor_run_id=executor_result.run_id,
+                executor_id=self.executor.instance_id,
+            )
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> CommandResult:
         """
-        Async command invocation.
+        Async command invocation — see `invoke` for the unwrap/lifecycle contract.
 
         This delegates to the wrapped executor's native async path instead of
         relying on AtomicInvokable's default sync-to-thread wrapper.
         """
         logger.info("[%s started]", self.full_name)
+        started_at = datetime.now(timezone.utc)
 
         self.filter_inputs(inputs)
         fixed_inputs = dict(self._fixed_inputs)
 
-        result = await self.executor.async_invoke(fixed_inputs)
+        executor_result = await self.executor.async_invoke(fixed_inputs)
 
+        ended_at = datetime.now(timezone.utc)
         logger.info("[%s finished]", self.full_name)
-        return result
+        return self.make_result(
+            result=executor_result.result,
+            started_at=started_at,
+            ended_at=ended_at,
+            executor_run_id=executor_result.run_id,
+            executor_id=self.executor.instance_id,
+        )
 
     # ---------------------------------------------------------------- #
     # Serialization
@@ -828,25 +951,6 @@ class Command(AtomicInvokable):
             }
         )
         return data
-
-
-class StructuredResultDict(dict[str, Any]):
-    """Deprecated compatibility carrier for older structured-output callers.
-
-    `StructuredInvokable` no longer returns this type in active v2 workflow
-    runtime behavior. It is retained temporarily so stale imports fail less
-    abruptly during the alpha migration line.
-    """
-
-    __slots__ = ("raw_result",)
-
-    def __init__(self, *args: Any, raw_result: Any = None, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.raw_result = raw_result
-
-    def copy(self) -> StructuredResultDict:
-        """Return a shallow copy preserving ``raw_result``."""
-        return type(self)(self, raw_result=self.raw_result)
 
 
 class StructuredInvokable(AtomicInvokable):
@@ -1108,49 +1212,121 @@ class StructuredInvokable(AtomicInvokable):
             )
         self._ignore_unhandled = value
 
-    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        """Synchronously invoke the wrapped component and return a plain mapping.
+    def make_result(
+        self,
+        result: dict[str, Any],
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> StructuredResult:
+        """
+        Construct this wrapper's ``StructuredResult`` envelope.
 
-        The wrapped component is invoked with filtered dict-first inputs. Its raw
-        output is then packaged into a dictionary according to this wrapper's output
-        schema and packaging policies. Missing-value handling is applied before the
-        final result is returned.
+        ``result`` is the packaged, missing-value-resolved output mapping stored
+        in ``StructuredResult.result``. Packaging diagnostics gathered during the
+        invocation — the pre-packaging payload, unresolved named fields, and the
+        wrapped component's run identity — are stored as explicit
+        StructuredInvokable-specific result fields. Mirrors
+        ``LLMEngine.make_result``'s validate-then-delegate shape: this hook
+        validates the kwargs ``invoke``/``async_invoke`` assemble, then fixes
+        ``result_cls=StructuredResult`` and delegates to ``_make_result``.
+        """
+        unexpected = set(result_kwargs) - {"unpackaged_result", "missing_keys", "component_run_id"}
+        if unexpected:
+            raise PackagingError(
+                f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
+            )
 
-        `StructuredInvokable` owns output shaping. It no longer returns a
-        `StructuredResultDict` carrier or exposes the wrapped component's raw result
-        through the active runtime return value.
+        if "unpackaged_result" not in result_kwargs:
+            raise PackagingError("StructuredInvokable.make_result: unpackaged_result is required.")
+        unpackaged_result = result_kwargs["unpackaged_result"]
+
+        missing_keys = result_kwargs.get("missing_keys", ())
+        if not isinstance(missing_keys, tuple) or not all(isinstance(k, str) for k in missing_keys):
+            raise PackagingError(
+                "StructuredInvokable.make_result: missing_keys must be a tuple of str."
+            )
+
+        component_run_id = result_kwargs.get("component_run_id")
+        if component_run_id is not None and not isinstance(component_run_id, str):
+            raise PackagingError(
+                "StructuredInvokable.make_result: component_run_id must be a str or None."
+            )
+
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=StructuredResult,
+            unpackaged_result=unpackaged_result,
+            missing_keys=missing_keys,
+            component_run_id=component_run_id,
+        )
+
+    def invoke(self, inputs: Mapping[str, Any]) -> StructuredResult:
+        """Synchronously invoke the wrapped component and return a StructuredResult.
+
+        1) Filter caller inputs through this wrapper's input contract.
+        2) Invoke the wrapped component — its return is an AtomicResult-family
+           object; this method extracts ``.result``/``.run_id`` from it before
+           packaging (every AtomicInvokable returns an AtomicResult).
+        3) Package the unwrapped payload according to the output schema and
+           packaging policies, then resolve unresolved named fields per
+           ``absent_value_mode``.
+        4) Assemble and return this invocation's StructuredResult via
+           ``make_result(...)``, carrying the packaged output plus packaging
+           diagnostics (unpackaged_result, missing_keys, component_run_id).
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
+            started_at = datetime.now(timezone.utc)
 
             filtered_inputs = self.filter_inputs(inputs)
-            raw_result = self.component.invoke(filtered_inputs)
-            packaged = self.package(raw_result)
+            component_result = self.component.invoke(filtered_inputs)
+            unpackaged_result = component_result.result
+            component_run_id = component_result.run_id
+
+            packaged = self.package(unpackaged_result)
+            missing_keys = tuple(key for key, value in packaged.items() if value is NO_VAL)
             final_output = self.handle_missing_values(packaged)
 
+            ended_at = datetime.now(timezone.utc)
             logger.info(f"[{self.full_name} finished]")
-            return dict(final_output)
 
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
-        """Asynchronously invoke the wrapped component and return a plain mapping.
+            return self.make_result(
+                result=dict(final_output),
+                started_at=started_at,
+                ended_at=ended_at,
+                unpackaged_result=unpackaged_result,
+                missing_keys=missing_keys,
+                component_run_id=component_run_id,
+            )
 
-        This is the async analog of :meth:`invoke`. The wrapped component is awaited
-        through its async invocation path, then the raw result is packaged and
-        missing-value handling is applied exactly as in the sync path.
-
-        `StructuredInvokable` owns output shaping. It no longer returns a
-        `StructuredResultDict` carrier or exposes the wrapped component's raw result
-        through the active runtime return value.
-        """
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> StructuredResult:
+        """Asynchronous analog of :meth:`invoke` — see its docstring for the lifecycle."""
         logger.info(f"[Async {self.full_name} started]")
+        started_at = datetime.now(timezone.utc)
 
         filtered_inputs = self.filter_inputs(inputs)
-        raw_result = await self.component.async_invoke(filtered_inputs)
-        packaged = self.package(raw_result)
+        component_result = await self.component.async_invoke(filtered_inputs)
+        unpackaged_result = component_result.result
+        component_run_id = component_result.run_id
+
+        packaged = self.package(unpackaged_result)
+        missing_keys = tuple(key for key, value in packaged.items() if value is NO_VAL)
         final_output = self.handle_missing_values(packaged)
 
+        ended_at = datetime.now(timezone.utc)
         logger.info(f"[Async {self.full_name} finished]")
-        return dict(final_output)
+
+        return self.make_result(
+            result=dict(final_output),
+            started_at=started_at,
+            ended_at=ended_at,
+            unpackaged_result=unpackaged_result,
+            missing_keys=missing_keys,
+            component_run_id=component_run_id,
+        )
 
     def package(self, raw: Any) -> dict[str, Any]:
         """Package a raw result into the normalized mapping output.

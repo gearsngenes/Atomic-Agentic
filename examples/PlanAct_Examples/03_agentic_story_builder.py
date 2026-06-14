@@ -94,7 +94,7 @@ if __name__ == "__main__":
     )
 
     print("\n⇢ Planning + execution …")
-    final_draft_md = orch.invoke({"prompt": task_prompt})
+    final_draft_md = orch.invoke({"prompt": task_prompt}).result
 
     print("\n========== FINAL DRAFT ==========\n")
     print(final_draft_md)

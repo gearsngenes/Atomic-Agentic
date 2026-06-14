@@ -29,7 +29,7 @@ def run_case(label: str, fn) -> None:
     print(f"--- {label} ---")
     try:
         result = fn()
-        print(result)
+        print(result.result)
     except Exception as exc:
         print(f"{type(exc).__name__}: {exc}")
     print()

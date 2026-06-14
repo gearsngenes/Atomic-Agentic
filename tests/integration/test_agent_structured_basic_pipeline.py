@@ -10,7 +10,8 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.workflows.base import FlowResultDict
+from atomic_agentic.results import LLMModelData, TokenUsage
+from atomic_agentic.results.workflows import BasicFlowResult, SequentialFlowResult
 from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.sequential import SequentialFlow
 
@@ -64,6 +65,12 @@ class StatefulEchoLLMEngine(LLMEngine):
 
     def _extract_text(self, response: Any) -> str:
         return f"{self.prefix}: {response['latest_user']}"
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        return TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
+
+    def _get_model_data(self) -> LLMModelData:
+        return LLMModelData(provider="stateful-echo")
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         return {"path": path}
@@ -176,13 +183,13 @@ class TestAgentStructuredBasicPipeline:
         expected_prompt = "Write about pytest in a strict tone."
         expected_raw = f"ECHO: {expected_prompt}"
 
-        assert isinstance(result, FlowResultDict)
-        assert result == {
+        assert isinstance(result, BasicFlowResult)
+        assert result.result == {
             "final": expected_raw,
             "length": len(expected_raw),
             "was_postprocessed": True,
         }
-        assert result.run_id == flow.latest_run
+        assert result.run_id == flow.checkpoints[-1].result.run_id
         assert len(flow.checkpoints) == 1
         assert engine.calls == [
             [
@@ -198,10 +205,8 @@ class TestAgentStructuredBasicPipeline:
         checkpoint = flow.get_checkpoint(result.run_id)
         assert checkpoint is not None
 
-        metadata = checkpoint.metadata
-
-        assert metadata.child_is_workflow is False
-        assert metadata.child_id == structured_agent.instance_id
+        assert checkpoint.result.child_id == structured_agent.instance_id
+        assert checkpoint.result.child_type == "StructuredInvokable"
         assert agent.history == []
 
     def test_structured_agent_can_feed_sequential_flow_step(self) -> None:
@@ -226,14 +231,15 @@ class TestAgentStructuredBasicPipeline:
             "summary": f"{len(expected_raw)}:True:{expected_raw}",
         }
 
-        assert isinstance(result, FlowResultDict)
-        assert result == expected_second
-        assert flow.get_step_results(result.run_id) == [
+        assert isinstance(result, SequentialFlowResult)
+        assert result.result == expected_second
+        step_results = flow.get_step_results(result.run_id)
+        assert [r.result for r in step_results] == [
             expected_first,
             expected_second,
         ]
-        assert flow.get_step_result(result.run_id, 0) == expected_first
-        assert flow.get_step_result(result.run_id, 1) == expected_second
+        assert flow.get_step_result(result.run_id, 0).result == expected_first
+        assert flow.get_step_result(result.run_id, 1).result == expected_second
 
     def test_wrapped_context_enabled_agent_preserves_history_across_flow_invokes(
         self,
@@ -245,8 +251,8 @@ class TestAgentStructuredBasicPipeline:
         first = flow.invoke({"topic": "first topic", "tone": "plain"})
         second = flow.invoke({"topic": "second topic", "tone": "plain"})
 
-        assert first["final"] == "ECHO: Write about first topic in a plain tone."
-        assert second["final"] == "ECHO: Write about second topic in a plain tone."
+        assert first.result["final"] == "ECHO: Write about first topic in a plain tone."
+        assert second.result["final"] == "ECHO: Write about second topic in a plain tone."
         assert len(flow.checkpoints) == 2
         assert len(engine.calls) == 2
 
@@ -278,14 +284,14 @@ class TestAgentStructuredBasicPipeline:
         expected_prompt = "Write about async pytest in a strict tone."
         expected_raw = f"ECHO: {expected_prompt}"
 
-        assert isinstance(result, FlowResultDict)
-        assert result == {
+        assert isinstance(result, BasicFlowResult)
+        assert result.result == {
             "final": expected_raw,
             "length": len(expected_raw),
             "was_postprocessed": True,
         }
         assert len(flow.checkpoints) == 1
-        assert flow.checkpoints[0].run_id == result.run_id
+        assert flow.checkpoints[0].result.run_id == result.run_id
         assert len(engine.calls) == 1
 
     def test_composed_agent_pipeline_to_dict_exposes_agent_and_engine_snapshot(

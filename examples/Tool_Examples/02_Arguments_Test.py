@@ -111,7 +111,7 @@ def run_case(label: str, tool: Tool, inputs: dict[str, Any]) -> None:
     print(f"\n=== {label} ===")
     try:
         out = tool.invoke(inputs)
-        print("OK:", out)
+        print("OK:", out.result)
     except (ToolInvocationError, ToolDefinitionError, TypeError, ValueError) as exc:
         print("ERR:", exc)
 

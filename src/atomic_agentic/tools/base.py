@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from datetime import datetime, timezone
 from typing import (
     Any,
     Callable,
@@ -16,6 +17,7 @@ from ..core.Invokable import AtomicInvokable
 from ..core.Parameters import ParamSpec, extract_io
 from ..core.utils import run_coro_sync
 from ..core.constants import NO_VAL
+from ..results import ToolResult
 
 
 logger = logging.getLogger(__name__)
@@ -31,7 +33,7 @@ class Tool(AtomicInvokable):
     Python callable or another ``AtomicInvokable``. It implements the template
     method::
 
-        invoke(inputs) -> to_arg_kwarg(inputs) -> execute(args, kwargs)
+        invoke(inputs) -> to_arg_kwarg(inputs) -> execute(args, kwargs) -> ToolResult
 
     Plain callable-backed tools derive their schema from Python signature
     introspection through ``extract_io(...)``. Invokable-backed tools instead
@@ -69,6 +71,12 @@ class Tool(AtomicInvokable):
     method. This keeps ``Tool`` aligned with the core ``AtomicInvokable``
     contract and avoids routing wrapped invokables through their call-style
     convenience API.
+
+    ``execute(...)`` and ``async_execute(...)`` return the raw execution payload.
+    Public ``invoke(...)`` and ``async_invoke(...)`` wrap that payload in a
+    ``ToolResult`` whose ``.result`` field contains the caller-facing value.
+    
+    Subclasses customize result-envelope selection by overriding ``make_result(...)``.
 
     Serialization
     -------------
@@ -339,11 +347,11 @@ class Tool(AtomicInvokable):
         try:
             if self.wraps_invokable:
                 result = self._function.invoke(kwargs)
+                result = self._unwrap_result_payload(result)
             else:
                 result = self._function(*args, **kwargs)
-
-            if inspect.isawaitable(result):
-                result = run_coro_sync(result)
+                if inspect.isawaitable(result):
+                    result = run_coro_sync(result)
 
         except ToolInvocationError:
             raise
@@ -370,6 +378,7 @@ class Tool(AtomicInvokable):
         try:
             if self.wraps_invokable:
                 result = await self._function.async_invoke(kwargs)
+                result = self._unwrap_result_payload(result)
             elif inspect.iscoroutinefunction(self._function):
                 result = await self._function(*args, **kwargs)
             else:
@@ -388,7 +397,7 @@ class Tool(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> ToolResult:
         """Asynchronously invoke the tool using dict-first inputs.
 
         Mirrors the sync ``invoke(...)`` flow:
@@ -397,32 +406,68 @@ class Tool(AtomicInvokable):
         2. Convert filtered inputs into the execution shape through
            ``to_arg_kwarg(...)``.
         3. Dispatch through ``async_execute(...)``.
+        4. Wrap the raw execution payload in ``ToolResult``.
 
         ``async_execute(...)`` owns the distinction between invokable-backed
         tools, native async callables, and sync callables.
         """
+        started_at = datetime.now(timezone.utc)
+
         logger.info(f"[Async {self.full_name} started]")
         inputs = self.filter_inputs(inputs)
         args, kwargs = self.to_arg_kwarg(inputs)
         result = await self.async_execute(args, kwargs)
-        logger.info(f"[Async {self.full_name} finished]")
-        return result
+        ended_at = datetime.now(timezone.utc)
 
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        logger.info(f"[Async {self.full_name} finished]")
+        return self.make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+        )
+
+    def invoke(self, inputs: Mapping[str, Any]) -> ToolResult:
         """Synchronously invoke the tool using dict-first inputs.
 
         This is the main public execution entrypoint. Subclasses should not
         override this method; instead, they should customize ``to_arg_kwarg()``
         and ``execute()`` when they need different binding or transport
         semantics.
+
+        The returned ``ToolResult.result`` contains the raw execution payload
+        that this method previously returned directly.
         """
         with self._invoke_lock:
+            started_at = datetime.now(timezone.utc)
+
             logger.info(f"[{self.full_name} started]")
             inputs = self.filter_inputs(inputs)
             args, kwargs = self.to_arg_kwarg(inputs)
             result = self.execute(args, kwargs)
+            ended_at = datetime.now(timezone.utc)
+
             logger.info(f"[{self.full_name} finished]")
-            return result
+            return self.make_result(
+                result=result,
+                started_at=started_at,
+                ended_at=ended_at,
+            )
+
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> ToolResult:
+        """Construct a ToolResult envelope for this tool's invocation."""
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=ToolResult,
+            **result_kwargs,
+        )
 
     # ------------------------------------------------------------------ #
     # Serialization

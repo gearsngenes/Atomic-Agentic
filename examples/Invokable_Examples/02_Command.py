@@ -1,6 +1,6 @@
 from atomic_agentic import Command
 from atomic_agentic.tools import Tool
-
+from pprint import pprint
 
 def multiply(*, a: int, b: int) -> int:
     """Multiply two integers."""
@@ -29,11 +29,11 @@ print(multiply_6_by_7.parameters)
 # []
 
 result = multiply_6_by_7.invoke({})
-print(result)
+pprint(result.result)
 # 42
 
 result = multiply_6_by_7()
-print(result)
+pprint(result.result)
 # 42
 
 try:

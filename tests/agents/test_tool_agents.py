@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 import asyncio
 import json
@@ -24,12 +25,14 @@ from atomic_agentic.core.Exceptions import (
 )
 from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.agents.data_classes import (
-    AgentTurn,
-    ToolAgentTurn,
+    AgentRecord,
+    LLMRecord,
+    ToolAgentRecord,
     BlackboardSlot,
     ConstantSpec,
 )
 from atomic_agentic.engines.LLMEngines import LLMEngine
+from atomic_agentic.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from atomic_agentic.tools import Tool
 
 
@@ -61,6 +64,12 @@ class EchoLLMEngine(LLMEngine):
 
     def _extract_text(self, response: Any) -> str:
         return str(response)
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        return TokenUsage(input_tokens=10, generated_tokens=5, total_tokens=15)
+
+    def _get_model_data(self) -> LLMModelData:
+        return LLMModelData(provider="echo")
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         return {"path": path}
@@ -96,6 +105,12 @@ class ScriptedLLMEngine(LLMEngine):
 
     def _extract_text(self, response: Any) -> str:
         return str(response)
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        return TokenUsage(input_tokens=10, generated_tokens=5, total_tokens=15)
+
+    def _get_model_data(self) -> LLMModelData:
+        return LLMModelData(provider="scripted")
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         return {"path": path}
@@ -194,6 +209,32 @@ def package_tool_result(result: Any, label: str) -> dict[str, Any]:
     return {"label": label, "result": result}
 
 
+def make_llm_result(*, text: str = "generated text", invoker_id: str = "engine-1") -> LLMResult:
+    started_at = datetime.now(timezone.utc)
+    return LLMResult(
+        result=text,
+        invoker_id=invoker_id,
+        started_at=started_at,
+        ended_at=started_at + timedelta(seconds=1),
+        token_usage=TokenUsage(input_tokens=10, generated_tokens=5, total_tokens=15),
+        model_data=LLMModelData(provider="test"),
+    )
+
+
+def make_llm_record(*, user_prompt: str = "generate a response", text: str = "generated text") -> LLMRecord:
+    return LLMRecord(user_prompt=user_prompt, llm_result=make_llm_result(text=text))
+
+
+def make_tool_result(value: Any, *, invoker_id: str = "tool-1") -> ToolResult:
+    started_at = datetime.now(timezone.utc)
+    return ToolResult(
+        result=value,
+        invoker_id=invoker_id,
+        started_at=started_at,
+        ended_at=started_at + timedelta(seconds=1),
+    )
+
+
 def react_step_json(
     *,
     tool: str,
@@ -270,6 +311,9 @@ class ScriptedToolAgent(ToolAgent[ScriptedRunState]):
         total_steps = sum(len(batch) for batch in self.script)
         running_blackboard = [BlackboardSlot(step=index) for index in range(total_steps)]
 
+        engine_result = self.llm_engine.invoke({"messages": messages})
+        llm_record = LLMRecord(user_prompt=messages[-1]["content"], llm_result=engine_result)
+
         return ScriptedRunState(
             messages=[dict(message) for message in messages],
             cache_blackboard=list(self._blackboard),
@@ -279,6 +323,7 @@ class ScriptedToolAgent(ToolAgent[ScriptedRunState]):
             tool_calls_used=0,
             is_done=False,
             return_value=NO_VAL,
+            llm_records=[llm_record],
             batches=[[dict(call) for call in batch] for batch in self.script],
             batch_index=0,
             next_step_index=0,
@@ -385,7 +430,7 @@ def executed_slot(step: int, result: Any, *, tool: str = "Tool.tests.add") -> Bl
     slot.tool = tool
     slot.args = {}
     slot.resolved_args = {}
-    slot.result = result
+    slot.result = make_tool_result(result)
     slot.status = "executed"
     return slot
 
@@ -550,7 +595,7 @@ class TestToolAgentPostInvokeRouting:
 
         result = agent.invoke({"prompt": "run", "label": "scripted"})
 
-        assert result == {"label": "scripted", "result": 5}
+        assert result.result == {"label": "scripted", "result": 5}
         assert agent.post_result_key == "result"
         assert agent.passthrough_inputs == ["label"]
 
@@ -573,7 +618,7 @@ class TestToolAgentPostInvokeRouting:
 
         result = agent.invoke({"prompt": "run plan", "label": "planact"})
 
-        assert result == {"label": "planact", "result": 5}
+        assert result.result == {"label": "planact", "result": 5}
 
     def test_react_agent_supports_post_invoke_passthrough(self) -> None:
         agent = make_react_agent(
@@ -592,7 +637,7 @@ class TestToolAgentPostInvokeRouting:
 
         result = agent.invoke({"prompt": "run react", "label": "react"})
 
-        assert result == {"label": "react", "result": 7}
+        assert result.result == {"label": "react", "result": 7}
 
 
 class TestToolRegistration:
@@ -603,7 +648,7 @@ class TestToolRegistration:
 
         assert key == "Tool.tests.add"
         assert agent.has_tool(key)
-        assert agent.get_tool(key).invoke({"x": 1, "y": 2}) == 3
+        assert agent.get_tool(key).invoke({"x": 1, "y": 2}).result == 3
 
     def test_register_tool_instance_adds_tool(self) -> None:
         agent = make_agent()
@@ -645,7 +690,7 @@ class TestToolRegistration:
         )
 
         assert second == first
-        assert agent.get_tool(first).invoke({"x": 3, "y": 4}) == 12
+        assert agent.get_tool(first).invoke({"x": 3, "y": 4}).result == 12
 
     def test_register_invalid_collision_mode_raises(self) -> None:
         agent = make_agent()
@@ -1000,7 +1045,7 @@ class TestExecutePreparedBatch:
 
         updated = agent._execute_prepared_batch(state)
 
-        assert updated.running_blackboard[0].result == 5
+        assert updated.running_blackboard[0].result.result == 5
         assert updated.running_blackboard[0].status == "executed"
         assert updated.running_blackboard[0].is_executed() is True
         assert updated.executed_steps == {0}
@@ -1021,9 +1066,9 @@ class TestExecutePreparedBatch:
 
         updated = agent._execute_prepared_batch(state)
 
-        assert updated.running_blackboard[0].result == 5
+        assert updated.running_blackboard[0].result.result == 5
         assert updated.running_blackboard[0].status == "executed"
-        assert updated.running_blackboard[1].result == 20
+        assert updated.running_blackboard[1].result.result == 20
         assert updated.running_blackboard[1].status == "executed"
         assert updated.tool_calls_used == 2
 
@@ -1179,6 +1224,154 @@ class TestExecutePreparedBatch:
         assert updated.prepared_steps == []
 
 
+class TestAsyncExecutePreparedBatch:
+    """Async analog of TestExecutePreparedBatch covering _async_execute_prepared_batch."""
+
+    def test_executes_single_non_return_tool_and_stores_result(self) -> None:
+        agent = make_agent()
+        keys = register_math_tools(agent)
+
+        slot = prepared_slot(0, keys["add"], {"x": 2, "y": 3})
+        state = make_state(running=[slot], prepared_steps=[0])
+
+        updated = asyncio.run(agent._async_execute_prepared_batch(state))
+
+        assert updated.running_blackboard[0].result.result == 5
+        assert updated.running_blackboard[0].status == "executed"
+        assert updated.executed_steps == {0}
+        assert updated.tool_calls_used == 1
+        assert updated.prepared_steps == []
+
+    def test_executes_return_tool_sets_done_and_return_value(self) -> None:
+        agent = make_agent()
+
+        state = make_state(
+            running=[prepared_slot(0, return_tool.full_name, {"val": 123})],
+            prepared_steps=[0],
+        )
+
+        updated = asyncio.run(agent._async_execute_prepared_batch(state))
+
+        assert updated.is_done is True
+        assert updated.return_value == 123
+        assert updated.tool_calls_used == 0
+
+    def test_empty_prepared_steps_raises(self) -> None:
+        agent = make_agent()
+        state = make_state(running=[])
+
+        with pytest.raises(ToolAgentError, match="no prepared steps"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+    def test_duplicate_prepared_steps_raises(self) -> None:
+        agent = make_agent()
+        keys = register_math_tools(agent)
+        state = make_state(
+            running=[prepared_slot(0, keys["add"], {"x": 1, "y": 2})],
+            prepared_steps=[0, 0],
+        )
+
+        with pytest.raises(ToolAgentError, match="duplicates"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+    def test_non_int_prepared_step_raises(self) -> None:
+        agent = make_agent()
+        state = make_state(
+            running=[BlackboardSlot(step=0)],
+            prepared_steps=["0"],  # type: ignore[list-item]
+        )
+
+        with pytest.raises(ToolAgentError, match="must be int"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+    def test_out_of_range_prepared_step_raises(self) -> None:
+        agent = make_agent()
+        state = make_state(running=[], prepared_steps=[0])
+
+        with pytest.raises(ToolAgentError, match="out of range"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+    def test_step_mismatch_raises(self) -> None:
+        agent = make_agent()
+        keys = register_math_tools(agent)
+        slot = prepared_slot(99, keys["add"], {"x": 1, "y": 2})
+        state = make_state(running=[slot], prepared_steps=[0])
+
+        with pytest.raises(ToolAgentError, match="step mismatch"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+    def test_already_executed_step_raises(self) -> None:
+        agent = make_agent()
+        state = make_state(running=[executed_slot(0, 3)], prepared_steps=[0])
+
+        with pytest.raises(ToolAgentError, match="already executed"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+    def test_unprepared_slot_raises(self) -> None:
+        agent = make_agent()
+        state = make_state(running=[BlackboardSlot(step=0)], prepared_steps=[0])
+
+        with pytest.raises(ToolAgentError, match="not prepared"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+    def test_invalid_tool_name_raises(self) -> None:
+        agent = make_agent()
+        slot = prepared_slot(0, "", {})
+        state = make_state(running=[slot], prepared_steps=[0])
+
+        with pytest.raises(ToolAgentError, match="invalid tool name"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+    def test_multiple_return_tools_in_same_batch_raises(self) -> None:
+        agent = make_agent()
+        state = make_state(
+            running=[
+                prepared_slot(0, return_tool.full_name, {"val": 1}),
+                prepared_slot(1, return_tool.full_name, {"val": 2}),
+            ],
+            prepared_steps=[0, 1],
+        )
+
+        with pytest.raises(ToolAgentError, match="multiple return"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+    def test_tool_calls_limit_exceeded_raises(self) -> None:
+        agent = make_agent(tool_calls_limit=0)
+        keys = register_math_tools(agent)
+        state = make_state(
+            running=[prepared_slot(0, keys["add"], {"x": 1, "y": 2})],
+            prepared_steps=[0],
+        )
+
+        with pytest.raises(ToolAgentError, match="tool_calls_limit exceeded"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+    def test_non_invocation_exception_is_wrapped_as_tool_agent_error(self) -> None:
+        agent = make_agent()
+        keys = register_math_tools(agent)
+        # Missing required "y" raises a raw TypeError out of Tool.async_invoke,
+        # before it can be wrapped as a ToolInvocationError.
+        slot = prepared_slot(0, keys["add"], {"x": 1})
+        state = make_state(running=[slot], prepared_steps=[0])
+
+        with pytest.raises(ToolAgentError, match="tool call failed at index 0"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+        assert isinstance(state.running_blackboard[0].error, ToolAgentError)
+        assert state.running_blackboard[0].status == "failed"
+
+    def test_return_tool_executed_more_than_once_raises(self) -> None:
+        agent = make_agent()
+        state = make_state(
+            running=[prepared_slot(0, return_tool.full_name, {"val": 2})],
+            prepared_steps=[0],
+        )
+        state.return_value = 1
+
+        with pytest.raises(ToolAgentError, match="return tool executed more than once"):
+            asyncio.run(agent._async_execute_prepared_batch(state))
+
+
 class TestScriptedInvokeLoop:
     def test_scripted_invoke_runs_tools_placeholders_and_return(self) -> None:
         agent = make_agent()
@@ -1193,7 +1386,7 @@ class TestScriptedInvokeLoop:
 
         result = agent.invoke({"prompt": "run"})
 
-        assert result == 50
+        assert result.result == 50
 
     def test_context_disabled_does_not_persist_blackboard(self) -> None:
         agent = make_agent(context_enabled=False)
@@ -1205,7 +1398,7 @@ class TestScriptedInvokeLoop:
             ]
         )
 
-        assert agent.invoke({"prompt": "run"}) == 5
+        assert agent.invoke({"prompt": "run"}).result == 5
         assert agent.blackboard == []
         assert agent.turn_history == []
 
@@ -1219,13 +1412,13 @@ class TestScriptedInvokeLoop:
             ]
         )
 
-        assert agent.invoke({"prompt": "run"}) == 5
+        assert agent.invoke({"prompt": "run"}).result == 5
 
         assert len(agent.turn_history) == 1
         turn = agent.turn_history[0]
-        assert isinstance(turn, ToolAgentTurn)
-        assert turn.prompt == "run"
-        assert turn.raw_response == 5
+        assert isinstance(turn, ToolAgentRecord)
+        assert turn.user_prompt == "run"
+        assert turn.generated_response == 5
         assert turn.final_response == 5
         assert turn.blackboard_start == 0
         assert turn.blackboard_end == len(agent.blackboard)
@@ -1240,15 +1433,15 @@ class TestScriptedInvokeLoop:
             ]
         )
 
-        assert agent.invoke({"prompt": "run"}) == 5
+        assert agent.invoke({"prompt": "run"}).result == 5
 
         board = agent.blackboard
         assert len(board) == 2
         assert board[0].tool == keys["add"]
-        assert board[0].result == 5
+        assert board[0].result.result == 5
         assert board[0].status == "executed"
         assert board[1].tool == return_tool.full_name
-        assert board[1].result == 5
+        assert board[1].result.result == 5
         assert board[1].status == "executed"
 
     def test_context_enabled_rewrites_step_placeholders_to_cache_placeholders(self) -> None:
@@ -1262,7 +1455,7 @@ class TestScriptedInvokeLoop:
             ]
         )
 
-        assert agent.invoke({"prompt": "run"}) == 50
+        assert agent.invoke({"prompt": "run"}).result == 50
 
         board = agent.blackboard
         assert board[1].args == {"x": "<<__c0__>>", "y": 10}
@@ -1324,14 +1517,14 @@ class TestScriptedInvokeLoop:
                 [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
             ]
         )
-        assert agent.invoke({"prompt": "first"}) == 5
+        assert agent.invoke({"prompt": "first"}).result == 5
 
         agent.set_script(
             [
                 [{"tool": return_tool.full_name, "args": {"val": "<<__c0__>>"}}],
             ]
         )
-        assert agent.invoke({"prompt": "second"}) == 5
+        assert agent.invoke({"prompt": "second"}).result == 5
 
 
 class TestBlackboardPersistenceAndDisplay:
@@ -1347,9 +1540,9 @@ class TestBlackboardPersistenceAndDisplay:
         agent.invoke({"prompt": "run"})
 
         snapshot = agent.blackboard
-        snapshot[0].result = 999
+        snapshot[0].result = make_tool_result(999)
 
-        assert agent.blackboard[0].result == 3
+        assert agent.blackboard[0].result.result == 3
 
     def test_blackboard_serialized_without_peek_hides_results_and_resolved_args(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -1384,9 +1577,28 @@ class TestBlackboardPersistenceAndDisplay:
         serialized = agent.blackboard_serialized(peek=True)
 
         assert isinstance(serialized, list)
-        assert serialized[0]["result"] == 3
+        assert serialized[0]["result"].result == 3
         assert serialized[0]["resolved_args"] == {"x": 1, "y": 2}
         assert serialized[0]["status"] == "executed"
+
+    def test_to_dict_includes_tool_agent_diagnostics(self) -> None:
+        agent = make_agent(context_enabled=True)
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+        agent.invoke({"prompt": "run"})
+
+        snapshot = agent.to_dict()
+
+        assert snapshot["tool_calls_limit"] == agent.tool_calls_limit
+        assert snapshot["peek_at_cache"] == agent.peek_at_cache
+        assert snapshot["blackboard_preview_limit"] == agent.blackboard_preview_limit
+        assert set(snapshot["tools"]) == set(agent._toolbox)
+        assert snapshot["blackboard"] == agent.blackboard_serialized(peek=False)
 
     def test_rendered_history_with_peek_at_cache_includes_cached_step_results(self) -> None:
         agent = make_agent(context_enabled=True, peek_at_cache=True, blackboard_preview_limit=10)
@@ -1408,7 +1620,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         result = agent.invoke({"prompt": "run"})
 
-        assert result == "long:abcdefghijklmnopqrstuvwxyz"
+        assert result.result == "long:abcdefghijklmnopqrstuvwxyz"
         with pytest.warns(DeprecationWarning):
             history = agent.history
 
@@ -1428,7 +1640,7 @@ class TestBlackboardPersistenceAndDisplay:
             ]
         )
 
-        assert agent.invoke({"prompt": "run"}) == 3
+        assert agent.invoke({"prompt": "run"}).result == 3
 
         with pytest.warns(DeprecationWarning):
             history = agent.history
@@ -1460,7 +1672,7 @@ class TestBlackboardPersistenceAndDisplay:
             ]
         )
 
-        assert agent.invoke({"prompt": "run"}) == "long:abcdefghijklmnopqrstuvwxyz"
+        assert agent.invoke({"prompt": "run"}).result == "long:abcdefghijklmnopqrstuvwxyz"
 
         with pytest.warns(DeprecationWarning):
             history = agent.history
@@ -1492,7 +1704,7 @@ class TestBlackboardPersistenceAndDisplay:
             ]
         )
 
-        assert agent.invoke({"prompt": "run"}) == "long:abcdefghijklmnopqrstuvwxyz"
+        assert agent.invoke({"prompt": "run"}).result == "long:abcdefghijklmnopqrstuvwxyz"
 
         with pytest.warns(DeprecationWarning):
             history = agent.history
@@ -1505,7 +1717,7 @@ class TestBlackboardPersistenceAndDisplay:
         assert "'long:abcdefghijklmnopqrstuvwxyz'" in cached_section
 
 
-class TestToolAgentTurnRendering:
+class TestToolAgentRecordRendering:
     def test_render_turn_returns_single_user_assistant_pair(self) -> None:
         agent = make_agent(context_enabled=True, peek_at_cache=True)
         keys = register_math_tools(agent)
@@ -1516,7 +1728,7 @@ class TestToolAgentTurnRendering:
             ]
         )
 
-        assert agent.invoke({"prompt": "run"}) == 3
+        assert agent.invoke({"prompt": "run"}).result == 3
 
         rendered = agent.render_turn(agent.turn_history[0])
 
@@ -1536,7 +1748,7 @@ class TestToolAgentTurnRendering:
                 [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
             ]
         )
-        assert agent.invoke({"prompt": "first"}) == 3
+        assert agent.invoke({"prompt": "first"}).result == 3
 
         agent.set_script(
             [
@@ -1544,7 +1756,7 @@ class TestToolAgentTurnRendering:
                 [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
             ]
         )
-        assert agent.invoke({"prompt": "second"}) == 20
+        assert agent.invoke({"prompt": "second"}).result == 20
 
         first_rendered = agent.render_turn(agent.turn_history[0])[1]["content"]
         second_rendered = agent.render_turn(agent.turn_history[1])[1]["content"]
@@ -1558,9 +1770,15 @@ class TestToolAgentTurnRendering:
 
     def test_render_turn_raises_for_non_tool_agent_turn(self) -> None:
         agent = make_agent()
-        turn = AgentTurn(prompt="run", raw_response="raw", final_response="final")
+        turn = AgentRecord(
+            user_prompt="run",
+            generated_response="raw",
+            final_response="final",
+            llm_records=(make_llm_record(),),
+            run_id="record-1",
+        )
 
-        with pytest.raises(ToolAgentError, match="ToolAgentTurn"):
+        with pytest.raises(ToolAgentError, match="ToolAgentRecord"):
             agent.render_turn(turn)
 
 
@@ -1625,6 +1843,13 @@ class TestParsingHelpers:
         with pytest.raises(ToolAgentError):
             agent._extract_from_json_string(raw)
 
+    def test_extract_from_json_string_skips_unparseable_candidates(self) -> None:
+        agent = make_agent()
+
+        value = agent._extract_from_json_string("garbage {not valid json then [1, 2, 3]")
+
+        assert value == [1, 2, 3]
+
 
 class TestPlanActAgent:
     def test_invokes_planned_tools_and_returns_value(self) -> None:
@@ -1642,7 +1867,7 @@ class TestPlanActAgent:
 
         result = agent.invoke({"prompt": "run plan"})
 
-        assert result == 50
+        assert result.result == 50
 
     def test_auto_appends_return_none_when_plan_has_no_return(self) -> None:
         agent = make_planact_agent(
@@ -1657,7 +1882,7 @@ class TestPlanActAgent:
 
         result = agent.invoke({"prompt": "run plan"})
 
-        assert result is None
+        assert result.result is None
 
     def test_moves_return_step_to_end(self) -> None:
         agent = make_planact_agent(
@@ -1673,7 +1898,7 @@ class TestPlanActAgent:
 
         result = agent.invoke({"prompt": "run plan"})
 
-        assert result == 3
+        assert result.result == 3
 
     def test_executes_independent_steps_in_same_batch(self) -> None:
         agent = make_planact_agent(
@@ -1707,6 +1932,18 @@ class TestPlanActAgent:
         )
 
         with pytest.raises(ToolAgentError, match="multiple return"):
+            agent.invoke({"prompt": "run plan"})
+
+    def test_rejects_plan_output_that_is_not_a_json_array(self) -> None:
+        agent = make_planact_agent(['{"not": "a list"}'])
+
+        with pytest.raises(ToolAgentError, match="plan output must be a non-empty JSON array"):
+            agent.invoke({"prompt": "run plan"})
+
+    def test_rejects_plan_item_that_is_not_a_json_object(self) -> None:
+        agent = make_planact_agent(["[1, 2, 3]"])
+
+        with pytest.raises(ToolAgentError, match="must be a JSON object"):
             agent.invoke({"prompt": "run plan"})
 
     def test_rejects_unknown_tool_in_plan(self) -> None:
@@ -1788,8 +2025,8 @@ class TestPlanActAgent:
             context_enabled=True,
         )
 
-        assert agent.invoke({"prompt": "first"}) == 5
-        assert agent.invoke({"prompt": "second"}) == 5
+        assert agent.invoke({"prompt": "first"}).result == 5
+        assert agent.invoke({"prompt": "second"}).result == 5
 
     def test_compile_batches_isolates_return_step(self) -> None:
         agent = make_planact_agent(["[]"])
@@ -1940,7 +2177,7 @@ class TestPlanActAgent:
 
         result = asyncio.run(agent.async_invoke({"prompt": "run plan"}))
 
-        assert result == 50
+        assert result.result == 50
 
 
 class TestReActAgent:
@@ -1952,6 +2189,12 @@ class TestReActAgent:
                 llm_engine=ScriptedLLMEngine([]),
                 tool_calls_limit=-1,
             )
+
+    def test_rejects_next_step_output_that_is_not_a_json_object(self) -> None:
+        agent = make_react_agent(["[1, 2, 3]"], tool_calls_limit=1)
+
+        with pytest.raises(ToolAgentError, match="next step output must be a JSON object"):
+            agent.invoke({"prompt": "run react"})
 
     def test_invokes_step_by_step_until_return(self) -> None:
         agent = make_react_agent(
@@ -1980,7 +2223,7 @@ class TestReActAgent:
 
         result = agent.invoke({"prompt": "run react"})
 
-        assert result == 50
+        assert result.result == 50
 
     def test_injects_running_plan_after_first_step(self) -> None:
         agent = make_react_agent(
@@ -2004,7 +2247,7 @@ class TestReActAgent:
 
         result = agent.invoke({"prompt": "run react"})
 
-        assert result == 5
+        assert result.result == 5
         engine = agent.llm_engine
         assert isinstance(engine, ScriptedLLMEngine)
         assert len(engine.calls) == 2
@@ -2332,7 +2575,7 @@ class TestReActAgent:
 
         result = asyncio.run(agent.async_invoke({"prompt": "run react"}))
 
-        assert result == 50
+        assert result.result == 50
 
 
 class TestToolAgentAsyncBaseLoop:
@@ -2349,7 +2592,7 @@ class TestToolAgentAsyncBaseLoop:
 
         result = asyncio.run(agent.async_invoke({"prompt": "run"}))
 
-        assert result == 50
+        assert result.result == 50
 
     def test_async_context_enabled_persists_blackboard(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -2363,10 +2606,10 @@ class TestToolAgentAsyncBaseLoop:
 
         result = asyncio.run(agent.async_invoke({"prompt": "run"}))
 
-        assert result == 5
+        assert result.result == 5
         assert len(agent.blackboard) == 2
-        assert agent.blackboard[0].result == 5
-        assert agent.blackboard[1].result == 5
+        assert agent.blackboard[0].result.result == 5
+        assert agent.blackboard[1].result.result == 5
 
     def test_async_execute_prepared_batch_records_tool_error(self) -> None:
         agent = make_agent()
@@ -2394,107 +2637,15 @@ class TestToolAgentAsyncBaseLoop:
         with pytest.raises(ToolAgentError, match="empty batch"):
             asyncio.run(agent.async_invoke({"prompt": "run"}))
 
-class TestToolAgentTurnMetadataContract:
-    def test_make_turn_accepts_valid_blackboard_span(self) -> None:
-        agent = make_agent()
-
-        turn = agent._make_turn(
-            prompt="run",
-            raw_response=3,
-            final_response=3,
-            blackboard_start=0,
-            blackboard_end=2,
-        )
-
-        assert isinstance(turn, ToolAgentTurn)
-        assert turn.prompt == "run"
-        assert turn.raw_response == 3
-        assert turn.final_response == 3
-        assert turn.blackboard_start == 0
-        assert turn.blackboard_end == 2
-
-    def test_make_turn_accepts_none_blackboard_span(self) -> None:
-        agent = make_agent()
-
-        turn = agent._make_turn(
-            prompt="run",
-            raw_response="raw",
-            final_response="final",
-            blackboard_start=None,
-            blackboard_end=None,
-        )
-
-        assert isinstance(turn, ToolAgentTurn)
-        assert turn.blackboard_start is None
-        assert turn.blackboard_end is None
-
-    def test_make_turn_rejects_partial_none_blackboard_span(self) -> None:
-        agent = make_agent()
-
-        with pytest.raises(ToolAgentError, match="both be None or both be integers"):
-            agent._make_turn(
-                prompt="run",
-                raw_response="raw",
-                final_response="final",
-                blackboard_start=0,
-                blackboard_end=None,
-            )
-
-        with pytest.raises(ToolAgentError, match="both be None or both be integers"):
-            agent._make_turn(
-                prompt="run",
-                raw_response="raw",
-                final_response="final",
-                blackboard_start=None,
-                blackboard_end=1,
-            )
-
-    @pytest.mark.parametrize(
-        ("blackboard_start", "blackboard_end"),
-        [
-            (-1, 1),
-            (2, 1),
-            (True, 1),
-            (0, False),
-            ("0", 1),
-            (0, "1"),
-        ],
-    )
-    def test_make_turn_rejects_invalid_blackboard_span(
-        self,
-        blackboard_start: Any,
-        blackboard_end: Any,
-    ) -> None:
-        agent = make_agent()
-
-        with pytest.raises(ToolAgentError, match="blackboard_start and blackboard_end"):
-            agent._make_turn(
-                prompt="run",
-                raw_response="raw",
-                final_response="final",
-                blackboard_start=blackboard_start,
-                blackboard_end=blackboard_end,
-            )
-
-    def test_make_turn_rejects_unexpected_metadata(self) -> None:
-        agent = make_agent()
-
-        with pytest.raises(ToolAgentError, match="unexpected metadata"):
-            agent._make_turn(
-                prompt="run",
-                raw_response="raw",
-                final_response="final",
-                blackboard_start=0,
-                blackboard_end=1,
-                unexpected=True,
-            )
-
+class TestToolAgentRecordMetadataContract:
     def test_render_turn_with_none_span_returns_base_user_assistant_pair(self) -> None:
         agent = make_agent()
-        turn = ToolAgentTurn(
-            prompt="run",
-            raw_response="raw response",
+        turn = ToolAgentRecord(
+            user_prompt="run",
+            generated_response="raw response",
             final_response="final response",
+            llm_records=(make_llm_record(),),
+            run_id="record-1",
             blackboard_start=None,
             blackboard_end=None,
         )
@@ -2508,10 +2659,12 @@ class TestToolAgentTurnMetadataContract:
 
     def test_render_turn_with_empty_span_returns_base_user_assistant_pair(self) -> None:
         agent = make_agent()
-        turn = ToolAgentTurn(
-            prompt="run",
-            raw_response="raw response",
+        turn = ToolAgentRecord(
+            user_prompt="run",
+            generated_response="raw response",
             final_response="final response",
+            llm_records=(make_llm_record(),),
+            run_id="record-1",
             blackboard_start=0,
             blackboard_end=0,
         )
@@ -2525,10 +2678,12 @@ class TestToolAgentTurnMetadataContract:
 
     def test_render_turn_rejects_span_beyond_current_blackboard(self) -> None:
         agent = make_agent()
-        turn = ToolAgentTurn(
-            prompt="run",
-            raw_response="raw response",
+        turn = ToolAgentRecord(
+            user_prompt="run",
+            generated_response="raw response",
             final_response="final response",
+            llm_records=(make_llm_record(),),
+            run_id="record-1",
             blackboard_start=0,
             blackboard_end=1,
         )

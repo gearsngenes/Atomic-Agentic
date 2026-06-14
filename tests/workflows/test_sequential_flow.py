@@ -2,54 +2,63 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from types import MethodType
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
 from atomic_agentic.core.Exceptions import ExecutionError, ValidationError
-from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.core.constants import NO_VAL
-from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.workflows.base import FlowResultDict, Workflow
+from atomic_agentic.core.Parameters import ParamSpec
+from atomic_agentic.results.workflows import SequentialFlowResult, WorkflowResult
+from atomic_agentic.tools.base import Tool
+from atomic_agentic.workflows.base import Workflow
 from atomic_agentic.workflows.basic import BasicFlow
-from atomic_agentic.workflows.metadata import WorkflowRunMetadata
 from atomic_agentic.workflows.sequential import SequentialFlow
 
 
-def value_param() -> ParamSpec:
-    return ParamSpec(
-        name="value",
-        index=0,
-        kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-        type="Any",
-        default=NO_VAL,
-    )
+class EchoWorkflow(Workflow):
+    """Same shape as other files' EchoWorkflow: _run returns ({"value": inputs["value"]}, {})."""
+
+    def __init__(
+        self,
+        *,
+        name: str = "echo_workflow",
+        description: str = "Echo workflow.",
+        filter_extraneous_inputs: bool = True,
+    ) -> None:
+        super().__init__(
+            name=name,
+            description=description,
+            parameters=[
+                ParamSpec(
+                    name="value",
+                    index=0,
+                    kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                    type="int",
+                )
+            ],
+            return_type="dict[str, Any]",
+            filter_extraneous_inputs=filter_extraneous_inputs,
+        )
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"value": inputs["value"]}, {}
 
 
-def make_param(name: str, index: int) -> ParamSpec:
-    return ParamSpec(
-        name=name,
-        index=index,
-        kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-        type="Any",
-        default=NO_VAL,
-    )
+def first_step(value: int) -> dict[str, int]:
+    """Move value into the first step field."""
+    return {"first": value + 1}
 
 
-def return_value(value: Any) -> Any:
-    """Return the provided value."""
-    return value
+def second_step(first: int) -> dict[str, int]:
+    """Move first into the second step field."""
+    return {"second": first * 2}
 
 
-def make_raw_tool() -> Tool:
-    return Tool(
-        function=return_value,
-        name="return_value",
-        namespace="tests",
-        description="Return the provided value.",
-    )
+def third_step(second: int) -> dict[str, str]:
+    """Move second into the third step field."""
+    return {"third": f"value={second}"}
 
 
 def make_structured_component(
@@ -71,77 +80,17 @@ def make_structured_component(
         output_schema=output_schema,
         name=f"structured_{name}",
         description=f"Structured test component {name}.",
-        ignore_unhandled=True,
     )
 
 
-class EchoWorkflow(Workflow[WorkflowRunMetadata]):
-    def __init__(
-        self,
-        *,
-        name: str = "echo_workflow",
-        description: str = "Echo workflow.",
-        filter_extraneous_inputs: bool = True,
-    ) -> None:
-        super().__init__(
-            name=name,
-            description=description,
-            parameters=[value_param()],
-            filter_extraneous_inputs=filter_extraneous_inputs,
-        )
-        self.run_inputs: list[dict[str, Any]] = []
-        self.async_run_inputs: list[dict[str, Any]] = []
-
-    def _run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
-        self.run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(), {"value": inputs["value"]}
-
-    async def _async_run(
-        self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[WorkflowRunMetadata, Mapping[str, Any]]:
-        self.async_run_inputs.append(dict(inputs))
-        return WorkflowRunMetadata(), {"value": inputs["value"]}
-
-
-def first_step(value: int) -> dict[str, int]:
-    """Move value into the first step field."""
-    return {"first": value + 1}
-
-
-def second_step(first: int) -> dict[str, int]:
-    """Move first into the second step field."""
-    return {"second": first * 2}
-
-
-def third_step(second: int) -> dict[str, str]:
-    """Move second into the third step field."""
-    return {"third": f"value={second}"}
-
-
-def make_three_step_flow(*, return_index: int = -1) -> SequentialFlow:
+def make_three_step_flow(*, return_index: int | None = None) -> SequentialFlow:
     return SequentialFlow(
         name="sequential_flow",
         description="Sequential test flow.",
         steps=[
-            make_structured_component(
-                first_step,
-                name="first_step",
-                output_schema=["first"],
-            ),
-            make_structured_component(
-                second_step,
-                name="second_step",
-                output_schema=["second"],
-            ),
-            make_structured_component(
-                third_step,
-                name="third_step",
-                output_schema=["third"],
-            ),
+            make_structured_component(first_step, name="first_step", output_schema=["first"]),
+            make_structured_component(second_step, name="second_step", output_schema=["second"]),
+            make_structured_component(third_step, name="third_step", output_schema=["third"]),
         ],
         return_index=return_index,
     )
@@ -185,11 +134,7 @@ class TestSequentialFlowConstruction:
         assert flow.steps[0] is child
 
     def test_constructor_wraps_structured_steps_in_basic_flow(self) -> None:
-        component = make_structured_component(
-            first_step,
-            name="first_step",
-            output_schema=["first"],
-        )
+        component = make_structured_component(first_step, name="first_step", output_schema=["first"])
 
         flow = SequentialFlow(
             name="sequential_flow",
@@ -201,408 +146,217 @@ class TestSequentialFlowConstruction:
         assert isinstance(flow.steps[0], BasicFlow)
         assert flow.steps[0].component is component  # type: ignore[attr-defined]
 
-    def test_constructor_uses_first_step_parameters(self) -> None:
-        component = make_structured_component(
-            first_step,
-            name="first_step",
-            output_schema=["first"],
-        )
+    def test_return_index_defaults_to_last_step(self) -> None:
+        flow = make_three_step_flow(return_index=None)
 
-        flow = SequentialFlow(
-            name="sequential_flow",
-            description="Sequential test flow.",
-            steps=[component],
-        )
+        assert flow.return_index == 2
 
-        assert flow.parameters == flow.steps[0].parameters
-        assert [param.name for param in flow.parameters] == ["value"]
+    def test_return_index_accepts_in_range_int(self) -> None:
+        flow = make_three_step_flow(return_index=0)
 
-    def test_constructor_inherits_first_step_filter_flag_by_default(self) -> None:
-        child = EchoWorkflow(filter_extraneous_inputs=False)
+        assert flow.return_index == 0
 
-        flow = SequentialFlow(
-            name="sequential_flow",
-            description="Sequential test flow.",
-            steps=[child],
-        )
-
-        assert flow.filter_extraneous_inputs is False
-
-    def test_constructor_allows_filter_flag_override(self) -> None:
-        child = EchoWorkflow(filter_extraneous_inputs=False)
-
-        flow = SequentialFlow(
-            name="sequential_flow",
-            description="Sequential test flow.",
-            steps=[child],
-            filter_extraneous_inputs=True,
-        )
-
-        assert flow.filter_extraneous_inputs is True
-
-    @pytest.mark.parametrize("return_index", [0, -1])
-    def test_return_index_accepts_positive_and_negative_indices(
-        self,
-        return_index: int,
-    ) -> None:
-        flow = make_three_step_flow(return_index=return_index)
-
-        assert flow.return_index == return_index
-
-    @pytest.mark.parametrize("bad_index", ["0", 1.5, None])
-    def test_return_index_rejects_non_int(self, bad_index: Any) -> None:
-        flow = make_three_step_flow()
-
+    def test_return_index_rejects_non_int_at_construction(self) -> None:
         with pytest.raises(TypeError, match="return_index must be an int"):
-            flow.return_index = bad_index  # type: ignore[assignment]
+            make_three_step_flow(return_index="0")  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize("bad_index", [3, -4])
-    def test_return_index_rejects_out_of_range(self, bad_index: int) -> None:
+    def test_return_index_rejects_negative_at_construction(self) -> None:
+        with pytest.raises(IndexError, match="out of range"):
+            make_three_step_flow(return_index=-1)
+
+    def test_return_index_rejects_out_of_range_at_construction(self) -> None:
+        with pytest.raises(IndexError, match="out of range"):
+            make_three_step_flow(return_index=3)
+
+    def test_return_index_has_no_setter(self) -> None:
         flow = make_three_step_flow()
 
-        with pytest.raises(IndexError, match="out of range"):
-            flow.return_index = bad_index
+        with pytest.raises(AttributeError):
+            flow.return_index = 0  # type: ignore[misc]
 
 
 class TestSequentialFlowSyncInvoke:
-    def test_invoke_runs_all_steps_in_order(self) -> None:
-        flow = make_three_step_flow()
-
-        result = flow.invoke({"value": 2})
-
-        assert result == {"third": "value=6"}
-        assert flow.get_step_results(result.run_id) == [
-            {"first": 3},
-            {"second": 6},
-            {"third": "value=6"},
-        ]
-
-    def test_first_step_receives_filtered_outer_inputs(self) -> None:
-        calls: list[dict[str, Any]] = []
-
-        def recording_first_step(value: int) -> dict[str, int]:
-            calls.append({"value": value})
-            return {"first": value + 1}
-
-        flow = SequentialFlow(
-            name="sequential_flow",
-            description="Sequential test flow.",
-            steps=[
-                make_structured_component(
-                    recording_first_step,
-                    name="recording_first_step",
-                    output_schema=["first"],
-                ),
-                make_structured_component(
-                    second_step,
-                    name="second_step",
-                    output_schema=["second"],
-                ),
-            ],
-        )
-
-        flow.invoke({"value": 2, "extra": "ignored"})
-
-        assert calls == [{"value": 2}]
-
-    def test_each_step_receives_previous_step_result(self) -> None:
-        second_calls: list[dict[str, Any]] = []
-
-        def recording_second_step(first: int) -> dict[str, int]:
-            second_calls.append({"first": first})
-            return {"second": first * 2}
-
-        flow = SequentialFlow(
-            name="sequential_flow",
-            description="Sequential test flow.",
-            steps=[
-                make_structured_component(
-                    first_step,
-                    name="first_step",
-                    output_schema=["first"],
-                ),
-                make_structured_component(
-                    recording_second_step,
-                    name="recording_second_step",
-                    output_schema=["second"],
-                ),
-            ],
-        )
-
-        flow.invoke({"value": 2})
-
-        assert second_calls == [{"first": 3}]
-
-    def test_default_return_index_returns_last_step_result(self) -> None:
-        flow = make_three_step_flow()
-
-        result = flow.invoke({"value": 2})
-
-        assert result == {"third": "value=6"}
-
-    def test_non_default_return_index_returns_selected_earlier_result(self) -> None:
-        flow = make_three_step_flow(return_index=0)
-
-        result = flow.invoke({"value": 2})
-
-        assert result == {"first": 3}
-        assert flow.get_step_results(result.run_id) == [
-            {"first": 3},
-            {"second": 6},
-            {"third": "value=6"},
-        ]
-
-    def test_invoke_returns_outer_flow_result_with_parent_run_id(self) -> None:
-        flow = make_three_step_flow()
-
-        result = flow.invoke({"value": 2})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert isinstance(result, FlowResultDict)
-        assert result.run_id == flow.latest_run
-        assert result.run_id not in {record.run_id for record in metadata.step_records}
-
-    def test_parent_checkpoint_records_outer_inputs_and_selected_result(self) -> None:
+    def test_invoke_returns_sequential_flow_result(self) -> None:
         flow = make_three_step_flow(return_index=1)
 
-        result = flow.invoke({"value": 2, "extra": "ignored"})
-        checkpoint = flow.get_checkpoint(result.run_id)
+        result = flow.invoke({"start": 1, "value": 2})
 
-        assert checkpoint is not None
-        assert checkpoint.inputs == {"value": 2}
-        assert checkpoint.result == {"second": 6}
+        assert isinstance(result, SequentialFlowResult)
+        assert result.result == {"second": 6}
+        assert result.return_index == 1
+        assert len(result.step_runs) == 3
+        assert result.run_id not in result.step_runs
+        assert result.run_id == flow.checkpoints[-1].result.run_id
 
-
-class TestSequentialFlowMetadata:
-    def test_metadata_records_one_child_record_per_step(self) -> None:
+    def test_each_step_invoked_with_previous_steps_mapping_output(self) -> None:
         flow = make_three_step_flow()
 
         result = flow.invoke({"value": 2})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
+        step_results = flow.get_step_results(result.run_id)
 
-        assert metadata.kind == "sequential"
-        assert len(metadata.step_records) == 3
+        assert step_results[0].result == {"first": 3}
+        assert step_results[1].result == {"second": 6}
+        assert step_results[2].result == {"third": "value=6"}
 
-    def test_step_records_match_child_workflows(self) -> None:
+    def test_checkpoint_records_outer_inputs_and_selected_payload(self) -> None:
         flow = make_three_step_flow()
 
         result = flow.invoke({"value": 2})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
 
-        for index, record in enumerate(metadata.step_records):
-            step = flow.steps[index]
-            assert record.slot == index
-            assert record.instance_id == step.instance_id
-            assert record.full_name == step.full_name
-            assert record.run_id == step.latest_run
-
-    def test_metadata_resolves_negative_return_index_to_absolute_index(self) -> None:
-        flow = make_three_step_flow(return_index=-1)
-
-        result = flow.invoke({"value": 2})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.return_child_index == 2
-
-    def test_metadata_return_child_run_id_matches_selected_step_record(self) -> None:
-        flow = make_three_step_flow(return_index=1)
-
-        result = flow.invoke({"value": 2})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.return_child_run_id == metadata.step_records[1].run_id
+        assert flow.checkpoints[-1].inputs == {"value": 2}
+        assert flow.checkpoints[-1].result.result == result.result
 
 
 class TestSequentialFlowRetrieval:
-    def test_get_step_records_returns_none_for_unknown_run(self) -> None:
-        flow = make_three_step_flow()
-
-        assert flow.get_step_records("unknown") is None
-
-    def test_get_step_records_returns_metadata_records(self) -> None:
+    def test_get_step_results_returns_result_objects_in_order(self) -> None:
         flow = make_three_step_flow()
 
         result = flow.invoke({"value": 2})
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
+        results = flow.get_step_results(result.run_id)
 
-        assert flow.get_step_records(result.run_id) == metadata.step_records
+        assert results is not None
+        assert len(results) == 3
+        assert all(isinstance(r, WorkflowResult) for r in results)
+        assert [r.run_id for r in results] == list(result.step_runs)
 
-    def test_get_step_results_returns_child_checkpoint_results(self) -> None:
+    def test_get_step_results_returns_none_for_unknown_run_id(self) -> None:
         flow = make_three_step_flow()
 
-        result = flow.invoke({"value": 2})
+        assert flow.get_step_results("nope") is None
 
-        assert flow.get_step_results(result.run_id) == [
-            {"first": 3},
-            {"second": 6},
-            {"third": "value=6"},
-        ]
-
-    def test_get_step_result_returns_selected_child_result(self) -> None:
+    def test_get_step_result_supports_negative_index(self) -> None:
         flow = make_three_step_flow()
 
         result = flow.invoke({"value": 2})
 
-        assert flow.get_step_result(result.run_id, 0) == {"first": 3}
-        assert flow.get_step_result(result.run_id, -1) == {"third": "value=6"}
-
-    def test_get_step_result_returns_none_for_unknown_parent_run(self) -> None:
-        flow = make_three_step_flow()
-
-        assert flow.get_step_result("unknown", 0) is None
+        assert flow.get_step_result(result.run_id, -1).run_id == result.step_runs[-1]
 
     def test_get_step_result_rejects_non_int_index(self) -> None:
         flow = make_three_step_flow()
 
+        result = flow.invoke({"value": 2})
+
         with pytest.raises(TypeError, match="step index must be an int"):
-            flow.get_step_result("unknown", "0")  # type: ignore[arg-type]
+            flow.get_step_result(result.run_id, "0")  # type: ignore[arg-type]
 
     def test_get_step_result_rejects_out_of_range_index(self) -> None:
         flow = make_three_step_flow()
 
-        with pytest.raises(IndexError, match="out of range"):
-            flow.get_step_result("unknown", 3)
+        result = flow.invoke({"value": 2})
 
-    def test_get_step_results_returns_none_for_missing_child_checkpoint(self) -> None:
+        with pytest.raises(IndexError, match="out of range"):
+            flow.get_step_result(result.run_id, 3)
+
+        with pytest.raises(IndexError, match="out of range"):
+            flow.get_step_result("nope", 3)
+
+    def test_get_step_result_returns_none_for_unknown_run_id_with_valid_index(self) -> None:
+        flow = make_three_step_flow()
+
+        assert flow.get_step_result("nope", 0) is None
+
+    def test_get_step_results_per_slot_none_if_child_checkpoint_cleared(self) -> None:
         flow = make_three_step_flow()
 
         result = flow.invoke({"value": 2})
         flow.steps[1].clear_memory()
 
-        assert flow.get_step_results(result.run_id) == [
-            {"first": 3},
-            None,
-            {"third": "value=6"},
-        ]
+        results = flow.get_step_results(result.run_id)
+
+        assert results[1] is None
+        assert results[0] is not None
+        assert results[2] is not None
 
 
 class TestSequentialFlowAsyncInvoke:
-    def test_async_invoke_runs_all_steps_in_order(self) -> None:
-        flow = make_three_step_flow()
+    def test_async_invoke_returns_sequential_flow_result(self) -> None:
+        flow = make_three_step_flow(return_index=1)
 
         result = asyncio.run(flow.async_invoke({"value": 2}))
 
-        assert result == {"third": "value=6"}
-        assert flow.get_step_results(result.run_id) == [
-            {"first": 3},
-            {"second": 6},
-            {"third": "value=6"},
-        ]
-
-    def test_async_invoke_returns_selected_return_index_result(self) -> None:
-        flow = make_three_step_flow(return_index=0)
-
-        result = asyncio.run(flow.async_invoke({"value": 2}))
-
-        assert result == {"first": 3}
-        assert flow.get_step_results(result.run_id) == [
-            {"first": 3},
-            {"second": 6},
-            {"third": "value=6"},
-        ]
-
-    def test_async_metadata_matches_sync_shape(self) -> None:
-        flow = make_three_step_flow(return_index=-1)
-
-        result = asyncio.run(flow.async_invoke({"value": 2}))
-        metadata = flow.get_checkpoint(result.run_id).metadata  # type: ignore[union-attr]
-
-        assert metadata.kind == "sequential"
-        assert len(metadata.step_records) == 3
-        assert metadata.return_child_index == 2
-        assert metadata.return_child_run_id == metadata.step_records[2].run_id
-
-    def test_async_child_checkpoints_are_created(self) -> None:
-        flow = make_three_step_flow()
-
-        asyncio.run(flow.async_invoke({"value": 2}))
-
-        assert [len(step.checkpoints) for step in flow.steps] == [1, 1, 1]
+        assert isinstance(result, SequentialFlowResult)
+        assert result.result == {"second": 6}
+        assert result.return_index == 1
+        assert len(result.step_runs) == 3
+        assert result.run_id == flow.checkpoints[-1].result.run_id
 
 
 class TestSequentialFlowValidationAndErrors:
-    def test_run_raises_validation_error_if_step_returns_non_flow_result(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_non_final_step_non_mapping_result_raises_validation_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         flow = make_three_step_flow()
 
-        monkeypatch.setattr(flow.steps[1], "invoke", lambda inputs: {"bad": True})
+        now = datetime.now(timezone.utc)
+        bad_result = flow.steps[0].make_result(
+            result=123,
+            started_at=now,
+            ended_at=now,
+            child_id="x",
+            child_type="x",
+            child_run_id="x",
+        )
+        monkeypatch.setattr(flow.steps[0], "invoke", lambda inputs: bad_result)
 
-        with pytest.raises(ValidationError, match="expected FlowResultDict"):
-            flow._run({"value": 2})
+        with pytest.raises(ValidationError, match="non-mapping result"):
+            flow._run({"value": 1})
 
-    def test_public_invoke_wraps_child_contract_failure_as_execution_error(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_invoke_wraps_step_contract_failure_as_execution_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         flow = make_three_step_flow()
 
-        monkeypatch.setattr(flow.steps[1], "invoke", lambda inputs: {"bad": True})
+        now = datetime.now(timezone.utc)
+        bad_result = flow.steps[0].make_result(
+            result=123,
+            started_at=now,
+            ended_at=now,
+            child_id="x",
+            child_type="x",
+            child_run_id="x",
+        )
+        monkeypatch.setattr(flow.steps[0], "invoke", lambda inputs: bad_result)
 
-        with pytest.raises(ExecutionError, match="_run failed"):
-            flow.invoke({"value": 2})
+        with pytest.raises(ExecutionError, match="_run failed") as exc_info:
+            flow.invoke({"value": 1})
 
-    def test_async_run_raises_validation_error_if_step_returns_non_flow_result(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+        assert isinstance(exc_info.value.__cause__, ValidationError)
+
+    def test_async_invoke_wraps_step_contract_failure_as_execution_error(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         flow = make_three_step_flow()
 
-        async def bad_async_invoke(self: Workflow[Any], inputs: Mapping[str, Any]) -> dict[str, bool]:
-            return {"bad": True}
-
-        monkeypatch.setattr(
-            flow.steps[1],
-            "async_invoke",
-            MethodType(bad_async_invoke, flow.steps[1]),
+        now = datetime.now(timezone.utc)
+        bad_result = flow.steps[0].make_result(
+            result=123,
+            started_at=now,
+            ended_at=now,
+            child_id="x",
+            child_type="x",
+            child_run_id="x",
         )
 
-        with pytest.raises(ValidationError, match="expected FlowResultDict"):
-            asyncio.run(flow._async_run({"value": 2}))
+        async def bad_async_invoke(inputs: Mapping[str, Any]) -> Any:
+            return bad_result
 
-    def test_public_async_invoke_wraps_child_contract_failure_as_execution_error(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        flow = make_three_step_flow()
+        monkeypatch.setattr(flow.steps[0], "async_invoke", bad_async_invoke)
 
-        async def bad_async_invoke(self: Workflow[Any], inputs: Mapping[str, Any]) -> dict[str, bool]:
-            return {"bad": True}
+        with pytest.raises(ExecutionError, match="_async_run failed") as exc_info:
+            asyncio.run(flow.async_invoke({"value": 1}))
 
-        monkeypatch.setattr(
-            flow.steps[1],
-            "async_invoke",
-            MethodType(bad_async_invoke, flow.steps[1]),
-        )
-
-        with pytest.raises(ExecutionError, match="_async_run failed"):
-            asyncio.run(flow.async_invoke({"value": 2}))
+        assert isinstance(exc_info.value.__cause__, ValidationError)
 
 
 class TestSequentialFlowSerialization:
-    def test_to_dict_includes_steps_and_step_count(self) -> None:
-        flow = make_three_step_flow()
-
-        data = flow.to_dict()
-
-        assert data["type"] == "SequentialFlow"
-        assert data["step_count"] == 3
-        assert len(data["steps"]) == 3
-
-    def test_to_dict_includes_return_index(self) -> None:
-        flow = make_three_step_flow(return_index=-2)
-
-        data = flow.to_dict()
-
-        assert data["return_index"] == -2
-
-    def test_to_dict_after_run_includes_base_checkpoint_summary(self) -> None:
+    def test_to_dict_includes_steps_and_return_index(self) -> None:
         flow = make_three_step_flow()
 
         result = flow.invoke({"value": 2})
         data = flow.to_dict()
 
+        assert data["return_index"] == flow.return_index
+        assert data["step_count"] == 3
+        assert "steps" in data and len(data["steps"]) == 3
         assert data["checkpoint_count"] == 1
         assert data["runs"] == [result.run_id]
-        assert data["step_count"] == 3

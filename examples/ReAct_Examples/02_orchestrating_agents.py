@@ -70,6 +70,7 @@ orchestrator = ReActAgent(
     tool_calls_limit=10,
     context_enabled=True,
     preview_limit=100,
+    blackboard_preview_limit=50,
 )
 
 # Register both agents as tools.
@@ -88,7 +89,7 @@ task = (
     "approaching your limit"
 )
 
-result = orchestrator.invoke({"prompt": task})
+result = orchestrator.invoke({"prompt": task}).result
 
 from pprint import pformat, pprint
 pprint(orchestrator.blackboard)

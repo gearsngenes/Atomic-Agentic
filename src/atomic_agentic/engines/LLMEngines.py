@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-# LLMEngines.py
-# Engines are stateless adapters around provider SDKs.
-# The Agent owns conversation history; engines map messages + attachments
-# to provider-specific requests.
+# ~~~Standard Library Imports~~~
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 import logging
+import mimetypes
 import os
 import random
 import time
@@ -14,10 +13,12 @@ from typing import (
     Dict,
     List,
     Mapping,
-    Optional,)
-import mimetypes
+    Optional,
+    Union,
+)
+import warnings
 
-# ~~~Provider SDKs~~~
+# ~~~Provider SDK Imports~~~
 # OpenAI
 try: from openai import OpenAI
 except: OpenAI = None
@@ -27,15 +28,29 @@ except: genai = None
 # Mistral
 try: from mistralai import Mistral
 except: Mistral = None
-# Lamma-CPP-Python
+# Llama-CPP-Python
 try: from llama_cpp import Llama
 except: Llama = None
+# Hugging Face Hub
+try: from huggingface_hub import hf_hub_download
+except: hf_hub_download = None
 
-# Import Exceptions
+# ~~~Local Imports~~~
 from ..core.Invokable import AtomicInvokable
 from ..core.constants import NO_VAL
 from ..core.Parameters import ParamSpec
 from ..core.Exceptions import LLMEngineError
+from ..results import (
+    GeminiTokenUsage,
+    LlamaCppModelData,
+    LlamaCppTokenUsage,
+    LLMModelData,
+    LLMResult,
+    MistralTokenUsage,
+    OpenAITokenUsage,
+    RemoteLLMModelData,
+    TokenUsage,
+)
 
 __all__ = [
     "GeminiEngine",
@@ -60,32 +75,47 @@ class LLMEngine(AtomicInvokable, ABC):
 
     Public contract
     ---------------
-    `LLMEngine` is an `AtomicInvokable`, so its public invocation entrypoint is
-    dict-first:
+    ``LLMEngine`` is an ``AtomicInvokable``, so its canonical public invocation
+    entrypoint is dict-first:
 
-        invoke({"messages": list[{"role": str, "content": str}]}) -> str
+        invoke({"messages": list[{"role": str, "content": str}]}) -> LLMResult
+
+    ``LLMResult.result`` is the generated assistant text string. The declared
+    invokable ``return_type`` remains ``"str"`` because ``return_type`` describes
+    the caller-facing payload stored inside ``AtomicResult.result``, not the
+    result envelope class.
 
     The declared invokable schema exposes one input parameter named
     ``messages``. The value must be a non-empty list of chat-message mappings
     containing string ``role`` and ``content`` fields.
 
+    Deprecated compatibility
+    ------------------------
+    ``invoke_messages(messages) -> str`` is retained as a deprecated text-only
+    compatibility wrapper during the v2 migration. Prefer:
+
+        invoke({"messages": messages}).result
+
     Engine lifecycle
     ----------------
-    The provider-call lifecycle lives in ``invoke_messages(messages)``:
+    The canonical result-envelope lifecycle lives in ``invoke(inputs)``:
 
-    1. Normalize and validate the input messages.
-    2. Snapshot current attachments.
-    3. Ask the subclass to build a provider-specific payload.
-    4. Call the provider with retries/timeouts.
-    5. Extract and normalize the assistant text.
+    1. Filter dict-first inputs.
+    2. Validate and normalize ``messages``.
+    3. Snapshot current attachments.
+    4. Ask the subclass to build a provider-specific payload.
+    5. Call the provider with retries/timeouts.
+    6. Extract assistant text, token usage, and configured model data.
+    7. Construct and return an ``LLMResult``.
 
-    Subclasses should not override ``invoke`` or ``invoke_messages`` unless they
-    are deliberately replacing the base lifecycle. Provider-specific behavior
-    should normally be implemented through the protected template hooks:
+    Provider-specific behavior should normally be implemented through the
+    protected template hooks:
 
     - ``_build_provider_payload``
     - ``_call_provider``
     - ``_extract_text``
+    - ``_extract_token_usage``
+    - ``_get_model_data``
     - ``_prepare_attachment``
     - ``_on_detach``
 
@@ -230,23 +260,23 @@ class LLMEngine(AtomicInvokable, ABC):
 
     def invoke_messages(self, messages: List[Dict[str, str]]) -> str:
         """
-        Template method that defines the engine invocation lifecycle.
+        Deprecated text-only compatibility wrapper.
 
-        Steps:
-        1. Normalize and validate the input `messages`.
-        2. Snapshot current attachments.
-        3. Ask the subclass to build a provider-specific payload.
-        4. Call the provider with retries/timeouts.
-        5. Extract and normalize the assistant text.
-
-        Subclasses **must not** override this method; they customize behavior
-        via the protected hooks documented below.
+        Prefer ``invoke({"messages": messages}).result`` so callers use the
+        canonical ``LLMResult`` envelope path.
         """
+        warnings.warn(
+            (
+                "LLMEngine.invoke_messages(...) is deprecated and will be removed "
+                "in a future v2 release. Use "
+                "LLMEngine.invoke({'messages': messages}).result instead."
+            ),
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         try:
-            normalized = self._normalize_messages(messages)
-            attachments = dict(self._attachments)
-            payload = self._build_provider_payload(normalized, attachments)
-            response = self._call_with_retries(payload)
+            response = self._call_model(messages)
             text = self._extract_text(response)
 
             if not isinstance(text, str):
@@ -254,27 +284,144 @@ class LLMEngine(AtomicInvokable, ABC):
                     f"{type(self).__name__}._extract_text must return str; "
                     f"got {type(text)!r}"
                 )
+
             return text.strip()
         except LLMEngineError:
-            # Already normalized; bubble up unchanged.
             raise
         except Exception as exc:
-            raise LLMEngineError(f"{self.name}.invoke failed") from exc
-    
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+            raise LLMEngineError(f"{self.name}.invoke_messages failed") from exc
+
+    def invoke(self, inputs: Mapping[str, Any]) -> LLMResult:
+        """
+        Invoke this engine through the canonical v2 result-envelope path.
+
+        Returns
+        -------
+        LLMResult
+            Result envelope whose ``.result`` field contains the generated
+            assistant text string.
+        """
         with self._invoke_lock:
-            logger.info(f"[{self.full_name} started]")
-            inputs = self.filter_inputs(inputs)
-            messages = inputs.get("messages")
-            if not isinstance(messages, list):
-                raise LLMEngineError("LLMEngine.invoke: 'messages' input must be a list")
-            result = self.invoke_messages(messages)
-            logger.info(f"[{self.full_name} finished]")
-            return result
+            logger.info("[%s started]", self.full_name)
+            started_at = datetime.now(timezone.utc)
+
+            try:
+                filtered_inputs = self.filter_inputs(inputs)
+                messages = filtered_inputs.get("messages")
+                if not isinstance(messages, list):
+                    raise LLMEngineError(
+                        "LLMEngine.invoke: 'messages' input must be a list"
+                    )
+
+                response = self._call_model(messages)
+                text, token_usage, model_data = self.extract(response)
+                ended_at = datetime.now(timezone.utc)
+
+                result = self.make_result(
+                    result=text,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    token_usage=token_usage,
+                    model_data=model_data,
+                )
+
+                logger.info("[%s finished]", self.full_name)
+                return result
+
+            except LLMEngineError:
+                raise
+            except Exception as exc:
+                raise LLMEngineError(f"{self.name}.invoke failed") from exc
 
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+    def _call_model(self, messages: List[Dict[str, Any]]) -> Any:
+        """
+        Normalize messages, snapshot current attachments, build the provider
+        payload, and return the raw provider response.
+
+        This helper owns only the shared provider-call sequence. It does not
+        extract text, extract token usage, construct results, capture timing, or
+        emit deprecation warnings.
+        """
+        normalized = self._normalize_messages(messages)
+        attachments = dict(self._attachments)
+        payload = self._build_provider_payload(normalized, attachments)
+        return self._call_with_retries(payload)
+
+    def extract(self, response: Any) -> tuple[str, TokenUsage, LLMModelData]:
+        """
+        Extract normalized generated text, token usage, and configured model
+        data from one provider response.
+
+        This method coordinates result-path extraction only. It does not call
+        the provider, capture timestamps, or construct ``LLMResult``.
+        """
+        text = self._extract_text(response)
+        if not isinstance(text, str):
+            raise LLMEngineError(
+                f"{type(self).__name__}._extract_text must return str; "
+                f"got {type(text)!r}"
+            )
+
+        token_usage = self._extract_token_usage(response)
+        if not isinstance(token_usage, TokenUsage):
+            raise LLMEngineError(
+                f"{type(self).__name__}._extract_token_usage must return "
+                f"TokenUsage, got {type(token_usage)!r}."
+            )
+
+        model_data = self._get_model_data()
+        if not isinstance(model_data, LLMModelData):
+            raise LLMEngineError(
+                f"{type(self).__name__}._get_model_data must return "
+                f"LLMModelData, got {type(model_data)!r}."
+            )
+
+        return text.strip(), token_usage, model_data
+
+    def make_result(
+        self,
+        result: str,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> LLMResult:
+        """
+        Construct this engine's ``LLMResult`` envelope.
+
+        ``result`` is the caller-facing generated text payload stored in
+        ``LLMResult.result``. Token usage and configured model data are stored as
+        explicit LLM-specific result fields.
+        """
+        unexpected = set(result_kwargs) - {"token_usage", "model_data"}
+        if unexpected:
+            raise LLMEngineError(
+                f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
+            )
+
+        token_usage = result_kwargs.get("token_usage")
+        model_data = result_kwargs.get("model_data")
+
+        if not isinstance(token_usage, TokenUsage):
+            raise LLMEngineError(
+                "make_result: token_usage must be a TokenUsage instance."
+            )
+
+        if not isinstance(model_data, LLMModelData):
+            raise LLMEngineError(
+                "make_result: model_data must be an LLMModelData instance."
+            )
+
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=LLMResult,
+            token_usage=token_usage,
+            model_data=model_data,
+        )
     def _normalize_messages(
         self, messages: List[Dict[str, Any]]
     ) -> List[Dict[str, str]]:
@@ -408,6 +555,26 @@ class LLMEngine(AtomicInvokable, ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        """
+        Extract normalized token usage from a provider response object.
+
+        Implementations must return a ``TokenUsage``-family record, not a raw
+        provider usage dictionary or SDK object.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _get_model_data(self) -> LLMModelData:
+        """
+        Return configured model identity data for this engine.
+
+        Model data is derived from engine configuration, not from a provider
+        response object.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         """
         Prepare a local path for reuse with this engine.
@@ -436,6 +603,9 @@ class LLMEngine(AtomicInvokable, ABC):
     def to_dict(self) -> Dict[str, Any]:
         """
         Shallow, non-secret configuration snapshot for debugging / logging.
+
+        Invocation result data such as token usage and model data belongs to
+        ``LLMResult``, not to engine metadata serialization.
         """
         d = super().to_dict()
         d.update({
@@ -450,7 +620,7 @@ class LLMEngine(AtomicInvokable, ABC):
 
 
 
-# ── OPENAI (Responses API + Chat fallback) ─────────────────────────────────────
+# ── OPENAI (Responses API) ─────────────────────────────────────────────────────
 class OpenAIEngine(LLMEngine):
     """
     OpenAI adapter using the Responses API.
@@ -459,16 +629,30 @@ class OpenAIEngine(LLMEngine):
     -----------
     Attachments are persistent engine state:
 
-    - PDFs    → uploaded once via Files API; attached as `{ "type": "input_file", "file_id": ... }`
-    - Images  → uploaded once via Files API; attached as `{ "type": "input_image", "file_id": ... }`
-    - Text/Code → read and inlined as `{ "type": "input_text", "text": ... }`
-      (with a configurable character cutoff).
+    - PDFs    → uploaded once via Files API; attached as
+      ``{"type": "input_file", "file_id": ...}``
+    - Images  → uploaded once via Files API; attached as
+      ``{"type": "input_image", "file_id": ...}``
+    - Text/Code → read and inlined as
+      ``{"type": "input_text", "text": ...}``
+      with a configurable character cutoff.
 
-    Unsupported file classes (audio/video, obviously binary types, etc.) are
-    rejected at `attach` time.
+    Unsupported file classes such as audio, video, archives, executables,
+    databases, model weights, and obviously binary files are rejected at
+    ``attach`` time.
 
-    System messages are carried via the `instructions` field; non-system messages
-    are encoded as `input_text` or `output_text` blocks.
+    Invocation
+    ----------
+    This engine uses ``client.responses.create(...)`` in ``_call_provider``.
+    System messages are carried via the Responses API ``instructions`` field;
+    non-system messages are encoded as ``input_text`` or ``output_text`` blocks.
+
+    Result extraction
+    -----------------
+    ``_extract_text`` reads the generated assistant text from the Responses API
+    response. ``_extract_token_usage`` maps Responses API usage fields into an
+    ``OpenAITokenUsage`` record. ``_get_model_data`` returns configured model
+    identity from ``self.model``.
     """
 
     # Image extensions that map to `input_image`
@@ -672,7 +856,55 @@ class OpenAIEngine(LLMEngine):
 
         Returns the empty string when no text is present (does not raise).
         """
-        return (getattr(response, "output_text", None) or "").strip()
+        return response.output_text
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        """
+        Extract OpenAI Responses API token usage into an OpenAITokenUsage record.
+
+        OpenAI Responses usage reports:
+
+        - input_tokens: prompt/input-side tokens
+        - output_tokens: generated-side tokens
+        - total_tokens: total input + generated tokens
+        - input_tokens_details.cached_tokens: cached input-token subset
+        - output_tokens_details.reasoning_tokens: hidden reasoning-token subset
+          counted inside output_tokens
+
+        ``response_tokens`` is derived as ``output_tokens - reasoning_tokens``.
+        """
+        usage = response.usage
+        if usage is None:
+            raise LLMEngineError("OpenAI response did not include usage.")
+
+        reasoning_tokens = usage.output_tokens_details.reasoning_tokens
+        response_tokens = usage.output_tokens - reasoning_tokens
+        if response_tokens < 0:
+            raise LLMEngineError(
+                "OpenAI response usage produced a negative response token count "
+                "after subtracting reasoning_tokens from output_tokens."
+            )
+
+        return OpenAITokenUsage(
+            input_tokens=usage.input_tokens,
+            generated_tokens=usage.output_tokens,
+            total_tokens=usage.total_tokens,
+            response_tokens=response_tokens,
+            cached_tokens=usage.input_tokens_details.cached_tokens,
+            reasoning_tokens=reasoning_tokens,
+        )
+
+    def _get_model_data(self) -> LLMModelData:
+        """
+        Return configured OpenAI model identity data for this engine.
+
+        Model data is derived from engine configuration, not from the provider
+        response object.
+        """
+        return RemoteLLMModelData(
+            provider="openai",
+            model_name=self.model,
+        )
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         """
@@ -880,22 +1112,35 @@ class GeminiEngine(LLMEngine):
 
     Flow per call
     -------------
-    1) Engine-level attachments are prepared via `attach(path)`:
-       - `_prepare_attachment` uploads supported files via `client.files.upload`.
-       - Attachment metadata stores the returned File object and its resource name.
-    2) `invoke({"messages": messages})` delegates to `invoke_messages(messages)`,
-       which will:
-       - normalize chat messages (role/content pairs),
-       - snapshot current attachments,
-       - call `_build_provider_payload` to construct:
-           * `system_instruction` from system messages
-           * a flat `contents` list:
-             - File objects for uploaded attachments
-             - plain strings for non-system turns
-       - call `_call_with_retries` → `_call_provider`
-       - call `_extract_text` to normalize the response.
-    3) `detach(path)` calls `_on_detach` for best-effort file deletion via
-       `client.files.delete`.
+    1) Engine-level attachments are prepared via ``attach(path)``:
+       - ``_prepare_attachment`` uploads supported files via
+         ``client.files.upload``.
+       - Attachment metadata stores the returned File object and its resource
+         name.
+
+    2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
+       lifecycle:
+       - normalize chat messages;
+       - snapshot current attachments;
+       - build the Gemini provider payload;
+       - call ``client.models.generate_content(...)``;
+       - extract assistant text, token usage, and configured model data;
+       - return ``LLMResult``.
+
+    3) ``detach(path)`` calls ``_on_detach`` for best-effort file deletion via
+       ``client.files.delete``.
+
+    Token usage
+    -----------
+    ``_extract_token_usage`` maps ``response.usage_metadata`` into
+    ``GeminiTokenUsage``. The base ``generated_tokens`` value is derived as
+    ``total_token_count - prompt_token_count`` so it captures all non-prompt
+    usage counted by Gemini, including candidate, thoughts, and tool-use prompt
+    tokens when present.
+
+    Model data
+    ----------
+    ``_get_model_data`` returns configured model identity from ``self.model``.
     """
 
     # Extra illegal extensions for this provider (merged with base `illegal_attachment_exts`)
@@ -1127,6 +1372,63 @@ class GeminiEngine(LLMEngine):
         """
         return response.text
 
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        """
+        Extract Gemini GenerateContent token usage into a GeminiTokenUsage record.
+
+        Gemini usage metadata reports:
+
+        - prompt_token_count: prompt/input-side tokens
+        - candidates_token_count: candidate response tokens, when present
+        - total_token_count: total request usage
+        - thoughts_token_count: generated thinking/reasoning tokens, when present
+        - tool_use_prompt_token_count: tool-use prompt tokens, when present
+        - cached_content_token_count: cached input-token subset, when present
+
+        ``generated_tokens`` is derived as
+        ``total_token_count - prompt_token_count``.
+        """
+        usage = response.usage_metadata
+        if usage is None:
+            raise LLMEngineError("Gemini response did not include usage_metadata.")
+
+        input_tokens = usage.prompt_token_count
+        total_tokens = usage.total_token_count
+
+        if input_tokens is None:
+            raise LLMEngineError("Gemini usage_metadata missing prompt_token_count.")
+        if total_tokens is None:
+            raise LLMEngineError("Gemini usage_metadata missing total_token_count.")
+
+        generated_tokens = total_tokens - input_tokens
+        if generated_tokens < 0:
+            raise LLMEngineError(
+                "Gemini usage_metadata total_token_count is less than "
+                "prompt_token_count."
+            )
+
+        return GeminiTokenUsage(
+            input_tokens=input_tokens,
+            generated_tokens=generated_tokens,
+            total_tokens=total_tokens,
+            candidates_token_count=usage.candidates_token_count,
+            thoughts_token_count=usage.thoughts_token_count,
+            tool_use_prompt_token_count=usage.tool_use_prompt_token_count,
+            cached_content_token_count=usage.cached_content_token_count,
+        )
+
+    def _get_model_data(self) -> LLMModelData:
+        """
+        Return configured Gemini model identity data for this engine.
+
+        Model data is derived from engine configuration, not from the provider
+        response object.
+        """
+        return RemoteLLMModelData(
+            provider="gemini",
+            model_name=self.model,
+        )
+
     # ------------------------------------------------------------------ #
     # Gemini-specific helpers (not part of the template surface)
     # ------------------------------------------------------------------ #
@@ -1242,32 +1544,36 @@ class MistralEngine(LLMEngine):
         retry_backoff_max: float = 8.0,
     ) -> None:
         """
-        Parameters
+        Mistral adapter using the chat completion API.
+
+        Flow per call
+        -------------
+        1) Attachments are prepared via ``attach(path)``:
+        - PDFs/images upload through the Mistral Files API, are signed, and are
+            attached to the last user message as URL parts.
+        - Text/code files are read and inlined into the last user message.
+
+        2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
+        lifecycle:
+        - normalize chat messages;
+        - snapshot current attachments;
+        - build the Mistral provider payload;
+        - call ``client.chat.complete(...)``;
+        - extract assistant text, token usage, and configured model data;
+        - return ``LLMResult``.
+
+        3) ``detach(path)`` triggers best-effort deletion of uploaded files via
+        ``_on_detach``, which calls ``client.files.delete(file_id=...)``.
+
+        Token usage
+        -----------
+        ``_extract_token_usage`` maps ``response.usage`` into
+        ``MistralTokenUsage`` using prompt, completion, total, and optional cached
+        prompt-token details.
+
+        Model data
         ----------
-        model:
-            Mistral chat model identifier (e.g. "mistral-small-latest").
-        api_key:
-            API key for the Mistral service. If omitted, `MISTRAL_API_KEY` is used.
-        temperature:
-            Sampling temperature for generation.
-        inline_cutoff_chars:
-            Soft cap for total inlined text across all attachments. Once exceeded,
-            additional text attachments are truncated with a marker.
-        extra_illegal_exts:
-            Optional extra file extensions to treat as unsupported/illegal on top of
-            the base `illegal_attachment_exts`.
-        name:
-            Optional human-friendly name for this engine instance. Defaults to
-            `"mistral:{model}"`.
-        description:
-            Human-friendly description for this engine instance.
-        filter_extraneous_inputs:
-            Whether to filter extraneous inputs.
-        timeout_seconds:
-            Suggested timeout per completion call. Used to configure the underlying
-            `httpx.Client` passed into the Mistral SDK.
-        max_retries, retry_backoff_base, retry_backoff_max:
-            Passed through to the shared `LLMEngine` retry handler for the chat call.
+        ``_get_model_data`` returns configured model identity from ``self.model``.
         """
         if Mistral is None:
             raise RuntimeError(
@@ -1492,6 +1798,56 @@ class MistralEngine(LLMEngine):
             )
         return (msg or "").strip()
 
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        """
+        Extract Mistral chat-completion token usage into a MistralTokenUsage record.
+
+        Mistral chat-completion usage reports:
+
+        - prompt_tokens: prompt/input-side tokens
+        - completion_tokens: generated response tokens
+        - total_tokens: total prompt + completion tokens
+        - prompt_tokens_details.cached_tokens: cached prompt-token subset, when present
+        """
+        usage = response.usage
+        if usage is None:
+            raise LLMEngineError("Mistral response did not include usage.")
+
+        if usage.prompt_tokens is None:
+            raise LLMEngineError("Mistral usage missing prompt_tokens.")
+        if usage.completion_tokens is None:
+            raise LLMEngineError("Mistral usage missing completion_tokens.")
+        if usage.total_tokens is None:
+            raise LLMEngineError("Mistral usage missing total_tokens.")
+
+        cached_tokens = None
+        prompt_tokens_details = usage.prompt_tokens_details
+        if prompt_tokens_details is not None:
+            if isinstance(prompt_tokens_details, Mapping):
+                cached_tokens = prompt_tokens_details.get("cached_tokens")
+            else:
+                cached_tokens = prompt_tokens_details.cached_tokens
+
+        return MistralTokenUsage(
+            input_tokens=usage.prompt_tokens,
+            generated_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            response_tokens=usage.completion_tokens,
+            cached_tokens=cached_tokens,
+        )
+
+    def _get_model_data(self) -> LLMModelData:
+        """
+        Return configured Mistral model identity data for this engine.
+
+        Model data is derived from engine configuration, not from the provider
+        response object.
+        """
+        return RemoteLLMModelData(
+            provider="mistral",
+            model_name=self.model,
+        )
+
     # ------------------------------------------------------------------ #
     # Mistral-specific helpers (not part of the template surface)
     # ------------------------------------------------------------------ #
@@ -1598,18 +1954,48 @@ class MistralEngine(LLMEngine):
 # ── LLAMA.CPP (local; no remote file store) ────────────────────────────────────
 class LlamaCppEngine(LLMEngine):
     """
-    Local llama.cpp adapter using `llama-cpp-python`.
+    Local llama.cpp adapter using ``llama-cpp-python``.
 
-    This engine wraps a local GGUF/GGML model via `llama_cpp.Llama` and plugs
-    into the shared `LLMEngine` template:
+    This engine wraps a local GGUF/GGML model via ``llama_cpp.Llama`` and plugs
+    into the shared ``LLMEngine`` template.
 
-    - Conversation turns are passed through as an OpenAI-style `messages` list.
-    - Attachments are **not supported**; any attempt to attach a file will
-      fail with an `LLMEngineError`.
-    - `invoke(...)` is inherited from `LLMEngine` and must not be overridden.
-      Provider-specific behavior is implemented via the template hooks:
-        `_build_provider_payload`, `_call_provider`, `_extract_text`,
-        `_prepare_attachment`.
+    Model source
+    ------------
+    A model may be loaded from either:
+
+    - ``model_path``: a direct path to an existing local GGUF/GGML file.
+    - ``repo_id`` + ``filename``: a Hugging Face Hub file reference resolved
+      through ``hf_hub_download(...)`` into a concrete local file path.
+
+    In both cases, ``self.model_path`` stores the concrete local path loaded by
+    ``Llama(model_path=...)``.
+
+    Flow per call
+    -------------
+    1) Conversation turns are passed through as an OpenAI-compatible
+       ``messages`` list.
+
+    2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
+       lifecycle:
+       - normalize chat messages;
+       - build the llama.cpp provider payload;
+       - call ``llm.create_chat_completion(...)``;
+       - extract assistant text, token usage, and configured model data;
+       - return ``LLMResult``.
+
+    3) Attachments are not supported. Any attempt to call ``attach(path)`` fails
+       with ``LLMEngineError``.
+
+    Token usage
+    -----------
+    ``_extract_token_usage`` maps the OpenAI-compatible response
+    ``response["usage"]`` dictionary into ``LlamaCppTokenUsage`` using prompt,
+    completion, and total token counts.
+
+    Model data
+    ----------
+    ``_get_model_data`` returns the concrete local model path loaded by
+    llama.cpp.
     """
 
     def __init__(
@@ -1617,52 +2003,102 @@ class LlamaCppEngine(LLMEngine):
         model_path: Optional[str] = None,
         repo_id: Optional[str] = None,
         filename: Optional[str] = None,
+        revision: Optional[str] = None,
+        cache_dir: Optional[str] = None,
+        local_dir: Optional[str] = None,
+        local_files_only: bool = False,
+        hf_token: Optional[Union[str, bool]] = None,
+        force_download: bool = False,
         n_ctx: int = 2048,
         n_threads: Optional[int] = None,
         n_threads_batch: Optional[int] = None,
+        n_gpu_layers: Optional[int] = None,
+        chat_format: Optional[str] = None,
         verbose: bool = False,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        stop: Optional[Union[str, List[str]]] = None,
         *,
         name: Optional[str] = None,
         description: str = "Llama.cpp LLM Engine",
         filter_extraneous_inputs: bool = True,
-        max_retries = 2,
-        retry_backoff_base = 0.5,
-        retry_backoff_max = 8
+        timeout_seconds: float = 30.0,
+        max_retries: int = 2,
+        retry_backoff_base: float = 0.5,
+        retry_backoff_max: float = 8.0,
     ) -> None:
         """
         Parameters
         ----------
         model_path:
-            Path to a local GGUF/GGML model file. Required if `repo_id`/`filename`
-            are not provided.
+            Direct path to a local GGUF/GGML model file. If provided, no
+            Hugging Face download is performed.
         repo_id:
-            Optional Hugging Face repo ID for `Llama.from_pretrained(...)`.
-            Must be used together with `filename` when `model_path` is omitted.
+            Optional Hugging Face repo ID used with ``filename`` when
+            ``model_path`` is omitted.
         filename:
-            Model filename within the given `repo_id` for `from_pretrained`.
+            Model filename within ``repo_id`` when resolving from Hugging Face.
+        revision:
+            Optional Hugging Face branch, tag, or commit hash to resolve.
+        cache_dir:
+            Optional Hugging Face cache root. Keeps Hugging Face cache layout.
+        local_dir:
+            Optional human-readable local directory where the model file should
+            be materialized.
+        local_files_only:
+            If True, resolve only from local cache/files and do not download.
+        hf_token:
+            Optional Hugging Face auth token. ``True`` means use the locally
+            configured Hugging Face token.
+        force_download:
+            If True, re-download the file even if a cached copy exists.
+
         n_ctx:
             Context window size to configure on the llama.cpp model.
         n_threads:
             Optional number of CPU threads to use for token generation.
         n_threads_batch:
-            Optional number of threads to use for batching.
+            Optional number of threads to use for batching/prompt processing.
+        n_gpu_layers:
+            Optional number of model layers to offload to GPU.
+        chat_format:
+            Optional llama-cpp-python chat format name used to serialize
+            role/content messages for local inference.
         verbose:
             If True, enable verbose logging from the underlying llama.cpp runtime.
+
+        temperature:
+            Optional default sampling temperature for chat completions.
+        max_tokens:
+            Optional default maximum generated-token count.
+        top_p:
+            Optional default nucleus sampling value.
+        stop:
+            Optional default stop sequence or stop-sequence list.
+
         name:
-            Optional human-friendly engine name; defaults to `"llama_cpp"`.
+            Optional human-friendly engine name; defaults to ``"llama_cpp"``.
         description:
             Human-friendly description for this engine instance.
         filter_extraneous_inputs:
-            Whether to filter extraneous inputs.
+            Whether to filter extraneous dict-first inputs.
+        timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
+            Shared ``LLMEngine`` retry/introspection configuration.
         """
-        sanitized_name = (name or "llama_cpp").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
+        sanitized_name = (
+            name or "llama_cpp"
+        ).replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
+
         super().__init__(
             name=sanitized_name,
             description=description or "Llama.cpp LLM Engine",
             filter_extraneous_inputs=filter_extraneous_inputs,
+            timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,
-            retry_backoff_max=retry_backoff_max)
+            retry_backoff_max=retry_backoff_max,
+        )
 
         if Llama is None:
             raise RuntimeError("LlamaCppEngine requires the `llama-cpp-python` package.")
@@ -1675,16 +2111,29 @@ class LlamaCppEngine(LLMEngine):
             llama_kwargs["n_threads"] = int(n_threads)
         if n_threads_batch is not None:
             llama_kwargs["n_threads_batch"] = int(n_threads_batch)
+        if n_gpu_layers is not None:
+            llama_kwargs["n_gpu_layers"] = int(n_gpu_layers)
+        if chat_format is not None:
+            llama_kwargs["chat_format"] = chat_format
 
         if model_path:
-            # Local file path.
-            self.llm = Llama(model_path=model_path, **llama_kwargs)
+            resolved_model_path = model_path
         elif repo_id and filename:
-            # Hugging Face repo/filename.
-            self.llm = Llama.from_pretrained(
+            if hf_hub_download is None:
+                raise RuntimeError(
+                    "LlamaCppEngine requires the `huggingface_hub` package when "
+                    "`repo_id` and `filename` are used."
+                )
+
+            resolved_model_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,
-                **llama_kwargs,
+                revision=revision,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+                local_files_only=bool(local_files_only),
+                token=hf_token,
+                force_download=bool(force_download),
             )
         else:
             raise LLMEngineError(
@@ -1692,11 +2141,31 @@ class LlamaCppEngine(LLMEngine):
                 "`repo_id` and `filename`."
             )
 
-        self.n_ctx = int(n_ctx)
-        self.verbose = bool(verbose)
-        self.model_path = model_path
+        self.model_path = str(resolved_model_path)
         self.repo_id = repo_id
         self.filename = filename
+        self.revision = revision
+        self.cache_dir = cache_dir
+        self.local_dir = local_dir
+        self.local_files_only = bool(local_files_only)
+        self.force_download = bool(force_download)
+        self._has_hf_token = hf_token is not None
+
+        self.n_ctx = int(n_ctx)
+        self.n_threads = int(n_threads) if n_threads is not None else None
+        self.n_threads_batch = (
+            int(n_threads_batch) if n_threads_batch is not None else None
+        )
+        self.n_gpu_layers = int(n_gpu_layers) if n_gpu_layers is not None else None
+        self.chat_format = chat_format
+        self.verbose = bool(verbose)
+
+        self.temperature = float(temperature) if temperature is not None else None
+        self.max_tokens = int(max_tokens) if max_tokens is not None else None
+        self.top_p = float(top_p) if top_p is not None else None
+        self.stop = stop
+
+        self.llm = Llama(model_path=self.model_path, **llama_kwargs)
 
     # ------------------------------------------------------------------ #
     # LLMEngine template hooks
@@ -1725,7 +2194,21 @@ class LlamaCppEngine(LLMEngine):
         """
         if getattr(self, "llm", None) is None:
             raise LLMEngineError("LlamaCppEngine: model is not loaded.")
-        return self.llm.create_chat_completion(messages=payload["messages"])
+
+        chat_kwargs: Dict[str, Any] = {}
+        if self.temperature is not None:
+            chat_kwargs["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            chat_kwargs["max_tokens"] = self.max_tokens
+        if self.top_p is not None:
+            chat_kwargs["top_p"] = self.top_p
+        if self.stop is not None:
+            chat_kwargs["stop"] = self.stop
+
+        return self.llm.create_chat_completion(
+            messages=payload["messages"],
+            **chat_kwargs,
+        )
 
     def _extract_text(self, response: Any) -> str:
         """
@@ -1746,6 +2229,55 @@ class LlamaCppEngine(LLMEngine):
                 "LlamaCppEngine._extract_text: unexpected response shape"
             ) from exc
         return str(content).strip()
+
+    def _extract_token_usage(self, response: Any) -> TokenUsage:
+        """
+        Extract llama-cpp-python chat-completion usage into a LlamaCppTokenUsage
+        record.
+
+        The default ``create_chat_completion(...)`` path returns an
+        OpenAI-compatible dictionary response whose ``usage`` mapping contains
+        prompt, completion, and total token counts.
+        """
+        try:
+            usage = response["usage"]
+        except Exception as exc:
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_token_usage: response missing usage."
+            ) from exc
+
+        if not isinstance(usage, Mapping):
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_token_usage: usage must be a mapping."
+            )
+
+        try:
+            input_tokens = usage["prompt_tokens"]
+            generated_tokens = usage["completion_tokens"]
+            total_tokens = usage["total_tokens"]
+        except Exception as exc:
+            raise LLMEngineError(
+                "LlamaCppEngine._extract_token_usage: unexpected usage shape."
+            ) from exc
+
+        return LlamaCppTokenUsage(
+            input_tokens=input_tokens,
+            generated_tokens=generated_tokens,
+            total_tokens=total_tokens,
+            response_tokens=generated_tokens,
+        )
+
+    def _get_model_data(self) -> LLMModelData:
+        """
+        Return configured llama.cpp model identity data for this engine.
+
+        Model data is derived from the concrete local path loaded by
+        llama-cpp-python.
+        """
+        return LlamaCppModelData(
+            provider="llama_cpp",
+            model_path=self.model_path,
+        )
 
     # ------------------------------------------------------------------ #
     # Attachments: explicitly unsupported
@@ -1772,17 +2304,32 @@ class LlamaCppEngine(LLMEngine):
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Diagnostic snapshot for LlamaCppEngine (no secrets).
+        Diagnostic snapshot for LlamaCppEngine.
 
-        Includes `n_ctx`, `verbose`, and model loading parameters.
+        Includes non-secret model source, model-load, compute, and generation
+        defaults. The Hugging Face token value is never serialized.
         """
         base = super().to_dict()
         base.update({
             "model_path": self.model_path,
             "repo_id": self.repo_id,
             "filename": self.filename,
+            "revision": self.revision,
+            "cache_dir": self.cache_dir,
+            "local_dir": self.local_dir,
+            "local_files_only": self.local_files_only,
+            "force_download": self.force_download,
+            "has_hf_token": self._has_hf_token,
             "n_ctx": self.n_ctx,
-            "verbose": self.verbose
+            "n_threads": self.n_threads,
+            "n_threads_batch": self.n_threads_batch,
+            "n_gpu_layers": self.n_gpu_layers,
+            "chat_format": self.chat_format,
+            "verbose": self.verbose,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "top_p": self.top_p,
+            "stop": self.stop,
         })
         return base
 

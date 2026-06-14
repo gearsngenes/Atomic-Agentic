@@ -98,7 +98,7 @@ print(tool.signature)
 print(tool.parameters)
 
 result = tool.invoke({"index": 0})
-print(result)
+print(result.result)
 ```
 
 ------------------------------------------------------------------------
@@ -120,7 +120,7 @@ response = engine.invoke({
     ]
 })
 
-print(response)
+print(response.result)
 ```
 
 LLM Engines intentionally remain **thin adapters**.\
@@ -167,7 +167,7 @@ provide a bulleted list of relevant investment tickers.""",
 )
 
 result = advisor.invoke({"account_index": 0, "sector": "technology"})
-print(result)
+print(result.result)
 ```
 
 ------------------------------------------------------------------------
@@ -195,7 +195,7 @@ agent = PlanActAgent(
 agent.batch_register(MATH_TOOLS)
 
 result = agent.invoke({"prompt": "Compute (6*7) + 5. Return only the number."})
-print(result)
+print(result.result)
 ```
 
 ------------------------------------------------------------------------
@@ -216,7 +216,7 @@ def raw_tool(x, y):
 schema = ["sum", "product"]
 structured = StructuredInvokable(component=Tool(raw_tool), output_schema=schema)
 result = structured.invoke({"x": 2, "y": 3})
-print(result)  # {'sum': 5, 'product': 6}
+print(result.result)  # {'sum': 5, 'product': 6}
 ```
 
 See the `StructuredInvokable` docstring for advanced options (absent value handling, mapping extras, etc).
@@ -256,6 +256,9 @@ Workflows do not perform output packaging themselves. Always use `StructuredInvo
     │   ├── Tool_Examples/
     │   └── Workflow_Examples/
     │
+    ├── docs/
+    │   └── CHANGELOG.md
+    │
     ├── images/
     │
     ├── src/
@@ -265,6 +268,7 @@ Workflows do not perform output packaging themselves. Always use `StructuredInvo
     │       ├── core/
     │       ├── engines/
     |       ├── mcp/
+    │       ├── results/
     │       ├── tools/
     │       ├── workflows/
     │       ├── __init__.py
@@ -275,3 +279,10 @@ Workflows do not perform output packaging themselves. Always use `StructuredInvo
     ├── README.md
     ├── pyproject.toml
     └── requirements.txt
+
+------------------------------------------------------------------------
+
+## Changelog
+
+See [`docs/CHANGELOG.md`](https://github.com/gearsngenes/Atomic-Agentic/blob/main/docs/CHANGELOG.md)
+for the release history of notable changes.

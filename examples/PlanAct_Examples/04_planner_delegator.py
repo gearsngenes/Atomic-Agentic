@@ -125,4 +125,4 @@ super_task = f"""
 start = time.time()
 super_result = super_planner.invoke({"prompt": super_task})
 end = time.time()
-print(f"Super Planner result: {super_result}\nCompleted task in {end - start:.2f} seconds")
+print(f"Super Planner result: {super_result.result}\nCompleted task in {end - start:.2f} seconds")

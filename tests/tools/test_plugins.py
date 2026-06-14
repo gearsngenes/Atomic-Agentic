@@ -50,14 +50,14 @@ class TestMathPluginSmoke:
     def test_math_add_invokes_correctly(self) -> None:
         tool = tool_by_full_name("Tool.Math.add")
 
-        assert tool.invoke({"a": 2, "b": 3}) == 5
+        assert tool.invoke({"a": 2, "b": 3}).result == 5
 
     def test_math_divide_by_zero_returns_inf(self) -> None:
         tool = tool_by_full_name("Tool.Math.divide")
 
         result = tool.invoke({"a": 2, "b": 0})
 
-        assert math.isinf(result)
+        assert math.isinf(result.result)
 
     def test_math_sqrt_negative_wraps_value_error(self) -> None:
         tool = tool_by_full_name("Tool.Math.sqrt")
@@ -68,34 +68,34 @@ class TestMathPluginSmoke:
     def test_math_mean_empty_returns_zero(self) -> None:
         tool = tool_by_full_name("Tool.Math.mean")
 
-        assert tool.invoke({"nums": []}) == 0.0
+        assert tool.invoke({"nums": []}).result == 0.0
 
 
 class TestParserPluginSmoke:
     def test_parser_json_loads_parses_object(self) -> None:
         tool = tool_by_full_name("Tool.Parser.json_loads")
 
-        assert tool.invoke({"s": '{"a": 1}'}) == {"a": 1}
+        assert tool.invoke({"s": '{"a": 1}'}).result == {"a": 1}
 
     def test_parser_split_splits_string(self) -> None:
         tool = tool_by_full_name("Tool.Parser.split")
 
-        assert tool.invoke({"s": "a,b,c", "sep": ","}) == ["a", "b", "c"]
+        assert tool.invoke({"s": "a,b,c", "sep": ","}).result == ["a", "b", "c"]
 
     def test_parser_join_joins_strings(self) -> None:
         tool = tool_by_full_name("Tool.Parser.join")
 
-        assert tool.invoke({"lst": ["a", "b", "c"], "sep": "-"}) == "a-b-c"
+        assert tool.invoke({"lst": ["a", "b", "c"], "sep": "-"}).result == "a-b-c"
 
     def test_parser_extract_json_string_finds_object(self) -> None:
         tool = tool_by_full_name("Tool.Parser.extract_json_string")
 
-        assert tool.invoke({"s": "prefix {\"a\": 1} suffix"}) == '{"a": 1}'
+        assert tool.invoke({"s": "prefix {\"a\": 1} suffix"}).result == '{"a": 1}'
 
     def test_parser_safe_eval_literal_smoke(self) -> None:
         tool = tool_by_full_name("Tool.Parser.safe_eval")
 
-        assert tool.invoke({"s": "[1, 2, 3]"}) == [1, 2, 3]
+        assert tool.invoke({"s": "[1, 2, 3]"}).result == [1, 2, 3]
 
 
 class TestConsolePluginSmoke:
@@ -105,13 +105,13 @@ class TestConsolePluginSmoke:
         result = tool.invoke({"value": "hello"})
 
         captured = capsys.readouterr()
-        assert result is None
+        assert result.result is None
         assert captured.out == "hello\n"
 
     def test_console_log_tool_invokes_without_error(self) -> None:
         tool = tool_by_full_name("Tool.Console.log")
 
-        assert tool.invoke({"message": "hello", "level": "INFO"}) is None
+        assert tool.invoke({"message": "hello", "level": "INFO"}).result is None
 
     def test_console_user_input_exists_but_is_not_invoked(self) -> None:
         tool = tool_by_full_name("Tool.Console.user_input")

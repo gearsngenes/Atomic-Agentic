@@ -57,6 +57,24 @@ async def async_fail() -> None:
     raise RuntimeError("async boom")
 
 
+def returns_coroutine(a: int, b: int) -> Any:
+    """Plain sync callable that hands the sync path an awaitable to drive."""
+
+    async def _add() -> int:
+        return a + b
+
+    return _add()
+
+
+async def returns_awaitable(a: int, b: int) -> Any:
+    """Async callable whose awaited result is itself awaitable."""
+
+    async def _add() -> int:
+        return a + b
+
+    return _add()
+
+
 def make_param(
     name: str,
     index: int,
@@ -128,6 +146,51 @@ class AsyncTrackingInvokable(AddInvokable):
         if self.fail_async:
             raise RuntimeError("async invokable boom")
         return await super().async_invoke(inputs)
+
+
+class BadReturnTypeInvokable(AddInvokable):
+    """Invokable whose return_type property reports a non-str value."""
+
+    @property
+    def return_type(self) -> Any:
+        return 123
+
+
+class VariadicInvokable(AtomicInvokable):
+    """AtomicInvokable test double exposing a variadic parameter spec."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="variadic_invokable",
+            description="Invokable with a variadic keyword parameter.",
+            parameters=[
+                make_param("a", 0, type_="int"),
+                make_param("extras", 1, kind=ParamSpec.VAR_KEYWORD, type_="dict"),
+            ],
+            return_type="int",
+        )
+
+    def invoke(self, inputs: Mapping[str, Any]) -> int:
+        filtered = self.filter_inputs(inputs)
+        return int(filtered["a"])
+
+
+class RaisingToolInvocationErrorInvokable(AtomicInvokable):
+    """Invokable whose invoke/async_invoke raise ToolInvocationError directly."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="raises_tool_invocation_error",
+            description="Invokable that raises ToolInvocationError directly.",
+            parameters=[],
+            return_type="None",
+        )
+
+    def invoke(self, inputs: Mapping[str, Any]) -> Any:
+        raise ToolInvocationError("deliberate invocation error")
+
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
+        raise ToolInvocationError("deliberate async invocation error")
 
 
 class TestToolConstruction:
@@ -251,14 +314,14 @@ class TestToolInvokableBacking:
         invokable = AddInvokable()
         tool = Tool(function=invokable)
 
-        assert tool.invoke({"a": 2, "b": 3}) == 5
+        assert tool.invoke({"a": 2, "b": 3}).result == 5
         assert invokable.last_inputs == {"a": 2, "b": 3}
 
     def test_invokable_tool_applies_defaults_before_dict_first_invoke(self) -> None:
         invokable = AddInvokable()
         tool = Tool(function=invokable)
 
-        assert tool.invoke({"a": 7}) == 7
+        assert tool.invoke({"a": 7}).result == 7
         assert invokable.last_inputs == {"a": 7, "b": 0}
 
     def test_invokable_tool_module_qualname_come_from_invoke_method(self) -> None:
@@ -296,7 +359,7 @@ class TestToolBindingBasic:
             description="Add values.",
         )
 
-        assert tool.invoke({"a": 2, "b": 3}) == 5
+        assert tool.invoke({"a": 2, "b": 3}).result == 5
 
     def test_default_values_are_applied(self) -> None:
         tool = Tool(
@@ -306,8 +369,8 @@ class TestToolBindingBasic:
             description="Greet.",
         )
 
-        assert tool.invoke({"name": "Ada"}) == "Hello, Ada!"
-        assert tool.invoke({"name": "Ada", "punctuation": "."}) == "Hello, Ada."
+        assert tool.invoke({"name": "Ada"}).result == "Hello, Ada!"
+        assert tool.invoke({"name": "Ada", "punctuation": "."}).result == "Hello, Ada."
 
     def test_keyword_only_parameters_bind_correctly(self) -> None:
         tool = Tool(
@@ -317,8 +380,8 @@ class TestToolBindingBasic:
             description="Keyword-only text tool.",
         )
 
-        assert tool.invoke({"text": "hello"}) == "hello"
-        assert tool.invoke({"text": "hello", "upper": True}) == "HELLO"
+        assert tool.invoke({"text": "hello"}).result == "hello"
+        assert tool.invoke({"text": "hello", "upper": True}).result == "HELLO"
 
     def test_missing_required_parameter_raises(self) -> None:
         tool = Tool(
@@ -352,7 +415,7 @@ class TestToolBindingBasic:
             filter_extraneous_inputs=True,
         )
 
-        assert tool.invoke({"a": 1, "b": 2, "extra": 3}) == 3
+        assert tool.invoke({"a": 1, "b": 2, "extra": 3}).result == 3
 
 
 class TestToolBindingPositionalKinds:
@@ -368,7 +431,7 @@ class TestToolBindingPositionalKinds:
 
         assert args == (5,)
         assert kwargs == {"b": 2}
-        assert tool.invoke({"a": 5, "b": 2}) == 3
+        assert tool.invoke({"a": 5, "b": 2}).result == 3
 
     def test_explicit_varargs_payload_switches_pos_or_kw_to_args(self) -> None:
         tool = Tool(
@@ -382,7 +445,7 @@ class TestToolBindingPositionalKinds:
 
         assert args == (1, 2, 3, 4)
         assert kwargs == {}
-        assert tool.invoke({"a": 1, "items": [2, 3, 4]}) == (1, (2, 3, 4))
+        assert tool.invoke({"a": 1, "items": [2, 3, 4]}).result == (1, (2, 3, 4))
 
     @pytest.mark.parametrize("payload", ["abc", b"abc", bytearray(b"abc")])
     def test_explicit_varargs_rejects_string_like_payloads(self, payload: Any) -> None:
@@ -420,7 +483,7 @@ class TestToolBindingPositionalKinds:
 
         assert args == ()
         assert kwargs == {"a": 1, "debug": True}
-        assert tool.invoke({"a": 1, "extras": {"debug": True}}) == {
+        assert tool.invoke({"a": 1, "extras": {"debug": True}}).result == {
             "a": 1,
             "debug": True,
         }
@@ -456,7 +519,7 @@ class TestToolBindingPositionalKinds:
             filter_extraneous_inputs=False,
         )
 
-        assert tool.invoke({"a": 1, "debug": True}) == {
+        assert tool.invoke({"a": 1, "debug": True}).result == {
             "a": 1,
             "debug": True,
         }
@@ -484,7 +547,7 @@ class TestToolExecution:
 
         result = asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
 
-        assert result == 5
+        assert result.result == 5
 
     def test_async_invoke_awaits_async_callable(self) -> None:
         tool = Tool(
@@ -496,7 +559,7 @@ class TestToolExecution:
 
         result = asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
 
-        assert result == 5
+        assert result.result == 5
 
     def test_async_invoke_wraps_async_callable_exception(self) -> None:
         tool = Tool(
@@ -515,7 +578,7 @@ class TestToolExecution:
 
         result = asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
 
-        assert result == 5
+        assert result.result == 5
         assert invokable.async_invoke_used is True
         assert invokable.async_call_used is False
         assert invokable.call_used is False
@@ -565,7 +628,7 @@ class TestToolMutableMetadata:
             ("punctuation", "!"),
         ]
         assert tool.return_type == "str"
-        assert tool.invoke({"name": "Ada"}) == "Hello, Ada!"
+        assert tool.invoke({"name": "Ada"}).result == "Hello, Ada!"
 
     def test_function_setter_switches_callable_to_invokable(self) -> None:
         tool = Tool(
@@ -584,7 +647,7 @@ class TestToolMutableMetadata:
         assert tool.description == "Stable description."
         assert [p.name for p in tool.parameters] == ["a", "b"]
         assert tool.return_type == "int"
-        assert tool.invoke({"a": 4, "b": 6}) == 10
+        assert tool.invoke({"a": 4, "b": 6}).result == 10
 
     def test_function_setter_switches_invokable_to_callable(self) -> None:
         invokable = AddInvokable()
@@ -601,7 +664,7 @@ class TestToolMutableMetadata:
             ("punctuation", "!"),
         ]
         assert tool.return_type == "str"
-        assert tool.invoke({"name": "Ada", "punctuation": "."}) == "Hello, Ada."
+        assert tool.invoke({"name": "Ada", "punctuation": "."}).result == "Hello, Ada."
 
     def test_function_setter_rejects_non_callable_without_mutating_state(self) -> None:
         tool = Tool(
@@ -627,3 +690,61 @@ class TestToolMutableMetadata:
         assert tool.module == old_module
         assert tool.qualname == old_qualname
         assert tool.wraps_invokable is old_wraps_invokable
+
+
+class TestToolExecutionEdgeCases:
+    def test_function_setter_rejects_non_string_return_type_from_invokable(self) -> None:
+        tool = Tool(function=AddInvokable())
+
+        with pytest.raises(TypeError, match="return_type must be str"):
+            tool.function = BadReturnTypeInvokable()
+
+    def test_invokable_dict_first_binding_skips_variadic_parameter_defaults(self) -> None:
+        invokable = VariadicInvokable()
+        tool = Tool(function=invokable)
+
+        args, kwargs = tool.to_arg_kwarg({"a": 1})
+
+        assert args == ()
+        assert kwargs == {"a": 1}
+        assert "extras" not in kwargs
+
+    def test_sync_execute_runs_awaitable_result_from_sync_callable(self) -> None:
+        tool = Tool(
+            function=returns_coroutine,
+            name="returns_coroutine",
+            namespace="tests",
+            description="Sync callable returning a coroutine.",
+        )
+
+        assert tool.invoke({"a": 2, "b": 3}).result == 5
+
+    def test_sync_execute_reraises_tool_invocation_error_without_rewrapping(self) -> None:
+        invokable = RaisingToolInvocationErrorInvokable()
+        tool = Tool(function=invokable)
+
+        with pytest.raises(ToolInvocationError) as exc_info:
+            tool.invoke({})
+
+        assert str(exc_info.value) == "deliberate invocation error"
+
+    def test_async_execute_awaits_doubly_awaitable_result(self) -> None:
+        tool = Tool(
+            function=returns_awaitable,
+            name="returns_awaitable",
+            namespace="tests",
+            description="Async callable returning an awaitable.",
+        )
+
+        result = asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
+
+        assert result.result == 5
+
+    def test_async_execute_reraises_tool_invocation_error_without_rewrapping(self) -> None:
+        invokable = RaisingToolInvocationErrorInvokable()
+        tool = Tool(function=invokable)
+
+        with pytest.raises(ToolInvocationError) as exc_info:
+            asyncio.run(tool.async_invoke({}))
+
+        assert str(exc_info.value) == "deliberate async invocation error"

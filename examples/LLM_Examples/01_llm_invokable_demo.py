@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from atomic_agentic.engines.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine, LlamaCppEngine
 import logging
+from pprint import pprint
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -19,4 +20,7 @@ messages = [
 
 # --- Invoke the engine as an AtomicInvokable (dict-first contract) ---
 result = llm.invoke({"messages": messages})
-print("LLM Response:", result)
+print("LLM RESPONSE STRING:")
+print(result.result)
+print("\nLLM RESULT OBJECT:")
+pprint(result)

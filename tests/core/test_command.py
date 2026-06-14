@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.core.Invokable import StructuredInvokable, Command
+from atomic_agentic.results import CommandResult, StructuredResult
 from atomic_agentic.tools.base import Tool
 
 
@@ -24,6 +25,11 @@ def add_with_default(*, a: int, b: int = 10) -> int:
 async def async_add(*, a: int, b: int) -> int:
     """Asynchronously add two integers."""
     return a + b
+
+
+def add_with_variadics(a: int, *args: int, **kwargs: int) -> int:
+    """Add a value with optional variadic extras."""
+    return a + sum(args) + sum(kwargs.values())
 
 
 def make_add_tool(
@@ -121,7 +127,7 @@ class TestCommandFixedInputValidation:
             fixed_inputs={"a": 5},
         )
 
-        assert command.invoke({}) == 15
+        assert command.invoke({}).result == 15
 
     def test_strict_executor_rejects_extra_fixed_input_at_construction(self) -> None:
         executor = make_add_tool(filter_extraneous_inputs=False)
@@ -141,7 +147,23 @@ class TestCommandFixedInputValidation:
         )
 
         assert command.fixed_inputs == {"a": 2, "b": 3}
-        assert command.invoke({}) == 5
+        assert command.invoke({}).result == 5
+
+    def test_variadic_executor_parameters_are_skipped_during_bindability_check(self) -> None:
+        executor = Tool(
+            function=add_with_variadics,
+            name="add_with_variadics",
+            namespace="tests",
+            description="Add with variadic extras.",
+        )
+
+        command = Command(
+            executor=executor,
+            fixed_inputs={"a": 1},
+        )
+
+        assert command.fixed_inputs == {"a": 1, "kwargs": {}}
+        assert command.invoke({}).result == 1
 
 
 class TestCommandFilterPolicy:
@@ -175,12 +197,21 @@ class TestCommandFilterPolicy:
 
 class TestCommandInvocation:
     def test_invoke_empty_mapping_delegates_to_executor_with_fixed_inputs(self) -> None:
+        executor = make_add_tool()
         command = Command(
-            executor=make_add_tool(),
+            executor=executor,
             fixed_inputs={"a": 2, "b": 3},
         )
 
-        assert command.invoke({}) == 5
+        result = command.invoke({})
+
+        assert isinstance(result, CommandResult)
+        assert result.result == 5
+        assert result.invoker_id == command.instance_id
+        assert result.executor_id == executor.instance_id
+        assert isinstance(result.executor_run_id, str) and result.executor_run_id
+        assert result.started_at <= result.ended_at
+        assert result.elapsed_s >= 0
 
     def test_call_without_arguments_delegates_to_executor(self) -> None:
         command = Command(
@@ -188,7 +219,7 @@ class TestCommandInvocation:
             fixed_inputs={"a": 2, "b": 3},
         )
 
-        assert command() == 5
+        assert command().result == 5
 
     def test_invoke_rejects_runtime_inputs(self) -> None:
         command = Command(
@@ -242,7 +273,11 @@ class TestCommandAsyncInvocation:
 
         result = asyncio.run(command.async_invoke({}))
 
-        assert result == 5
+        assert isinstance(result, CommandResult)
+        assert result.result == 5
+        assert result.invoker_id == command.instance_id
+        assert result.executor_id == executor.instance_id
+        assert isinstance(result.executor_run_id, str) and result.executor_run_id
 
     def test_async_call_without_arguments_delegates_to_async_invoke(self) -> None:
         executor = Tool(
@@ -258,7 +293,8 @@ class TestCommandAsyncInvocation:
 
         result = asyncio.run(command.async_call())
 
-        assert result == 5
+        assert isinstance(result, CommandResult)
+        assert result.result == 5
 
     def test_async_invoke_rejects_runtime_inputs(self) -> None:
         command = Command(
@@ -309,7 +345,8 @@ class TestCommandComposition:
 
         result = wrapper.invoke({})
 
-        assert type(result) is dict
-        assert result == {"value": 5}
-        assert not hasattr(result, "raw_result")
+        assert isinstance(result, StructuredResult)
+        assert result.result == {"value": 5}
+        assert result.unpackaged_result == 5
+        assert isinstance(result.component_run_id, str) and result.component_run_id
         assert wrapper.parameters == []

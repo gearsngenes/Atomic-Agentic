@@ -41,6 +41,6 @@ Return None.
 
 final_result = orchestrator.invoke({"prompt": task})
 
-print(f"\nFinal Result: {final_result}")
+print(f"\nFinal Result: {final_result.result}")
 from pprint import pprint
 pprint(orchestrator.blackboard)

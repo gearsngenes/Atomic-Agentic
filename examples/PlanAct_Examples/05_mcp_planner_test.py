@@ -36,4 +36,4 @@ result = planner.invoke(
     }
 )
 
-print(result, type(result))
+print(result.result, type(result.result))

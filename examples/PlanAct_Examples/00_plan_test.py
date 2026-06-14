@@ -50,7 +50,7 @@ task_prompt = (
 
 final = agent.invoke({"prompt": task_prompt})
 
-print("\nFinal Result:\n", final)
+print("\nFinal Result:\n", final.result)
 
 # Optional: inspect executed steps (even if context_enabled=False, the view is useful for debugging)
 from pprint import pprint
