@@ -4,14 +4,14 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Dict, Mapping
 
-from .constants import (
+from ...agents.constants import (
     ARGS_FIELD,
     AWAIT_FIELD,
     STEP_FIELD,
     TOOL_FIELD,
 )
-from ..core.constants import IDENTIFIER_PATTERN, NO_VAL
-from ..models.results import AtomicResult, LLMResult
+from ...core.constants import IDENTIFIER_PATTERN, NO_VAL
+from ..results import AtomicResult, LLMResult
 
 __all__ = [
     "AgentRecord",

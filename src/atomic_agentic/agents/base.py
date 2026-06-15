@@ -26,7 +26,7 @@ from ..core.constants import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..models.results import AgentResult, LLMModelData, TokenUsage
 from ..tools import Tool, toolify
-from .data_classes import AgentRecord, LLMRecord
+from ..models.agents.data_classes import AgentRecord, LLMRecord
 
 logger = logging.getLogger(__name__)
 

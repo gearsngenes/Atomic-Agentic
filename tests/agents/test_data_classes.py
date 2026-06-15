@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.agents.data_classes import (
+from atomic_agentic.models.agents.data_classes import (
     AgentRecord,
     LLMRecord,
     ToolAgentRecord,

@@ -11,7 +11,7 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.core.Exceptions import AgentError, AgentInvocationError, ToolInvocationError
 from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.engines.LLMEngines import LLMEngine
-from atomic_agentic.agents.data_classes import AgentRecord, LLMRecord
+from atomic_agentic.models.agents.data_classes import AgentRecord, LLMRecord
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
 
 

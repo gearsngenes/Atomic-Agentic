@@ -24,7 +24,7 @@ from atomic_agentic.core.Exceptions import (
     ToolRegistrationError,
 )
 from atomic_agentic.core.constants import NO_VAL
-from atomic_agentic.agents.data_classes import (
+from atomic_agentic.models.agents.data_classes import (
     AgentRecord,
     LLMRecord,
     ToolAgentRecord,

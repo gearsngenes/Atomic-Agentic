@@ -142,7 +142,7 @@ from .constants import (
     TOOL_FIELD,
 )
 
-from .data_classes import AgentRecord, ToolAgentRecord, LLMRecord, BlackboardSlot, ConstantSpec
+from ..models.agents.data_classes import AgentRecord, ToolAgentRecord, LLMRecord, BlackboardSlot, ConstantSpec
 from ..core.Exceptions import (
     ToolAgentError,
     ToolDefinitionError,
