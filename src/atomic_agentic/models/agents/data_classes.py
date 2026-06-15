@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Dict, Mapping
 
-from ...agents.constants import (
+from ...constants.agents import (
     ARGS_FIELD,
     AWAIT_FIELD,
     STEP_FIELD,

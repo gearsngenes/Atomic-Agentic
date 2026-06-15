@@ -121,15 +121,14 @@ from typing import (
 import pprint
 
 from .base import Agent
-from .constants import (
+from .prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
+from ..constants.agents import (
     ARGS_FIELD,
     AWAIT_FIELD,
     BASE_STEP_FIELDS,
     DESCRIPTION_FIELD,
     DURATION_FIELD,
-    ORCHESTRATOR_PROMPT,
     PLAN_FIELDS,
-    PLANNER_PROMPT,
     REACT_FIELDS,
     REQUIRED_PLAN_FIELDS,
     REQUIRED_REACT_FIELDS,
