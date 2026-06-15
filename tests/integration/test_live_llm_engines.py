@@ -18,7 +18,7 @@ from atomic_agentic.engines.LLMEngines import (
     MistralEngine,
     OpenAIEngine,
 )
-from atomic_agentic.results import LLMResult
+from atomic_agentic.models.results import LLMResult
 
 
 pytestmark = [

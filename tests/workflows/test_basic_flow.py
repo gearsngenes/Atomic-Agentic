@@ -9,7 +9,7 @@ import pytest
 from atomic_agentic.core.Exceptions import ExecutionError
 from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.results.workflows import BasicFlowResult
+from atomic_agentic.models.results.workflows import BasicFlowResult
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.workflows.base import Workflow
 from atomic_agentic.workflows.basic import BasicFlow

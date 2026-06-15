@@ -32,7 +32,7 @@ from atomic_agentic.agents.data_classes import (
     ConstantSpec,
 )
 from atomic_agentic.engines.LLMEngines import LLMEngine
-from atomic_agentic.results import LLMModelData, LLMResult, TokenUsage, ToolResult
+from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from atomic_agentic.tools import Tool
 
 

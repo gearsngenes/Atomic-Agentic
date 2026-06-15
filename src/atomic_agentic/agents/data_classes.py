@@ -11,7 +11,7 @@ from .constants import (
     TOOL_FIELD,
 )
 from ..core.constants import IDENTIFIER_PATTERN, NO_VAL
-from ..results import AtomicResult, LLMResult
+from ..models.results import AtomicResult, LLMResult
 
 __all__ = [
     "AgentRecord",

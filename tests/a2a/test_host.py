@@ -13,7 +13,7 @@ from atomic_agentic.a2a.constants import (
     LIST_INVOKABLES_FUNCTION,)
 from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.results.atomic import AtomicResult
+from atomic_agentic.models.results.atomic import AtomicResult
 
 
 class EchoInvokable(AtomicInvokable):

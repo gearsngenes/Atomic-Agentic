@@ -17,7 +17,7 @@ from ..core.Invokable import AtomicInvokable
 from ..core.Parameters import ParamSpec, extract_io
 from ..core.utils import run_coro_sync
 from ..core.constants import NO_VAL
-from ..results import ToolResult
+from ..models.results.tools import ToolResult
 
 
 logger = logging.getLogger(__name__)

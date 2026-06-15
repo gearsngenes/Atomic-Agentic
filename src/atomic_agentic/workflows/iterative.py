@@ -8,7 +8,7 @@ from typing import Any, Optional
 from ..core.constants import NO_VAL
 from ..core.Exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
-from ..results.workflows import IterativeFlowResult, WorkflowResult
+from ..models.results.workflows import IterativeFlowResult, WorkflowResult
 from .base import Workflow
 from .basic import BasicFlow
 from .sequential import SequentialFlow

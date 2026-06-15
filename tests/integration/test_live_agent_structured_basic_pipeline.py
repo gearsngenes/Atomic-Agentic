@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover
 from atomic_agentic.agents.base import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.results.workflows import BasicFlowResult
+from atomic_agentic.models.results.workflows import BasicFlowResult
 from atomic_agentic.workflows.basic import BasicFlow
 
 

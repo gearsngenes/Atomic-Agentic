@@ -11,7 +11,7 @@ import logging
 from .constants import IDENTIFIER_PATTERN, NO_VAL
 from .Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from .Exceptions import PackagingError
-from ..results import AtomicResult, CommandResult, StructuredResult
+from ..models.results import AtomicResult, CommandResult, StructuredResult
 
 
 logger = logging.getLogger(__name__)
