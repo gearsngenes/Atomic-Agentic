@@ -6,7 +6,8 @@ except PackageNotFoundError:  # pragma: no cover
     __version__ = "0.0.0"
 
 from .core.constants import NO_VAL
-from .models.parameters import ParamSpec, to_paramspec_list, extract_io, is_valid_parameter_order
+from .models.parameters import ParamSpec
+from .utils.parameters import to_paramspec_list, extract_io, is_valid_parameter_order
 from .core.Invokable import (
     AtomicInvokable,
     Command,

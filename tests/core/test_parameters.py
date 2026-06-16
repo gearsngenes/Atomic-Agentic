@@ -5,8 +5,9 @@ from typing import Any, Mapping, Optional, TypedDict
 import pytest
 
 from atomic_agentic.core.Exceptions import SchemaError
-from atomic_agentic.models.parameters import (
-    ParamSpec,
+from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.utils.parameters import (
+    _validate_parameter_order,
     extract_io,
     is_valid_parameter_order,
     to_paramspec_list,
@@ -285,7 +286,7 @@ class TestParameterOrderValidation:
         ]
 
         with pytest.raises(SchemaError, match="Duplicate"):
-            is_valid_parameter_order(parameters)
+            _validate_parameter_order(parameters)
 
     def test_paramspec_rejects_unknown_parameter_kind(self) -> None:
         with pytest.raises(ValueError, match="ParamSpec.kind"):
@@ -303,7 +304,7 @@ class TestParameterOrderValidation:
         ]
 
         with pytest.raises(SchemaError, match="Invalid parameter order"):
-            is_valid_parameter_order(parameters)
+            _validate_parameter_order(parameters)
 
     def test_rejects_multiple_varargs(self) -> None:
         parameters = [
@@ -312,7 +313,7 @@ class TestParameterOrderValidation:
         ]
 
         with pytest.raises(SchemaError, match="Only one VAR_POSITIONAL"):
-            is_valid_parameter_order(parameters)
+            _validate_parameter_order(parameters)
 
     def test_rejects_multiple_varkwargs(self) -> None:
         parameters = [
@@ -321,7 +322,7 @@ class TestParameterOrderValidation:
         ]
 
         with pytest.raises(SchemaError, match="Only one VAR_KEYWORD"):
-            is_valid_parameter_order(parameters)
+            _validate_parameter_order(parameters)
 
     def test_rejects_varargs_with_default(self) -> None:
         parameters = [
@@ -329,7 +330,7 @@ class TestParameterOrderValidation:
         ]
 
         with pytest.raises(SchemaError, match="cannot have a default"):
-            is_valid_parameter_order(parameters)
+            _validate_parameter_order(parameters)
 
     def test_rejects_varkwargs_with_default(self) -> None:
         parameters = [
@@ -337,7 +338,7 @@ class TestParameterOrderValidation:
         ]
 
         with pytest.raises(SchemaError, match="cannot have a default"):
-            is_valid_parameter_order(parameters)
+            _validate_parameter_order(parameters)
 
     def test_rejects_required_positional_after_defaulted_positional(self) -> None:
         parameters = [
@@ -346,7 +347,7 @@ class TestParameterOrderValidation:
         ]
 
         with pytest.raises(SchemaError, match="cannot follow"):
-            is_valid_parameter_order(parameters)
+            _validate_parameter_order(parameters)
 
     def test_allows_required_keyword_only_after_defaulted_keyword_only(self) -> None:
         parameters = [

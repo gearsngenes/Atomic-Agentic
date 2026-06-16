@@ -9,7 +9,8 @@ from uuid import uuid4
 import logging
 
 from .constants import IDENTIFIER_PATTERN, NO_VAL
-from ..models.parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
+from ..models.parameters import ParamSpec
+from ..utils.parameters import _validate_parameter_order, to_paramspec_list
 from .Exceptions import PackagingError
 from ..models.results import AtomicResult, CommandResult, StructuredResult
 
@@ -135,7 +136,7 @@ class AtomicInvokable(ABC):
                 )
 
         # Validate parameter ordering (will raise SchemaError if invalid)
-        is_valid_parameter_order(parameters)
+        _validate_parameter_order(parameters)
 
         # Validate return type
         if not isinstance(return_type, str):
@@ -1070,7 +1071,7 @@ class StructuredInvokable(AtomicInvokable):
     ) -> None:
         """Normalize, validate, and set the output schema."""
         normalized = to_paramspec_list(value)
-        is_valid_parameter_order(normalized)
+        _validate_parameter_order(normalized)
         self._output_schema = normalized
 
     @property

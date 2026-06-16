@@ -8,7 +8,8 @@ from typing import Any, Optional
 
 from ..core.Exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
-from ..models.parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
+from ..models.parameters import ParamSpec
+from ..utils.parameters import _validate_parameter_order, to_paramspec_list
 from ..models.results.workflows import RoutingFlowResult
 from .base import Workflow
 from .basic import BasicFlow
@@ -107,7 +108,7 @@ class RoutingFlow(Workflow):
             declared_parameters = list(normalized_router.parameters)
         else:
             declared_parameters = to_paramspec_list(parameters)
-            is_valid_parameter_order(declared_parameters)
+            _validate_parameter_order(declared_parameters)
 
         resolved_filter = (
             filter_extraneous_inputs if filter_extraneous_inputs is not None else True
