@@ -5,7 +5,7 @@ from __future__ import annotations
 # =============================================================================
 # Used by:
 # - agents/tool_agents.py: generated step validation and BlackboardSlot creation
-# - agents/data_classes.py: BlackboardSlot.from_dict support
+# - models/agents/blackboard_models.py: BlackboardSlot.from_dict support
 #
 # These fields are centralized because ToolAgent prompt contracts and parser/
 # validator code need to agree on the same LLM-output protocol.
