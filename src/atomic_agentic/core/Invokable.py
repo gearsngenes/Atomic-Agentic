@@ -9,7 +9,7 @@ from uuid import uuid4
 import logging
 
 from .constants import IDENTIFIER_PATTERN, NO_VAL
-from .Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
+from ..models.parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from .Exceptions import PackagingError
 from ..models.results import AtomicResult, CommandResult, StructuredResult
 

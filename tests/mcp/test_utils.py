@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
-from atomic_agentic.core.Parameters import ParamSpec
+from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.core.constants import NO_VAL
 from atomic_agentic.core.utils import run_coro_sync
 from atomic_agentic.mcp.utils import (

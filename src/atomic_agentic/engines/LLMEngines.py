@@ -38,7 +38,7 @@ except: hf_hub_download = None
 # ~~~Local Imports~~~
 from ..core.Invokable import AtomicInvokable
 from ..core.constants import NO_VAL
-from ..core.Parameters import ParamSpec
+from ..models.parameters import ParamSpec
 from ..core.Exceptions import LLMEngineError
 from ..models.results import (
     GeminiTokenUsage,

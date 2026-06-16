@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from ..core.Exceptions import ExecutionError
 from ..core.Invokable import AtomicInvokable
-from ..core.Parameters import ParamSpec
+from ..models.parameters import ParamSpec
 from dataclasses import dataclass
 from ..models.results.workflows import WorkflowResult
 

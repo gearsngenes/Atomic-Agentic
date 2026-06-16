@@ -12,7 +12,7 @@ from atomic_agentic.a2a.constants import (
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,)
 from atomic_agentic.core.Invokable import AtomicInvokable
-from atomic_agentic.core.Parameters import ParamSpec
+from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.atomic import AtomicResult
 
 

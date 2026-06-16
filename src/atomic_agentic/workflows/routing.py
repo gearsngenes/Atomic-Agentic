@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from ..core.Exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
-from ..core.Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
+from ..models.parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from ..models.results.workflows import RoutingFlowResult
 from .base import Workflow
 from .basic import BasicFlow

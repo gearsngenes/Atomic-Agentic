@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.core.Exceptions import ExecutionError
-from atomic_agentic.core.Parameters import ParamSpec
+from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.workflows.base import Workflow, WorkflowCheckpoint
 from atomic_agentic.models.results.workflows import WorkflowResult
 

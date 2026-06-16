@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from ..core.Invokable import AtomicInvokable
-from ..core.Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
+from ..models.parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
 from ..core.constants import IDENTIFIER_PATTERN
 from ..models.results.workflows import ParallelFlowResult, WorkflowResult
 from .base import Workflow

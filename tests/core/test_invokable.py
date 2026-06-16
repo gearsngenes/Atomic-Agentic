@@ -8,7 +8,7 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.core.Invokable import AtomicInvokable
-from atomic_agentic.core.Parameters import ParamSpec
+from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.core.constants import NO_VAL
 
 

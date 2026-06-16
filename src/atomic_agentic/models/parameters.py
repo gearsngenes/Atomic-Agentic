@@ -26,8 +26,8 @@ from typing import (
     get_type_hints,
 )
 
-from .constants import IDENTIFIER_PATTERN, NO_VAL
-from .Exceptions import SchemaError
+from ..core.constants import IDENTIFIER_PATTERN, NO_VAL
+from ..core.Exceptions import SchemaError
 
 __all__ = ["ParamSpec", "extract_io", "to_paramspec_list", "is_valid_parameter_order"]
 

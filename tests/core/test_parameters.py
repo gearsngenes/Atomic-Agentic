@@ -5,7 +5,7 @@ from typing import Any, Mapping, Optional, TypedDict
 import pytest
 
 from atomic_agentic.core.Exceptions import SchemaError
-from atomic_agentic.core.Parameters import (
+from atomic_agentic.models.parameters import (
     ParamSpec,
     extract_io,
     is_valid_parameter_order,
