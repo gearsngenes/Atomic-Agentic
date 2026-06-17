@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Mapping
 from types import MappingProxyType
 from typing import Any
 
-from .constants import HeaderValue, T
+from ..core.constants import HeaderValue, T
 
 __all__ = [
     "normalize_headers",

@@ -11,7 +11,7 @@ from python_a2a import (
 )
 
 from ..core.constants import HeaderValue
-from ..core.utils import normalize_headers
+from ..utils.core import normalize_headers
 from .constants import (
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,

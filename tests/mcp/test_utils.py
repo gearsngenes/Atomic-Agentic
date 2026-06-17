@@ -6,8 +6,8 @@ from typing import Any
 
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.core.constants import NO_VAL
-from atomic_agentic.core.utils import run_coro_sync
-from atomic_agentic.mcp.utils import (
+from atomic_agentic.utils.core import run_coro_sync
+from atomic_agentic.utils.mcp import (
     _build_mcp_tool_metadata,
     _infer_mcp_extraction_mode,
     _infer_mcp_return_type,
