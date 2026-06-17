@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any
 
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.core.constants import NO_VAL
-from atomic_agentic.utils.core import run_coro_sync
+from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.utils.mcp import (
     _build_mcp_tool_metadata,
     _infer_mcp_extraction_mode,
@@ -20,23 +18,6 @@ from atomic_agentic.utils.mcp import (
 class DumpableObject:
     def model_dump(self, mode: str = "python") -> dict[str, Any]:
         return {"mode": mode, "value": 123}
-
-
-class TestRunCoroSync:
-    def test_run_coro_sync_returns_result_without_running_loop(self) -> None:
-        async def sample() -> int:
-            return 42
-
-        assert run_coro_sync(sample()) == 42
-
-    def test_run_coro_sync_works_when_event_loop_is_already_running(self) -> None:
-        async def outer() -> str:
-            async def inner() -> str:
-                return "ok"
-
-            return run_coro_sync(inner())
-
-        assert asyncio.run(outer()) == "ok"
 
 
 class TestJsonSchemaTypeToStr:

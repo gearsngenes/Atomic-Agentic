@@ -8,7 +8,7 @@ import asyncio
 from uuid import uuid4
 import logging
 
-from .constants import IDENTIFIER_PATTERN, NO_VAL
+from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
 from ..models.parameters import ParamSpec
 from ..utils.parameters import _validate_parameter_order, to_paramspec_list
 from .Exceptions import PackagingError

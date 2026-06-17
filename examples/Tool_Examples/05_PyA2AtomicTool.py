@@ -5,7 +5,7 @@ import json
 from typing import Any, Mapping
 
 from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
-from atomic_agentic.core.constants import NO_VAL
+from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.tools.a2a import PyA2AtomicTool
 
 

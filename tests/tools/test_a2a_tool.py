@@ -10,7 +10,7 @@ from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
 from atomic_agentic.core.Exceptions import ToolDefinitionError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.tools.a2a import PyA2AtomicTool
-from atomic_agentic.core.constants import NO_VAL
+from atomic_agentic.constants.core import NO_VAL
 
 def param_dict(
     name: str,

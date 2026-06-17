@@ -24,7 +24,7 @@ from atomic_agentic.core.Exceptions import (
     ToolInvocationError,
     ToolRegistrationError,
 )
-from atomic_agentic.core.constants import NO_VAL
+from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from atomic_agentic.tools import Tool

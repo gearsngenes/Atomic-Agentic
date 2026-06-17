@@ -5,7 +5,7 @@ import math
 import pytest
 
 from atomic_agentic.core.Exceptions import ToolInvocationError
-from atomic_agentic.tools.Plugins import CONSOLE_TOOLS, MATH_TOOLS, PARSER_TOOLS
+from atomic_agentic.tools.prebuilt import CONSOLE_TOOLS, MATH_TOOLS, PARSER_TOOLS
 from atomic_agentic.tools.base import Tool
 
 

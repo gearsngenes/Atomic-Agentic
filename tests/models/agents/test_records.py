@@ -8,7 +8,7 @@ import pytest
 
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
-from atomic_agentic.core.constants import NO_VAL
+from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results import AtomicResult, LLMModelData, LLMResult, TokenUsage
 
 

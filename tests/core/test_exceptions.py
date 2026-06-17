@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from atomic_agentic.core.Exceptions import (
+from atomic_agentic.exceptions.exceptions import (
     AgentError,
     AgentInvocationError,
     ExecutionError,

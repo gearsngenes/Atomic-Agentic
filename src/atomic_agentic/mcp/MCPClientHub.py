@@ -16,7 +16,7 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
-from ..core.constants import HeaderValue, T
+from ..constants.core import HeaderValue, T
 from ..utils.core import run_coro_sync, normalize_headers
 from ..utils.mcp import (
     _build_mcp_tool_metadata,

@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar, Mapping
 
-from ..core.constants import IDENTIFIER_PATTERN, NO_VAL
+from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
 
 __all__ = ["ParamSpec"]
 

@@ -10,9 +10,9 @@ from python_a2a import (
     MessageRole,
 )
 
-from ..core.constants import HeaderValue
+from ..constants.core import HeaderValue
 from ..utils.core import normalize_headers
-from .constants import (
+from ..constants.a2a import (
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,
     PYA2A_RESULT_KEY,

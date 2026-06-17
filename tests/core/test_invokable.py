@@ -9,7 +9,7 @@ import pytest
 
 from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.core.constants import NO_VAL
+from atomic_agentic.constants.core import NO_VAL
 
 
 class EchoInvokable(AtomicInvokable):

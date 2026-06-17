@@ -182,7 +182,7 @@ Atomic-Agentic also supports autonomous **tool-calling agent classes**.
 ```python
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.tools.Plugins import MATH_TOOLS
+from atomic_agentic.tools.prebuilt import MATH_TOOLS
 
 engine = OpenAIEngine(model="gpt-4.1-mini")
 

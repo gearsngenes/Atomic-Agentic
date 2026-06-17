@@ -17,7 +17,7 @@ from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..utils.parameters import extract_io
 from ..utils.core import run_coro_sync
-from ..core.constants import NO_VAL
+from ..constants.core import NO_VAL
 from ..models.results.tools import ToolResult
 
 

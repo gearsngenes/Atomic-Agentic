@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent as PydanticAgent
 
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.tools.Plugins import CONSOLE_TOOLS
+from atomic_agentic.tools.prebuilt import CONSOLE_TOOLS
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()

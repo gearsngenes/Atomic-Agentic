@@ -9,7 +9,7 @@ from ...constants.agents import (
     STEP_FIELD,
     TOOL_FIELD,
 )
-from ...core.constants import IDENTIFIER_PATTERN, NO_VAL
+from ...constants.core import IDENTIFIER_PATTERN, NO_VAL
 from ..results import AtomicResult
 
 __all__ = [

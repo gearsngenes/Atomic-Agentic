@@ -7,7 +7,7 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
-from atomic_agentic.a2a.constants import (
+from atomic_agentic.constants.a2a import (
     PYA2A_RESULT_KEY,
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,)

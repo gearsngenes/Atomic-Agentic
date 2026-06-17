@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...core.constants import NO_VAL
+from ...constants.core import NO_VAL
 from .blackboard_models import BlackboardSlot
 from .records import LLMRecord
 
