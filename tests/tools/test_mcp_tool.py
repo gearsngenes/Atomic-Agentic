@@ -7,6 +7,7 @@ import pytest
 
 from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.models.results.tools import MCPToolResult
 from atomic_agentic.mcp.MCPClientHub import MCPClientHub
 from atomic_agentic.tools.mcp import MCPProxyTool
 from atomic_agentic.constants.core import NO_VAL
@@ -439,6 +440,62 @@ class TestMCPProxyToolAsync:
 
         with pytest.raises(ToolInvocationError, match="known failure"):
             asyncio.run(tool.async_invoke({"query": "hello"}))
+
+
+class TestMCPProxyToolMakeResult:
+    def test_invoke_returns_mcp_tool_result(self) -> None:
+        tool = make_tool()
+
+        result = tool.invoke({"query": "hello"})
+
+        assert isinstance(result, MCPToolResult)
+
+    def test_result_carries_transport_mode_from_hub(self) -> None:
+        tool = make_tool()
+
+        result = tool.invoke({"query": "hello"})
+
+        assert result.transport_mode == "stdio"
+
+    def test_result_carries_remote_name(self) -> None:
+        tool = make_tool()
+
+        result = tool.invoke({"query": "hello"})
+
+        assert result.remote_name == "search"
+
+    def test_result_carries_command_for_stdio_transport(self) -> None:
+        tool = make_tool()
+
+        result = tool.invoke({"query": "hello"})
+
+        assert result.command == "python"
+        assert result.endpoint is None
+
+    def test_to_dict_includes_transport_fields(self) -> None:
+        tool = make_tool()
+
+        data = tool.invoke({"query": "hello"}).to_dict()
+
+        assert data["transport_mode"] == "stdio"
+        assert data["remote_name"] == "search"
+        assert data["command"] == "python"
+        assert data["endpoint"] is None
+
+    def test_async_invoke_also_returns_mcp_tool_result(self) -> None:
+        hub = FakeMCPClientHub(
+            async_result={
+                "structuredContent": {"result": "async answer"},
+                "isError": False,
+            }
+        )
+        tool = make_tool(hub=hub)
+
+        result = asyncio.run(tool.async_invoke({"query": "hello"}))
+
+        assert isinstance(result, MCPToolResult)
+        assert result.transport_mode == "stdio"
+        assert result.remote_name == "search"
 
 
 class TestMCPProxyToolRefreshAndSerialization:

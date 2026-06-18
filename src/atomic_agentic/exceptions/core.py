@@ -50,6 +50,26 @@ class ExecutionError(WorkflowError, RuntimeError):
     """Raised when a workflow fails to execute in runtime"""
 
 
+class RemoteInvocationError(Exception):
+    """Raised when a remote host reports a host-side execution failure via error payload.
+
+    Distinct from connection-level failures (which surface as RuntimeError).
+    ``error_type`` carries the remote exception class name as a string.
+    ``function_name`` identifies which invokable was being called.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str,
+        function_name: str,
+    ) -> None:
+        super().__init__(message)
+        self.error_type: str = error_type
+        self.function_name: str = function_name
+
+
 __all__ = [
     "LLMEngineError",
     "ToolError",
@@ -64,4 +84,5 @@ __all__ = [
     "SchemaError",
     "PackagingError",
     "ExecutionError",
+    "RemoteInvocationError",
 ]

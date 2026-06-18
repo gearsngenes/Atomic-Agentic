@@ -129,7 +129,7 @@ class PyA2AtomicClient:
         self,
         remote_name: str,
         inputs: Mapping[str, Any],
-    ) -> Any:
+    ) -> dict[str, Any]:
         resolved_remote_name = str(remote_name).strip()
         if not resolved_remote_name:
             raise ValueError("remote_name must be a non-empty string.")
@@ -140,18 +140,7 @@ class PyA2AtomicClient:
             function_name=resolved_remote_name,
             parameters=dict(inputs),
         )
-        self._raise_if_error_payload(
-            payload=payload,
-            function_name=resolved_remote_name,
-        )
-
-        if PYA2A_RESULT_KEY not in payload:
-            raise RuntimeError(
-                f"Direct invokable call {resolved_remote_name!r} did not return "
-                f"required result key {PYA2A_RESULT_KEY!r}."
-            )
-
-        return payload[PYA2A_RESULT_KEY]
+        return dict(payload)
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -5,6 +5,7 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
+from atomic_agentic.constants.a2a import PYA2A_RESULT_KEY
 from atomic_agentic.exceptions import ToolDefinitionError
 from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
@@ -270,9 +271,9 @@ class FakePyA2AtomicClient(PyA2AtomicClient):
         self.metadata_calls.append(remote_name)
         return dict(self._invokables[remote_name])
 
-    def call_invokable(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
+    def call_invokable(self, remote_name: str, inputs: Mapping[str, Any]) -> dict[str, Any]:
         self.calls.append((remote_name, dict(inputs)))
-        return self.result
+        return {PYA2A_RESULT_KEY: self.result}
 
     def to_dict(self) -> dict[str, Any]:
         return {
