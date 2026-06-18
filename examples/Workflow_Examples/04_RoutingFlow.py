@@ -9,7 +9,7 @@ from __future__ import annotations
 from pprint import pprint
 from dotenv import load_dotenv
 from atomic_agentic.tools import Tool
-from atomic_agentic.workflows.routing import RoutingFlow
+from atomic_agentic.workflows import RoutingFlow
 
 # ──────────────────────────────────────────────────────────────
 # Router functions: return the selector used to pick a branch

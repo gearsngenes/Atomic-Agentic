@@ -23,6 +23,7 @@ tests/*/__pycache__/
 tests/__pycache__/
 src/atomic_agentic/__pycache__/
 src/atomic_agentic/*/__pycache__/
+src/atomic_agentic/*/*/__pycache__/
 
 # Ignore coverage reports
 .coverage

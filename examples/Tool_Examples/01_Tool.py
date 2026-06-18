@@ -1,13 +1,9 @@
 """
 Beginner-friendly demo: using Tool to wrap simple Python functions.
-
-Adjust the import path to your project layout if needed:
-from atomic_agentic.Tools import Tool, ToolInvocationError
 """
 from atomic_agentic.tools import Tool
-from atomic_agentic.core.Exceptions import ToolInvocationError
+from atomic_agentic.exceptions import ToolInvocationError
 import logging
-import json
 
 logging.basicConfig(level = logging.INFO)
 

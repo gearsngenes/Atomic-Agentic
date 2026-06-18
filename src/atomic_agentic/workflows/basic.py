@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from ..core.Invokable import AtomicInvokable
-from ..results.workflows import BasicFlowResult
+from ..models.results.workflows import BasicFlowResult
 from .base import Workflow
 
 logger = logging.getLogger(__name__)

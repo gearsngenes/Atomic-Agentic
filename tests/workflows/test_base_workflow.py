@@ -6,10 +6,10 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.core.Exceptions import ExecutionError
-from atomic_agentic.core.Parameters import ParamSpec
+from atomic_agentic.exceptions import ExecutionError
+from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.workflows.base import Workflow, WorkflowCheckpoint
-from atomic_agentic.results.workflows import WorkflowResult
+from atomic_agentic.models.results.workflows import WorkflowResult
 
 
 def make_value_param() -> ParamSpec:

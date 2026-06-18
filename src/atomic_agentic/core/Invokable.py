@@ -8,10 +8,11 @@ import asyncio
 from uuid import uuid4
 import logging
 
-from .constants import IDENTIFIER_PATTERN, NO_VAL
-from .Parameters import ParamSpec, is_valid_parameter_order, to_paramspec_list
-from .Exceptions import PackagingError
-from ..results import AtomicResult, CommandResult, StructuredResult
+from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
+from ..models.parameters import ParamSpec
+from ..utils.parameters import _validate_parameter_order, to_paramspec_list
+from ..exceptions import PackagingError
+from ..models.results import AtomicResult, CommandResult, StructuredResult
 
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,7 @@ class AtomicInvokable(ABC):
                 )
 
         # Validate parameter ordering (will raise SchemaError if invalid)
-        is_valid_parameter_order(parameters)
+        _validate_parameter_order(parameters)
 
         # Validate return type
         if not isinstance(return_type, str):
@@ -232,14 +233,13 @@ class AtomicInvokable(ABC):
         self._filter_extraneous_inputs = value
 
     # ---------------------------------------------------------------- #
-    # Legacy backward compatibility properties
+    # Secondary Access compatibility properties
     # ---------------------------------------------------------------- #
     @property
     def parameters_map(self) -> dict[str, ParamSpec]:
-        """Legacy alternative viewing mechanism: parameters as a dict mapping name -> ParamSpec.
+        """Secondary access: parameters as a dict mapping name -> ParamSpec.
 
-        This property is retained temporarily during the v2 migration. New code should
-        prefer the ``parameters`` property, which provides the ordered list directly.
+        Prefer ``parameters`` for ordered list access.
         """
         return {spec.name: spec for spec in self._parameters}
 
@@ -1070,7 +1070,7 @@ class StructuredInvokable(AtomicInvokable):
     ) -> None:
         """Normalize, validate, and set the output schema."""
         normalized = to_paramspec_list(value)
-        is_valid_parameter_order(normalized)
+        _validate_parameter_order(normalized)
         self._output_schema = normalized
 
     @property
