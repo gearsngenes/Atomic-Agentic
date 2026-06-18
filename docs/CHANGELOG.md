@@ -5,6 +5,48 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a6] - 2026-06-18
+
+### Added
+
+- `exceptions/` top-level package with `exceptions/core.py` as the canonical
+  definition site for all 13 exception classes; `exceptions/__init__.py` is
+  the single import surface (`from atomic_agentic.exceptions import X`).
+- `constants/` top-level package — pure literals and sentinels subdivided by
+  originating domain (`core.py`, `agents.py`, `a2a.py`).
+- `models/` top-level package — dataclasses subdivided by kind:
+  `models/parameters.py` (`ParamSpec`), `models/results/` (the full
+  `AtomicResult`-family, relocated wholesale), `models/agents/` (agent
+  records/runstates/blackboard, split from the former `data_classes.py`),
+  `models/workflows/` (`WorkflowCheckpoint`).
+- `utils/` top-level package — pure functions subdivided by domain:
+  `utils/core.py` (async bridging, header normalization), `utils/parameters.py`
+  (parameter extraction and validation), `utils/mcp.py` (MCP conversion
+  helpers), `utils/agents.py` (dependency extraction).
+- `agents/tools.py` — identity pre/post tools and return-tool helpers
+  extracted from `agents/base.py` and `agents/tool_agents.py`.
+- `workflows/tools.py` — fallback judge factory extracted from
+  `workflows/iterative.py`.
+- package topology table and "What's New in v2" section added to `README.md`.
+
+### Changed
+
+- `core/` narrowed to the shared invocation contract only (`AtomicInvokable`,
+  `Command`, `StructuredInvokable`); all other former `core/` residents moved
+  to their respective concern packages above.
+- `tools/prebuilt.py` — renamed from `tools/Plugins.py`; reflects its actual
+  role as a prebuilt tool-instance collection.
+- `mcp/utils.py` removed; its helpers relocated to `utils/mcp.py`.
+- test suite restructured to mirror the new layout (`tests/constants/`,
+  `tests/models/`, `tests/models/agents/`, `tests/utils/`, `tests/exceptions/`).
+- breaking (type-annotation only): `ToolAgent` de-Genericed — `Generic[RS]`
+  and the `RS` TypeVar removed; no runtime behavior change.
+
+### Removed
+
+- `core/Exceptions.py` shim (callers now import from `atomic_agentic.exceptions`).
+- `mcp/utils.py` (merged into `utils/mcp.py`).
+
 ## [2.0.0a5] - 2026-06-14
 
 ### Added

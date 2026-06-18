@@ -11,14 +11,14 @@ try:
 except ImportError:  # pragma: no cover
     load_dotenv = None
 
-from atomic_agentic.core.Exceptions import LLMEngineError
+from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.engines.LLMEngines import (
     GeminiEngine,
     LLMEngine,
     MistralEngine,
     OpenAIEngine,
 )
-from atomic_agentic.results import LLMResult
+from atomic_agentic.models.results import LLMResult
 
 
 pytestmark = [

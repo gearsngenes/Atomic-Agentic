@@ -37,10 +37,10 @@ except: hf_hub_download = None
 
 # ~~~Local Imports~~~
 from ..core.Invokable import AtomicInvokable
-from ..core.constants import NO_VAL
-from ..core.Parameters import ParamSpec
-from ..core.Exceptions import LLMEngineError
-from ..results import (
+from ..constants.core import NO_VAL
+from ..models.parameters import ParamSpec
+from ..exceptions import LLMEngineError
+from ..models.results import (
     GeminiTokenUsage,
     LlamaCppModelData,
     LlamaCppTokenUsage,
@@ -92,7 +92,7 @@ class LLMEngine(AtomicInvokable, ABC):
     Deprecated compatibility
     ------------------------
     ``invoke_messages(messages) -> str`` is retained as a deprecated text-only
-    compatibility wrapper during the v2 migration. Prefer:
+    compatibility wrapper. Prefer:
 
         invoke({"messages": messages}).result
 
@@ -268,7 +268,7 @@ class LLMEngine(AtomicInvokable, ABC):
         warnings.warn(
             (
                 "LLMEngine.invoke_messages(...) is deprecated and will be removed "
-                "in a future v2 release. Use "
+                "in a future release. Use "
                 "LLMEngine.invoke({'messages': messages}).result instead."
             ),
             DeprecationWarning,

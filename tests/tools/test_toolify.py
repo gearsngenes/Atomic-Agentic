@@ -5,10 +5,10 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
-from atomic_agentic.core.Exceptions import ToolDefinitionError
+from atomic_agentic.exceptions import ToolDefinitionError
 from atomic_agentic.core.Invokable import AtomicInvokable
-from atomic_agentic.core.Parameters import ParamSpec
-from atomic_agentic.core.constants import NO_VAL
+from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.mcp.MCPClientHub import MCPClientHub
 from atomic_agentic.tools.Toolify import batch_toolify, toolify
 from atomic_agentic.tools.a2a import PyA2AtomicTool

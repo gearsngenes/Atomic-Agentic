@@ -8,31 +8,25 @@ import json
 
 import pytest
 
-from atomic_agentic.agents.tool_agents import ToolAgent
 from atomic_agentic.agents.tool_agents import (
     ToolAgent,
-    ToolAgentRunState,
     extract_dependencies,
     return_tool,
     PlanActAgent,
     ReActAgent,
 )
-from atomic_agentic.core.Exceptions import (
+from atomic_agentic.models.agents.runstates import ToolAgentRunState
+from atomic_agentic.models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
+from atomic_agentic.exceptions import (
     AgentError,
     ToolAgentError,
     ToolInvocationError,
     ToolRegistrationError,
 )
-from atomic_agentic.core.constants import NO_VAL
-from atomic_agentic.agents.data_classes import (
-    AgentRecord,
-    LLMRecord,
-    ToolAgentRecord,
-    BlackboardSlot,
-    ConstantSpec,
-)
+from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.engines.LLMEngines import LLMEngine
-from atomic_agentic.results import LLMModelData, LLMResult, TokenUsage, ToolResult
+from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from atomic_agentic.tools import Tool
 
 
@@ -266,7 +260,7 @@ class ScriptedRunState(ToolAgentRunState):
     next_step_index: int = 0
 
 
-class ScriptedToolAgent(ToolAgent[ScriptedRunState]):
+class ScriptedToolAgent(ToolAgent):
     """Deterministic ToolAgent subclass for testing the base ToolAgent loop."""
 
     def __init__(

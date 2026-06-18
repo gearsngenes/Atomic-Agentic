@@ -4,10 +4,10 @@ import logging
 
 from dotenv import load_dotenv
 
-from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
-from atomic_agentic.agents.tool_agents import PlanActAgent
+from atomic_agentic.a2a import PyA2AtomicHost
+from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.tools.Plugins import MATH_TOOLS
+from atomic_agentic.tools.prebuilt import MATH_TOOLS
 
 load_dotenv()
 

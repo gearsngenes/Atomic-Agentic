@@ -10,8 +10,8 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.results import LLMModelData, TokenUsage
-from atomic_agentic.results.workflows import BasicFlowResult, SequentialFlowResult
+from atomic_agentic.models.results import LLMModelData, TokenUsage
+from atomic_agentic.models.results.workflows import BasicFlowResult, SequentialFlowResult
 from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.sequential import SequentialFlow
 

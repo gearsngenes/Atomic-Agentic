@@ -6,15 +6,10 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.agents.data_classes import (
-    AgentRecord,
-    LLMRecord,
-    ToolAgentRecord,
-    BlackboardSlot,
-    ConstantSpec,
-)
-from atomic_agentic.core.constants import NO_VAL
-from atomic_agentic.results import AtomicResult, LLMModelData, LLMResult, TokenUsage
+from atomic_agentic.models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
+from atomic_agentic.constants.core import NO_VAL
+from atomic_agentic.models.results import AtomicResult, LLMModelData, LLMResult, TokenUsage
 
 
 def make_token_usage(*, input_tokens: int = 10, generated_tokens: int = 5) -> TokenUsage:

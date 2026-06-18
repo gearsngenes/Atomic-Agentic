@@ -1,14 +1,14 @@
-# modules/Plugins.py
+# tools/prebuilt.py
 """
-Plugins (Tool Lists)
-====================
+Prebuilt Tool Collections
+=========================
 
 This module exposes *prebuilt lists of Tools* that you can register on a ToolAgent
-(e.g., PlanActAgent / IterActAgent) via `batch_register(...)`.
+(e.g., PlanActAgent / ReActAgent) via `batch_register(...)`.
 
 Example
 -------
->>> from atomic_agentic.Plugins import MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
+>>> from atomic_agentic.tools.prebuilt import MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
 >>> agent.batch_register(MATH_TOOLS)
 >>> agent.batch_register(CONSOLE_TOOLS)
 >>> agent.batch_register(PARSER_TOOLS)

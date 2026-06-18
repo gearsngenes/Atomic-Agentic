@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.core.Invokable import StructuredInvokable, Command
-from atomic_agentic.results import CommandResult, StructuredResult
+from atomic_agentic.models.results import CommandResult, StructuredResult
 from atomic_agentic.tools.base import Tool
 
 

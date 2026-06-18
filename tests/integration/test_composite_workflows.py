@@ -7,7 +7,7 @@ import pytest
 
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.results.workflows import (
+from atomic_agentic.models.results.workflows import (
     IterativeFlowResult,
     ParallelFlowResult,
     RoutingFlowResult,

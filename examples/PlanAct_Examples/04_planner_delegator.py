@@ -14,7 +14,7 @@ import time
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import Agent, PlanActAgent
-from atomic_agentic.tools.Plugins import MATH_TOOLS
+from atomic_agentic.tools.prebuilt import MATH_TOOLS
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()
