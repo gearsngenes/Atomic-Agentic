@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Optional
 
-from ..core.Exceptions import ValidationError
+from ..exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
 from ..models.results.workflows import SequentialFlowResult, WorkflowResult
 from .base import Workflow

@@ -32,7 +32,7 @@ import inspect
 from typing import Any, Callable, Optional, get_args, get_origin, get_type_hints
 
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
-from ..exceptions.exceptions import SchemaError
+from ..exceptions import SchemaError
 from ..models.parameters import ParamSpec
 
 __all__ = ["extract_io", "to_paramspec_list", "is_valid_parameter_order"]

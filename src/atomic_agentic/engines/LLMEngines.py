@@ -39,7 +39,7 @@ except: hf_hub_download = None
 from ..core.Invokable import AtomicInvokable
 from ..constants.core import NO_VAL
 from ..models.parameters import ParamSpec
-from ..core.Exceptions import LLMEngineError
+from ..exceptions import LLMEngineError
 from ..models.results import (
     GeminiTokenUsage,
     LlamaCppModelData,

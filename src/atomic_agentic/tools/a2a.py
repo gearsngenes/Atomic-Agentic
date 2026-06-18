@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 
 from atomic_agentic.core.Invokable import AtomicInvokable
 
-from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
+from ..exceptions import ToolDefinitionError, ToolInvocationError
 from ..models.parameters import ParamSpec
 from ..constants.core import HeaderValue, NO_VAL
 from .base import Tool

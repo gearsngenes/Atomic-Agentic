@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from atomic_agentic.core.Exceptions import ToolDefinitionError, ToolInvocationError
+from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.tools import Tool
 

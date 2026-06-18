@@ -6,7 +6,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Optional
 
-from ..core.Exceptions import ValidationError
+from ..exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..utils.parameters import _validate_parameter_order, to_paramspec_list

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.core.Exceptions import PackagingError
+from atomic_agentic.exceptions import PackagingError
 from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL

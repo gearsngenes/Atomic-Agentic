@@ -15,7 +15,7 @@ from uuid import uuid4
 import logging
 import warnings
 
-from ..core.Exceptions import (
+from ..exceptions import (
     AgentError,
     AgentInvocationError,
     ToolInvocationError,

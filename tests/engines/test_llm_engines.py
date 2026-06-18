@@ -10,7 +10,7 @@ import pytest
 
 llm_module = importlib.import_module("atomic_agentic.engines.LLMEngines")
 
-from atomic_agentic.core.Exceptions import LLMEngineError
+from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.engines.LLMEngines import (
     GeminiEngine,
     LlamaCppEngine,

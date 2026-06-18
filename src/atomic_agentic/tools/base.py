@@ -12,7 +12,7 @@ from typing import (
     Optional,
 )
 
-from ..core.Exceptions import ToolDefinitionError, ToolInvocationError
+from ..exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..utils.parameters import extract_io

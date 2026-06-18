@@ -9,7 +9,7 @@ from typing import Any, Mapping
 import json
 from atomic_agentic.tools.mcp import MCPProxyTool
 from atomic_agentic.mcp import MCPClientHub
-from atomic_agentic.core.Exceptions import ToolInvocationError
+from atomic_agentic.exceptions import ToolInvocationError
 
 
 SERVER_URL  = "http://127.0.0.1:8000/mcp"   # we'll normalize to /mcp if path missing

@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from ..core.Exceptions import ExecutionError
+from ..exceptions import ExecutionError
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..models.results.workflows import WorkflowResult

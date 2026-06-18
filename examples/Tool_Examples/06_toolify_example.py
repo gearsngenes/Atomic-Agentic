@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
 from atomic_agentic.agents import Agent
-from atomic_agentic.core.Exceptions import ToolInvocationError
+from atomic_agentic.exceptions import ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.mcp.MCPClientHub import MCPClientHub

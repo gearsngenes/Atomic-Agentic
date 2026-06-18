@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
-from ..core.Exceptions import ToolDefinitionError
+from ..exceptions import ToolDefinitionError
 from ..core.Invokable import AtomicInvokable
 from ..mcp import MCPClientHub
 from ..a2a import PyA2AtomicClient

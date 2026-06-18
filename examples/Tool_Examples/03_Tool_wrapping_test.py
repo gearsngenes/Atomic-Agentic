@@ -7,7 +7,7 @@ for AtomicInvokable objects.
 
 from dotenv import load_dotenv
 from atomic_agentic.tools import Tool
-from atomic_agentic.core.Exceptions import ToolInvocationError, AgentInvocationError
+from atomic_agentic.exceptions import ToolInvocationError, AgentInvocationError
 from atomic_agentic.agents import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 import logging

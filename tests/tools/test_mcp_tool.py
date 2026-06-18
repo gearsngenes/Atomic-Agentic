@@ -5,7 +5,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from atomic_agentic.core.Exceptions import ToolDefinitionError, ToolInvocationError
+from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.mcp.MCPClientHub import MCPClientHub
 from atomic_agentic.tools.mcp import MCPProxyTool
