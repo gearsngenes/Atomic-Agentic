@@ -233,7 +233,7 @@ class AtomicInvokable(ABC):
         self._filter_extraneous_inputs = value
 
     # ---------------------------------------------------------------- #
-    # Legacy backward compatibility properties
+    # Secondary Access compatibility properties
     # ---------------------------------------------------------------- #
     @property
     def parameters_map(self) -> dict[str, ParamSpec]:

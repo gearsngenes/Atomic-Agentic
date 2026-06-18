@@ -92,7 +92,7 @@ class LLMEngine(AtomicInvokable, ABC):
     Deprecated compatibility
     ------------------------
     ``invoke_messages(messages) -> str`` is retained as a deprecated text-only
-    compatibility wrapper during the v2 migration. Prefer:
+    compatibility wrapper. Prefer:
 
         invoke({"messages": messages}).result
 
@@ -268,7 +268,7 @@ class LLMEngine(AtomicInvokable, ABC):
         warnings.warn(
             (
                 "LLMEngine.invoke_messages(...) is deprecated and will be removed "
-                "in a future v2 release. Use "
+                "in a future release. Use "
                 "LLMEngine.invoke({'messages': messages}).result instead."
             ),
             DeprecationWarning,
