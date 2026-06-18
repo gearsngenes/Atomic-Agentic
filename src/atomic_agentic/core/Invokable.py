@@ -237,10 +237,9 @@ class AtomicInvokable(ABC):
     # ---------------------------------------------------------------- #
     @property
     def parameters_map(self) -> dict[str, ParamSpec]:
-        """Legacy alternative viewing mechanism: parameters as a dict mapping name -> ParamSpec.
+        """Secondary access: parameters as a dict mapping name -> ParamSpec.
 
-        This property is retained temporarily during the v2 migration. New code should
-        prefer the ``parameters`` property, which provides the ordered list directly.
+        Prefer ``parameters`` for ordered list access.
         """
         return {spec.name: spec for spec in self._parameters}
 

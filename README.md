@@ -26,8 +26,9 @@ composable primitives:
     messages.
 -   **Agent** -- An autonomous reasoning component that uses LLM Engines
     and Tools to complete tasks and interact with its environment.
--   **StructuredInvokable** -- A packaging boundary wrapper for other
-    primary primitives to format raw outputs into structured, dictionary-based outputs. 
+-   **StructuredInvokable** -- An explicit output-projection adapter
+    that wraps any other primitive and maps its raw output into a
+    validated, dictionary-based output schema.
 -   **Workflow** -- An **orchestration and checkpointing** layer that
     coordinates tools, engines, agents, and other workflows into structured
     pipelines.
@@ -235,10 +236,38 @@ Workflows orchestrate Atomic-Agentic primitives into deterministic pipelines. Th
 - `IterativeFlow` – loops until a judge condition is met
 
 **Note:**
-Workflows do not perform output packaging themselves. Always use `StructuredInvokable` to enforce output schemas and handle missing/extra fields.
+Workflows return typed result envelopes (`*FlowResult`) with `.result` and full run metadata. Use `StructuredInvokable` explicitly when you need to project a step's output dict to a fixed schema — workflow steps themselves do not apply schema projection.
 
 **For practical workflow usage and advanced patterns, see the examples in:**
 `examples/Workflow_Examples/`
+
+------------------------------------------------------------------------
+
+## What's New in v2
+
+v2 is a deliberate breaking-change line with two headline improvements:
+
+**Reorganized package structure.** `src/atomic_agentic/` is now
+organized into concern-based layers — `exceptions/`, `constants/`,
+`models/`, and `utils/` sit below the domain packages (`agents/`,
+`tools/`, `workflows/`, `engines/`, `mcp/`, `a2a/`), with `core/`
+holding only the shared invocation contract. The dependency topology
+is explicit and there are no cross-layer back-edges.
+
+**AtomicResult-family return contract.** Every `AtomicInvokable` —
+Tool, Agent, ToolAgent, Workflow, Engine, Command, StructuredInvokable
+— now returns a typed `AtomicResult`-family envelope from
+`invoke()`/`async_invoke()`. The `.result` field is always the
+caller-facing payload; envelope fields (`run_id`, `started_at`,
+`ended_at`, `elapsed_s`, `invoker_id`, and subclass-specific fields
+like token usage, step traces, and tool-call accounting) carry timing
+and provenance. Workflows return typed `*FlowResult` envelopes
+(`SequentialFlowResult`, `IterativeFlowResult`, etc.) with per-run
+history accessible via checkpoint helpers.
+
+For a full breakdown of breaking changes and a v1→v2 migration guide:
+- [`docs/MIGRATION.md`](docs/MIGRATION.md) — v1→v2 migration guide *(coming soon)*
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — full release history
 
 ------------------------------------------------------------------------
 
@@ -248,10 +277,9 @@ Workflows do not perform output packaging themselves. Always use `StructuredInvo
     ├── examples/
     │   ├── Agent_Examples/
     │   ├── Agentic_Research/
+    │   ├── Invokable_Examples/
     │   ├── LLM_Examples/
-    │   ├── output_markdowns/
     │   ├── PlanAct_Examples/
-    │   ├── RAG_Examples/
     │   ├── ReAct_Examples/
     │   ├── Tool_Examples/
     │   └── Workflow_Examples/
@@ -265,11 +293,14 @@ Workflows do not perform output packaging themselves. Always use `StructuredInvo
     │   └── atomic_agentic/
     │       ├── a2a/
     │       ├── agents/
+    │       ├── constants/
     │       ├── core/
     │       ├── engines/
-    |       ├── mcp/
-    │       ├── results/
+    │       ├── exceptions/
+    │       ├── mcp/
+    │       ├── models/
     │       ├── tools/
+    │       ├── utils/
     │       ├── workflows/
     │       ├── __init__.py
     │       ├── _version.py
@@ -279,6 +310,23 @@ Workflows do not perform output packaging themselves. Always use `StructuredInvo
     ├── README.md
     ├── pyproject.toml
     └── requirements.txt
+
+### Package topology
+
+The subpackages of `src/atomic_agentic/` form a strict layered
+dependency hierarchy — no back-edges:
+
+```
+{exceptions, constants} → models → utils → core → {agents, tools, workflows, engines, mcp, a2a}
+```
+
+| Layer | Packages | What lives here |
+|---|---|---|
+| Base | `exceptions/`, `constants/` | Exception classes and pure literals/sentinels; zero dependencies |
+| Data | `models/` | Dataclasses: `ParamSpec`, runtime records, result envelopes, workflow checkpoints |
+| Functions | `utils/` | Pure functions: async bridging, parameter ops, MCP and agent helpers |
+| Contract | `core/` | Shared invocation contract: `AtomicInvokable`, `Command`, `StructuredInvokable` |
+| Domain | `agents/`, `tools/`, `workflows/`, `engines/`, `mcp/`, `a2a/` | Behavior implementations |
 
 ------------------------------------------------------------------------
 

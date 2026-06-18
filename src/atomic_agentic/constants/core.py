@@ -8,7 +8,7 @@ from typing import Any, TypeAlias, TypeVar
 # Sentinel / absence
 # =============================================================================
 # Used by:
-# - core/Parameters.py: ParamSpec defaults
+# - models/parameters.py: ParamSpec defaults
 # - core/Invokable.py: signature/default rendering and input filtering
 #
 # Contract:
@@ -40,7 +40,7 @@ NO_VAL: Any = _NoValSentinel()
 # =============================================================================
 # Used by:
 # - core/Invokable.py: invokable names and parameter names
-# - core/Parameters.py: schema-derived parameter names
+# - utils/parameters.py: schema-derived parameter names
 #
 # This is intentionally Python-identifier-like, not a full Python keyword check.
 # Individual modules remain responsible for deciding which exception type/message
@@ -57,7 +57,7 @@ IDENTIFIER_PATTERN: re.Pattern[str] = re.compile(
 # Shared utility typing
 # =============================================================================
 # Used by:
-# - core/utils.py: generic sync/async bridge and header normalization
+# - utils/core.py: generic sync/async bridge and header normalization
 #
 # Keep this section intentionally small. These names support narrow shared
 # utilities and should not become a dumping ground for module-specific type aliases.

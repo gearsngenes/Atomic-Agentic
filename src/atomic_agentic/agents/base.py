@@ -893,7 +893,7 @@ class Agent(AtomicInvokable):
         """Return a rendered message history compatibility view."""
         warnings.warn(
             "Agent.history currently returns rendered message dictionaries for compatibility. "
-            "Use Agent.turn_history for canonical stored turns. In a future version 2.0.0, "
+            "Use Agent.turn_history for canonical stored turns. In a future release, "
             "Agent.history will become turn-native.",
             DeprecationWarning,
             stacklevel=2,
