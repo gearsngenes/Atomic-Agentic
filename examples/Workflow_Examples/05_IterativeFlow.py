@@ -1,4 +1,3 @@
-
 """
 05_IterativeFlow.py
 
@@ -19,12 +18,10 @@ from atomic_agentic.workflows import IterativeFlow
 load_dotenv()
 
 
-
 # ---------------------------------------------------------------------
 # LLM Engine
 # ---------------------------------------------------------------------
 engine = OpenAIEngine(model="gpt-5-mini")
-
 
 
 # ---------------------------------------------------------------------
@@ -57,7 +54,6 @@ def writer_pre(*, prompt: str = "", revision_notes: str = "") -> str:
     )
 
 
-
 writer_agent = Agent(
     name="story_writer",
     description="Writes and revises short stories from a request and revision notes.",
@@ -86,7 +82,6 @@ writer = StructuredInvokable(
 )
 
 
-
 # ---------------------------------------------------------------------
 # Critic agent: reviews a draft and returns revision notes or approval
 # ---------------------------------------------------------------------
@@ -99,7 +94,6 @@ def critic_pre(*, draft: str) -> str:
         "respond with exactly <<APPROVED>> and nothing else. Otherwise, provide concrete "
         "revision notes that the writer can directly apply."
     )
-
 
 
 critic_agent = Agent(
@@ -128,7 +122,6 @@ critic = StructuredInvokable(
 )
 
 
-
 # ---------------------------------------------------------------------
 # Approval judge: returns True if the critic approved the draft
 # ---------------------------------------------------------------------
@@ -142,7 +135,6 @@ judge = toolify(
     description="Return True when the critic has approved the story draft.",
     filter_extraneous_inputs=True,
 )
-
 
 
 # ---------------------------------------------------------------------
@@ -160,35 +152,37 @@ flow = IterativeFlow(
     evaluate_index=1,  # critic notes are also sent to judge
 )
 
-inputs = {
-    "prompt": (
-        "Write a short story about Robin Hood in space. "
-        "Keep it adventurous, emotionally grounded, and a little playful."
-    )
-}
 
-final = flow.invoke(inputs)
+if __name__ == "__main__":
+    inputs = {
+        "prompt": (
+            "Write a short story about Robin Hood in space. "
+            "Keep it adventurous, emotionally grounded, and a little playful."
+        )
+    }
 
-output_dir = Path("examples/output_markdowns")
-draft_path = output_dir / "iterflow_final_draft.md"
-checkpoints_path = output_dir / "iterflow_checkpoints.txt"
+    final = flow.invoke(inputs)
 
-draft_path.write_text(final.result["draft"], encoding="utf-8")
+    output_dir = Path("examples/output_markdowns")
+    draft_path = output_dir / "iterflow_final_draft.md"
+    checkpoints_path = output_dir / "iterflow_checkpoints.txt"
 
-with open(checkpoints_path, "w", encoding="utf-8") as f:
-    f.write("=== OUTER ITERATIVE RESULT ===\n")
-    pprint(final, stream=f)
-    f.write(f"\nouter run_id: {final.run_id}\n")
+    draft_path.write_text(final.result["draft"], encoding="utf-8")
 
-    f.write("\n=== ITERATION-BY-ITERATION RESULTS ===\n")
-    for i, (body_result, judge_result) in enumerate(flow.get_iteration_results(final.run_id)):
-        approved = judge_result.result == flow.approval_value
-        f.write(f"\n-- iteration {i} -- judge result: {judge_result.result!r} (approved={approved})\n")
-        pprint(body_result.result, stream=f)
+    with open(checkpoints_path, "w", encoding="utf-8") as f:
+        f.write("=== OUTER ITERATIVE RESULT ===\n")
+        pprint(final, stream=f)
+        f.write(f"\nouter run_id: {final.run_id}\n")
 
-    f.write("\n=== CHECKPOINT ===\n")
-    checkpoint = flow.get_checkpoint(final.run_id)
-    pprint(checkpoint, stream=f)
+        f.write("\n=== ITERATION-BY-ITERATION RESULTS ===\n")
+        for i, (body_result, judge_result) in enumerate(flow.get_iteration_results(final.run_id)):
+            approved = judge_result.result == flow.approval_value
+            f.write(f"\n-- iteration {i} -- judge result: {judge_result.result!r} (approved={approved})\n")
+            pprint(body_result.result, stream=f)
 
-print(f"Final draft written to: {draft_path}")
-print(f"Checkpoints written to: {checkpoints_path}")
+        f.write("\n=== CHECKPOINT ===\n")
+        checkpoint = flow.get_checkpoint(final.run_id)
+        pprint(checkpoint, stream=f)
+
+    print(f"Final draft written to: {draft_path}")
+    print(f"Checkpoints written to: {checkpoints_path}")

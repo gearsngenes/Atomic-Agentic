@@ -7,7 +7,7 @@ It also highlights how to configure packaging controls for different use-cases.
 """
 from pprint import pprint
 from atomic_agentic import StructuredInvokable
-from atomic_agentic.tools.base import Tool
+from atomic_agentic.tools import Tool
 
 # --- Example 1: Scalar output to single-field dict ---
 def add_one(x: int) -> int:

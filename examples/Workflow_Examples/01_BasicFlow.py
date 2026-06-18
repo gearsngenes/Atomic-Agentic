@@ -7,8 +7,8 @@ using BasicFlow to expose it as a workflow-shaped node.
 
 from pprint import pprint
 
-from atomic_agentic.tools.base import Tool
-from atomic_agentic.workflows.basic import BasicFlow
+from atomic_agentic.tools import Tool
+from atomic_agentic.workflows import BasicFlow
 
 
 def square_plus_one(x: int) -> int:

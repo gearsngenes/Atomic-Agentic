@@ -5,14 +5,13 @@ from typing import Any, Mapping
 
 from dotenv import load_dotenv
 
-from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
+from atomic_agentic.a2a import PyA2AtomicClient
 from atomic_agentic.agents import Agent
 from atomic_agentic.exceptions import ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
-from atomic_agentic.mcp.MCPClientHub import MCPClientHub
-from atomic_agentic.tools.Toolify import batch_toolify, toolify
-from atomic_agentic.tools.base import Tool
+from atomic_agentic.mcp import MCPClientHub
+from atomic_agentic.tools import Tool, batch_toolify, toolify
 
 load_dotenv()
 

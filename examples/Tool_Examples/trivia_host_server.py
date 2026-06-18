@@ -4,7 +4,7 @@ import logging
 
 from dotenv import load_dotenv
 
-from atomic_agentic.a2a.PyA2AtomicHost import PyA2AtomicHost
+from atomic_agentic.a2a import PyA2AtomicHost
 from atomic_agentic.agents import Agent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
