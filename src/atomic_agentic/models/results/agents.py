@@ -5,61 +5,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from .atomic import AtomicResult
-from .llm import LLMModelData, LLMResult
+from .llm import LLMModelData, TokenUsage
 
 __all__ = [
-    "LLMRecord",
     "ToolUsageRecord",
     "AgentResult",
     "ToolAgentResult",
 ]
-
-
-@dataclass(frozen=True, slots=True)
-class LLMRecord:
-    """
-    Canonical memory record for one completed LLM generation made during an
-    Agent invocation.
-
-    An Agent invocation may involve one or more LLM generations (e.g. a
-    ToolAgent's planning loop). Each generation that contributes to an
-    invocation is preserved here in full — not distilled — so that future
-    rendering, debugging, and accounting needs are not constrained by what an
-    earlier pass chose to keep.
-
-    Fields
-    ------
-    user_prompt:
-        User-facing prompt text that triggered this specific LLM generation.
-        May differ from the AgentRecord's overall ``user_prompt`` when an
-        invocation makes multiple LLM calls with distinct prompts.
-
-    llm_result:
-        The complete LLMResult produced by this generation, including its
-        token usage, model identity, timing, and run identity.
-    """
-
-    user_prompt: str
-    llm_result: LLMResult
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.user_prompt, str):
-            raise TypeError(
-                f"LLMRecord.user_prompt must be a str, got {type(self.user_prompt).__name__}."
-            )
-
-        if not isinstance(self.llm_result, LLMResult):
-            raise TypeError(
-                "LLMRecord.llm_result must be an LLMResult instance, "
-                f"got {type(self.llm_result).__name__}."
-            )
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the explicit serialized dictionary representation."""
-        return {
-            "user_prompt": self.user_prompt,
-            "llm_result": self.llm_result.to_dict(),
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,21 +61,22 @@ class AgentResult(AtomicResult):
 
     Fields
     ------
-    llm_records:
-        Complete record of every LLM generation that contributed to this
-        invocation. Non-empty; stored as an immutable tuple after construction.
-        Carries full token usage, model identity, and timing per generation.
+    llm_token_usage:
+        Per-call token usage for every LLM generation that contributed to this
+        invocation, ordered by call order. Entries where the provider did not
+        report usage are omitted. Empty tuple is valid.
 
     llm_model_data:
         Model identity associated with the LLM activity that produced this
         Agent result. Sourced from the last LLMRecord's engine model_data.
     """
 
-    llm_records: tuple[LLMRecord, ...]
+    llm_token_usage: tuple[TokenUsage, ...]
     llm_model_data: LLMModelData
 
     def __post_init__(self) -> None:
-        normalized_llm_records = self._normalize_llm_records(self.llm_records)
+        normalized = self._normalize_llm_token_usage(self.llm_token_usage)
+        object.__setattr__(self, "llm_token_usage", normalized)
 
         if not isinstance(self.llm_model_data, LLMModelData):
             raise TypeError(
@@ -131,29 +84,23 @@ class AgentResult(AtomicResult):
                 f"got {type(self.llm_model_data).__name__}."
             )
 
-        object.__setattr__(self, "llm_records", normalized_llm_records)
         AtomicResult.__post_init__(self)
 
     @staticmethod
-    def _normalize_llm_records(value: Any) -> tuple[LLMRecord, ...]:
-        """Validate and normalize the invocation's LLM generation records."""
+    def _normalize_llm_token_usage(value: Any) -> tuple[TokenUsage, ...]:
+        """Validate and normalize the invocation's per-call token usage records."""
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             raise TypeError(
-                "AgentResult.llm_records must be a non-empty sequence of "
-                f"LLMRecord instances, got {type(value).__name__}."
+                "AgentResult.llm_token_usage must be a sequence of TokenUsage "
+                f"instances, got {type(value).__name__}."
             )
-
         normalized = tuple(value)
-        if not normalized:
-            raise ValueError("AgentResult.llm_records must not be empty.")
-
-        for index, record in enumerate(normalized):
-            if not isinstance(record, LLMRecord):
+        for index, entry in enumerate(normalized):
+            if not isinstance(entry, TokenUsage):
                 raise TypeError(
-                    "AgentResult.llm_records must contain only LLMRecord instances; "
-                    f"item {index} is {type(record).__name__}."
+                    "AgentResult.llm_token_usage must contain only TokenUsage instances; "
+                    f"item {index} is {type(entry).__name__}."
                 )
-
         return normalized
 
     def to_dict(self) -> dict[str, Any]:
@@ -161,7 +108,7 @@ class AgentResult(AtomicResult):
         data = AtomicResult.to_dict(self)
         data.update(
             {
-                "llm_records": [r.to_dict() for r in self.llm_records],
+                "llm_token_usage": [u.to_dict() for u in self.llm_token_usage],
                 "llm_model_data": self.llm_model_data.to_dict(),
             }
         )

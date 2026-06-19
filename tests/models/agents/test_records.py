@@ -6,11 +6,11 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.models.agents.records import AgentRecord, ToolAgentRecord
+from atomic_agentic.models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results import AtomicResult, LLMModelData, LLMResult, TokenUsage
-from atomic_agentic.models.results.agents import LLMRecord, AgentResult
+from atomic_agentic.models.results.agents import AgentResult
 
 
 def make_token_usage(*, input_tokens: int = 10, generated_tokens: int = 5) -> TokenUsage:
@@ -58,7 +58,7 @@ def make_agent_result(*, value: Any = "final output") -> AgentResult:
         invoker_id="agent-1",
         started_at=started_at,
         ended_at=started_at + timedelta(seconds=1),
-        llm_records=(make_llm_record(),),
+        llm_token_usage=(make_token_usage(),),
         llm_model_data=make_model_data(),
     )
 
@@ -126,6 +126,35 @@ class TestConstantSpec:
             spec.name = "OTHER"  # type: ignore[misc]
 
 
+class TestLLMRecord:
+    def test_valid_record_exposes_user_prompt_and_llm_result(self) -> None:
+        llm_result = make_llm_result(text="hello world")
+        record = LLMRecord(user_prompt="say hello", llm_result=llm_result)
+        assert record.user_prompt == "say hello"
+        assert record.llm_result is llm_result
+
+    def test_to_dict_returns_user_prompt_and_serialized_llm_result(self) -> None:
+        llm_result = make_llm_result(text="hello world")
+        record = LLMRecord(user_prompt="say hello", llm_result=llm_result)
+        assert record.to_dict() == {
+            "user_prompt": "say hello",
+            "llm_result": llm_result.to_dict(),
+        }
+
+    def test_rejects_non_string_user_prompt(self) -> None:
+        with pytest.raises(TypeError, match="user_prompt"):
+            LLMRecord(user_prompt=123, llm_result=make_llm_result())  # type: ignore[arg-type]
+
+    def test_rejects_non_llm_result(self) -> None:
+        with pytest.raises(TypeError, match="llm_result"):
+            LLMRecord(user_prompt="hi", llm_result="not a result")  # type: ignore[arg-type]
+
+    def test_is_frozen(self) -> None:
+        record = make_llm_record()
+        with pytest.raises(FrozenInstanceError):
+            record.user_prompt = "other"  # type: ignore[misc]
+
+
 class TestAgentRecord:
     def test_valid_record_stores_prompt_and_response(self) -> None:
         record = AgentRecord(
@@ -154,6 +183,7 @@ class TestAgentRecord:
             "user_prompt": "run",
             "generated_response": "raw",
             "final_result": None,
+            "llm_records": [],
         }
 
     def test_to_dict_with_agent_result(self) -> None:
@@ -177,6 +207,48 @@ class TestAgentRecord:
         with pytest.raises(FrozenInstanceError):
             record.user_prompt = "other"  # type: ignore[misc]
 
+    def test_llm_records_defaults_to_empty_tuple(self) -> None:
+        record = AgentRecord(user_prompt="hi", generated_response="there")
+        assert record.llm_records == ()
+
+    def test_llm_records_populated_on_completed_record(self) -> None:
+        llm_rec = make_llm_record()
+        record = AgentRecord(
+            user_prompt="hi",
+            generated_response="there",
+            llm_records=(llm_rec,),
+        )
+        assert record.llm_records == (llm_rec,)
+
+    def test_llm_records_normalizes_list_to_tuple(self) -> None:
+        llm_rec = make_llm_record()
+        record = AgentRecord(
+            user_prompt="hi",
+            generated_response="there",
+            llm_records=[llm_rec],
+        )
+        assert isinstance(record.llm_records, tuple)
+
+    def test_rejects_non_llm_record_item_in_llm_records(self) -> None:
+        with pytest.raises(TypeError, match="LLMRecord"):
+            AgentRecord(
+                user_prompt="hi",
+                generated_response="there",
+                llm_records=("not a record",),
+            )
+
+    def test_to_dict_includes_llm_records(self) -> None:
+        llm_rec = make_llm_record()
+        record = AgentRecord(
+            user_prompt="hi",
+            generated_response="there",
+            llm_records=(llm_rec,),
+        )
+        d = record.to_dict()
+        assert "llm_records" in d
+        assert isinstance(d["llm_records"], list)
+        assert d["llm_records"] == [llm_rec.to_dict()]
+
 
 class TestToolAgentRecord:
     def test_is_an_agent_record(self) -> None:
@@ -199,6 +271,7 @@ class TestToolAgentRecord:
             "user_prompt": "run tools",
             "generated_response": 42,
             "final_result": None,
+            "llm_records": [],
         }
 
     def test_blackboard_span_defaults_to_none(self) -> None:

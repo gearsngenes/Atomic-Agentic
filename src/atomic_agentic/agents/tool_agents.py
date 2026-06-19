@@ -135,8 +135,8 @@ from ..constants.agents import (
     TOOL_FIELD,
 )
 
-from ..models.agents.records import AgentRecord, ToolAgentRecord
-from ..models.results.agents import LLMRecord, ToolAgentResult, ToolUsageRecord
+from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from ..models.results.agents import ToolAgentResult, ToolUsageRecord
 from ..models.results import LLMModelData
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from ..models.agents.runstates import ToolAgentRunState, PlanActRunState, ReActRunState
@@ -1714,12 +1714,18 @@ class ToolAgent(Agent, ABC):
                 "ToolAgent.make_result: llm_model_data must be an LLMModelData instance."
             )
 
+        llm_token_usage = tuple(
+            r.llm_result.token_usage
+            for r in llm_records
+            if r.llm_result.token_usage is not None
+        )
+
         return self._make_result(
             result=result,
             started_at=started_at,
             ended_at=ended_at,
             result_cls=ToolAgentResult,
-            llm_records=llm_records,
+            llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
             tool_usage=tool_usage,
         )

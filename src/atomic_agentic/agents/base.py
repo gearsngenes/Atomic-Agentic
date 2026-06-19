@@ -25,8 +25,7 @@ from ..constants.core import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..models.results import AgentResult, LLMModelData
 from ..tools import Tool, toolify
-from ..models.agents.records import AgentRecord
-from ..models.results.agents import LLMRecord
+from ..models.agents.records import AgentRecord, LLMRecord
 
 logger = logging.getLogger(__name__)
 
@@ -1191,12 +1190,20 @@ class Agent(AtomicInvokable):
                 "Agent.make_result: llm_model_data must be an LLMModelData instance."
             )
 
+        # Derive per-call token usage from the validated records.
+        # Entries where token_usage is None (provider did not report) are omitted.
+        llm_token_usage = tuple(
+            r.llm_result.token_usage
+            for r in llm_records
+            if r.llm_result.token_usage is not None
+        )
+
         return self._make_result(
             result=result,
             started_at=started_at,
             ended_at=ended_at,
             result_cls=AgentResult,
-            llm_records=llm_records,
+            llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
         )
 
@@ -1362,7 +1369,7 @@ class Agent(AtomicInvokable):
         # Complete and store the canonical record only when memory is kept.
         if self._context_enabled:
             logger.debug(f"Agent.{self.name} updating history")
-            record = replace(draft, final_result=agent_result)
+            record = replace(draft, final_result=agent_result, llm_records=metadata["llm_records"])
             self._history.append(record)
 
         logger.info(f"[Async {self.full_name} finished]")
@@ -1489,7 +1496,7 @@ class Agent(AtomicInvokable):
             # Complete and store the canonical record only when memory is kept.
             if self._context_enabled:
                 logger.debug(f"Agent.{self.name} updating history")
-                record = replace(draft, final_result=agent_result)
+                record = replace(draft, final_result=agent_result, llm_records=metadata["llm_records"])
                 self._history.append(record)
 
             # Final logging.
