@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from atomic_agentic.core.Invokable import AtomicInvokable
 
-from ..exceptions import ToolDefinitionError, ToolInvocationError
+from ..exceptions import ToolDefinitionError, ToolInvocationError, RemoteInvocationError
 from ..models.parameters import ParamSpec
 from ..constants.core import HeaderValue, NO_VAL
+from ..constants.a2a import PYA2A_RESULT_KEY
+from ..models.results.tools import PyA2AtomicToolResult
 from .base import Tool
 from ..a2a.PyA2AtomicClient import PyA2AtomicClient
 
@@ -183,12 +186,35 @@ class PyA2AtomicTool(Tool):
     ) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         return tuple(), dict(inputs)
 
+    def _handle_a2a_payload(self, payload: dict[str, Any]) -> Any:
+        """Extract the caller-facing result from a raw A2A response payload.
+
+        Raises RemoteInvocationError if the host reported a host-side failure.
+        Raises ToolInvocationError if the success key is missing.
+        """
+        if "error" in payload:
+            error_type = payload.get("error_type")
+            if not isinstance(error_type, str) or not error_type.strip():
+                error_type = "RemoteError"
+            raise RemoteInvocationError(
+                str(payload["error"]),
+                error_type=error_type,
+                function_name=self._remote_name,
+            )
+        if PYA2A_RESULT_KEY not in payload:
+            raise ToolInvocationError(
+                f"{self.full_name}: A2A response missing required result key "
+                f"{PYA2A_RESULT_KEY!r}."
+            )
+        return payload[PYA2A_RESULT_KEY]
+
     def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
         if args:
             raise ToolInvocationError(
                 f"{self.full_name}: PyA2Atomic tools do not accept positional arguments; got {args!r}."
             )
-        return self._function(self._remote_name, inputs=kwargs)
+        payload = self._function(self._remote_name, inputs=kwargs)
+        return self._handle_a2a_payload(payload)
 
     async def async_execute(
         self,
@@ -201,7 +227,7 @@ class PyA2AtomicTool(Tool):
             )
 
         try:
-            return await asyncio.to_thread(
+            payload = await asyncio.to_thread(
                 self._function,
                 self._remote_name,
                 inputs=kwargs,
@@ -210,10 +236,30 @@ class PyA2AtomicTool(Tool):
             raise ToolInvocationError(
                 f"{self.full_name}: async invocation failed: {exc}"
             ) from exc
+        return self._handle_a2a_payload(payload)
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> PyA2AtomicToolResult:
+        """Construct a PyA2AtomicToolResult carrying this proxy's transport identity."""
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=PyA2AtomicToolResult,
+            url=self.url,
+            remote_name=self.remote_name,
+            invokable_type=self._remote_metadata["invokable_type"],
+            **result_kwargs,
+        )
+
     def refresh(self, headers: Mapping[str, HeaderValue] | None = NO_VAL) -> None:
         """
         Re-fetch remote metadata and rebuild the local binding.

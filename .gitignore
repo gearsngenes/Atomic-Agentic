@@ -19,6 +19,7 @@ atomic_agentic-*/
 src/atomic_agentic/_version.py
 
 # Ignore compiled Python files
+tests/*/*/__pycache__/
 tests/*/__pycache__/
 tests/__pycache__/
 src/atomic_agentic/__pycache__/

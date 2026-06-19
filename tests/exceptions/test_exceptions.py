@@ -8,6 +8,7 @@ from atomic_agentic.exceptions import (
     ExecutionError,
     LLMEngineError,
     PackagingError,
+    RemoteInvocationError,
     SchemaError,
     ToolAgentError,
     ToolDefinitionError,
@@ -119,3 +120,30 @@ class TestWorkflowErrors:
     ) -> None:
         with pytest.raises(WorkflowError):
             raise error_type("workflow failed")
+
+
+class TestRemoteInvocationError:
+    def test_remote_invocation_error_is_exception(self) -> None:
+        assert issubclass(RemoteInvocationError, Exception)
+
+    def test_carries_message_error_type_and_function_name(self) -> None:
+        exc = RemoteInvocationError(
+            "something went wrong",
+            error_type="ToolInvocationError",
+            function_name="my_tool",
+        )
+
+        assert str(exc) == "something went wrong"
+        assert exc.error_type == "ToolInvocationError"
+        assert exc.function_name == "my_tool"
+
+    def test_can_be_raised_and_caught(self) -> None:
+        with pytest.raises(RemoteInvocationError) as exc_info:
+            raise RemoteInvocationError(
+                "remote failure",
+                error_type="AgentError",
+                function_name="run_agent",
+            )
+
+        assert exc_info.value.error_type == "AgentError"
+        assert exc_info.value.function_name == "run_agent"

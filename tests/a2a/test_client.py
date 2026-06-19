@@ -372,7 +372,7 @@ class TestPyA2AtomicClientPublicAPI:
         with pytest.raises(RuntimeError, match="missing required key"):
             client.get_invokable_metadata("echo")
 
-    def test_call_invokable_returns_result_key(
+    def test_call_invokable_returns_raw_payload(
         self,
         fake_client_factory: FakeA2AClientFactory,
     ) -> None:
@@ -380,7 +380,7 @@ class TestPyA2AtomicClientPublicAPI:
         fake = latest_fake_client(fake_client_factory)
         fake.next_payload = {PYA2A_RESULT_KEY: {"value": 123}}
 
-        assert client.call_invokable("echo", {"value": 123}) == {"value": 123}
+        assert client.call_invokable("echo", {"value": 123}) == {PYA2A_RESULT_KEY: {"value": 123}}
 
     def test_call_invokable_strips_remote_name(
         self,
@@ -392,7 +392,7 @@ class TestPyA2AtomicClientPublicAPI:
 
         result = client.call_invokable("  echo  ", {"value": 123})
 
-        assert result == {"value": 123}
+        assert result == {PYA2A_RESULT_KEY: {"value": 123}}
         assert fake.sent_messages[0].content.name == "echo"
 
     def test_call_invokable_rejects_blank_name(
@@ -413,16 +413,15 @@ class TestPyA2AtomicClientPublicAPI:
         with pytest.raises(TypeError, match="inputs"):
             client.call_invokable("echo", ["bad"])  # type: ignore[arg-type]
 
-    def test_call_invokable_requires_result_key(
+    def test_call_invokable_returns_payload_as_is_without_extraction(
         self,
         fake_client_factory: FakeA2AClientFactory,
     ) -> None:
         client = PyA2AtomicClient("http://example.test/a2a")
         fake = latest_fake_client(fake_client_factory)
-        fake.next_payload = {"wrong": 123}
+        fake.next_payload = {"some_key": 123}
 
-        with pytest.raises(RuntimeError, match="required result key"):
-            client.call_invokable("echo", {})
+        assert client.call_invokable("echo", {}) == {"some_key": 123}
 
     def test_error_payload_raises_runtime_error(
         self,

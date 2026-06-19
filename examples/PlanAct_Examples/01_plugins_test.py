@@ -37,8 +37,10 @@ Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN O
 """
 
 print("\n⇢ Executing math demo …")
-agent.invoke({"prompt": task_prompt})
+result = agent.invoke({"prompt": task_prompt})
 from pprint import pprint
+print("\n=== FINAL AGENT RESULT ===")
+pprint(result)
 print("BLACKBOARD AFTER MATH DEMO:")
 pprint(agent.blackboard)
 agent.clear_memory()

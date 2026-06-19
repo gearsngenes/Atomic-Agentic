@@ -5,6 +5,48 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a7] - 2026-06-19
+
+### Added
+
+- `MCPToolResult` (`ToolResult` subclass): remote-identity fields
+  `transport_mode`, `endpoint` / `command`, and `remote_name`; emitted by
+  `MCPProxyTool.make_result`.
+- `PyA2AtomicToolResult` (`ToolResult` subclass): fields `url`, `remote_name`,
+  `invokable_type`; emitted by `PyA2AtomicTool.make_result`.
+- `ToolUsageRecord` dataclass: `tool_name: str`, `call_count: int`; tracks
+  non-return tool calls for a single `ToolAgent` invocation, ordered by
+  first-call order.
+- `ToolAgentResult` (`AgentResult` subclass): new result type for `ToolAgent`
+  invocations; carries `tool_usage: tuple[ToolUsageRecord, ...]` alongside the
+  full `AgentResult` envelope.
+- `LLMRecord` re-homed to `models/results/agents.py` and re-exported from
+  `models/results`; eliminates a latent circular import between
+  `models/agents/` and `models/results/`.
+
+### Changed
+
+- `AgentResult` enriched: `llm_records: tuple[LLMRecord, ...]` replaces the
+  former `llm_token_usage` field — per-call LLM records now travel with the
+  result rather than the record.
+- `AgentRecord` simplified: `final_response` renamed to `final_result:
+  AgentResult | None`; `run_id` and `llm_records` fields removed; draft
+  records carry `None`, completed records carry the `AgentResult`.
+- `Agent._invoke` / `_ainvoke` return a 2-tuple `(draft_record, metadata_dict)`
+  instead of a bare `AgentRecord`; metadata carries `llm_records` and
+  `llm_model_data` for `make_result`.
+- `ToolAgent._invoke` / `_ainvoke` compute `tool_usage` during the execution
+  loop and include it in the returned metadata dict.
+- `Agent.make_result` accepts `llm_records` and `llm_model_data` via metadata
+  kwargs; UUID minted via `AtomicResult.__post_init__`; emits `AgentResult`.
+- `ToolAgent.make_result` override additionally accepts `tool_usage` and emits
+  `ToolAgentResult`; no derivation from the record — direct construction only.
+- `invoke` / `async_invoke` complete the draft via
+  `dataclasses.replace(draft, final_result=agent_result)` before appending to
+  turn history.
+- A2A typed error serialization: remote exception class names are now preserved
+  across the wire instead of surfacing as bare `RuntimeError`.
+
 ## [2.0.0a6] - 2026-06-18
 
 ### Added

@@ -3,7 +3,7 @@ from __future__ import annotations
 from .atomic import AtomicResult
 from .commands import CommandResult
 from .structured import StructuredResult
-from .agents import AgentResult
+from .agents import AgentResult, LLMRecord, ToolAgentResult, ToolUsageRecord
 from .llm import (
     GeminiTokenUsage,
     LlamaCppModelData,
@@ -16,7 +16,7 @@ from .llm import (
     RemoteLLMModelData,
     TokenUsage,
 )
-from .tools import ToolResult
+from .tools import ToolResult, MCPToolResult, PyA2AtomicToolResult
 from .workflows import (
     WorkflowResult,
     BasicFlowResult,
@@ -29,6 +29,8 @@ from .workflows import (
 __all__ = [
     "AtomicResult",
     "ToolResult",
+    "MCPToolResult",
+    "PyA2AtomicToolResult",
     "CommandResult",
     "StructuredResult",
     "TokenUsage",
@@ -41,7 +43,10 @@ __all__ = [
     "LocalLLMModelData",
     "LlamaCppModelData",
     "LLMResult",
+    "LLMRecord",
+    "ToolUsageRecord",
     "AgentResult",
+    "ToolAgentResult",
     "WorkflowResult",
     "BasicFlowResult",
     "SequentialFlowResult",

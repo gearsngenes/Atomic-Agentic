@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+from datetime import datetime
 from typing import (
     Any,
     Callable,
@@ -15,6 +16,7 @@ from ..exceptions import ToolDefinitionError, ToolInvocationError
 from ..models.parameters import ParamSpec
 from ..constants.core import HeaderValue, NO_VAL
 from ..mcp.MCPClientHub import MCPClientHub
+from ..models.results.tools import MCPToolResult
 from .base import Tool
 
 __all__ = ["MCPProxyTool"]
@@ -146,6 +148,26 @@ class MCPProxyTool(Tool):
     def raw_metadata(self) -> Dict[str, Any]:
         raw = self._mcpdata.get("raw_metadata")
         return dict(raw) if isinstance(raw, Mapping) else {}
+
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> MCPToolResult:
+        """Construct an MCPToolResult carrying this proxy's transport identity."""
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=MCPToolResult,
+            transport_mode=self.transport_mode,
+            remote_name=self.remote_name,
+            endpoint=self.endpoint,
+            command=self.command,
+            **result_kwargs,
+        )
 
     def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
         parameters = self._mcpdata.get("parameters")
