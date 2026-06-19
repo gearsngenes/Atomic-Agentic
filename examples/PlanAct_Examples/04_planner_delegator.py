@@ -9,7 +9,6 @@ Three planning agents demonstrating delegation:
 Updated to use PlanActAgent (ReWOO-style: plan once, then execute).
 """
 import logging
-import time
 
 from dotenv import load_dotenv
 
@@ -122,7 +121,5 @@ super_task = f"""
     You don't need to print or return anything, let the planners handle that.
     """
 
-start = time.time()
 super_result = super_planner.invoke({"prompt": super_task})
-end = time.time()
-print(f"Super Planner result: {super_result.result}\nCompleted task in {end - start:.2f} seconds")
+print(f"Super Planner result: {super_result.result}\nCompleted task in {super_result.elapsed_s:.2f} seconds")
