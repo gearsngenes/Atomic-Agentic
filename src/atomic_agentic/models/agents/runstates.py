@@ -5,7 +5,7 @@ from typing import Any
 
 from ...constants.core import NO_VAL
 from .blackboard_models import BlackboardSlot
-from .records import LLMRecord
+from ..results.agents import LLMRecord
 
 __all__ = [
     "ToolAgentRunState",

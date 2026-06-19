@@ -16,7 +16,8 @@ from atomic_agentic.agents.tool_agents import (
     ReActAgent,
 )
 from atomic_agentic.models.agents.runstates import ToolAgentRunState
-from atomic_agentic.models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from atomic_agentic.models.agents.records import AgentRecord, ToolAgentRecord
+from atomic_agentic.models.results.agents import LLMRecord, ToolAgentResult
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from atomic_agentic.exceptions import (
     AgentError,
@@ -1413,7 +1414,7 @@ class TestScriptedInvokeLoop:
         assert isinstance(turn, ToolAgentRecord)
         assert turn.user_prompt == "run"
         assert turn.generated_response == 5
-        assert turn.final_response == 5
+        assert turn.final_result.result == 5
         assert turn.blackboard_start == 0
         assert turn.blackboard_end == len(agent.blackboard)
 
@@ -1767,9 +1768,6 @@ class TestToolAgentRecordRendering:
         turn = AgentRecord(
             user_prompt="run",
             generated_response="raw",
-            final_response="final",
-            llm_records=(make_llm_record(),),
-            run_id="record-1",
         )
 
         with pytest.raises(ToolAgentError, match="ToolAgentRecord"):
@@ -2637,9 +2635,6 @@ class TestToolAgentRecordMetadataContract:
         turn = ToolAgentRecord(
             user_prompt="run",
             generated_response="raw response",
-            final_response="final response",
-            llm_records=(make_llm_record(),),
-            run_id="record-1",
             blackboard_start=None,
             blackboard_end=None,
         )
@@ -2656,9 +2651,6 @@ class TestToolAgentRecordMetadataContract:
         turn = ToolAgentRecord(
             user_prompt="run",
             generated_response="raw response",
-            final_response="final response",
-            llm_records=(make_llm_record(),),
-            run_id="record-1",
             blackboard_start=0,
             blackboard_end=0,
         )
@@ -2675,12 +2667,51 @@ class TestToolAgentRecordMetadataContract:
         turn = ToolAgentRecord(
             user_prompt="run",
             generated_response="raw response",
-            final_response="final response",
-            llm_records=(make_llm_record(),),
-            run_id="record-1",
             blackboard_start=0,
             blackboard_end=1,
         )
 
         with pytest.raises(ToolAgentError, match="Invalid blackboard span"):
             agent.render_turn(turn)
+
+    def test_invoke_returns_tool_agent_result(self) -> None:
+        """ToolAgent.invoke returns a ToolAgentResult, not a plain AgentResult."""
+        agent = make_agent()
+        agent.set_script(
+            [[{"tool": return_tool.full_name, "args": {"val": 42}}]]
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert isinstance(result, ToolAgentResult)
+        assert result.result == 42
+
+    def test_invoke_tool_usage_records_call_counts(self) -> None:
+        """tool_usage on the returned ToolAgentResult reflects non-return call counts."""
+        agent = make_agent()
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
+                [{"tool": keys["add"], "args": {"x": 3, "y": 4}}],
+                [{"tool": return_tool.full_name, "args": {"val": 0}}],
+            ]
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert isinstance(result, ToolAgentResult)
+        usage = {r.tool_name: r.call_count for r in result.tool_usage}
+        assert usage.get(keys["add"]) == 2
+
+    def test_invoke_tool_usage_empty_when_only_return_tool_called(self) -> None:
+        """tool_usage is empty when only the return tool was executed."""
+        agent = make_agent()
+        agent.set_script(
+            [[{"tool": return_tool.full_name, "args": {"val": "done"}}]]
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert isinstance(result, ToolAgentResult)
+        assert result.tool_usage == ()

@@ -11,7 +11,6 @@ from typing import (
 )
 from dataclasses import replace
 from datetime import datetime, timezone
-from uuid import uuid4
 import logging
 import warnings
 
@@ -24,9 +23,10 @@ from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..constants.core import NO_VAL
 from ..engines.LLMEngines import LLMEngine
-from ..models.results import AgentResult, LLMModelData, TokenUsage
+from ..models.results import AgentResult, LLMModelData
 from ..tools import Tool, toolify
-from ..models.agents.records import AgentRecord, LLMRecord
+from ..models.agents.records import AgentRecord
+from ..models.results.agents import LLMRecord
 
 logger = logging.getLogger(__name__)
 
@@ -57,17 +57,17 @@ class Agent(AtomicInvokable):
     4) Select prior ``AgentRecord`` records according to ``context_enabled`` and
        ``history_window``.
     5) Delegate ``turns`` and ``prompt`` to ``_invoke(...)`` or ``_ainvoke(...)``
-       to obtain a draft ``AgentRecord`` carrying the raw response and this
-       invocation's LLM activity (``final_response`` is still ``NO_VAL`` at
-       this point).
+       to obtain a 2-tuple of a draft ``AgentRecord`` (``final_result`` is
+       ``None`` at this point) and a metadata dict carrying LLM accounting.
     6) The protected invocation path owns any provider-facing message rendering
        it needs, usually through ``build_messages(...)``.
     7) Assemble post-invoke inputs from:
        - the raw response under ``post_result_key``.
        - configured passthrough inputs.
     8) ``post_invoke.invoke(post_inputs) -> final output``.
-    9) Complete the draft record (``final_response`` filled in) and store it if
-       ``context_enabled``; assemble and return the invocation's ``AgentResult``.
+    9) Construct the ``AgentResult`` via ``make_result(**metadata)``; complete
+       the draft record (``final_result`` filled in) and store it if
+       ``context_enabled``; return the ``AgentResult``.
 
     Inputs and schema
     -----------------
@@ -978,9 +978,9 @@ class Agent(AtomicInvokable):
         """Render one canonical AgentRecord into LLM-facing messages.
 
         The assistant content is selected from either ``turn.generated_response``
-        or ``turn.final_response`` according to ``assistant_response_source``. The
-        optional ``response_preview_limit`` is applied only to the rendered text;
-        stored turn values are never mutated.
+        or ``turn.final_result.result`` according to ``assistant_response_source``.
+        The optional ``response_preview_limit`` is applied only to the rendered
+        text; stored turn values are never mutated.
 
         Subclasses can override this method to preserve richer canonical turn
         records while controlling their provider-facing representation.
@@ -993,7 +993,7 @@ class Agent(AtomicInvokable):
         response = (
             turn.generated_response
             if self._assistant_response_source == "raw"
-            else turn.final_response
+            else turn.final_result.result
         )
         response_text = str(response)
 
@@ -1053,21 +1053,20 @@ class Agent(AtomicInvokable):
 
         return pre_inputs, passthrough_inputs
 
-    async def _ainvoke(self, turns: List[AgentRecord], prompt: str) -> AgentRecord:
+    async def _ainvoke(self, turns: List[AgentRecord], prompt: str) -> tuple[AgentRecord, dict]:
         """Async internal call path used by ``async_invoke``.
 
         The protected async contract receives the selected canonical turns plus
         the current prompt string. This base implementation renders those values
         into provider-facing messages with ``build_messages(...)``, delegates to
-        the engine's async interface, and returns a **draft** ``AgentRecord`` for
-        this invocation: every field is final except ``final_response``, which is
-        still ``NO_VAL`` because post-processing has not run yet.
+        the engine's async interface, and returns a 2-tuple of a **draft**
+        ``AgentRecord`` and a metadata dict for this invocation. The draft's
+        ``final_result`` is ``None`` because post-processing has not run yet.
 
-        The draft already carries its own ``run_id`` (minted here, not passed in)
-        and the full ``LLMRecord`` envelope(s) for every LLM generation made while
-        producing it — ``async_invoke`` later completes the draft in place via
-        ``dataclasses.replace(draft, final_response=...)`` and uses it to derive
-        the invocation's ``AgentResult``.
+        The metadata dict carries ``llm_records`` and ``llm_model_data``, which
+        ``async_invoke`` passes to ``make_result`` to construct the AgentResult.
+        ``async_invoke`` later completes the draft via
+        ``dataclasses.replace(draft, final_result=agent_result)``.
 
         Subclasses may override this method to implement more complex async
         behavior, including delayed rendering, multiple model calls, or alternate
@@ -1088,35 +1087,33 @@ class Agent(AtomicInvokable):
                 f"engine returned non-string (type={type(text)!r}); a string is required"
             )
 
-        # Mint this invocation's run identity and capture the full LLM envelope
-        # (not just its text) so the eventual AgentResult can report token usage
-        # and model identity without re-deriving them later.
-        run_id = uuid4().hex
+        # Capture the full LLM envelope so the eventual AgentResult can report
+        # model identity and per-generation records without re-deriving them later.
         llm_record = LLMRecord(user_prompt=prompt, llm_result=engine_result)
-
-        return AgentRecord(
+        draft = AgentRecord(
             user_prompt=prompt,
             generated_response=text,
-            final_response=NO_VAL,
-            llm_records=(llm_record,),
-            run_id=run_id,
         )
+        metadata: dict = {
+            "llm_records": (llm_record,),
+            "llm_model_data": engine_result.model_data,
+        }
+        return draft, metadata
 
-    def _invoke(self, turns: List[AgentRecord], prompt: str) -> AgentRecord:
+    def _invoke(self, turns: List[AgentRecord], prompt: str) -> tuple[AgentRecord, dict]:
         """Internal call path used by ``invoke``.
 
         The protected sync contract receives the selected canonical turns plus
         the current prompt string. This base implementation renders those values
         into provider-facing messages with ``build_messages(...)``, delegates to
-        the configured LLM engine, and returns a **draft** ``AgentRecord`` for
-        this invocation: every field is final except ``final_response``, which is
-        still ``NO_VAL`` because post-processing has not run yet.
+        the configured LLM engine, and returns a 2-tuple of a **draft**
+        ``AgentRecord`` and a metadata dict for this invocation. The draft's
+        ``final_result`` is ``None`` because post-processing has not run yet.
 
-        The draft already carries its own ``run_id`` (minted here, not passed in)
-        and the full ``LLMRecord`` envelope(s) for every LLM generation made while
-        producing it — ``invoke`` later completes the draft in place via
-        ``dataclasses.replace(draft, final_response=...)`` and uses it to derive
-        the invocation's ``AgentResult``.
+        The metadata dict carries ``llm_records`` and ``llm_model_data``, which
+        ``invoke`` passes to ``make_result`` to construct the AgentResult.
+        ``invoke`` later completes the draft via
+        ``dataclasses.replace(draft, final_result=agent_result)``.
 
         Subclasses may override this method to implement more complex behavior,
         including delayed rendering, multiple model calls, or alternate system
@@ -1133,27 +1130,27 @@ class Agent(AtomicInvokable):
         except Exception as e:  # pragma: no cover - engine-specific failures
             raise AgentInvocationError(f"engine invocation failed: {e}") from e
 
-        # 2) Engine contract: base Agent expects a string
+        # 2) Engine contract: base Agent expects a string.
         if not isinstance(text, str):
             raise AgentInvocationError(
                 f"engine returned non-string (type={type(text)!r}); a string is required"
             )
 
-        # 3) Mint this invocation's run identity and capture the full LLM envelope
-        #    (not just its text) so the eventual AgentResult can report token usage
-        #    and model identity without re-deriving them later.
-        run_id = uuid4().hex
+        # 3) Capture the full LLM envelope so the eventual AgentResult can report
+        #    model identity and per-generation records without re-deriving them later.
         llm_record = LLMRecord(user_prompt=prompt, llm_result=engine_result)
 
-        # 4) Return the draft AgentRecord: complete except for final_response,
-        #    which post-processing has not produced yet.
-        return AgentRecord(
+        # 4) Return the draft AgentRecord (final_result=None until make_result runs)
+        #    alongside the metadata dict that invoke passes to make_result.
+        draft = AgentRecord(
             user_prompt=prompt,
             generated_response=text,
-            final_response=NO_VAL,
-            llm_records=(llm_record,),
-            run_id=run_id,
         )
+        metadata: dict = {
+            "llm_records": (llm_record,),
+            "llm_model_data": engine_result.model_data,
+        }
+        return draft, metadata
 
     def make_result(
         self,
@@ -1165,36 +1162,28 @@ class Agent(AtomicInvokable):
         """
         Construct this Agent's ``AgentResult`` envelope.
 
-        ``result`` is the caller-facing post-processed payload stored in
-        ``AgentResult.result``. Run identity and LLM activity gathered during the
-        invocation are stored as explicit Agent-specific result fields. Mirrors
-        ``LLMEngine.make_result``'s validate-then-delegate shape: this hook
-        validates the kwargs ``invoke``/``async_invoke`` assemble from the
-        completed draft record, then fixes ``result_cls=AgentResult`` and
-        delegates to ``_make_result``.
+        ``result`` is the caller-facing post-processed payload. LLM accounting
+        and model context gathered during the invocation are passed via
+        ``result_kwargs`` from the metadata dict returned by ``_invoke``.
+        UUID minting is handled by ``AtomicResult.__post_init__`` automatically
+        when ``run_id`` is not provided.
         """
-        unexpected = set(result_kwargs) - {"run_id", "llm_token_usage", "llm_model_data"}
+        unexpected = set(result_kwargs) - {"llm_records", "llm_model_data"}
         if unexpected:
             raise AgentInvocationError(
                 f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
             )
 
-        run_id = result_kwargs.get("run_id")
-        llm_token_usage = result_kwargs.get("llm_token_usage")
+        llm_records = result_kwargs.get("llm_records")
         llm_model_data = result_kwargs.get("llm_model_data")
 
-        if not isinstance(run_id, str) or not run_id.strip():
-            raise AgentInvocationError(
-                "Agent.make_result: run_id must be a non-empty string."
-            )
-
         if (
-            not isinstance(llm_token_usage, tuple)
-            or not llm_token_usage
-            or not all(isinstance(usage, TokenUsage) for usage in llm_token_usage)
+            not isinstance(llm_records, tuple)
+            or not llm_records
+            or not all(isinstance(r, LLMRecord) for r in llm_records)
         ):
             raise AgentInvocationError(
-                "Agent.make_result: llm_token_usage must be a non-empty tuple of TokenUsage instances."
+                "Agent.make_result: llm_records must be a non-empty tuple of LLMRecord instances."
             )
 
         if not isinstance(llm_model_data, LLMModelData):
@@ -1207,8 +1196,7 @@ class Agent(AtomicInvokable):
             started_at=started_at,
             ended_at=ended_at,
             result_cls=AgentResult,
-            run_id=run_id,
-            llm_token_usage=llm_token_usage,
+            llm_records=llm_records,
             llm_model_data=llm_model_data,
         )
 
@@ -1295,13 +1283,13 @@ class Agent(AtomicInvokable):
            ``context_enabled``.
         4) Delegate ``turns`` and ``prompt`` to ``_ainvoke(...)``, which owns any
            provider-facing rendering and async generation work, and returns a
-           draft ``AgentRecord`` (``final_response`` still ``NO_VAL``).
+           2-tuple of a draft ``AgentRecord`` (``final_result`` still ``None``)
+           and a metadata dict.
         5) Run ``post_invoke`` on the draft's generated response and configured
            passthrough inputs to obtain the final response.
-        6) Complete the draft via ``dataclasses.replace(draft, final_response=...)``
+        6) Construct the ``AgentResult`` via ``make_result(**metadata)``.
+        7) Complete the draft via ``dataclasses.replace(draft, final_result=agent_result)``
            and commit it to history if ``context_enabled=True``.
-        7) Assemble and return this invocation's ``AgentResult`` via
-           ``make_result(...)``, correlated to the completed record by ``run_id``.
 
         Concurrent calls to the same stateful agent instance may interleave unless the
         caller serializes them externally or the class is later configured with an async
@@ -1340,10 +1328,9 @@ class Agent(AtomicInvokable):
                 turns = self._history[-self._history_window :] if self._history_window > 0 else []
 
         # Delegate selected turns and current prompt to the protected core logic.
-        # The contract is now a single typed value: a draft AgentRecord whose
-        # final_response is NO_VAL until post-processing runs below.
+        # Returns a 2-tuple: draft AgentRecord (final_result=None) + metadata dict.
         logger.debug(f"Agent.{self.name} performing async logic for class '{type(self).__name__}'")
-        draft = await self._ainvoke(turns=turns, prompt=prompt)
+        draft, metadata = await self._ainvoke(turns=turns, prompt=prompt)
 
         if not isinstance(draft, AgentRecord):
             raise AgentInvocationError(
@@ -1359,36 +1346,28 @@ class Agent(AtomicInvokable):
         except Exception as e:  # pragma: no cover
             raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
 
-        # Extract the final response from the post-invoke ToolResult
         final_response = post_result.result
-
-        # Complete and store the canonical record only when memory is kept —
-        # the draft already carries everything make_result needs below.
-        if self._context_enabled:
-            logger.debug(f"Agent.{self.name} updating history")
-            record = replace(draft, final_response=final_response)
-            self._history.append(record)
-
-        logger.info(f"[Async {self.full_name} finished]")
-
-        # Derive the AgentResult's LLM-activity fields from the draft's LLMRecords:
-        # one TokenUsage per generation, and the (stable, engine-configured) model
-        # identity of the generation that produced the final output.
-        llm_token_usage = tuple(llm_record.llm_result.token_usage for llm_record in draft.llm_records)
-        llm_model_data = draft.llm_records[-1].llm_result.model_data
 
         # The invocation is complete once post-processing has produced the final
         # response; this is the natural "ended_at" boundary for the AgentResult.
         ended_at = datetime.now(timezone.utc)
 
-        return self.make_result(
+        agent_result = self.make_result(
             result=final_response,
             started_at=started_at,
             ended_at=ended_at,
-            run_id=draft.run_id,
-            llm_token_usage=llm_token_usage,
-            llm_model_data=llm_model_data,
+            **metadata,
         )
+
+        # Complete and store the canonical record only when memory is kept.
+        if self._context_enabled:
+            logger.debug(f"Agent.{self.name} updating history")
+            record = replace(draft, final_result=agent_result)
+            self._history.append(record)
+
+        logger.info(f"[Async {self.full_name} finished]")
+
+        return agent_result
 
     def invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Invoke the Agent with a single input mapping.
@@ -1405,13 +1384,13 @@ class Agent(AtomicInvokable):
            ``context_enabled``.
         5) Delegate ``turns`` and ``prompt`` to ``_invoke(...)``, which owns any
            provider-facing rendering and sync generation work, and returns a
-           draft ``AgentRecord`` (``final_response`` still ``NO_VAL``).
+           2-tuple of a draft ``AgentRecord`` (``final_result`` still ``None``)
+           and a metadata dict.
         6) Run ``post_invoke`` on the draft's generated response and configured
            passthrough inputs to obtain the final response.
-        7) Complete the draft via ``dataclasses.replace(draft, final_response=...)``
+        7) Construct the ``AgentResult`` via ``make_result(**metadata)``.
+        8) Complete the draft via ``dataclasses.replace(draft, final_result=agent_result)``
            and commit it to history if ``context_enabled`` is True.
-        8) Assemble and return this invocation's ``AgentResult`` via
-           ``make_result(...)``, correlated to the completed record by ``run_id``.
 
         Parameters
         ----------
@@ -1423,8 +1402,7 @@ class Agent(AtomicInvokable):
         AgentResult
             This invocation's successful-invocation envelope: the post-processed
             output plus run identity, timing, and the LLM activity gathered while
-            producing it. The ``run_id`` matches the stored ``AgentRecord`` (when
-            ``context_enabled``), linking the two views of the same invocation.
+            producing it.
 
         Raises
         ------
@@ -1474,11 +1452,10 @@ class Agent(AtomicInvokable):
                     turns = self._history[-self._history_window :] if self._history_window > 0 else []
 
             # Delegate selected turns and current prompt to the protected core
-            # logic. The contract is now a single typed value: a draft
-            # AgentRecord whose final_response is NO_VAL until post-processing
-            # runs below.
+            # logic. Returns a 2-tuple: draft AgentRecord (final_result=None)
+            # + metadata dict that make_result unpacks.
             logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
-            draft = self._invoke(turns=turns, prompt=prompt)
+            draft, metadata = self._invoke(turns=turns, prompt=prompt)
 
             if not isinstance(draft, AgentRecord):
                 raise AgentInvocationError(
@@ -1495,39 +1472,30 @@ class Agent(AtomicInvokable):
             except Exception as e:  # pragma: no cover
                 raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
 
-            # Extract result payload from post-invoke's ToolResult.
             final_response = post_result.result
-
-            # Complete and store the canonical record only when memory is kept —
-            # the draft already carries everything make_result needs below.
-            if self._context_enabled:
-                logger.debug(f"Agent.{self.name} updating history")
-                record = replace(draft, final_response=final_response)
-                self._history.append(record)
-
-            # Final logging.
-            logger.info(f"[{self.full_name} finished]")
-
-            # Derive the AgentResult's LLM-activity fields from the draft's
-            # LLMRecords: one TokenUsage per generation, and the (stable,
-            # engine-configured) model identity of the generation that produced
-            # the final output.
-            llm_token_usage = tuple(llm_record.llm_result.token_usage for llm_record in draft.llm_records)
-            llm_model_data = draft.llm_records[-1].llm_result.model_data
 
             # The invocation is complete once post-processing has produced the
             # final response; this is the natural "ended_at" boundary for the
             # AgentResult.
             ended_at = datetime.now(timezone.utc)
 
-            return self.make_result(
+            agent_result = self.make_result(
                 result=final_response,
                 started_at=started_at,
                 ended_at=ended_at,
-                run_id=draft.run_id,
-                llm_token_usage=llm_token_usage,
-                llm_model_data=llm_model_data,
+                **metadata,
             )
+
+            # Complete and store the canonical record only when memory is kept.
+            if self._context_enabled:
+                logger.debug(f"Agent.{self.name} updating history")
+                record = replace(draft, final_result=agent_result)
+                self._history.append(record)
+
+            # Final logging.
+            logger.info(f"[{self.full_name} finished]")
+
+            return agent_result
 
     # ------------------------------------------------------------------ #
     # Serialization

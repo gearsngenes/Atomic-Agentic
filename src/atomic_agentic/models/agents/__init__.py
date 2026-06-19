@@ -1,9 +1,8 @@
-from .records import AgentRecord, LLMRecord, ToolAgentRecord
+from .records import AgentRecord, ToolAgentRecord
 from .blackboard_models import BlackboardSlot, ConstantSpec
 from .runstates import ToolAgentRunState, PlanActRunState, ReActRunState
 
 __all__ = [
-    "LLMRecord",
     "AgentRecord",
     "ToolAgentRecord",
     "BlackboardSlot",

@@ -11,7 +11,7 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.exceptions import AgentError, AgentInvocationError, ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.engines.LLMEngines import LLMEngine
-from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
+from atomic_agentic.models.agents.records import AgentRecord
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
 
 
@@ -888,7 +888,7 @@ class StringDraftAgent(Agent):
         turns: list[AgentRecord],
         prompt: str,
     ) -> Any:
-        return "raw response, not a draft AgentRecord"
+        return "raw response, not a draft AgentRecord", {}
 
 
 class MappingDraftAgent(Agent):
@@ -897,7 +897,7 @@ class MappingDraftAgent(Agent):
         turns: list[AgentRecord],
         prompt: str,
     ) -> Any:
-        return {"generated_response": "raw response", "final_response": NO_VAL}
+        return {"generated_response": "raw response"}, {}
 
 
 class AsyncStringDraftAgent(Agent):
@@ -906,7 +906,7 @@ class AsyncStringDraftAgent(Agent):
         turns: list[AgentRecord],
         prompt: str,
     ) -> Any:
-        return "raw async response, not a draft AgentRecord"
+        return "raw async response, not a draft AgentRecord", {}
 
 
 class AsyncMappingDraftAgent(Agent):
@@ -915,30 +915,13 @@ class AsyncMappingDraftAgent(Agent):
         turns: list[AgentRecord],
         prompt: str,
     ) -> Any:
-        return {"generated_response": "raw async response", "final_response": NO_VAL}
+        return {"generated_response": "raw async response"}, {}
 
 
 def make_mutation_record(*, user_prompt: str = "mutated") -> AgentRecord:
-    token_usage = TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
-    model_data = LLMModelData(provider="test-provider")
-    started = datetime.now(timezone.utc)
-    ended = started + timedelta(seconds=1)
-    llm_result = LLMResult(
-        result="mutated",
-        invoker_id="engine-1",
-        started_at=started,
-        ended_at=ended,
-        token_usage=token_usage,
-        model_data=model_data,
-        run_id="llm-run-id",
-    )
-    llm_record = LLMRecord(user_prompt=user_prompt, llm_result=llm_result)
     return AgentRecord(
         user_prompt=user_prompt,
         generated_response="mutated",
-        final_response="mutated",
-        llm_records=(llm_record,),
-        run_id="mutation-run-id",
     )
 
 
@@ -960,13 +943,11 @@ class TestAgentRecordHistory:
 
         assert turns[0].user_prompt == "Write about pytest in a strict tone."
         assert turns[0].generated_response == "ECHO: Write about pytest in a strict tone."
-        assert turns[0].final_response == first.result
-        assert turns[0].run_id == first.run_id
+        assert turns[0].final_result.result == first.result
 
         assert turns[1].user_prompt == "Write about agents in a concise tone."
         assert turns[1].generated_response == "ECHO: Write about agents in a concise tone."
-        assert turns[1].final_response == second.result
-        assert turns[1].run_id == second.run_id
+        assert turns[1].final_result.result == second.result
 
     def test_turn_history_returns_shallow_copy(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -1000,8 +981,7 @@ class TestAgentRecordHistory:
 
         assert turn.user_prompt == expected_prompt
         assert turn.generated_response == expected_raw
-        assert turn.final_response == result.result
-        assert turn.run_id == result.run_id
+        assert turn.final_result.result == result.result
 
         with pytest.warns(DeprecationWarning):
             rendered_history = agent.history

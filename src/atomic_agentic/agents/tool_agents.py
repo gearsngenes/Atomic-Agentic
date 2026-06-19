@@ -103,11 +103,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import asyncio
 from collections.abc import Collection
+from datetime import datetime
 import logging
 import re
 import string
 import json
-from uuid import uuid4
 from typing import (
     Any,
     Callable,
@@ -135,7 +135,9 @@ from ..constants.agents import (
     TOOL_FIELD,
 )
 
-from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from ..models.agents.records import AgentRecord, ToolAgentRecord
+from ..models.results.agents import LLMRecord, ToolAgentResult, ToolUsageRecord
+from ..models.results import LLMModelData
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from ..models.agents.runstates import ToolAgentRunState, PlanActRunState, ReActRunState
 from ..exceptions import (
@@ -178,27 +180,26 @@ class ToolAgent(Agent, ABC):
     the existing ToolAgent template loop::
 
     1. messages = build_messages(role_prompt, turns, prompt)
-    2. run_id = uuid4().hex                              [minted internally]
-    3. state = _initialize_run_state(messages=messages)  [subclass hook]
-    4. while not state.is_done:
+    2. state = _initialize_run_state(messages=messages)  [subclass hook]
+    3. while not state.is_done:
         state = _prepare_next_batch(state)              [subclass hook]
         state = _execute_prepared_batch(state)          [base implementation]
         [completion check: if return tool executed, is_done=True]
        (each LLM generation made along the way is captured as an LLMRecord
        and accumulated onto state.llm_records)
-    5. if context_enabled:
+    4. if context_enabled:
         blackboard_start = len(self._blackboard)
         state = update_blackboard(state)
         blackboard_end = len(self._blackboard)
-    6. return a draft ToolAgentRecord (final_response=NO_VAL) carrying
-       state.return_value, run_id, tuple(state.llm_records),
-       blackboard_start, and blackboard_end
+    5. return a 2-tuple of a draft ToolAgentRecord (final_result=None) carrying
+       state.return_value, blackboard_start, and blackboard_end; and a metadata
+       dict with llm_records, llm_model_data, and tool_usage.
 
-    The draft is complete except for ``final_response``, which post-processing
-    has not produced yet — ``invoke``/``async_invoke`` complete it in place via
-    ``dataclasses.replace(draft, final_response=...)`` and use it to derive the
-    invocation's ``AgentResult``. Future LLM-facing messages are rendered from
-    the stored ``ToolAgentRecord`` by ``render_turn(...)``.
+    The draft is complete except for ``final_result``, which is set after
+    ``make_result`` runs — ``invoke``/``async_invoke`` complete it via
+    ``dataclasses.replace(draft, final_result=agent_result)``. Future LLM-facing
+    messages are rendered from the stored ``ToolAgentRecord`` by
+    ``render_turn(...)``.
 
     Subclass Responsibilities
     -------------------------
@@ -1493,23 +1494,21 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     # Template Method (FINAL)
     # ------------------------------------------------------------------ #
-    def _invoke(self, turns: List[AgentRecord], prompt: str) -> AgentRecord:
+    def _invoke(self, turns: List[AgentRecord], prompt: str) -> tuple[ToolAgentRecord, dict]:
         """
         FINAL sync ToolAgent template method.
 
         Receives selected canonical turns and the current prompt from the base
         ``Agent.invoke(...)`` lifecycle. This method renders those values into a
-        provider-facing message list once, then runs the existing ToolAgent
-        message-based template loop, and returns a **draft** ``ToolAgentRecord``
-        for this invocation: every field is final except ``final_response``,
-        which is still ``NO_VAL`` because post-processing has not run yet.
+        provider-facing message list once, then runs the ToolAgent template loop,
+        and returns a 2-tuple of a **draft** ``ToolAgentRecord`` (``final_result``
+        is ``None``) and a metadata dict carrying ``llm_records``,
+        ``llm_model_data``, and ``tool_usage``.
 
-        The draft already carries its own ``run_id`` (minted here, not passed
-        in) and the full ``LLMRecord`` envelope for every LLM generation made
-        while producing it (accumulated on ``state.llm_records`` across the
-        planning loop) — ``invoke`` later completes the draft in place via
-        ``dataclasses.replace(draft, final_response=...)`` and uses it to
-        derive the invocation's ``AgentResult``.
+        The LLMRecord envelopes are accumulated on ``state.llm_records`` across
+        the planning loop and transferred to the metadata dict at return time.
+        ``invoke`` later completes the draft via
+        ``dataclasses.replace(draft, final_result=agent_result)``.
 
         Subclasses should not override this method. They should implement:
         - ``_initialize_run_state(messages=...)``
@@ -1519,8 +1518,6 @@ class ToolAgent(Agent, ABC):
 
         if not messages:
             raise ToolAgentError("ToolAgent._invoke requires a non-empty messages list.")
-
-        run_id = uuid4().hex
 
         state = self._initialize_run_state(messages=messages)
 
@@ -1557,33 +1554,48 @@ class ToolAgent(Agent, ABC):
             state = self.update_blackboard(state)
             blackboard_end = len(self._blackboard)
 
-        # Return the draft ToolAgentRecord: complete except for final_response,
-        # which post-processing has not produced yet.
-        return ToolAgentRecord(
+        # Derive per-tool call counts from this invocation's running blackboard.
+        # Slots are iterated in execution order (first-call order preserved by dict).
+        _counts: dict[str, int] = {}
+        for _slot in state.running_blackboard:
+            if (
+                _slot.is_executed()
+                and isinstance(_slot.tool, str)
+                and _slot.tool != RETURN_TOOL_FULL_NAME
+            ):
+                _counts[_slot.tool] = _counts.get(_slot.tool, 0) + 1
+        tool_usage = tuple(
+            ToolUsageRecord(tool_name=name, call_count=count)
+            for name, count in _counts.items()
+        )
+
+        draft = ToolAgentRecord(
             user_prompt=prompt,
             generated_response=state.return_value,
-            final_response=NO_VAL,
-            llm_records=tuple(state.llm_records),
-            run_id=run_id,
             blackboard_start=blackboard_start,
             blackboard_end=blackboard_end,
         )
+        metadata: dict = {
+            "llm_records": tuple(state.llm_records),
+            "llm_model_data": state.llm_records[-1].llm_result.model_data,
+            "tool_usage": tool_usage,
+        }
+        return draft, metadata
 
     async def _ainvoke(
         self,
         turns: List[AgentRecord],
         prompt: str,
-    ) -> AgentRecord:
+    ) -> tuple[ToolAgentRecord, dict]:
         """
         FINAL async ToolAgent template method.
 
         Receives selected canonical turns and the current prompt from the base
         ``Agent.async_invoke(...)`` lifecycle. This method renders those values
-        into a provider-facing message list once, then runs the existing
-        ToolAgent message-based template loop, and returns a **draft**
-        ``ToolAgentRecord`` for this invocation, exactly mirroring the sync
-        ``_invoke(...)`` contract — see its docstring for the draft-record and
-        ``run_id``/``llm_records`` accumulation details.
+        into a provider-facing message list once, then runs the ToolAgent
+        template loop, and returns a 2-tuple mirroring the sync ``_invoke(...)``
+        contract — see its docstring for details on the draft-record and metadata
+        dict contents.
 
         Mirrors the sync ``_invoke(...)`` loop, but offloads the current sync
         planning hooks to worker threads and awaits the async batch executor for
@@ -1597,8 +1609,6 @@ class ToolAgent(Agent, ABC):
 
         if not messages:
             raise ToolAgentError("ToolAgent._ainvoke requires a non-empty messages list.")
-
-        run_id = uuid4().hex
 
         state = await asyncio.to_thread(self._initialize_run_state, messages=messages)
 
@@ -1639,16 +1649,79 @@ class ToolAgent(Agent, ABC):
             state = self.update_blackboard(state)
             blackboard_end = len(self._blackboard)
 
-        # Return the draft ToolAgentRecord: complete except for final_response,
-        # which post-processing has not produced yet.
-        return ToolAgentRecord(
+        # Derive per-tool call counts from this invocation's running blackboard.
+        _counts: dict[str, int] = {}
+        for _slot in state.running_blackboard:
+            if (
+                _slot.is_executed()
+                and isinstance(_slot.tool, str)
+                and _slot.tool != RETURN_TOOL_FULL_NAME
+            ):
+                _counts[_slot.tool] = _counts.get(_slot.tool, 0) + 1
+        tool_usage = tuple(
+            ToolUsageRecord(tool_name=name, call_count=count)
+            for name, count in _counts.items()
+        )
+
+        draft = ToolAgentRecord(
             user_prompt=prompt,
             generated_response=state.return_value,
-            final_response=NO_VAL,
-            llm_records=tuple(state.llm_records),
-            run_id=run_id,
             blackboard_start=blackboard_start,
             blackboard_end=blackboard_end,
+        )
+        metadata: dict = {
+            "llm_records": tuple(state.llm_records),
+            "llm_model_data": state.llm_records[-1].llm_result.model_data,
+            "tool_usage": tool_usage,
+        }
+        return draft, metadata
+
+    def make_result(
+        self,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+        **result_kwargs: Any,
+    ) -> ToolAgentResult:
+        """
+        Construct this ToolAgent's ``ToolAgentResult`` envelope.
+
+        Extends ``Agent.make_result`` with ``tool_usage`` from the metadata dict
+        returned by ``_invoke``. No derivation occurs here — ``tool_usage`` is
+        computed during the execution loop and passed through directly.
+        """
+        unexpected = set(result_kwargs) - {"llm_records", "llm_model_data", "tool_usage"}
+        if unexpected:
+            raise ToolAgentError(
+                f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
+            )
+
+        llm_records = result_kwargs.get("llm_records")
+        llm_model_data = result_kwargs.get("llm_model_data")
+        tool_usage = result_kwargs.get("tool_usage", ())
+
+        if (
+            not isinstance(llm_records, tuple)
+            or not llm_records
+            or not all(isinstance(r, LLMRecord) for r in llm_records)
+        ):
+            raise ToolAgentError(
+                "ToolAgent.make_result: llm_records must be a non-empty tuple of LLMRecord instances."
+            )
+
+        if not isinstance(llm_model_data, LLMModelData):
+            raise ToolAgentError(
+                "ToolAgent.make_result: llm_model_data must be an LLMModelData instance."
+            )
+
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=ToolAgentResult,
+            llm_records=llm_records,
+            llm_model_data=llm_model_data,
+            tool_usage=tool_usage,
         )
 
     def render_turn(self, turn: AgentRecord) -> list[dict[str, str]]:

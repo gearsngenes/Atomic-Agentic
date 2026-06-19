@@ -60,7 +60,7 @@ def main() -> None:
         print("raw_response:")
         pprint.pp(turn.generated_response)
         print("final_response:")
-        pprint.pp(turn.final_response)
+        pprint.pp(turn.final_result)
 
     print("\n=== Rendered history using raw assistant response ===")
     agent.assistant_response_source = "raw"

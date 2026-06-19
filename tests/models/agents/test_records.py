@@ -6,10 +6,11 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from atomic_agentic.models.agents.records import AgentRecord, ToolAgentRecord
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results import AtomicResult, LLMModelData, LLMResult, TokenUsage
+from atomic_agentic.models.results.agents import LLMRecord, AgentResult
 
 
 def make_token_usage(*, input_tokens: int = 10, generated_tokens: int = 5) -> TokenUsage:
@@ -47,6 +48,18 @@ def make_atomic_result(*, value: Any = 5, invoker_id: str = "tool-1") -> AtomicR
         invoker_id=invoker_id,
         started_at=started_at,
         ended_at=started_at + timedelta(seconds=1),
+    )
+
+
+def make_agent_result(*, value: Any = "final output") -> AgentResult:
+    started_at = datetime.now(timezone.utc)
+    return AgentResult(
+        result=value,
+        invoker_id="agent-1",
+        started_at=started_at,
+        ended_at=started_at + timedelta(seconds=1),
+        llm_records=(make_llm_record(),),
+        llm_model_data=make_model_data(),
     )
 
 
@@ -113,167 +126,54 @@ class TestConstantSpec:
             spec.name = "OTHER"  # type: ignore[misc]
 
 
-class TestLLMRecord:
-    def test_valid_record_exposes_user_prompt_and_llm_result(self) -> None:
-        llm_result = make_llm_result(text="hello world")
-
-        record = LLMRecord(user_prompt="say hello", llm_result=llm_result)
-
-        assert record.user_prompt == "say hello"
-        assert record.llm_result is llm_result
-
-    def test_to_dict_returns_user_prompt_and_serialized_llm_result(self) -> None:
-        llm_result = make_llm_result(text="hello world")
-        record = LLMRecord(user_prompt="say hello", llm_result=llm_result)
-
-        assert record.to_dict() == {
-            "user_prompt": "say hello",
-            "llm_result": llm_result.to_dict(),
-        }
-
-    def test_rejects_non_string_user_prompt(self) -> None:
-        with pytest.raises(TypeError, match="user_prompt"):
-            LLMRecord(user_prompt=123, llm_result=make_llm_result())  # type: ignore[arg-type]
-
-    def test_rejects_non_llm_result_llm_result(self) -> None:
-        with pytest.raises(TypeError, match="llm_result"):
-            LLMRecord(user_prompt="say hello", llm_result="not an llm result")  # type: ignore[arg-type]
-
-    def test_is_frozen(self) -> None:
-        record = make_llm_record()
-
-        with pytest.raises(FrozenInstanceError):
-            record.user_prompt = "other"  # type: ignore[misc]
-
-
 class TestAgentRecord:
-    def test_to_dict_returns_explicit_canonical_shape(self) -> None:
-        llm_record = make_llm_record(user_prompt="write a summary", text="raw assistant text")
+    def test_valid_record_stores_prompt_and_response(self) -> None:
         record = AgentRecord(
             user_prompt="write a summary",
             generated_response="raw assistant text",
-            final_response={"final": "processed assistant text"},
-            llm_records=(llm_record,),
-            run_id="run-123",
         )
+        assert record.user_prompt == "write a summary"
+        assert record.generated_response == "raw assistant text"
+        assert record.final_result is None
 
+    def test_final_result_accepts_agent_result(self) -> None:
+        agent_result = make_agent_result()
+        record = AgentRecord(
+            user_prompt="run",
+            generated_response="raw",
+            final_result=agent_result,
+        )
+        assert record.final_result is agent_result
+
+    def test_to_dict_with_none_final_result(self) -> None:
+        record = AgentRecord(
+            user_prompt="run",
+            generated_response="raw",
+        )
         assert record.to_dict() == {
-            "user_prompt": "write a summary",
-            "generated_response": "raw assistant text",
-            "final_response": {"final": "processed assistant text"},
-            "llm_records": [llm_record.to_dict()],
-            "run_id": "run-123",
+            "user_prompt": "run",
+            "generated_response": "raw",
+            "final_result": None,
         }
 
-    def test_to_dict_returns_independent_top_level_mapping(self) -> None:
-        record = AgentRecord(
-            user_prompt="collect items",
-            generated_response="raw",
-            final_response={"items": ["a", "b"]},
-            llm_records=(make_llm_record(),),
-            run_id="run-456",
-        )
-
-        data = record.to_dict()
-        data["user_prompt"] = "mutated"
-
-        assert record.user_prompt == "collect items"
-        assert record.final_response == {"items": ["a", "b"]}
-
-    def test_normalizes_llm_records_into_immutable_tuple(self) -> None:
-        llm_record = make_llm_record()
-
+    def test_to_dict_with_agent_result(self) -> None:
+        agent_result = make_agent_result(value="done")
         record = AgentRecord(
             user_prompt="run",
             generated_response="raw",
-            final_response="final",
-            llm_records=[llm_record, llm_record],
-            run_id="run-789",
+            final_result=agent_result,
         )
-
-        assert record.llm_records == (llm_record, llm_record)
-        assert isinstance(record.llm_records, tuple)
-
-    def test_normalizes_run_id_by_stripping_whitespace(self) -> None:
-        record = AgentRecord(
-            user_prompt="run",
-            generated_response="raw",
-            final_response="final",
-            llm_records=(make_llm_record(),),
-            run_id="  run-789  ",
-        )
-
-        assert record.run_id == "run-789"
+        d = record.to_dict()
+        assert d["user_prompt"] == "run"
+        assert d["generated_response"] == "raw"
+        assert d["final_result"] == agent_result.to_dict()
 
     def test_rejects_non_string_user_prompt(self) -> None:
         with pytest.raises(TypeError, match="user_prompt"):
-            AgentRecord(
-                user_prompt=123,  # type: ignore[arg-type]
-                generated_response="raw",
-                final_response="final",
-                llm_records=(make_llm_record(),),
-                run_id="run-1",
-            )
-
-    def test_rejects_non_sequence_llm_records(self) -> None:
-        with pytest.raises(TypeError, match="llm_records"):
-            AgentRecord(
-                user_prompt="run",
-                generated_response="raw",
-                final_response="final",
-                llm_records=make_llm_record(),  # type: ignore[arg-type]
-                run_id="run-1",
-            )
-
-    def test_rejects_empty_llm_records(self) -> None:
-        with pytest.raises(ValueError, match="llm_records"):
-            AgentRecord(
-                user_prompt="run",
-                generated_response="raw",
-                final_response="final",
-                llm_records=(),
-                run_id="run-1",
-            )
-
-    def test_rejects_non_llm_record_items_in_llm_records(self) -> None:
-        with pytest.raises(TypeError, match="llm_records"):
-            AgentRecord(
-                user_prompt="run",
-                generated_response="raw",
-                final_response="final",
-                llm_records=(make_llm_record(), "not a record"),
-                run_id="run-1",
-            )
-
-    def test_rejects_non_string_run_id(self) -> None:
-        with pytest.raises(TypeError, match="run_id"):
-            AgentRecord(
-                user_prompt="run",
-                generated_response="raw",
-                final_response="final",
-                llm_records=(make_llm_record(),),
-                run_id=123,  # type: ignore[arg-type]
-            )
-
-    def test_rejects_blank_run_id(self) -> None:
-        with pytest.raises(ValueError, match="run_id"):
-            AgentRecord(
-                user_prompt="run",
-                generated_response="raw",
-                final_response="final",
-                llm_records=(make_llm_record(),),
-                run_id="   ",
-            )
+            AgentRecord(user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
 
     def test_is_frozen(self) -> None:
-        record = AgentRecord(
-            user_prompt="run",
-            generated_response="raw",
-            final_response="final",
-            llm_records=(make_llm_record(),),
-            run_id="run-1",
-        )
-
+        record = AgentRecord(user_prompt="run", generated_response="raw")
         with pytest.raises(FrozenInstanceError):
             record.user_prompt = "other"  # type: ignore[misc]
 
@@ -283,70 +183,38 @@ class TestToolAgentRecord:
         record = ToolAgentRecord(
             user_prompt="run tools",
             generated_response=42,
-            final_response={"value": 42},
-            llm_records=(make_llm_record(),),
-            run_id="run-1",
             blackboard_start=3,
             blackboard_end=6,
         )
-
         assert isinstance(record, AgentRecord)
         assert record.blackboard_start == 3
         assert record.blackboard_end == 6
 
     def test_to_dict_returns_inherited_agent_record_shape(self) -> None:
-        llm_record = make_llm_record()
         record = ToolAgentRecord(
             user_prompt="run tools",
             generated_response=42,
-            final_response={"value": 42},
-            llm_records=(llm_record,),
-            run_id="run-1",
-            blackboard_start=3,
-            blackboard_end=6,
         )
-
-        # ToolAgentRecord does not override AgentRecord.to_dict(); the
-        # blackboard span is exposed only through the dataclass attributes.
         assert record.to_dict() == {
             "user_prompt": "run tools",
             "generated_response": 42,
-            "final_response": {"value": 42},
-            "llm_records": [llm_record.to_dict()],
-            "run_id": "run-1",
+            "final_result": None,
         }
 
     def test_blackboard_span_defaults_to_none(self) -> None:
         record = ToolAgentRecord(
             user_prompt="run without context",
             generated_response="raw",
-            final_response="final",
-            llm_records=(make_llm_record(),),
-            run_id="run-2",
         )
-
         assert record.blackboard_start is None
         assert record.blackboard_end is None
 
     def test_inherits_agent_record_validation(self) -> None:
         with pytest.raises(TypeError, match="user_prompt"):
-            ToolAgentRecord(
-                user_prompt=123,  # type: ignore[arg-type]
-                generated_response="raw",
-                final_response="final",
-                llm_records=(make_llm_record(),),
-                run_id="run-3",
-            )
+            ToolAgentRecord(user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
 
     def test_is_frozen(self) -> None:
-        record = ToolAgentRecord(
-            user_prompt="run",
-            generated_response="raw",
-            final_response="final",
-            llm_records=(make_llm_record(),),
-            run_id="run-4",
-        )
-
+        record = ToolAgentRecord(user_prompt="run", generated_response="raw")
         with pytest.raises(FrozenInstanceError):
             record.blackboard_start = 1  # type: ignore[misc]
 
