@@ -17,7 +17,8 @@ from atomic_agentic.agents.tool_agents import (
 )
 from atomic_agentic.models.agents.runstates import ToolAgentRunState
 from atomic_agentic.models.agents.records import AgentRecord, ToolAgentRecord
-from atomic_agentic.models.results.agents import LLMRecord, ToolAgentResult
+from atomic_agentic.models.agents.records import LLMRecord
+from atomic_agentic.models.results.agents import ToolAgentResult
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from atomic_agentic.exceptions import (
     AgentError,
@@ -1395,7 +1396,7 @@ class TestScriptedInvokeLoop:
 
         assert agent.invoke({"prompt": "run"}).result == 5
         assert agent.blackboard == []
-        assert agent.turn_history == []
+        assert agent.records == []
 
     def test_context_enabled_stores_tool_agent_turn_with_blackboard_span(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -1409,8 +1410,8 @@ class TestScriptedInvokeLoop:
 
         assert agent.invoke({"prompt": "run"}).result == 5
 
-        assert len(agent.turn_history) == 1
-        turn = agent.turn_history[0]
+        assert len(agent.records) == 1
+        turn = agent.records[0]
         assert isinstance(turn, ToolAgentRecord)
         assert turn.user_prompt == "run"
         assert turn.generated_response == 5
@@ -1469,17 +1470,12 @@ class TestScriptedInvokeLoop:
         agent.invoke({"prompt": "run"})
 
         assert agent.blackboard
-        assert agent.turn_history
+        assert agent.records
 
         agent.clear_memory()
 
         assert agent.blackboard == []
-        assert agent.turn_history == []
-
-        with pytest.warns(DeprecationWarning):
-            rendered_history = agent.history
-
-        assert rendered_history == []
+        assert agent.records == []
 
     def test_prepare_empty_batch_raises(self) -> None:
         agent = make_agent()
@@ -1616,10 +1612,7 @@ class TestBlackboardPersistenceAndDisplay:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == "long:abcdefghijklmnopqrstuvwxyz"
-        with pytest.warns(DeprecationWarning):
-            history = agent.history
-
-        content = history[-1]["content"]
+        content = agent.render_turn(agent.records[0])[1]["content"]
         assert "CACHED STEPS" in content
         assert "result" in content
         assert "long:abcd" in content
@@ -1637,10 +1630,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         assert agent.invoke({"prompt": "run"}).result == 3
 
-        with pytest.warns(DeprecationWarning):
-            history = agent.history
-
-        content = history[-1]["content"]
+        content = agent.render_turn(agent.records[0])[1]["content"]
         assert "CACHED STEPS" in content
         assert "'args'" in content
         assert "'result'" not in content
@@ -1669,10 +1659,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         assert agent.invoke({"prompt": "run"}).result == "long:abcdefghijklmnopqrstuvwxyz"
 
-        with pytest.warns(DeprecationWarning):
-            history = agent.history
-
-        content = history[-1]["content"]
+        content = agent.render_turn(agent.records[0])[1]["content"]
         assert "abcdefghijklmnopqrstuvwxyz" in content
         assert "'long:abcd..." in content
 
@@ -1701,10 +1688,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         assert agent.invoke({"prompt": "run"}).result == "long:abcdefghijklmnopqrstuvwxyz"
 
-        with pytest.warns(DeprecationWarning):
-            history = agent.history
-
-        content = history[-1]["content"]
+        content = agent.render_turn(agent.records[0])[1]["content"]
         response_section = content.split("CACHED STEPS", maxsplit=1)[0]
         cached_section = content.split("CACHED STEPS", maxsplit=1)[1]
         assert "RESPONSE:\nlong:abcde..." in response_section
@@ -1725,7 +1709,7 @@ class TestToolAgentRecordRendering:
 
         assert agent.invoke({"prompt": "run"}).result == 3
 
-        rendered = agent.render_turn(agent.turn_history[0])
+        rendered = agent.render_turn(agent.records[0])
 
         assert len(rendered) == 2
         assert [message["role"] for message in rendered] == ["user", "assistant"]
@@ -1753,8 +1737,8 @@ class TestToolAgentRecordRendering:
         )
         assert agent.invoke({"prompt": "second"}).result == 20
 
-        first_rendered = agent.render_turn(agent.turn_history[0])[1]["content"]
-        second_rendered = agent.render_turn(agent.turn_history[1])[1]["content"]
+        first_rendered = agent.render_turn(agent.records[0])[1]["content"]
+        second_rendered = agent.render_turn(agent.records[1])[1]["content"]
 
         assert "CACHED STEPS #0-1 PRODUCED" in first_rendered
         assert "CACHED STEPS #2-3 PRODUCED" in second_rendered

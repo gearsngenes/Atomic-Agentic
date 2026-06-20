@@ -35,7 +35,7 @@ builder = Agent(
     ),
     context_enabled=True,
     pre_invoke=builder_prestep,
-    history_window=10,
+    records_window=10,
 )
 
 
@@ -59,14 +59,14 @@ reviewer = Agent(
     ),
     context_enabled=True,
     pre_invoke=reviewer_prestep,
-    history_window=10,
+    records_window=10,
 )
 
 orchestrator = ReActAgent(
     name="AgenticOrchestrator",
     description="Orchestrates calls between the code builder and the code reviewer.",
     llm_engine=llm,
-    history_window=10,
+    records_window=10,
     tool_calls_limit=10,
     context_enabled=True,
     preview_limit=100,

@@ -8,7 +8,6 @@ import pytest
 
 from atomic_agentic.models.results.agents import (
     AgentResult,
-    LLMRecord,
     ToolAgentResult,
     ToolUsageRecord,
 )
@@ -29,22 +28,6 @@ def make_model_data(*, provider: str = "openai") -> LLMModelData:
     return LLMModelData(provider=provider)
 
 
-def make_llm_result(*, text: str = "generated text") -> LLMResult:
-    started_at = datetime.now(timezone.utc)
-    return LLMResult(
-        result=text,
-        invoker_id="engine-1",
-        started_at=started_at,
-        ended_at=started_at + timedelta(seconds=1),
-        token_usage=make_token_usage(),
-        model_data=make_model_data(),
-    )
-
-
-def make_llm_record(*, user_prompt: str = "say something") -> LLMRecord:
-    return LLMRecord(user_prompt=user_prompt, llm_result=make_llm_result())
-
-
 def make_agent_result(*, value: Any = "output") -> AgentResult:
     started_at = datetime.now(timezone.utc)
     return AgentResult(
@@ -52,40 +35,9 @@ def make_agent_result(*, value: Any = "output") -> AgentResult:
         invoker_id="agent-1",
         started_at=started_at,
         ended_at=started_at + timedelta(seconds=1),
-        llm_records=(make_llm_record(),),
+        llm_token_usage=(make_token_usage(),),
         llm_model_data=make_model_data(),
     )
-
-
-# ── TestLLMRecord ─────────────────────────────────────────────────────────────
-
-class TestLLMRecord:
-    def test_valid_record_exposes_user_prompt_and_llm_result(self) -> None:
-        llm_result = make_llm_result(text="hello world")
-        record = LLMRecord(user_prompt="say hello", llm_result=llm_result)
-        assert record.user_prompt == "say hello"
-        assert record.llm_result is llm_result
-
-    def test_to_dict_returns_user_prompt_and_serialized_llm_result(self) -> None:
-        llm_result = make_llm_result(text="hello world")
-        record = LLMRecord(user_prompt="say hello", llm_result=llm_result)
-        assert record.to_dict() == {
-            "user_prompt": "say hello",
-            "llm_result": llm_result.to_dict(),
-        }
-
-    def test_rejects_non_string_user_prompt(self) -> None:
-        with pytest.raises(TypeError, match="user_prompt"):
-            LLMRecord(user_prompt=123, llm_result=make_llm_result())  # type: ignore[arg-type]
-
-    def test_rejects_non_llm_result(self) -> None:
-        with pytest.raises(TypeError, match="llm_result"):
-            LLMRecord(user_prompt="hi", llm_result="not a result")  # type: ignore[arg-type]
-
-    def test_is_frozen(self) -> None:
-        record = make_llm_record()
-        with pytest.raises(FrozenInstanceError):
-            record.user_prompt = "other"  # type: ignore[misc]
 
 
 # ── TestToolUsageRecord ───────────────────────────────────────────────────────
@@ -130,7 +82,7 @@ class TestToolUsageRecord:
 
 class TestAgentResult:
     def test_valid_result_exposes_all_fields(self) -> None:
-        llm_rec = make_llm_record()
+        token_usage = make_token_usage()
         model_data = make_model_data()
         started_at = datetime.now(timezone.utc)
         result = AgentResult(
@@ -138,56 +90,66 @@ class TestAgentResult:
             invoker_id="agent-1",
             started_at=started_at,
             ended_at=started_at + timedelta(seconds=1),
-            llm_records=(llm_rec,),
+            llm_token_usage=(token_usage,),
             llm_model_data=model_data,
         )
         assert result.result == "done"
-        assert result.llm_records == (llm_rec,)
+        assert result.llm_token_usage == (token_usage,)
         assert result.llm_model_data is model_data
 
-    def test_normalizes_llm_records_list_to_tuple(self) -> None:
-        llm_rec = make_llm_record()
+    def test_normalizes_llm_token_usage_list_to_tuple(self) -> None:
         started_at = datetime.now(timezone.utc)
         result = AgentResult(
             result="out",
             invoker_id="agent-1",
             started_at=started_at,
             ended_at=started_at + timedelta(seconds=1),
-            llm_records=[llm_rec],
+            llm_token_usage=[make_token_usage()],
             llm_model_data=make_model_data(),
         )
-        assert isinstance(result.llm_records, tuple)
-        assert result.llm_records == (llm_rec,)
+        assert isinstance(result.llm_token_usage, tuple)
 
-    def test_to_dict_includes_llm_records_and_model_data(self) -> None:
+    def test_to_dict_includes_llm_token_usage_and_model_data(self) -> None:
         result = make_agent_result()
         d = result.to_dict()
-        assert "llm_records" in d
-        assert isinstance(d["llm_records"], list)
+        assert "llm_token_usage" in d
+        assert isinstance(d["llm_token_usage"], list)
         assert "llm_model_data" in d
-        assert "llm_token_usage" not in d
+        assert "llm_records" not in d
 
-    def test_rejects_empty_llm_records(self) -> None:
+    def test_empty_llm_token_usage_is_valid(self) -> None:
         started_at = datetime.now(timezone.utc)
-        with pytest.raises(ValueError, match="llm_records"):
+        result = AgentResult(
+            result="out",
+            invoker_id="agent-1",
+            started_at=started_at,
+            ended_at=started_at + timedelta(seconds=1),
+            llm_token_usage=(),
+            llm_model_data=make_model_data(),
+        )
+        assert result.llm_token_usage == ()
+
+    def test_rejects_non_sequence_llm_token_usage(self) -> None:
+        started_at = datetime.now(timezone.utc)
+        with pytest.raises(TypeError, match="llm_token_usage"):
             AgentResult(
                 result="out",
                 invoker_id="agent-1",
                 started_at=started_at,
                 ended_at=started_at + timedelta(seconds=1),
-                llm_records=(),
+                llm_token_usage=42,  # type: ignore[arg-type]
                 llm_model_data=make_model_data(),
             )
 
-    def test_rejects_non_llm_record_items(self) -> None:
+    def test_rejects_non_token_usage_item(self) -> None:
         started_at = datetime.now(timezone.utc)
-        with pytest.raises(TypeError, match="llm_records"):
+        with pytest.raises(TypeError, match="llm_token_usage"):
             AgentResult(
                 result="out",
                 invoker_id="agent-1",
                 started_at=started_at,
                 ended_at=started_at + timedelta(seconds=1),
-                llm_records=("not a record",),
+                llm_token_usage=("not a token usage",),  # type: ignore[arg-type]
                 llm_model_data=make_model_data(),
             )
 
@@ -199,7 +161,7 @@ class TestAgentResult:
                 invoker_id="agent-1",
                 started_at=started_at,
                 ended_at=started_at + timedelta(seconds=1),
-                llm_records=(make_llm_record(),),
+                llm_token_usage=(make_token_usage(),),
                 llm_model_data="not model data",  # type: ignore[arg-type]
             )
 
@@ -224,7 +186,7 @@ class TestToolAgentResult:
             invoker_id="agent-1",
             started_at=started_at,
             ended_at=started_at + timedelta(seconds=1),
-            llm_records=(make_llm_record(),),
+            llm_token_usage=(make_token_usage(),),
             llm_model_data=make_model_data(),
             tool_usage=tool_usage,
         )
@@ -248,7 +210,7 @@ class TestToolAgentResult:
         result = self._make_result(tool_usage=(rec,))
         d = result.to_dict()
         assert d["tool_usage"] == [{"tool_name": "Tool.x", "call_count": 1}]
-        assert "llm_records" in d
+        assert "llm_token_usage" in d
 
     def test_rejects_non_tool_usage_record_items(self) -> None:
         started_at = datetime.now(timezone.utc)
@@ -258,7 +220,7 @@ class TestToolAgentResult:
                 invoker_id="agent-1",
                 started_at=started_at,
                 ended_at=started_at + timedelta(seconds=1),
-                llm_records=(make_llm_record(),),
+                llm_token_usage=(make_token_usage(),),
                 llm_model_data=make_model_data(),
                 tool_usage=("not a record",),  # type: ignore[arg-type]
             )

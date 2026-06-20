@@ -3,7 +3,7 @@ from __future__ import annotations
 from .atomic import AtomicResult
 from .commands import CommandResult
 from .structured import StructuredResult
-from .agents import AgentResult, LLMRecord, ToolAgentResult, ToolUsageRecord
+from .agents import AgentResult, ToolAgentResult, ToolUsageRecord
 from .llm import (
     GeminiTokenUsage,
     LlamaCppModelData,
@@ -43,7 +43,6 @@ __all__ = [
     "LocalLLMModelData",
     "LlamaCppModelData",
     "LLMResult",
-    "LLMRecord",
     "ToolUsageRecord",
     "AgentResult",
     "ToolAgentResult",

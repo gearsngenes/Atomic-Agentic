@@ -5,6 +5,52 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a8] - 2026-06-20
+
+### Added
+
+- `AgentRecord.prev: AgentRecord | None` — each record carries a pointer to
+  the last record used as context when it was created, forming a conversation
+  chain within the flat `_records` list.
+- `AgentRecord.to_dict()` emits `prev_run_id`: the `run_id` of the predecessor
+  record, or `None` for chain roots.
+- `Agent.get_conversation(run_id=None, turns=None) -> list[AgentRecord]` —
+  public method that walks the `prev` chain from a target record, returning
+  results oldest-first. `run_id=None` starts from the most-recent record;
+  `turns=None` returns the full chain; `turns=0` raises `ValueError`;
+  unresolvable `run_id` raises `AgentInvocationError`.
+- `continue_from: str | None = None` — reserved `KEYWORD_ONLY` parameter
+  grafted onto every `Agent`'s input schema. Three modes:
+  - `None` (default) — standard tail-of-history behavior, respecting
+    `records_window`.
+  - `"new"` — parallel fresh root: no prior context is sent; the committed
+    record's `prev` is `None`. The record is still appended to `_records`.
+  - `<run_id>` — forks from the identified record: `get_conversation` resolves
+    the branch chain from that turn.
+- `AgentRecord.llm_records: tuple[LLMRecord, ...]` — per-invocation LLM call
+  records now live on the record, populated in the completion `replace` step.
+
+### Changed
+
+- `AgentResult`: `llm_records` replaced by `llm_token_usage:
+  tuple[TokenUsage, ...]` (one entry per LLM call, ordered) — the result
+  carries derived token-usage accounting; full records live on `AgentRecord`.
+- `Agent.make_result`: derives `llm_token_usage` from metadata `llm_records`
+  rather than receiving records directly.
+- `Agent.records_window` (formerly `history_window`) — constructor parameter,
+  public property, and private variable (`_records_window`) renamed throughout
+  `base.py`, `tool_agents.py`, examples, and tests.
+- `Agent.to_dict()`: `"history"` key removed; `"turn_history"` key renamed to
+  `"records"`; rendered-history build loop removed.
+- `LLMRecord` re-homed to `models/agents/records.py` (moved back from
+  `models/results/agents.py`); re-exported from `models/agents`.
+
+### Removed
+
+- `Agent.history` deprecated property (and the `import warnings` it required).
+- `LLMRecord` from `models/results` exports — import from `models/agents`
+  instead.
+
 ## [2.0.0a7] - 2026-06-19
 
 ### Added

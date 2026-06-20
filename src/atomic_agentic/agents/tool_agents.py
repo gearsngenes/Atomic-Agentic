@@ -135,8 +135,8 @@ from ..constants.agents import (
     TOOL_FIELD,
 )
 
-from ..models.agents.records import AgentRecord, ToolAgentRecord
-from ..models.results.agents import LLMRecord, ToolAgentResult, ToolUsageRecord
+from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from ..models.results.agents import ToolAgentResult, ToolUsageRecord
 from ..models.results import LLMModelData
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from ..models.agents.runstates import ToolAgentRunState, PlanActRunState, ReActRunState
@@ -285,7 +285,7 @@ class ToolAgent(Agent, ABC):
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_result_key: Optional[str] = None,
         passthrough_inputs: Optional[list[str]] = None,
-        history_window: Optional[int] = None,
+        records_window: Optional[int] = None,
     ) -> None:
         template = self._validate_role_prompt_template(role_prompt)
 
@@ -308,7 +308,7 @@ class ToolAgent(Agent, ABC):
             post_invoke=post_invoke,
             post_result_key=post_result_key,
             passthrough_inputs=passthrough_inputs,
-            history_window=history_window,
+            records_window=records_window,
             response_preview_limit=response_preview_limit,
         )
 
@@ -1714,12 +1714,18 @@ class ToolAgent(Agent, ABC):
                 "ToolAgent.make_result: llm_model_data must be an LLMModelData instance."
             )
 
+        llm_token_usage = tuple(
+            r.llm_result.token_usage
+            for r in llm_records
+            if r.llm_result.token_usage is not None
+        )
+
         return self._make_result(
             result=result,
             started_at=started_at,
             ended_at=ended_at,
             result_cls=ToolAgentResult,
-            llm_records=llm_records,
+            llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
             tool_usage=tool_usage,
         )
@@ -2137,8 +2143,7 @@ class ToolAgent(Agent, ABC):
         """Return a diagnostic snapshot of this ToolAgent.
 
         Extends the base Agent snapshot with ToolAgent-specific toolbox and blackboard
-        diagnostics. The inherited `history` field remains a rendered compatibility
-        view, while `turn_history` remains the canonical stored turn representation.
+        diagnostics.
         """
         d = super().to_dict()
         d.update({
@@ -2215,7 +2220,7 @@ class PlanActAgent(ToolAgent):
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_result_key: Optional[str] = None,
         passthrough_inputs: Optional[list[str]] = None,
-        history_window: int | None = None,
+        records_window: int | None = None,
     ) -> None:
         super().__init__(
             name=name,
@@ -2233,7 +2238,7 @@ class PlanActAgent(ToolAgent):
             post_invoke=post_invoke,
             post_result_key=post_result_key,
             passthrough_inputs=passthrough_inputs,
-            history_window=history_window,
+            records_window=records_window,
         )
 
     # ------------------------------------------------------------------ #
@@ -2952,7 +2957,7 @@ class ReActAgent(ToolAgent):
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_result_key: Optional[str] = None,
         passthrough_inputs: Optional[list[str]] = None,
-        history_window: int | None = None,
+        records_window: int | None = None,
     ) -> None:
         super().__init__(
             name=name,
@@ -2970,7 +2975,7 @@ class ReActAgent(ToolAgent):
             post_invoke=post_invoke,
             post_result_key=post_result_key,
             passthrough_inputs=passthrough_inputs,
-            history_window=history_window,
+            records_window=records_window,
         )
 
         # ReAct requires a concrete integer tool_calls_limit so that we can preallocate
