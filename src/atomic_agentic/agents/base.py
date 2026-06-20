@@ -12,7 +12,6 @@ from typing import (
 from dataclasses import replace
 from datetime import datetime, timezone
 import logging
-import warnings
 
 from ..exceptions import (
     AgentError,
@@ -95,8 +94,7 @@ class Agent(AtomicInvokable):
       invocation path calls ``build_messages(...)`` or equivalent rendering logic.
     - Stored history is append-only; no trimming or summarization is performed by
       default.
-    - ``history`` is currently a deprecated rendered compatibility view.
-    - ``turn_history`` is the canonical stored turn view.
+    - ``records`` is the canonical stored turn view.
 
     Parameters
     ----------
@@ -151,8 +149,7 @@ class Agent(AtomicInvokable):
     llm_engine : LLMEngine (read-write, type-enforced)
     context_enabled : bool (read-write)
     history_window : Optional[int] (read-write)
-    history : List[Dict[str, str]] (deprecated rendered message view)
-    turn_history : List[AgentRecord] (read-only canonical turn view)
+    records : List[AgentRecord] (read-only canonical turn view)
     attachments : Dict[str, Dict[str, Any]] (read-only view)
     pre_invoke : Tool (read-only lifecycle reference)
     post_invoke : Tool (read-only lifecycle reference)
@@ -238,7 +235,7 @@ class Agent(AtomicInvokable):
 
         # Stored turn history.
         # We never trim storage; we only limit which turns are selected per invocation.
-        self._history: List[AgentRecord] = []
+        self._records: List[AgentRecord] = []
 
         # Store history-rendering controls.
         self.response_preview_limit = response_preview_limit
@@ -911,24 +908,9 @@ class Agent(AtomicInvokable):
         self._assistant_response_source = value
 
     @property
-    def history(self) -> List[Dict[str, str]]:
-        """Return a rendered message history compatibility view."""
-        warnings.warn(
-            "Agent.history currently returns rendered message dictionaries for compatibility. "
-            "Use Agent.turn_history for canonical stored turns. In a future release, "
-            "Agent.history will become turn-native.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        rendered: List[Dict[str, str]] = []
-        for turn in self._history:
-            rendered.extend(self.render_turn(turn))
-        return rendered
-
-    @property
-    def turn_history(self) -> List[AgentRecord]:
+    def records(self) -> List[AgentRecord]:
         """Return a shallow copy of the stored turn history (never trimmed)."""
-        return list(self._history)
+        return list(self._records)
 
     @property
     def attachments(self) -> Dict[str, Dict[str, Any]]:
@@ -1092,7 +1074,7 @@ class Agent(AtomicInvokable):
 
         Subclasses may override this method to implement more complex async
         behavior, including delayed rendering, multiple model calls, or alternate
-        system prompts. They must not mutate ``self._history`` directly; memory
+        system prompts. They must not mutate ``self._records`` directly; memory
         is committed by ``async_invoke`` after post-processing has produced the
         final response.
         """
@@ -1139,7 +1121,7 @@ class Agent(AtomicInvokable):
 
         Subclasses may override this method to implement more complex behavior,
         including delayed rendering, multiple model calls, or alternate system
-        prompts. They must not mutate ``self._history`` directly; memory is
+        prompts. They must not mutate ``self._records`` directly; memory is
         committed by ``invoke`` after post-processing has produced the final
         response.
         """
@@ -1298,7 +1280,7 @@ class Agent(AtomicInvokable):
 
     def clear_memory(self) -> None:
         """Clear the stored turn history."""
-        self._history.clear()
+        self._records.clear()
 
     def get_conversation(
         self,
@@ -1345,15 +1327,15 @@ class Agent(AtomicInvokable):
             )
 
         # 2. Empty history with no specific run_id → nothing to walk.
-        if not self._history:
+        if not self._records:
             return []
 
         # 3. Resolve the starting record.
         if run_id is None:
-            start = self._history[-1]
+            start = self._records[-1]
         else:
             start = next(
-                (r for r in self._history if r.final_result.run_id == run_id),
+                (r for r in self._records if r.final_result.run_id == run_id),
                 None,
             )
             if start is None:
@@ -1478,7 +1460,7 @@ class Agent(AtomicInvokable):
                 llm_records=metadata["llm_records"],
                 prev=turns[-1] if turns else None,
             )
-            self._history.append(record)
+            self._records.append(record)
 
         logger.info(f"[Async {self.full_name} finished]")
 
@@ -1615,7 +1597,7 @@ class Agent(AtomicInvokable):
                     llm_records=metadata["llm_records"],
                     prev=turns[-1] if turns else None,
                 )
-                self._history.append(record)
+                self._records.append(record)
 
             # Final logging.
             logger.info(f"[{self.full_name} finished]")
@@ -1626,15 +1608,7 @@ class Agent(AtomicInvokable):
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> Dict[str, Any]:
-        """Return a minimal diagnostic snapshot of this agent.
-
-        The `history` field is a rendered compatibility view. The `turn_history` field is
-        the canonical stored turn representation.
-        """
-        rendered_history: List[Dict[str, str]] = []
-        for turn in self._history:
-            rendered_history.extend(self.render_turn(turn))
-
+        """Return a minimal diagnostic snapshot of this agent."""
         d = super().to_dict()
         d.update({
             "role_prompt": self.role_prompt,
@@ -1647,7 +1621,6 @@ class Agent(AtomicInvokable):
             "history_window": self.history_window,
             "response_preview_limit": self.response_preview_limit,
             "assistant_response_source": self.assistant_response_source,
-            "history": rendered_history,
-            "turn_history": [turn.to_dict() for turn in self._history],
+            "records": [turn.to_dict() for turn in self._records],
         })
         return d

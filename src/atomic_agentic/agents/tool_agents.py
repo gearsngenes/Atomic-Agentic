@@ -2143,8 +2143,7 @@ class ToolAgent(Agent, ABC):
         """Return a diagnostic snapshot of this ToolAgent.
 
         Extends the base Agent snapshot with ToolAgent-specific toolbox and blackboard
-        diagnostics. The inherited `history` field remains a rendered compatibility
-        view, while `turn_history` remains the canonical stored turn representation.
+        diagnostics.
         """
         d = super().to_dict()
         d.update({

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import pprint
-import warnings
 from typing import Any
 from dotenv import load_dotenv
 
@@ -27,13 +26,11 @@ def summarize_result(*, result: str) -> dict[str, Any]:
 
 
 def main() -> None:
-    warnings.simplefilter("default", DeprecationWarning)
-
     engine = OpenAIEngine("gpt-4o-mini")
 
     agent = Agent(
         name="basic_turn_demo_agent",
-        description="Basic Agent demo showing raw/final turn history rendering.",
+        description="Basic Agent demo showing raw/final turn rendering.",
         llm_engine=engine,
         role_prompt="You are concise. Answer in one short sentence.",
         context_enabled=True,
@@ -52,8 +49,8 @@ def main() -> None:
     print("\n=== Final invoke() result after post_invoke ===")
     pprint.pp(result.result)
 
-    print("\n=== Canonical turn history: agent.turn_history ===")
-    for i, turn in enumerate(agent.turn_history):
+    print("\n=== Canonical turn history: agent.records ===")
+    for i, turn in enumerate(agent.records):
         print(f"\nTurn {i}")
         print("prompt:")
         pprint.pp(turn.user_prompt)
@@ -62,18 +59,18 @@ def main() -> None:
         print("final_response:")
         pprint.pp(turn.final_result)
 
-    print("\n=== Rendered history using raw assistant response ===")
+    print("\n=== Rendered turn using raw assistant response ===")
     agent.assistant_response_source = "raw"
-    pprint.pp(agent.history)
+    pprint.pp(agent.render_turn(agent.records[0]))
 
-    print("\n=== Rendered history using final assistant response ===")
+    print("\n=== Rendered turn using final assistant response ===")
     agent.assistant_response_source = "final"
-    pprint.pp(agent.history)
+    pprint.pp(agent.render_turn(agent.records[0]))
 
     print("\n=== Messages that would be sent on the next invoke ===")
     next_messages = agent.build_messages(
         system_prompt = agent.role_prompt,
-        turns = agent.turn_history,
+        turns = agent.records,
         prompt = "Now explain why turn-native memory is useful."
     )
     pprint.pp(next_messages)

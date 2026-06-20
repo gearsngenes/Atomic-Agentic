@@ -207,7 +207,7 @@ class TestAgentStructuredBasicPipeline:
 
         assert checkpoint.result.child_id == structured_agent.instance_id
         assert checkpoint.result.child_type == "StructuredInvokable"
-        assert agent.history == []
+        assert agent.records == []
 
     def test_structured_agent_can_feed_sequential_flow_step(self) -> None:
         _engine, _agent, structured_agent = make_structured_agent()
@@ -255,13 +255,6 @@ class TestAgentStructuredBasicPipeline:
         assert second.result["final"] == "ECHO: Write about second topic in a plain tone."
         assert len(flow.checkpoints) == 2
         assert len(engine.calls) == 2
-
-        assert [message["role"] for message in agent.history] == [
-            "user",
-            "assistant",
-            "user",
-            "assistant",
-        ]
 
         second_call_messages = engine.calls[1]
         assert [message["role"] for message in second_call_messages] == [

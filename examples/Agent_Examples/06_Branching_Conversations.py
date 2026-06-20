@@ -216,7 +216,7 @@ def main() -> None:
     # Reconstruct and display each branch chain
     # ------------------------------------------------------------------ #
     print(f"\n\n{'═' * _W}")
-    print(f"  BRANCH CHAINS  ({len(agent.turn_history)} records in flat history)")
+    print(f"  BRANCH CHAINS  ({len(agent.records)} records in flat history)")
     print(f"{'═' * _W}")
 
     print_chain(
@@ -236,7 +236,7 @@ def main() -> None:
     # Flat history — all records stored, regardless of branch
     # ------------------------------------------------------------------ #
     print(f"\n{'═' * _W}")
-    print(f"  Flat turn_history  —  {len(agent.turn_history)} records total")
+    print(f"  Flat records  —  {len(agent.records)} records total")
     print(f"{'═' * _W}")
     labels = {
         run_0:  "T0     root",
@@ -245,7 +245,7 @@ def main() -> None:
         run_b1: "T_B1   branch B — parallel fork from T0",
         run_f:  "T_F    fresh start",
     }
-    for i, record in enumerate(agent.turn_history):
+    for i, record in enumerate(agent.records):
         rid    = record.final_result.run_id
         parent = (
             f"{record.prev.final_result.run_id[:8]}..."
