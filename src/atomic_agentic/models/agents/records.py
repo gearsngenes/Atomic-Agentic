@@ -70,6 +70,13 @@ class AgentRecord:
     accounting; AgentRecord is the memory/rendering record. The completed
     record points to its AgentResult via ``final_result``.
 
+    Records form a singly-linked list via ``prev``: each committed record
+    points to the most recent record that was used as context when it was
+    created. ``prev=None`` marks a chain root (first invocation, or a fresh
+    start requested via ``continue_from="new"``). Walking ``prev`` backward
+    from any record reconstructs the exact conversation branch that produced
+    it.
+
     Fields
     ------
     user_prompt:
@@ -88,12 +95,18 @@ class AgentRecord:
         Complete record of every LLM generation that contributed to this
         invocation. Empty tuple during the draft phase; populated in the
         completion ``replace`` step after ``make_result`` runs.
+
+    prev:
+        The most recent ``AgentRecord`` that was used as context for this
+        invocation, or ``None`` if no prior context was used. Always points
+        to a completed (non-draft) record on any record committed to history.
     """
 
     user_prompt: str
     generated_response: Any
     final_result: AgentResult | None = None
     llm_records: tuple[LLMRecord, ...] = ()
+    prev: AgentRecord | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.user_prompt, str):
@@ -115,6 +128,12 @@ class AgentRecord:
                 )
         object.__setattr__(self, "llm_records", normalized)
 
+        if self.prev is not None and not isinstance(self.prev, AgentRecord):
+            raise TypeError(
+                f"AgentRecord.prev must be an AgentRecord or None, "
+                f"got {type(self.prev).__name__}."
+            )
+
     def to_dict(self) -> Dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         return {
@@ -122,6 +141,7 @@ class AgentRecord:
             "generated_response": self.generated_response,
             "final_result": self.final_result.to_dict() if self.final_result is not None else None,
             "llm_records": [r.to_dict() for r in self.llm_records],
+            "prev_run_id": self.prev.final_result.run_id if self.prev is not None else None,
         }
 
 

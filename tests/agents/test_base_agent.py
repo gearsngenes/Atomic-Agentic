@@ -236,6 +236,7 @@ class TestAgentPipeline:
         assert [(param.name, param.kind, param.default) for param in agent.parameters] == [
             ("topic", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
+            ("continue_from", "KEYWORD_ONLY", None),
         ]
         assert agent.return_type == "dict[str, Any]"
 
@@ -251,6 +252,7 @@ class TestAgentSchemaComposition:
             ("topic", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
             ("suffix", "KEYWORD_ONLY", NO_VAL),
+            ("continue_from", "KEYWORD_ONLY", None),
         ]
 
     def test_post_only_passthrough_preserves_post_default(self) -> None:
@@ -821,7 +823,7 @@ class TestAgentMutableRuntimeProperties:
     def test_constructor_with_custom_pre_invoke_builds_parameters(self) -> None:
         agent = make_agent(pre_invoke=pre_with_two_fields)
 
-        assert [param.name for param in agent.parameters] == ["subject", "style"]
+        assert [param.name for param in agent.parameters] == ["subject", "style", "continue_from"]
         assert agent.invoke({"subject": "pytest", "style": "direct"}).result == {
             "final": "ECHO: pytest:direct",
             "length": len("ECHO: pytest:direct"),
@@ -875,7 +877,7 @@ class TestAgentMutableRuntimeProperties:
         assert tool.namespace == "tests"
         assert tool.description == "Custom preprocessor."
 
-        assert [param.name for param in agent.parameters] == ["subject", "style"]
+        assert [param.name for param in agent.parameters] == ["subject", "style", "continue_from"]
         assert agent.invoke({"subject": "pytest", "style": "direct"}).result == {
             "final": "ECHO: pytest:direct",
             "length": len("ECHO: pytest:direct"),
@@ -1096,3 +1098,397 @@ class TestAgentDraftRecordContract:
             match=r"_ainvoke returned non-AgentRecord draft \(type=<class 'dict'>\)",
         ):
             asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper for history tests
+# ---------------------------------------------------------------------------
+
+def invoke_and_get_record(agent: Agent, prompt: str) -> AgentRecord:
+    """Invoke the agent with a single-prompt input and return the committed record."""
+    agent.invoke({"prompt": prompt})
+    return agent.turn_history[-1]
+
+
+def pre_with_varkw(**kwargs: Any) -> str:
+    """Pre-invoke that accepts any keyword arguments; used for varkw schema tests."""
+    return str(kwargs)
+
+
+# ---------------------------------------------------------------------------
+# TestAgentContinueFromSchema
+# ---------------------------------------------------------------------------
+
+class TestAgentContinueFromSchema:
+    """Tests for the reserved ``continue_from`` parameter in the Agent schema."""
+
+    def test_continue_from_present_in_parameters(self) -> None:
+        agent = make_agent()
+        assert any(p.name == "continue_from" for p in agent.parameters)
+
+    def test_continue_from_is_keyword_only(self) -> None:
+        agent = make_agent()
+        param = next(p for p in agent.parameters if p.name == "continue_from")
+        assert param.kind == "KEYWORD_ONLY"
+
+    def test_continue_from_default_is_none(self) -> None:
+        agent = make_agent()
+        param = next(p for p in agent.parameters if p.name == "continue_from")
+        assert param.default is None
+
+    def test_continue_from_type_annotation(self) -> None:
+        agent = make_agent()
+        param = next(p for p in agent.parameters if p.name == "continue_from")
+        assert param.type == "str | None"
+
+    def test_continue_from_with_custom_pre_invoke(self) -> None:
+        agent = make_agent(pre_invoke=build_prompt)
+        assert any(p.name == "continue_from" for p in agent.parameters)
+
+    def test_continue_from_with_varkw_pre_invoke(self) -> None:
+        # continue_from must be inserted before **kwargs, not appended after.
+        agent = make_agent(pre_invoke=pre_with_varkw, post_invoke=None)
+        names = [p.name for p in agent.parameters]
+        assert "continue_from" in names
+        cf_idx = names.index("continue_from")
+        # Find **kwargs position
+        varkw_idx = next(
+            (i for i, p in enumerate(agent.parameters) if p.kind == "VAR_KEYWORD"),
+            None,
+        )
+        assert varkw_idx is not None
+        assert cf_idx < varkw_idx
+
+    def test_continue_from_conflict_raises_agent_error(self) -> None:
+        def conflicting_pre(continue_from: str) -> str:
+            return continue_from
+
+        with pytest.raises(AgentError, match="reserved"):
+            make_agent(pre_invoke=conflicting_pre)
+
+    def test_continue_from_not_in_pre_inputs(self) -> None:
+        received_pre_inputs: list[dict[str, Any]] = []
+
+        def capturing_pre(prompt: str) -> str:
+            received_pre_inputs.append({"prompt": prompt})
+            return prompt
+
+        engine = StatefulEchoLLMEngine()
+        agent = make_agent(engine=engine, pre_invoke=capturing_pre, post_invoke=None, context_enabled=True)
+        agent.invoke({"prompt": "hello", "continue_from": "new"})
+
+        assert received_pre_inputs
+        assert "continue_from" not in received_pre_inputs[-1]
+
+    def test_continue_from_not_in_post_inputs(self) -> None:
+        received_post_inputs: list[dict[str, Any]] = []
+
+        def capturing_post(result: str) -> str:
+            received_post_inputs.append({"result": result})
+            return result
+
+        engine = StatefulEchoLLMEngine()
+        agent = make_agent(engine=engine, pre_invoke=None, post_invoke=capturing_post, context_enabled=True)
+        agent.invoke({"prompt": "hello", "continue_from": "new"})
+
+        assert received_post_inputs
+        assert "continue_from" not in received_post_inputs[-1]
+
+    def test_continue_from_survives_filter_extraneous_inputs_true(self) -> None:
+        # With filter_extraneous_inputs=True, continue_from is a declared
+        # parameter and must not be stripped as extraneous.
+        engine = StatefulEchoLLMEngine()
+        agent = Agent(
+            name="strict_agent",
+            description="Strict filter agent.",
+            llm_engine=engine,
+            filter_extraneous_inputs=True,
+            context_enabled=True,
+        )
+        # Should not raise; continue_from="new" means no prior turns used.
+        agent.invoke({"prompt": "hello", "continue_from": "new"})
+        assert len(agent.turn_history) == 1
+        assert agent.turn_history[0].prev is None
+
+
+# ---------------------------------------------------------------------------
+# TestAgentGetConversation
+# ---------------------------------------------------------------------------
+
+class TestAgentGetConversation:
+    """Tests for ``Agent.get_conversation``."""
+
+    def _make_history_agent(self, history_window: int | None = None) -> Agent:
+        return make_agent(pre_invoke=None, post_invoke=None, context_enabled=True, history_window=history_window)
+
+    def test_get_conversation_turns_zero_raises_value_error(self) -> None:
+        agent = self._make_history_agent()
+        with pytest.raises(ValueError, match="turns"):
+            agent.get_conversation(turns=0)
+
+    def test_get_conversation_empty_history_returns_empty_list(self) -> None:
+        agent = self._make_history_agent()
+        assert agent.get_conversation() == []
+
+    def test_get_conversation_no_run_id_returns_latest_chain(self) -> None:
+        agent = self._make_history_agent()
+        invoke_and_get_record(agent, "first")
+        invoke_and_get_record(agent, "second")
+        invoke_and_get_record(agent, "third")
+
+        chain = agent.get_conversation()
+        assert len(chain) == 3
+        assert chain[-1] is agent.turn_history[-1]
+        # oldest-first
+        assert chain[0] is agent.turn_history[0]
+
+    def test_get_conversation_turns_limit(self) -> None:
+        agent = self._make_history_agent()
+        for i in range(5):
+            invoke_and_get_record(agent, f"turn {i}")
+
+        chain = agent.get_conversation(turns=3)
+        assert len(chain) == 3
+        # Should be the 3 most recent, oldest-first
+        assert chain[-1] is agent.turn_history[-1]
+        assert chain[0] is agent.turn_history[2]
+
+    def test_get_conversation_turns_none_returns_full_chain(self) -> None:
+        agent = self._make_history_agent()
+        for i in range(4):
+            invoke_and_get_record(agent, f"turn {i}")
+
+        chain = agent.get_conversation(turns=None)
+        assert len(chain) == 4
+
+    def test_get_conversation_oldest_first_ordering(self) -> None:
+        agent = self._make_history_agent()
+        invoke_and_get_record(agent, "alpha")
+        invoke_and_get_record(agent, "beta")
+        invoke_and_get_record(agent, "gamma")
+
+        chain = agent.get_conversation()
+        assert chain[0].final_result is agent.turn_history[0].final_result
+
+    def test_get_conversation_run_id_finds_correct_record(self) -> None:
+        agent = self._make_history_agent()
+        invoke_and_get_record(agent, "first")
+        invoke_and_get_record(agent, "second")
+        invoke_and_get_record(agent, "third")
+
+        middle_run_id = agent.turn_history[1].final_result.run_id
+        chain = agent.get_conversation(run_id=middle_run_id)
+        # Walking from second: second.prev = first, first.prev = None
+        assert len(chain) == 2
+        assert chain[0] is agent.turn_history[0]
+        assert chain[1] is agent.turn_history[1]
+
+    def test_get_conversation_unresolvable_run_id_raises(self) -> None:
+        agent = self._make_history_agent()
+        invoke_and_get_record(agent, "only")
+
+        with pytest.raises(AgentInvocationError, match="run_id"):
+            agent.get_conversation(run_id="not-a-real-id")
+
+    def test_get_conversation_single_record(self) -> None:
+        agent = self._make_history_agent()
+        invoke_and_get_record(agent, "only")
+
+        chain = agent.get_conversation()
+        assert len(chain) == 1
+        assert chain[0] is agent.turn_history[0]
+
+    def test_get_conversation_branched_history(self) -> None:
+        agent = self._make_history_agent()
+        # root → child A (normal) → root B (fresh start)
+        invoke_and_get_record(agent, "root")
+        root_run_id = agent.turn_history[0].final_result.run_id
+
+        invoke_and_get_record(agent, "child A")
+        child_a_run_id = agent.turn_history[1].final_result.run_id
+
+        agent.invoke({"prompt": "root B", "continue_from": "new"})
+        root_b_run_id = agent.turn_history[2].final_result.run_id
+
+        chain_a = agent.get_conversation(run_id=child_a_run_id)
+        assert len(chain_a) == 2
+        assert chain_a[0].final_result.run_id == root_run_id
+        assert chain_a[1].final_result.run_id == child_a_run_id
+
+        chain_b = agent.get_conversation(run_id=root_b_run_id)
+        assert len(chain_b) == 1
+        assert chain_b[0].final_result.run_id == root_b_run_id
+
+    def test_get_conversation_chain_shorter_than_turns_limit(self) -> None:
+        agent = self._make_history_agent()
+        invoke_and_get_record(agent, "first")
+        invoke_and_get_record(agent, "second")
+
+        chain = agent.get_conversation(turns=10)
+        assert len(chain) == 2
+
+
+# ---------------------------------------------------------------------------
+# TestAgentContinueFromInvoke
+# ---------------------------------------------------------------------------
+
+class TestAgentContinueFromInvoke:
+    """Tests for ``continue_from`` behavior in ``invoke`` and ``async_invoke``."""
+
+    def _make_ctx_agent(
+        self,
+        engine: StatefulEchoLLMEngine | None = None,
+        history_window: int | None = None,
+    ) -> Agent:
+        return make_agent(
+            engine=engine or StatefulEchoLLMEngine(),
+            pre_invoke=None,
+            post_invoke=None,
+            context_enabled=True,
+            history_window=history_window,
+        )
+
+    def test_continue_from_none_uses_history_window(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = self._make_ctx_agent(engine=engine, history_window=2)
+
+        for i in range(4):
+            agent.invoke({"prompt": f"turn {i}"})
+
+        # 5th call with continue_from=None (default): should see exactly 2 prior turns
+        agent.invoke({"prompt": "fifth", "continue_from": None})
+
+        last_call = engine.calls[-1]
+        # system + 2 prior user/assistant pairs + current user = 6 messages
+        assert len(last_call) == 6
+        roles = [m["role"] for m in last_call]
+        assert roles == ["system", "user", "assistant", "user", "assistant", "user"]
+
+    def test_continue_from_new_produces_empty_turns(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = self._make_ctx_agent(engine=engine, history_window=None)
+
+        agent.invoke({"prompt": "first"})
+        agent.invoke({"prompt": "second"})
+        agent.invoke({"prompt": "third", "continue_from": "new"})
+
+        last_call = engine.calls[-1]
+        # Only system + current user message
+        assert len(last_call) == 2
+        assert last_call[0]["role"] == "system"
+        assert last_call[1]["role"] == "user"
+        assert last_call[1]["content"] == "third"
+
+    def test_continue_from_new_record_has_prev_none(self) -> None:
+        agent = self._make_ctx_agent()
+
+        agent.invoke({"prompt": "first"})
+        agent.invoke({"prompt": "second", "continue_from": "new"})
+
+        assert agent.turn_history[-1].prev is None
+
+    def test_continue_from_new_history_still_appended(self) -> None:
+        agent = self._make_ctx_agent()
+
+        agent.invoke({"prompt": "first"})
+        before = len(agent.turn_history)
+        agent.invoke({"prompt": "second", "continue_from": "new"})
+
+        assert len(agent.turn_history) == before + 1
+
+    def test_continue_from_new_parallel_branches(self) -> None:
+        agent = self._make_ctx_agent()
+
+        agent.invoke({"prompt": "root"})
+        agent.invoke({"prompt": "branch A", "continue_from": "new"})
+        agent.invoke({"prompt": "branch B", "continue_from": "new"})
+
+        assert len(agent.turn_history) == 3
+        assert agent.turn_history[1].prev is None
+        assert agent.turn_history[2].prev is None
+
+    def test_continue_from_valid_run_id_selects_branch(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = self._make_ctx_agent(engine=engine, history_window=None)
+
+        agent.invoke({"prompt": "root A"})
+        root_a_run_id = agent.turn_history[0].final_result.run_id
+
+        agent.invoke({"prompt": "root B", "continue_from": "new"})
+
+        agent.invoke({"prompt": "child of A", "continue_from": root_a_run_id})
+
+        # The last call should include root A's user message but not root B's
+        last_call = engine.calls[-1]
+        contents = [m["content"] for m in last_call]
+        assert any("root A" in c for c in contents)
+        assert not any("root B" in c for c in contents)
+
+    def test_continue_from_invalid_run_id_raises_at_invoke(self) -> None:
+        agent = self._make_ctx_agent()
+
+        agent.invoke({"prompt": "first"})
+
+        with pytest.raises(AgentInvocationError):
+            agent.invoke({"prompt": "second", "continue_from": "bad-id"})
+
+    def test_prev_stamped_when_turns_nonempty(self) -> None:
+        agent = self._make_ctx_agent()
+
+        agent.invoke({"prompt": "first"})
+        agent.invoke({"prompt": "second"})
+
+        first_record = agent.turn_history[0]
+        second_record = agent.turn_history[1]
+        assert second_record.prev is first_record
+
+    def test_prev_none_when_context_disabled(self) -> None:
+        # context_enabled=False: no history is stored at all
+        agent = make_agent(pre_invoke=None, post_invoke=None, context_enabled=False)
+        agent.invoke({"prompt": "only"})
+        assert len(agent.turn_history) == 0
+
+    def test_prev_none_when_history_window_zero(self) -> None:
+        agent = self._make_ctx_agent(history_window=0)
+
+        agent.invoke({"prompt": "first"})
+        agent.invoke({"prompt": "second"})
+
+        assert agent.turn_history[1].prev is None
+
+    def test_prev_none_on_first_invocation(self) -> None:
+        agent = self._make_ctx_agent()
+        agent.invoke({"prompt": "only"})
+        assert agent.turn_history[0].prev is None
+
+    def test_async_invoke_continue_from_new_parity(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = self._make_ctx_agent(engine=engine, history_window=None)
+
+        asyncio.run(agent.async_invoke({"prompt": "first"}))
+        asyncio.run(agent.async_invoke({"prompt": "second"}))
+        asyncio.run(agent.async_invoke({"prompt": "third", "continue_from": "new"}))
+
+        last_call = engine.calls[-1]
+        assert len(last_call) == 2
+        assert last_call[0]["role"] == "system"
+        assert last_call[1]["content"] == "third"
+        assert agent.turn_history[-1].prev is None
+
+    def test_async_invoke_branching_parity(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = self._make_ctx_agent(engine=engine, history_window=None)
+
+        asyncio.run(agent.async_invoke({"prompt": "root A"}))
+        root_a_run_id = agent.turn_history[0].final_result.run_id
+
+        asyncio.run(agent.async_invoke({"prompt": "root B", "continue_from": "new"}))
+
+        asyncio.run(
+            agent.async_invoke({"prompt": "child of A", "continue_from": root_a_run_id})
+        )
+
+        last_call = engine.calls[-1]
+        contents = [m["content"] for m in last_call]
+        assert any("root A" in c for c in contents)
+        assert not any("root B" in c for c in contents)

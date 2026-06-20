@@ -686,6 +686,29 @@ class Agent(AtomicInvokable):
                     + composed_parameters[varkw_index:]
                 )
 
+        # Reserve continue_from as a framework-level input parameter.
+        existing_names = {p.name for p in composed_parameters}
+        if "continue_from" in existing_names:
+            raise AgentError(
+                "'continue_from' is a reserved Agent input parameter; "
+                "pre_invoke may not declare a parameter with that name."
+            )
+        _varkw_idx = next(
+            (i for i, p in enumerate(composed_parameters) if p.kind == ParamSpec.VAR_KEYWORD),
+            None,
+        )
+        _continue_from_param = ParamSpec(
+            name="continue_from",
+            index=0,
+            kind=ParamSpec.KEYWORD_ONLY,
+            type="str | None",
+            default=None,
+        )
+        if _varkw_idx is None:
+            composed_parameters.append(_continue_from_param)
+        else:
+            composed_parameters.insert(_varkw_idx, _continue_from_param)
+
         return [
             ParamSpec(
                 name=param.name,
@@ -1277,6 +1300,81 @@ class Agent(AtomicInvokable):
         """Clear the stored turn history."""
         self._history.clear()
 
+    def get_conversation(
+        self,
+        run_id: str | None = None,
+        turns: int | None = None,
+    ) -> list[AgentRecord]:
+        """Walk the ``prev`` chain backward from a target record and return it oldest-first.
+
+        This is the canonical entry point for branch-aware turn selection. Linear
+        history (no branching) degenerates to a reversed tail-slice. Branched
+        history returns only the records on the chain leading to the target record,
+        not siblings committed via a different ``continue_from`` invocation.
+
+        Parameters
+        ----------
+        run_id:
+            ``run_id`` of the target record to start the walk from. If ``None``,
+            the walk starts from the most recently committed record. If provided
+            and not found in history, ``AgentInvocationError`` is raised.
+        turns:
+            Maximum number of records to return. ``None`` means return the full
+            chain from the target record back to the root. ``0`` is not valid and
+            always raises ``ValueError`` before any history check.
+
+        Returns
+        -------
+        list[AgentRecord]
+            Records in oldest-first order (i.e. ``list[0]`` is the chain root or
+            earliest record within the requested window).
+
+        Raises
+        ------
+        ValueError
+            If ``turns == 0``.
+        AgentInvocationError
+            If ``run_id`` is provided and no record with that ``run_id`` exists
+            in history.
+        """
+        # 1. turns=0 is always invalid.
+        if turns == 0:
+            raise ValueError(
+                "get_conversation: turns must be a positive integer or None; "
+                "0 is not valid (the method always returns at least the target record)."
+            )
+
+        # 2. Empty history with no specific run_id → nothing to walk.
+        if not self._history:
+            return []
+
+        # 3. Resolve the starting record.
+        if run_id is None:
+            start = self._history[-1]
+        else:
+            start = next(
+                (r for r in self._history if r.final_result.run_id == run_id),
+                None,
+            )
+            if start is None:
+                raise AgentInvocationError(
+                    f"get_conversation: no record with run_id {run_id!r} "
+                    "found in agent history."
+                )
+
+        # 4. Walk the prev chain backward, collecting up to `turns` records.
+        chain: list[AgentRecord] = []
+        current: AgentRecord | None = start
+        while current is not None:
+            chain.append(current)
+            if turns is not None and len(chain) >= turns:
+                break
+            current = current.prev
+
+        # 5. Reverse to oldest-first order and return.
+        chain.reverse()
+        return chain
+
     async def async_invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Async analog of ``Agent.invoke``.
 
@@ -1309,6 +1407,9 @@ class Agent(AtomicInvokable):
         started_at = datetime.now(timezone.utc)
 
         inputs = self.filter_inputs(inputs)
+        # Site A: pop continue_from before _split_inputs so it is not forwarded
+        # to pre_invoke or post_invoke.
+        continue_from = inputs.pop("continue_from", None)
         pre_inputs, post_inputs = self._split_inputs(inputs)
 
         try:
@@ -1325,14 +1426,15 @@ class Agent(AtomicInvokable):
                 f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
             )
 
-        # Select prior turns for the protected invocation path.
+        # Site B: chain-aware turn selection replacing the inline tail-slice.
         logger.debug(f"Agent.{self.name} selecting turns for class '{type(self).__name__}'")
-        turns = []
-        if self._context_enabled:
-            if self._history_window is None:
-                turns = self._history
-            else:
-                turns = self._history[-self._history_window :] if self._history_window > 0 else []
+        turns: list[AgentRecord] = []
+        if self._context_enabled and continue_from != "new":
+            if self._history_window != 0:
+                turns = self.get_conversation(
+                    run_id=continue_from,
+                    turns=self._history_window,
+                )
 
         # Delegate selected turns and current prompt to the protected core logic.
         # Returns a 2-tuple: draft AgentRecord (final_result=None) + metadata dict.
@@ -1367,9 +1469,15 @@ class Agent(AtomicInvokable):
         )
 
         # Complete and store the canonical record only when memory is kept.
+        # Site C: stamp prev with the most recent turn used as context.
         if self._context_enabled:
             logger.debug(f"Agent.{self.name} updating history")
-            record = replace(draft, final_result=agent_result, llm_records=metadata["llm_records"])
+            record = replace(
+                draft,
+                final_result=agent_result,
+                llm_records=metadata["llm_records"],
+                prev=turns[-1] if turns else None,
+            )
             self._history.append(record)
 
         logger.info(f"[Async {self.full_name} finished]")
@@ -1432,6 +1540,9 @@ class Agent(AtomicInvokable):
 
             # Filter inputs.
             inputs = self.filter_inputs(inputs)
+            # Site A: pop continue_from before _split_inputs so it is not
+            # forwarded to pre_invoke or post_invoke.
+            continue_from = inputs.pop("continue_from", None)
             pre_inputs, post_inputs = self._split_inputs(inputs)
 
             # Preprocess inputs to prompt string.
@@ -1449,14 +1560,15 @@ class Agent(AtomicInvokable):
                     f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
                 )
 
-            # Select prior turns for the protected invocation path.
+            # Site B: chain-aware turn selection replacing the inline tail-slice.
             logger.debug(f"Agent.{self.name} selecting turns for class '{type(self).__name__}'")
-            turns = []
-            if self._context_enabled:
-                if self._history_window is None:
-                    turns = self._history
-                else:
-                    turns = self._history[-self._history_window :] if self._history_window > 0 else []
+            turns: list[AgentRecord] = []
+            if self._context_enabled and continue_from != "new":
+                if self._history_window != 0:
+                    turns = self.get_conversation(
+                        run_id=continue_from,
+                        turns=self._history_window,
+                    )
 
             # Delegate selected turns and current prompt to the protected core
             # logic. Returns a 2-tuple: draft AgentRecord (final_result=None)
@@ -1494,9 +1606,15 @@ class Agent(AtomicInvokable):
             )
 
             # Complete and store the canonical record only when memory is kept.
+            # Site C: stamp prev with the most recent turn used as context.
             if self._context_enabled:
                 logger.debug(f"Agent.{self.name} updating history")
-                record = replace(draft, final_result=agent_result, llm_records=metadata["llm_records"])
+                record = replace(
+                    draft,
+                    final_result=agent_result,
+                    llm_records=metadata["llm_records"],
+                    prev=turns[-1] if turns else None,
+                )
                 self._history.append(record)
 
             # Final logging.

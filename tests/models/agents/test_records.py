@@ -184,6 +184,7 @@ class TestAgentRecord:
             "generated_response": "raw",
             "final_result": None,
             "llm_records": [],
+            "prev_run_id": None,
         }
 
     def test_to_dict_with_agent_result(self) -> None:
@@ -249,6 +250,42 @@ class TestAgentRecord:
         assert isinstance(d["llm_records"], list)
         assert d["llm_records"] == [llm_rec.to_dict()]
 
+    def test_prev_defaults_to_none(self) -> None:
+        record = AgentRecord(user_prompt="x", generated_response="y")
+        assert record.prev is None
+
+    def test_prev_accepts_agent_record_instance(self) -> None:
+        completed = AgentRecord(
+            user_prompt="first",
+            generated_response="response",
+            final_result=make_agent_result(),
+        )
+        record = AgentRecord(user_prompt="second", generated_response="r2", prev=completed)
+        assert record.prev is completed
+
+    def test_prev_rejects_non_agent_record(self) -> None:
+        with pytest.raises(TypeError, match="prev"):
+            AgentRecord(user_prompt="x", generated_response="y", prev="bad")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("bad_prev", [0, "string", object(), []])
+    def test_prev_rejects_non_agent_record_parametrize(self, bad_prev: Any) -> None:
+        with pytest.raises(TypeError, match="prev"):
+            AgentRecord(user_prompt="x", generated_response="y", prev=bad_prev)  # type: ignore[arg-type]
+
+    def test_to_dict_prev_run_id_is_none_when_no_prev(self) -> None:
+        record = AgentRecord(user_prompt="x", generated_response="y")
+        assert record.to_dict()["prev_run_id"] is None
+
+    def test_to_dict_prev_run_id_matches_prev_final_result_run_id(self) -> None:
+        agent_result = make_agent_result()
+        prev_record = AgentRecord(
+            user_prompt="first",
+            generated_response="r1",
+            final_result=agent_result,
+        )
+        record = AgentRecord(user_prompt="second", generated_response="r2", prev=prev_record)
+        assert record.to_dict()["prev_run_id"] == agent_result.run_id
+
 
 class TestToolAgentRecord:
     def test_is_an_agent_record(self) -> None:
@@ -272,6 +309,7 @@ class TestToolAgentRecord:
             "generated_response": 42,
             "final_result": None,
             "llm_records": [],
+            "prev_run_id": None,
         }
 
     def test_blackboard_span_defaults_to_none(self) -> None:
