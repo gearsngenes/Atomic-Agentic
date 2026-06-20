@@ -158,7 +158,7 @@ def make_agent(
     *,
     engine: StatefulEchoLLMEngine | None = None,
     context_enabled: bool = False,
-    history_window: int | None = None,
+    records_window: int | None = None,
     pre_invoke: Any = build_prompt,
     post_invoke: Any = package_response,
     post_result_key: str | None = None,
@@ -171,7 +171,7 @@ def make_agent(
         llm_engine=engine or StatefulEchoLLMEngine(),
         role_prompt=role_prompt,
         context_enabled=context_enabled,
-        history_window=history_window,
+        records_window=records_window,
         pre_invoke=pre_invoke,
         post_invoke=post_invoke,
         post_result_key=post_result_key,
@@ -466,12 +466,12 @@ class TestAgentContext:
         assert second_call_messages[2]["content"] == "ECHO: Write about pytest in a strict tone."
         assert second_call_messages[3]["content"] == "Write about agents in a concise tone."
 
-    def test_history_window_none_sends_all_prior_turns(self) -> None:
+    def test_records_window_none_sends_all_prior_turns(self) -> None:
         engine = StatefulEchoLLMEngine()
         agent = make_agent(
             engine=engine,
             context_enabled=True,
-            history_window=None,
+            records_window=None,
         )
 
         agent.invoke({"topic": "first topic", "tone": "plain"})
@@ -493,12 +493,12 @@ class TestAgentContext:
         assert "second topic" in joined_contents
         assert "third topic" in joined_contents
 
-    def test_history_window_one_sends_only_last_prior_turn(self) -> None:
+    def test_records_window_one_sends_only_last_prior_turn(self) -> None:
         engine = StatefulEchoLLMEngine()
         agent = make_agent(
             engine=engine,
             context_enabled=True,
-            history_window=1,
+            records_window=1,
         )
 
         agent.invoke({"topic": "first topic", "tone": "plain"})
@@ -518,12 +518,12 @@ class TestAgentContext:
         assert "second topic" in joined_contents
         assert "third topic" in joined_contents
 
-    def test_history_window_zero_sends_no_prior_turns_but_still_stores_history(self) -> None:
+    def test_records_window_zero_sends_no_prior_turns_but_still_stores_history(self) -> None:
         engine = StatefulEchoLLMEngine()
         agent = make_agent(
             engine=engine,
             context_enabled=True,
-            history_window=0,
+            records_window=0,
         )
 
         agent.invoke({"topic": "first topic", "tone": "plain"})
@@ -584,15 +584,15 @@ class TestAgentValidation:
         with pytest.raises(ValueError, match="context_enabled"):
             agent.context_enabled = "yes"  # type: ignore[assignment]
 
-    def test_history_window_setter_rejects_negative_values(self) -> None:
+    def test_records_window_setter_rejects_negative_values(self) -> None:
         agent = make_agent()
 
-        with pytest.raises(ValueError, match="history_window"):
-            agent.history_window = -1
+        with pytest.raises(ValueError, match="records_window"):
+            agent.records_window = -1
 
-    def test_constructor_rejects_negative_history_window(self) -> None:
-        with pytest.raises(AgentError, match="history_window"):
-            make_agent(history_window=-1)
+    def test_constructor_rejects_negative_records_window(self) -> None:
+        with pytest.raises(AgentError, match="records_window"):
+            make_agent(records_window=-1)
 
     def test_llm_engine_setter_rejects_non_llm_engine(self) -> None:
         agent = make_agent()
@@ -607,7 +607,7 @@ class TestAgentSerialization:
         agent = make_agent(
             engine=engine,
             context_enabled=True,
-            history_window=1,
+            records_window=1,
         )
 
         agent.invoke({"topic": "pytest", "tone": "strict"})
@@ -619,7 +619,7 @@ class TestAgentSerialization:
         assert data["description"] == "Deterministic writer test agent."
         assert data["role_prompt"] == ROLE_PROMPT
         assert data["context_enabled"] is True
-        assert data["history_window"] == 1
+        assert data["records_window"] == 1
         assert data["records"] == [turn.to_dict() for turn in agent.records]
 
         assert data["pre_invoke"]["name"] == "pre_invoke"
@@ -1174,20 +1174,20 @@ class TestAgentContinueFromSchema:
 class TestAgentGetConversation:
     """Tests for ``Agent.get_conversation``."""
 
-    def _make_history_agent(self, history_window: int | None = None) -> Agent:
-        return make_agent(pre_invoke=None, post_invoke=None, context_enabled=True, history_window=history_window)
+    def _make_records_agent(self, records_window: int | None = None) -> Agent:
+        return make_agent(pre_invoke=None, post_invoke=None, context_enabled=True, records_window=records_window)
 
     def test_get_conversation_turns_zero_raises_value_error(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         with pytest.raises(ValueError, match="turns"):
             agent.get_conversation(turns=0)
 
     def test_get_conversation_empty_history_returns_empty_list(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         assert agent.get_conversation() == []
 
     def test_get_conversation_no_run_id_returns_latest_chain(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         invoke_and_get_record(agent, "first")
         invoke_and_get_record(agent, "second")
         invoke_and_get_record(agent, "third")
@@ -1199,7 +1199,7 @@ class TestAgentGetConversation:
         assert chain[0] is agent.records[0]
 
     def test_get_conversation_turns_limit(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         for i in range(5):
             invoke_and_get_record(agent, f"turn {i}")
 
@@ -1210,7 +1210,7 @@ class TestAgentGetConversation:
         assert chain[0] is agent.records[2]
 
     def test_get_conversation_turns_none_returns_full_chain(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         for i in range(4):
             invoke_and_get_record(agent, f"turn {i}")
 
@@ -1218,7 +1218,7 @@ class TestAgentGetConversation:
         assert len(chain) == 4
 
     def test_get_conversation_oldest_first_ordering(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         invoke_and_get_record(agent, "alpha")
         invoke_and_get_record(agent, "beta")
         invoke_and_get_record(agent, "gamma")
@@ -1227,7 +1227,7 @@ class TestAgentGetConversation:
         assert chain[0].final_result is agent.records[0].final_result
 
     def test_get_conversation_run_id_finds_correct_record(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         invoke_and_get_record(agent, "first")
         invoke_and_get_record(agent, "second")
         invoke_and_get_record(agent, "third")
@@ -1240,14 +1240,14 @@ class TestAgentGetConversation:
         assert chain[1] is agent.records[1]
 
     def test_get_conversation_unresolvable_run_id_raises(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         invoke_and_get_record(agent, "only")
 
         with pytest.raises(AgentInvocationError, match="run_id"):
             agent.get_conversation(run_id="not-a-real-id")
 
     def test_get_conversation_single_record(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         invoke_and_get_record(agent, "only")
 
         chain = agent.get_conversation()
@@ -1255,7 +1255,7 @@ class TestAgentGetConversation:
         assert chain[0] is agent.records[0]
 
     def test_get_conversation_branched_history(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         # root → child A (normal) → root B (fresh start)
         invoke_and_get_record(agent, "root")
         root_run_id = agent.records[0].final_result.run_id
@@ -1276,7 +1276,7 @@ class TestAgentGetConversation:
         assert chain_b[0].final_result.run_id == root_b_run_id
 
     def test_get_conversation_chain_shorter_than_turns_limit(self) -> None:
-        agent = self._make_history_agent()
+        agent = self._make_records_agent()
         invoke_and_get_record(agent, "first")
         invoke_and_get_record(agent, "second")
 
@@ -1294,19 +1294,19 @@ class TestAgentContinueFromInvoke:
     def _make_ctx_agent(
         self,
         engine: StatefulEchoLLMEngine | None = None,
-        history_window: int | None = None,
+        records_window: int | None = None,
     ) -> Agent:
         return make_agent(
             engine=engine or StatefulEchoLLMEngine(),
             pre_invoke=None,
             post_invoke=None,
             context_enabled=True,
-            history_window=history_window,
+            records_window=records_window,
         )
 
-    def test_continue_from_none_uses_history_window(self) -> None:
+    def test_continue_from_none_uses_records_window(self) -> None:
         engine = StatefulEchoLLMEngine()
-        agent = self._make_ctx_agent(engine=engine, history_window=2)
+        agent = self._make_ctx_agent(engine=engine, records_window=2)
 
         for i in range(4):
             agent.invoke({"prompt": f"turn {i}"})
@@ -1322,7 +1322,7 @@ class TestAgentContinueFromInvoke:
 
     def test_continue_from_new_produces_empty_turns(self) -> None:
         engine = StatefulEchoLLMEngine()
-        agent = self._make_ctx_agent(engine=engine, history_window=None)
+        agent = self._make_ctx_agent(engine=engine, records_window=None)
 
         agent.invoke({"prompt": "first"})
         agent.invoke({"prompt": "second"})
@@ -1365,7 +1365,7 @@ class TestAgentContinueFromInvoke:
 
     def test_continue_from_valid_run_id_selects_branch(self) -> None:
         engine = StatefulEchoLLMEngine()
-        agent = self._make_ctx_agent(engine=engine, history_window=None)
+        agent = self._make_ctx_agent(engine=engine, records_window=None)
 
         agent.invoke({"prompt": "root A"})
         root_a_run_id = agent.records[0].final_result.run_id
@@ -1404,8 +1404,8 @@ class TestAgentContinueFromInvoke:
         agent.invoke({"prompt": "only"})
         assert len(agent.records) == 0
 
-    def test_prev_none_when_history_window_zero(self) -> None:
-        agent = self._make_ctx_agent(history_window=0)
+    def test_prev_none_when_records_window_zero(self) -> None:
+        agent = self._make_ctx_agent(records_window=0)
 
         agent.invoke({"prompt": "first"})
         agent.invoke({"prompt": "second"})
@@ -1419,7 +1419,7 @@ class TestAgentContinueFromInvoke:
 
     def test_async_invoke_continue_from_new_parity(self) -> None:
         engine = StatefulEchoLLMEngine()
-        agent = self._make_ctx_agent(engine=engine, history_window=None)
+        agent = self._make_ctx_agent(engine=engine, records_window=None)
 
         asyncio.run(agent.async_invoke({"prompt": "first"}))
         asyncio.run(agent.async_invoke({"prompt": "second"}))
@@ -1433,7 +1433,7 @@ class TestAgentContinueFromInvoke:
 
     def test_async_invoke_branching_parity(self) -> None:
         engine = StatefulEchoLLMEngine()
-        agent = self._make_ctx_agent(engine=engine, history_window=None)
+        agent = self._make_ctx_agent(engine=engine, records_window=None)
 
         asyncio.run(agent.async_invoke({"prompt": "root A"}))
         root_a_run_id = agent.records[0].final_result.run_id

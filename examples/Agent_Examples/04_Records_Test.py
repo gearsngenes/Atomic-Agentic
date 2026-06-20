@@ -34,7 +34,7 @@ def main() -> None:
         llm_engine=engine,
         role_prompt="You are concise. Answer in one short sentence.",
         context_enabled=True,
-        history_window=None,
+        records_window=None,
         post_invoke=summarize_result,
         response_preview_limit=300,
         assistant_response_source="raw",

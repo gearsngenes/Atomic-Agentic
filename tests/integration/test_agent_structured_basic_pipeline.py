@@ -105,7 +105,7 @@ def make_agent(
     *,
     engine: StatefulEchoLLMEngine | None = None,
     context_enabled: bool = False,
-    history_window: int | None = None,
+    records_window: int | None = None,
 ) -> Agent:
     return Agent(
         name="writer_agent",
@@ -113,7 +113,7 @@ def make_agent(
         llm_engine=engine or StatefulEchoLLMEngine(),
         role_prompt=ROLE_PROMPT,
         context_enabled=context_enabled,
-        history_window=history_window,
+        records_window=records_window,
         pre_invoke=build_prompt,
         post_invoke=package_response,
     )
@@ -123,13 +123,13 @@ def make_structured_agent(
     *,
     engine: StatefulEchoLLMEngine | None = None,
     context_enabled: bool = False,
-    history_window: int | None = None,
+    records_window: int | None = None,
 ) -> tuple[StatefulEchoLLMEngine, Agent, StructuredInvokable]:
     resolved_engine = engine or StatefulEchoLLMEngine()
     agent = make_agent(
         engine=resolved_engine,
         context_enabled=context_enabled,
-        history_window=history_window,
+        records_window=records_window,
     )
     structured_agent = StructuredInvokable(
         component=agent,
@@ -144,12 +144,12 @@ def make_basic_agent_flow(
     *,
     engine: StatefulEchoLLMEngine | None = None,
     context_enabled: bool = False,
-    history_window: int | None = None,
+    records_window: int | None = None,
 ) -> tuple[StatefulEchoLLMEngine, Agent, StructuredInvokable, BasicFlow]:
     resolved_engine, agent, structured_agent = make_structured_agent(
         engine=engine,
         context_enabled=context_enabled,
-        history_window=history_window,
+        records_window=records_window,
     )
     flow = BasicFlow(
         component=structured_agent,
@@ -292,7 +292,7 @@ class TestAgentStructuredBasicPipeline:
     ) -> None:
         _engine, agent, structured_agent, flow = make_basic_agent_flow(
             context_enabled=True,
-            history_window=1,
+            records_window=1,
         )
 
         result = flow.invoke({"topic": "serialization", "tone": "careful"})
@@ -312,7 +312,7 @@ class TestAgentStructuredBasicPipeline:
         assert agent_snapshot["name"] == agent.name
         assert agent_snapshot["role_prompt"] == ROLE_PROMPT
         assert agent_snapshot["context_enabled"] is True
-        assert agent_snapshot["history_window"] == 1
+        assert agent_snapshot["records_window"] == 1
         assert agent_snapshot["pre_invoke"]["name"] == "pre_invoke"
         assert agent_snapshot["post_invoke"]["name"] == "post_invoke"
         assert agent_snapshot["llm"]["type"] == "StatefulEchoLLMEngine"

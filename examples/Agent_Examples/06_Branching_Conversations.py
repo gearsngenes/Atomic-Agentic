@@ -123,7 +123,7 @@ def main() -> None:
             "never guess or invent details."
         ),
         context_enabled=True,
-        history_window=None,
+        records_window=None,
         pre_invoke=build_message,
         post_invoke=package_reply,
         post_result_key="result",

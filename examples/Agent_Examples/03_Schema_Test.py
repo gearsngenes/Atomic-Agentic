@@ -127,7 +127,7 @@ def main(use_permissive: bool = False) -> None:
         llm_engine=engine,
         role_prompt="You are an expert teacher who writes concise, practical lesson plans.",
         context_enabled=True,
-        history_window=8,
+        records_window=8,
         pre_invoke=(permissive_tool if use_permissive else strict_tool),
     )
 

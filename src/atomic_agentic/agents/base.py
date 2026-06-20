@@ -53,7 +53,7 @@ class Agent(AtomicInvokable):
        - post-invoke passthrough inputs, copied by configured name.
     3) ``pre_invoke.invoke(pre_inputs) -> str``.
     4) Select prior ``AgentRecord`` records according to ``context_enabled`` and
-       ``history_window``.
+       ``records_window``.
     5) Delegate ``turns`` and ``prompt`` to ``_invoke(...)`` or ``_ainvoke(...)``
        to obtain a 2-tuple of a draft ``AgentRecord`` (``final_result`` is
        ``None`` at this point) and a metadata dict carrying LLM accounting.
@@ -88,7 +88,7 @@ class Agent(AtomicInvokable):
     History and context
     -------------------
     - The Agent keeps an in-memory history of ``AgentRecord`` objects.
-    - ``history_window`` controls how many turns from the tail of stored history
+    - ``records_window`` controls how many turns from the tail of stored history
       are selected for the protected invocation path.
     - Selected turns are rendered into provider-facing messages only when an
       invocation path calls ``build_messages(...)`` or equivalent rendering logic.
@@ -130,7 +130,7 @@ class Agent(AtomicInvokable):
         name. Names must refer to post-invoke parameters and must not include
         ``post_result_key``. Post-only passthrough parameters are grafted into
         the Agent schema as keyword-only parameters.
-    history_window : Optional[int], default None
+    records_window : Optional[int], default None
         Turn-selection window. None selects all stored turns; 0 selects no prior
         turns. Stored history is never trimmed.
     response_preview_limit : Optional[int], default None
@@ -148,7 +148,7 @@ class Agent(AtomicInvokable):
     role_prompt : str (read-write)
     llm_engine : LLMEngine (read-write, type-enforced)
     context_enabled : bool (read-write)
-    history_window : Optional[int] (read-write)
+    records_window : Optional[int] (read-write)
     records : List[AgentRecord] (read-only canonical turn view)
     attachments : Dict[str, Dict[str, Any]] (read-only view)
     pre_invoke : Tool (read-only lifecycle reference)
@@ -175,7 +175,7 @@ class Agent(AtomicInvokable):
         post_invoke: Optional[AtomicInvokable | Callable] = None,
         post_result_key: Optional[str] = None,
         passthrough_inputs: Optional[list[str]] = None,
-        history_window: Optional[int] = None,
+        records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
@@ -228,10 +228,10 @@ class Agent(AtomicInvokable):
                 self._role_prompt = cleaned_role_prompt
         self._context_enabled: bool = context_enabled
 
-        # history_window: strict int semantics (>= 0). None means select all stored turns.
-        if history_window is not None and (not type(history_window) is int or history_window < 0):
-            raise AgentError("history_window must be an int >= 0 or be 'None'.")
-        self._history_window: Optional[int] = history_window
+        # records_window: strict int semantics (>= 0). None means select all stored turns.
+        if records_window is not None and (not type(records_window) is int or records_window < 0):
+            raise AgentError("records_window must be an int >= 0 or be 'None'.")
+        self._records_window: Optional[int] = records_window
 
         # Stored turn history.
         # We never trim storage; we only limit which turns are selected per invocation.
@@ -865,7 +865,7 @@ class Agent(AtomicInvokable):
         self._context_enabled = value
 
     @property
-    def history_window(self) -> Optional[int]:
+    def records_window(self) -> Optional[int]:
         """
         Number of stored turns to select from the tail of turn history.
 
@@ -874,13 +874,13 @@ class Agent(AtomicInvokable):
         provider-facing messages by ``_invoke(...)``, ``_ainvoke(...)``, or
         subclass-specific logic.
         """
-        return self._history_window
+        return self._records_window
 
-    @history_window.setter
-    def history_window(self, value: Optional[int]) -> None:
+    @records_window.setter
+    def records_window(self, value: Optional[int]) -> None:
         if value is not None and (type(value) is not int or value < 0):
-            raise ValueError("history_window must be an int >= 0 or be 'None'.")
-        self._history_window = value
+            raise ValueError("records_window must be an int >= 0 or be 'None'.")
+        self._records_window = value
 
     @property
     def response_preview_limit(self) -> Optional[int]:
@@ -1366,7 +1366,7 @@ class Agent(AtomicInvokable):
 
         1) Filter and split inputs.
         2) Run ``pre_invoke`` to produce the current prompt string.
-        3) Select the appropriate turn window according to ``history_window`` and
+        3) Select the appropriate turn window according to ``records_window`` and
            ``context_enabled``.
         4) Delegate ``turns`` and ``prompt`` to ``_ainvoke(...)``, which owns any
            provider-facing rendering and async generation work, and returns a
@@ -1412,10 +1412,10 @@ class Agent(AtomicInvokable):
         logger.debug(f"Agent.{self.name} selecting turns for class '{type(self).__name__}'")
         turns: list[AgentRecord] = []
         if self._context_enabled and continue_from != "new":
-            if self._history_window != 0:
+            if self._records_window != 0:
                 turns = self.get_conversation(
                     run_id=continue_from,
-                    turns=self._history_window,
+                    turns=self._records_window,
                 )
 
         # Delegate selected turns and current prompt to the protected core logic.
@@ -1477,7 +1477,7 @@ class Agent(AtomicInvokable):
         3) Run ``pre_invoke(pre_inputs)`` to produce the current prompt string.
            If the Tool raises ``ToolInvocationError``, it propagates unchanged.
            Other exceptions are wrapped as ``AgentInvocationError``.
-        4) Select the appropriate turn window according to ``history_window`` and
+        4) Select the appropriate turn window according to ``records_window`` and
            ``context_enabled``.
         5) Delegate ``turns`` and ``prompt`` to ``_invoke(...)``, which owns any
            provider-facing rendering and sync generation work, and returns a
@@ -1546,10 +1546,10 @@ class Agent(AtomicInvokable):
             logger.debug(f"Agent.{self.name} selecting turns for class '{type(self).__name__}'")
             turns: list[AgentRecord] = []
             if self._context_enabled and continue_from != "new":
-                if self._history_window != 0:
+                if self._records_window != 0:
                     turns = self.get_conversation(
                         run_id=continue_from,
-                        turns=self._history_window,
+                        turns=self._records_window,
                     )
 
             # Delegate selected turns and current prompt to the protected core
@@ -1618,7 +1618,7 @@ class Agent(AtomicInvokable):
             "passthrough_inputs": self.passthrough_inputs,
             "llm": self._llm_engine.to_dict(),
             "context_enabled": self.context_enabled,
-            "history_window": self.history_window,
+            "records_window": self.records_window,
             "response_preview_limit": self.response_preview_limit,
             "assistant_response_source": self.assistant_response_source,
             "records": [turn.to_dict() for turn in self._records],

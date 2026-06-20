@@ -19,7 +19,7 @@ orchestrator = ReActAgent(
     name="MathOrchestrator",
     description="Orchestrates math + console tools to solve multi-step arithmetic tasks.",
     llm_engine=llm,
-    history_window=20,    # send-window (turns) to the model
+    records_window=20,    # send-window (turns) to the model
     tool_calls_limit=15,  # max *non-return* tool calls per run
     context_enabled=True,
 )

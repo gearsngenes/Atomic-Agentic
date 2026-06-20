@@ -285,7 +285,7 @@ class ToolAgent(Agent, ABC):
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_result_key: Optional[str] = None,
         passthrough_inputs: Optional[list[str]] = None,
-        history_window: Optional[int] = None,
+        records_window: Optional[int] = None,
     ) -> None:
         template = self._validate_role_prompt_template(role_prompt)
 
@@ -308,7 +308,7 @@ class ToolAgent(Agent, ABC):
             post_invoke=post_invoke,
             post_result_key=post_result_key,
             passthrough_inputs=passthrough_inputs,
-            history_window=history_window,
+            records_window=records_window,
             response_preview_limit=response_preview_limit,
         )
 
@@ -2220,7 +2220,7 @@ class PlanActAgent(ToolAgent):
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_result_key: Optional[str] = None,
         passthrough_inputs: Optional[list[str]] = None,
-        history_window: int | None = None,
+        records_window: int | None = None,
     ) -> None:
         super().__init__(
             name=name,
@@ -2238,7 +2238,7 @@ class PlanActAgent(ToolAgent):
             post_invoke=post_invoke,
             post_result_key=post_result_key,
             passthrough_inputs=passthrough_inputs,
-            history_window=history_window,
+            records_window=records_window,
         )
 
     # ------------------------------------------------------------------ #
@@ -2957,7 +2957,7 @@ class ReActAgent(ToolAgent):
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_result_key: Optional[str] = None,
         passthrough_inputs: Optional[list[str]] = None,
-        history_window: int | None = None,
+        records_window: int | None = None,
     ) -> None:
         super().__init__(
             name=name,
@@ -2975,7 +2975,7 @@ class ReActAgent(ToolAgent):
             post_invoke=post_invoke,
             post_result_key=post_result_key,
             passthrough_inputs=passthrough_inputs,
-            history_window=history_window,
+            records_window=records_window,
         )
 
         # ReAct requires a concrete integer tool_calls_limit so that we can preallocate
