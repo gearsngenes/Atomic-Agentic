@@ -5,6 +5,41 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a9] - 2026-06-22
+
+### Added
+
+- `namespace: str` as a constructor parameter and read-only property on
+  `AtomicInvokable`; propagated to all derived classes (`Command`,
+  `StructuredInvokable`, `Agent`, `ToolAgent`, `PlanActAgent`, `ReActAgent`,
+  all `Workflow` kinds, `LLMEngine` and its adapters).
+- `full_name` property unified to `Type.namespace.name` format across all
+  invokable types — replaces per-class overrides.
+- `to_dict()` extended with `"namespace"` on all classes.
+
+### Changed
+
+- breaking: `namespace` is now a **required** positional-or-keyword parameter
+  (no default) on all identity-owning classes: `AtomicInvokable` base,
+  `Agent`, `ToolAgent`, `PlanActAgent`, `ReActAgent`, `Workflow` base,
+  `SequentialFlow`, `ParallelFlow`, `RoutingFlow`, and `IterativeFlow`.
+  `namespace` appears immediately after `name` in all signatures.
+- LLM engine adapters (`LLMEngine`, `OpenAIEngine`, `GeminiEngine`,
+  `MistralEngine`, `LlamaCppEngine`) receive `namespace: str = "llm"` — a
+  meaningful categorical default; no change required at call sites.
+- Wrapper classes (`Tool`, `Command`, `StructuredInvokable`, `BasicFlow`)
+  retain `namespace: Optional[str] = None`; namespace resolution from the
+  wrapped component or `"default"` fallback is preserved.
+- All `examples/` files updated: `namespace=` added to every identity-owning
+  constructor; convention `"examples"` for agent/workflow examples,
+  `"research"` for `Agentic_Research/` files.
+
+### Removed
+
+- `Tool`'s independent `_namespace` storage, `namespace` property setter, and
+  `full_name` override — `Tool` now inherits the read-only `namespace`
+  property from `AtomicInvokable` base.
+
 ## [2.0.0a8] - 2026-06-20
 
 ### Added
