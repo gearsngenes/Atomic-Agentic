@@ -32,6 +32,7 @@ class CounterStepWorkflow(Workflow):
     def __init__(self, *, name: str = "counter_step") -> None:
         super().__init__(
             name=name,
+            namespace="tests",
             description="Increment count by 1.",
             parameters=[make_count_param()],
             return_type="dict[str, Any]",
@@ -48,6 +49,7 @@ class ScalarStepWorkflow(Workflow):
     def __init__(self, *, name: str = "scalar_step") -> None:
         super().__init__(
             name=name,
+            namespace="tests",
             description="Return count as a raw scalar.",
             parameters=[make_count_param()],
             return_type="int",
@@ -97,6 +99,7 @@ def make_iterative_flow(
 ) -> IterativeFlow:
     return IterativeFlow(
         name=name,
+        namespace="tests",
         description="Iterative test flow.",
         body_steps=body_steps if body_steps is not None else [CounterStepWorkflow()],
         judge=judge,
@@ -113,6 +116,7 @@ class TestIterativeFlowConstruction:
         with pytest.raises(ValueError, match="body_steps must not be empty"):
             IterativeFlow(
                 name="bad_flow",
+                namespace="tests",
                 description="Bad flow.",
                 body_steps=[],
                 judge=make_threshold_judge(1),
@@ -129,6 +133,7 @@ class TestIterativeFlowConstruction:
 
         flow = IterativeFlow(
             name="iterative_flow",
+            namespace="tests",
             description="Iterative test flow.",
             body_steps=[component],
             judge=make_threshold_judge(1),
@@ -168,6 +173,7 @@ class TestIterativeFlowConstruction:
     def test_indices_default_to_last_body_step(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
+            namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
             judge=make_threshold_judge(1),
@@ -181,6 +187,7 @@ class TestIterativeFlowConstruction:
     def test_indices_accept_negative_resolution_at_construction(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
+            namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
             judge=make_threshold_judge(1),
@@ -198,6 +205,7 @@ class TestIterativeFlowConstruction:
         with pytest.raises(IndexError, match="out of range"):
             IterativeFlow(
                 name="iterative_flow",
+                namespace="tests",
                 description="Iterative test flow.",
                 body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
                 judge=make_threshold_judge(1),
@@ -209,6 +217,7 @@ class TestIterativeFlowConstruction:
         with pytest.raises(TypeError, match="step index must be an int"):
             IterativeFlow(
                 name="iterative_flow",
+                namespace="tests",
                 description="Iterative test flow.",
                 body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
                 judge=make_threshold_judge(1),
@@ -326,6 +335,7 @@ class TestIterativeFlowValidationAndErrors:
     def test_evaluate_step_non_mapping_result_raises_validation_error(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
+            namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow(), ScalarStepWorkflow()],
             judge=make_threshold_judge(3),
@@ -345,6 +355,7 @@ class TestIterativeFlowValidationAndErrors:
     def test_handoff_step_non_mapping_result_raises_validation_error(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
+            namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow(), ScalarStepWorkflow()],
             judge=make_threshold_judge(0),

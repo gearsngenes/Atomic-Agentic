@@ -93,8 +93,8 @@ class AtomicInvokable(ABC):
         self,
         *,
         name: str,
+        namespace: str,
         description: str,
-        namespace: str = "default",
         parameters: list[ParamSpec],
         return_type: str,
         filter_extraneous_inputs: bool = True,
@@ -761,8 +761,8 @@ class Command(AtomicInvokable):
         executor: AtomicInvokable,
         fixed_inputs: Mapping[str, Any],
         name: Optional[str] = None,
-        description: Optional[str] = None,
         namespace: Optional[str] = None,
+        description: Optional[str] = None,
     ) -> None:
         if not isinstance(executor, AtomicInvokable):
             raise TypeError(
@@ -800,8 +800,8 @@ class Command(AtomicInvokable):
 
         super().__init__(
             name=resolved_name,
-            description=resolved_description,
             namespace=namespace or executor.namespace,  # inherit when not supplied
+            description=resolved_description,
             parameters=[],
             return_type=executor.return_type,
             filter_extraneous_inputs=False,
@@ -991,9 +991,9 @@ class StructuredInvokable(AtomicInvokable):
         self,
         component: AtomicInvokable,
         name: Optional[str] = None,
+        namespace: Optional[str] = None,
         description: Optional[str] = None,
         *,
-        namespace: Optional[str] = None,
         output_schema: Optional[
             type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec]
         ] = None,
@@ -1026,8 +1026,8 @@ class StructuredInvokable(AtomicInvokable):
         # - return type is always dictionary-shaped for StructuredInvokable
         super().__init__(
             name=name or component.name,
-            description=description or component.description,
             namespace=namespace or component.namespace,  # inherit when not supplied
+            description=description or component.description,
             parameters=component.parameters,
             return_type="dict[str, Any]",
             filter_extraneous_inputs=resolved_filter,

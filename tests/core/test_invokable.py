@@ -40,12 +40,14 @@ def make_invokable(
     parameters: list[ParamSpec] | None = None,
     *,
     name: str = "echo",
+    namespace: str = "tests",
     description: str = "Echo test invokable.",
     return_type: str = "dict[str, Any]",
     filter_extraneous_inputs: bool = True,
 ) -> EchoInvokable:
     return EchoInvokable(
         name=name,
+        namespace=namespace,
         description=description,
         parameters=parameters if parameters is not None else [make_param("x", 0)],
         return_type=return_type,
@@ -76,6 +78,7 @@ class TestAtomicInvokableConstruction:
         with pytest.raises(TypeError):
             EchoInvokable(
                 name="echo",
+                namespace="tests",
                 description="Echo test invokable.",
                 parameters=("x",),  # type: ignore[arg-type]
                 return_type="dict[str, Any]",
@@ -130,7 +133,7 @@ class TestAtomicInvokableIdentity:
     def test_full_name_uses_base_class_name_and_name(self) -> None:
         invokable = make_invokable(name="sample")
 
-        assert invokable.full_name == "EchoInvokable.default.sample"
+        assert invokable.full_name == "EchoInvokable.tests.sample"
 
     def test_name_mutation_updates_full_name(self) -> None:
         invokable = make_invokable(name="before")
@@ -138,7 +141,7 @@ class TestAtomicInvokableIdentity:
         invokable.name = "after"
 
         assert invokable.name == "after"
-        assert invokable.full_name == "EchoInvokable.default.after"
+        assert invokable.full_name == "EchoInvokable.tests.after"
 
     def test_invalid_name_mutation_raises(self) -> None:
         invokable = make_invokable()
@@ -148,9 +151,14 @@ class TestAtomicInvokableIdentity:
 
 
 class TestAtomicInvokableNamespace:
-    def test_namespace_defaults_to_default(self) -> None:
-        invokable = make_invokable()
-        assert invokable.namespace == "default"
+    def test_namespace_is_required(self) -> None:
+        with pytest.raises(TypeError):
+            EchoInvokable(
+                name="echo",
+                description="Echo test invokable.",
+                parameters=[make_param("x", 0)],
+                return_type="str",
+            )
 
     def test_namespace_explicit(self) -> None:
         invokable = EchoInvokable(
@@ -226,7 +234,7 @@ class TestAtomicInvokableParameterContract:
 
         signature = invokable.signature
 
-        assert "EchoInvokable.default.echo" in signature
+        assert "EchoInvokable.tests.echo" in signature
         assert "x: int" in signature
         assert "*args: Any" in signature
         assert "**extras: Any" in signature

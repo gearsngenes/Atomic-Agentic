@@ -123,6 +123,7 @@ def main(use_permissive: bool = False) -> None:
     # 2) Build an Agent and install the pre-invoke Tool
     agent = Agent(
         name="LessonPlanner",
+        namespace="examples",
         description="Builds lesson plans from structured inputs.",
         llm_engine=engine,
         role_prompt="You are an expert teacher who writes concise, practical lesson plans.",

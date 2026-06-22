@@ -119,7 +119,7 @@ class TestLLMEngineConstruction:
 class TestLLMEngineNamespace:
     def test_llm_engine_namespace_default(self) -> None:
         engine = FakeLLMEngine()
-        assert engine.namespace == "default"
+        assert engine.namespace == "llm"
 
     def test_llm_engine_namespace_explicit(self) -> None:
         engine = FakeLLMEngine(namespace="prod_llm")

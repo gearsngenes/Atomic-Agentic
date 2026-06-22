@@ -109,6 +109,7 @@ def make_agent(
 ) -> Agent:
     return Agent(
         name="writer_agent",
+        namespace="integration",
         description="Deterministic writer integration-test agent.",
         llm_engine=engine or StatefulEchoLLMEngine(),
         role_prompt=ROLE_PROMPT,
@@ -214,6 +215,7 @@ class TestAgentStructuredBasicPipeline:
         summary_step = make_summary_step()
         flow = SequentialFlow(
             name="agent_summary_sequence",
+            namespace="integration",
             description="Agent result feeding a downstream summary step.",
             steps=[structured_agent, summary_step],
         )

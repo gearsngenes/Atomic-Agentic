@@ -55,11 +55,13 @@ class EchoWorkflow(Workflow):
         self,
         *,
         name: str = "echo_workflow",
+        namespace: str = "tests",
         description: str = "Echo workflow.",
         filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=[make_value_param()],
             return_type="dict[str, Any]",

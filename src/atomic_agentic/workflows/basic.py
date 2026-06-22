@@ -46,8 +46,8 @@ class BasicFlow(Workflow):
         component: AtomicInvokable,
         *,
         name: Optional[str] = None,
-        description: Optional[str] = None,
         namespace: Optional[str] = None,
+        description: Optional[str] = None,
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         if not isinstance(component, AtomicInvokable):
@@ -66,8 +66,8 @@ class BasicFlow(Workflow):
 
         super().__init__(
             name=name or component.name,
-            description=description or component.description,
             namespace=namespace or component.namespace,  # inherit when not supplied
+            description=description or component.description,
             parameters=component.parameters,
             return_type=component.return_type,
             filter_extraneous_inputs=resolved_filter,

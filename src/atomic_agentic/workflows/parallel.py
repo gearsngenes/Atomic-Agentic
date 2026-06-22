@@ -57,10 +57,10 @@ class ParallelFlow(Workflow):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         branches: list[Workflow | AtomicInvokable],
         *,
-        namespace: str = "default",
         parameters: type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec] | None = None,
         output_type: str = LIST,
         output_indices: list[int] | None = None,
@@ -100,8 +100,8 @@ class ParallelFlow(Workflow):
 
         super().__init__(
             name=name,
-            description=description,
             namespace=namespace,
+            description=description,
             parameters=list(declared_parameters),
             return_type=resolved_return_type,
             filter_extraneous_inputs=resolved_filter,

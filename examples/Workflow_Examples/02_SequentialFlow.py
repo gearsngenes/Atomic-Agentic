@@ -36,6 +36,7 @@ def main() -> None:
 
     flow = SequentialFlow(
         name="demo_sequential",
+        namespace="examples",
         description="Demo SequentialFlow: add -> multiply -> format",
         steps=[step1, step2, step3],
     )

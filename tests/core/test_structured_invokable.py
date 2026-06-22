@@ -90,6 +90,7 @@ class RecordingInvokable(AtomicInvokable):
         *,
         raw_result: Any,
         name: str = "recording_invokable",
+        namespace: str = "tests",
         description: str = "Recording invokable.",
         filter_extraneous_inputs: bool = True,
         raise_sync: Exception | None = None,
@@ -97,6 +98,7 @@ class RecordingInvokable(AtomicInvokable):
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=[
                 make_param("value", 0, type_="Any"),

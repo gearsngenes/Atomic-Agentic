@@ -39,17 +39,17 @@ class Workflow(AtomicInvokable, ABC):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         parameters: list[ParamSpec],
         return_type: str,
         *,
-        namespace: str = "default",
         filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name,
-            description=description,
             namespace=namespace,
+            description=description,
             parameters=parameters,
             return_type=return_type,
             filter_extraneous_inputs=filter_extraneous_inputs,

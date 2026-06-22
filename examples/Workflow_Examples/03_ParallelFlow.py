@@ -73,6 +73,7 @@ text_flags_tool = Tool(
 # ──────────────────────────────────────────────────────────────
 parallel = ParallelFlow(
     name="text_parallel_analysis",
+    namespace="examples",
     description="Run several text-analysis branches in parallel.",
     branches=[
         word_stats_tool,
@@ -108,6 +109,7 @@ for i, branch_result in enumerate(parallel.get_branch_results(result.run_id)):
 # ──────────────────────────────────────────────────────────────
 parallel_subset = ParallelFlow(
     name="text_parallel_subset",
+    namespace="examples",
     description="Project only the text-flags and word-stats branches, as a list.",
     branches=[
         word_stats_tool,

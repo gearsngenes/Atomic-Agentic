@@ -102,6 +102,7 @@ def main() -> None:
 
     agent = PlanActAgent(
         name="Hybrid_PlanAct",
+        namespace="examples",
         description="One-shot planner/executor that can call PydanticAI-backed wrapper tools.",
         llm_engine=llm_engine,
         context_enabled=False,

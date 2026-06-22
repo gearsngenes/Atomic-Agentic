@@ -34,11 +34,13 @@ class EchoWorkflow(Workflow):
         *,
         tag: str,
         name: str | None = None,
+        namespace: str = "tests",
         description: str = "Echo workflow.",
         filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name if name is not None else f"echo_workflow_{tag}",
+            namespace=namespace,
             description=description,
             parameters=[make_value_param()],
             return_type="dict[str, Any]",
@@ -57,6 +59,7 @@ def make_branch(tag: str) -> EchoWorkflow:
 def make_three_branch_flow(**kwargs: Any) -> ParallelFlow:
     return ParallelFlow(
         name="parallel_flow",
+        namespace="tests",
         description="Parallel test flow.",
         branches=[make_branch("a"), make_branch("b"), make_branch("c")],
         **kwargs,
@@ -68,6 +71,7 @@ class TestParallelFlowConstruction:
         with pytest.raises(ValueError, match="branches must not be empty"):
             ParallelFlow(
                 name="bad_flow",
+                namespace="tests",
                 description="Bad flow.",
                 branches=[],
             )
@@ -75,6 +79,7 @@ class TestParallelFlowConstruction:
         with pytest.raises(TypeError, match="branches must be"):
             ParallelFlow(
                 name="bad_flow",
+                namespace="tests",
                 description="Bad flow.",
                 branches="not-a-list",  # type: ignore[arg-type]
             )
@@ -100,6 +105,7 @@ class TestParallelFlowConstruction:
 
         flow = ParallelFlow(
             name="parallel_flow",
+            namespace="tests",
             description="Parallel test flow.",
             branches=[component, branch_b],
         )
@@ -113,6 +119,7 @@ class TestParallelFlowConstruction:
 
         flow = ParallelFlow(
             name="parallel_flow",
+            namespace="tests",
             description="Parallel test flow.",
             branches=[b0, b1],
             parameters=None,
@@ -236,6 +243,7 @@ class TestParallelFlowSyncInvoke:
 
         flow = ParallelFlow(
             name="parallel_flow",
+            namespace="tests",
             description="Parallel test flow.",
             branches=[TaggedScalar(tag="a"), TaggedScalar(tag="b"), TaggedScalar(tag="c")],
             output_type=ParallelFlow.SET,

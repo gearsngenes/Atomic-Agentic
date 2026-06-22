@@ -24,6 +24,7 @@ def builder_prestep(task: str | None = None, revision_notes: str | None = None) 
 
 builder = Agent(
     name="CodeBuilderAgent",
+    namespace="examples",
     description="""
     Generates Python code per user request OR revises its latest drafts from revision notes. If this is
     the first draft of a code, provide ONLY the task. If you are sending feedback to revise the latest
@@ -44,6 +45,7 @@ def reviewer_prestep(draft_code: str) -> str:
 
 reviewer = Agent(
     name="CodeReviewer",
+    namespace="examples",
     description="Reviews draft code from the builder and returns revision suggestions or 'Approved'.",
     llm_engine=llm,
     role_prompt=(
@@ -64,6 +66,7 @@ reviewer = Agent(
 
 orchestrator = ReActAgent(
     name="AgenticOrchestrator",
+    namespace="examples",
     description="Orchestrates calls between the code builder and the code reviewer.",
     llm_engine=llm,
     records_window=10,

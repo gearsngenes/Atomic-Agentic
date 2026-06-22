@@ -18,6 +18,7 @@ def testDelayPrint() -> None:
 
 async_tester = PlanActAgent(
     name="Async_Delay_Tester",
+    namespace="examples",
     description="Tests the ability to run independent steps concurrently.",
     llm_engine=llm_engine,
     context_enabled=False,

@@ -24,6 +24,7 @@ llm_engine = OpenAIEngine(model="gpt-4o-mini")
 # ----- Haiku Writer Agent -----
 haiku_agent = Agent(
     name="HaikuWriter",
+    namespace="examples",
     description="Writes Haiku when given a topic.",
     llm_engine=llm_engine,
     role_prompt=(
@@ -36,6 +37,7 @@ haiku_agent = Agent(
 # ----- Batch Haiku PlanAct Agent -----
 batch_haiku_planner = PlanActAgent(
     name="BatchHaikuPlanner",
+    namespace="examples",
     description="Orchestrates calls to the Haiku Writer Agent and prints outputs",
     llm_engine=llm_engine,
 )
@@ -55,6 +57,7 @@ print_haiku_tool_id = batch_haiku_planner.register(
 # ----- Batch Math PlanAct Agent -----
 batch_math_planner = PlanActAgent(
     name="BatchMathPlanner",
+    namespace="examples",
     description="Handles tasks involving math problems and printing solutions",
     llm_engine=llm_engine,
 )
@@ -74,6 +77,7 @@ print_math_tool_id = batch_math_planner.register(
 # ----- Super Planner (delegates to both planners) -----
 super_planner = PlanActAgent(
     name="SuperPlanner",
+    namespace="examples",
     description="Planner that decomposes and delegates tasks to sub-planners",
     llm_engine=llm_engine,
 )

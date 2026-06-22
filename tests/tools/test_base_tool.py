@@ -99,12 +99,14 @@ class AddInvokable(AtomicInvokable):
         self,
         *,
         name: str = "add_invokable",
+        namespace: str = "tests",
         description: str = "Add invokable.",
         filter_extraneous_inputs: bool = True,
     ) -> None:
         self.last_inputs: dict[str, Any] | None = None
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=[
                 make_param("a", 0, type_="int"),
@@ -162,6 +164,7 @@ class VariadicInvokable(AtomicInvokable):
     def __init__(self) -> None:
         super().__init__(
             name="variadic_invokable",
+            namespace="tests",
             description="Invokable with a variadic keyword parameter.",
             parameters=[
                 make_param("a", 0, type_="int"),
@@ -181,6 +184,7 @@ class RaisingToolInvocationErrorInvokable(AtomicInvokable):
     def __init__(self) -> None:
         super().__init__(
             name="raises_tool_invocation_error",
+            namespace="tests",
             description="Invokable that raises ToolInvocationError directly.",
             parameters=[],
             return_type="None",
