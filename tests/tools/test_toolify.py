@@ -85,14 +85,14 @@ class EchoInvokable(AtomicInvokable):
         self,
         *,
         name: str = "echo_invokable",
-        namespace: str | None = None,
+        namespace: str = "default",
         description: str = "Echo invokable.",
         filter_extraneous_inputs: bool = True,
     ) -> None:
-        self.namespace = namespace
         super().__init__(
             name=name,
             description=description,
+            namespace=namespace,
             parameters=[
                 make_param("value", 0, type_="Any"),
             ],
@@ -105,12 +105,6 @@ class EchoInvokable(AtomicInvokable):
 
     async def async_invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
         return dict(inputs)
-
-    def to_dict(self) -> dict[str, Any]:
-        data = super().to_dict()
-        if self.namespace is not None:
-            data["namespace"] = self.namespace
-        return data
 
 
 def mcp_metadata(
@@ -496,6 +490,23 @@ class TestToolifyAtomicInvokable:
 
         with pytest.raises(ToolDefinitionError, match="remote_name"):
             toolify(invokable, remote_name="remote_echo")
+
+
+class TestToolifyAtomicInvokableNamespace:
+    def test_route2_inherits_namespace_from_invokable(self) -> None:
+        invokable = EchoInvokable(namespace="team_ns")
+        tool = toolify(invokable)
+        assert tool.namespace == "team_ns"
+
+    def test_route2_explicit_namespace_overrides_invokable(self) -> None:
+        invokable = EchoInvokable(namespace="team_ns")
+        tool = toolify(invokable, namespace="override_ns")
+        assert tool.namespace == "override_ns"
+
+    def test_route1_existing_tool_returned_unchanged(self) -> None:
+        t = Tool(function=add, name="add", namespace="ns", description="d")
+        result = toolify(t)
+        assert result is t
 
 
 class TestToolifyMCPClientHub:

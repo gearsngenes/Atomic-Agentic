@@ -102,6 +102,7 @@ class IterativeFlow(Workflow):
         judge: AtomicInvokable | None = None,
         max_iterations: int = 1,
         *,
+        namespace: str = "default",
         return_index: Optional[int] = None,
         handoff_index: Optional[int] = None,
         evaluate_index: Optional[int] = None,
@@ -205,6 +206,7 @@ class IterativeFlow(Workflow):
         super().__init__(
             name=name,
             description=description,
+            namespace=namespace,
             parameters=self._loop_body.parameters,
             return_type=self._loop_body.return_type,
             filter_extraneous_inputs=resolved_filter,

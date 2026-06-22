@@ -601,6 +601,30 @@ class TestAgentValidation:
             agent.llm_engine = object()  # type: ignore[assignment]
 
 
+class TestAgentNamespace:
+    def test_agent_namespace_default(self) -> None:
+        agent = make_agent()
+        assert agent.namespace == "default"
+
+    def test_agent_namespace_explicit(self) -> None:
+        agent = Agent(
+            name="a",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            namespace="my_team",
+        )
+        assert agent.namespace == "my_team"
+
+    def test_agent_namespace_in_to_dict(self) -> None:
+        agent = Agent(
+            name="a",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            namespace="my_team",
+        )
+        assert agent.to_dict()["namespace"] == "my_team"
+
+
 class TestAgentSerialization:
     def test_to_dict_includes_agent_configuration(self) -> None:
         engine = StatefulEchoLLMEngine()

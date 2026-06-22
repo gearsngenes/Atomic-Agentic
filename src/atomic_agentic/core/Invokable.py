@@ -94,6 +94,7 @@ class AtomicInvokable(ABC):
         *,
         name: str,
         description: str,
+        namespace: str = "default",
         parameters: list[ParamSpec],
         return_type: str,
         filter_extraneous_inputs: bool = True,
@@ -101,6 +102,16 @@ class AtomicInvokable(ABC):
         # setters include validation
         self.name = name
         self.description = description
+
+        # Validate and store namespace — same identifier rules as name.
+        if not isinstance(namespace, str) or not namespace.strip():
+            raise ValueError("namespace must be a non-empty string")
+        if not IDENTIFIER_PATTERN.fullmatch(namespace):
+            raise ValueError(
+                f"namespace must be alphanumeric/underscore and not start with a digit; "
+                f"got {namespace!r}"
+            )
+        self._namespace: str = namespace
 
         # Validate parameters
         if not isinstance(parameters, list):
@@ -182,9 +193,14 @@ class AtomicInvokable(ABC):
         self._description = value.strip()
 
     @property
+    def namespace(self) -> str:
+        """Grouping label for this invokable, used as the middle segment of ``full_name``."""
+        return self._namespace
+
+    @property
     def full_name(self) -> str:
-        """Fully-qualified name (for logging)."""
-        return f"{type(self).__name__}.{self.name}"
+        """Fully-qualified name of the form ``Type.namespace.name``."""
+        return f"{type(self).__name__}.{self._namespace}.{self._name}"
     
     @property
     def instance_id(self) -> str:
@@ -440,6 +456,7 @@ class AtomicInvokable(ABC):
             "type": type(self).__name__,
             "instance_id": self.instance_id,
             "name": self.name,
+            "namespace": self.namespace,
             "description": self.description,
             "parameters": [spec.to_dict() for spec in self._parameters],
             "return_type": self.return_type,
@@ -745,6 +762,7 @@ class Command(AtomicInvokable):
         fixed_inputs: Mapping[str, Any],
         name: Optional[str] = None,
         description: Optional[str] = None,
+        namespace: Optional[str] = None,
     ) -> None:
         if not isinstance(executor, AtomicInvokable):
             raise TypeError(
@@ -783,6 +801,7 @@ class Command(AtomicInvokable):
         super().__init__(
             name=resolved_name,
             description=resolved_description,
+            namespace=namespace or executor.namespace,  # inherit when not supplied
             parameters=[],
             return_type=executor.return_type,
             filter_extraneous_inputs=False,
@@ -974,6 +993,7 @@ class StructuredInvokable(AtomicInvokable):
         name: Optional[str] = None,
         description: Optional[str] = None,
         *,
+        namespace: Optional[str] = None,
         output_schema: Optional[
             type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec]
         ] = None,
@@ -1007,6 +1027,7 @@ class StructuredInvokable(AtomicInvokable):
         super().__init__(
             name=name or component.name,
             description=description or component.description,
+            namespace=namespace or component.namespace,  # inherit when not supplied
             parameters=component.parameters,
             return_type="dict[str, Any]",
             filter_extraneous_inputs=resolved_filter,

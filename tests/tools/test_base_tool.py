@@ -596,7 +596,7 @@ class TestToolExecution:
 
 
 class TestToolMutableMetadata:
-    def test_namespace_setter_updates_full_name(self) -> None:
+    def test_namespace_is_read_only(self) -> None:
         tool = Tool(
             function=add,
             name="add",
@@ -604,10 +604,10 @@ class TestToolMutableMetadata:
             description="Add values.",
         )
 
-        tool.namespace = "math"
-
-        assert tool.namespace == "math"
-        assert tool.full_name == "Tool.math.add"
+        assert tool.namespace == "tests"
+        assert tool.full_name == "Tool.tests.add"
+        with pytest.raises(AttributeError):
+            tool.namespace = "math"
 
     def test_function_setter_refreshes_callable_schema(self) -> None:
         tool = Tool(

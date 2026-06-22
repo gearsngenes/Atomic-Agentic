@@ -137,6 +137,7 @@ structured_mismatch_noextras = StructuredInvokable(
     output_schema=schema_cd,
     map_extras=False,
     ignore_unhandled=True,
+    namespace="mismatch",
 )
 
 print("\n--- Mismatched keys (map_extras=True, extras fill schema) ---")

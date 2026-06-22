@@ -142,6 +142,7 @@ class LLMEngine(AtomicInvokable, ABC):
         *,
         name: Optional[str] = None,
         description: str = "",
+        namespace: str = "default",
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 30.0,
         max_retries: int = 2,
@@ -153,6 +154,8 @@ class LLMEngine(AtomicInvokable, ABC):
         ----------
         name:
             Optional human-friendly identifier for logging/introspection.
+        namespace:
+            Grouping label for this engine instance.
         timeout_seconds:
             Suggested per-call timeout; subclasses should honor this where
             their provider SDKs allow it.
@@ -169,6 +172,7 @@ class LLMEngine(AtomicInvokable, ABC):
             self,
             name=name or type(self).__name__,
             description=description or "LLM Engine",
+            namespace=namespace,
             parameters=[ParamSpec(name ="messages",
                                   index = 0,
                                   kind = "POSITIONAL_OR_KEYWORD",
@@ -695,6 +699,7 @@ class OpenAIEngine(LLMEngine):
         *,
         name: Optional[str] = None,
         description: str = "OpenAI LLM Engine",
+        namespace: Optional[str] = None,
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
         max_retries: int = 2,
@@ -714,13 +719,14 @@ class OpenAIEngine(LLMEngine):
             Maximum number of characters to inline from text/code attachments.
         extra_illegal_exts:
             Optional set of additional extensions to reject at `attach` time.
-        name, description, filter_extraneous_inputs, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
+        name, description, namespace, filter_extraneous_inputs, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
             Template-method engine configuration (see `_primitives.LLMEngine`).
         """
         sanitized_name = (name or f"openai_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_").replace(".", "_")
         super().__init__(
             name=sanitized_name,
             description=description or "OpenAI LLM Engine",
+            namespace=namespace or "default",
             filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
@@ -1163,6 +1169,7 @@ class GeminiEngine(LLMEngine):
         *,
         name: Optional[str] = None,
         description: str = "Gemini LLM Engine",
+        namespace: Optional[str] = None,
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
         max_retries: int = 2,
@@ -1181,13 +1188,14 @@ class GeminiEngine(LLMEngine):
             Sampling temperature for text generation.
         extra_illegal_exts:
             Optional set of additional extensions to reject at `attach` time.
-        name, description, filter_extraneous_inputs, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
+        name, description, namespace, filter_extraneous_inputs, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
             Template-method engine configuration (see `_primitives.LLMEngine`).
         """
         sanitized_name = (name or f"gemini_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
         super().__init__(
             name=sanitized_name,
             description=description or "Gemini LLM Engine",
+            namespace=namespace or "default",
             filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
@@ -1537,6 +1545,7 @@ class MistralEngine(LLMEngine):
         *,
         name: Optional[str] = None,
         description: str = "Mistral LLM Engine",
+        namespace: Optional[str] = None,
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
         max_retries: int = 2,
@@ -1584,6 +1593,7 @@ class MistralEngine(LLMEngine):
         super().__init__(
             name=sanitized_name,
             description=description or "Mistral LLM Engine",
+            namespace=namespace or "default",
             filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
@@ -2022,6 +2032,7 @@ class LlamaCppEngine(LLMEngine):
         *,
         name: Optional[str] = None,
         description: str = "Llama.cpp LLM Engine",
+        namespace: Optional[str] = None,
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 30.0,
         max_retries: int = 2,
@@ -2093,6 +2104,7 @@ class LlamaCppEngine(LLMEngine):
         super().__init__(
             name=sanitized_name,
             description=description or "Llama.cpp LLM Engine",
+            namespace=namespace or "default",
             filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,

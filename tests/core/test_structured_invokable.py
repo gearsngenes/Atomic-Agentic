@@ -726,3 +726,25 @@ class TestStructuredInvokableInvoke:
 
         with pytest.raises(RuntimeError, match="async component failed"):
             asyncio.run(wrapper.async_invoke({"value": 1}))
+
+
+class TestStructuredInvokableNamespace:
+    def test_inherits_namespace_from_component(self) -> None:
+        component = Tool(
+            function=lambda value: value,
+            name="t",
+            namespace="comp_ns",
+            description="A tool.",
+        )
+        si = StructuredInvokable(component=component)
+        assert si.namespace == "comp_ns"
+
+    def test_explicit_namespace_overrides_component(self) -> None:
+        component = Tool(
+            function=lambda value: value,
+            name="t",
+            namespace="comp_ns",
+            description="A tool.",
+        )
+        si = StructuredInvokable(component=component, namespace="si_ns")
+        assert si.namespace == "si_ns"

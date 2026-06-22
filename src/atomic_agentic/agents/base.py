@@ -171,6 +171,7 @@ class Agent(AtomicInvokable):
         role_prompt: Optional[str] = None,
         context_enabled: bool = True,
         *,
+        namespace: str = "default",
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
         post_result_key: Optional[str] = None,
@@ -251,6 +252,7 @@ class Agent(AtomicInvokable):
         super().__init__(
             name=name,
             description=description,
+            namespace=namespace,
             parameters=agent_parameters,
             return_type=self._post_invoke.return_type,
             filter_extraneous_inputs=resolved_filter_extraneous_inputs,)

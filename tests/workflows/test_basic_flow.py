@@ -214,6 +214,28 @@ class TestBasicFlowValidationAndErrors:
             asyncio.run(flow.async_invoke({"value": 123}))
 
 
+class TestBasicFlowNamespace:
+    def test_inherits_namespace_from_component(self) -> None:
+        component = Tool(
+            function=return_scalar,
+            name="t",
+            namespace="comp_ns",
+            description="A tool.",
+        )
+        flow = BasicFlow(component=component)
+        assert flow.namespace == "comp_ns"
+
+    def test_explicit_namespace_overrides_component(self) -> None:
+        component = Tool(
+            function=return_scalar,
+            name="t",
+            namespace="comp_ns",
+            description="A tool.",
+        )
+        flow = BasicFlow(component=component, namespace="flow_ns")
+        assert flow.namespace == "flow_ns"
+
+
 class TestBasicFlowSerialization:
     def test_to_dict_includes_component_and_checkpoint_summary(self) -> None:
         component = make_structured_component()

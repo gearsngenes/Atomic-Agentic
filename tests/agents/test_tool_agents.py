@@ -579,6 +579,31 @@ class TestToolAgentConstruction:
             agent.blackboard_preview_limit = value  # type: ignore[assignment]
 
 
+class TestToolAgentNamespace:
+    def test_tool_agent_namespace_default(self) -> None:
+        agent = make_agent()
+        assert agent.namespace == "default"
+
+    def test_plan_act_agent_namespace_explicit(self) -> None:
+        agent = PlanActAgent(
+            name="a",
+            description="d",
+            llm_engine=EchoLLMEngine(),
+            namespace="planner_ns",
+        )
+        assert agent.namespace == "planner_ns"
+
+    def test_react_agent_namespace_explicit(self) -> None:
+        agent = ReActAgent(
+            name="a",
+            description="d",
+            llm_engine=EchoLLMEngine(),
+            namespace="react_ns",
+            tool_calls_limit=5,
+        )
+        assert agent.namespace == "react_ns"
+
+
 class TestToolAgentPostInvokeRouting:
     def test_scripted_tool_agent_forwards_post_routing_to_base_agent(self) -> None:
         agent = make_agent(

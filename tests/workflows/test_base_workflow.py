@@ -62,6 +62,7 @@ class ConfigurableWorkflow(Workflow):
         parameters: list[ParamSpec],
         return_type: str,
         *,
+        namespace: str = "default",
         result: Any = None,
         run_error: Exception | None = None,
         async_error: Exception | None = None,
@@ -70,6 +71,7 @@ class ConfigurableWorkflow(Workflow):
         super().__init__(
             name=name,
             description=description,
+            namespace=namespace,
             parameters=parameters,
             return_type=return_type,
             filter_extraneous_inputs=(
@@ -91,6 +93,22 @@ class ConfigurableWorkflow(Workflow):
         if self._async_error is not None:
             raise self._async_error
         return self._result, {}
+
+
+class TestWorkflowNamespace:
+    def test_workflow_namespace_default(self) -> None:
+        workflow = EchoWorkflow()
+        assert workflow.namespace == "default"
+
+    def test_workflow_namespace_explicit(self) -> None:
+        workflow = ConfigurableWorkflow(
+            name="wf",
+            description="d",
+            parameters=[make_value_param()],
+            return_type="int",
+            namespace="wf_ns",
+        )
+        assert workflow.namespace == "wf_ns"
 
 
 class TestWorkflowConstruction:

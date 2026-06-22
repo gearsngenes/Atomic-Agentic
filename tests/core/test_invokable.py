@@ -130,7 +130,7 @@ class TestAtomicInvokableIdentity:
     def test_full_name_uses_base_class_name_and_name(self) -> None:
         invokable = make_invokable(name="sample")
 
-        assert invokable.full_name == "EchoInvokable.sample"
+        assert invokable.full_name == "EchoInvokable.default.sample"
 
     def test_name_mutation_updates_full_name(self) -> None:
         invokable = make_invokable(name="before")
@@ -138,13 +138,53 @@ class TestAtomicInvokableIdentity:
         invokable.name = "after"
 
         assert invokable.name == "after"
-        assert invokable.full_name == "EchoInvokable.after"
+        assert invokable.full_name == "EchoInvokable.default.after"
 
     def test_invalid_name_mutation_raises(self) -> None:
         invokable = make_invokable()
 
         with pytest.raises(ValueError):
             invokable.name = "bad-name"
+
+
+class TestAtomicInvokableNamespace:
+    def test_namespace_defaults_to_default(self) -> None:
+        invokable = make_invokable()
+        assert invokable.namespace == "default"
+
+    def test_namespace_explicit(self) -> None:
+        invokable = EchoInvokable(
+            name="foo", description="d", namespace="my_group",
+            parameters=[], return_type="str",
+        )
+        assert invokable.namespace == "my_group"
+
+    def test_namespace_in_full_name(self) -> None:
+        invokable = EchoInvokable(
+            name="foo", description="d", namespace="grp",
+            parameters=[], return_type="str",
+        )
+        assert invokable.full_name == "EchoInvokable.grp.foo"
+
+    def test_namespace_in_to_dict(self) -> None:
+        invokable = EchoInvokable(
+            name="foo", description="d", namespace="grp",
+            parameters=[], return_type="str",
+        )
+        assert invokable.to_dict()["namespace"] == "grp"
+
+    @pytest.mark.parametrize("bad_ns", ["bad namespace", "1bad", ""])
+    def test_namespace_invalid_raises(self, bad_ns: str) -> None:
+        with pytest.raises(ValueError):
+            EchoInvokable(
+                name="foo", description="d", namespace=bad_ns,
+                parameters=[], return_type="str",
+            )
+
+    def test_namespace_is_read_only(self) -> None:
+        invokable = make_invokable()
+        with pytest.raises(AttributeError):
+            invokable.namespace = "other"  # type: ignore[misc]
 
 
 class TestAtomicInvokableParameterContract:
@@ -186,7 +226,7 @@ class TestAtomicInvokableParameterContract:
 
         signature = invokable.signature
 
-        assert "EchoInvokable.echo" in signature
+        assert "EchoInvokable.default.echo" in signature
         assert "x: int" in signature
         assert "*args: Any" in signature
         assert "**extras: Any" in signature

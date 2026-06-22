@@ -139,7 +139,7 @@ def toolify(
         return Tool(
             function=component,
             name=name,
-            namespace=namespace,
+            namespace=namespace if namespace is not None else component.namespace,  # parallel to filter_extraneous_inputs
             description=description,
             filter_extraneous_inputs=resolved_filter,
         )
