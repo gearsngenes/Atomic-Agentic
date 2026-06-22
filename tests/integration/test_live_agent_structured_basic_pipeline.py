@@ -78,6 +78,7 @@ def _openai_engine() -> OpenAIEngine:
 def make_live_openai_agent() -> Agent:
     return Agent(
         name="live_openai_writer_agent",
+        namespace="integration",
         description="Live OpenAI writer agent for integration tests.",
         llm_engine=_openai_engine(),
         role_prompt=ROLE_PROMPT,

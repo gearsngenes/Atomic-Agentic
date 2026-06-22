@@ -97,6 +97,7 @@ class IterativeFlow(Workflow):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         body_steps: list[Workflow | AtomicInvokable],
         judge: AtomicInvokable | None = None,
@@ -166,6 +167,7 @@ class IterativeFlow(Workflow):
 
         self._loop_body = SequentialFlow(
             name=f"{name}_loop_body",
+            namespace=namespace,
             description=f"Normalized body for iterative workflow {name}",
             steps=body_steps,
             return_index=resolved_return_index,
@@ -204,6 +206,7 @@ class IterativeFlow(Workflow):
 
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=self._loop_body.parameters,
             return_type=self._loop_body.return_type,

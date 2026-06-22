@@ -56,6 +56,7 @@ def writer_pre(*, prompt: str = "", revision_notes: str = "") -> str:
 
 writer_agent = Agent(
     name="story_writer",
+    namespace="examples",
     description="Writes and revises short stories from a request and revision notes.",
     llm_engine=engine,
     role_prompt=(
@@ -98,6 +99,7 @@ def critic_pre(*, draft: str) -> str:
 
 critic_agent = Agent(
     name="story_critic",
+    namespace="examples",
     description="Critiques a story draft and either approves it or gives revision notes.",
     llm_engine=engine,
     role_prompt=(
@@ -142,6 +144,7 @@ judge = toolify(
 # ---------------------------------------------------------------------
 flow = IterativeFlow(
     name="story_writer_checker_flow",
+    namespace="examples",
     description="Iterative writer/critic loop with approval judge.",
     body_steps=[writer, critic],
     judge=judge,

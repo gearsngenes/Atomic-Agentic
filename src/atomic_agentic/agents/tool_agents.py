@@ -270,6 +270,7 @@ class ToolAgent(Agent, ABC):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         llm_engine: LLMEngine,
         role_prompt: str,
@@ -299,6 +300,7 @@ class ToolAgent(Agent, ABC):
 
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             llm_engine=llm_engine,
             filter_extraneous_inputs=filter_extraneous_inputs,
@@ -2206,6 +2208,7 @@ class PlanActAgent(ToolAgent):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         llm_engine: LLMEngine,
         filter_extraneous_inputs: Optional[bool] = None,
@@ -2224,6 +2227,7 @@ class PlanActAgent(ToolAgent):
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             llm_engine=llm_engine,
             filter_extraneous_inputs=filter_extraneous_inputs,
@@ -2943,6 +2947,7 @@ class ReActAgent(ToolAgent):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         llm_engine: LLMEngine,
         filter_extraneous_inputs: Optional[bool] = None,
@@ -2961,6 +2966,7 @@ class ReActAgent(ToolAgent):
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             llm_engine=llm_engine,
             filter_extraneous_inputs=filter_extraneous_inputs,

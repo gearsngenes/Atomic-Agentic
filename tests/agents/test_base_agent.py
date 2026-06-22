@@ -167,6 +167,7 @@ def make_agent(
 ) -> Agent:
     return Agent(
         name="writer_agent",
+        namespace="tests",
         description="Deterministic writer test agent.",
         llm_engine=engine or StatefulEchoLLMEngine(),
         role_prompt=role_prompt,
@@ -216,6 +217,7 @@ class TestAgentPipeline:
         engine = StatefulEchoLLMEngine()
         agent = Agent(
             name="identity_agent",
+            namespace="tests",
             description="Identity agent.",
             llm_engine=engine,
             role_prompt=ROLE_PROMPT,
@@ -601,6 +603,34 @@ class TestAgentValidation:
             agent.llm_engine = object()  # type: ignore[assignment]
 
 
+class TestAgentNamespace:
+    def test_namespace_is_required(self) -> None:
+        with pytest.raises(TypeError):
+            Agent(
+                name="a",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+            )
+
+    def test_agent_namespace_explicit(self) -> None:
+        agent = Agent(
+            name="a",
+            namespace="my_team",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+        )
+        assert agent.namespace == "my_team"
+
+    def test_agent_namespace_in_to_dict(self) -> None:
+        agent = Agent(
+            name="a",
+            namespace="my_team",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+        )
+        assert agent.to_dict()["namespace"] == "my_team"
+
+
 class TestAgentSerialization:
     def test_to_dict_includes_agent_configuration(self) -> None:
         engine = StatefulEchoLLMEngine()
@@ -938,6 +968,7 @@ class TestAgentRecordHistory:
         engine = StatefulEchoLLMEngine()
         agent = Agent(
             name="preview_agent",
+            namespace="tests",
             description="Preview test agent.",
             llm_engine=engine,
             role_prompt=ROLE_PROMPT,
@@ -966,6 +997,7 @@ class TestAgentRecordRendering:
     def test_rendered_history_uses_raw_response_by_default(self) -> None:
         agent = Agent(
             name="raw_render_agent",
+            namespace="tests",
             description="Raw render test agent.",
             llm_engine=StatefulEchoLLMEngine(),
             role_prompt=ROLE_PROMPT,
@@ -982,6 +1014,7 @@ class TestAgentRecordRendering:
     def test_rendered_history_uses_final_response_when_configured(self) -> None:
         agent = Agent(
             name="final_render_agent",
+            namespace="tests",
             description="Final render test agent.",
             llm_engine=StatefulEchoLLMEngine(),
             role_prompt=ROLE_PROMPT,
@@ -1002,6 +1035,7 @@ class TestAgentDraftRecordContract:
     def test_invoke_rejects_string_draft(self) -> None:
         agent = StringDraftAgent(
             name="string_draft_agent",
+            namespace="tests",
             description="String draft test agent.",
             llm_engine=StatefulEchoLLMEngine(),
             context_enabled=True,
@@ -1016,6 +1050,7 @@ class TestAgentDraftRecordContract:
     def test_invoke_rejects_mapping_draft(self) -> None:
         agent = MappingDraftAgent(
             name="mapping_draft_agent",
+            namespace="tests",
             description="Mapping draft test agent.",
             llm_engine=StatefulEchoLLMEngine(),
             context_enabled=True,
@@ -1030,6 +1065,7 @@ class TestAgentDraftRecordContract:
     def test_async_invoke_rejects_string_draft(self) -> None:
         agent = AsyncStringDraftAgent(
             name="async_string_draft_agent",
+            namespace="tests",
             description="Async string draft test agent.",
             llm_engine=StatefulEchoLLMEngine(),
             context_enabled=True,
@@ -1044,6 +1080,7 @@ class TestAgentDraftRecordContract:
     def test_async_invoke_rejects_mapping_draft(self) -> None:
         agent = AsyncMappingDraftAgent(
             name="async_mapping_draft_agent",
+            namespace="tests",
             description="Async mapping draft test agent.",
             llm_engine=StatefulEchoLLMEngine(),
             context_enabled=True,
@@ -1156,6 +1193,7 @@ class TestAgentContinueFromSchema:
         engine = StatefulEchoLLMEngine()
         agent = Agent(
             name="strict_agent",
+            namespace="tests",
             description="Strict filter agent.",
             llm_engine=engine,
             filter_extraneous_inputs=True,

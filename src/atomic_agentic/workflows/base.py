@@ -39,6 +39,7 @@ class Workflow(AtomicInvokable, ABC):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         parameters: list[ParamSpec],
         return_type: str,
@@ -47,6 +48,7 @@ class Workflow(AtomicInvokable, ABC):
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=parameters,
             return_type=return_type,

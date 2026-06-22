@@ -24,11 +24,13 @@ class EchoWorkflow(Workflow):
         self,
         *,
         name: str = "echo_workflow",
+        namespace: str = "tests",
         description: str = "Echo workflow.",
         filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=[
                 ParamSpec(
@@ -86,6 +88,7 @@ def make_structured_component(
 def make_three_step_flow(*, return_index: int | None = None) -> SequentialFlow:
     return SequentialFlow(
         name="sequential_flow",
+        namespace="tests",
         description="Sequential test flow.",
         steps=[
             make_structured_component(first_step, name="first_step", output_schema=["first"]),
@@ -101,6 +104,7 @@ class TestSequentialFlowConstruction:
         with pytest.raises(TypeError, match="steps must be"):
             SequentialFlow(
                 name="bad_flow",
+                namespace="tests",
                 description="Bad flow.",
                 steps=(EchoWorkflow(),),  # type: ignore[arg-type]
             )
@@ -109,6 +113,7 @@ class TestSequentialFlowConstruction:
         with pytest.raises(ValueError, match="steps must not be empty"):
             SequentialFlow(
                 name="bad_flow",
+                namespace="tests",
                 description="Bad flow.",
                 steps=[],
             )
@@ -117,6 +122,7 @@ class TestSequentialFlowConstruction:
         with pytest.raises(TypeError, match="Workflow or AtomicInvokable"):
             SequentialFlow(
                 name="bad_flow",
+                namespace="tests",
                 description="Bad flow.",
                 steps=[object()],  # type: ignore[list-item]
             )
@@ -126,6 +132,7 @@ class TestSequentialFlowConstruction:
 
         flow = SequentialFlow(
             name="sequential_flow",
+            namespace="tests",
             description="Sequential test flow.",
             steps=[child],
         )
@@ -138,6 +145,7 @@ class TestSequentialFlowConstruction:
 
         flow = SequentialFlow(
             name="sequential_flow",
+            namespace="tests",
             description="Sequential test flow.",
             steps=[component],
         )

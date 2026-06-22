@@ -116,6 +116,20 @@ class TestLLMEngineConstruction:
             FakeLLMEngine(name="bad-name")
 
 
+class TestLLMEngineNamespace:
+    def test_llm_engine_namespace_default(self) -> None:
+        engine = FakeLLMEngine()
+        assert engine.namespace == "llm"
+
+    def test_llm_engine_namespace_explicit(self) -> None:
+        engine = FakeLLMEngine(namespace="prod_llm")
+        assert engine.namespace == "prod_llm"
+
+    def test_llm_engine_namespace_in_to_dict(self) -> None:
+        engine = FakeLLMEngine(namespace="prod_llm")
+        assert engine.to_dict()["namespace"] == "prod_llm"
+
+
 class TestLLMEngineMessagesAndInvoke:
     def test_invoke_filters_inputs_and_returns_stripped_text(self) -> None:
         engine = FakeLLMEngine()

@@ -33,12 +33,14 @@ class EchoWorkflow(Workflow):
         tag: str,
         *,
         name: str | None = None,
+        namespace: str = "tests",
         description: str | None = None,
         return_type: str = "dict[str, Any]",
         filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name or f"echo_{tag}",
+            namespace=namespace,
             description=description or f"Echo workflow {tag}.",
             parameters=[make_value_param()],
             return_type=return_type,
@@ -80,6 +82,7 @@ class RouterWorkflow(Workflow):
     def __init__(self, selector: Any, *, raise_error: bool = False) -> None:
         super().__init__(
             name="router_workflow",
+            namespace="tests",
             description="Router workflow returning a constant selector.",
             parameters=[make_value_param()],
             return_type="Any",
@@ -104,6 +107,7 @@ class RaisingBranch(Workflow):
     def __init__(self) -> None:
         super().__init__(
             name="raising_branch",
+            namespace="tests",
             description="Branch that always raises.",
             parameters=[make_value_param()],
             return_type="dict[str, Any]",
@@ -120,6 +124,7 @@ class UnhashableSelectorRouter(Workflow):
     def __init__(self) -> None:
         super().__init__(
             name="unhashable_router",
+            namespace="tests",
             description="Router returning an unhashable selector.",
             parameters=[make_value_param()],
             return_type="Any",
@@ -133,6 +138,7 @@ class UnhashableSelectorRouter(Workflow):
 def make_list_routing_flow(selector: Any, **router_kwargs: Any) -> RoutingFlow:
     return RoutingFlow(
         name="routing_flow",
+        namespace="tests",
         description="Routing test flow.",
         branches=[make_branch("a"), make_branch("b"), make_branch("c")],
         router=make_router(selector, **router_kwargs),
@@ -142,6 +148,7 @@ def make_list_routing_flow(selector: Any, **router_kwargs: Any) -> RoutingFlow:
 def make_dict_routing_flow(selector: Any) -> RoutingFlow:
     return RoutingFlow(
         name="routing_flow",
+        namespace="tests",
         description="Routing test flow.",
         branches={"left": make_branch("left"), "right": make_branch("right")},
         router=make_router(selector),
@@ -153,6 +160,7 @@ class TestRoutingFlowConstruction:
         with pytest.raises(ValueError, match="branches must not be empty"):
             RoutingFlow(
                 name="bad_flow",
+                namespace="tests",
                 description="Bad flow.",
                 branches=[],
                 router=make_router(0),
@@ -161,6 +169,7 @@ class TestRoutingFlowConstruction:
         with pytest.raises(TypeError, match="branches must be"):
             RoutingFlow(
                 name="bad_flow",
+                namespace="tests",
                 description="Bad flow.",
                 branches="x",  # type: ignore[arg-type]
                 router=make_router(0),
@@ -170,6 +179,7 @@ class TestRoutingFlowConstruction:
         component = make_structured_router(0)
         flow = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches=[component, make_branch("b")],
             router=make_router(0),
@@ -183,6 +193,7 @@ class TestRoutingFlowConstruction:
         component = make_structured_router(0)
         flow = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches={"a": component, "b": make_branch("b")},
             router=make_router("a"),
@@ -196,6 +207,7 @@ class TestRoutingFlowConstruction:
         router = make_router(0)
         flow = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches=[make_branch("a"), make_branch("b")],
             router=router,
@@ -205,6 +217,7 @@ class TestRoutingFlowConstruction:
         component_router = make_structured_router(0)
         flow2 = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches=[make_branch("a"), make_branch("b")],
             router=component_router,
@@ -216,6 +229,7 @@ class TestRoutingFlowConstruction:
         with pytest.raises(TypeError, match="Workflow or AtomicInvokable"):
             RoutingFlow(
                 name="bad_flow",
+                namespace="tests",
                 description="Bad flow.",
                 branches=[make_branch("a"), make_branch("b")],
                 router=object(),  # type: ignore[arg-type]
@@ -225,6 +239,7 @@ class TestRoutingFlowConstruction:
         router = make_router(0)
         flow = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches=[make_branch("a"), make_branch("b")],
             router=router,
@@ -235,6 +250,7 @@ class TestRoutingFlowConstruction:
     def test_return_type_is_shared_or_union_of_branch_return_types(self) -> None:
         flow = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches=[make_branch("a"), make_branch("b")],
             router=make_router(0),
@@ -243,6 +259,7 @@ class TestRoutingFlowConstruction:
 
         flow2 = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches=[
                 make_branch("a", return_type="dict[str, Any]"),
@@ -307,6 +324,7 @@ class TestRoutingFlowSyncInvokeDictBranches:
     def test_dict_branch_selector_must_be_hashable(self) -> None:
         flow = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches={"left": make_branch("left"), "right": make_branch("right")},
             router=UnhashableSelectorRouter(),
@@ -351,6 +369,7 @@ class TestRoutingFlowValidationAndErrors:
     def test_router_invoke_failure_wrapped_as_execution_error(self) -> None:
         flow = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches=[make_branch("a"), make_branch("b")],
             router=make_router(0, raise_error=True),
@@ -362,6 +381,7 @@ class TestRoutingFlowValidationAndErrors:
     def test_chosen_branch_invoke_failure_wrapped_as_execution_error(self) -> None:
         flow = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches=[RaisingBranch(), make_branch("b")],
             router=make_router(0),
@@ -381,6 +401,7 @@ class TestRoutingFlowValidationAndErrors:
     def test_async_invoke_wraps_branch_failure_as_execution_error(self) -> None:
         flow = RoutingFlow(
             name="routing_flow",
+            namespace="tests",
             description="Routing test flow.",
             branches=[RaisingBranch(), make_branch("b")],
             router=make_router(0),

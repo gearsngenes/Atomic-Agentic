@@ -17,6 +17,7 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 # --- define our agent ---
 agent = Agent(
     name="DocSummarizer",
+    namespace="examples",
     description="Summarizes uploaded documents.",
     llm_engine=llm,
     role_prompt="You are a concise technical summarizer.",

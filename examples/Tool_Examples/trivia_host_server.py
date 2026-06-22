@@ -18,6 +18,7 @@ def main() -> None:
 
     trivia_agent = Agent(
         name="TriviaAgent",
+        namespace="trivia_host",
         description="A concise trivia agent that returns one interesting fact about the user's topic.",
         llm_engine=llm,
         role_prompt=(

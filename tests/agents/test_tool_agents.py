@@ -138,6 +138,7 @@ def make_planact_agent(
 ) -> PlanActAgent:
     agent = PlanActAgent(
         name="planact_agent",
+        namespace="tests",
         description="PlanAct agent under test.",
         llm_engine=ScriptedLLMEngine(responses),
         context_enabled=context_enabled,
@@ -169,6 +170,7 @@ def make_react_agent(
 ) -> ReActAgent:
     agent = ReActAgent(
         name="react_agent",
+        namespace="tests",
         description="ReAct agent under test.",
         llm_engine=ScriptedLLMEngine(responses),
         context_enabled=context_enabled,
@@ -281,6 +283,7 @@ class ScriptedToolAgent(ToolAgent):
     ) -> None:
         super().__init__(
             name="scripted_agent",
+            namespace="tests",
             description="Scripted ToolAgent for unit tests.",
             llm_engine=EchoLLMEngine(),
             role_prompt=ROLE_TEMPLATE,
@@ -577,6 +580,35 @@ class TestToolAgentConstruction:
 
         with pytest.raises(ToolAgentError, match="blackboard_preview_limit"):
             agent.blackboard_preview_limit = value  # type: ignore[assignment]
+
+
+class TestToolAgentNamespace:
+    def test_namespace_is_required(self) -> None:
+        with pytest.raises(TypeError):
+            PlanActAgent(
+                name="a",
+                description="d",
+                llm_engine=EchoLLMEngine(),
+            )
+
+    def test_plan_act_agent_namespace_explicit(self) -> None:
+        agent = PlanActAgent(
+            name="a",
+            namespace="planner_ns",
+            description="d",
+            llm_engine=EchoLLMEngine(),
+        )
+        assert agent.namespace == "planner_ns"
+
+    def test_react_agent_namespace_explicit(self) -> None:
+        agent = ReActAgent(
+            name="a",
+            namespace="react_ns",
+            description="d",
+            llm_engine=EchoLLMEngine(),
+            tool_calls_limit=5,
+        )
+        assert agent.namespace == "react_ns"
 
 
 class TestToolAgentPostInvokeRouting:
@@ -2161,6 +2193,7 @@ class TestReActAgent:
         with pytest.raises(ToolAgentError, match="tool_calls_limit"):
             ReActAgent(
                 name="bad_react",
+                namespace="tests",
                 description="Bad ReAct agent.",
                 llm_engine=ScriptedLLMEngine([]),
                 tool_calls_limit=-1,

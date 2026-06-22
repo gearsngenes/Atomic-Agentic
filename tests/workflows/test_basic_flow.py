@@ -55,11 +55,13 @@ class EchoWorkflow(Workflow):
         self,
         *,
         name: str = "echo_workflow",
+        namespace: str = "tests",
         description: str = "Echo workflow.",
         filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=[make_value_param()],
             return_type="dict[str, Any]",
@@ -212,6 +214,28 @@ class TestBasicFlowValidationAndErrors:
 
         with pytest.raises(ExecutionError, match="_async_run failed"):
             asyncio.run(flow.async_invoke({"value": 123}))
+
+
+class TestBasicFlowNamespace:
+    def test_inherits_namespace_from_component(self) -> None:
+        component = Tool(
+            function=return_scalar,
+            name="t",
+            namespace="comp_ns",
+            description="A tool.",
+        )
+        flow = BasicFlow(component=component)
+        assert flow.namespace == "comp_ns"
+
+    def test_explicit_namespace_overrides_component(self) -> None:
+        component = Tool(
+            function=return_scalar,
+            name="t",
+            namespace="comp_ns",
+            description="A tool.",
+        )
+        flow = BasicFlow(component=component, namespace="flow_ns")
+        assert flow.namespace == "flow_ns"
 
 
 class TestBasicFlowSerialization:

@@ -44,6 +44,7 @@ def make_param(name: str, index: int) -> ParamSpec:
 def make_invokable(name: str = "echo") -> EchoInvokable:
     return EchoInvokable(
         name=name,
+        namespace="tests",
         description="Echo invokable.",
         parameters=[make_param("value", 0)],
         return_type="dict[str, Any]",
@@ -53,6 +54,7 @@ def make_invokable(name: str = "echo") -> EchoInvokable:
 def make_scalar_invokable(name: str = "scalar") -> ScalarInvokable:
     return ScalarInvokable(
         name=name,
+        namespace="tests",
         description="Scalar invokable.",
         parameters=[make_param("value", 0)],
         return_type="int",

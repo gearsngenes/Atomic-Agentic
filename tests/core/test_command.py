@@ -63,7 +63,7 @@ class TestCommandConstruction:
         assert command.filter_extraneous_inputs is False
         assert command.name == "add_two_and_three"
         assert command.description == "Add 2 and 3."
-        assert command.signature == "Command.add_two_and_three() -> int"
+        assert command.signature == "Command.tests.add_two_and_three() -> int"
 
     def test_defaults_identity_when_name_and_description_are_omitted(self) -> None:
         executor = make_add_tool()
@@ -327,6 +327,18 @@ class TestCommandSerialization:
         assert data["fixed_inputs"] == {"a": 2, "b": 3}
         assert data["executor"]["type"] == "Tool"
         assert data["executor"]["name"] == "add"
+
+
+class TestCommandNamespace:
+    def test_command_inherits_executor_namespace(self) -> None:
+        executor = make_add_tool()  # namespace="tests"
+        cmd = Command(executor=executor, fixed_inputs={"a": 1, "b": 2})
+        assert cmd.namespace == "tests"
+
+    def test_command_explicit_namespace_overrides_executor(self) -> None:
+        executor = make_add_tool()  # namespace="tests"
+        cmd = Command(executor=executor, fixed_inputs={"a": 1, "b": 2}, namespace="cmd_ns")
+        assert cmd.namespace == "cmd_ns"
 
 
 class TestCommandComposition:

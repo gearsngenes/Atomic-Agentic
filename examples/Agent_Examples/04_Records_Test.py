@@ -30,6 +30,7 @@ def main() -> None:
 
     agent = Agent(
         name="basic_turn_demo_agent",
+        namespace="examples",
         description="Basic Agent demo showing raw/final turn rendering.",
         llm_engine=engine,
         role_prompt="You are concise. Answer in one short sentence.",

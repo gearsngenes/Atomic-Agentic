@@ -15,6 +15,7 @@ print("Testing Task Decomposition and Printing capabilities")
 llm_engine = OpenAIEngine(model="gpt-4o-mini")
 agent = PlanActAgent(
     name="Test_PlanAct",
+    namespace="examples",
     description="Testing the prebuilt plugins with one-shot planning + execution.",
     llm_engine=llm_engine,
     context_enabled=True,

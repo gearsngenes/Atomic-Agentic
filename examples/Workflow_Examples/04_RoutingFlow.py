@@ -103,6 +103,7 @@ escalation_tool = Tool(
 # List-configured branches: router returns an int index into branches.
 flow = RoutingFlow(
     name="support_router",
+    namespace="examples",
     description="Route support requests to one fixed branch based on router output.",
     router=router_tool,
     branches=[billing_tool, general_tool, escalation_tool],
@@ -111,6 +112,7 @@ flow = RoutingFlow(
 # Dict-configured branches: router returns a key into branches.
 flow_by_key = RoutingFlow(
     name="support_router_by_key",
+    namespace="examples",
     description="Route support requests to one fixed branch keyed by router output.",
     router=router_tool_by_key,
     branches={

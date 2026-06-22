@@ -12,6 +12,7 @@ llm_engine = OpenAIEngine(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY
 # PlanAct agent (ReWOO-style: one plan LLM call, then execute tools)
 agent = PlanActAgent(
     name="Test_PlanAct",
+    namespace="examples",
     description="Testing one-shot planning + execution over local python tools.",
     llm_engine=llm_engine,
     context_enabled=True,    # True => persists blackboard across runs

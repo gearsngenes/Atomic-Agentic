@@ -19,6 +19,7 @@ def main() -> None:
 
     math_agent = PlanActAgent(
         name="MathPlannerAgent",
+        namespace="math_host",
         description="A tool-using planner that solves problems with the local math tools.",
         llm_engine=llm,
         context_enabled=False,

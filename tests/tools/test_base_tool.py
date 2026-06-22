@@ -99,12 +99,14 @@ class AddInvokable(AtomicInvokable):
         self,
         *,
         name: str = "add_invokable",
+        namespace: str = "tests",
         description: str = "Add invokable.",
         filter_extraneous_inputs: bool = True,
     ) -> None:
         self.last_inputs: dict[str, Any] | None = None
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=[
                 make_param("a", 0, type_="int"),
@@ -162,6 +164,7 @@ class VariadicInvokable(AtomicInvokable):
     def __init__(self) -> None:
         super().__init__(
             name="variadic_invokable",
+            namespace="tests",
             description="Invokable with a variadic keyword parameter.",
             parameters=[
                 make_param("a", 0, type_="int"),
@@ -181,6 +184,7 @@ class RaisingToolInvocationErrorInvokable(AtomicInvokable):
     def __init__(self) -> None:
         super().__init__(
             name="raises_tool_invocation_error",
+            namespace="tests",
             description="Invokable that raises ToolInvocationError directly.",
             parameters=[],
             return_type="None",
@@ -596,7 +600,7 @@ class TestToolExecution:
 
 
 class TestToolMutableMetadata:
-    def test_namespace_setter_updates_full_name(self) -> None:
+    def test_namespace_is_read_only(self) -> None:
         tool = Tool(
             function=add,
             name="add",
@@ -604,10 +608,10 @@ class TestToolMutableMetadata:
             description="Add values.",
         )
 
-        tool.namespace = "math"
-
-        assert tool.namespace == "math"
-        assert tool.full_name == "Tool.math.add"
+        assert tool.namespace == "tests"
+        assert tool.full_name == "Tool.tests.add"
+        with pytest.raises(AttributeError):
+            tool.namespace = "math"
 
     def test_function_setter_refreshes_callable_schema(self) -> None:
         tool = Tool(

@@ -37,14 +37,16 @@ Output: bullet-point critique ONLY (max 8 bullets). No rewriting.
 """.strip()
 
 outliner = Agent(
-    "StoryOutliner",
+    name="StoryOutliner",
+    namespace="examples",
     description="Generate a structured outline from a one-sentence idea.",
     llm_engine=llm_engine,
     role_prompt=OUTLINER_PROMPT,
 )
 
 writer = Agent(
-    "StoryWriter",
+    name="StoryWriter",
+    namespace="examples",
     description="Writes drafts based on the outline or reviewer notes.",
     llm_engine=llm_engine,
     role_prompt=WRITER_PROMPT,
@@ -52,7 +54,8 @@ writer = Agent(
 )
 
 reviewer = Agent(
-    "DraftReviewer",
+    name="DraftReviewer",
+    namespace="examples",
     description="Reviews drafts and provides revision notes.",
     llm_engine=llm_engine,
     role_prompt=REVIEWER_PROMPT,
@@ -61,6 +64,7 @@ reviewer = Agent(
 
 orch = PlanActAgent(
     name="StoryPlanner",
+    namespace="examples",
     description="Plan-once agent that orchestrates outliner/writer/reviewer.",
     llm_engine=llm_engine,
     context_enabled=False,

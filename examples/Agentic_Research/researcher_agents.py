@@ -34,6 +34,7 @@ def writer_post(*, result: Any) -> Mapping[str, str]:
 
 writer = Agent(
     name="report_writer",
+    namespace="research",
     description="Drafts and revises an APA-style research report.",
     llm_engine=llm,
     role_prompt=(
@@ -62,6 +63,7 @@ def critic_post(*, result: str) -> Mapping[str, str]:
 
 critic = Agent(
     name="report_critic",
+    namespace="research",
     description="Reviews the report draft and returns revision notes or <<APPROVED>>.",
     llm_engine=llm,
     role_prompt=(

@@ -64,6 +64,7 @@ def main() -> None:
 
     agent = Agent(
         name="PassthroughDemoAgent",
+        namespace="examples",
         description="Demonstrates post-invoke passthrough inputs.",
         llm_engine=llm,
         role_prompt="You are a concise assistant.",

@@ -57,6 +57,7 @@ class ParallelFlow(Workflow):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         branches: list[Workflow | AtomicInvokable],
         *,
@@ -99,6 +100,7 @@ class ParallelFlow(Workflow):
 
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=list(declared_parameters),
             return_type=resolved_return_type,

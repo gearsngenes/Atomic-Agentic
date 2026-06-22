@@ -129,7 +129,6 @@ class Tool(AtomicInvokable):
 
         # Underlying callable or invokable-backed execution target and identity.
         self._function: AtomicInvokable | Callable[..., Any] = function
-        self._namespace: str = namespace or "default"
         self._module, self._qualname = self._get_mod_qual(function)
 
         inferred_name = (
@@ -165,10 +164,12 @@ class Tool(AtomicInvokable):
         # Build tool signature (template method)
         parameters, return_type = self._build_tool_signature()
 
+        # namespace is stored by AtomicInvokable; no local storage needed
         # Delegate name/description validation and schema setup to parent
         super().__init__(
             name=inferred_name,
             description=inferred_description,
+            namespace=namespace or "default",
             parameters=parameters,
             return_type=return_type,
             filter_extraneous_inputs=filter_extraneous_inputs,
@@ -177,14 +178,6 @@ class Tool(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Tool Properties
     # ------------------------------------------------------------------ #
-    @property
-    def namespace(self) -> str:
-        return self._namespace
-
-    @namespace.setter
-    def namespace(self, value: str) -> None:
-        self._namespace = value
-
     @property
     def wraps_invokable(self) -> bool:
         """Return whether this Tool wraps an ``AtomicInvokable`` target."""
@@ -229,11 +222,6 @@ class Tool(AtomicInvokable):
     def qualname(self) -> Optional[str]:
         """Best-effort qualified-name identity for the wrapped callable or invokable target."""
         return self._qualname
-
-    @property
-    def full_name(self) -> str:
-        """Fully-qualified tool name of the form ``Type.namespace.name``."""
-        return f"{type(self).__name__}.{self._namespace}.{self._name}"
 
     # ------------------------------------------------------------------ #
     # Signature Building (Template Method)
@@ -485,9 +473,9 @@ class Tool(AtomicInvokable):
         reconstructable; reconstruction is left to future factory logic.
         """
         d = super().to_dict()
+        # "namespace" is emitted by super().to_dict(); not repeated here
         d.update({
             "wraps_invokable": self.wraps_invokable,
-            "namespace": self.namespace,
             "module": self.module,
             "qualname": self.qualname,
         })

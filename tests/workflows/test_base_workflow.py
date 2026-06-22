@@ -28,6 +28,7 @@ class EchoWorkflow(Workflow):
         self,
         *,
         name: str = "echo_workflow",
+        namespace: str = "tests",
         description: str = "Echo workflow.",
         parameters: list[ParamSpec] | None = None,
         return_type: str = "dict[str, Any]",
@@ -35,6 +36,7 @@ class EchoWorkflow(Workflow):
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=parameters if parameters is not None else [make_value_param()],
             return_type=return_type,
@@ -58,9 +60,10 @@ class ConfigurableWorkflow(Workflow):
     def __init__(
         self,
         name: str,
-        description: str,
-        parameters: list[ParamSpec],
-        return_type: str,
+        namespace: str = "tests",
+        description: str = "Configurable workflow.",
+        parameters: list[ParamSpec] | None = None,
+        return_type: str = "Any",
         *,
         result: Any = None,
         run_error: Exception | None = None,
@@ -69,8 +72,9 @@ class ConfigurableWorkflow(Workflow):
     ) -> None:
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
-            parameters=parameters,
+            parameters=parameters if parameters is not None else [make_value_param()],
             return_type=return_type,
             filter_extraneous_inputs=(
                 filter_extraneous_inputs
@@ -91,6 +95,19 @@ class ConfigurableWorkflow(Workflow):
         if self._async_error is not None:
             raise self._async_error
         return self._result, {}
+
+
+class TestWorkflowNamespace:
+    def test_workflow_namespace_default(self) -> None:
+        workflow = EchoWorkflow()
+        assert workflow.namespace == "tests"
+
+    def test_workflow_namespace_explicit(self) -> None:
+        workflow = ConfigurableWorkflow(
+            name="wf",
+            namespace="wf_ns",
+        )
+        assert workflow.namespace == "wf_ns"
 
 
 class TestWorkflowConstruction:

@@ -165,6 +165,7 @@ class Agent(AtomicInvokable):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         llm_engine: LLMEngine,
         filter_extraneous_inputs: Optional[bool] = None,
@@ -250,6 +251,7 @@ class Agent(AtomicInvokable):
         # Delegate to parent with the composed Agent schema.
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=agent_parameters,
             return_type=self._post_invoke.return_type,

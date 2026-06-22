@@ -72,6 +72,7 @@ class RoutingFlow(Workflow):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         branches: tuple[Workflow | AtomicInvokable] | list[Workflow | AtomicInvokable] | dict[Hashable, Workflow | AtomicInvokable],
         router: Workflow | AtomicInvokable,
@@ -131,6 +132,7 @@ class RoutingFlow(Workflow):
 
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=list(declared_parameters),
             return_type=resolved_return_type,

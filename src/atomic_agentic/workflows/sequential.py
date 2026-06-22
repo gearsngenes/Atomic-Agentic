@@ -76,6 +76,7 @@ class SequentialFlow(Workflow):
     def __init__(
         self,
         name: str,
+        namespace: str,
         description: str,
         steps: list[Workflow | AtomicInvokable],
         *,
@@ -113,6 +114,7 @@ class SequentialFlow(Workflow):
 
         super().__init__(
             name=name,
+            namespace=namespace,
             description=description,
             parameters=normalized_steps[0].parameters,
             return_type=normalized_steps[resolved_return_index].return_type,

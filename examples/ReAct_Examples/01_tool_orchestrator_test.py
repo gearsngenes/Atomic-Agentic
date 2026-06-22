@@ -17,6 +17,7 @@ llm = OpenAIEngine(model="gpt-4o-mini")
 # 2) ReAct-style Orchestrator (iterative tool-use)
 orchestrator = ReActAgent(
     name="MathOrchestrator",
+    namespace="examples",
     description="Orchestrates math + console tools to solve multi-step arithmetic tasks.",
     llm_engine=llm,
     records_window=20,    # send-window (turns) to the model
