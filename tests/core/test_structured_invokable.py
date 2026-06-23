@@ -291,23 +291,17 @@ class TestStructuredInvokablePolicyValidation:
         self,
         mode: str,
     ) -> None:
-        wrapper = structured(output_schema=["a"])
-
-        wrapper.absent_value_mode = mode
+        wrapper = structured(output_schema=["a"], absent_value_mode=mode)
 
         assert wrapper.absent_value_mode == mode.upper()
 
     def test_absent_value_mode_rejects_invalid_string(self) -> None:
-        wrapper = structured(output_schema=["a"])
-
         with pytest.raises(ValueError, match="absent_value_mode"):
-            wrapper.absent_value_mode = "ignore"
+            structured(output_schema=["a"], absent_value_mode="ignore")
 
     def test_absent_value_mode_rejects_non_string(self) -> None:
-        wrapper = structured(output_schema=["a"])
-
         with pytest.raises(TypeError, match="absent_value_mode"):
-            wrapper.absent_value_mode = 123  # type: ignore[assignment]
+            structured(output_schema=["a"], absent_value_mode=123)  # type: ignore[arg-type]
 
 
 class TestStructuredInvokableMappingPackaging:

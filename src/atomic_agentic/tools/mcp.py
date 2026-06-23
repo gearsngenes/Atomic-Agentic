@@ -14,7 +14,7 @@ from typing import (
 from ..core.Invokable import AtomicInvokable
 from ..exceptions import ToolDefinitionError, ToolInvocationError
 from ..models.parameters import ParamSpec
-from ..constants.core import HeaderValue, NO_VAL
+from ..constants.core import HeaderValue
 from ..mcp.MCPClientHub import MCPClientHub
 from ..models.results.tools import MCPToolResult
 from .base import Tool
@@ -108,11 +108,6 @@ class MCPProxyTool(Tool):
         )
 
     @property
-    def function(self) -> AtomicInvokable | Callable[..., Any]:
-        """Remote proxy call binding. Rebuilt through refresh(), not reassigned directly."""
-        return self._function
-
-    @property
     def client_hub(self) -> MCPClientHub:
         return self._client_hub
 
@@ -139,6 +134,10 @@ class MCPProxyTool(Tool):
     @property
     def headers(self) -> Mapping[str, str] | None:
         return self.client_hub.headers
+
+    @headers.setter
+    def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
+        self.client_hub.headers = value
 
     @property
     def mcpdata(self) -> Dict[str, Any]:
@@ -305,34 +304,6 @@ class MCPProxyTool(Tool):
         raise ToolInvocationError(
             f"{self.full_name}: remote MCP tool reported isError=True. Payload: {payload!r}"
         )
-
-    def refresh(self, headers: Mapping[str, HeaderValue] | None = NO_VAL) -> None:
-        """
-        Re-fetch remote metadata and rebuild the local MCP binding.
-
-        Refresh semantics intentionally prefer fresh remote description data.
-        If the remote description is missing, fall back to a stub based on the
-        AA-facing local tool name.
-        """
-        if headers is not NO_VAL:
-            self.client_hub.headers = headers
-
-        all_tools = self.client_hub.list_tools()
-        if self.remote_name not in all_tools:
-            raise ToolDefinitionError(
-                f"{self.full_name}: remote tool {self.remote_name!r} not found during refresh."
-            )
-
-        self._mcpdata = dict(all_tools[self.remote_name])
-
-        remote_description = str(self._mcpdata.get("description") or "").strip()
-        self.description = remote_description or f"MCP proxy tool '{self.name}'"
-
-        self._function = functools.partial(self.client_hub.call_tool, self.remote_name)
-        self._module, self._qualname = self._get_mod_qual(self._function)
-        parameters, return_type = self._build_tool_signature()
-        self._parameters = parameters
-        self._return_type = return_type
 
     def to_dict(self) -> Dict[str, Any]:
         data = super().to_dict()

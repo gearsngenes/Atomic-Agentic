@@ -498,46 +498,35 @@ class TestMCPProxyToolMakeResult:
         assert result.remote_name == "search"
 
 
-class TestMCPProxyToolRefreshAndSerialization:
-    def test_refresh_updates_headers_metadata_description_and_schema(self) -> None:
+class TestMCPProxyToolHeaders:
+    def test_headers_getter_reads_from_client_hub(self) -> None:
+        hub = FakeMCPClientHub()
+        hub._headers = {"X-Token": "abc"}
+        tool = make_tool(hub=hub)
+
+        assert tool.headers == hub.headers
+
+    def test_headers_setter_updates_client_hub(self) -> None:
         hub = FakeMCPClientHub()
         tool = make_tool(hub=hub)
 
-        hub._tools = {
-            "search": {
-                **search_metadata(description="Fresh description.", return_type="dict"),
-                "parameters": [param("query", 0, type_="str")],
-            }
-        }
-
-        tool.refresh(headers={"Authorization": "Bearer token"})
+        tool.headers = {"Authorization": "Bearer token"}
 
         assert hub.headers == {"Authorization": "Bearer token"}
-        assert tool.description == "Fresh description."
-        assert [(p.name, p.type) for p in tool.parameters] == [("query", "str")]
-        assert tool.return_type == "dict"
 
-    def test_refresh_uses_stub_description_when_remote_description_missing(self) -> None:
-        hub = FakeMCPClientHub()
-        tool = make_tool(hub=hub, name="local_search")
-
-        hub._tools = {
-            "search": search_metadata(description=""),
-        }
-
-        tool.refresh()
-
-        assert tool.description == "MCP proxy tool 'local_search'"
-
-    def test_refresh_missing_remote_raises(self) -> None:
+    def test_headers_setter_does_not_mutate_schema(self) -> None:
         hub = FakeMCPClientHub()
         tool = make_tool(hub=hub)
+        original_parameters = tool.parameters
+        original_return_type = tool.return_type
 
-        hub._tools = {}
+        tool.headers = {"X-Test": "yes"}
 
-        with pytest.raises(ToolDefinitionError, match="not found during refresh"):
-            tool.refresh()
+        assert tool.parameters == original_parameters
+        assert tool.return_type == original_return_type
 
+
+class TestMCPProxyToolHeadersAndSerialization:
     def test_to_dict_includes_remote_and_client_metadata(self) -> None:
         tool = make_tool()
 

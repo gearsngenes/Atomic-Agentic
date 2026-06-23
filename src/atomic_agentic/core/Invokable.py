@@ -99,8 +99,13 @@ class AtomicInvokable(ABC):
         return_type: str,
         filter_extraneous_inputs: bool = True,
     ) -> None:
-        # setters include validation
-        self.name = name
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name must be a non-empty string")
+        if not IDENTIFIER_PATTERN.fullmatch(name):
+            raise ValueError(
+                f"name must be alphanumeric/underscore and not start with a digit; got {name!r}"
+            )
+        self._name = name
         self.description = description
 
         # Validate and store namespace — same identifier rules as name.
@@ -170,16 +175,6 @@ class AtomicInvokable(ABC):
     def name(self) -> str:
         """The canonical name of this invokable."""
         return self._name
-
-    @name.setter
-    def name(self, value: str) -> None:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("name must be a non-empty string")
-        if not IDENTIFIER_PATTERN.fullmatch(value):
-            raise ValueError(
-                f"name must be alphanumeric/underscore and not start with a digit; got {value!r}"
-            )
-        self._name = value
 
     @property
     def description(self) -> str:
@@ -820,29 +815,6 @@ class Command(AtomicInvokable):
         """A shallow copy of the fixed executor input mapping."""
         return dict(self._fixed_inputs)
 
-    @property
-    def filter_extraneous_inputs(self) -> bool:
-        """
-        Commands always reject runtime caller inputs.
-
-        This property is intentionally fixed to False so that the empty
-        parameter list means "no inputs accepted", not "drop all inputs".
-        """
-        return self._filter_extraneous_inputs
-
-    @filter_extraneous_inputs.setter
-    def filter_extraneous_inputs(self, value: bool) -> None:
-        if not isinstance(value, bool):
-            raise TypeError(
-                f"{type(self).__name__}.filter_extraneous_inputs must be a bool, "
-                f"got {type(value)!r}"
-            )
-        if value is not False:
-            raise ValueError(
-                f"{type(self).__name__}.filter_extraneous_inputs is fixed to False."
-            )
-        self._filter_extraneous_inputs = False
-
     # ---------------------------------------------------------------- #
     # Construction validation
     # ---------------------------------------------------------------- #
@@ -1033,13 +1005,24 @@ class StructuredInvokable(AtomicInvokable):
             filter_extraneous_inputs=resolved_filter,
         )
 
-        # Packaging contract and policy knobs.
-        # These setters are expected to validate and normalize their inputs.
-        self.output_schema = output_schema
+        normalized_schema = to_paramspec_list(output_schema)
+        _validate_parameter_order(normalized_schema)
+        self._output_schema = normalized_schema
+
+        if not isinstance(absent_value_mode, str):
+            raise TypeError(
+                f"absent_value_mode must be a string, got {type(absent_value_mode).__name__}"
+            )
+        normalized_mode = absent_value_mode.strip().upper()
+        if normalized_mode not in self._ABSENT_VALUE_MODES:
+            raise ValueError(
+                "absent_value_mode must be one of: 'RAISE', 'DROP', 'FILL' (case-insensitive)"
+            )
+        self._absent_value_mode = normalized_mode
+
         self.map_single_fields = map_single_fields
         self.map_extras = map_extras
         self.ignore_unhandled = ignore_unhandled
-        self.absent_value_mode = absent_value_mode
         self.default_absent_value = default_absent_value
         self.none_is_absent = none_is_absent
         self.coerce_to_collection = coerce_to_collection
@@ -1083,16 +1066,6 @@ class StructuredInvokable(AtomicInvokable):
     def output_schema(self) -> list[ParamSpec]:
         """The normalized output schema."""
         return list(self._output_schema)
-
-    @output_schema.setter
-    def output_schema(
-        self,
-        value: Optional[type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec]],
-    ) -> None:
-        """Normalize, validate, and set the output schema."""
-        normalized = to_paramspec_list(value)
-        _validate_parameter_order(normalized)
-        self._output_schema = normalized
 
     @property
     def named_output_fields(self) -> list[ParamSpec]:
@@ -1163,23 +1136,6 @@ class StructuredInvokable(AtomicInvokable):
     def absent_value_mode(self) -> str:
         """The canonical uppercase missing-value policy."""
         return self._absent_value_mode
-
-    @absent_value_mode.setter
-    def absent_value_mode(self, value: str) -> None:
-        """Validate, normalize, and set the missing-value policy."""
-        if not isinstance(value, str):
-            raise TypeError(
-                f"absent_value_mode must be a string, got {type(value).__name__}"
-            )
-
-        normalized = value.strip().upper()
-        if normalized not in self._ABSENT_VALUE_MODES:
-            raise ValueError(
-                "absent_value_mode must be one of: 'RAISE', 'DROP', 'FILL' "
-                "(case-insensitive)"
-            )
-
-        self._absent_value_mode = normalized
 
     @property
     def default_absent_value(self) -> Any:

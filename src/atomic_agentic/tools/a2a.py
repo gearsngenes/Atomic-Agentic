@@ -8,7 +8,7 @@ from atomic_agentic.core.Invokable import AtomicInvokable
 
 from ..exceptions import ToolDefinitionError, ToolInvocationError, RemoteInvocationError
 from ..models.parameters import ParamSpec
-from ..constants.core import HeaderValue, NO_VAL
+from ..constants.core import HeaderValue
 from ..constants.a2a import PYA2A_RESULT_KEY
 from ..models.results.tools import PyA2AtomicToolResult
 from .base import Tool
@@ -135,7 +135,6 @@ class PyA2AtomicTool(Tool):
     @headers.setter
     def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
         self._client.headers = value
-        self.refresh()
 
     @property
     def agent_card(self) -> Any:
@@ -259,25 +258,6 @@ class PyA2AtomicTool(Tool):
             invokable_type=self._remote_metadata["invokable_type"],
             **result_kwargs,
         )
-
-    def refresh(self, headers: Mapping[str, HeaderValue] | None = NO_VAL) -> None:
-        """
-        Re-fetch remote metadata and rebuild the local binding.
-
-        Refresh does not rewrite the Tool's local name, namespace, or description.
-        It only updates remote metadata, callable binding, parameters, and return type.
-        """
-        if headers is not NO_VAL:
-            self._client.headers = headers
-
-        self._remote_metadata = self._client.get_invokable_metadata(self._remote_name)
-
-        self._function = self._client.call_invokable
-        self._module, self._qualname = self._get_mod_qual(self._function)
-
-        parameters, return_type = self._build_tool_signature()
-        self._parameters = parameters
-        self._return_type = return_type
 
     # ------------------------------------------------------------------ #
     # Serialization

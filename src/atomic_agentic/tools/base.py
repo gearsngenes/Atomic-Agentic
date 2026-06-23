@@ -188,31 +188,6 @@ class Tool(AtomicInvokable):
         """Underlying plain callable or ``AtomicInvokable`` execution target."""
         return self._function
 
-    @function.setter
-    def function(self, func: AtomicInvokable | Callable[..., Any]) -> None:
-        """Update the execution target and refresh schema/import metadata."""
-        if not callable(func):
-            raise ToolDefinitionError(f"Tool function must be callable, got {type(func)!r}")
-
-        module, qualname = self._get_mod_qual(func)
-
-        if isinstance(func, AtomicInvokable):
-            parameters = list(func.parameters)
-            return_type = func.return_type
-        else:
-            parameters, return_type = extract_io(func)
-
-        if not isinstance(return_type, str):
-            raise TypeError(
-                f"{type(self).__name__}.return_type must be str, got {type(return_type)!r}"
-            )
-
-        self._function = func
-        self._module = module
-        self._qualname = qualname
-        self._parameters = parameters
-        self._return_type = return_type
-
     @property
     def module(self) -> Optional[str]:
         """Best-effort module identity for the wrapped callable or invokable target."""

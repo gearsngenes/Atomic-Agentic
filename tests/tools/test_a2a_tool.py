@@ -237,43 +237,6 @@ class TestPyA2AtomicToolSignatureAndMetadata:
 
         assert tool.remote_metadata["description"] == "Remote echo invokable."
 
-    def test_invalid_remote_parameters_type_raises_on_refresh(self) -> None:
-        client = FakePyA2AtomicClient()
-        tool = make_tool(client=client)
-
-        client.metadata = {
-            **remote_metadata(),
-            "parameters": "bad",
-        }
-
-        with pytest.raises(ToolDefinitionError, match="'parameters' must be a list"):
-            tool.refresh()
-
-    def test_invalid_remote_parameter_item_raises_on_refresh(self) -> None:
-        client = FakePyA2AtomicClient()
-        tool = make_tool(client=client)
-
-        client.metadata = {
-            **remote_metadata(),
-            "parameters": ["bad"],
-        }
-
-        with pytest.raises(ToolDefinitionError, match="parameters\\[0\\]"):
-            tool.refresh()
-
-    def test_invalid_remote_return_type_raises_on_refresh(self) -> None:
-        client = FakePyA2AtomicClient()
-        tool = make_tool(client=client)
-
-        client.metadata = {
-            **remote_metadata(),
-            "return_type": 123,
-        }
-
-        with pytest.raises(ToolDefinitionError, match="'return_type' must be a str"):
-            tool.refresh()
-
-
 class TestPyA2AtomicToolInvocation:
     def test_invoke_forwards_remote_name_and_kwargs_to_client(self) -> None:
         client = FakePyA2AtomicClient(result={"value": 123})
@@ -444,51 +407,14 @@ class TestPyA2AtomicToolErrorHandling:
         assert exc_info.value.error_type == "RuntimeError"
 
 
-class TestPyA2AtomicToolRefreshAndSerialization:
-    def test_headers_setter_updates_client_headers_and_refreshes_metadata(self) -> None:
+class TestPyA2AtomicToolHeadersAndSerialization:
+    def test_headers_setter_updates_client_headers(self) -> None:
         client = FakePyA2AtomicClient()
         tool = make_tool(client=client)
-
-        client.metadata = {
-            **remote_metadata(return_type="str"),
-            "parameters": [param_dict("value", 0, type_="str")],
-        }
 
         tool.headers = {"Authorization": "Bearer token"}
 
         assert client.headers == {"Authorization": "Bearer token"}
-        assert tool.return_type == "str"
-        assert [(p.name, p.type) for p in tool.parameters] == [("value", "str")]
-
-    def test_refresh_with_headers_updates_client_headers(self) -> None:
-        client = FakePyA2AtomicClient()
-        tool = make_tool(client=client)
-
-        tool.refresh(headers={"X-Test": "yes"})
-
-        assert client.headers == {"X-Test": "yes"}
-
-    def test_refresh_rebuilds_schema_but_keeps_local_identity_and_description(self) -> None:
-        client = FakePyA2AtomicClient()
-        tool = make_tool(
-            client=client,
-            name="local_echo",
-            namespace="a2a_tools",
-            description="Original local description.",
-        )
-
-        client.metadata = {
-            **remote_metadata(description="Fresh remote description.", return_type="str"),
-            "parameters": [param_dict("value", 0, type_="str")],
-        }
-
-        tool.refresh()
-
-        assert tool.name == "local_echo"
-        assert tool.namespace == "a2a_tools"
-        assert tool.description == "Original local description."
-        assert tool.return_type == "str"
-        assert [(p.name, p.type) for p in tool.parameters] == [("value", "str")]
 
     def test_url_headers_and_agent_card_proxy_through_client(self) -> None:
         client = FakePyA2AtomicClient(

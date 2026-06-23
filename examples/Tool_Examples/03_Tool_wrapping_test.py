@@ -30,6 +30,7 @@ def to_prompt(topic: str, style: str, *, audience: str = "general") -> str:
 
 agent = Agent(
     name="Writer",
+    namespace="agent_wrapped",
     description="Helpful writing assistant.",
     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
     role_prompt="You are a concise writing assistant.",
@@ -42,7 +43,6 @@ agent = Agent(
 agent_tool = Tool(
     function=agent,
     name="writer_tool",
-    namespace="agent_wrapped",
     description="Base Tool wrapping the Writer Agent directly.",
 )
 

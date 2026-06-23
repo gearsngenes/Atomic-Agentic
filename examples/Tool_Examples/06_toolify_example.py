@@ -49,6 +49,7 @@ pre_invoke_tool = Tool(
 
 agent = Agent(
     name="Writer",
+    namespace="agent_wrapped",
     description="Concise writing assistant.",
     llm_engine=OpenAIEngine("gpt-4o-mini"),
     role_prompt="You are a concise writing assistant.",
