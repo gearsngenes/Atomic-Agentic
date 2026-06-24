@@ -112,6 +112,16 @@ class MCPClientHub:
     def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
         self._headers = normalize_headers(value)
 
+    def refresh(self, headers: Mapping[str, HeaderValue] | None = None) -> None:
+        """
+        Optionally update stored headers.
+
+        MCP sessions open and close per invocation — there is no persistent
+        connection to refresh. If headers is not None, normalizes and stores them.
+        """
+        if headers is not None:
+            self._headers = normalize_headers(headers)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "transport_mode": self.transport_mode,
