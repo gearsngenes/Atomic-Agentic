@@ -281,7 +281,6 @@ class ToolAgent(Agent, ABC):
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
         blackboard_preview_limit: Optional[int] = None,
-        preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_result_key: Optional[str] = None,
@@ -289,14 +288,6 @@ class ToolAgent(Agent, ABC):
         records_window: Optional[int] = None,
     ) -> None:
         template = self._validate_role_prompt_template(role_prompt)
-
-        if preview_limit is not None:
-            if response_preview_limit is not None:
-                raise ToolAgentError(
-                    "preview_limit and response_preview_limit cannot both be provided; "
-                    "preview_limit is a compatibility alias for response_preview_limit."
-                )
-            response_preview_limit = preview_limit
 
         super().__init__(
             name=name,
@@ -318,10 +309,16 @@ class ToolAgent(Agent, ABC):
         self._blackboard: list[BlackboardSlot] = []
         self._constants: list[ConstantSpec] = []
 
-        self._peek_at_cache = False
-        self.peek_at_cache = peek_at_cache
+        if type(peek_at_cache) is not bool:
+            raise ToolAgentError("peek_at_cache must be a boolean.")
+        self._peek_at_cache = peek_at_cache
 
-        self.blackboard_preview_limit = blackboard_preview_limit
+        if blackboard_preview_limit is None:
+            self._blackboard_preview_limit = None
+        elif type(blackboard_preview_limit) is not int or blackboard_preview_limit <= 0:
+            raise ToolAgentError("blackboard_preview_limit must be None or a positive integer > 0.")
+        else:
+            self._blackboard_preview_limit = blackboard_preview_limit
 
         self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
@@ -372,19 +369,30 @@ class ToolAgent(Agent, ABC):
     def blackboard_serialized(self, peek: bool = False) -> list[dict[str, Any]]:
         """
         Read-only serialized view of the persisted blackboard.
-        (Keeps backward-friendly dict shape.)
+
+        ``peek=False`` (default): hides ``result`` and ``resolved_args`` fields.
+        ``peek=True``: includes those fields; the ``result`` value is rendered
+        through ``_preview_blackboard_result`` so ``blackboard_preview_limit``
+        applies consistently with the ReAct observable rendering path.
         """
-        result = []
         if peek:
-            result = [slot.to_dict() for slot in self._blackboard]
+            result = []
+            for slot in self._blackboard:
+                d = slot.to_dict()
+                if slot.is_executed():
+                    d[BlackboardSlot.RESULT_FIELD] = self._preview_blackboard_result(
+                        slot.result.result
+                    )
+                result.append(d)
+            return result
         else:
-            dicts = [slot.to_dict() for slot in self._blackboard]
-            for _dict in dicts:
-                _dict.pop(BlackboardSlot.RESOLVED_ARGS_FIELD)
-                _dict.pop(BlackboardSlot.RESULT_FIELD)
-                result.append(_dict)
-            
-        return result
+            result = []
+            for slot in self._blackboard:
+                d = slot.to_dict()
+                d.pop(BlackboardSlot.RESOLVED_ARGS_FIELD)
+                d.pop(BlackboardSlot.RESULT_FIELD)
+                result.append(d)
+            return result
     
     @property
     def blackboard(self) -> list[BlackboardSlot]:
@@ -394,34 +402,10 @@ class ToolAgent(Agent, ABC):
     def peek_at_cache(self) -> bool:
         return self._peek_at_cache
 
-    @peek_at_cache.setter
-    def peek_at_cache(self, val: bool) -> None:
-        if type(val) is not bool:
-            raise ToolAgentError("peek_at_cache must be a boolean.")
-        self._peek_at_cache = val
-    
     @property
     def blackboard_preview_limit(self) -> Optional[int]:
         """Character limit for cached blackboard result previews. None means no truncation."""
         return self._blackboard_preview_limit
-    
-    @blackboard_preview_limit.setter
-    def blackboard_preview_limit(self, value: Optional[int]) -> None:
-        if value is None:
-            self._blackboard_preview_limit = None
-            return
-        if type(value) is not int or value <= 0:
-            raise ToolAgentError("blackboard_preview_limit must be None or a positive integer > 0.")
-        self._blackboard_preview_limit = value
-
-    @property
-    def preview_limit(self) -> Optional[int]:
-        """Compatibility alias for response_preview_limit."""
-        return self.response_preview_limit
-    
-    @preview_limit.setter
-    def preview_limit(self, value: Optional[int]) -> None:
-        self.response_preview_limit = value
 
     def _preview_blackboard_result(self, result: Any) -> str:
         """Render and optionally truncate a cached blackboard result preview."""
@@ -2218,7 +2202,6 @@ class PlanActAgent(ToolAgent):
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
         blackboard_preview_limit: Optional[int] = None,
-        preview_limit: Optional[int] = None,
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_result_key: Optional[str] = None,
@@ -2237,7 +2220,6 @@ class PlanActAgent(ToolAgent):
             peek_at_cache=peek_at_cache,
             response_preview_limit=response_preview_limit,
             blackboard_preview_limit=blackboard_preview_limit,
-            preview_limit=preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
@@ -2957,7 +2939,6 @@ class ReActAgent(ToolAgent):
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
         blackboard_preview_limit: Optional[int] = None,
-        preview_limit: Optional[int] = None,
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_result_key: Optional[str] = None,
@@ -2976,7 +2957,6 @@ class ReActAgent(ToolAgent):
             peek_at_cache=peek_at_cache,
             response_preview_limit=response_preview_limit,
             blackboard_preview_limit=blackboard_preview_limit,
-            preview_limit=preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,

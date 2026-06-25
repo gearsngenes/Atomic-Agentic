@@ -5,6 +5,49 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a10] - 2026-06-25
+
+### Added
+
+- `LLMEngine.timeout_seconds` — read-only property exposing the per-call timeout
+  baked into provider SDK clients at construction; previously accessible only as
+  the private `_timeout_seconds`.
+
+### Changed
+
+- `OpenAIEngine.inline_cutoff_chars` and `MistralEngine.inline_cutoff_chars` are
+  now frozen (read-only property backed by `_inline_cutoff_chars`). These values
+  are consumed at `attach()` time — the truncated text is baked into stored
+  attachment metadata — so changing them mid-session previously created silent
+  state inconsistency.
+- `LlamaCppEngine`: source/download parameters (`model_path`, `repo_id`,
+  `filename`, `revision`, `cache_dir`, `local_dir`, `local_files_only`,
+  `force_download`) and model-load parameters (`n_ctx`, `n_threads`,
+  `n_threads_batch`, `n_gpu_layers`, `chat_format`, `verbose`) are now frozen
+  as `_private` + read-only properties. All were consumed once at construction
+  by `Llama(...)` and could not retroactively affect the loaded model. External
+  property names are unchanged.
+- `OpenAIEngine.llm`, `GeminiEngine.client`, `MistralEngine.client`: renamed to
+  `_llm`/`_client` (fully private, no public property). These SDK client objects
+  are construction-time artifacts; direct access is no longer part of the public
+  API.
+
+### Removed
+
+- `Agent.attach`, `Agent.detach`, `Agent.clear_attachments`, `Agent.attachments`
+  — attachment state is engine-coupled; access via `agent.llm_engine` directly.
+- `ToolAgent.preview_limit` compatibility alias (and equivalent aliases on
+  `PlanActAgent`, `ReActAgent`).
+- `refresh()` and other lifecycle methods from `MCPProxyTool` and
+  `PyA2AtomicTool` — tools are static once constructed.
+- Mutable `headers` setters from `MCPClientHub` and `PyA2AtomicClient` — header
+  ownership belongs to the proxy tools, not the client helpers.
+
+**Frozen (no setter, construction-time only):**
+- `AtomicInvokable`: `name`, `namespace`, `parameters`, `return_type`.
+- `Agent` family: `response_preview_limit`, `assistant_response_source`,
+  `peek_at_cache`, `blackboard_preview_limit`.
+
 ## [2.0.0a9] - 2026-06-22
 
 ### Added

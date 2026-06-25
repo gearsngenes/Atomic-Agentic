@@ -135,21 +135,6 @@ class TestAtomicInvokableIdentity:
 
         assert invokable.full_name == "EchoInvokable.tests.sample"
 
-    def test_name_mutation_updates_full_name(self) -> None:
-        invokable = make_invokable(name="before")
-
-        invokable.name = "after"
-
-        assert invokable.name == "after"
-        assert invokable.full_name == "EchoInvokable.tests.after"
-
-    def test_invalid_name_mutation_raises(self) -> None:
-        invokable = make_invokable()
-
-        with pytest.raises(ValueError):
-            invokable.name = "bad-name"
-
-
 class TestAtomicInvokableNamespace:
     def test_namespace_is_required(self) -> None:
         with pytest.raises(TypeError):

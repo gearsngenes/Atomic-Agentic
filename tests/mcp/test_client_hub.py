@@ -255,3 +255,29 @@ class TestMCPClientHubOperationsWithoutRealServer:
 
         with pytest.raises(RuntimeError, match="inputs"):
             hub.call_tool("search", ["not", "mapping"])  # type: ignore[arg-type]
+
+
+class TestMCPClientHubRefresh:
+    def test_refresh_without_headers_is_noop(self) -> None:
+        hub = MCPClientHub(
+            "sse",
+            endpoint="http://localhost:8000/sse",
+            headers={"X-Old": "yes"},
+        )
+
+        hub.refresh()
+
+        assert hub.headers == {"X-Old": "yes"}
+
+    def test_refresh_with_headers_updates_stored_headers(self) -> None:
+        hub = MCPClientHub("sse", endpoint="http://localhost:8000/sse")
+
+        hub.refresh(headers={"X-New": "yes"})
+
+        assert hub.headers == {"X-New": "yes"}
+
+    def test_refresh_header_validation_applies(self) -> None:
+        hub = MCPClientHub("sse", endpoint="http://localhost:8000/sse")
+
+        with pytest.raises(ValueError, match="headers must be a mapping"):
+            hub.refresh(headers="bad")  # type: ignore[arg-type]

@@ -129,7 +129,6 @@ def make_planact_agent(
     context_enabled: bool = False,
     tool_calls_limit: int | None = None,
     peek_at_cache: bool = False,
-    preview_limit: int | None = None,
     response_preview_limit: int | None = None,
     blackboard_preview_limit: int | None = None,
     post_invoke: Any = None,
@@ -144,7 +143,6 @@ def make_planact_agent(
         context_enabled=context_enabled,
         tool_calls_limit=tool_calls_limit,
         peek_at_cache=peek_at_cache,
-        preview_limit=preview_limit,
         response_preview_limit=response_preview_limit,
         blackboard_preview_limit=blackboard_preview_limit,
         post_invoke=post_invoke,
@@ -161,7 +159,6 @@ def make_react_agent(
     context_enabled: bool = False,
     tool_calls_limit: int = 3,
     peek_at_cache: bool = False,
-    preview_limit: int | None = None,
     response_preview_limit: int | None = None,
     blackboard_preview_limit: int | None = None,
     post_invoke: Any = None,
@@ -176,7 +173,6 @@ def make_react_agent(
         context_enabled=context_enabled,
         tool_calls_limit=tool_calls_limit,
         peek_at_cache=peek_at_cache,
-        preview_limit=preview_limit,
         response_preview_limit=response_preview_limit,
         blackboard_preview_limit=blackboard_preview_limit,
         post_invoke=post_invoke,
@@ -274,7 +270,6 @@ class ScriptedToolAgent(ToolAgent):
         context_enabled: bool = False,
         tool_calls_limit: int | None = None,
         peek_at_cache: bool = False,
-        preview_limit: int | None = None,
         response_preview_limit: int | None = None,
         blackboard_preview_limit: int | None = None,
         post_invoke: Any = None,
@@ -290,7 +285,6 @@ class ScriptedToolAgent(ToolAgent):
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
-            preview_limit=preview_limit,
             response_preview_limit=response_preview_limit,
             blackboard_preview_limit=blackboard_preview_limit,
             post_invoke=post_invoke,
@@ -386,7 +380,6 @@ def make_agent(
     context_enabled: bool = False,
     tool_calls_limit: int | None = None,
     peek_at_cache: bool = False,
-    preview_limit: int | None = None,
     response_preview_limit: int | None = None,
     blackboard_preview_limit: int | None = None,
     post_invoke: Any = None,
@@ -397,7 +390,6 @@ def make_agent(
         context_enabled=context_enabled,
         tool_calls_limit=tool_calls_limit,
         peek_at_cache=peek_at_cache,
-        preview_limit=preview_limit,
         response_preview_limit=response_preview_limit,
         blackboard_preview_limit=blackboard_preview_limit,
         post_invoke=post_invoke,
@@ -525,61 +517,42 @@ class TestToolAgentConstruction:
         with pytest.raises(ToolAgentError, match="tool_calls_limit"):
             make_agent(tool_calls_limit=value)  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize("value", [True, False])
-    def test_peek_at_cache_accepts_bool(self, value: bool) -> None:
-        agent = make_agent()
+    def test_peek_at_cache_is_frozen(self) -> None:
+        agent = make_agent(peek_at_cache=True)
 
-        agent.peek_at_cache = value
+        with pytest.raises(AttributeError):
+            agent.peek_at_cache = False  # type: ignore[misc]
 
-        assert agent.peek_at_cache is value
-
-    @pytest.mark.parametrize("value", ["yes", 1, None])
-    def test_peek_at_cache_rejects_non_bool(self, value: Any) -> None:
-        agent = make_agent()
-
+    def test_peek_at_cache_construction_rejects_non_bool(self) -> None:
         with pytest.raises(ToolAgentError, match="peek_at_cache"):
-            agent.peek_at_cache = value  # type: ignore[assignment]
+            make_agent(peek_at_cache=1)  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize("value", [None, 1, 20])
-    def test_preview_limit_alias_sets_response_preview_limit(
-        self,
-        value: int | None,
-    ) -> None:
-        agent = make_agent()
+    def test_blackboard_preview_limit_is_frozen(self) -> None:
+        agent = make_agent(blackboard_preview_limit=10)
 
-        agent.preview_limit = value
+        with pytest.raises(AttributeError):
+            agent.blackboard_preview_limit = 20  # type: ignore[misc]
 
-        assert agent.preview_limit == value
-        assert agent.response_preview_limit == value
-
-    @pytest.mark.parametrize("value", [0, -1, "10"])
-    def test_preview_limit_alias_rejects_via_response_preview_limit(self, value: Any) -> None:
-        agent = make_agent()
-
-        with pytest.raises(AgentError, match="response_preview_limit"):
-            agent.preview_limit = value  # type: ignore[assignment]
-
-    def test_constructor_rejects_preview_limit_and_response_preview_limit_together(self) -> None:
-        with pytest.raises(ToolAgentError, match="preview_limit and response_preview_limit"):
-            make_agent(preview_limit=10, response_preview_limit=20)
-
-    @pytest.mark.parametrize("value", [None, 1, 20])
-    def test_blackboard_preview_limit_accepts_none_or_positive_int(
-        self,
-        value: int | None,
-    ) -> None:
-        agent = make_agent()
-
-        agent.blackboard_preview_limit = value
-
-        assert agent.blackboard_preview_limit == value
-
-    @pytest.mark.parametrize("value", [0, -1, "10"])
-    def test_blackboard_preview_limit_rejects_zero_negative_or_non_int(self, value: Any) -> None:
-        agent = make_agent()
-
+    def test_blackboard_preview_limit_construction_rejects_zero(self) -> None:
         with pytest.raises(ToolAgentError, match="blackboard_preview_limit"):
-            agent.blackboard_preview_limit = value  # type: ignore[assignment]
+            make_agent(blackboard_preview_limit=0)
+
+    def test_blackboard_preview_limit_construction_rejects_negative(self) -> None:
+        with pytest.raises(ToolAgentError, match="blackboard_preview_limit"):
+            make_agent(blackboard_preview_limit=-1)
+
+    def test_blackboard_preview_limit_construction_rejects_non_int(self) -> None:
+        with pytest.raises(ToolAgentError, match="blackboard_preview_limit"):
+            make_agent(blackboard_preview_limit="10")  # type: ignore[arg-type]
+
+    def test_preview_limit_removed(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(AttributeError):
+            _ = agent.preview_limit  # type: ignore[attr-defined]
+
+        with pytest.raises(TypeError):
+            ScriptedToolAgent(preview_limit=10)  # type: ignore[call-arg]
 
 
 class TestToolAgentNamespace:
@@ -1586,7 +1559,7 @@ class TestBlackboardPersistenceAndDisplay:
         assert "result" not in serialized[0]
         assert "resolved_args" not in serialized[0]
 
-    def test_blackboard_serialized_with_peek_includes_results_and_resolved_args(self) -> None:
+    def test_blackboard_serialized_with_peek_includes_preview_and_resolved_args(self) -> None:
         agent = make_agent(context_enabled=True)
         keys = register_math_tools(agent)
         agent.set_script(
@@ -1600,9 +1573,30 @@ class TestBlackboardPersistenceAndDisplay:
         serialized = agent.blackboard_serialized(peek=True)
 
         assert isinstance(serialized, list)
-        assert serialized[0]["result"].result == 3
+        # result field is now a preview string (repr of the caller-facing value)
+        assert serialized[0]["result"] == repr(3)
         assert serialized[0]["resolved_args"] == {"x": 1, "y": 2}
         assert serialized[0]["status"] == "executed"
+
+    def test_blackboard_serialized_peek_applies_preview_limit(self) -> None:
+        agent = make_agent(context_enabled=True, blackboard_preview_limit=5)
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["join_text"], "args": {"prefix": "long", "value": "abcdefghij"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+        agent.invoke({"prompt": "run"})
+
+        peek_serialized = agent.blackboard_serialized(peek=True)
+        hidden_serialized = agent.blackboard_serialized(peek=False)
+
+        # result preview is sliced to blackboard_preview_limit chars then "..." appended
+        assert peek_serialized[0]["result"].endswith("...")
+        assert len(peek_serialized[0]["result"]) == 5 + len("...")
+        # result is absent in the non-peek view
+        assert "result" not in hidden_serialized[0]
 
     def test_to_dict_includes_tool_agent_diagnostics(self) -> None:
         agent = make_agent(context_enabled=True)

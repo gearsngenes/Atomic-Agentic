@@ -19,8 +19,13 @@ class FakeA2AClient:
         self.sent_messages: list[Any] = []
         self.agent_card = SimpleNamespace(name="fake_agent")
         self.next_payload: dict[str, Any] = {}
+        self.fetch_card_call_count: int = 0
 
     def get_agent_card(self) -> Any:
+        return self.agent_card
+
+    def _fetch_agent_card(self) -> Any:
+        self.fetch_card_call_count += 1
         return self.agent_card
 
     def send_message(self, message: Any) -> Any:
@@ -139,7 +144,7 @@ class TestPyA2AtomicClientConstruction:
         with pytest.raises(TypeError):
             client.headers["Authorization"] = "changed"  # type: ignore[index]
 
-    def test_headers_setter_rebuilds_client(
+    def test_headers_setter_updates_client_headers_without_rebuild(
         self,
         fake_client_factory: FakeA2AClientFactory,
     ) -> None:
@@ -147,7 +152,7 @@ class TestPyA2AtomicClientConstruction:
 
         client.headers = {"X-Test": "yes"}
 
-        assert len(fake_client_factory.instances) == 2
+        assert len(fake_client_factory.instances) == 1
         assert client.headers == {"X-Test": "yes"}
         assert latest_fake_client(fake_client_factory).headers == {"X-Test": "yes"}
 
@@ -450,3 +455,47 @@ class TestPyA2AtomicClientPublicAPI:
 
         with pytest.raises(RuntimeError, match="RemoteError"):
             client.list_invokables()
+
+
+class TestPyA2AtomicClientRefresh:
+    def test_refresh_without_headers_refetches_card_without_changing_headers(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient(
+            "http://example.test/a2a",
+            headers={"X-Old": "yes"},
+        )
+        fake = latest_fake_client(fake_client_factory)
+
+        client.refresh()
+
+        assert client.headers == {"X-Old": "yes"}
+        assert len(fake_client_factory.instances) == 1
+        assert fake.fetch_card_call_count == 1
+
+    def test_refresh_with_headers_updates_and_refetches(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient("http://example.test/a2a")
+        fake = latest_fake_client(fake_client_factory)
+
+        client.refresh(headers={"X-New": "yes"})
+
+        assert client.headers == {"X-New": "yes"}
+        assert fake.headers == {"X-New": "yes"}
+        assert len(fake_client_factory.instances) == 1
+        assert fake.fetch_card_call_count == 1
+
+    def test_refresh_updates_agent_card(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient("http://example.test/a2a")
+        fake = latest_fake_client(fake_client_factory)
+        fake.agent_card = SimpleNamespace(name="updated_agent")
+
+        client.refresh()
+
+        assert client.agent_card.name == "updated_agent"

@@ -167,20 +167,6 @@ class TestCommandFixedInputValidation:
 
 
 class TestCommandFilterPolicy:
-    def test_filter_extraneous_inputs_is_fixed_to_false(self) -> None:
-        command = Command(
-            executor=make_add_tool(),
-            fixed_inputs={"a": 2, "b": 3},
-        )
-
-        assert command.filter_extraneous_inputs is False
-
-        command.filter_extraneous_inputs = False
-        assert command.filter_extraneous_inputs is False
-
-        with pytest.raises(ValueError, match="fixed to False"):
-            command.filter_extraneous_inputs = True
-
     @pytest.mark.parametrize("value", ["false", 0, 1, None, [], {}])
     def test_filter_extraneous_inputs_rejects_non_bool_assignment(
         self,

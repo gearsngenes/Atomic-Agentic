@@ -29,7 +29,7 @@ def main():
     file_path = "./examples/Agent_Examples/Dromaeosaurs.pdf"
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
-    agent.attach(file_path)
+    agent.llm_engine.attach(file_path)
     print(f"Uploaded and tracked file: {file_path}")
     time.sleep(2)  # wait a moment for upload to complete if needed
     
@@ -45,7 +45,7 @@ def main():
     print(summary.result)
 
     # 4) detach the file if no longer needed
-    agent.detach(file_path)
+    agent.llm_engine.detach(file_path)
 
 if __name__ == "__main__":
     main()

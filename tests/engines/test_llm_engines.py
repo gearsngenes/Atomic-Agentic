@@ -357,6 +357,70 @@ class TestLLMEngineAttachments:
         assert len(engine.detach_calls) == 2
 
 
+class TestLLMEngineImmutability:
+    def test_timeout_seconds_is_read_only(self) -> None:
+        engine = FakeLLMEngine(timeout_seconds=12.5)
+
+        assert engine.timeout_seconds == 12.5
+
+        with pytest.raises(AttributeError):
+            engine.timeout_seconds = 99.0  # type: ignore[misc]
+
+    def test_openai_inline_cutoff_chars_is_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        engine = OpenAIEngine(model="gpt-4o-mini", inline_cutoff_chars=500)
+
+        assert engine.inline_cutoff_chars == 500
+
+        with pytest.raises(AttributeError):
+            engine.inline_cutoff_chars = 999  # type: ignore[misc]
+
+    def test_mistral_inline_cutoff_chars_is_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        engine = MistralEngine(model="mistral-small-latest", inline_cutoff_chars=300)
+
+        assert engine.inline_cutoff_chars == 300
+
+        with pytest.raises(AttributeError):
+            engine.inline_cutoff_chars = 999  # type: ignore[misc]
+
+    def test_llamacpp_source_params_are_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        engine = LlamaCppEngine(model_path="model.gguf")
+
+        assert engine.model_path == "model.gguf"
+        assert engine.repo_id is None
+
+        for attr in (
+            "model_path", "repo_id", "filename", "revision",
+            "cache_dir", "local_dir", "local_files_only", "force_download",
+        ):
+            with pytest.raises(AttributeError):
+                setattr(engine, attr, None)
+
+    def test_llamacpp_model_load_params_are_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        engine = LlamaCppEngine(model_path="model.gguf", n_ctx=2048, verbose=True)
+
+        assert engine.n_ctx == 2048
+        assert engine.verbose is True
+
+        for attr in (
+            "n_ctx", "n_threads", "n_threads_batch",
+            "n_gpu_layers", "chat_format", "verbose",
+        ):
+            with pytest.raises(AttributeError):
+                setattr(engine, attr, None)
+
+
 class FakeOpenAIClient:
     instances: list["FakeOpenAIClient"] = []
 

@@ -45,10 +45,17 @@ class PyA2AtomicClient:
 
         self._url: str = url.strip()
         self._headers: Mapping[str, str] | None = normalize_headers(headers)
-        self._client: A2AClient
-        self._agent_card: Any
 
-        self._rebuild_client()
+        self._client = A2AClient(
+            self._url,
+            headers=dict(self._headers) if self._headers is not None else None,
+        )
+        try:
+            self._agent_card: Any = self._client.get_agent_card()
+        except Exception as exc:
+            raise RuntimeError(
+                f"{type(self).__name__}: failed to fetch agent card from {self._url!r}: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -64,7 +71,24 @@ class PyA2AtomicClient:
     @headers.setter
     def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
         self._headers = normalize_headers(value)
-        self._rebuild_client()
+        self._client.headers = dict(self._headers) if self._headers is not None else {}
+
+    def refresh(self, headers: Mapping[str, HeaderValue] | None = None) -> None:
+        """
+        Re-fetch the remote agent card on the existing client instance.
+
+        If headers is not None, updates stored headers and propagates them to
+        the underlying client before re-fetching. No new client instance is created.
+        """
+        if headers is not None:
+            self._headers = normalize_headers(headers)
+            self._client.headers = dict(self._headers) if self._headers is not None else {}
+        try:
+            self._agent_card = self._client._fetch_agent_card()
+        except Exception as exc:
+            raise RuntimeError(
+                f"{type(self).__name__}: failed to refresh agent card from {self._url!r}: {exc}"
+            ) from exc
 
     @property
     def agent_card(self) -> Any:
@@ -154,17 +178,6 @@ class PyA2AtomicClient:
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
-    def _rebuild_client(self) -> None:
-        headers = dict(self._headers) if self._headers is not None else None
-        self._client = A2AClient(self._url, headers=headers)
-
-        try:
-            self._agent_card = self._client.get_agent_card()
-        except Exception as exc:  # pragma: no cover
-            raise RuntimeError(
-                f"{type(self).__name__}: failed to fetch agent card from {self._url!r}: {exc}"
-            ) from exc
-
     def _send_function_call(
         self,
         *,
