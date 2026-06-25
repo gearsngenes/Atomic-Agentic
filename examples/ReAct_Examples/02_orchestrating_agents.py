@@ -1,3 +1,4 @@
+import json
 import logging
 
 from dotenv import load_dotenv
@@ -72,7 +73,7 @@ orchestrator = ReActAgent(
     records_window=10,
     tool_calls_limit=10,
     context_enabled=True,
-    preview_limit=100,
+    response_preview_limit=100,
     blackboard_preview_limit=50,
 )
 
@@ -93,10 +94,10 @@ task = (
 )
 
 result = orchestrator.invoke({"prompt": task}).result
+record = orchestrator.records[-1].to_dict()
+serialized_record = json.dumps(record, indent=2)
 
-from pprint import pformat, pprint
-pprint(orchestrator.blackboard)
-
+from pprint import pformat
 from pathlib import Path
 
 out_dir = Path("examples/output_markdowns")
@@ -107,3 +108,6 @@ print(f"\n✓ Final Draft code saved to: {filepath.resolve()}")
 filepath = out_dir / "ReAct_Blackboard.txt"
 filepath.write_text(pformat(orchestrator.blackboard), encoding="utf-8")
 print(f"\n✓ Blackboard content saved to: {filepath.resolve()}")
+filepath = out_dir / "ReAct_Record.json"
+filepath.write_text(serialized_record, encoding="utf-8")
+print(f"\n✓ Serialized record saved to: {filepath.resolve()}")

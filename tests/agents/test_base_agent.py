@@ -164,6 +164,8 @@ def make_agent(
     post_result_key: str | None = None,
     passthrough_inputs: list[str] | None = None,
     role_prompt: str = ROLE_PROMPT,
+    response_preview_limit: int | None = None,
+    assistant_response_source: str = "raw",
 ) -> Agent:
     return Agent(
         name="writer_agent",
@@ -177,6 +179,8 @@ def make_agent(
         post_invoke=post_invoke,
         post_result_key=post_result_key,
         passthrough_inputs=passthrough_inputs,
+        response_preview_limit=response_preview_limit,
+        assistant_response_source=assistant_response_source,
     )
 
 
@@ -759,45 +763,53 @@ class TestAgentAsyncInvoke:
         assert result.result == "ECHO: Write about pytest in a strict tone.!"
 
 
-class TestAgentAttachmentDelegation:
-    def test_attach_delegates_to_engine_and_exposes_attachments(self, tmp_path: Any) -> None:
-        path = tmp_path / "sample.txt"
-        path.write_text("hello", encoding="utf-8")
+class TestAgentFrozenRenderingProperties:
+    def test_response_preview_limit_is_frozen(self) -> None:
+        agent = make_agent(response_preview_limit=50)
 
+        with pytest.raises(AttributeError):
+            agent.response_preview_limit = 100  # type: ignore[misc]
+
+    def test_assistant_response_source_is_frozen(self) -> None:
         agent = make_agent()
 
-        metadata = agent.attach(str(path))
+        with pytest.raises(AttributeError):
+            agent.assistant_response_source = "final"  # type: ignore[misc]
 
-        assert metadata["path"] == str(path)
-        assert str(path) in agent.attachments
-        assert agent.attachments[str(path)]["path"] == str(path)
+    def test_response_preview_limit_construction_rejects_zero(self) -> None:
+        with pytest.raises(AgentError, match="response_preview_limit"):
+            make_agent(response_preview_limit=0)
 
-    def test_detach_delegates_to_engine(self, tmp_path: Any) -> None:
-        path = tmp_path / "sample.txt"
-        path.write_text("hello", encoding="utf-8")
+    def test_response_preview_limit_construction_rejects_negative(self) -> None:
+        with pytest.raises(AgentError, match="response_preview_limit"):
+            make_agent(response_preview_limit=-1)
 
+    def test_response_preview_limit_construction_rejects_non_int(self) -> None:
+        with pytest.raises(AgentError, match="response_preview_limit"):
+            make_agent(response_preview_limit="100")  # type: ignore[arg-type]
+
+    def test_assistant_response_source_construction_rejects_bad_value(self) -> None:
+        with pytest.raises(AgentError, match="assistant_response_source"):
+            make_agent(assistant_response_source="both")  # type: ignore[arg-type]
+
+    def test_assistant_response_source_construction_rejects_non_string(self) -> None:
+        with pytest.raises(AgentError, match="assistant_response_source"):
+            make_agent(assistant_response_source=1)  # type: ignore[arg-type]
+
+    def test_attach_api_removed(self) -> None:
         agent = make_agent()
-        agent.attach(str(path))
 
-        assert agent.detach(str(path)) is True
-        assert agent.detach(str(path)) is False
-        assert str(path) not in agent.attachments
+        with pytest.raises(AttributeError):
+            agent.attach("some/path.txt")  # type: ignore[attr-defined]
 
-    def test_clear_attachments_delegates_to_engine(self, tmp_path: Any) -> None:
-        first = tmp_path / "first.txt"
-        second = tmp_path / "second.txt"
-        first.write_text("first", encoding="utf-8")
-        second.write_text("second", encoding="utf-8")
+        with pytest.raises(AttributeError):
+            agent.detach("some/path.txt")  # type: ignore[attr-defined]
 
-        agent = make_agent()
-        agent.attach(str(first))
-        agent.attach(str(second))
+        with pytest.raises(AttributeError):
+            agent.clear_attachments()  # type: ignore[attr-defined]
 
-        assert agent.attachments
-
-        agent.clear_attachments()
-
-        assert agent.attachments == {}
+        with pytest.raises(AttributeError):
+            _ = agent.attachments  # type: ignore[attr-defined]
 
 
 class TestAgentMutableRuntimeProperties:

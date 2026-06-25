@@ -149,8 +149,9 @@ class Agent(AtomicInvokable):
     llm_engine : LLMEngine (read-write, type-enforced)
     context_enabled : bool (read-write)
     records_window : Optional[int] (read-write)
+    response_preview_limit : Optional[int] (read-only, set at construction)
+    assistant_response_source : Literal["raw", "final"] (read-only, set at construction)
     records : List[AgentRecord] (read-only canonical turn view)
-    attachments : Dict[str, Dict[str, Any]] (read-only view)
     pre_invoke : Tool (read-only lifecycle reference)
     post_invoke : Tool (read-only lifecycle reference)
     post_result_key : str (read-only)
@@ -238,9 +239,17 @@ class Agent(AtomicInvokable):
         # We never trim storage; we only limit which turns are selected per invocation.
         self._records: List[AgentRecord] = []
 
-        # Store history-rendering controls.
-        self.response_preview_limit = response_preview_limit
-        self.assistant_response_source = assistant_response_source
+        # Store history-rendering controls (frozen at construction).
+        if response_preview_limit is None:
+            self._response_preview_limit = None
+        elif type(response_preview_limit) is not int or response_preview_limit <= 0:
+            raise AgentError("response_preview_limit must be None or a positive integer > 0.")
+        else:
+            self._response_preview_limit = response_preview_limit
+
+        if not isinstance(assistant_response_source, str) or assistant_response_source not in {"raw", "final"}:
+            raise AgentError("assistant_response_source must be either 'raw' or 'final'.")
+        self._assistant_response_source = assistant_response_source
 
         resolved_filter_extraneous_inputs = (
             filter_extraneous_inputs
@@ -889,35 +898,15 @@ class Agent(AtomicInvokable):
         """Character limit for rendered assistant responses. None means no truncation."""
         return self._response_preview_limit
 
-    @response_preview_limit.setter
-    def response_preview_limit(self, value: Optional[int]) -> None:
-        if value is None:
-            self._response_preview_limit = None
-            return
-        if type(value) is not int or value <= 0:
-            raise AgentError("response_preview_limit must be None or a positive integer > 0.")
-        self._response_preview_limit = value
-
     @property
     def assistant_response_source(self) -> Literal["raw", "final"]:
         """Whether rendered assistant history uses raw or final turn responses."""
         return self._assistant_response_source
 
-    @assistant_response_source.setter
-    def assistant_response_source(self, value: Literal["raw", "final"]) -> None:
-        if not isinstance(value, str) or value not in {"raw", "final"}:
-            raise AgentError("assistant_response_source must be either 'raw' or 'final'.")
-        self._assistant_response_source = value
-
     @property
     def records(self) -> List[AgentRecord]:
         """Return a shallow copy of the stored turn history (never trimmed)."""
         return list(self._records)
-
-    @property
-    def attachments(self) -> Dict[str, Dict[str, Any]]:
-        """A shallow copy of the current attachment paths."""
-        return self.llm_engine.attachments
 
     @property
     def pre_invoke(self) -> Tool:
@@ -1217,69 +1206,6 @@ class Agent(AtomicInvokable):
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    def attach(self, path: str) -> Mapping[str, Any]:
-        """
-        Attach a file to this Agent via the underlying LLM engine.
-
-        This method delegates to the engine's attachment system, which validates
-        paths, extracts metadata, and prepares provider-specific structures.
-        Each engine has its own supported formats, policies, and size limits.
-
-        Parameters
-        ----------
-        path : str
-            Local filesystem path to the file. Must be a non-empty string.
-
-        Returns
-        -------
-        Mapping[str, Any]
-            Provider-specific attachment metadata. The structure depends on the
-            engine; see the engine class documentation for details.
-
-        Raises
-        ------
-        LLMEngineError
-            If the path is invalid, the engine does not support the file format,
-            or the file is too large for the provider.
-
-        Notes
-        -----
-        - Not all engines support file attachments. Check your engine's
-          documentation (e.g., ``OpenAIEngine``, ``AnthropicEngine``).
-        - Some engines may have format or size restrictions.
-        - Multiple calls with the same path are idempotent if the file hasn't changed.
-        """
-        return self._llm_engine.attach(path)
-
-    def detach(self, path: str) -> bool:
-        """
-        Detach a previously attached file from this Agent.
-
-        Delegates to the underlying engine's detach logic, which performs
-        provider-specific cleanup if needed.
-
-        Parameters
-        ----------
-        path : str
-            The local filesystem path to detach.
-
-        Returns
-        -------
-        bool
-            ``True`` if the path was attached and has been removed;
-            ``False`` if the path was not in the attachments.
-        """
-        return self._llm_engine.detach(path)
-
-    def clear_attachments(self) -> None:
-        """
-        Remove all currently attached files from this Agent.
-
-        Delegates to the underlying engine to detach all paths and perform
-        any necessary provider-specific cleanup.
-        """
-        return self.llm_engine.clear_attachments()
-
     def clear_memory(self) -> None:
         """Clear the stored turn history."""
         self._records.clear()
