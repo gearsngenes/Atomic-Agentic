@@ -203,6 +203,11 @@ class LLMEngine(AtomicInvokable, ABC):
         # Return a shallow copy to discourage mutation of internal state.
         return dict(self._attachments)
 
+    @property
+    def timeout_seconds(self) -> float:
+        """Per-call timeout baked into the provider SDK client at construction."""
+        return self._timeout_seconds
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
@@ -741,14 +746,14 @@ class OpenAIEngine(LLMEngine):
 
         # Honor the base engine's timeout knob when constructing the OpenAI client.
         # The official SDK exposes a `timeout` option for this.
-        self.llm = OpenAI(
+        self._llm = OpenAI(
             api_key=api_key or os.getenv("OPENAI_API_KEY"),
             timeout=self._timeout_seconds,
         )
 
         self.model = model
         self.temperature = float(temperature)
-        self.inline_cutoff_chars = int(inline_cutoff_chars)
+        self._inline_cutoff_chars = int(inline_cutoff_chars)
 
         # Merge illegal extension policy with base defaults + any user-supplied extras.
         merged_illegal = set(self.illegal_attachment_exts) | set(self._ILLEGAL_EXTS)
@@ -759,6 +764,14 @@ class OpenAIEngine(LLMEngine):
         # Positive allow-list: PDFs + known image + text/code extensions.
         allowed = set(self._TEXT_EXTS) | set(self._IMAGE_EXTS) | {".pdf"}
         self.allowed_attachment_exts = allowed
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
+    @property
+    def inline_cutoff_chars(self) -> int:
+        """Max characters inlined from text attachments; fixed at construction."""
+        return self._inline_cutoff_chars
 
     # ------------------------------------------------------------------ #
     # Overrides / template hooks
@@ -854,7 +867,7 @@ class OpenAIEngine(LLMEngine):
         if "gpt-5" not in self.model.lower():
             kwargs["temperature"] = self.temperature
 
-        return self.llm.responses.create(**kwargs)
+        return self._llm.responses.create(**kwargs)
 
     def _extract_text(self, response: Any) -> str:
         """
@@ -938,8 +951,8 @@ class OpenAIEngine(LLMEngine):
 
             # Text/code → inline as text
             text = self._read_text_file(path)
-            if len(text) > self.inline_cutoff_chars:
-                text = text[: self.inline_cutoff_chars] + "\n…[truncated]\n"
+            if len(text) > self._inline_cutoff_chars:
+                text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
 
             return {
                 "kind": "text",
@@ -966,7 +979,7 @@ class OpenAIEngine(LLMEngine):
         if not file_id:
             return
         try:
-            self.llm.files.delete(file_id)
+            self._llm.files.delete(file_id)
         except Exception:
             return
 
@@ -1054,7 +1067,7 @@ class OpenAIEngine(LLMEngine):
         We use purpose="assistants" which is appropriate for model context files.
         """
         with open(path, "rb") as fp:
-            f = self.llm.files.create(file=fp, purpose="assistants")
+            f = self._llm.files.create(file=fp, purpose="assistants")
         return str(f.id)
 
     def _attach_local_path(
@@ -1087,8 +1100,8 @@ class OpenAIEngine(LLMEngine):
 
         # Inline as text
         text = self._read_text_file(path)
-        if len(text) > self.inline_cutoff_chars:
-            text = text[: self.inline_cutoff_chars] + "\n…[truncated]\n"
+        if len(text) > self._inline_cutoff_chars:
+            text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
 
         header = f"\n[Inlined file: {os.path.basename(path)}]\n"
         user_parts.append({"type": "input_text", "text": header + text})
@@ -1105,9 +1118,9 @@ class OpenAIEngine(LLMEngine):
         """
         base = super().to_dict()
         base.update({
-            "model" : self.model,
-            "temperature" : self.temperature,
-            "inline_cutoff_chars": self.inline_cutoff_chars
+            "model": self.model,
+            "temperature": self.temperature,
+            "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return base
 
@@ -1219,7 +1232,7 @@ class GeminiEngine(LLMEngine):
         if api_key is not None:
             client_kwargs["api_key"] = api_key
 
-        self.client = genai.Client(**client_kwargs)
+        self._client = genai.Client(**client_kwargs)
         self.model = model
         self.temperature = float(temperature)
 
@@ -1312,7 +1325,7 @@ class GeminiEngine(LLMEngine):
         if not name:
             return
         try:
-            self.client.files.delete(name=name)
+            self._client.files.delete(name=name)
         except Exception:
             return
 
@@ -1366,7 +1379,7 @@ class GeminiEngine(LLMEngine):
             system_instruction=payload.get("system_instruction") or None,
         )
 
-        return self.client.models.generate_content(
+        return self._client.models.generate_content(
             model=self.model,
             contents=payload["contents"],
             config=cfg,
@@ -1479,7 +1492,7 @@ class GeminiEngine(LLMEngine):
         The Gen AI SDK supports passing File objects directly in `contents`.
         """
         abs_path = os.path.abspath(path)
-        return self.client.files.upload(file=abs_path)
+        return self._client.files.upload(file=abs_path)
 
     # ------------------------------------------------------------------ #
     # Introspection
@@ -1603,13 +1616,13 @@ class MistralEngine(LLMEngine):
 
         import httpx
 
-        self.client = Mistral(
+        self._client = Mistral(
             api_key=api_key or os.getenv("MISTRAL_API_KEY", ""),
             client=httpx.Client(timeout=self._timeout_seconds),
         )
         self.model = model
         self.temperature = float(temperature)
-        self.inline_cutoff_chars = int(inline_cutoff_chars)
+        self._inline_cutoff_chars = int(inline_cutoff_chars)
 
         # Merge subclass-specific illegal extensions into the base policy.
         merged_illegal = set(self.illegal_attachment_exts) | set(self._ILLEGAL_EXTS)
@@ -1617,6 +1630,14 @@ class MistralEngine(LLMEngine):
             merged_illegal |= set(extra_illegal_exts)
         self.illegal_attachment_exts = merged_illegal
         # We leave allowed_attachment_exts as None (blacklist-based policy).
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
+    @property
+    def inline_cutoff_chars(self) -> int:
+        """Max characters inlined from text attachments; fixed at construction."""
+        return self._inline_cutoff_chars
 
     # ------------------------------------------------------------------ #
     # Attachment validation & preparation
@@ -1688,8 +1709,8 @@ class MistralEngine(LLMEngine):
 
             # text/code → inline
             text = self._read_text_file(path)
-            if len(text) > self.inline_cutoff_chars:
-                text = text[: self.inline_cutoff_chars] + "\n…[truncated]\n"
+            if len(text) > self._inline_cutoff_chars:
+                text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
             return {
                 "kind": "text",
                 "mime": mime,
@@ -1715,7 +1736,7 @@ class MistralEngine(LLMEngine):
         if not file_id:
             return
         try:
-            self.client.files.delete(file_id=file_id)
+            self._client.files.delete(file_id=file_id)
         except Exception:
             # Best-effort cleanup only.
             return
@@ -1756,9 +1777,9 @@ class MistralEngine(LLMEngine):
             kind = meta.get("kind")
             inlined_text = meta.get("inlined_text")
             if kind == "text" and inlined_text:
-                budget = self.inline_cutoff_chars - total_inlined
+                budget = self._inline_cutoff_chars - total_inlined
                 if budget <= 0:
-                    if total_inlined == self.inline_cutoff_chars:
+                    if total_inlined == self._inline_cutoff_chars:
                         parts.append({"type": "text", "text": cutoff_marker})
                         total_inlined += len(cutoff_marker)
                     continue
@@ -1789,7 +1810,7 @@ class MistralEngine(LLMEngine):
 
         Retries and error wrapping are handled by the shared `LLMEngine` template.
         """
-        return self.client.chat.complete(
+        return self._client.chat.complete(
             model=self.model,
             messages=payload["messages"],
             temperature=self.temperature,
@@ -1922,7 +1943,7 @@ class MistralEngine(LLMEngine):
     def _upload_file(self, path: str) -> str:
         """Upload to Mistral Files; return file handle ID."""
         with open(path, "rb") as f:
-            up = self.client.files.upload(
+            up = self._client.files.upload(
                 file={"file_name": os.path.basename(path), "content": f},
                 purpose="ocr",  # suitable for PDFs/images; used for doc/image understanding
             )
@@ -1936,7 +1957,7 @@ class MistralEngine(LLMEngine):
         performed here (chat-level retries are handled by the base engine).
         """
         try:
-            signed = self.client.files.get_signed_url(file_id=file_id)
+            signed = self._client.files.get_signed_url(file_id=file_id)
             return signed.url
         except Exception as exc:
             raise LLMEngineError(
@@ -1957,7 +1978,7 @@ class MistralEngine(LLMEngine):
         base.update({
             "model": self.model,
             "temperature": self.temperature,
-            "inline_cutoff_chars": self.inline_cutoff_chars
+            "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return base
 
@@ -2153,31 +2174,105 @@ class LlamaCppEngine(LLMEngine):
                 "`repo_id` and `filename`."
             )
 
-        self.model_path = str(resolved_model_path)
-        self.repo_id = repo_id
-        self.filename = filename
-        self.revision = revision
-        self.cache_dir = cache_dir
-        self.local_dir = local_dir
-        self.local_files_only = bool(local_files_only)
-        self.force_download = bool(force_download)
+        self._model_path = str(resolved_model_path)
+        self._repo_id = repo_id
+        self._filename = filename
+        self._revision = revision
+        self._cache_dir = cache_dir
+        self._local_dir = local_dir
+        self._local_files_only = bool(local_files_only)
+        self._force_download = bool(force_download)
         self._has_hf_token = hf_token is not None
 
-        self.n_ctx = int(n_ctx)
-        self.n_threads = int(n_threads) if n_threads is not None else None
-        self.n_threads_batch = (
+        self._n_ctx = int(n_ctx)
+        self._n_threads = int(n_threads) if n_threads is not None else None
+        self._n_threads_batch = (
             int(n_threads_batch) if n_threads_batch is not None else None
         )
-        self.n_gpu_layers = int(n_gpu_layers) if n_gpu_layers is not None else None
-        self.chat_format = chat_format
-        self.verbose = bool(verbose)
+        self._n_gpu_layers = int(n_gpu_layers) if n_gpu_layers is not None else None
+        self._chat_format = chat_format
+        self._verbose = bool(verbose)
 
         self.temperature = float(temperature) if temperature is not None else None
         self.max_tokens = int(max_tokens) if max_tokens is not None else None
         self.top_p = float(top_p) if top_p is not None else None
         self.stop = stop
 
-        self.llm = Llama(model_path=self.model_path, **llama_kwargs)
+        self._llm = Llama(model_path=self._model_path, **llama_kwargs)
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
+
+    @property
+    def model_path(self) -> str:
+        """Concrete local path of the loaded model; fixed at construction."""
+        return self._model_path
+
+    @property
+    def repo_id(self) -> Optional[str]:
+        """Hugging Face repo ID used to download the model; fixed at construction."""
+        return self._repo_id
+
+    @property
+    def filename(self) -> Optional[str]:
+        """Model filename within the repo; fixed at construction."""
+        return self._filename
+
+    @property
+    def revision(self) -> Optional[str]:
+        """Hugging Face revision used at download; fixed at construction."""
+        return self._revision
+
+    @property
+    def cache_dir(self) -> Optional[str]:
+        """Hugging Face cache root used at download; fixed at construction."""
+        return self._cache_dir
+
+    @property
+    def local_dir(self) -> Optional[str]:
+        """Local directory where the model was materialized; fixed at construction."""
+        return self._local_dir
+
+    @property
+    def local_files_only(self) -> bool:
+        """Whether only local files were used at download; fixed at construction."""
+        return self._local_files_only
+
+    @property
+    def force_download(self) -> bool:
+        """Whether a forced re-download was requested; fixed at construction."""
+        return self._force_download
+
+    @property
+    def n_ctx(self) -> int:
+        """Context window size passed to Llama at construction."""
+        return self._n_ctx
+
+    @property
+    def n_threads(self) -> Optional[int]:
+        """CPU thread count passed to Llama at construction."""
+        return self._n_threads
+
+    @property
+    def n_threads_batch(self) -> Optional[int]:
+        """Batch CPU thread count passed to Llama at construction."""
+        return self._n_threads_batch
+
+    @property
+    def n_gpu_layers(self) -> Optional[int]:
+        """GPU layer count passed to Llama at construction."""
+        return self._n_gpu_layers
+
+    @property
+    def chat_format(self) -> Optional[str]:
+        """Chat format name passed to Llama at construction."""
+        return self._chat_format
+
+    @property
+    def verbose(self) -> bool:
+        """Verbose flag passed to Llama at construction."""
+        return self._verbose
 
     # ------------------------------------------------------------------ #
     # LLMEngine template hooks
@@ -2204,7 +2299,7 @@ class LlamaCppEngine(LLMEngine):
 
         Retries and error-wrapping are handled by `LLMEngine._call_with_retries`.
         """
-        if getattr(self, "llm", None) is None:
+        if getattr(self, "_llm", None) is None:
             raise LLMEngineError("LlamaCppEngine: model is not loaded.")
 
         chat_kwargs: Dict[str, Any] = {}
@@ -2217,7 +2312,7 @@ class LlamaCppEngine(LLMEngine):
         if self.stop is not None:
             chat_kwargs["stop"] = self.stop
 
-        return self.llm.create_chat_completion(
+        return self._llm.create_chat_completion(
             messages=payload["messages"],
             **chat_kwargs,
         )
@@ -2288,7 +2383,7 @@ class LlamaCppEngine(LLMEngine):
         """
         return LlamaCppModelData(
             provider="llama_cpp",
-            model_path=self.model_path,
+            model_path=self._model_path,
         )
 
     # ------------------------------------------------------------------ #
@@ -2323,21 +2418,21 @@ class LlamaCppEngine(LLMEngine):
         """
         base = super().to_dict()
         base.update({
-            "model_path": self.model_path,
-            "repo_id": self.repo_id,
-            "filename": self.filename,
-            "revision": self.revision,
-            "cache_dir": self.cache_dir,
-            "local_dir": self.local_dir,
-            "local_files_only": self.local_files_only,
-            "force_download": self.force_download,
+            "model_path": self._model_path,
+            "repo_id": self._repo_id,
+            "filename": self._filename,
+            "revision": self._revision,
+            "cache_dir": self._cache_dir,
+            "local_dir": self._local_dir,
+            "local_files_only": self._local_files_only,
+            "force_download": self._force_download,
             "has_hf_token": self._has_hf_token,
-            "n_ctx": self.n_ctx,
-            "n_threads": self.n_threads,
-            "n_threads_batch": self.n_threads_batch,
-            "n_gpu_layers": self.n_gpu_layers,
-            "chat_format": self.chat_format,
-            "verbose": self.verbose,
+            "n_ctx": self._n_ctx,
+            "n_threads": self._n_threads,
+            "n_threads_batch": self._n_threads_batch,
+            "n_gpu_layers": self._n_gpu_layers,
+            "chat_format": self._chat_format,
+            "verbose": self._verbose,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "top_p": self.top_p,
