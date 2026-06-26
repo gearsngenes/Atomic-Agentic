@@ -2383,7 +2383,7 @@ class TestReActAgent:
         assert slot.step == 0
         assert slot.tool == "Tool.tests.add"
         assert slot.resolved_args == {"x": 1, "y": 2}
-        assert updated.descriptions[0] == "Add the two test numbers for this ReAct step."
+        assert updated.step_meta[0].description == "Add the two test numbers for this ReAct step."
 
     def test_rejects_extra_step_keys(self) -> None:
         agent = make_react_agent(
@@ -2522,8 +2522,8 @@ class TestReActAgent:
         assert slot.step_dependencies == ()
         assert slot.await_step is NO_VAL
         assert slot.resolved_args == {"x": 2, "y": 3}
-        assert updated.observables[0] == 2
-        assert updated.descriptions[0] == "Add the two numbers and keep the result visible for later branching."
+        assert updated.step_meta[0].observable == 2
+        assert updated.step_meta[0].description == "Add the two numbers and keep the result visible for later branching."
 
     def test_prepare_next_batch_records_step_dependencies(self) -> None:
         agent = make_react_agent(
@@ -2542,7 +2542,7 @@ class TestReActAgent:
         )
         state.next_step_index = 1
         state.running_blackboard[0] = executed_slot(0, 5)
-        state.descriptions[0] = "Add the two numbers for the current calculation."
+        state.step_meta[0].description = "Add the two numbers for the current calculation."
 
         updated = agent._prepare_next_batch(state)
 
@@ -2551,7 +2551,7 @@ class TestReActAgent:
         assert slot.step_dependencies == (0,)
         assert slot.await_step is NO_VAL
         assert slot.resolved_args == {"x": 5, "y": 10}
-        assert updated.descriptions[1] == "Multiply the prior addition result by ten for the current calculation."
+        assert updated.step_meta[1].description == "Multiply the prior addition result by ten for the current calculation."
 
     def test_async_invoke_executes_step_by_step_until_return(self) -> None:
         agent = make_react_agent(
@@ -2728,3 +2728,92 @@ class TestToolAgentRecordMetadataContract:
 
         assert isinstance(result, ToolAgentResult)
         assert result.tool_usage == ()
+
+
+class TestAsyncHookDispatch:
+    """Verify that async hook overrides are wired correctly for each agent type."""
+
+    def test_toolagent_base_has_concrete_async_hooks(self) -> None:
+        agent = make_agent()
+        assert callable(getattr(agent, "_ainitialize_run_state", None))
+        assert callable(getattr(agent, "_aprepare_next_batch", None))
+
+    def test_planact_overrides_ainitialize_run_state(self) -> None:
+        # PlanActAgent._ainitialize_run_state must be its own override, not the base default.
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+                ])
+            ]
+        )
+        assert type(agent)._ainitialize_run_state is not ToolAgent._ainitialize_run_state
+
+    def test_react_overrides_aprepare_next_batch(self) -> None:
+        # ReActAgent._aprepare_next_batch must be its own override, not the base default.
+        agent = make_react_agent(
+            [
+                react_step_json(
+                    tool="Tool.tests.add",
+                    args={"x": 1, "y": 2},
+                    description="Add the two numbers for the test.",
+                )
+            ],
+            tool_calls_limit=1,
+        )
+        assert type(agent)._aprepare_next_batch is not ToolAgent._aprepare_next_batch
+
+    def test_scripted_toolagent_async_invoke_uses_base_hook_defaults(self) -> None:
+        # ScriptedToolAgent inherits the asyncio.to_thread defaults — full async_invoke works.
+        agent = make_agent()
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+
+        result = asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+        assert result.result == 5
+
+    def test_planact_async_invoke_uses_agenerate_plan(self) -> None:
+        # Full async_invoke via PlanActAgent exercises _ainitialize_run_state → _agenerate_plan.
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.add", "args": {"x": 4, "y": 6}},
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+                ])
+            ]
+        )
+
+        result = asyncio.run(agent.async_invoke({"prompt": "run plan"}))
+
+        assert result.result == 10
+
+    def test_react_async_invoke_uses_agenerate_next_step(self) -> None:
+        # Full async_invoke via ReActAgent exercises _aprepare_next_batch → _agenerate_next_step.
+        agent = make_react_agent(
+            [
+                react_step_json(
+                    step=0,
+                    tool="Tool.tests.add",
+                    args={"x": 3, "y": 7},
+                    description="Add the two numbers for the current calculation.",
+                ),
+                react_step_json(
+                    step=1,
+                    tool=return_tool.full_name,
+                    args={"val": "<<__s0__>>"},
+                    description="Return the addition result as the final answer.",
+                ),
+            ],
+            tool_calls_limit=1,
+        )
+
+        result = asyncio.run(agent.async_invoke({"prompt": "run react"}))
+
+        assert result.result == 10

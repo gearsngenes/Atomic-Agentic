@@ -139,7 +139,7 @@ from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
 from ..models.results.agents import ToolAgentResult, ToolUsageRecord
 from ..models.results import LLMModelData
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
-from ..models.agents.runstates import ToolAgentRunState, PlanActRunState, ReActRunState
+from ..models.agents.runstates import ToolAgentRunState, PlanActRunState, ReActRunState, ReActStepMeta
 from ..exceptions import (
     ToolAgentError,
     ToolDefinitionError,
@@ -1591,13 +1591,15 @@ class ToolAgent(Agent, ABC):
         Subclasses should not override this method. They should implement:
         - ``_initialize_run_state(messages=...)``
         - ``_prepare_next_batch(state)``
+        - ``_ainitialize_run_state(messages=...)`` (async; base default: asyncio.to_thread wrap)
+        - ``_aprepare_next_batch(state)`` (async; base default: asyncio.to_thread wrap)
         """
         messages = self.build_messages(self.role_prompt, turns, prompt)
 
         if not messages:
             raise ToolAgentError("ToolAgent._ainvoke requires a non-empty messages list.")
 
-        state = await asyncio.to_thread(self._initialize_run_state, messages=messages)
+        state = await self._ainitialize_run_state(messages=messages)
 
         if not isinstance(state, ToolAgentRunState):
             raise ToolAgentError(
@@ -1617,7 +1619,7 @@ class ToolAgent(Agent, ABC):
                     "before prepare. Execute must follow prepare before preparing again."
                 )
 
-            state = await asyncio.to_thread(self._prepare_next_batch, state)
+            state = await self._aprepare_next_batch(state)
 
             # Keep the same empty-batch guard as the sync path.
             if not state.prepared_steps:
@@ -2126,6 +2128,31 @@ class ToolAgent(Agent, ABC):
         """
         raise NotImplementedError
 
+    async def _ainitialize_run_state(
+        self,
+        *,
+        messages: list[dict[str, str]],
+    ) -> ToolAgentRunState:
+        """
+        Async hook for run-state initialization.
+
+        Default offloads the sync hook to a worker thread. Subclasses override
+        when the hook contains blocking I/O (e.g. a planning LLM call).
+        """
+        return await asyncio.to_thread(self._initialize_run_state, messages=messages)
+
+    async def _aprepare_next_batch(
+        self,
+        state: ToolAgentRunState,
+    ) -> ToolAgentRunState:
+        """
+        Async hook for batch preparation.
+
+        Default offloads the sync hook to a worker thread. Subclasses override
+        when the hook contains blocking I/O (e.g. a per-step LLM call).
+        """
+        return await asyncio.to_thread(self._prepare_next_batch, state)
+
     def to_dict(self) -> dict[str, Any]:
         """Return a diagnostic snapshot of this ToolAgent.
 
@@ -2465,6 +2492,120 @@ class PlanActAgent(ToolAgent):
                         f"{slot.await_step!r}; await_step must be < {i}."
                     )
 
+    # ------------------------------------------------------------------ #
+    # Private helpers
+    # ------------------------------------------------------------------ #
+    def _setup_plan_init(
+        self,
+        *,
+        messages: list[dict[str, str]],
+    ) -> tuple[list[dict[str, str]], list[BlackboardSlot]]:
+        """Validate messages, copy to working list, snapshot cache blackboard."""
+        if not messages:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: messages must be non-empty."
+            )
+        working_messages = [dict(m) for m in messages]
+        cache_blackboard: list[BlackboardSlot] = (
+            self.blackboard if self.context_enabled else []
+        )
+        for i, slot in enumerate(cache_blackboard):
+            slot.step = i
+        return working_messages, cache_blackboard
+
+    def _process_plan_output(
+        self,
+        *,
+        engine_result: Any,
+        messages: list[dict[str, str]],
+        cache_blackboard: list[BlackboardSlot],
+    ) -> tuple[list[BlackboardSlot], LLMRecord]:
+        """
+        Parse, validate, and normalize raw LLM plan output into planned slots.
+
+        Constructs the LLMRecord, then applies the full
+        parse → validate → convert → normalize → validate pipeline.
+        """
+        llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
+        parsed = self._extract_from_json_string(engine_result.result)
+
+        if not isinstance(parsed, list) or not parsed:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: plan output must be a non-empty JSON array."
+            )
+
+        planned_slots: list[BlackboardSlot] = []
+
+        for i, item in enumerate(parsed):
+            if not isinstance(item, Mapping):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: plan item at index {i} must be a JSON object; "
+                    f"got {type(item).__name__!r}."
+                )
+
+            step_dict = self._validate_tool_step_dict(
+                item,
+                expected_step=i,
+                allowed_fields=PLAN_FIELDS,
+                required_fields=REQUIRED_PLAN_FIELDS,
+                context="plan step",
+            )
+            slot = self._tool_step_dict_to_slot(
+                step_dict,
+                step=i,
+                allowed_fields=PLAN_FIELDS,
+                context="plan step",
+            )
+            planned_slots.append(slot)
+
+        planned_slots = self._normalize_planned_slots(planned_slots)
+
+        self._validate_planned_slots(
+            planned_slots=planned_slots,
+            cache_blackboard=cache_blackboard,
+        )
+
+        return planned_slots, llm_record
+
+    def _build_planact_run_state(
+        self,
+        *,
+        planned_slots: list[BlackboardSlot],
+        working_messages: list[dict[str, str]],
+        cache_blackboard: list[BlackboardSlot],
+        llm_record: LLMRecord,
+    ) -> PlanActRunState:
+        """Validate plan structure, compile batches, and construct PlanActRunState."""
+        if not planned_slots:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: internal error: generated plan is empty."
+            )
+
+        return_idx = len(planned_slots) - 1
+        if planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: internal error: generated plan does not end with return tool."
+            )
+
+        batches = self._compile_batches_from_deps(
+            planned_slots=planned_slots,
+            return_idx=return_idx,
+        )
+
+        return PlanActRunState(
+            messages=working_messages,
+            cache_blackboard=cache_blackboard,
+            running_blackboard=planned_slots,
+            executed_steps=set(),
+            prepared_steps=[],
+            tool_calls_used=0,
+            llm_records=[llm_record],
+            is_done=False,
+            return_value=NO_VAL,
+            batches=batches,
+            batch_index=0,
+        )
+
     def _generate_plan(
         self,
         *,
@@ -2523,46 +2664,30 @@ class PlanActAgent(ToolAgent):
             )
 
         engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
-        llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
-        parsed = self._extract_from_json_string(engine_result.result)
-
-        if not isinstance(parsed, list) or not parsed:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan output must be a non-empty JSON array."
-            )
-
-        planned_slots: list[BlackboardSlot] = []
-
-        for i, item in enumerate(parsed):
-            if not isinstance(item, Mapping):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: plan item at index {i} must be a JSON object; "
-                    f"got {type(item).__name__!r}."
-                )
-
-            step_dict = self._validate_tool_step_dict(
-                item,
-                expected_step=i,
-                allowed_fields=PLAN_FIELDS,
-                required_fields=REQUIRED_PLAN_FIELDS,
-                context="plan step",
-            )
-            slot = self._tool_step_dict_to_slot(
-                step_dict,
-                step=i,
-                allowed_fields=PLAN_FIELDS,
-                context="plan step",
-            )
-            planned_slots.append(slot)
-
-        planned_slots = self._normalize_planned_slots(planned_slots)
-
-        self._validate_planned_slots(
-            planned_slots=planned_slots,
+        return self._process_plan_output(
+            engine_result=engine_result,
+            messages=messages,
             cache_blackboard=cache_blackboard,
         )
 
-        return planned_slots, llm_record
+    async def _agenerate_plan(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        cache_blackboard: list[BlackboardSlot],
+    ) -> tuple[list[BlackboardSlot], LLMRecord]:
+        """Async mirror of ``_generate_plan``: uses ``async_invoke`` for the LLM call."""
+        if not messages:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: messages must be non-empty."
+            )
+
+        engine_result = await self._llm_engine.async_invoke({"messages": [dict(m) for m in messages]})
+        return self._process_plan_output(
+            engine_result=engine_result,
+            messages=messages,
+            cache_blackboard=cache_blackboard,
+        )
 
     def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> PlanActRunState:
         """
@@ -2624,52 +2749,37 @@ class PlanActAgent(ToolAgent):
             - Invalid plan dependencies
             - Budget exceeded
         """
-        if not messages:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: messages must be non-empty."
-            )
-
-        working_messages = [dict(m) for m in messages]
-
-        cache_blackboard: list[BlackboardSlot] = (
-            self.blackboard if self.context_enabled else []
-        )
-        for i, slot in enumerate(cache_blackboard):
-            slot.step = i
-
+        working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
         planned_slots, llm_record = self._generate_plan(
             messages=working_messages,
             cache_blackboard=cache_blackboard,
         )
-
-        if not planned_slots:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: generated plan is empty."
-            )
-
-        return_idx = len(planned_slots) - 1
-        if planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: generated plan does not end with return tool."
-            )
-
-        batches = self._compile_batches_from_deps(
+        return self._build_planact_run_state(
             planned_slots=planned_slots,
-            return_idx=return_idx,
+            working_messages=working_messages,
+            cache_blackboard=cache_blackboard,
+            llm_record=llm_record,
         )
 
-        return PlanActRunState(
+    async def _ainitialize_run_state(
+        self,
+        *,
+        messages: list[dict[str, str]],
+    ) -> PlanActRunState:
+        """
+        Async override: uses ``_agenerate_plan`` so the planning LLM call
+        goes through ``async_invoke`` rather than a worker thread.
+        """
+        working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
+        planned_slots, llm_record = await self._agenerate_plan(
             messages=working_messages,
             cache_blackboard=cache_blackboard,
-            running_blackboard=planned_slots,
-            executed_steps=set(),
-            prepared_steps=[],
-            tool_calls_used=0,
-            llm_records=[llm_record],
-            is_done=False,
-            return_value=NO_VAL,
-            batches=batches,
-            batch_index=0,
+        )
+        return self._build_planact_run_state(
+            planned_slots=planned_slots,
+            working_messages=working_messages,
+            cache_blackboard=cache_blackboard,
+            llm_record=llm_record,
         )
 
     def _compile_batches_from_deps(
@@ -2985,6 +3095,318 @@ class ReActAgent(ToolAgent):
         self._tool_calls_limit = value
 
     # ------------------------------------------------------------------ #
+    # Private helpers
+    # ------------------------------------------------------------------ #
+    def _validate_react_prepare_state(self, state: ReActRunState) -> None:
+        """
+        Validate cursor bounds, prior-step execution, and step_meta length.
+
+        Replaces the former ``latest_executed`` validation block: the invariant
+        that the previous step was executed is derived from ``next_step_index - 1``
+        and the slot's status rather than a separate bookkeeping field.
+        """
+        prefix_len = state.next_step_index
+        if type(prefix_len) is not int or prefix_len < 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next_step_index must be an "
+                f"int >= 0; got {prefix_len!r}."
+            )
+        if prefix_len >= len(state.running_blackboard):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next_step_index exceeds run "
+                f"blackboard capacity ({prefix_len} >= {len(state.running_blackboard)})."
+            )
+        if prefix_len > 0:
+            prev = state.running_blackboard[prefix_len - 1]
+            if not prev.is_executed():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: step {prefix_len - 1} was "
+                    f"not executed before the next prepare call "
+                    f"(status={prev.status!r})."
+                )
+        if len(state.step_meta) != len(state.running_blackboard):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: step_meta length must match "
+                f"running_blackboard length "
+                f"({len(state.step_meta)} != {len(state.running_blackboard)})."
+            )
+
+    def _build_react_messages(
+        self,
+        state: ReActRunState,
+        prefix_len: int,
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """
+        Build the working message list and delta for one ReAct step generation.
+
+        Returns ``(working_messages, delta)`` where ``working_messages`` is the
+        full message list to pass to the LLM and ``delta`` is the three-element
+        list used to construct the LLMRecord.
+        """
+        working_messages: list[dict[str, str]] = [dict(m) for m in state.messages]
+
+        running_records: list[dict[str, Any]] = []
+        for idx in range(prefix_len):
+            slot = state.running_blackboard[idx]
+            if not slot.is_executed():
+                continue
+
+            record: dict[str, Any] = {
+                STEP_FIELD: slot.step,
+                DESCRIPTION_FIELD: state.step_meta[idx].description,
+                TOOL_FIELD: slot.tool,
+                ARGS_FIELD: slot.args,
+                "result_ref": f"<<__s{idx}__>>",
+            }
+
+            if state.step_meta[idx].observable > 0:
+                record["observable_result"] = self._preview_blackboard_result(slot.result.result)
+
+            running_records.append(record)
+
+        if running_records:
+            running_text = (
+                f"RUNNING PLAN STEPS 0-{prefix_len - 1} SO FAR:\n"
+                "These are the executed steps for the current user task.\n"
+                "Use descriptions to understand what each executed step was intended to do.\n"
+                "Use result_ref placeholders when a new arg needs a prior step value.\n"
+                "observable_result fields are for OBSERVATION ONLY: use them only to choose the next tool or branch.\n"
+                "Do not copy observable_result values into new args.\n\n"
+                + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
+            )
+        else:
+            running_text = (
+                "RUNNING PLAN STEPS SO FAR:\n"
+                "No steps executed yet.\n"
+                "When steps execute, their results will be available by result_ref "
+                "placeholders like <<__s0__>>."
+            )
+
+        max_duration = len(state.running_blackboard) - prefix_len - 1
+
+        working_messages.append({"role": "assistant", "content": running_text})
+        working_messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Produce the NEXT BEST single tool call for the current task. "
+                    "Pick the return tool if the running plan has completed all needed work. "
+                    "Output exactly one JSON object with keys {step, tool, args, duration, description}. "
+                    "Preserve symbolic dataflow with quoted placeholders; do not copy observable_result values into args. "
+                    f"For this output step, duration must be an int from 0 to {max_duration}."
+                ),
+            }
+        )
+
+        delta = [state.messages[-1], working_messages[-2], working_messages[-1]]
+        return working_messages, delta
+
+    def _process_next_step_output(
+        self,
+        *,
+        engine_result: Any,
+        delta: list[dict[str, str]],
+        expected_step: int,
+        cache_blackboard: list[BlackboardSlot],
+        max_duration: int,
+    ) -> tuple[BlackboardSlot, int, str, LLMRecord]:
+        """
+        Parse and validate one ReAct step from raw LLM output.
+
+        Constructs the LLMRecord, parses the JSON payload, and applies the full
+        validation pipeline extracted from ``_generate_next_step``.
+        """
+        llm_record = LLMRecord(messages=delta, llm_result=engine_result)
+        parsed = self._extract_from_json_string(engine_result.result)
+
+        if not isinstance(parsed, Mapping):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step output must be a JSON object; "
+                f"got {type(parsed).__name__!r}."
+            )
+
+        raw_payload = dict(parsed)
+
+        extra = set(raw_payload) - REACT_FIELDS
+        if extra:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step contains unsupported keys: "
+                f"{sorted(extra)!r}."
+            )
+
+        if DURATION_FIELD not in raw_payload:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step missing required key {DURATION_FIELD!r}."
+            )
+
+        if DESCRIPTION_FIELD not in raw_payload:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step missing required key {DESCRIPTION_FIELD!r}."
+            )
+
+        step_payload = self._validate_tool_step_dict(
+            raw_payload,
+            expected_step=expected_step,
+            allowed_fields=REACT_FIELDS,
+            required_fields=REQUIRED_REACT_FIELDS,
+            context="next step",
+        )
+
+        duration = step_payload.pop(DURATION_FIELD)
+        if type(duration) is not int or duration < 0 or duration > max_duration:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step {DURATION_FIELD!r} must be an int in "
+                f"[0, {max_duration}] for expected_step={expected_step}; got {duration!r}."
+            )
+
+        description = step_payload.pop(DESCRIPTION_FIELD)
+        if type(description) is not str:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step {DESCRIPTION_FIELD!r} must be a string; "
+                f"got {type(description).__name__!r}."
+            )
+
+        description = description.strip()
+        if not description:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step {DESCRIPTION_FIELD!r} cannot be empty."
+            )
+
+        slot = self._tool_step_dict_to_slot(
+            step_payload,
+            step=expected_step,
+            allowed_fields=BASE_STEP_FIELDS,
+            context="next step",
+        )
+
+        self.get_tool(slot.tool)
+
+        if slot.tool == RETURN_TOOL_FULL_NAME and duration != 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return tool must use {DURATION_FIELD!r} 0; "
+                f"got {duration!r}."
+            )
+
+        cache_len = len(cache_blackboard)
+        cache_refs = extract_dependencies(slot.args, placeholder_pattern=self.CACHE_REF_PATTERN)
+        bad_cache = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
+        if bad_cache:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step references out-of-range cache indices "
+                f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
+            )
+
+        bad_step_deps = [
+            dep for dep in slot.step_dependencies
+            if dep < 0 or dep >= expected_step
+        ]
+        if bad_step_deps:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step has illegal deps "
+                f"{sorted(set(bad_step_deps))!r}; deps must be < {expected_step}."
+            )
+
+        return slot, duration, description, llm_record
+
+    def _apply_react_step_result(
+        self,
+        state: ReActRunState,
+        prefix_len: int,
+        generated_slot: BlackboardSlot,
+        observe_duration: int,
+        description: str,
+        llm_record: LLMRecord,
+    ) -> ReActRunState:
+        """
+        Apply one validated ReAct step generation result to the run state.
+
+        Validates the returned tuple fields, decrements observable counters,
+        fills the preallocated running-blackboard slot, resolves placeholders,
+        and advances the cursor. Writes ``step_meta`` instead of the former
+        parallel ``observables``/``descriptions`` lists.
+        """
+        max_duration = len(state.running_blackboard) - prefix_len - 1
+
+        if not isinstance(generated_slot, BlackboardSlot):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: _generate_next_step must return "
+                f"(BlackboardSlot, observe_duration, description, LLMRecord); got first "
+                f"item {type(generated_slot).__name__!r}."
+            )
+
+        state.llm_records.append(llm_record)
+
+        if type(observe_duration) is not int or observe_duration < 0 or observe_duration > max_duration:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: observe_duration must be an int in "
+                f"[0, {max_duration}]; got {observe_duration!r}."
+            )
+
+        if generated_slot.tool == RETURN_TOOL_FULL_NAME and observe_duration != 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return tool must use duration 0; "
+                f"got {observe_duration!r}."
+            )
+
+        if type(description) is not str:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: description must be a string; "
+                f"got {type(description).__name__!r}."
+            )
+
+        description = description.strip()
+
+        if generated_slot.step != prefix_len:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: generated step mismatch: "
+                f"got {generated_slot.step}, expected {prefix_len}."
+            )
+
+        if not generated_slot.is_planned():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: generated slot must be planned; "
+                f"got status={generated_slot.status!r}."
+            )
+
+        # A successful generation turn consumed any raw results that were visible.
+        for meta in state.step_meta:
+            if meta.observable > 0:
+                meta.observable -= 1
+
+        # Fill the preallocated running-blackboard slot.
+        slot = state.running_blackboard[prefix_len]
+        if slot.step != prefix_len:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: running slot step mismatch at index {prefix_len}: "
+                f"slot.step={slot.step}."
+            )
+
+        if not slot.is_empty():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: attempted to prepare into non-empty slot {prefix_len}."
+            )
+
+        slot.tool = generated_slot.tool
+        slot.args = generated_slot.args
+        slot.result = NO_VAL
+        slot.error = NO_VAL
+        slot.step_dependencies = generated_slot.step_dependencies
+        slot.await_step = generated_slot.await_step
+
+        # Resolve placeholders after stamping the planned slot into the running state.
+        slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
+        slot.status = BlackboardSlot.PREPARED
+
+        # Write per-slot metadata.
+        state.step_meta[prefix_len].observable = observe_duration
+        state.step_meta[prefix_len].description = description
+
+        state.prepared_steps = [prefix_len]
+        state.next_step_index = prefix_len + 1
+
+        return state
+
+    # ------------------------------------------------------------------ #
     # Tool-Agent Hooks
     # ------------------------------------------------------------------ #
     def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> ReActRunState:
@@ -3014,9 +3436,7 @@ class ReActAgent(ToolAgent):
             is_done=False,
             return_value=NO_VAL,
             next_step_index=0,
-            latest_executed=[],
-            observables=[0 for _ in running_blackboard],
-            descriptions=["" for _ in running_blackboard],
+            step_meta=[ReActStepMeta() for _ in running_blackboard],
         )
 
     def _generate_next_step(
@@ -3115,103 +3535,56 @@ class ReActAgent(ToolAgent):
             )
 
         max_duration = max(0, self._tool_calls_limit - expected_step)
-
         engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
-        llm_record = LLMRecord(messages=delta, llm_result=engine_result)
-        parsed = self._extract_from_json_string(engine_result.result)
-
-        if not isinstance(parsed, Mapping):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step output must be a JSON object; "
-                f"got {type(parsed).__name__!r}."
-            )
-
-        raw_payload = dict(parsed)
-
-        # Preserve the existing ReAct error order/wording for unsupported keys and
-        # required ReAct metadata fields while still delegating schema-bound validation
-        # to _validate_tool_step_dict below.
-        extra = set(raw_payload) - REACT_FIELDS
-        if extra:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step contains unsupported keys: "
-                f"{sorted(extra)!r}."
-            )
-
-        if DURATION_FIELD not in raw_payload:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step missing required key {DURATION_FIELD!r}."
-            )
-
-        if DESCRIPTION_FIELD not in raw_payload:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step missing required key {DESCRIPTION_FIELD!r}."
-            )
-
-        step_payload = self._validate_tool_step_dict(
-            raw_payload,
+        return self._process_next_step_output(
+            engine_result=engine_result,
+            delta=delta,
             expected_step=expected_step,
-            allowed_fields=REACT_FIELDS,
-            required_fields=REQUIRED_REACT_FIELDS,
-            context="next step",
+            cache_blackboard=cache_blackboard,
+            max_duration=max_duration,
         )
 
-        duration = step_payload.pop(DURATION_FIELD)
-        if type(duration) is not int or duration < 0 or duration > max_duration:
+    async def _agenerate_next_step(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        cache_blackboard: list[BlackboardSlot],
+        expected_step: int,
+        delta: list[dict[str, str]],
+    ) -> tuple[BlackboardSlot, int, str, LLMRecord]:
+        """Async mirror of ``_generate_next_step``: uses ``async_invoke`` for the LLM call."""
+        if not messages:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step {DURATION_FIELD!r} must be an int in "
-                f"[0, {max_duration}] for expected_step={expected_step}; got {duration!r}."
+                f"{type(self).__name__}.{self.name}: messages must be non-empty."
             )
 
-        description = step_payload.pop(DESCRIPTION_FIELD)
-        if type(description) is not str:
+        if not isinstance(cache_blackboard, list):
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step {DESCRIPTION_FIELD!r} must be a string; "
-                f"got {type(description).__name__!r}."
+                f"{type(self).__name__}.{self.name}: cache_blackboard must be a list."
             )
 
-        description = description.strip()
-        if not description:
+        if type(expected_step) is not int or expected_step < 0:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step {DESCRIPTION_FIELD!r} cannot be empty."
+                f"{type(self).__name__}.{self.name}: expected_step must be an int >= 0; "
+                f"got {expected_step!r}."
             )
 
-        slot = self._tool_step_dict_to_slot(
-            step_payload,
-            step=expected_step,
-            allowed_fields=BASE_STEP_FIELDS,
-            context="next step",
+        if self._tool_calls_limit is None or type(self._tool_calls_limit) is not int or self._tool_calls_limit < 0:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: ReActAgent requires tool_calls_limit to be an int >= 0."
+            )
+
+        max_duration = max(0, self._tool_calls_limit - expected_step)
+        engine_result = await self._llm_engine.async_invoke(
+            {"messages": [dict(m) for m in messages]}
         )
-
-        # Validate tool exists before this slot is later stamped into run state.
-        self.get_tool(slot.tool)
-
-        if slot.tool == RETURN_TOOL_FULL_NAME and duration != 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return tool must use {DURATION_FIELD!r} 0; "
-                f"got {duration!r}."
-            )
-
-        cache_len = len(cache_blackboard)
-        cache_refs = extract_dependencies(slot.args, placeholder_pattern=self.CACHE_REF_PATTERN)
-        bad_cache = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
-        if bad_cache:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step references out-of-range cache indices "
-                f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
-            )
-
-        bad_step_deps = [
-            dep for dep in slot.step_dependencies
-            if dep < 0 or dep >= expected_step
-        ]
-        if bad_step_deps:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step has illegal deps "
-                f"{sorted(set(bad_step_deps))!r}; deps must be < {expected_step}."
-            )
-
-        return slot, duration, description, llm_record
+        return self._process_next_step_output(
+            engine_result=engine_result,
+            delta=delta,
+            expected_step=expected_step,
+            cache_blackboard=cache_blackboard,
+            max_duration=max_duration,
+        )
 
     def _prepare_next_batch(self, state: ReActRunState) -> ReActRunState:
         """
@@ -3231,8 +3604,7 @@ class ReActAgent(ToolAgent):
         - Mark the slot prepared.
         - prepared_steps is a list of exactly one index.
         - next_step_index advances by 1.
-        - latest_executed is overwritten with the newly prepared index. By the next
-          prepare call, the base execute loop must have executed it.
+        - step_meta[idx] is updated with the new observable duration and description.
 
         The temporary running-plan messages do not persist between turns; state.messages
         remains the static base message list for this invoke.
@@ -3248,236 +3620,44 @@ class ReActAgent(ToolAgent):
             )
 
         prefix_len = state.next_step_index
-        if type(prefix_len) is not int or prefix_len < 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next_step_index must be an int >= 0; "
-                f"got {prefix_len!r}."
-            )
+        self._validate_react_prepare_state(state)
+        working_messages, delta = self._build_react_messages(state, prefix_len)
 
-        if prefix_len >= len(state.running_blackboard):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next_step_index exceeds run blackboard capacity "
-                f"({prefix_len} >= {len(state.running_blackboard)})."
-            )
-
-        if not isinstance(state.observables, list):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: observables must be a list."
-            )
-
-        if len(state.observables) != len(state.running_blackboard):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: observables length must match running_blackboard length "
-                f"({len(state.observables)} != {len(state.running_blackboard)})."
-            )
-
-        for obs_idx, turns_left in enumerate(state.observables):
-            max_turns_left = len(state.running_blackboard) - obs_idx - 1
-            if type(turns_left) is not int or turns_left < 0 or turns_left > max_turns_left:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: observables[{obs_idx}] must be an int in "
-                    f"[0, {max_turns_left}]; got {turns_left!r}."
-                )
-
-        if not isinstance(state.descriptions, list):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: descriptions must be a list."
-            )
-
-        if len(state.descriptions) != len(state.running_blackboard):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: descriptions length must match running_blackboard length "
-                f"({len(state.descriptions)} != {len(state.running_blackboard)})."
-            )
-
-        for desc_idx, step_description in enumerate(state.descriptions):
-            if type(step_description) is not str:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: descriptions[{desc_idx}] must be a string; "
-                    f"got {type(step_description).__name__!r}."
-                )
-
-        if state.latest_executed:
-            if len(state.latest_executed) != 1:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: ReAct latest_executed must contain exactly one index; "
-                    f"got {state.latest_executed!r}."
-                )
-
-            latest_idx = state.latest_executed[0]
-            if type(latest_idx) is not int:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: latest_executed index must be int; "
-                    f"got {type(latest_idx).__name__!r}."
-                )
-            if latest_idx < 0 or latest_idx >= len(state.running_blackboard):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: latest_executed index {latest_idx} out of range "
-                    f"(running plan length={len(state.running_blackboard)})."
-                )
-
-            latest_slot = state.running_blackboard[latest_idx]
-            if not latest_slot.is_executed():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: latest_executed step {latest_idx} is not executed "
-                    f"(status={latest_slot.status!r})."
-                )
-
-        # ------------------------------------------------------------------ #
-        # 1) Build non-persistent messages for this ReAct LLM turn
-        # ------------------------------------------------------------------ #
-        working_messages: list[dict[str, str]] = [dict(m) for m in state.messages]
-
-        running_records: list[dict[str, Any]] = []
-        for idx in range(prefix_len):
-            slot = state.running_blackboard[idx]
-            if not slot.is_executed():
-                continue
-
-            record: dict[str, Any] = {
-                STEP_FIELD: slot.step,
-                DESCRIPTION_FIELD: state.descriptions[idx],
-                TOOL_FIELD: slot.tool,
-                ARGS_FIELD: slot.args,
-                "result_ref": f"<<__s{idx}__>>",
-            }
-
-            if state.observables[idx] > 0:
-                record["observable_result"] = self._preview_blackboard_result(slot.result.result)
-
-            running_records.append(record)
-
-        if running_records:
-            running_text = (
-                f"RUNNING PLAN STEPS 0-{prefix_len - 1} SO FAR:\n"
-                "These are the executed steps for the current user task.\n"
-                "Use descriptions to understand what each executed step was intended to do.\n"
-                "Use result_ref placeholders when a new arg needs a prior step value.\n"
-                "observable_result fields are for OBSERVATION ONLY: use them only to choose the next tool or branch.\n"
-                "Do not copy observable_result values into new args.\n\n"
-                + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
-            )
-        else:
-            running_text = (
-                "RUNNING PLAN STEPS SO FAR:\n"
-                "No steps executed yet.\n"
-                "When steps execute, their results will be available by result_ref placeholders like <<__s0__>>."
-            )
-
-        max_duration = len(state.running_blackboard) - prefix_len - 1
-
-        working_messages.append({"role": "assistant", "content": running_text})
-        working_messages.append(
-            {
-                "role": "user",
-                "content": "Produce the NEXT BEST single tool call for the current task. "
-                           "Pick the return tool if the running plan has completed all needed work. "
-                           "Output exactly one JSON object with keys {step, tool, args, duration, description}. "
-                           "Preserve symbolic dataflow with quoted placeholders; do not copy observable_result values into args. "
-                           f"For this output step, duration must be an int from 0 to {max_duration}.",
-            }
-        )
-
-        # ------------------------------------------------------------------ #
-        # 2) Generate and validate the next planned slot
-        # ------------------------------------------------------------------ #
-        delta = [state.messages[-1], working_messages[-2], working_messages[-1]]
         generated_slot, observe_duration, description, llm_record = self._generate_next_step(
             messages=working_messages,
             cache_blackboard=state.cache_blackboard,
             expected_step=prefix_len,
             delta=delta,
         )
+        return self._apply_react_step_result(
+            state, prefix_len, generated_slot, observe_duration, description, llm_record
+        )
 
-        if not isinstance(generated_slot, BlackboardSlot):
+    async def _aprepare_next_batch(self, state: ReActRunState) -> ReActRunState:
+        """
+        Async override: uses ``_agenerate_next_step`` so the per-step LLM call
+        goes through ``async_invoke`` rather than a worker thread.
+        """
+        if not isinstance(state, ReActRunState):
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: _generate_next_step must return "
-                f"(BlackboardSlot, observe_duration, description, LLMRecord); got first "
-                f"item {type(generated_slot).__name__!r}."
+                f"{type(self).__name__}.{self.name}: _aprepare_next_batch requires a ReActRunState."
             )
 
-        state.llm_records.append(llm_record)
-
-        if type(observe_duration) is not int or observe_duration < 0 or observe_duration > max_duration:
+        if state.prepared_steps:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: observe_duration must be an int in "
-                f"[0, {max_duration}]; got {observe_duration!r}."
+                f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
             )
 
-        if generated_slot.tool == RETURN_TOOL_FULL_NAME and observe_duration != 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return tool must use duration 0; "
-                f"got {observe_duration!r}."
-            )
+        prefix_len = state.next_step_index
+        self._validate_react_prepare_state(state)
+        working_messages, delta = self._build_react_messages(state, prefix_len)
 
-        if type(description) is not str:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: description must be a string; "
-                f"got {type(description).__name__!r}."
-            )
-
-        description = description.strip()
-
-        if generated_slot.step != prefix_len:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: generated step mismatch: "
-                f"got {generated_slot.step}, expected {prefix_len}."
-            )
-
-        if not generated_slot.is_planned():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: generated slot must be planned; "
-                f"got status={generated_slot.status!r}."
-            )
-
-        # A successful generation turn consumed any raw results that were visible.
-        for obs_idx, turns_left in enumerate(state.observables):
-            if turns_left > 0:
-                state.observables[obs_idx] = turns_left - 1
-
-        # ------------------------------------------------------------------ #
-        # 3) Fill the next slot of the preallocated running blackboard
-        # ------------------------------------------------------------------ #
-        slot = state.running_blackboard[prefix_len]
-        if slot.step != prefix_len:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: running slot step mismatch at index {prefix_len}: "
-                f"slot.step={slot.step}."
-            )
-
-        if not slot.is_empty():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: attempted to prepare into non-empty slot {prefix_len}."
-            )
-
-        slot.tool = generated_slot.tool
-        slot.args = generated_slot.args
-        slot.result = NO_VAL
-        slot.error = NO_VAL
-        slot.step_dependencies = generated_slot.step_dependencies
-        slot.await_step = generated_slot.await_step
-
-        # Resolve placeholders after stamping the planned slot into the running state.
-        # The base resolver validates that referenced cache/running slots are executed.
-        slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
-        slot.status = BlackboardSlot.PREPARED
-
-        # Store this step's future raw-result visibility duration.
-        # The result is not available until after the base execute loop runs this step,
-        # so this duration is not decremented in the current prepare turn.
-        state.observables[prefix_len] = observe_duration
-
-        # Store this step's description for richer future running-plan context.
-        state.descriptions[prefix_len] = description
-
-        # prepared_steps is what the base execute() will run next (list-of-one).
-        state.prepared_steps = [prefix_len]
-
-        # Used for lightweight ReAct bookkeeping at the start of the next prepare() call.
-        # The base ToolAgent loop executes this prepared step before preparing again.
-        state.latest_executed = [prefix_len]
-
-        # Advance cursor.
-        state.next_step_index = prefix_len + 1
-
-        return state
+        generated_slot, observe_duration, description, llm_record = await self._agenerate_next_step(
+            messages=working_messages,
+            cache_blackboard=state.cache_blackboard,
+            expected_step=prefix_len,
+            delta=delta,
+        )
+        return self._apply_react_step_result(
+            state, prefix_len, generated_slot, observe_duration, description, llm_record
+        )

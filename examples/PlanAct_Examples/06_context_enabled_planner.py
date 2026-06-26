@@ -38,5 +38,6 @@ while True:
     print(f"Result: {result.result}\n")
     from pprint import pprint
     print("Blackboard:")
-    pprint(my_planner.blackboard)
+    record = my_planner.records[-1]
+    pprint(my_planner.blackboard[record.blackboard_start:record.blackboard_end+1])
     print("-" * 40 + "\n")
