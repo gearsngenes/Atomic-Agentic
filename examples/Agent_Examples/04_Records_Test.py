@@ -61,12 +61,21 @@ def main() -> None:
         pprint.pp(turn.final_result)
 
     print("\n=== Rendered turn using raw assistant response ===")
-    agent.assistant_response_source = "raw"
     pprint.pp(agent.render_turn(agent.records[0]))
 
     print("\n=== Rendered turn using final assistant response ===")
-    agent.assistant_response_source = "final"
-    pprint.pp(agent.render_turn(agent.records[0]))
+    # assistant_response_source is read-only after construction; build a view agent for the alternate source
+    final_view = Agent(
+        name="basic_turn_demo_agent",
+        namespace="examples",
+        description="Basic Agent demo showing raw/final turn rendering.",
+        llm_engine=engine,
+        role_prompt="You are concise. Answer in one short sentence.",
+        post_invoke=summarize_result,
+        response_preview_limit=300,
+        assistant_response_source="final",
+    )
+    pprint.pp(final_view.render_turn(agent.records[0]))
 
     print("\n=== Messages that would be sent on the next invoke ===")
     next_messages = agent.build_messages(

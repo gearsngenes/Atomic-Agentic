@@ -5,6 +5,28 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a11] - 2026-06-25
+
+### Changed
+
+- `LLMRecord.user_prompt: str` replaced by `messages: tuple[dict[str, str], ...]`
+  — the delta of messages appended on top of the rendered conversation history
+  immediately before each LLM call; system message and prior rendered turns are
+  excluded. `to_dict()` serializes this field as `"messages"` (a list of dicts).
+- `LLMRecord` validation hardened: rejects strings/bytes passed as `messages`,
+  empty sequences, non-dict elements, empty dicts, and non-string keys or values;
+  list inputs are normalized to tuple.
+- `Agent._invoke` / `_ainvoke`: `LLMRecord` is now constructed with
+  `messages=[messages[-1]]` (the current user message dict) instead of
+  `user_prompt=prompt`.
+- `PlanActAgent._generate_plan`: same one-element delta.
+- `ReActAgent._generate_next_step`: accepts a new keyword-only
+  `delta: list[dict[str, str]]` parameter; uses it for `LLMRecord` construction.
+- `ReActAgent._prepare_next_batch`: computes a three-element delta
+  `[state.messages[-1], working_messages[-2], working_messages[-1]]` — original
+  task, running-plan snapshot, step-request stub — before each
+  `_generate_next_step` call.
+
 ## [2.0.0a10] - 2026-06-25
 
 ### Added
