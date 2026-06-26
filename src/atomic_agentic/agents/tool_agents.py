@@ -154,6 +154,7 @@ from ..tools import Tool, toolify, batch_toolify
 from ..mcp import MCPClientHub
 from ..a2a import PyA2AtomicClient
 from ..utils.agents import extract_dependencies
+from ..utils.core import run_coro_sync
 from .tools import return_tool
 
 
@@ -990,7 +991,7 @@ class ToolAgent(Agent, ABC):
             if isinstance(x, tuple):
                 return tuple(resolve(v) for v in x)
             if isinstance(x, set):
-                return {resolve(v) for v in x}
+                return set([resolve(v) for v in x])
             if isinstance(x, dict):
                 return {resolve(k): resolve(v) for k, v in x.items()}
             return x
@@ -1011,7 +1012,7 @@ class ToolAgent(Agent, ABC):
         ~~~~~~~~~~~~~~~
         - All steps in ``prepared_steps`` are **concurrent**
         - Multi-step batches use ``asyncio.gather(..., return_exceptions=True)``
-        under a single ``asyncio.run(...)``
+        under a single ``run_coro_sync(...)``
         - This version favors compactness over strict fail-fast cancellation
         - **Ordering**: Results are stored in the blackboard; order is immaterial
 
@@ -1184,7 +1185,7 @@ class ToolAgent(Agent, ABC):
 
             return [(idx, result) for idx, result in zip(indices, raw_results)]
 
-        results = asyncio.run(run_batch())
+        results = run_coro_sync(run_batch())
 
         for idx, tool_result in results:
             board[idx].result = tool_result

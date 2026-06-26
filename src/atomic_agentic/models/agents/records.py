@@ -157,11 +157,17 @@ class AgentRecord:
                 )
         object.__setattr__(self, "llm_records", normalized)
 
-        if self.prev is not None and not isinstance(self.prev, AgentRecord):
-            raise TypeError(
-                f"AgentRecord.prev must be an AgentRecord or None, "
-                f"got {type(self.prev).__name__}."
-            )
+        if self.prev is not None:
+            if not isinstance(self.prev, AgentRecord):
+                raise TypeError(
+                    f"AgentRecord.prev must be an AgentRecord or None, "
+                    f"got {type(self.prev).__name__}."
+                )
+            if self.prev.final_result is None:
+                raise ValueError(
+                    "AgentRecord.prev must point to a completed record "
+                    "(final_result is not None); cannot link to a draft."
+                )
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
@@ -187,3 +193,11 @@ class ToolAgentRecord(AgentRecord):
 
     blackboard_start: int | None = None
     blackboard_end: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation."""
+        return {
+            **super(ToolAgentRecord, self).to_dict(),
+            "blackboard_start": self.blackboard_start,
+            "blackboard_end": self.blackboard_end,
+        }

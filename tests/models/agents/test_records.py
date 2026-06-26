@@ -345,10 +345,12 @@ class TestToolAgentRecord:
         assert record.blackboard_start == 3
         assert record.blackboard_end == 6
 
-    def test_to_dict_returns_inherited_agent_record_shape(self) -> None:
+    def test_to_dict_includes_blackboard_span_fields(self) -> None:
         record = ToolAgentRecord(
             user_prompt="run tools",
             generated_response=42,
+            blackboard_start=3,
+            blackboard_end=6,
         )
         assert record.to_dict() == {
             "user_prompt": "run tools",
@@ -356,7 +358,18 @@ class TestToolAgentRecord:
             "final_result": None,
             "llm_records": [],
             "prev_run_id": None,
+            "blackboard_start": 3,
+            "blackboard_end": 6,
         }
+
+    def test_to_dict_blackboard_span_defaults_to_none(self) -> None:
+        record = ToolAgentRecord(
+            user_prompt="run tools",
+            generated_response=42,
+        )
+        d = record.to_dict()
+        assert d["blackboard_start"] is None
+        assert d["blackboard_end"] is None
 
     def test_blackboard_span_defaults_to_none(self) -> None:
         record = ToolAgentRecord(
