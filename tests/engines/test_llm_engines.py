@@ -598,6 +598,86 @@ class FakeGenAIClient:
         self.deleted_files.append(name)
 
 
+class TestOpenAIExtractTokenUsage:
+    def _engine(self, monkeypatch: pytest.MonkeyPatch) -> OpenAIEngine:
+        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        return OpenAIEngine(model="gpt-4o-mini")
+
+    def _usage(
+        self,
+        *,
+        input_tokens: int = 10,
+        output_tokens: int = 5,
+        total_tokens: int = 15,
+        output_tokens_details: Any = None,
+        input_tokens_details: Any = None,
+    ) -> Any:
+        return SimpleNamespace(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            output_tokens_details=output_tokens_details,
+            input_tokens_details=input_tokens_details,
+        )
+
+    def test_both_details_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = self._engine(monkeypatch)
+        response = SimpleNamespace(usage=self._usage(
+            input_tokens=10,
+            output_tokens=8,
+            total_tokens=18,
+            output_tokens_details=SimpleNamespace(reasoning_tokens=3),
+            input_tokens_details=SimpleNamespace(cached_tokens=2),
+        ))
+
+        result = engine._extract_token_usage(response)
+
+        assert result.reasoning_tokens == 3
+        assert result.response_tokens == 5          # 8 - 3
+        assert result.cached_tokens == 2
+
+    def test_output_tokens_details_none_defaults_reasoning_to_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = self._engine(monkeypatch)
+        response = SimpleNamespace(usage=self._usage(
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            output_tokens_details=None,
+            input_tokens_details=SimpleNamespace(cached_tokens=1),
+        ))
+
+        result = engine._extract_token_usage(response)
+
+        assert result.reasoning_tokens == 0
+        assert result.response_tokens == 5          # 5 - 0
+        assert result.cached_tokens == 1
+
+    def test_input_tokens_details_none_defaults_cached_to_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = self._engine(monkeypatch)
+        response = SimpleNamespace(usage=self._usage(
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            output_tokens_details=SimpleNamespace(reasoning_tokens=0),
+            input_tokens_details=None,
+        ))
+
+        result = engine._extract_token_usage(response)
+
+        assert result.cached_tokens is None
+
+    def test_usage_none_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = self._engine(monkeypatch)
+        response = SimpleNamespace(usage=None)
+
+        with pytest.raises(LLMEngineError, match="did not include usage"):
+            engine._extract_token_usage(response)
+
+
 class FakeGenAI:
     Client = FakeGenAIClient
 

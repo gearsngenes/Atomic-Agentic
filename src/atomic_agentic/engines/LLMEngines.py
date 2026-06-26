@@ -845,9 +845,14 @@ class OpenAIEngine(LLMEngine):
         - input_tokens: prompt/input-side tokens
         - output_tokens: generated-side tokens
         - total_tokens: total input + generated tokens
-        - input_tokens_details.cached_tokens: cached input-token subset
+        - input_tokens_details.cached_tokens: cached input-token subset (optional)
         - output_tokens_details.reasoning_tokens: hidden reasoning-token subset
-          counted inside output_tokens
+          counted inside output_tokens (optional)
+
+        Both ``output_tokens_details`` and ``input_tokens_details`` are optional and
+        may be absent (``None``) from the response.  When absent, ``reasoning_tokens``
+        defaults to ``0`` (no reasoning occurred) and ``cached_tokens`` defaults to
+        ``None`` (not reported).
 
         ``response_tokens`` is derived as ``output_tokens - reasoning_tokens``.
         """
@@ -855,7 +860,9 @@ class OpenAIEngine(LLMEngine):
         if usage is None:
             raise LLMEngineError("OpenAI response did not include usage.")
 
-        reasoning_tokens = usage.output_tokens_details.reasoning_tokens
+        output_details = usage.output_tokens_details
+        reasoning_tokens = output_details.reasoning_tokens if output_details is not None else 0
+
         response_tokens = usage.output_tokens - reasoning_tokens
         if response_tokens < 0:
             raise LLMEngineError(
@@ -863,12 +870,15 @@ class OpenAIEngine(LLMEngine):
                 "after subtracting reasoning_tokens from output_tokens."
             )
 
+        input_details = usage.input_tokens_details
+        cached_tokens = input_details.cached_tokens if input_details is not None else None
+
         return OpenAITokenUsage(
             input_tokens=usage.input_tokens,
             generated_tokens=usage.output_tokens,
             total_tokens=usage.total_tokens,
             response_tokens=response_tokens,
-            cached_tokens=usage.input_tokens_details.cached_tokens,
+            cached_tokens=cached_tokens,
             reasoning_tokens=reasoning_tokens,
         )
 
@@ -2398,23 +2408,3 @@ class LlamaCppEngine(LLMEngine):
             "stop": self.stop,
         })
         return base
-
-# ── PLACEHOLDERS (keep the same abstract contract) ─────────────────────────────
-class AzureOpenAIEngine(LLMEngine):
-    """
-    Placeholder for an Azure OpenAI adapter.
-
-    This class documents the intended constructor/contract but provides **no**
-    implementation: `upload`, `delete`, and `invoke` are intentionally unimplemented.
-    """
-    pass
-
-
-class BedrockEngine(LLMEngine):
-    """
-    Placeholder for an AWS Bedrock adapter.
-
-    This class documents the intended constructor/contract but provides **no**
-    implementation: `upload`, `delete`, and `invoke` are intentionally unimplemented.
-    """
-    pass
