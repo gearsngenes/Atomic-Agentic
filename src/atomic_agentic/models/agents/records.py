@@ -20,31 +20,60 @@ class LLMRecord:
     Agent invocation.
 
     An Agent invocation may involve one or more LLM generations (e.g. a
-    ToolAgent's planning loop). Each generation that contributes to an
-    invocation is preserved here in full — not distilled — so that future
-    rendering, debugging, and accounting needs are not constrained by what an
-    earlier pass chose to keep.
+    ToolAgent's planning loop). Each generation is preserved here so that
+    future rendering, debugging, and accounting are not constrained by what
+    an earlier pass chose to keep.
 
     Fields
     ------
-    user_prompt:
-        User-facing prompt text that triggered this specific LLM generation.
-        May differ from the AgentRecord's overall ``user_prompt`` when an
-        invocation makes multiple LLM calls with distinct prompts.
+    messages:
+        The messages appended on top of the rendered conversation history
+        immediately before this LLM call — the delta that is new for this
+        specific generation. The system message and rendered prior turns are
+        excluded; they are already captured by the enclosing AgentRecord /
+        ToolAgentRecord.
+
+        For base Agent: a one-element tuple containing the current user
+        prompt message. For PlanActAgent: the same — one new user message.
+        For ReActAgent: a three-element tuple — the original user task
+        (user), the running-plan snapshot (assistant), and the step-request
+        stub (user).
 
     llm_result:
-        The complete LLMResult produced by this generation, including its
-        token usage, model identity, timing, and run identity.
+        The complete LLMResult produced by this generation, including token
+        usage, model identity, timing, and run identity.
     """
 
-    user_prompt: str
+    messages: tuple[dict[str, str], ...]
     llm_result: LLMResult
 
     def __post_init__(self) -> None:
-        if not isinstance(self.user_prompt, str):
+        if isinstance(self.messages, (str, bytes)) or not isinstance(self.messages, (list, tuple)):
             raise TypeError(
-                f"LLMRecord.user_prompt must be a str, got {type(self.user_prompt).__name__}."
+                "LLMRecord.messages must be a list or tuple of dict[str, str]; "
+                f"got {type(self.messages).__name__}."
             )
+        normalized = tuple(self.messages)
+        if not normalized:
+            raise ValueError("LLMRecord.messages must be non-empty.")
+        for index, msg in enumerate(normalized):
+            if not isinstance(msg, dict):
+                raise TypeError(
+                    f"LLMRecord.messages[{index}] must be a dict; got {type(msg).__name__}."
+                )
+            if not msg:
+                raise ValueError(f"LLMRecord.messages[{index}] must not be empty.")
+            for key, value in msg.items():
+                if not isinstance(key, str):
+                    raise TypeError(
+                        f"LLMRecord.messages[{index}] has a non-string key: {key!r}."
+                    )
+                if not isinstance(value, str):
+                    raise TypeError(
+                        f"LLMRecord.messages[{index}] key {key!r} has a non-string value: "
+                        f"{type(value).__name__}."
+                    )
+        object.__setattr__(self, "messages", normalized)
         if not isinstance(self.llm_result, LLMResult):
             raise TypeError(
                 "LLMRecord.llm_result must be an LLMResult instance, "
@@ -54,7 +83,7 @@ class LLMRecord:
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         return {
-            "user_prompt": self.user_prompt,
+            "messages": list(self.messages),
             "llm_result": self.llm_result.to_dict(),
         }
 

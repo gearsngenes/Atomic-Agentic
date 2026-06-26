@@ -1084,7 +1084,7 @@ class Agent(AtomicInvokable):
 
         # Capture the full LLM envelope so the eventual AgentResult can report
         # model identity and per-generation records without re-deriving them later.
-        llm_record = LLMRecord(user_prompt=prompt, llm_result=engine_result)
+        llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
         draft = AgentRecord(
             user_prompt=prompt,
             generated_response=text,
@@ -1133,7 +1133,7 @@ class Agent(AtomicInvokable):
 
         # 3) Capture the full LLM envelope so the eventual AgentResult can report
         #    model identity and per-generation records without re-deriving them later.
-        llm_record = LLMRecord(user_prompt=prompt, llm_result=engine_result)
+        llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
 
         # 4) Return the draft AgentRecord (final_result=None until make_result runs)
         #    alongside the metadata dict that invoke passes to make_result.

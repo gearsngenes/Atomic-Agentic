@@ -37,8 +37,11 @@ def make_llm_result(*, text: str = "generated text", invoker_id: str = "engine-1
     )
 
 
-def make_llm_record(*, user_prompt: str = "generate a response", text: str = "generated text") -> LLMRecord:
-    return LLMRecord(user_prompt=user_prompt, llm_result=make_llm_result(text=text))
+def make_llm_record(*, text: str = "generated text") -> LLMRecord:
+    return LLMRecord(
+        messages=({"role": "user", "content": "generate a response"},),
+        llm_result=make_llm_result(text=text),
+    )
 
 
 def make_atomic_result(*, value: Any = 5, invoker_id: str = "tool-1") -> AtomicResult:
@@ -127,32 +130,75 @@ class TestConstantSpec:
 
 
 class TestLLMRecord:
-    def test_valid_record_exposes_user_prompt_and_llm_result(self) -> None:
+    def test_valid_record_stores_messages_and_llm_result(self) -> None:
         llm_result = make_llm_result(text="hello world")
-        record = LLMRecord(user_prompt="say hello", llm_result=llm_result)
-        assert record.user_prompt == "say hello"
+        record = LLMRecord(
+            messages=[{"role": "user", "content": "say hello"}],
+            llm_result=llm_result,
+        )
+        assert record.messages == ({"role": "user", "content": "say hello"},)
         assert record.llm_result is llm_result
 
-    def test_to_dict_returns_user_prompt_and_serialized_llm_result(self) -> None:
+    def test_messages_list_normalized_to_tuple(self) -> None:
+        record = LLMRecord(
+            messages=[{"role": "user", "content": "hi"}],
+            llm_result=make_llm_result(),
+        )
+        assert isinstance(record.messages, tuple)
+
+    def test_multi_message_delta_stored_in_order(self) -> None:
+        msgs = [
+            {"role": "user", "content": "original task"},
+            {"role": "assistant", "content": "running plan"},
+            {"role": "user", "content": "next step"},
+        ]
+        record = LLMRecord(messages=msgs, llm_result=make_llm_result())
+        assert record.messages == tuple(msgs)
+
+    def test_to_dict_serializes_messages_as_list(self) -> None:
         llm_result = make_llm_result(text="hello world")
-        record = LLMRecord(user_prompt="say hello", llm_result=llm_result)
+        msgs = [{"role": "user", "content": "say hello"}]
+        record = LLMRecord(messages=msgs, llm_result=llm_result)
         assert record.to_dict() == {
-            "user_prompt": "say hello",
+            "messages": msgs,
             "llm_result": llm_result.to_dict(),
         }
 
-    def test_rejects_non_string_user_prompt(self) -> None:
-        with pytest.raises(TypeError, match="user_prompt"):
-            LLMRecord(user_prompt=123, llm_result=make_llm_result())  # type: ignore[arg-type]
+    def test_rejects_string_as_messages(self) -> None:
+        with pytest.raises(TypeError, match="messages"):
+            LLMRecord(messages="not a list", llm_result=make_llm_result())  # type: ignore[arg-type]
+
+    def test_rejects_empty_messages(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            LLMRecord(messages=[], llm_result=make_llm_result())
+
+    def test_rejects_non_dict_element(self) -> None:
+        with pytest.raises(TypeError, match=r"messages\[0\]"):
+            LLMRecord(messages=["not a dict"], llm_result=make_llm_result())  # type: ignore[arg-type]
+
+    def test_rejects_empty_dict_element(self) -> None:
+        with pytest.raises(ValueError, match=r"messages\[0\]"):
+            LLMRecord(messages=[{}], llm_result=make_llm_result())
+
+    def test_rejects_non_string_key(self) -> None:
+        with pytest.raises(TypeError, match="non-string key"):
+            LLMRecord(messages=[{1: "val"}], llm_result=make_llm_result())  # type: ignore[arg-type]
+
+    def test_rejects_non_string_value(self) -> None:
+        with pytest.raises(TypeError, match="non-string value"):
+            LLMRecord(messages=[{"role": 123}], llm_result=make_llm_result())  # type: ignore[arg-type]
 
     def test_rejects_non_llm_result(self) -> None:
         with pytest.raises(TypeError, match="llm_result"):
-            LLMRecord(user_prompt="hi", llm_result="not a result")  # type: ignore[arg-type]
+            LLMRecord(
+                messages=[{"role": "user", "content": "hi"}],
+                llm_result="not a result",  # type: ignore[arg-type]
+            )
 
     def test_is_frozen(self) -> None:
         record = make_llm_record()
         with pytest.raises(FrozenInstanceError):
-            record.user_prompt = "other"  # type: ignore[misc]
+            record.messages = ({"role": "user", "content": "other"},)  # type: ignore[misc]
 
 
 class TestAgentRecord:

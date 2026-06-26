@@ -21,7 +21,6 @@ from atomic_agentic.models.agents.records import LLMRecord
 from atomic_agentic.models.results.agents import ToolAgentResult
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from atomic_agentic.exceptions import (
-    AgentError,
     ToolAgentError,
     ToolInvocationError,
     ToolRegistrationError,
@@ -215,8 +214,11 @@ def make_llm_result(*, text: str = "generated text", invoker_id: str = "engine-1
     )
 
 
-def make_llm_record(*, user_prompt: str = "generate a response", text: str = "generated text") -> LLMRecord:
-    return LLMRecord(user_prompt=user_prompt, llm_result=make_llm_result(text=text))
+def make_llm_record(*, text: str = "generated text") -> LLMRecord:
+    return LLMRecord(
+        messages=({"role": "user", "content": "generate a response"},),
+        llm_result=make_llm_result(text=text),
+    )
 
 
 def make_tool_result(value: Any, *, invoker_id: str = "tool-1") -> ToolResult:
@@ -305,7 +307,7 @@ class ScriptedToolAgent(ToolAgent):
         running_blackboard = [BlackboardSlot(step=index) for index in range(total_steps)]
 
         engine_result = self.llm_engine.invoke({"messages": messages})
-        llm_record = LLMRecord(user_prompt=messages[-1]["content"], llm_result=engine_result)
+        llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
 
         return ScriptedRunState(
             messages=[dict(message) for message in messages],

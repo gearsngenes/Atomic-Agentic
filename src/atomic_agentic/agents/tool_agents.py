@@ -2522,7 +2522,7 @@ class PlanActAgent(ToolAgent):
             )
 
         engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
-        llm_record = LLMRecord(user_prompt=messages[-1]["content"], llm_result=engine_result)
+        llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
         parsed = self._extract_from_json_string(engine_result.result)
 
         if not isinstance(parsed, list) or not parsed:
@@ -3024,6 +3024,7 @@ class ReActAgent(ToolAgent):
         messages: list[dict[str, str]],
         cache_blackboard: list[BlackboardSlot],
         expected_step: int,
+        delta: list[dict[str, str]],
     ) -> tuple[BlackboardSlot, int, str, LLMRecord]:
         """
         Generate and validate one ReAct tool step as a planned BlackboardSlot plus
@@ -3062,6 +3063,12 @@ class ReActAgent(ToolAgent):
         expected_step : int
             Authoritative plan-local step index for the generated slot. The raw
             LLM-produced "step" value is optional/advisory and is overwritten.
+
+        delta : list[dict[str, str]]
+            The messages that are new for this specific step call, pre-computed
+            by the caller. Used to construct the LLMRecord for this generation.
+            Typically three messages: the original user task, the running-plan
+            snapshot (assistant), and the step-request stub (user).
 
         Returns
         -------
@@ -3109,7 +3116,7 @@ class ReActAgent(ToolAgent):
         max_duration = max(0, self._tool_calls_limit - expected_step)
 
         engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
-        llm_record = LLMRecord(user_prompt=messages[-1]["content"], llm_result=engine_result)
+        llm_record = LLMRecord(messages=delta, llm_result=engine_result)
         parsed = self._extract_from_json_string(engine_result.result)
 
         if not isinstance(parsed, Mapping):
@@ -3373,10 +3380,12 @@ class ReActAgent(ToolAgent):
         # ------------------------------------------------------------------ #
         # 2) Generate and validate the next planned slot
         # ------------------------------------------------------------------ #
+        delta = [state.messages[-1], working_messages[-2], working_messages[-1]]
         generated_slot, observe_duration, description, llm_record = self._generate_next_step(
             messages=working_messages,
             cache_blackboard=state.cache_blackboard,
             expected_step=prefix_len,
+            delta=delta,
         )
 
         if not isinstance(generated_slot, BlackboardSlot):
