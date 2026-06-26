@@ -62,6 +62,12 @@ version_file = "src/atomic_agentic/_version.py"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+markers = [
+  "integration: multi-component integration tests",
+  "llm: tests that make real LLM API calls",
+  "network: tests that require network access",
+  "slow: tests with long runtimes",
+]
 norecursedirs = [
   ".git",
   ".venv",

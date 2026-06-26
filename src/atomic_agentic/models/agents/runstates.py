@@ -11,6 +11,7 @@ __all__ = [
     "ToolAgentRunState",
     "PlanActRunState",
     "ReActRunState",
+    "ReActStepMeta",
 ]
 
 
@@ -136,12 +137,35 @@ class PlanActRunState(ToolAgentRunState):
 
 
 @dataclass(slots=True)
+class ReActStepMeta:
+    """
+    Per-slot metadata for a single ReAct step.
+
+    Pairs the raw-result visibility counter with the one-sentence description
+    for the same slot, replacing two parallel lists on ``ReActRunState``.
+
+    Fields
+    ------
+    observable : int
+        Remaining prepare-turns during which this step's raw result is shown
+        as ``observable_result`` in the running-plan snapshot. Decremented
+        after each successful generation turn. ``0`` means not visible.
+
+    description : str
+        One-sentence intent summary rendered in the running-plan snapshot so
+        the LLM understands what the step was intended to do without needing
+        raw result visibility.
+    """
+    observable: int = 0
+    description: str = ""
+
+
+@dataclass(slots=True)
 class ReActRunState(ToolAgentRunState):
     """
     ReActAgent-specific run state extending ToolAgentRunState.
 
-    Tracks cursor, visibility, and semantic step metadata for step-by-step
-    reactive planning.
+    Tracks cursor and per-slot metadata for step-by-step reactive planning.
 
     Fields
     ------
@@ -154,28 +178,20 @@ class ReActRunState(ToolAgentRunState):
         2. Dependency cutoff: any <<__sN__>> placeholder in newly prepared args must
            satisfy N < next_step_index.
 
-    latest_executed : list[int]
-        Plan-local indices of the most recently prepared single-step batch.
-        ReAct prepares one step at a time, so this is expected to be empty before
-        the first step and length 1 after each prepared/executed step.
+    step_meta : list[ReActStepMeta]
+        Per-slot metadata for each slot in ``running_blackboard``. Always the same
+        length as ``running_blackboard``. Initialized to
+        ``[ReActStepMeta() for _ in running_blackboard]`` at construction.
 
-    observables : list[int]
-        Per-step raw-result visibility counters for the current ReAct run.
+        ``step_meta[i].observable`` — raw-result visibility counter for slot i.
+        Zero means not visible; positive means the result is shown as
+        ``observable_result`` for that many future successful generation turns.
 
-        - observables[i] == 0 means step i's raw result is not shown to the LLM.
-        - observables[i] > 0 means step i's raw result is shown as observable_result
-          for that many future successful step-generation turns.
+        ``step_meta[i].description`` — one-sentence intent summary for slot i,
+        rendered in the running-plan snapshot to preserve semantic context.
 
-        Regardless of observability, every executed step is rendered with a
-        result_ref placeholder like <<__s0__>> so the model can pass values forward
-        without seeing or copying raw literals.
-
-    descriptions : list[str]
-        Per-step one-sentence descriptions for the current ReAct run.
-
-        descriptions[i] describes what running step i was intended to do for the
-        current user task. Descriptions are rendered in the running-plan snapshot
-        to preserve semantic intent without requiring raw result visibility.
+        Both fields are written by ``_prepare_next_batch`` /
+        ``_aprepare_next_batch`` at the index of the slot being prepared.
 
     Workflow
     ~~~~~~~~
@@ -190,8 +206,8 @@ class ReActRunState(ToolAgentRunState):
          {"step": idx, "tool": ..., "args": {...}, "duration": ..., "description": ...}
        - Validate idx == next_step_index.
        - Fill running_blackboard[idx].
-       - Store duration and description in ReAct run state.
-       - Set prepared_steps=[idx], latest_executed=[idx].
+       - Write step_meta[idx].observable and step_meta[idx].description.
+       - Set prepared_steps=[idx].
        - Increment next_step_index.
 
     2. execute():
@@ -201,6 +217,4 @@ class ReActRunState(ToolAgentRunState):
     3. Continue until the return tool executes.
     """
     next_step_index: int = 0
-    latest_executed: list[int] = field(default_factory=list)
-    observables: list[int] = field(default_factory=list)
-    descriptions: list[str] = field(default_factory=list)
+    step_meta: list[ReActStepMeta] = field(default_factory=list)

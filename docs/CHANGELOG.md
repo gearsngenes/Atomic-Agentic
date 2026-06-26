@@ -5,6 +5,68 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a12] - 2026-06-26
+
+### Fixed
+
+- `ToolAgent` sync `invoke` crash when called from within a running event loop
+  — replaced `asyncio.run(...)` with `run_coro_sync(...)`.
+- `ToolAgent` `TypeError` when a placeholder resolves to an unhashable value
+  in a set-typed argument — set comprehension replaced with a list comprehension.
+- `LLMRecord` construction: `messages` was passed as a list literal where
+  `LLMRecord.__post_init__` requires a tuple; corrected in `Agent._ainvoke` and
+  `Agent._invoke`.
+- `OpenAIEngine._extract_token_usage`: unguarded `output_tokens_details` and
+  `input_tokens_details` attribute access — now guarded before accessing
+  sub-fields.
+- `AgentRecord.__post_init__` now enforces that `prev`, when set, points to a
+  completed record (`final_result is not None`).
+- `ToolAgentRecord` was missing a `to_dict()` override; `blackboard_start` and
+  `blackboard_end` fields were silently dropped from serialization.
+
+### Added
+
+- Native async paths for `ToolAgent` hooks: `_ainitialize_run_state` and
+  `_aprepare_next_batch` on the `ToolAgent` base (default: `asyncio.to_thread`
+  wrap); `PlanActAgent._agenerate_plan` / `_ainitialize_run_state` and
+  `ReActAgent._agenerate_next_step` / `_aprepare_next_batch` use `async_invoke`
+  directly, avoiding thread-pool dispatch on every LLM call.
+- `ReActStepMeta` dataclass — consolidates `observable: int` and
+  `description: str` per step slot in `ReActRunState`, replacing former parallel
+  lists.
+
+### Changed
+
+- `AzureOpenAIEngine` and `BedrockEngine` stub classes (which raised a
+  confusing `TypeError` on instantiation) removed.
+- Dead `token_usage is not None` filter in `Agent.make_result` removed —
+  `LLMResult.token_usage` is always a `TokenUsage` instance.
+- Redundant `tool_calls_limit` runtime guards in `ReActAgent._initialize_run_state`,
+  `_generate_next_step`, and `_agenerate_next_step` removed — the invariant is
+  enforced once at `__init__`.
+- `prepared_steps` reset idiom unified to `= []` throughout `tool_agents.py`.
+
+### Removed
+
+- `LLMEngine.invoke_messages` — pre-v2 text-only wrapper that bypassed
+  `LLMResult` and emitted `DeprecationWarning`.
+
+### Documentation
+
+- Docstrings added to `ToolAgent.register()`, `ToolAgent.batch_register()`,
+  `ReActAgent._initialize_run_state`, `ToolAgent.blackboard`,
+  `ToolAgent.peek_at_cache`, and all six toolbox query/mutator methods
+  (`list_tools`, `has_tool`, `get_tool`, `remove_tool`, `clear_tools`,
+  `clear_memory`).
+- `LLMEngine._on_detach` abstract-method docstring corrected — removed
+  `# Intentionally a no-op by default` comment that contradicted
+  `@abstractmethod + raise NotImplementedError`.
+- `StructuredInvokable.map_single_fields` property docstring corrected —
+  semantics were inverted (True/False meanings were swapped).
+- Stale, misleading, and duplicate docstring content cleaned up across
+  `engines/LLMEngines.py`, `agents/base.py`, `agents/tools.py`,
+  `exceptions/core.py`, and `core/Invokable.py`.
+
 ## [2.0.0a11] - 2026-06-25
 
 ### Changed

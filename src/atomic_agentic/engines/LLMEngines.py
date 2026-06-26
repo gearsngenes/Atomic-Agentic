@@ -16,7 +16,6 @@ from typing import (
     Optional,
     Union,
 )
-import warnings
 
 # ~~~Provider SDK Imports~~~
 # OpenAI
@@ -88,13 +87,6 @@ class LLMEngine(AtomicInvokable, ABC):
     The declared invokable schema exposes one input parameter named
     ``messages``. The value must be a non-empty list of chat-message mappings
     containing string ``role`` and ``content`` fields.
-
-    Deprecated compatibility
-    ------------------------
-    ``invoke_messages(messages) -> str`` is retained as a deprecated text-only
-    compatibility wrapper. Prefer:
-
-        invoke({"messages": messages}).result
 
     Engine lifecycle
     ----------------
@@ -205,7 +197,8 @@ class LLMEngine(AtomicInvokable, ABC):
 
     @property
     def timeout_seconds(self) -> float:
-        """Per-call timeout baked into the provider SDK client at construction."""
+        """Suggested per-call timeout; subclasses honor this where their
+        provider SDK allows it to be configured."""
         return self._timeout_seconds
 
     # ------------------------------------------------------------------ #
@@ -266,39 +259,6 @@ class LLMEngine(AtomicInvokable, ABC):
         """Detach all currently attached paths."""
         for path in list(self._attachments.keys()):
             self.detach(path)
-
-    def invoke_messages(self, messages: List[Dict[str, str]]) -> str:
-        """
-        Deprecated text-only compatibility wrapper.
-
-        Prefer ``invoke({"messages": messages}).result`` so callers use the
-        canonical ``LLMResult`` envelope path.
-        """
-        warnings.warn(
-            (
-                "LLMEngine.invoke_messages(...) is deprecated and will be removed "
-                "in a future release. Use "
-                "LLMEngine.invoke({'messages': messages}).result instead."
-            ),
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        try:
-            response = self._call_model(messages)
-            text = self._extract_text(response)
-
-            if not isinstance(text, str):
-                raise LLMEngineError(
-                    f"{type(self).__name__}._extract_text must return str; "
-                    f"got {type(text)!r}"
-                )
-
-            return text.strip()
-        except LLMEngineError:
-            raise
-        except Exception as exc:
-            raise LLMEngineError(f"{self.name}.invoke_messages failed") from exc
 
     def invoke(self, inputs: Mapping[str, Any]) -> LLMResult:
         """
@@ -598,11 +558,11 @@ class LLMEngine(AtomicInvokable, ABC):
     @abstractmethod
     def _on_detach(self, meta: Mapping[str, Any]) -> None:
         """
-        Optional hook called when an attachment is detached.
+        Hook called when an attachment is detached.
 
-        Subclasses implement provider-specific cleanup (e.g. remote delete).
+        Subclasses must implement provider-specific cleanup (e.g. remote file
+        deletion). Errors should be swallowed — detach is best-effort.
         """
-        # Intentionally a no-op by default.
         raise NotImplementedError
 
 
@@ -886,9 +846,14 @@ class OpenAIEngine(LLMEngine):
         - input_tokens: prompt/input-side tokens
         - output_tokens: generated-side tokens
         - total_tokens: total input + generated tokens
-        - input_tokens_details.cached_tokens: cached input-token subset
+        - input_tokens_details.cached_tokens: cached input-token subset (optional)
         - output_tokens_details.reasoning_tokens: hidden reasoning-token subset
-          counted inside output_tokens
+          counted inside output_tokens (optional)
+
+        Both ``output_tokens_details`` and ``input_tokens_details`` are optional and
+        may be absent (``None``) from the response.  When absent, ``reasoning_tokens``
+        defaults to ``0`` (no reasoning occurred) and ``cached_tokens`` defaults to
+        ``None`` (not reported).
 
         ``response_tokens`` is derived as ``output_tokens - reasoning_tokens``.
         """
@@ -896,7 +861,9 @@ class OpenAIEngine(LLMEngine):
         if usage is None:
             raise LLMEngineError("OpenAI response did not include usage.")
 
-        reasoning_tokens = usage.output_tokens_details.reasoning_tokens
+        output_details = usage.output_tokens_details
+        reasoning_tokens = output_details.reasoning_tokens if output_details is not None else 0
+
         response_tokens = usage.output_tokens - reasoning_tokens
         if response_tokens < 0:
             raise LLMEngineError(
@@ -904,12 +871,15 @@ class OpenAIEngine(LLMEngine):
                 "after subtracting reasoning_tokens from output_tokens."
             )
 
+        input_details = usage.input_tokens_details
+        cached_tokens = input_details.cached_tokens if input_details is not None else None
+
         return OpenAITokenUsage(
             input_tokens=usage.input_tokens,
             generated_tokens=usage.output_tokens,
             total_tokens=usage.total_tokens,
             response_tokens=response_tokens,
-            cached_tokens=usage.input_tokens_details.cached_tokens,
+            cached_tokens=cached_tokens,
             reasoning_tokens=reasoning_tokens,
         )
 
@@ -1470,10 +1440,11 @@ class GeminiEngine(LLMEngine):
         self, messages: List[Dict[str, str]]
     ) -> List[str]:
         """
-        Return a list of non-system message contents, preserving order.
+        Return a list of non-system message content strings, preserving order.
 
-        For Gemini's flat `contents` call style we just send plain strings
-        rather than structured chat roles.
+        For Gemini's flat ``contents`` call style only the content string is
+        kept; the ``role`` key (user vs. assistant) is discarded and not
+        represented in the output.
         """
         out: List[str] = []
         for m in messages:
@@ -1566,36 +1537,22 @@ class MistralEngine(LLMEngine):
         retry_backoff_max: float = 8.0,
     ) -> None:
         """
-        Mistral adapter using the chat completion API.
-
-        Flow per call
-        -------------
-        1) Attachments are prepared via ``attach(path)``:
-        - PDFs/images upload through the Mistral Files API, are signed, and are
-            attached to the last user message as URL parts.
-        - Text/code files are read and inlined into the last user message.
-
-        2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
-        lifecycle:
-        - normalize chat messages;
-        - snapshot current attachments;
-        - build the Mistral provider payload;
-        - call ``client.chat.complete(...)``;
-        - extract assistant text, token usage, and configured model data;
-        - return ``LLMResult``.
-
-        3) ``detach(path)`` triggers best-effort deletion of uploaded files via
-        ``_on_detach``, which calls ``client.files.delete(file_id=...)``.
-
-        Token usage
-        -----------
-        ``_extract_token_usage`` maps ``response.usage`` into
-        ``MistralTokenUsage`` using prompt, completion, total, and optional cached
-        prompt-token details.
-
-        Model data
+        Parameters
         ----------
-        ``_get_model_data`` returns configured model identity from ``self.model``.
+        model : str
+            Mistral model identifier (e.g. ``"mistral-medium-latest"``).
+        api_key : str | None
+            Optional API key; if omitted, ``MISTRAL_API_KEY`` from the
+            environment is used.
+        temperature : float
+            Sampling temperature for text generation.
+        inline_cutoff_chars : int
+            Maximum number of characters to inline from text/code attachments.
+        extra_illegal_exts : set[str] | None
+            Optional set of additional extensions to reject at ``attach`` time.
+        name, namespace, description, filter_extraneous_inputs, timeout_seconds,
+        max_retries, retry_backoff_base, retry_backoff_max :
+            Template-method engine configuration (see ``LLMEngine``).
         """
         if Mistral is None:
             raise RuntimeError(
@@ -2439,23 +2396,3 @@ class LlamaCppEngine(LLMEngine):
             "stop": self.stop,
         })
         return base
-
-# ── PLACEHOLDERS (keep the same abstract contract) ─────────────────────────────
-class AzureOpenAIEngine(LLMEngine):
-    """
-    Placeholder for an Azure OpenAI adapter.
-
-    This class documents the intended constructor/contract but provides **no**
-    implementation: `upload`, `delete`, and `invoke` are intentionally unimplemented.
-    """
-    pass
-
-
-class BedrockEngine(LLMEngine):
-    """
-    Placeholder for an AWS Bedrock adapter.
-
-    This class documents the intended constructor/contract but provides **no**
-    implementation: `upload`, `delete`, and `invoke` are intentionally unimplemented.
-    """
-    pass

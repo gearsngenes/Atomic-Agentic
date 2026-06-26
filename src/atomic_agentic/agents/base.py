@@ -979,6 +979,12 @@ class Agent(AtomicInvokable):
 
         Subclasses can override this method to preserve richer canonical turn
         records while controlling their provider-facing representation.
+
+        Notes
+        -----
+        When ``assistant_response_source="final"``, ``turn.final_result`` must
+        not be ``None``. Passing a draft record (where ``final_result`` is
+        ``None``) will raise ``AttributeError``.
         """
         if not isinstance(turn, AgentRecord):
             raise AgentInvocationError(
@@ -1084,7 +1090,7 @@ class Agent(AtomicInvokable):
 
         # Capture the full LLM envelope so the eventual AgentResult can report
         # model identity and per-generation records without re-deriving them later.
-        llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
+        llm_record = LLMRecord(messages=(messages[-1],), llm_result=engine_result)
         draft = AgentRecord(
             user_prompt=prompt,
             generated_response=text,
@@ -1133,7 +1139,7 @@ class Agent(AtomicInvokable):
 
         # 3) Capture the full LLM envelope so the eventual AgentResult can report
         #    model identity and per-generation records without re-deriving them later.
-        llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
+        llm_record = LLMRecord(messages=(messages[-1],), llm_result=engine_result)
 
         # 4) Return the draft AgentRecord (final_result=None until make_result runs)
         #    alongside the metadata dict that invoke passes to make_result.
@@ -1160,8 +1166,6 @@ class Agent(AtomicInvokable):
         ``result`` is the caller-facing post-processed payload. LLM accounting
         and model context gathered during the invocation are passed via
         ``result_kwargs`` from the metadata dict returned by ``_invoke``.
-        UUID minting is handled by ``AtomicResult.__post_init__`` automatically
-        when ``run_id`` is not provided.
         """
         unexpected = set(result_kwargs) - {"llm_records", "llm_model_data"}
         if unexpected:
@@ -1186,13 +1190,7 @@ class Agent(AtomicInvokable):
                 "Agent.make_result: llm_model_data must be an LLMModelData instance."
             )
 
-        # Derive per-call token usage from the validated records.
-        # Entries where token_usage is None (provider did not report) are omitted.
-        llm_token_usage = tuple(
-            r.llm_result.token_usage
-            for r in llm_records
-            if r.llm_result.token_usage is not None
-        )
+        llm_token_usage = tuple(r.llm_result.token_usage for r in llm_records)
 
         return self._make_result(
             result=result,

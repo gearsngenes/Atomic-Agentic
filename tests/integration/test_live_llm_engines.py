@@ -131,18 +131,6 @@ def test_live_llm_engine_returns_non_empty_text(
 
 
 @pytest.mark.parametrize("provider,build_engine", ENGINE_BUILDERS)
-def test_live_llm_engine_invoke_messages_returns_non_empty_text(
-    provider: str,
-    build_engine: Callable[[], LLMEngine],
-) -> None:
-    engine = build_engine()
-
-    result = engine.invoke_messages(_messages())
-
-    _assert_live_text_response(result)
-
-
-@pytest.mark.parametrize("provider,build_engine", ENGINE_BUILDERS)
 def test_live_llm_engine_rejects_invalid_messages_before_provider_call(
     provider: str,
     build_engine: Callable[[], LLMEngine],
