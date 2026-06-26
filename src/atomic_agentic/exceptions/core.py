@@ -11,7 +11,8 @@ class ToolDefinitionError(ToolError):
 
 
 class ToolInvocationError(ToolError):
-    """Raised when inputs are invalid for invocation or binding fails."""
+    """Raised when tool invocation fails, including input binding failures and
+    execution-time exceptions thrown by the underlying callable."""
 
 
 class AgentError(RuntimeError):
@@ -47,7 +48,7 @@ class PackagingError(ValidationError):
 
 
 class ExecutionError(WorkflowError, RuntimeError):
-    """Raised when a workflow fails to execute in runtime"""
+    """Raised when a workflow fails to execute at runtime."""
 
 
 class RemoteInvocationError(Exception):

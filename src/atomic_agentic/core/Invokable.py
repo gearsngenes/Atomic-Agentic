@@ -163,7 +163,6 @@ class AtomicInvokable(ABC):
         self._parameters: list[ParamSpec] = parameters
         self._return_type: str = return_type
         self.filter_extraneous_inputs = filter_extraneous_inputs
-        # invoke lock
         self._invoke_lock = threading.RLock()
         # unique identifier for this invokable instance
         self._instance_id = str(uuid4())
@@ -497,11 +496,10 @@ class AtomicInvokable(ABC):
     @staticmethod
     def _unwrap_result_payload(value: Any) -> Any:
         """
-        Return the caller-facing payload from an AtomicResult-family value.
+        Return the caller-facing payload from an ``AtomicResult``-family value.
 
-        During staged result integration, some child invokables may already
-        return AtomicResult-family objects while others still return raw payloads.
-        This helper gives migrated callers one narrow compatibility rule.
+        If ``value`` is an ``AtomicResult`` instance, returns ``value.result``.
+        Non-result values are returned unchanged.
         """
         if isinstance(value, AtomicResult):
             return value.result
@@ -1106,7 +1104,14 @@ class StructuredInvokable(AtomicInvokable):
 
     @property
     def map_single_fields(self) -> bool:
-        """Whether single fields may map collection-shaped raw outputs."""
+        """Single-field packaging mode.
+
+        When ``True`` (default), a single-field output schema traverses
+        collection-shaped raw outputs normally, extracting the matching key or
+        index. When ``False``, the raw value is assigned wholesale to the
+        single named field without any traversal or mapping — useful when the
+        caller wants the whole raw object delivered under one name.
+        """
         return self._map_single_fields
 
     @map_single_fields.setter
@@ -1424,12 +1429,9 @@ class StructuredInvokable(AtomicInvokable):
         )
 
         # -------------------------------------------------------------------
-        # Step 3.5: Special passthrough mode for mapping sources with a passthrough schema.
-        #
-        # Special passthrough mode for mapping sources with a passthrough schema.
-        # In this mode, the raw mapping is returned as-is with no packaging or
-        # missing-value handling applied. This is an escape hatch for maximum flexibility
-        # when the source is already a mapping and the schema is just a generic passthrough.
+        # Step 3a: Passthrough schema — return mapping as-is with no packaging
+        # or absent-value handling. Escape hatch for callers whose source is
+        # already a correctly-shaped mapping.
         # -------------------------------------------------------------------
         if is_mapping_source and self.output_schema == self.PASSTHROUGH:
             packaged = {}

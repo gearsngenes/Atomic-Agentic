@@ -15,6 +15,13 @@ __all__ = ["identity_pre_tool", "identity_post_tool", "return_tool"]
 
 
 def identity_pre(*, prompt: str) -> str:
+    """
+    Default pre-invoke identity function.
+
+    Requires exactly ``{"prompt": str}`` and returns the prompt string
+    unchanged. Wrapped as a Tool and used when no explicit ``pre_invoke``
+    Tool is provided to ``Agent``.
+    """
     if not isinstance(prompt, str):
         raise ValueError("prompt must be a string")
     return prompt

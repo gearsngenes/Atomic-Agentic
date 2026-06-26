@@ -197,7 +197,8 @@ class LLMEngine(AtomicInvokable, ABC):
 
     @property
     def timeout_seconds(self) -> float:
-        """Per-call timeout baked into the provider SDK client at construction."""
+        """Suggested per-call timeout; subclasses honor this where their
+        provider SDK allows it to be configured."""
         return self._timeout_seconds
 
     # ------------------------------------------------------------------ #
@@ -557,11 +558,11 @@ class LLMEngine(AtomicInvokable, ABC):
     @abstractmethod
     def _on_detach(self, meta: Mapping[str, Any]) -> None:
         """
-        Optional hook called when an attachment is detached.
+        Hook called when an attachment is detached.
 
-        Subclasses implement provider-specific cleanup (e.g. remote delete).
+        Subclasses must implement provider-specific cleanup (e.g. remote file
+        deletion). Errors should be swallowed — detach is best-effort.
         """
-        # Intentionally a no-op by default.
         raise NotImplementedError
 
 
@@ -1439,10 +1440,11 @@ class GeminiEngine(LLMEngine):
         self, messages: List[Dict[str, str]]
     ) -> List[str]:
         """
-        Return a list of non-system message contents, preserving order.
+        Return a list of non-system message content strings, preserving order.
 
-        For Gemini's flat `contents` call style we just send plain strings
-        rather than structured chat roles.
+        For Gemini's flat ``contents`` call style only the content string is
+        kept; the ``role`` key (user vs. assistant) is discarded and not
+        represented in the output.
         """
         out: List[str] = []
         for m in messages:
@@ -1535,36 +1537,22 @@ class MistralEngine(LLMEngine):
         retry_backoff_max: float = 8.0,
     ) -> None:
         """
-        Mistral adapter using the chat completion API.
-
-        Flow per call
-        -------------
-        1) Attachments are prepared via ``attach(path)``:
-        - PDFs/images upload through the Mistral Files API, are signed, and are
-            attached to the last user message as URL parts.
-        - Text/code files are read and inlined into the last user message.
-
-        2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
-        lifecycle:
-        - normalize chat messages;
-        - snapshot current attachments;
-        - build the Mistral provider payload;
-        - call ``client.chat.complete(...)``;
-        - extract assistant text, token usage, and configured model data;
-        - return ``LLMResult``.
-
-        3) ``detach(path)`` triggers best-effort deletion of uploaded files via
-        ``_on_detach``, which calls ``client.files.delete(file_id=...)``.
-
-        Token usage
-        -----------
-        ``_extract_token_usage`` maps ``response.usage`` into
-        ``MistralTokenUsage`` using prompt, completion, total, and optional cached
-        prompt-token details.
-
-        Model data
+        Parameters
         ----------
-        ``_get_model_data`` returns configured model identity from ``self.model``.
+        model : str
+            Mistral model identifier (e.g. ``"mistral-medium-latest"``).
+        api_key : str | None
+            Optional API key; if omitted, ``MISTRAL_API_KEY`` from the
+            environment is used.
+        temperature : float
+            Sampling temperature for text generation.
+        inline_cutoff_chars : int
+            Maximum number of characters to inline from text/code attachments.
+        extra_illegal_exts : set[str] | None
+            Optional set of additional extensions to reject at ``attach`` time.
+        name, namespace, description, filter_extraneous_inputs, timeout_seconds,
+        max_retries, retry_backoff_base, retry_backoff_max :
+            Template-method engine configuration (see ``LLMEngine``).
         """
         if Mistral is None:
             raise RuntimeError(

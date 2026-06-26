@@ -397,10 +397,14 @@ class ToolAgent(Agent, ABC):
     
     @property
     def blackboard(self) -> list[BlackboardSlot]:
+        """Shallow copy of the persisted blackboard slots. Mutations to the
+        returned list or its slots do not affect internal agent state."""
         return [slot.copy() for slot in self._blackboard]
-    
+
     @property
     def peek_at_cache(self) -> bool:
+        """Whether ``blackboard_serialized(peek=True)`` is used when building
+        LLM context, exposing raw result and resolved-args fields."""
         return self._peek_at_cache
 
     @property
@@ -426,7 +430,8 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     # Memory management
     # ------------------------------------------------------------------ #
-    def clear_memory(self):
+    def clear_memory(self) -> None:
+        """Clear the stored turn history and the persisted blackboard."""
         super().clear_memory()
         self._blackboard.clear()
     # ------------------------------------------------------------------ #
@@ -486,21 +491,39 @@ class ToolAgent(Agent, ABC):
         return "\n".join(f"-- {t}" for t in tools)
 
     def list_tools(self) -> dict[str, Tool]:
+        """Return a shallow copy of the toolbox mapping ``full_name → Tool``."""
         return dict(self._toolbox)
 
     def has_tool(self, tool_full_name: str) -> bool:
+        """Return ``True`` if a tool with the given ``full_name`` is registered."""
         return tool_full_name in self._toolbox
 
     def get_tool(self, tool_full_name: str) -> Tool:
+        """Return the registered ``Tool`` with the given ``full_name``.
+
+        Raises
+        ------
+        ToolAgentError
+            If no tool with ``tool_full_name`` is registered.
+        """
         tool = self._toolbox.get(tool_full_name)
         if tool is None:
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown tool {tool_full_name!r}.")
         return tool
 
     def remove_tool(self, tool_full_name: str) -> bool:
+        """Remove the tool with the given ``full_name`` from the toolbox.
+
+        Returns
+        -------
+        bool
+            ``True`` if the tool was present and removed; ``False`` if it was
+            not registered.
+        """
         return self._toolbox.pop(tool_full_name, None) is not None
 
     def clear_tools(self) -> None:
+        """Remove all registered tools from the toolbox."""
         self._toolbox.clear()
 
     # ------------------------------------------------------------------ #
@@ -733,6 +756,53 @@ class ToolAgent(Agent, ABC):
         filter_extraneous_inputs: Optional[bool] = None,
         name_collision_mode: str = "raise",  # raise|skip|replace
     ) -> str:
+        """
+        Register one tool on this ToolAgent.
+
+        The component is normalized through ``toolify(...)`` before registration.
+        The resolved ``tool.full_name`` is used as the registry key.
+
+        Parameters
+        ----------
+        component : AtomicInvokable | Callable | MCPClientHub | PyA2AtomicClient
+            The item to register. Plain callables and ``AtomicInvokable``
+            instances are wrapped via ``toolify``; ``MCPClientHub`` and
+            ``PyA2AtomicClient`` instances enumerate and register all their
+            remote tools.
+        name : str | None
+            Override the tool name. If ``None``, inferred from the component.
+        description : str | None
+            Override the tool description. If ``None``, inferred from the
+            component.
+        namespace : str | None
+            Override the tool namespace. If ``None``, inferred from the
+            component.
+        remote_name : str | None
+            For ``MCPClientHub`` / ``PyA2AtomicClient`` components only:
+            register only the remote tool with this exact name instead of all
+            tools exposed by the client.
+        filter_extraneous_inputs : bool | None
+            Override the toolified tool's ``filter_extraneous_inputs`` flag.
+            ``None`` inherits from the component or ``toolify`` default.
+        name_collision_mode : str
+            Controls behavior when the resolved ``full_name`` is already
+            registered. One of:
+
+            - ``"raise"`` (default) — raise ``ToolRegistrationError``.
+            - ``"skip"`` — return the existing key without updating.
+            - ``"replace"`` — overwrite the existing registration.
+
+        Returns
+        -------
+        str
+            The registered tool's ``full_name`` (``"Type.namespace.name"``).
+
+        Raises
+        ------
+        ToolRegistrationError
+            If ``name_collision_mode`` is invalid, ``toolify`` fails, or a
+            collision is detected under ``"raise"`` mode.
+        """
         # Validate collision policy
         if name_collision_mode not in ("raise", "skip", "replace"):
             raise ToolRegistrationError(
@@ -777,6 +847,46 @@ class ToolAgent(Agent, ABC):
         batch_filter_inputs: Optional[bool] = None,
         batch_namespace: Optional[str] = None,
     ) -> list[str]:
+        """
+        Register a batch of tools on this ToolAgent.
+
+        All sources are normalized through ``batch_toolify(...)`` first.
+        Validation runs over the whole batch before any registration mutation
+        occurs: if any source fails toolification, no tools are registered.
+        Collision handling runs per-tool during the registration phase.
+
+        Parameters
+        ----------
+        sources : list
+            Non-empty list of items to register. Each entry may be a plain
+            callable, an ``AtomicInvokable``, an ``MCPClientHub``, or a
+            ``PyA2AtomicClient``.
+        name_collision_mode : str
+            Per-tool collision policy. One of ``"raise"``, ``"skip"``, or
+            ``"replace"`` — same semantics as ``register()``.
+        batch_filter_inputs : bool | None
+            Applied uniformly to all toolified tools in this batch. ``None``
+            inherits each tool's own default.
+        batch_namespace : str | None
+            Applied uniformly as the namespace for all toolified tools.
+            ``None`` infers namespace from each component individually.
+
+        Returns
+        -------
+        list[str]
+            The ``full_name`` of every tool that was newly registered (skipped
+            tools under ``"skip"`` mode are excluded).
+
+        Raises
+        ------
+        ValueError
+            If ``sources`` is empty.
+        ToolDefinitionError
+            If any source fails toolification (before any registration occurs).
+        ToolRegistrationError
+            If ``name_collision_mode`` is invalid or a collision is detected
+            under ``"raise"`` mode.
+        """
         if name_collision_mode not in ("raise", "skip", "replace"):
             raise ToolRegistrationError(
                 "name_collision_mode must be one of: 'raise', 'skip', 'replace'."
@@ -1197,7 +1307,7 @@ class ToolAgent(Agent, ABC):
             state.executed_steps.add(idx)
 
         state.tool_calls_used += non_return_planned
-        state.prepared_steps.clear()
+        state.prepared_steps = []
 
         if return_indices:
             ret_idx = return_indices[0]
@@ -3410,11 +3520,39 @@ class ReActAgent(ToolAgent):
     # Tool-Agent Hooks
     # ------------------------------------------------------------------ #
     def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> ReActRunState:
+        """
+        Initialize run state for a single ReAct invocation.
+
+        Satisfies the ``ToolAgent._initialize_run_state`` abstract hook. Unlike
+        ``PlanActAgent``, ReAct performs no LLM call at initialization — the
+        running blackboard is pre-allocated and step planning is deferred to
+        ``_prepare_next_batch`` / ``_aprepare_next_batch``.
+
+        Steps
+        -----
+        1. Validate ``messages`` is non-empty.
+        2. Snapshot the persisted blackboard as ``cache_blackboard`` (empty list
+           when ``context_enabled=False``).
+        3. Copy ``messages`` into a mutable working list.
+        4. Pre-allocate a fixed-size ``running_blackboard`` of
+           ``tool_calls_limit + 1`` slots — one slot per allowed non-return
+           call plus one slot for the mandatory return call.
+        5. Initialize ``step_meta`` as a list of ``ReActStepMeta()`` instances
+           of the same length as ``running_blackboard``.
+        6. Construct and return ``ReActRunState`` with empty ``llm_records``
+           (records are appended by each ``_prepare_next_batch`` call).
+
+        Returns
+        -------
+        ReActRunState
+
+        Raises
+        ------
+        ToolAgentError
+            If ``messages`` is empty.
+        """
         if not messages:
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
-
-        if self._tool_calls_limit is None or type(self._tool_calls_limit) is not int or self._tool_calls_limit < 0:
-            raise ToolAgentError("ReActAgent requires tool_calls_limit to be an int >= 0.")
 
         cache_blackboard = self.blackboard if self.context_enabled else []
         for i, slot in enumerate(cache_blackboard):
@@ -3529,11 +3667,6 @@ class ReActAgent(ToolAgent):
                 f"got {expected_step!r}."
             )
 
-        if self._tool_calls_limit is None or type(self._tool_calls_limit) is not int or self._tool_calls_limit < 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: ReActAgent requires tool_calls_limit to be an int >= 0."
-            )
-
         max_duration = max(0, self._tool_calls_limit - expected_step)
         engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
         return self._process_next_step_output(
@@ -3567,11 +3700,6 @@ class ReActAgent(ToolAgent):
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: expected_step must be an int >= 0; "
                 f"got {expected_step!r}."
-            )
-
-        if self._tool_calls_limit is None or type(self._tool_calls_limit) is not int or self._tool_calls_limit < 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: ReActAgent requires tool_calls_limit to be an int >= 0."
             )
 
         max_duration = max(0, self._tool_calls_limit - expected_step)
