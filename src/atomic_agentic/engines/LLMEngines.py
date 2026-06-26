@@ -16,7 +16,6 @@ from typing import (
     Optional,
     Union,
 )
-import warnings
 
 # ~~~Provider SDK Imports~~~
 # OpenAI
@@ -88,13 +87,6 @@ class LLMEngine(AtomicInvokable, ABC):
     The declared invokable schema exposes one input parameter named
     ``messages``. The value must be a non-empty list of chat-message mappings
     containing string ``role`` and ``content`` fields.
-
-    Deprecated compatibility
-    ------------------------
-    ``invoke_messages(messages) -> str`` is retained as a deprecated text-only
-    compatibility wrapper. Prefer:
-
-        invoke({"messages": messages}).result
 
     Engine lifecycle
     ----------------
@@ -266,39 +258,6 @@ class LLMEngine(AtomicInvokable, ABC):
         """Detach all currently attached paths."""
         for path in list(self._attachments.keys()):
             self.detach(path)
-
-    def invoke_messages(self, messages: List[Dict[str, str]]) -> str:
-        """
-        Deprecated text-only compatibility wrapper.
-
-        Prefer ``invoke({"messages": messages}).result`` so callers use the
-        canonical ``LLMResult`` envelope path.
-        """
-        warnings.warn(
-            (
-                "LLMEngine.invoke_messages(...) is deprecated and will be removed "
-                "in a future release. Use "
-                "LLMEngine.invoke({'messages': messages}).result instead."
-            ),
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        try:
-            response = self._call_model(messages)
-            text = self._extract_text(response)
-
-            if not isinstance(text, str):
-                raise LLMEngineError(
-                    f"{type(self).__name__}._extract_text must return str; "
-                    f"got {type(text)!r}"
-                )
-
-            return text.strip()
-        except LLMEngineError:
-            raise
-        except Exception as exc:
-            raise LLMEngineError(f"{self.name}.invoke_messages failed") from exc
 
     def invoke(self, inputs: Mapping[str, Any]) -> LLMResult:
         """

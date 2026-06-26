@@ -162,17 +162,17 @@ class TestLLMEngineMessagesAndInvoke:
         with pytest.raises(LLMEngineError, match="messages"):
             engine.invoke({"messages": "hello"})
 
-    def test_invoke_messages_rejects_empty_messages(self) -> None:
+    def test_invoke_rejects_empty_messages_list(self) -> None:
         engine = FakeLLMEngine()
 
         with pytest.raises(LLMEngineError, match="must not be empty"):
-            engine.invoke_messages([])
+            engine.invoke({"messages": []})
 
     def test_normalize_messages_rejects_non_mapping_message(self) -> None:
         engine = FakeLLMEngine()
 
         with pytest.raises(LLMEngineError, match="not a mapping"):
-            engine.invoke_messages(["bad"])  # type: ignore[list-item]
+            engine.invoke({"messages": ["bad"]})  # type: ignore[list-item]
 
     @pytest.mark.parametrize(
         "message",
@@ -190,19 +190,19 @@ class TestLLMEngineMessagesAndInvoke:
         engine = FakeLLMEngine()
 
         with pytest.raises(LLMEngineError, match="role.*content"):
-            engine.invoke_messages([message])  # type: ignore[list-item]
+            engine.invoke({"messages": [message]})  # type: ignore[list-item]
 
     def test_extract_text_must_return_string(self) -> None:
         engine = FakeLLMEngine(provider_results=[{"text": 123}])
 
         with pytest.raises(LLMEngineError, match="must return str"):
-            engine.invoke_messages([{"role": "user", "content": "Hello"}])
+            engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
-    def test_unexpected_provider_error_is_wrapped_by_invoke_messages(self) -> None:
+    def test_unexpected_provider_error_is_wrapped_by_invoke(self) -> None:
         engine = FakeLLMEngine(provider_results=[ValueError("provider failed")])
 
-        with pytest.raises(LLMEngineError, match="invoke_messages failed"):
-            engine.invoke_messages([{"role": "user", "content": "Hello"}])
+        with pytest.raises(LLMEngineError, match="invoke failed"):
+            engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
 
 class TestLLMEngineRetries:
@@ -218,9 +218,9 @@ class TestLLMEngineRetries:
             ],
         )
 
-        result = engine.invoke_messages([{"role": "user", "content": "Hello"}])
+        result = engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
-        assert result == "recovered"
+        assert result.result == "recovered"
         assert engine.call_count == 2
 
     def test_connection_error_retries_then_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,9 +235,9 @@ class TestLLMEngineRetries:
             ],
         )
 
-        result = engine.invoke_messages([{"role": "user", "content": "Hello"}])
+        result = engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
-        assert result == "recovered"
+        assert result.result == "recovered"
         assert engine.call_count == 2
 
     def test_llm_engine_error_does_not_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,7 +249,7 @@ class TestLLMEngineRetries:
         )
 
         with pytest.raises(LLMEngineError, match="normalized"):
-            engine.invoke_messages([{"role": "user", "content": "Hello"}])
+            engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
         assert engine.call_count == 1
 
@@ -261,8 +261,8 @@ class TestLLMEngineRetries:
             provider_results=[ValueError("bad request")],
         )
 
-        with pytest.raises(LLMEngineError, match="invoke_messages failed"):
-            engine.invoke_messages([{"role": "user", "content": "Hello"}])
+        with pytest.raises(LLMEngineError, match="invoke failed"):
+            engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
         assert engine.call_count == 1
 
