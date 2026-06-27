@@ -5,6 +5,45 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a13] - 2026-06-27
+
+### Added
+
+- `ToolAgent` now accepts any `AtomicInvokable` (Tool, Agent, Workflow, remote
+  proxy) directly in `register()` — stored under its own `full_name` with no
+  wrapping or mutation. Registering an `AtomicInvokable` with `name` or
+  `description` overrides raises `ToolRegistrationError`.
+- `batch_register()` redesigned: accepts a `tools` list of
+  `AtomicInvokable | Callable`, a remote `client`, or both in one call; new
+  `remote_names` whitelist param for selective client registration; intra-batch
+  duplicate `full_name` detection always raises regardless of
+  `name_collision_mode`.
+
+### Changed
+
+- `ToolAgent._toolbox` widened from `dict[str, Tool]` to
+  `dict[str, AtomicInvokable]`; `list_tools()` and `get_tool()` return types
+  updated accordingly.
+- `register()` simplified: `namespace`, `filter_extraneous_inputs`, and
+  `remote_name` params removed; `MCPClientHub` / `PyA2AtomicClient` input
+  routes removed (use `batch_register(client=...)` instead); callable route
+  uses `self.name` as the tool namespace.
+- `batch_register()` old `(sources: List[...], batch_namespace)` signature
+  replaced by `(tools, client, *, remote_names, name_collision_mode,
+  batch_filter_inputs)`.
+
+### Removed
+
+- `batch_toolify` removed from `tool_agents.py` internal imports.
+
+### Documentation
+
+- `StructuredInvokable` class docstring expanded to a narrative covering the
+  absent-value mode contract (RAISE / DROP / FILL); `__init__` docstring
+  expanded with full 13-param Parameters section.
+- `ToolAgent.__init__` docstring added; documents all 16 constructor
+  parameters.
+
 ## [2.0.0a12] - 2026-06-26
 
 ### Fixed

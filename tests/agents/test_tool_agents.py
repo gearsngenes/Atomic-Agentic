@@ -29,6 +29,7 @@ from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from atomic_agentic.tools import Tool
+from atomic_agentic.core.Invokable import AtomicInvokable
 
 
 ROLE_TEMPLATE = "Tools:\n{TOOLS}\nLimit: {TOOL_CALLS_LIMIT}\nConstants:\n{CONSTANTS}"
@@ -135,7 +136,7 @@ def make_planact_agent(
     passthrough_inputs: list[str] | None = None,
 ) -> PlanActAgent:
     agent = PlanActAgent(
-        name="planact_agent",
+        name="tests",
         namespace="tests",
         description="PlanAct agent under test.",
         llm_engine=ScriptedLLMEngine(responses),
@@ -165,7 +166,7 @@ def make_react_agent(
     passthrough_inputs: list[str] | None = None,
 ) -> ReActAgent:
     agent = ReActAgent(
-        name="react_agent",
+        name="tests",
         namespace="tests",
         description="ReAct agent under test.",
         llm_engine=ScriptedLLMEngine(responses),
@@ -279,7 +280,7 @@ class ScriptedToolAgent(ToolAgent):
         passthrough_inputs: list[str] | None = None,
     ) -> None:
         super().__init__(
-            name="scripted_agent",
+            name="tests",
             namespace="tests",
             description="Scripted ToolAgent for unit tests.",
             llm_engine=EchoLLMEngine(),
@@ -402,10 +403,10 @@ def make_agent(
 
 def register_math_tools(agent: ScriptedToolAgent) -> dict[str, str]:
     return {
-        "add": agent.register(add, namespace="tests"),
-        "multiply": agent.register(multiply, namespace="tests"),
-        "join_text": agent.register(join_text, namespace="tests"),
-        "fail_tool": agent.register(fail_tool, namespace="tests"),
+        "add": agent.register(add),
+        "multiply": agent.register(multiply),
+        "join_text": agent.register(join_text),
+        "fail_tool": agent.register(fail_tool),
     }
 
 
@@ -647,7 +648,7 @@ class TestToolRegistration:
     def test_register_callable_adds_tool(self) -> None:
         agent = make_agent()
 
-        key = agent.register(add, namespace="tests")
+        key = agent.register(add)
 
         assert key == "Tool.tests.add"
         assert agent.has_tool(key)
@@ -669,28 +670,23 @@ class TestToolRegistration:
 
     def test_register_duplicate_raises_by_default(self) -> None:
         agent = make_agent()
-        agent.register(add, namespace="tests")
+        agent.register(add)
 
         with pytest.raises(ToolRegistrationError, match="already registered"):
-            agent.register(add, namespace="tests")
+            agent.register(add)
 
     def test_register_duplicate_skip_returns_existing_key(self) -> None:
         agent = make_agent()
-        first = agent.register(add, namespace="tests")
-        second = agent.register(add, namespace="tests", name_collision_mode="skip")
+        first = agent.register(add)
+        second = agent.register(add, name_collision_mode="skip")
 
         assert second == first
         assert agent.get_tool(first).function is add
 
     def test_register_duplicate_replace_replaces_tool(self) -> None:
         agent = make_agent()
-        first = agent.register(add, name="calc", namespace="tests")
-        second = agent.register(
-            multiply,
-            name="calc",
-            namespace="tests",
-            name_collision_mode="replace",
-        )
+        first = agent.register(add, name="calc")
+        second = agent.register(multiply, name="calc", name_collision_mode="replace")
 
         assert second == first
         assert agent.get_tool(first).invoke({"x": 3, "y": 4}).result == 12
@@ -699,7 +695,7 @@ class TestToolRegistration:
         agent = make_agent()
 
         with pytest.raises(ToolRegistrationError, match="name_collision_mode"):
-            agent.register(add, namespace="tests", name_collision_mode="bad")
+            agent.register(add, name_collision_mode="bad")
 
     def test_get_tool_unknown_raises(self) -> None:
         agent = make_agent()
@@ -709,7 +705,7 @@ class TestToolRegistration:
 
     def test_remove_tool_returns_true_then_false(self) -> None:
         agent = make_agent()
-        key = agent.register(add, namespace="tests")
+        key = agent.register(add)
 
         assert agent.remove_tool(key) is True
         assert agent.remove_tool(key) is False
@@ -725,25 +721,128 @@ class TestToolRegistration:
     def test_batch_register_callables(self) -> None:
         agent = make_agent()
 
-        keys = agent.batch_register([add, multiply], batch_namespace="tests")
+        keys = agent.batch_register(tools=[add, multiply])
 
         assert keys == ["Tool.tests.add", "Tool.tests.multiply"]
         assert agent.has_tool("Tool.tests.add")
         assert agent.has_tool("Tool.tests.multiply")
 
-    def test_batch_register_empty_sources_raises(self) -> None:
+    def test_batch_register_empty_tools_no_client_raises(self) -> None:
         agent = make_agent()
 
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(ValueError, match="tools list is empty"):
             agent.batch_register([])
 
     def test_actions_context_lists_registered_tools(self) -> None:
         agent = make_agent()
-        key = agent.register(add, namespace="tests")
+        key = agent.register(add)
 
         context = agent.actions_context()
 
         assert key in context
+
+    def test_register_atomic_invokable_stores_directly(self) -> None:
+        """AtomicInvokable registers without wrapping under its own full_name."""
+        agent = make_agent()
+        tool = Tool(function=add, name="adder", namespace="myns", description="Add.")
+        key = agent.register(tool)
+        assert key == "Tool.myns.adder"
+        assert agent.get_tool(key) is tool
+
+    def test_register_atomic_invokable_name_override_raises(self) -> None:
+        agent = make_agent()
+        tool = Tool(function=add, name="adder", namespace="myns", description="Add.")
+        with pytest.raises(ToolRegistrationError, match="name and description overrides"):
+            agent.register(tool, name="other")
+
+    def test_register_atomic_invokable_description_override_raises(self) -> None:
+        agent = make_agent()
+        tool = Tool(function=add, name="adder", namespace="myns", description="Add.")
+        with pytest.raises(ToolRegistrationError, match="name and description overrides"):
+            agent.register(tool, description="other")
+
+    def test_register_callable_uses_self_name_as_namespace(self) -> None:
+        """Callable registration uses agent.name as the tool namespace."""
+        agent = make_agent()
+        key = agent.register(add)
+        assert key == f"Tool.{agent.name}.add"
+
+    def test_register_unsupported_type_raises(self) -> None:
+        agent = make_agent()
+        with pytest.raises(ToolRegistrationError, match="unsupported component type"):
+            agent.register(42)  # type: ignore[arg-type]
+
+    def test_register_non_invokable_non_callable_raises(self) -> None:
+        agent = make_agent()
+        with pytest.raises(ToolRegistrationError, match="unsupported component type"):
+            agent.register("not_callable")  # type: ignore[arg-type]
+
+    def test_list_tools_return_type_is_atomic_invokable_dict(self) -> None:
+        """list_tools returns dict[str, AtomicInvokable], not dict[str, Tool]."""
+        agent = make_agent()
+        agent.register(add)
+        result = agent.list_tools()
+        assert isinstance(result, dict)
+        for v in result.values():
+            assert isinstance(v, AtomicInvokable)
+
+    def test_get_tool_returns_atomic_invokable(self) -> None:
+        agent = make_agent()
+        key = agent.register(add)
+        result = agent.get_tool(key)
+        assert isinstance(result, AtomicInvokable)
+
+    def test_batch_register_tools_none_client_none_raises(self) -> None:
+        agent = make_agent()
+        with pytest.raises(ValueError, match="at least one of"):
+            agent.batch_register()
+
+    def test_batch_register_tools_empty_no_client_raises(self) -> None:
+        agent = make_agent()
+        with pytest.raises(ValueError):
+            agent.batch_register(tools=[])
+
+    def test_batch_register_remote_names_without_client_raises(self) -> None:
+        agent = make_agent()
+        with pytest.raises(ValueError, match="remote_names requires a client"):
+            agent.batch_register(tools=[add], remote_names=["foo"])
+
+    def test_batch_register_intraset_duplicate_raises(self) -> None:
+        """Duplicate full_name in incoming batch always raises regardless of mode."""
+        agent = make_agent()
+        t1 = Tool(function=add, name="adder", namespace="myns", description="Add.")
+        t2 = Tool(function=multiply, name="adder", namespace="myns", description="Dup.")
+        with pytest.raises(ToolRegistrationError, match="duplicate full_name"):
+            agent.batch_register(tools=[t1, t2])
+
+    def test_batch_register_callable_intraset_duplicate_raises(self) -> None:
+        """Duplicate callable full_name in incoming batch raises."""
+        agent = make_agent()
+        with pytest.raises(ToolRegistrationError, match="duplicate full_name"):
+            agent.batch_register(tools=[add, add])
+
+    def test_batch_register_mixed_invokables_and_callables(self) -> None:
+        """batch_register handles a mixed list of AtomicInvokable and Callable."""
+        agent = make_agent()
+        tool = Tool(function=multiply, name="mult", namespace="myns", description="Mult.")
+        keys = agent.batch_register(tools=[add, tool])
+        assert f"Tool.{agent.name}.add" in keys
+        assert "Tool.myns.mult" in keys
+
+    def test_batch_register_skip_mode_excludes_skipped_from_return(self) -> None:
+        """Skipped tools under skip mode are excluded from the returned list."""
+        agent = make_agent()
+        agent.register(add)
+        keys = agent.batch_register(tools=[add, multiply], name_collision_mode="skip")
+        assert f"Tool.{agent.name}.multiply" in keys
+        assert f"Tool.{agent.name}.add" not in keys
+
+    def test_batch_register_replace_mode_overwrites_existing(self) -> None:
+        """Replace mode overwrites existing toolbox entries."""
+        agent = make_agent()
+        agent.register(add)
+        keys = agent.batch_register(tools=[add], name_collision_mode="replace")
+        assert f"Tool.{agent.name}.add" in keys
 
 
 class TestConstantRegistration:
