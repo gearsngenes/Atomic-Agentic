@@ -24,9 +24,8 @@ planner = PlanActAgent(
     llm_engine=llm_engine,
 )
 
-# Register all tools from MCP server (bulk discover).
-# batch_register with mcp_servers parameter auto-discovers and registers all tools.
-planner.batch_register([MCPClientHub("streamable_http", endpoint="http://localhost:8000/mcp")])
+# Register all tools from MCP server (bulk discover via client= param).
+planner.batch_register(client=MCPClientHub("streamable_http", endpoint="http://localhost:8000/mcp"))
 
 result = planner.invoke(
     {

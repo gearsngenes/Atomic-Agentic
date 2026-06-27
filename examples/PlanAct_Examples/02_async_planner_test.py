@@ -29,7 +29,6 @@ async_tester.register(
     testDelayPrint,
     name="DelayPrint",
     description="delay for 10 seconds.",
-    namespace="local",
 )
 
 if __name__ == "__main__":

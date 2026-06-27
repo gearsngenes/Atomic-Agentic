@@ -150,7 +150,7 @@ from ..constants.core import IDENTIFIER_PATTERN_TEXT
 from ..core.Invokable import AtomicInvokable
 from ..constants.core import NO_VAL
 from ..engines.LLMEngines import LLMEngine
-from ..tools import Tool, toolify, batch_toolify
+from ..tools import Tool, toolify
 from ..mcp import MCPClientHub
 from ..a2a import PyA2AtomicClient
 from ..utils.agents import extract_dependencies
@@ -288,6 +288,60 @@ class ToolAgent(Agent, ABC):
         passthrough_inputs: Optional[list[str]] = None,
         records_window: Optional[int] = None,
     ) -> None:
+        """
+        Parameters
+        ----------
+        name : str
+            Agent identity name. Frozen at construction.
+        namespace : str
+            Agent identity namespace. Frozen at construction.
+        description : str
+            Human-readable description of this agent's purpose.
+        llm_engine : LLMEngine
+            Provider-facing LLM engine used for all generation calls.
+        role_prompt : str
+            Template string for the system/role prompt. Must contain the
+            named placeholders ``{TOOLS}``, ``{TOOL_CALLS_LIMIT}``, and
+            ``{CONSTANTS}``; may include additional simple named placeholders.
+            Validated and frozen at construction.
+        filter_extraneous_inputs : bool | None
+            When ``True``, inputs not declared in ``parameters`` are silently
+            dropped before invocation. When ``False``, extraneous inputs raise.
+            ``None`` inherits the base class default.
+        context_enabled : bool
+            When ``True``, the completed run blackboard is merged into the
+            persisted blackboard after each invoke and the produced span is
+            stored on the ``ToolAgentRecord`` for future context rendering.
+            Defaults to ``False``.
+        tool_calls_limit : int | None
+            Maximum number of non-return action calls per invoke run.
+            ``None`` means unlimited. Must be ``>= 0`` if set.
+        peek_at_cache : bool
+            When ``True``, the persisted blackboard is rendered with raw
+            result and resolved-args fields exposed (via
+            ``blackboard_serialized(peek=True)``). Defaults to ``False``.
+        response_preview_limit : int | None
+            Character limit for assistant response previews in rendered turns.
+            ``None`` means no truncation.
+        blackboard_preview_limit : int | None
+            Character limit for cached blackboard result previews. ``None``
+            means no truncation.
+        pre_invoke : AtomicInvokable | Callable | None
+            Optional hook invoked before the main agent loop. Receives the
+            same inputs as the agent.
+        post_invoke : AtomicInvokable | Callable | None
+            Optional hook invoked after the main agent loop. Receives the
+            agent result.
+        post_result_key : str | None
+            Key under which the agent result is passed to ``post_invoke``
+            when ``post_invoke`` is set.
+        passthrough_inputs : list[str] | None
+            Input keys forwarded verbatim to ``post_invoke`` alongside the
+            agent result.
+        records_window : int | None
+            Maximum number of prior ``AgentRecord`` turns rendered into LLM
+            context. ``None`` means all records are rendered.
+        """
         template = self._validate_role_prompt_template(role_prompt)
 
         super().__init__(
@@ -306,7 +360,7 @@ class ToolAgent(Agent, ABC):
             response_preview_limit=response_preview_limit,
         )
 
-        self._toolbox: dict[str, Tool] = {}
+        self._toolbox: dict[str, AtomicInvokable] = {}
         self._blackboard: list[BlackboardSlot] = []
         self._constants: list[ConstantSpec] = []
 
@@ -490,16 +544,16 @@ class ToolAgent(Agent, ABC):
         tools = list(self._toolbox.values())
         return "\n".join(f"-- {t}" for t in tools)
 
-    def list_tools(self) -> dict[str, Tool]:
-        """Return a shallow copy of the toolbox mapping ``full_name → Tool``."""
+    def list_tools(self) -> dict[str, AtomicInvokable]:
+        """Return a shallow copy of the toolbox mapping ``full_name → AtomicInvokable``."""
         return dict(self._toolbox)
 
     def has_tool(self, tool_full_name: str) -> bool:
         """Return ``True`` if a tool with the given ``full_name`` is registered."""
         return tool_full_name in self._toolbox
 
-    def get_tool(self, tool_full_name: str) -> Tool:
-        """Return the registered ``Tool`` with the given ``full_name``.
+    def get_tool(self, tool_full_name: str) -> AtomicInvokable:
+        """Return the registered invokable with the given ``full_name``.
 
         Raises
         ------
@@ -747,85 +801,86 @@ class ToolAgent(Agent, ABC):
 
     def register(
         self,
-        component: AtomicInvokable | Callable | MCPClientHub | PyA2AtomicClient,
+        component: AtomicInvokable | Callable,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        namespace: Optional[str] = None,
         *,
-        remote_name: Optional[str] = None,
-        filter_extraneous_inputs: Optional[bool] = None,
-        name_collision_mode: str = "raise",  # raise|skip|replace
+        name_collision_mode: str = "raise",
     ) -> str:
-        """
-        Register one tool on this ToolAgent.
+        """Register one invokable on this ToolAgent.
 
-        The component is normalized through ``toolify(...)`` before registration.
-        The resolved ``tool.full_name`` is used as the registry key.
+        AtomicInvokables are stored directly under their own ``full_name``;
+        ``name`` and ``description`` overrides are not permitted for this route.
+        Plain callables are normalized through ``toolify`` with this agent's
+        ``name`` as their namespace; ``name`` and ``description`` may override
+        the inferred values.
 
         Parameters
         ----------
-        component : AtomicInvokable | Callable | MCPClientHub | PyA2AtomicClient
-            The item to register. Plain callables and ``AtomicInvokable``
-            instances are wrapped via ``toolify``; ``MCPClientHub`` and
-            ``PyA2AtomicClient`` instances enumerate and register all their
-            remote tools.
+        component : AtomicInvokable | Callable
+            The item to register. AtomicInvokables are stored as-is; callables
+            are wrapped via ``toolify(namespace=self.name)``.
         name : str | None
-            Override the tool name. If ``None``, inferred from the component.
+            Override the tool name (callable route only). ``None`` infers from
+            ``component.__name__``.
         description : str | None
-            Override the tool description. If ``None``, inferred from the
-            component.
-        namespace : str | None
-            Override the tool namespace. If ``None``, inferred from the
-            component.
-        remote_name : str | None
-            For ``MCPClientHub`` / ``PyA2AtomicClient`` components only:
-            register only the remote tool with this exact name instead of all
-            tools exposed by the client.
-        filter_extraneous_inputs : bool | None
-            Override the toolified tool's ``filter_extraneous_inputs`` flag.
-            ``None`` inherits from the component or ``toolify`` default.
+            Override the tool description (callable route only). ``None``
+            infers from ``component.__doc__``.
         name_collision_mode : str
             Controls behavior when the resolved ``full_name`` is already
-            registered. One of:
-
-            - ``"raise"`` (default) — raise ``ToolRegistrationError``.
-            - ``"skip"`` — return the existing key without updating.
-            - ``"replace"`` — overwrite the existing registration.
+            registered. One of ``"raise"`` (default), ``"skip"``, or
+            ``"replace"``.
 
         Returns
         -------
         str
-            The registered tool's ``full_name`` (``"Type.namespace.name"``).
+            The registered invokable's ``full_name`` (``"Type.namespace.name"``).
 
         Raises
         ------
         ToolRegistrationError
-            If ``name_collision_mode`` is invalid, ``toolify`` fails, or a
-            collision is detected under ``"raise"`` mode.
+            If ``name_collision_mode`` is invalid; if ``name`` or
+            ``description`` overrides are supplied for an ``AtomicInvokable``
+            component; if ``toolify`` fails; or if a collision is detected
+            under ``"raise"`` mode.
         """
-        # Validate collision policy
+        name_collision_mode = name_collision_mode.lower().strip()
         if name_collision_mode not in ("raise", "skip", "replace"):
             raise ToolRegistrationError(
                 "name_collision_mode must be one of: 'raise', 'skip', 'replace'."
             )
 
-        # Normalize via toolify (single source of truth)
-        try:
-            tool = toolify(
-                component=component,
-                name=name,
-                description=description,
-                namespace=namespace,
-                filter_extraneous_inputs=filter_extraneous_inputs,
-                remote_name=remote_name,
-            )
-        except Exception as e:
-            raise ToolRegistrationError(
-                f"{type(self).__name__}.{self.name}: failed to toolify component: {e}"
-            ) from e
+        # AtomicInvokable route — store directly under its own identity
+        if isinstance(component, AtomicInvokable):
+            if name is not None or description is not None:
+                raise ToolRegistrationError(
+                    f"{type(self).__name__}.{self.name}: name and description "
+                    "overrides are not supported when registering an AtomicInvokable "
+                    "directly. Use the component's own identity."
+                )
+            key = component.full_name
+            invokable = component
 
-        # Collision handling
-        key = tool.full_name
+        # Callable route — normalize via toolify with self.name as namespace
+        elif callable(component):
+            try:
+                invokable = toolify(
+                    component=component,
+                    name=name or component.__name__,
+                    description=description or component.__doc__,
+                    namespace=self.name,
+                )
+            except Exception as e:
+                raise ToolRegistrationError(
+                    f"{type(self).__name__}.{self.name}: failed to toolify component: {e}"
+                ) from e
+            key = invokable.full_name
+
+        else:
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: unsupported component type "
+                f"{type(component).__name__!r}. Expected AtomicInvokable or Callable."
+            )
 
         if key in self._toolbox:
             if name_collision_mode == "raise":
@@ -834,89 +889,165 @@ class ToolAgent(Agent, ABC):
                 )
             if name_collision_mode == "skip":
                 return key
-            # replace → fall through
 
-        self._toolbox[key] = tool
+        self._toolbox[key] = invokable
         return key
 
     def batch_register(
         self,
-        sources: List[AtomicInvokable | Callable | MCPClientHub | PyA2AtomicClient],
+        tools: list[AtomicInvokable | Callable] | None = None,
+        client: PyA2AtomicClient | MCPClientHub | None = None,
         *,
+        remote_names: list[str] | None = None,
         name_collision_mode: str = "raise",
         batch_filter_inputs: Optional[bool] = None,
-        batch_namespace: Optional[str] = None,
     ) -> list[str]:
-        """
-        Register a batch of tools on this ToolAgent.
+        """Register a batch of invokables on this ToolAgent.
 
-        All sources are normalized through ``batch_toolify(...)`` first.
-        Validation runs over the whole batch before any registration mutation
-        occurs: if any source fails toolification, no tools are registered.
-        Collision handling runs per-tool during the registration phase.
+        Accepts a local list, a remote client, or both. All items are expanded
+        into ``(full_name, invokable)`` pairs before any toolbox mutation;
+        duplicate full_names within the incoming batch always raise regardless
+        of ``name_collision_mode``.
 
         Parameters
         ----------
-        sources : list
-            Non-empty list of items to register. Each entry may be a plain
-            callable, an ``AtomicInvokable``, an ``MCPClientHub``, or a
-            ``PyA2AtomicClient``.
+        tools : list[AtomicInvokable | Callable] | None
+            Local items to register. AtomicInvokables are stored as-is;
+            callables are normalized via ``toolify(namespace=self.name)``.
+        client : PyA2AtomicClient | MCPClientHub | None
+            Remote client to enumerate and register tools from. Combined with
+            ``tools`` in one registration pass when both are provided.
+        remote_names : list[str] | None
+            Whitelist of remote tool names to register from ``client``.
+            ``None`` registers all available remote tools. Requires ``client``.
         name_collision_mode : str
-            Per-tool collision policy. One of ``"raise"``, ``"skip"``, or
-            ``"replace"`` — same semantics as ``register()``.
+            Per-item collision policy for toolbox conflicts. One of
+            ``"raise"`` (default), ``"skip"``, or ``"replace"``. Does not
+            affect intra-batch dedup, which always raises.
         batch_filter_inputs : bool | None
-            Applied uniformly to all toolified tools in this batch. ``None``
+            ``filter_extraneous_inputs`` override applied uniformly to all
+            callables and remote tools toolified in this batch. ``None``
             inherits each tool's own default.
-        batch_namespace : str | None
-            Applied uniformly as the namespace for all toolified tools.
-            ``None`` infers namespace from each component individually.
 
         Returns
         -------
         list[str]
-            The ``full_name`` of every tool that was newly registered (skipped
-            tools under ``"skip"`` mode are excluded).
+            ``full_name`` of every invokable newly registered. Skipped items
+            (under ``"skip"`` mode) are excluded.
 
         Raises
         ------
         ValueError
-            If ``sources`` is empty.
-        ToolDefinitionError
-            If any source fails toolification (before any registration occurs).
+            If both ``tools`` and ``client`` are ``None``; if ``tools`` is
+            empty and no ``client`` is provided; if ``remote_names`` is
+            supplied without a ``client``; or if ``remote_names`` is an empty
+            list when a ``client`` is provided.
         ToolRegistrationError
-            If ``name_collision_mode`` is invalid or a collision is detected
-            under ``"raise"`` mode.
+            If ``name_collision_mode`` is invalid; if a duplicate full_name
+            appears in the incoming batch; if toolification of any item fails;
+            or if a toolbox collision is detected under ``"raise"`` mode.
         """
+        name_collision_mode = name_collision_mode.lower().strip()
         if name_collision_mode not in ("raise", "skip", "replace"):
             raise ToolRegistrationError(
                 "name_collision_mode must be one of: 'raise', 'skip', 'replace'."
             )
 
-        if not sources:
-            raise ValueError("ToolAgents.batch_register() expects a non-empty list of callables, AtomicInvokables, or MCPClientHubs")
-        try:
-            tool_list = batch_toolify(
-                sources=list(sources),
-                batch_namespace=batch_namespace,
-                batch_filter_inputs=batch_filter_inputs,
+        # Validate argument combinations before any expansion
+        if tools is None and client is None:
+            raise ValueError(
+                f"{type(self).__name__}.batch_register requires at least one of: "
+                "tools list or client."
             )
-        except ToolDefinitionError:
-            raise
-        except Exception as exc:  # pragma: no cover
-            raise ToolRegistrationError(f"batch_toolify failed: {exc}") from exc
+        if tools is not None and len(tools) == 0 and client is None:
+            raise ValueError(
+                f"{type(self).__name__}.batch_register: tools list is empty and no "
+                "client provided."
+            )
+        if remote_names is not None and client is None:
+            raise ValueError(
+                f"{type(self).__name__}.batch_register: remote_names requires a client."
+            )
+        if client is not None and remote_names is not None and len(remote_names) == 0:
+            raise ValueError(
+                f"{type(self).__name__}.batch_register: remote_names is an empty list; "
+                "nothing to register from client."
+            )
 
+        # Expand all sources into (full_name, invokable) pairs
+        combined: list[tuple[str, AtomicInvokable]] = []
+
+        if tools is not None:
+            for item in tools:
+                if isinstance(item, AtomicInvokable):
+                    combined.append((item.full_name, item))
+                elif callable(item):
+                    try:
+                        t = toolify(
+                            component=item,
+                            namespace=self.name,
+                            filter_extraneous_inputs=batch_filter_inputs,
+                        )
+                    except Exception as exc:
+                        raise ToolRegistrationError(
+                            f"{type(self).__name__}.{self.name}: failed to toolify "
+                            f"{item!r}: {exc}"
+                        ) from exc
+                    combined.append((t.full_name, t))
+                else:
+                    raise ToolRegistrationError(
+                        f"{type(self).__name__}.{self.name}: unsupported item type "
+                        f"{type(item).__name__!r} in tools list."
+                    )
+
+        if client is not None:
+            if isinstance(client, MCPClientHub):
+                available = client.list_tools()
+            else:
+                available = client.list_invokables()
+
+            names_to_register = (
+                [n for n in available if n in remote_names]
+                if remote_names is not None
+                else available
+            )
+
+            for remote_name in names_to_register:
+                try:
+                    proxy = toolify(
+                        component=client,
+                        namespace=self.name,
+                        remote_name=remote_name,
+                        filter_extraneous_inputs=batch_filter_inputs,
+                    )
+                except Exception as exc:
+                    raise ToolRegistrationError(
+                        f"{type(self).__name__}.{self.name}: failed to toolify remote "
+                        f"{remote_name!r}: {exc}"
+                    ) from exc
+                combined.append((proxy.full_name, proxy))
+
+        # Intra-set dedup — always raise regardless of name_collision_mode
+        seen: set[str] = set()
+        for key, _ in combined:
+            if key in seen:
+                raise ToolRegistrationError(
+                    f"{type(self).__name__}.{self.name}: duplicate full_name in "
+                    f"incoming batch: {key!r}."
+                )
+            seen.add(key)
+
+        # Register against toolbox — apply name_collision_mode per item
         registered: list[str] = []
-        for tool in tool_list:
-            key = tool.full_name
+        for key, invokable in combined:
             if key in self._toolbox:
                 if name_collision_mode == "raise":
                     raise ToolRegistrationError(
-                        f"{type(self).__name__}.{self.name}: tool already registered: {key}"
+                        f"{type(self).__name__}.{self.name}: already registered: {key}"
                     )
                 if name_collision_mode == "skip":
                     continue
-
-            self._toolbox[key] = tool
+            self._toolbox[key] = invokable
             registered.append(key)
 
         return registered

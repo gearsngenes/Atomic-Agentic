@@ -943,7 +943,19 @@ class Command(AtomicInvokable):
 
 
 class StructuredInvokable(AtomicInvokable):
-    """Wrap an invokable and package its raw output into a mapping."""
+    """Wrap any AtomicInvokable and package its raw output into a typed mapping per an explicit ``output_schema``.
+
+    The wrapped invokable's ``invoke``/``async_invoke`` output must be a Mapping;
+    ``StructuredInvokable`` extracts each declared field by key and handles absent
+    values according to ``absent_value_mode``:
+
+    - ``RAISE`` (default) — raise ``ValidationError`` for any missing key.
+    - ``DROP``  — omit missing keys from the output dict silently.
+    - ``FILL``  — substitute ``default_absent_value`` for missing keys.
+
+    Returns a ``StructuredResult`` whose ``.result`` is a ``dict[str, Any]``
+    containing only the declared output fields.
+    """
 
     RAISE = "RAISE"
     DROP = "DROP"
@@ -976,7 +988,52 @@ class StructuredInvokable(AtomicInvokable):
         coerce_to_collection: bool = False,
         filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
-        """Initialize a structured-output wrapper around an invokable."""
+        """
+        Parameters
+        ----------
+        component : AtomicInvokable
+            The wrapped invokable. Its output must be a Mapping.
+        name : str | None
+            Override name for this wrapper. Defaults to the component's name.
+        namespace : str | None
+            Override namespace. Defaults to the component's namespace.
+        description : str | None
+            Override description. Defaults to the component's description.
+        output_schema : type | list[str | ParamSpec] | None
+            Declared output fields to extract. Accepts a dataclass/namedtuple
+            type, a list of field name strings, or a list of ``ParamSpec``
+            objects. ``None`` produces an empty schema.
+        map_single_fields : bool
+            When ``True`` (default), a single-field schema traverses
+            collection-shaped raw outputs to extract the matching key or index.
+            When ``False``, the raw value is assigned wholesale to the single
+            named field without traversal.
+        map_extras : bool
+            When ``True`` (default), keys in the component output that are not
+            declared in ``output_schema`` may backfill missing named fields
+            before absent-value handling applies.
+        ignore_unhandled : bool
+            When ``True``, extra keys in the component output that cannot be
+            mapped to any schema field or sink are silently dropped. When
+            ``False`` (default), they raise ``PackagingError``.
+        absent_value_mode : str
+            One of ``"RAISE"`` (default), ``"DROP"``, or ``"FILL"``
+            (case-insensitive). Controls handling of schema keys absent from
+            the component result.
+        default_absent_value : Any
+            Value substituted for absent keys when
+            ``absent_value_mode="FILL"``. Ignored under RAISE and DROP modes.
+            Defaults to ``None``.
+        none_is_absent : bool
+            When ``True``, a ``None`` value for a declared field is treated as
+            absent and handled per ``absent_value_mode``. Defaults to ``False``.
+        coerce_to_collection : bool
+            When ``True``, object-like outputs may be coerced to a list/dict
+            before field extraction. Defaults to ``False``.
+        filter_extraneous_inputs : bool | None
+            Input-filtering override for this wrapper. ``None`` (default)
+            inherits from the wrapped component.
+        """
         if not isinstance(component, AtomicInvokable):
             raise TypeError(
                 f"component must be an AtomicInvokable, got {type(component)!r}"
