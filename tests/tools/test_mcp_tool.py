@@ -289,7 +289,7 @@ class TestMCPProxyToolInvocation:
         tool = make_tool(hub=hub)
 
         assert tool.invoke({"query": "hello"}).result == "answer"
-        assert hub.calls == [("search", {"query": "hello"})]
+        assert hub.calls == [("search", {"query": "hello", "top_k": 5})]
 
     def test_structured_content_mode_returns_structured_content(self) -> None:
         hub = FakeMCPClientHub(
@@ -419,7 +419,7 @@ class TestMCPProxyToolAsync:
         result = asyncio.run(tool.async_invoke({"query": "hello"}))
 
         assert result.result == "async answer"
-        assert hub.async_calls == [("search", {"query": "hello"})]
+        assert hub.async_calls == [("search", {"query": "hello", "top_k": 5})]
 
     def test_async_execute_rejects_positional_args(self) -> None:
         tool = make_tool()

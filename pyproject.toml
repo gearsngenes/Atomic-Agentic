@@ -61,7 +61,8 @@ version_file = "src/atomic_agentic/_version.py"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra"
+addopts = "-ra --basetemp=.pytest_tmp"
+tmp_path_retention_policy = "none"
 markers = [
   "integration: multi-component integration tests",
   "llm: tests that make real LLM API calls",

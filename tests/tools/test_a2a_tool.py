@@ -245,7 +245,7 @@ class TestPyA2AtomicToolInvocation:
         result = tool.invoke({"value": 123})
 
         assert result.result == {"value": 123}
-        assert client.calls == [("echo", {"value": 123})]
+        assert client.calls == [("echo", {"value": 123, "tag": "default"})]
 
     def test_to_arg_kwarg_returns_empty_args_and_copy_of_kwargs(self) -> None:
         tool = make_tool()
@@ -270,7 +270,7 @@ class TestPyA2AtomicToolInvocation:
         result = asyncio.run(tool.async_invoke({"value": "hello"}))
 
         assert result.result == {"async": True}
-        assert client.calls == [("echo", {"value": "hello"})]
+        assert client.calls == [("echo", {"value": "hello", "tag": "default"})]
 
     def test_async_execute_rejects_positional_args(self) -> None:
         tool = make_tool()

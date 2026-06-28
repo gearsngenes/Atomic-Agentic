@@ -398,6 +398,13 @@ class AtomicInvokable(ABC):
             if param_name in inputs:
                 filtered[param_name] = inputs[param_name]
 
+        # inject defaults for absent non-variadic params
+        for param in parameters:
+            if param.kind in {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}:
+                continue
+            if param.name not in filtered and param.default is not NO_VAL:
+                filtered[param.name] = param.default
+
         if vararg_name is not None and vararg_name in filtered:
             value = filtered[vararg_name]
             if not isinstance(value, (list, tuple)):

@@ -31,9 +31,9 @@ logger = logging.getLogger(__name__)
 from .tools import identity_pre_tool, identity_post_tool
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Agent
+# BasicAgent
 # ───────────────────────────────────────────────────────────────────────────────
-class Agent(AtomicInvokable):
+class BasicAgent(AtomicInvokable):
     """
     Schema-driven LLM Agent.
 
