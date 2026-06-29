@@ -33,6 +33,7 @@ from ..models.agents.prompts import PromptConfig
 logger = logging.getLogger(__name__)
 
 from .tools import identity_pre_tool, identity_post_tool
+from ..constants.agents import RUN_ID_PARAM
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent
@@ -51,7 +52,7 @@ class Agent(AtomicInvokable, ABC):
     ``invoke(inputs)`` follows this sequence:
 
     1. ``filter_inputs`` collects declared keys and injects defaults.
-    2. Framework-reserved args (``continue_from``) are popped.
+    2. Framework-reserved args (``run_id``) are popped.
     3. ``_build_context`` extracts declared context keys (and any
        instance-state values added by a subclass override) into ``context``.
     4. Remaining inputs are sliced into ``pre_inputs`` and ``post_inputs``.
@@ -68,12 +69,12 @@ class Agent(AtomicInvokable, ABC):
     - All ``pre_invoke`` parameters.
     - Post-only non-result non-variadic parameters, grafted as KEYWORD_ONLY.
     - ``context_keys`` parameters, grafted as KEYWORD_ONLY.
-    - ``continue_from`` (KEYWORD_ONLY, default None).
+    - ``run_id`` (KEYWORD_ONLY, default None).
 
     ``context_enabled``
     -------------------
     ``True``:  ``get_conversation`` selects prior turns for each invocation.
-    ``False``: turns are always ``[]``; ``continue_from`` is ignored.
+    ``False``: turns are always ``[]``; ``run_id`` is ignored.
     Records are appended unconditionally regardless of this setting.
     """
 
@@ -309,12 +310,17 @@ class Agent(AtomicInvokable, ABC):
         post_params: list[ParamSpec],
         context_key_names: frozenset[str],
     ) -> None:
-        """Warn when a pre/post param name collides with a context key or reserved agent arg.
+        """Warn or raise when a pre/post param name collides with a context key or reserved arg.
 
-        Values under colliding names are popped before reaching pre/post invoke,
-        so those parameters will never receive a caller-supplied value.
+        Context-key collisions always warn: the param will never receive a value.
+
+        Reserved-arg collisions are tiered on ``run_id``:
+        - Semantically identical to ``RUN_ID_PARAM`` (name/kind/type/default match): warn
+          (redundant declaration; the framework grafts it automatically).
+        - Semantically different: raise ``AgentError`` (true collision — the caller's
+          param would silently shadow the framework's meaning).
         """
-        reserved_agent_args = frozenset({"continue_from"})
+        reserved_agent_args = frozenset({"run_id"})
         all_reserved = context_key_names | reserved_agent_args
         checked: set[str] = set()
         all_params = (
@@ -325,16 +331,41 @@ class Agent(AtomicInvokable, ABC):
             if param.name not in all_reserved or param.name in checked:
                 continue
             checked.add(param.name)
-            which = (
-                "a context key" if param.name in context_key_names
-                else "a reserved agent argument"
-            )
-            warnings.warn(
-                f"{param.name!r} declared in {source} will be popped from inputs "
-                f"before reaching it ({which}); it will never receive a caller-supplied value.",
-                UserWarning,
-                stacklevel=4,
-            )
+            if param.name in context_key_names:
+                warnings.warn(
+                    f"{param.name!r} declared in {source} will be popped from inputs "
+                    "before reaching it (a context key); it will never receive a "
+                    "caller-supplied value.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+            elif param.name == "run_id":
+                semantically_equal = (
+                    param.kind == RUN_ID_PARAM.kind
+                    and param.type == RUN_ID_PARAM.type
+                    and param.default == RUN_ID_PARAM.default
+                )
+                if semantically_equal:
+                    warnings.warn(
+                        f"'run_id' declared in {source} is redundant; "
+                        "the framework grafts it automatically.",
+                        UserWarning,
+                        stacklevel=4,
+                    )
+                else:
+                    raise AgentError(
+                        f"'run_id' declared in {source} conflicts with the "
+                        "framework-reserved 'run_id' parameter "
+                        "(kind, type, or default mismatch)."
+                    )
+            else:
+                warnings.warn(
+                    f"{param.name!r} declared in {source} will be popped from inputs "
+                    "before reaching it (a reserved agent argument); it will never "
+                    "receive a caller-supplied value.",
+                    UserWarning,
+                    stacklevel=4,
+                )
 
     @staticmethod
     def _compose_agent_parameters(
@@ -348,7 +379,7 @@ class Agent(AtomicInvokable, ABC):
 
         Graft A: post-only non-result non-variadic params (as KEYWORD_ONLY).
         Graft B: context_key_params (as KEYWORD_ONLY).
-        Graft C: ``continue_from`` (KEYWORD_ONLY, default=None).
+        Graft C: ``run_id`` (KEYWORD_ONLY, default=None).
 
         All grafts are inserted before an existing ``**kwargs`` parameter.
         Pre's ``ParamSpec`` wins on name overlaps with post params.
@@ -386,14 +417,10 @@ class Agent(AtomicInvokable, ABC):
         ck_grafts = [p for p in context_key_params if p.name not in existing_names]
         composed = _insert_before_varkw(composed, ck_grafts)
 
-        # Graft C: continue_from (only if not already present — warning already issued)
-        if "continue_from" not in {p.name for p in composed}:
-            composed = _insert_before_varkw(composed, [
-                ParamSpec(
-                    name="continue_from", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                    type="str | None", default=None,
-                )
-            ])
+        # Graft C: run_id — always the canonical framework version.
+        # Pop any collision (already warned/raised above) then reinsert.
+        composed = [p for p in composed if p.name != "run_id"]
+        composed = _insert_before_varkw(composed, [RUN_ID_PARAM])
 
         return [
             ParamSpec(name=p.name, index=i, kind=p.kind, type=p.type, default=p.default)
@@ -447,6 +474,26 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Agent Properties
     # ------------------------------------------------------------------ #
+    @property
+    def description(self) -> str:
+        """Agent description with a ``run_id`` usage note appended.
+
+        The note is added so that when this agent is exposed as a sub-tool the
+        orchestrating LLM knows ``run_id`` is a framework-reserved conversation
+        threading slot, not a general-purpose context-carry parameter.
+        """
+        return (
+            self._description
+            + "\n\n[`run_id` (framework-reserved): pass a UUID run-id string "
+            "to resume from a specific record in this agent's history, or omit "
+            "/ pass None to continue from the agent's most recent checkpoint "
+            "(default).]"
+        )
+
+    @description.setter
+    def description(self, value: str) -> None:
+        AtomicInvokable.description.fset(self, value)
+
     @property
     def post_result_key(self) -> str:
         """Post-invoke parameter name that receives the raw ``_invoke`` result."""
@@ -744,7 +791,7 @@ class Agent(AtomicInvokable, ABC):
         inputs = self.filter_inputs(inputs)
 
         # ② Agent args
-        continue_from = inputs.pop("continue_from", None)
+        run_id = inputs.pop("run_id", None)
 
         # ③ Context extraction
         context, remaining = self._build_context(inputs)
@@ -778,7 +825,7 @@ class Agent(AtomicInvokable, ABC):
         turns: list[AgentRecord] = []
         if self._context_enabled:
             if self._records_window != 0:
-                turns = self.get_conversation(run_id=continue_from, turns=self._records_window)
+                turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
         # ⑧ Core LLM work
         logger.debug(f"Agent.{self.name} performing async logic")
@@ -828,7 +875,7 @@ class Agent(AtomicInvokable, ABC):
         Steps
         -----
         ① filter_inputs — collect declared keys; inject defaults.
-        ② Pop framework-reserved arg ``continue_from``.
+        ② Pop framework-reserved arg ``run_id``.
         ③ _build_context — extract context keys into ``context``; remainder stays.
         ④ Slice ``pre_inputs`` from remaining.
         ⑤ Slice ``post_inputs`` from remaining (excludes result_key).
@@ -847,7 +894,7 @@ class Agent(AtomicInvokable, ABC):
             inputs = self.filter_inputs(inputs)
 
             # ② Agent args
-            continue_from = inputs.pop("continue_from", None)
+            run_id = inputs.pop("run_id", None)
 
             # ③ Context extraction
             context, remaining = self._build_context(inputs)
@@ -882,7 +929,7 @@ class Agent(AtomicInvokable, ABC):
             if self._context_enabled:
                 if self._records_window != 0:
                     turns = self.get_conversation(
-                        run_id=continue_from, turns=self._records_window
+                        run_id=run_id, turns=self._records_window
                     )
 
             # ⑧ Core LLM work
@@ -933,6 +980,7 @@ class Agent(AtomicInvokable, ABC):
     def to_dict(self) -> Dict[str, Any]:
         """Return a minimal diagnostic snapshot of this agent."""
         d = super().to_dict()
+        d["description"] = self._description  # store raw; augmented form is tool-facing only
         d.update({
             "system_prompts": {
                 key: {"template": cfg.template, "description": cfg.description}

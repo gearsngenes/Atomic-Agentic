@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 import logging
 
-from atomic_agentic.agents import Agent, PlanActAgent
+from atomic_agentic.agents import BasicAgent, PlanActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()
@@ -15,8 +15,8 @@ You are the *Story Outliner*.
 Input: story_idea (one sentence).
 Output: **JSON only** with keys:
   working_title, premise,
-  characters [ {name, motivation, conflict} … ],
-  scenes     [ {title, purpose} … ]
+  characters [ {{name, motivation, conflict}} … ],
+  scenes     [ {{title, purpose}} … ]
 """.strip()
 
 WRITER_PROMPT = """
@@ -36,7 +36,7 @@ Input: draft_md (markdown).
 Output: bullet-point critique ONLY (max 8 bullets). No rewriting.
 """.strip()
 
-outliner = Agent(
+outliner = BasicAgent(
     name="StoryOutliner",
     namespace="examples",
     description="Generate a structured outline from a one-sentence idea.",
@@ -44,7 +44,7 @@ outliner = Agent(
     role_prompt=OUTLINER_PROMPT,
 )
 
-writer = Agent(
+writer = BasicAgent(
     name="StoryWriter",
     namespace="examples",
     description="Writes drafts based on the outline or reviewer notes.",
@@ -53,7 +53,7 @@ writer = Agent(
     context_enabled=True,
 )
 
-reviewer = Agent(
+reviewer = BasicAgent(
     name="DraftReviewer",
     namespace="examples",
     description="Reviews drafts and provides revision notes.",
@@ -84,8 +84,8 @@ if __name__ == "__main__":
         raise ValueError("loops must be >= 0")
 
     # Enforce a tight tool-call budget for this run:
-    # outliner (1) + loops * (writer + reviewer)(2 * loops) + return (1)
-    orch.tool_calls_limit = 2 * loops + 2
+    # outliner (1) + initial write (1) + loops * (reviewer + writer) (2 * loops) + return (1)
+    orch.tool_calls_limit = 2 * loops + 3
 
     task_prompt = (
         "Do the following task:\n\n"
@@ -93,7 +93,7 @@ if __name__ == "__main__":
         "2) Using the outline created, write a full draft of the story with the writer.\n"
         "3) Review the story and provide feedback with the reviewer\n"
         "4) Rewrite the draft by providing the writer with the reviewer feedback.\n"
-        f"5) Repeat steps 3-4 EXACTLY {loops - 1} times more"
+        f"5) Repeat steps 3-4 EXACTLY {loops - 1} times more\n"
         "6) Return the writer's final draft markdown."
     )
 

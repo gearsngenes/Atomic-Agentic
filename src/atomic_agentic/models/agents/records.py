@@ -113,8 +113,8 @@ class AgentRecord:
 
     Records form a singly-linked list via ``prev``: each committed record
     points to the most recent record that was used as context when it was
-    created. ``prev=None`` marks a chain root (first invocation, or a fresh
-    start requested via ``continue_from="new"``). Walking ``prev`` backward
+    created. ``prev=None`` marks a chain root (first invocation or a fresh
+    start). Walking ``prev`` backward
     from any record reconstructs the exact conversation branch that produced
     it.
 

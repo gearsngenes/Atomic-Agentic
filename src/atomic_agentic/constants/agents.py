@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+from ..models.parameters import ParamSpec
+
+# =============================================================================
+# Agent framework-reserved parameters
+# =============================================================================
+# RUN_ID_PARAM is the canonical ParamSpec grafted onto every Agent subclass
+# schema (Graft C in _compose_agent_parameters). It is defined here so that
+# _warn_reserved_name_collisions can compare caller-declared params against the
+# authoritative definition without re-constructing it inline.
+
+RUN_ID_PARAM: ParamSpec = ParamSpec(
+    name="run_id", index=0, kind=ParamSpec.KEYWORD_ONLY,
+    type="str | None", default=None,
+)
+
 # =============================================================================
 # ToolAgent LLM-output JSON fields
 # =============================================================================
@@ -96,6 +111,8 @@ RETURN_TOOL_FULL_NAME = (
 
 
 __all__ = [
+    # Framework-reserved parameters
+    "RUN_ID_PARAM",
     # LLM step fields
     "STEP_FIELD",
     "TOOL_FIELD",

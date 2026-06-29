@@ -305,7 +305,7 @@ class TestAgentPipeline:
         assert [(param.name, param.kind, param.default) for param in agent.parameters] == [
             ("topic", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
-            ("continue_from", "KEYWORD_ONLY", None),
+            ("run_id", "KEYWORD_ONLY", None),
         ]
         assert agent.return_type == "dict[str, Any]"
 
@@ -318,7 +318,7 @@ class TestAgentSchemaComposition:
             ("topic", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
             ("suffix", "KEYWORD_ONLY", NO_VAL),
-            ("continue_from", "KEYWORD_ONLY", None),
+            ("run_id", "KEYWORD_ONLY", None),
         ]
 
     def test_auto_grafted_param_preserves_post_default(self) -> None:
@@ -831,7 +831,7 @@ class TestAgentMutableRuntimeProperties:
     def test_constructor_with_custom_pre_invoke_builds_parameters(self) -> None:
         agent = make_agent(pre_invoke=pre_with_two_fields)
 
-        assert [param.name for param in agent.parameters] == ["subject", "style", "continue_from"]
+        assert [param.name for param in agent.parameters] == ["subject", "style", "run_id"]
         assert agent.invoke({"subject": "pytest", "style": "direct"}).result == {
             "final": "ECHO: pytest:direct",
             "length": len("ECHO: pytest:direct"),
@@ -925,6 +925,30 @@ class TestAgentContextKeys:
 
         assert context == {}
         assert remaining == {"prompt": "hello", "extra": "value"}
+
+    def test_warn_reserved_name_collisions_run_id_semantic_match_warns(self) -> None:
+        matching = ParamSpec(
+            name="run_id", index=0, kind=ParamSpec.KEYWORD_ONLY,
+            type="str | None", default=None,
+        )
+        with pytest.warns(UserWarning, match="redundant"):
+            Agent._warn_reserved_name_collisions(
+                pre_params=[matching],
+                post_params=[],
+                context_key_names=frozenset(),
+            )
+
+    def test_warn_reserved_name_collisions_run_id_semantic_mismatch_raises(self) -> None:
+        clashing = ParamSpec(
+            name="run_id", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+            type="str", default=NO_VAL,
+        )
+        with pytest.raises(AgentError, match="conflicts"):
+            Agent._warn_reserved_name_collisions(
+                pre_params=[clashing],
+                post_params=[],
+                context_key_names=frozenset(),
+            )
 
     def test_warn_reserved_name_collisions_warns_on_context_key_collision(self) -> None:
         def pre_with_persona(persona: str, prompt: str) -> str:

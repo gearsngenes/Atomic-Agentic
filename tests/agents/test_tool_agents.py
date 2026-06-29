@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-pytestmark = pytest.mark.skip(reason="ToolAgent not yet migrated to new Agent contract (Pass 6 pending)")
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -24,10 +23,12 @@ from atomic_agentic.models.agents.records import LLMRecord
 from atomic_agentic.models.results.agents import ToolAgentResult
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from atomic_agentic.exceptions import (
+    AgentError,
     ToolAgentError,
     ToolInvocationError,
     ToolRegistrationError,
 )
+from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
@@ -136,7 +137,6 @@ def make_planact_agent(
     blackboard_preview_limit: int | None = None,
     post_invoke: Any = None,
     post_result_key: str | None = None,
-    passthrough_inputs: list[str] | None = None,
 ) -> PlanActAgent:
     agent = PlanActAgent(
         name="tests",
@@ -150,7 +150,6 @@ def make_planact_agent(
         blackboard_preview_limit=blackboard_preview_limit,
         post_invoke=post_invoke,
         post_result_key=post_result_key,
-        passthrough_inputs=passthrough_inputs,
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
@@ -166,7 +165,6 @@ def make_react_agent(
     blackboard_preview_limit: int | None = None,
     post_invoke: Any = None,
     post_result_key: str | None = None,
-    passthrough_inputs: list[str] | None = None,
 ) -> ReActAgent:
     agent = ReActAgent(
         name="tests",
@@ -180,7 +178,6 @@ def make_react_agent(
         blackboard_preview_limit=blackboard_preview_limit,
         post_invoke=post_invoke,
         post_result_key=post_result_key,
-        passthrough_inputs=passthrough_inputs,
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
@@ -273,6 +270,7 @@ class ScriptedToolAgent(ToolAgent):
         self,
         *,
         script: list[list[dict[str, Any]]] | None = None,
+        tool_instructions: str | PromptConfig = ROLE_TEMPLATE,
         context_enabled: bool = False,
         tool_calls_limit: int | None = None,
         peek_at_cache: bool = False,
@@ -280,14 +278,14 @@ class ScriptedToolAgent(ToolAgent):
         blackboard_preview_limit: int | None = None,
         post_invoke: Any = None,
         post_result_key: str | None = None,
-        passthrough_inputs: list[str] | None = None,
+        prompt_key: str = "tool_instructions",
     ) -> None:
         super().__init__(
             name="tests",
             namespace="tests",
             description="Scripted ToolAgent for unit tests.",
             llm_engine=EchoLLMEngine(),
-            role_prompt=ROLE_TEMPLATE,
+            tool_instructions=tool_instructions,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
@@ -295,7 +293,7 @@ class ScriptedToolAgent(ToolAgent):
             blackboard_preview_limit=blackboard_preview_limit,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
-            passthrough_inputs=passthrough_inputs,
+            prompt_key=prompt_key,
         )
         self.script = script or []
 
@@ -390,7 +388,6 @@ def make_agent(
     blackboard_preview_limit: int | None = None,
     post_invoke: Any = None,
     post_result_key: str | None = None,
-    passthrough_inputs: list[str] | None = None,
 ) -> ScriptedToolAgent:
     return ScriptedToolAgent(
         context_enabled=context_enabled,
@@ -400,7 +397,6 @@ def make_agent(
         blackboard_preview_limit=blackboard_preview_limit,
         post_invoke=post_invoke,
         post_result_key=post_result_key,
-        passthrough_inputs=passthrough_inputs,
     )
 
 
@@ -461,52 +457,90 @@ class TestToolAgentConstruction:
         assert agent.has_tool(return_tool.full_name)
         assert agent.get_tool(return_tool.full_name) is return_tool
 
-    def test_role_prompt_renders_tools_limit_and_constants(self) -> None:
+    def test_tool_instructions_property_returns_template(self) -> None:
+        agent = make_agent()
+        assert agent.tool_instructions == ROLE_TEMPLATE
+
+    def test_build_context_populates_tools_limit_constants(self) -> None:
         agent = make_agent(tool_calls_limit=3)
-        keys = register_math_tools(agent)
+        register_math_tools(agent)
 
-        rendered = agent.role_prompt
+        context, _ = agent._build_context({})
 
-        assert "Limit: 3" in rendered
-        assert keys["add"] in rendered
-        assert "No constants registered." in rendered
-        assert "{TOOLS}" not in rendered
-        assert "{TOOL_CALLS_LIMIT}" not in rendered
-        assert "{CONSTANTS}" not in rendered
+        assert ToolAgent.TOOLS_FIELD in context
+        assert ToolAgent.LIMIT_FIELD in context
+        assert ToolAgent.CONSTANTS_FIELD in context
+        assert "3" in context[ToolAgent.LIMIT_FIELD]
+        assert agent._tool_prompt_key not in context
 
-    def test_role_prompt_missing_tools_placeholder_raises(self) -> None:
+    def test_build_context_unlimited_when_no_limit(self) -> None:
+        agent = make_agent()
+        context, _ = agent._build_context({})
+        assert context[ToolAgent.LIMIT_FIELD] == "unlimited"
+
+    def test_custom_prompt_key_stored_and_accessible(self) -> None:
+        agent = ScriptedToolAgent(prompt_key="custom_key")
+        assert agent._tool_prompt_key == "custom_key"
+        assert "custom_key" in agent.system_prompts
+
+    def test_tool_instructions_accepts_prompt_config_directly(self) -> None:
+        config = PromptConfig(template=ROLE_TEMPLATE, description="pre-built config")
+        agent = ScriptedToolAgent(tool_instructions=config)
+        assert agent.tool_instructions == ROLE_TEMPLATE
+
+    def test_update_prompt_rejects_tool_prompt_key(self) -> None:
+        agent = make_agent()
+        replacement = PromptConfig(template=ROLE_TEMPLATE, description="replacement")
+        with pytest.raises(AgentError):
+            agent.update_prompt(agent._tool_prompt_key, replacement)
+
+    def test_update_prompt_accepts_other_key(self) -> None:
+        agent = make_agent()
+        config = PromptConfig(template="hello", description="other")
+        agent.update_prompt("other_key", config)
+        assert "other_key" in agent.system_prompts
+
+    def test_tool_prompt_missing_tools_placeholder_raises(self) -> None:
+        config = PromptConfig(
+            template="Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS}",
+            description="missing TOOLS",
+        )
         with pytest.raises(ToolAgentError, match="TOOLS"):
-            ScriptedToolAgent._validate_role_prompt_template(
-                "Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS}"
-            )
+            ScriptedToolAgent._validate_tool_prompt_template(config)
 
-    def test_role_prompt_missing_tool_calls_limit_placeholder_raises(self) -> None:
+    def test_tool_prompt_missing_tool_calls_limit_placeholder_raises(self) -> None:
+        config = PromptConfig(
+            template="Tools: {TOOLS} Constants: {CONSTANTS}",
+            description="missing TOOL_CALLS_LIMIT",
+        )
         with pytest.raises(ToolAgentError, match="TOOL_CALLS_LIMIT"):
-            ScriptedToolAgent._validate_role_prompt_template(
-                "Tools: {TOOLS} Constants: {CONSTANTS}"
-            )
+            ScriptedToolAgent._validate_tool_prompt_template(config)
 
-    def test_role_prompt_missing_constants_placeholder_raises(self) -> None:
+    def test_tool_prompt_missing_constants_placeholder_raises(self) -> None:
+        config = PromptConfig(
+            template="Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT}",
+            description="missing CONSTANTS",
+        )
         with pytest.raises(ToolAgentError, match="CONSTANTS"):
-            ScriptedToolAgent._validate_role_prompt_template(
-                "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT}"
+            ScriptedToolAgent._validate_tool_prompt_template(config)
+
+    def test_tool_prompt_extra_simple_placeholder_is_allowed(self) -> None:
+        config = PromptConfig(
+            template="Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS} Extra: {EXTRA}",
+            description="extra field",
+        )
+        ScriptedToolAgent._validate_tool_prompt_template(config)  # must not raise
+
+    def test_constructor_positional_placeholder_raises_tool_agent_error(self) -> None:
+        with pytest.raises(ToolAgentError):
+            ScriptedToolAgent(
+                tool_instructions="Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS} {}"
             )
 
-    def test_role_prompt_extra_simple_placeholder_is_allowed(self) -> None:
-        assert ScriptedToolAgent._validate_role_prompt_template(
-            "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS} Extra: {EXTRA}"
-        ) == "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS} Extra: {EXTRA}"
-
-    def test_role_prompt_positional_placeholder_raises(self) -> None:
-        with pytest.raises(ToolAgentError, match="positional fields"):
-            ScriptedToolAgent._validate_role_prompt_template(
-                "Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS} {}"
-            )
-
-    def test_role_prompt_field_expression_raises(self) -> None:
-        with pytest.raises(ToolAgentError, match="unsupported field expression"):
-            ScriptedToolAgent._validate_role_prompt_template(
-                "Tools: {TOOLS.name} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS}"
+    def test_constructor_field_expression_raises_tool_agent_error(self) -> None:
+        with pytest.raises(ToolAgentError):
+            ScriptedToolAgent(
+                tool_instructions="Tools: {TOOLS.name} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS}"
             )
 
     @pytest.mark.parametrize("value", [None, 0, 1, 5])
@@ -592,10 +626,7 @@ class TestToolAgentNamespace:
 
 class TestToolAgentPostInvokeRouting:
     def test_scripted_tool_agent_forwards_post_routing_to_base_agent(self) -> None:
-        agent = make_agent(
-            post_invoke=package_tool_result,
-            passthrough_inputs=["label"],
-        )
+        agent = make_agent(post_invoke=package_tool_result)
         agent.set_script(
             [[{"tool": return_tool.full_name, "args": {"val": 5}}]]
         )
@@ -604,7 +635,6 @@ class TestToolAgentPostInvokeRouting:
 
         assert result.result == {"label": "scripted", "result": 5}
         assert agent.post_result_key == "result"
-        assert agent.passthrough_inputs == ["label"]
 
     def test_planact_agent_supports_post_invoke_passthrough(self) -> None:
         agent = make_planact_agent(
@@ -620,7 +650,6 @@ class TestToolAgentPostInvokeRouting:
                 )
             ],
             post_invoke=package_tool_result,
-            passthrough_inputs=["label"],
         )
 
         result = agent.invoke({"prompt": "run plan", "label": "planact"})
@@ -639,7 +668,6 @@ class TestToolAgentPostInvokeRouting:
             ],
             tool_calls_limit=1,
             post_invoke=package_tool_result,
-            passthrough_inputs=["label"],
         )
 
         result = agent.invoke({"prompt": "run react", "label": "react"})
@@ -981,17 +1009,17 @@ class TestConstantRegistration:
         assert "Description: No description provided." in context
         assert "super-secret-value" not in context
 
-    def test_role_prompt_renders_registered_constants_context(self) -> None:
+    def test_constants_context_includes_registered_constants(self) -> None:
         agent = make_agent()
         agent.register_constant("THRESHOLD", 0.9, "Decision threshold.")
 
-        rendered = agent.role_prompt
+        context, _ = agent._build_context({})
+        constants_block = context[ToolAgent.CONSTANTS_FIELD]
 
-        assert "THRESHOLD" in rendered
-        assert "Type: float" in rendered
-        assert "Decision threshold." in rendered
-        assert "0.9" not in rendered
-        assert "{CONSTANTS}" not in rendered
+        assert "THRESHOLD" in constants_block
+        assert "Type: float" in constants_block
+        assert "Decision threshold." in constants_block
+        assert "0.9" not in constants_block
 
     def test_resolve_exact_constant_placeholder_preserves_type(self) -> None:
         agent = make_agent()
@@ -1505,7 +1533,8 @@ class TestScriptedInvokeLoop:
 
         assert agent.invoke({"prompt": "run"}).result == 5
         assert agent.blackboard == []
-        assert agent.records == []
+        # Records are always stored regardless of context_enabled (Pass 4 contract).
+        assert len(agent.records) == 1
 
     def test_context_enabled_stores_tool_agent_turn_with_blackboard_span(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -2285,6 +2314,18 @@ class TestPlanActAgent:
 
         assert result.result == 50
 
+    def test_llm_record_system_prompt_name_is_plan_first(self) -> None:
+        agent = make_planact_agent(
+            [
+                f'[{{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": 42}}}}]'
+            ]
+        )
+
+        agent.invoke({"prompt": "run"})
+
+        for rec in agent.records[-1].llm_records:
+            assert rec.system_prompt_name == "plan_first"
+
 
 class TestReActAgent:
     def test_requires_concrete_non_negative_tool_calls_limit(self) -> None:
@@ -2683,6 +2724,24 @@ class TestReActAgent:
         result = asyncio.run(agent.async_invoke({"prompt": "run react"}))
 
         assert result.result == 50
+
+    def test_llm_record_system_prompt_name_is_reason_then_act(self) -> None:
+        agent = make_react_agent(
+            [
+                react_step_json(
+                    tool=return_tool.full_name,
+                    args={"val": 42},
+                    duration=0,
+                    description="Return the value for the test.",
+                )
+            ],
+            tool_calls_limit=1,
+        )
+
+        agent.invoke({"prompt": "run"})
+
+        for rec in agent.records[-1].llm_records:
+            assert rec.system_prompt_name == "reason_then_act"
 
 
 class TestToolAgentAsyncBaseLoop:

@@ -1,6 +1,6 @@
 # 06_Branching_Conversations.py
 """
-Demonstrates conversation branching via the ``continue_from`` parameter.
+Demonstrates conversation branching via the ``run_id`` parameter.
 
 The scenario uses grounded, verifiable facts so the agent's context isolation
 is unambiguous — it cannot invent the right answer if the fact was never in
@@ -20,12 +20,12 @@ Conversation tree
 
 Key concepts shown
 ------------------
-- ``continue_from=<run_id>``   fork from any prior turn, not just the tail
+- ``run_id=<run_id>``   fork from any prior turn, not just the tail
 - ``Agent.get_conversation()`` reconstruct any branch chain from flat history
 
 Breaking change (v2.0.0a14)
 ----------------------------
-``continue_from="new"`` has been removed.  It previously opened a fresh
+``run_id="new"`` has been removed.  It previously opened a fresh
 conversation root without clearing flat history.  The new design always
 appends records unconditionally; to get a fresh conversation per-invocation
 use ``context_enabled=False``, or instantiate a separate agent.
@@ -200,7 +200,7 @@ def main() -> None:
     r_b1 = agent(
         message="What's my dog's name?",
         style="friendly",
-        continue_from=run_0,
+        run_id=run_0,
     )
     run_b1 = r_b1.run_id
     print(f"  run  : {run_b1[:8]}...   parent: {run_0[:8]}...")

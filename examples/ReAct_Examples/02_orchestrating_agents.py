@@ -3,7 +3,7 @@ import logging
 
 from dotenv import load_dotenv
 
-from atomic_agentic.agents import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.agents import ReActAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
@@ -23,7 +23,7 @@ def builder_prestep(task: str | None = None, revision_notes: str | None = None) 
     else:
         raise ValueError("Either task or revision_notes must be provided.")
 
-builder = Agent(
+builder = BasicAgent(
     name="CodeBuilderAgent",
     namespace="examples",
     description="""
@@ -44,7 +44,7 @@ builder = Agent(
 def reviewer_prestep(draft_code: str) -> str:
     return f"Please review and provide feedback for the following code: ```python\n{draft_code}\n```"
 
-reviewer = Agent(
+reviewer = BasicAgent(
     name="CodeReviewer",
     namespace="examples",
     description="Reviews draft code from the builder and returns revision suggestions or 'Approved'.",

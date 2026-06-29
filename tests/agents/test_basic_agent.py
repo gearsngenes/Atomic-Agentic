@@ -138,9 +138,9 @@ class TestBasicAgentContextKeys:
     def test_static_role_prompt_produces_no_context_keys(self) -> None:
         agent = make_basic_agent(role_prompt="You are a generic assistant.")
 
-        # Only expect: prompt, continue_from (no context keys)
+        # Only expect: prompt, run_id (no context keys)
         names = [p.name for p in agent.parameters]
-        assert names == ["prompt", "continue_from"]
+        assert names == ["prompt", "run_id"]
 
     def test_placeholder_default_injected_from_prompt_config(self) -> None:
         config = PromptConfig(

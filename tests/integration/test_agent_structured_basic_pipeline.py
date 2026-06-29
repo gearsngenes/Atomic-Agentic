@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.agents.base import Agent
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.tools.base import Tool
@@ -126,7 +125,7 @@ def make_structured_agent(
     engine: StatefulEchoLLMEngine | None = None,
     context_enabled: bool = False,
     records_window: int | None = None,
-) -> tuple[StatefulEchoLLMEngine, Agent, StructuredInvokable]:
+) -> tuple[StatefulEchoLLMEngine, BasicAgent, StructuredInvokable]:
     resolved_engine = engine or StatefulEchoLLMEngine()
     agent = make_agent(
         engine=resolved_engine,
@@ -147,7 +146,7 @@ def make_basic_agent_flow(
     engine: StatefulEchoLLMEngine | None = None,
     context_enabled: bool = False,
     records_window: int | None = None,
-) -> tuple[StatefulEchoLLMEngine, Agent, StructuredInvokable, BasicFlow]:
+) -> tuple[StatefulEchoLLMEngine, BasicAgent, StructuredInvokable, BasicFlow]:
     resolved_engine, agent, structured_agent = make_structured_agent(
         engine=engine,
         context_enabled=context_enabled,
