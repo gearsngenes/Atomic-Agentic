@@ -193,7 +193,7 @@ def main() -> None:
     # The agent cannot know Biscuit's name.
     # ------------------------------------------------------------------ #
     print(f"\n{'═' * _W}")
-    print("  T_B1  ·  Branch B  —  forked from T0  (continue_from=run_0)")
+    print("  T_B1  ·  Branch B  —  forked from T0  (run_id=run_0)")
     print("  ↳ T_A1 and T_A2 are invisible — agent has no dog info")
     print(f"{'═' * _W}")
 

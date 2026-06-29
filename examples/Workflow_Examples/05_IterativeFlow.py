@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from pprint import pprint
 from dotenv import load_dotenv
-from atomic_agentic.agents import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.tools import toolify
 from atomic_agentic import StructuredInvokable
@@ -21,7 +21,7 @@ load_dotenv()
 # ---------------------------------------------------------------------
 # LLM Engine
 # ---------------------------------------------------------------------
-engine = OpenAIEngine(model="gpt-5-mini")
+engine = OpenAIEngine(model="gpt-4o-mini")
 
 
 # ---------------------------------------------------------------------
@@ -54,7 +54,7 @@ def writer_pre(*, prompt: str = "", revision_notes: str = "") -> str:
     )
 
 
-writer_agent = Agent(
+writer_agent = BasicAgent(
     name="story_writer",
     namespace="examples",
     description="Writes and revises short stories from a request and revision notes.",
@@ -97,7 +97,7 @@ def critic_pre(*, draft: str) -> str:
     )
 
 
-critic_agent = Agent(
+critic_agent = BasicAgent(
     name="story_critic",
     namespace="examples",
     description="Critiques a story draft and either approves it or gives revision notes.",

@@ -458,6 +458,7 @@ class ToolAgent(Agent, ABC):
                     d[BlackboardSlot.RESULT_FIELD] = self._preview_blackboard_result(
                         slot.result.result
                     )
+                    d["run_id"] = slot.result.run_id
                 result.append(d)
             return result
         else:
@@ -466,6 +467,8 @@ class ToolAgent(Agent, ABC):
                 d = slot.to_dict()
                 d.pop(BlackboardSlot.RESOLVED_ARGS_FIELD)
                 d.pop(BlackboardSlot.RESULT_FIELD)
+                if slot.is_executed():
+                    d["run_id"] = slot.result.run_id
                 result.append(d)
             return result
     
@@ -1996,6 +1999,8 @@ class ToolAgent(Agent, ABC):
                 TOOL_FIELD: slot.tool,
                 ARGS_FIELD: slot.args,
             }
+            if slot.is_executed():
+                step["run_id"] = slot.result.run_id
             if self.peek_at_cache:
                 step["result"] = self._preview_blackboard_result(slot.result.result)
             extracted.append(step)
@@ -3400,6 +3405,7 @@ class ReActAgent(ToolAgent):
                 TOOL_FIELD: slot.tool,
                 ARGS_FIELD: slot.args,
                 "result_ref": f"<<__s{idx}__>>",
+                "run_id": slot.result.run_id,
             }
 
             if state.step_meta[idx].observable > 0:

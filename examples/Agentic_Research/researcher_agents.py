@@ -1,7 +1,7 @@
 from typing import Any, Mapping
 from dotenv import load_dotenv
 
-from atomic_agentic.agents import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()
@@ -32,7 +32,7 @@ def writer_pre(*, query: str = "", sources: list[str] | None = None, revision_no
 def writer_post(*, result: Any) -> Mapping[str, str]:
     return {"draft": str(result).strip()}
 
-writer = Agent(
+writer = BasicAgent(
     name="report_writer",
     namespace="research",
     description="Drafts and revises an APA-style research report.",
@@ -61,7 +61,7 @@ def critic_pre(*, draft: str) -> str:
 def critic_post(*, result: str) -> Mapping[str, str]:
     return {"revision_notes": str(result).strip()}
 
-critic = Agent(
+critic = BasicAgent(
     name="report_critic",
     namespace="research",
     description="Reviews the report draft and returns revision notes or <<APPROVED>>.",

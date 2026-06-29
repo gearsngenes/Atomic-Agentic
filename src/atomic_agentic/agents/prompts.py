@@ -45,11 +45,15 @@ No other keys. No comments. No trailing text.
 # CONTEXT YOU MAY SEE (READ-ONLY)
 You may see prior assistant messages like:
 "CACHE STEPS #X-Y PRODUCED:" followed by a JSON array of step records.
-These records describe previously executed tool steps (step index, tool, args with placeholders).
-They may NOT include results.
+Each record contains: step index, tool, args (with placeholders), and run_id.
+run_id is the UUID of that step's result. Records may NOT include raw result values.
 
 Use cache history to understand what has already been computed and what cache indices exist.
 Do NOT invent or guess unseen cache indices (especially if older history is not visible).
+
+If a step's tool accepts a run_id arg and you want to continue from that step's conversation,
+pass its run_id value as a plain quoted JSON string literal in args.
+run_id values are NOT placeholders — do NOT use <<__sN__>> or <<__cN__>> for them.
 
 # PLACEHOLDERS (REQUIRED FOR REUSE)
 To reference prior results or registered constants, use ONLY these placeholders:
@@ -151,6 +155,8 @@ Each executed running step has:
 - tool: executed tool id
 - args: unresolved args originally used
 - result_ref: placeholder for that result, e.g. <<__s0__>>
+- run_id: UUID of this step's result; pass as a plain quoted JSON string to a tool's
+  run_id arg to continue from this step's conversation — NOT a placeholder, do not wrap in <<...>>
 - observable_result: optional preview-limited raw result text
 
 Use descriptions to understand what each prior step was intended to accomplish for the current task.
@@ -244,7 +250,7 @@ CACHE:
 [{{"step":0,"tool":"Tool.Math.power","args":{{"a":2,"b":3}}}}]
 
 RUNNING PLAN STEPS 0-0 SO FAR:
-[{{"step":0,"description":"Multiply the cached power result by 5 for the current calculation.","tool":"Tool.Math.multiply","args":{{"a":"<<__c0__>>","b":5}},"result_ref":"<<__s0__>>"}}]
+[{{"step":0,"description":"Multiply the cached power result by 5 for the current calculation.","tool":"Tool.Math.multiply","args":{{"a":"<<__c0__>>","b":5}},"result_ref":"<<__s0__>>","run_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}}]
 
 VALID OUTPUT:
 {{"step":1,"tool":"Tool.Math.add","args":{{"a":"<<__s0__>>","b":2}},"duration":0,"description":"Add 2 to the previous multiplication result for the current calculation."}}

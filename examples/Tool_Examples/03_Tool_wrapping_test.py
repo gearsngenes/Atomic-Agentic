@@ -8,7 +8,7 @@ for AtomicInvokable objects.
 from dotenv import load_dotenv
 from atomic_agentic.tools import Tool
 from atomic_agentic.exceptions import ToolInvocationError, AgentInvocationError
-from atomic_agentic.agents import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 import logging
 
@@ -28,7 +28,7 @@ def to_prompt(topic: str, style: str, *, audience: str = "general") -> str:
 
 # --- 2) Build the Agent ---
 
-agent = Agent(
+agent = BasicAgent(
     name="Writer",
     namespace="agent_wrapped",
     description="Helpful writing assistant.",

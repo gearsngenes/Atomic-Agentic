@@ -15,7 +15,7 @@ Schema produced by this agent:
   audience          (POSITIONAL_OR_KEYWORD, default "general reader")  ← pre_invoke
   output_label      (KEYWORD_ONLY, default "answer")    ← auto-grafted from post_invoke
   include_metadata  (KEYWORD_ONLY, default True)        ← auto-grafted from post_invoke
-  continue_from     (KEYWORD_ONLY, default None)        ← framework-reserved
+  run_id            (KEYWORD_ONLY, default None)        ← framework-reserved
 """
 
 from __future__ import annotations

@@ -1691,6 +1691,8 @@ class TestBlackboardPersistenceAndDisplay:
         assert serialized[0]["status"] == "executed"
         assert "result" not in serialized[0]
         assert "resolved_args" not in serialized[0]
+        assert "run_id" in serialized[0]
+        assert isinstance(serialized[0]["run_id"], str)
 
     def test_blackboard_serialized_with_peek_includes_preview_and_resolved_args(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -1710,6 +1712,8 @@ class TestBlackboardPersistenceAndDisplay:
         assert serialized[0]["result"] == repr(3)
         assert serialized[0]["resolved_args"] == {"x": 1, "y": 2}
         assert serialized[0]["status"] == "executed"
+        assert "run_id" in serialized[0]
+        assert isinstance(serialized[0]["run_id"], str)
 
     def test_blackboard_serialized_peek_applies_preview_limit(self) -> None:
         agent = make_agent(context_enabled=True, blackboard_preview_limit=5)
@@ -1730,6 +1734,23 @@ class TestBlackboardPersistenceAndDisplay:
         assert len(peek_serialized[0]["result"]) == 5 + len("...")
         # result is absent in the non-peek view
         assert "result" not in hidden_serialized[0]
+        # run_id is present in both views for executed slots
+        assert "run_id" in peek_serialized[0]
+        assert "run_id" in hidden_serialized[0]
+
+    def test_blackboard_serialized_unexecuted_slot_has_no_run_id(self) -> None:
+        agent = make_agent(context_enabled=True)
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+        # Script is set but agent is NOT invoked — slots remain in planned/empty state.
+        serialized = agent.blackboard_serialized(peek=False)
+        for slot_dict in serialized:
+            assert "run_id" not in slot_dict
 
     def test_to_dict_includes_tool_agent_diagnostics(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -1875,6 +1896,7 @@ class TestToolAgentRecordRendering:
         assert rendered[0]["content"] == "run"
         assert rendered[1]["content"].startswith("RESPONSE:")
         assert "CACHED STEPS #0-1 PRODUCED" in rendered[1]["content"]
+        assert "'run_id'" in rendered[1]["content"]
 
     def test_render_turn_uses_blackboard_span_only_for_that_turn(self) -> None:
         agent = make_agent(context_enabled=True, peek_at_cache=True)
@@ -2407,6 +2429,7 @@ class TestReActAgent:
         assert "<<__s0__>>" in second_call_text
         assert "observable_result" in second_call_text
         assert "5" in second_call_text
+        assert "run_id" in second_call_text
 
     @pytest.mark.parametrize(
         "raw_response, match",
