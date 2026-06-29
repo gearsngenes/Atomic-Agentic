@@ -12,7 +12,7 @@ Usage:
   - Run as-is to use the STRICT tool.
   - Set use_permissive=True in main() to try the permissive variant.
 """
-from atomic_agentic.agents import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.tools import Tool
 from atomic_agentic.engines.LLMEngines import OpenAIEngine  # swap for another engine if desired
 from typing import List, Optional
@@ -121,7 +121,7 @@ def main(use_permissive: bool = False) -> None:
     engine = OpenAIEngine(model="gpt-4o-mini")
 
     # 2) Build an Agent and install the pre-invoke Tool
-    agent = Agent(
+    agent = BasicAgent(
         name="LessonPlanner",
         namespace="examples",
         description="Builds lesson plans from structured inputs.",

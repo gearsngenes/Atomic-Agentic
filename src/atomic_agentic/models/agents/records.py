@@ -42,10 +42,16 @@ class LLMRecord:
     llm_result:
         The complete LLMResult produced by this generation, including token
         usage, model identity, timing, and run identity.
+
+    system_prompt_name:
+        Key in the producing agent's ``system_prompts`` dict used to generate
+        the system prompt for this LLM call. ``None`` for static or legacy
+        callers that do not participate in the ``system_prompts`` API.
     """
 
     messages: tuple[dict[str, str], ...]
     llm_result: LLMResult
+    system_prompt_name: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.messages, (str, bytes)) or not isinstance(self.messages, (list, tuple)):
@@ -79,12 +85,18 @@ class LLMRecord:
                 "LLMRecord.llm_result must be an LLMResult instance, "
                 f"got {type(self.llm_result).__name__}."
             )
+        if self.system_prompt_name is not None and not isinstance(self.system_prompt_name, str):
+            raise TypeError(
+                "LLMRecord.system_prompt_name must be a str or None, "
+                f"got {type(self.system_prompt_name).__name__}."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         return {
             "messages": list(self.messages),
             "llm_result": self.llm_result.to_dict(),
+            "system_prompt_name": self.system_prompt_name,
         }
 
 
