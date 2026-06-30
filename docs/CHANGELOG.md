@@ -5,6 +5,75 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a14] - 2026-06-29
+
+### Added
+
+- `BasicAgent` — concrete single-turn LLM agent exposed from
+  `atomic_agentic.agents`. Accepts `role_prompt: str | PromptConfig | None`;
+  renders the role prompt (with optional placeholder context) before each LLM
+  call. Replaces direct instantiation of `Agent`, which is now abstract.
+- `PromptConfig` — frozen dataclass in `models/agents/prompts.py` pairing a
+  format-string template with metadata and per-placeholder defaults; parameters
+  are auto-discovered from `{placeholder}` slots; `render(inputs)` fills them.
+  Exported from `atomic_agentic.models.agents`.
+- `LLMRecord.system_prompt_name: str | None` — records which `system_prompts`
+  key produced the system prompt for a given LLM call (`None` for static /
+  legacy callers).
+- `Agent.context_keys` — constructor parameter
+  `(list[str] | list[ParamSpec] | None)` declaring which inputs are consumed by
+  role-prompt context rendering rather than forwarded to `pre_invoke`.
+- `Agent.system_prompts` read-only property and `Agent.update_prompt(key,
+  config)` for per-key prompt management; `BasicAgent.update_prompt` raises
+  `AgentError` for the reserved `"role"` key.
+- `RUN_ID_PARAM` — canonical `ParamSpec` constant in `constants/agents.py`
+  defining the framework-reserved `run_id` keyword argument grafted onto every
+  agent's composed schema.
+- `AtomicInvokable.filter_inputs` now injects defaults for absent non-variadic
+  parameters with non-`NO_VAL` defaults, removing the need for call-site
+  duplication in `Agent._split_inputs`.
+- All three blackboard rendering surfaces now include `run_id` for every
+  executed slot: `ToolAgent.blackboard_serialized()`, `ToolAgent.render_turn()`,
+  and `ReActAgent._build_react_messages()`. Unexecuted (PLANNED/EMPTY) slots
+  carry no `run_id` key.
+- `PLANNER_PROMPT` and `ORCHESTRATOR_PROMPT` updated to document the `run_id`
+  field in step records and clarify it is a plain quoted string literal, not a
+  `<<__sN__>>` placeholder.
+
+### Changed
+
+- breaking: `Agent` is now an abstract base class (`ABC`). Direct instantiation
+  raises `TypeError`; use `BasicAgent` instead.
+- breaking: `passthrough_inputs` constructor parameter removed from `Agent`.
+  Post-invoke parameters beyond the result key are now auto-grafted into the
+  agent schema from the `post_invoke` callable's signature — no explicit
+  declaration needed.
+- breaking: framework-reserved parameter renamed `continue_from` → `run_id`
+  across all agents, examples, and tests.
+- breaking: `run_id="new"` mode removed. To start a context-free invocation use
+  `context_enabled=False`; for a parallel conversation root use a separate
+  agent instance.
+- `Agent._invoke` / `_ainvoke` signature changed to
+  `(turns, prompt, context: dict)`; `context` carries inputs consumed by
+  role-prompt rendering.
+- `Agent.description` property overridden to append a `run_id`-usage note when
+  the agent is registered as a sub-tool, ensuring orchestrating LLMs see
+  correct argument semantics in the registered schema.
+
+### Removed
+
+- Direct `Agent` instantiation — class is now abstract.
+- `Agent.passthrough_inputs` constructor parameter and the internal
+  `_normalize_passthrough_inputs` / `_validate_passthrough_parameter_shapes`
+  helpers.
+- Redundant default-fill loop from `Agent._split_inputs` — superseded by
+  `filter_inputs` default injection.
+
+### Fixed
+
+- `examples/Workflow_Examples/05_IterativeFlow.py`: `gpt-5-mini` typo
+  corrected to `gpt-4o-mini`.
+
 ## [2.0.0a13] - 2026-06-27
 
 ### Added
