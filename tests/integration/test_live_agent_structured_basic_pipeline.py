@@ -11,7 +11,7 @@ try:
 except ImportError:  # pragma: no cover
     load_dotenv = None
 
-from atomic_agentic.agents.base import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.results.workflows import BasicFlowResult
@@ -75,8 +75,8 @@ def _openai_engine() -> OpenAIEngine:
         pytest.skip(str(exc))
 
 
-def make_live_openai_agent() -> Agent:
-    return Agent(
+def make_live_openai_agent() -> BasicAgent:
+    return BasicAgent(
         name="live_openai_writer_agent",
         namespace="integration",
         description="Live OpenAI writer agent for integration tests.",
@@ -88,7 +88,7 @@ def make_live_openai_agent() -> Agent:
     )
 
 
-def make_live_openai_basic_flow() -> tuple[Agent, StructuredInvokable, BasicFlow]:
+def make_live_openai_basic_flow() -> tuple[BasicAgent, StructuredInvokable, BasicFlow]:
     agent = make_live_openai_agent()
     structured_agent = StructuredInvokable(
         component=agent,
@@ -167,7 +167,7 @@ class TestLiveAgentStructuredBasicPipeline:
         assert structured_snapshot["name"] == structured_agent.name
 
         agent_snapshot = structured_snapshot["component"]
-        assert agent_snapshot["type"] == "Agent"
+        assert agent_snapshot["type"] == "BasicAgent"
         assert agent_snapshot["name"] == agent.name
         assert agent_snapshot["llm"]["type"] == "OpenAIEngine"
         assert "api_key" not in str(data).lower()

@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from abc import ABC, abstractmethod
 from typing import (
     Any,
     Callable,
@@ -12,6 +14,7 @@ from typing import (
 from dataclasses import replace
 from datetime import datetime, timezone
 import logging
+import warnings
 
 from ..exceptions import (
     AgentError,
@@ -25,140 +28,55 @@ from ..engines.LLMEngines import LLMEngine
 from ..models.results import AgentResult, LLMModelData
 from ..tools import Tool, toolify
 from ..models.agents.records import AgentRecord, LLMRecord
+from ..models.agents.prompts import PromptConfig
 
 logger = logging.getLogger(__name__)
 
 from .tools import identity_pre_tool, identity_post_tool
+from ..constants.agents import RUN_ID_PARAM
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent
 # ───────────────────────────────────────────────────────────────────────────────
-class Agent(AtomicInvokable):
+class Agent(AtomicInvokable, ABC):
     """
-    Schema-driven LLM Agent.
+    Abstract base for schema-driven LLM agents.
 
-    An Agent is a stateful software unit that points to an LLM engine and carries
-    a system/role prompt. It accepts a single input mapping and uses a
-    pre-invoke Tool to convert a subset of that mapping into the current prompt
-    string for the protected invocation path.
+    ``Agent`` owns the full invocation lifecycle shell — input filtering,
+    context extraction, turn selection, pre/post-invoke dispatch, record
+    management — but delegates the actual LLM work to the ``_invoke`` /
+    ``_ainvoke`` abstract methods that concrete subclasses implement.
 
-    Core behavior
-    -------------
-    ``invoke(inputs: Mapping[str, Any]) -> AgentResult`` follows this lifecycle:
+    Lifecycle (four-tier input model)
+    ----------------------------------
+    ``invoke(inputs)`` follows this sequence:
 
-    1) Filter the caller-provided input mapping through the Agent's composed
-       ``AtomicInvokable`` input contract.
-    2) Split the filtered mapping into:
-       - ``pre_invoke`` inputs, used to produce the current prompt.
-       - post-invoke passthrough inputs, copied by configured name.
-    3) ``pre_invoke.invoke(pre_inputs) -> str``.
-    4) Select prior ``AgentRecord`` records according to ``context_enabled`` and
-       ``records_window``.
-    5) Delegate ``turns`` and ``prompt`` to ``_invoke(...)`` or ``_ainvoke(...)``
-       to obtain a 2-tuple of a draft ``AgentRecord`` (``final_result`` is
-       ``None`` at this point) and a metadata dict carrying LLM accounting.
-    6) The protected invocation path owns any provider-facing message rendering
-       it needs, usually through ``build_messages(...)``.
-    7) Assemble post-invoke inputs from:
-       - the raw response under ``post_result_key``.
-       - configured passthrough inputs.
-    8) ``post_invoke.invoke(post_inputs) -> final output``.
-    9) Construct the ``AgentResult`` via ``make_result(**metadata)``; complete
-       the draft record (``final_result`` filled in) and store it if
-       ``context_enabled``; return the ``AgentResult``.
+    1. ``filter_inputs`` collects declared keys and injects defaults.
+    2. Framework-reserved args (``run_id``) are popped.
+    3. ``_build_context`` extracts declared context keys (and any
+       instance-state values added by a subclass override) into ``context``.
+    4. Remaining inputs are sliced into ``pre_inputs`` and ``post_inputs``.
+    5. Turns are selected from history if ``context_enabled`` is True.
+    6. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
+    7. ``_invoke(turns, prompt, context)`` performs LLM work.
+    8. ``post_invoke`` transforms the raw response to the final result.
+    9. A completed ``AgentRecord`` is always appended to ``_records``.
 
-    Inputs and schema
-    -----------------
-    Inputs are always mapping-shaped. The Agent-facing parameter schema is
-    composed from:
+    Schema composition
+    ------------------
+    The agent's parameter schema is composed at construction time from:
 
-    - all ``pre_invoke`` parameters; plus
-    - post-only passthrough parameters explicitly named in ``passthrough_inputs``.
+    - All ``pre_invoke`` parameters.
+    - Post-only non-result non-variadic parameters, grafted as KEYWORD_ONLY.
+    - ``context_keys`` parameters, grafted as KEYWORD_ONLY.
+    - ``run_id`` (KEYWORD_ONLY, default None).
 
-    If a passthrough name exists in both ``pre_invoke`` and ``post_invoke``, the
-    ``pre_invoke`` parameter owns the Agent-facing schema/default. This keeps the
-    prompt-building view and post-processing view of the same input value
-    consistent.
-
-    Type annotations are descriptive metadata for introspection. The Agent
-    validates routing names and structural parameter shape, but it does not try
-    to enforce semantic type compatibility between pre/post annotations. Runtime
-    value validation belongs to the Tools/callables that consume those values.
-
-    History and context
+    ``context_enabled``
     -------------------
-    - The Agent keeps an in-memory history of ``AgentRecord`` objects.
-    - ``records_window`` controls how many turns from the tail of stored history
-      are selected for the protected invocation path.
-    - Selected turns are rendered into provider-facing messages only when an
-      invocation path calls ``build_messages(...)`` or equivalent rendering logic.
-    - Stored history is append-only; no trimming or summarization is performed by
-      default.
-    - ``records`` is the canonical stored turn view.
-
-    Parameters
-    ----------
-    name : str
-        Logical name for this agent.
-    description : str
-        Short, human-readable description.
-    llm_engine : LLMEngine
-        Engine used to perform the model call. Must be an instance of
-        ``LLMEngine``.
-    filter_extraneous_inputs : Optional[bool], default None
-        Agent-level filtering policy. If None, inherits from ``pre_invoke``.
-    role_prompt : Optional[str], default None
-        Optional system prompt. If None or empty, a default assistant prompt is
-        used.
-    context_enabled : bool, default True
-        If True, prior turns are selected for the protected invocation path and
-        completed invocations are stored as canonical turns. If False, no prior
-        turns are selected and no new turns are recorded.
-    pre_invoke : Optional[Tool or Callable], default None
-        Tool that converts pre-invoke inputs into a prompt string. If None, a
-        strict identity Tool is used that accepts ``{"prompt": str}``.
-    post_invoke : Optional[Tool or Callable], default None
-        Tool that converts the raw result from ``_invoke`` plus configured
-        passthrough inputs into the final return value.
-    post_result_key : Optional[str], default None
-        Name of the post-invoke parameter that receives the raw ``_invoke``
-        result. If None, defaults to the first declared post-invoke parameter.
-        The result key may name any declared post-invoke parameter, including a
-        variadic parameter; post-invoke binding owns shape validation.
-    passthrough_inputs : Optional[list[str]], default None
-        Post-invoke parameter names to expose as Agent inputs and pass through by
-        name. Names must refer to post-invoke parameters and must not include
-        ``post_result_key``. Post-only passthrough parameters are grafted into
-        the Agent schema as keyword-only parameters.
-    records_window : Optional[int], default None
-        Turn-selection window. None selects all stored turns; 0 selects no prior
-        turns. Stored history is never trimmed.
-    response_preview_limit : Optional[int], default None
-        Optional character limit applied only when rendering stored assistant
-        responses into future LLM-facing message history. Stored turn values are
-        not mutated.
-    assistant_response_source : Literal["raw", "final"], default "raw"
-        Whether rendered assistant history should use each turn's raw response or
-        final post-processed response.
-
-    Properties (selected)
-    ---------------------
-    name : str (read-only)
-    description : str (read-only)
-    role_prompt : str (read-write)
-    llm_engine : LLMEngine (read-write, type-enforced)
-    context_enabled : bool (read-write)
-    records_window : Optional[int] (read-write)
-    response_preview_limit : Optional[int] (read-only, set at construction)
-    assistant_response_source : Literal["raw", "final"] (read-only, set at construction)
-    records : List[AgentRecord] (read-only canonical turn view)
-    pre_invoke : Tool (read-only lifecycle reference)
-    post_invoke : Tool (read-only lifecycle reference)
-    post_result_key : str (read-only)
-    passthrough_inputs : List[str] (read-only copy)
+    ``True``:  ``get_conversation`` selects prior turns for each invocation.
+    ``False``: turns are always ``[]``; ``run_id`` is ignored.
+    Records are appended unconditionally regardless of this setting.
     """
-
-    DEFAULT_ROLE_PROMPT = "You are a helpful AI assistant"
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -170,13 +88,12 @@ class Agent(AtomicInvokable):
         description: str,
         llm_engine: LLMEngine,
         filter_extraneous_inputs: Optional[bool] = None,
-        role_prompt: Optional[str] = None,
         context_enabled: bool = True,
         *,
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
         post_result_key: Optional[str] = None,
-        passthrough_inputs: Optional[list[str]] = None,
+        context_keys: list[str] | list[ParamSpec] | None = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         assistant_response_source: Literal["raw", "final"] = "raw",
@@ -190,9 +107,7 @@ class Agent(AtomicInvokable):
                 pre_invoke,
                 name="pre_invoke",
                 namespace=name,
-                description=(
-                    f"The tool that preprocesses inputs into a string for Agent {name}"
-                ),
+                description=f"The tool that preprocesses inputs into a string for Agent {name}",
             )
 
         if pre_tool.return_type.lower() not in {"any", "str"}:
@@ -200,46 +115,38 @@ class Agent(AtomicInvokable):
                 "Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke"
             )
 
-        # Prepare post_invoke Tool, passthrough config, and composed Agent schema.
-        post_tool, resolved_post_result_key, resolved_passthrough_inputs, agent_parameters = (
+        # Prepare post_invoke Tool, context_keys, and composed Agent schema.
+        post_tool, resolved_post_result_key, context_key_params, agent_parameters = (
             self._prepare_agent_lifecycle_config(
                 post_invoke=post_invoke,
                 agent_name=name,
                 pre_parameters=pre_tool.parameters,
                 post_result_key=post_result_key,
-                passthrough_inputs=passthrough_inputs,
+                context_keys=context_keys,
             )
         )
 
-        # Store lifecycle components and post-processing configuration.
+        # Store lifecycle components.
         self._pre_invoke = pre_tool
         self._post_invoke = post_tool
         self._post_result_key = resolved_post_result_key
-        self._passthrough_inputs = resolved_passthrough_inputs
+        self._context_key_names: frozenset[str] = frozenset(
+            p.name for p in context_key_params
+        )
+
+        # System prompt registry — subclasses populate after super().__init__.
+        self._system_prompts: dict[str, PromptConfig] = {}
 
         # Store Agent runtime configuration.
         self._llm_engine: LLMEngine = llm_engine
-        self._role_prompt: str = Agent.DEFAULT_ROLE_PROMPT
-        if role_prompt is not None:
-            if not isinstance(role_prompt, str):
-                raise TypeError(
-                    f"role_prompt must be of type 'str' or 'None', but got {type(role_prompt).__name__}"
-                )
-            cleaned_role_prompt = role_prompt.strip()
-            if cleaned_role_prompt:
-                self._role_prompt = cleaned_role_prompt
         self._context_enabled: bool = context_enabled
 
-        # records_window: strict int semantics (>= 0). None means select all stored turns.
         if records_window is not None and (not type(records_window) is int or records_window < 0):
             raise AgentError("records_window must be an int >= 0 or be 'None'.")
         self._records_window: Optional[int] = records_window
 
-        # Stored turn history.
-        # We never trim storage; we only limit which turns are selected per invocation.
         self._records: List[AgentRecord] = []
 
-        # Store history-rendering controls (frozen at construction).
         if response_preview_limit is None:
             self._response_preview_limit = None
         elif type(response_preview_limit) is not int or response_preview_limit <= 0:
@@ -257,17 +164,17 @@ class Agent(AtomicInvokable):
             else pre_tool.filter_extraneous_inputs
         )
 
-        # Delegate to parent with the composed Agent schema.
         super().__init__(
             name=name,
             namespace=namespace,
             description=description,
             parameters=agent_parameters,
             return_type=self._post_invoke.return_type,
-            filter_extraneous_inputs=resolved_filter_extraneous_inputs,)
+            filter_extraneous_inputs=resolved_filter_extraneous_inputs,
+        )
 
     # ------------------------------------------------------------------ #
-    # agent lifecycle configuration and validation
+    # Agent lifecycle configuration and validation
     # ------------------------------------------------------------------ #
     @classmethod
     def _prepare_post_invoke_tool(
@@ -276,40 +183,7 @@ class Agent(AtomicInvokable):
         candidate: Optional[Union[Callable, AtomicInvokable]],
         agent_name: str,
     ) -> Tool:
-        """
-        Normalize the configured post-invoke component into a Tool.
-
-        This helper owns only post-invoke Tool preparation:
-
-        - If ``candidate`` is None, the shared identity post-invoke Tool is used.
-        - Otherwise, ``candidate`` is normalized through ``toolify(...)``.
-        - The resulting Tool must expose at least one parameter, because one
-          declared parameter must receive the raw result from ``_invoke(...)``.
-
-        It intentionally does not resolve ``post_result_key`` or validate
-        passthrough routing. Those concerns are handled by the routing helpers so
-        construction-time lifecycle preparation can be read as a sequence of
-        small, explicit steps.
-
-        Parameters
-        ----------
-        candidate : Optional[Union[Callable, AtomicInvokable]]
-            User-provided post-invoke component, or None for the default identity
-            post-invoke Tool.
-        agent_name : str
-            Agent name used as the namespace when wrapping a plain callable or
-            invokable into a Tool.
-
-        Returns
-        -------
-        Tool
-            Prepared post-invoke Tool.
-
-        Raises
-        ------
-        AgentError
-            If the prepared post-invoke Tool has no declared parameters.
-        """
+        """Normalize the configured post-invoke component into a Tool."""
         if candidate is None:
             post_tool = identity_post_tool
         else:
@@ -326,116 +200,12 @@ class Agent(AtomicInvokable):
         return post_tool
 
     @staticmethod
-    def _normalize_passthrough_inputs(
-        passthrough_inputs: Optional[list[str]],
-    ) -> tuple[str, ...]:
-        """
-        Normalize configured post-invoke passthrough input names.
-
-        ``passthrough_inputs`` is an explicit list of post-invoke parameter names
-        that should also be exposed on the Agent's input contract and copied from
-        the filtered Agent input mapping into ``post_invoke``.
-
-        This helper performs only list/name normalization:
-
-        - None becomes an empty tuple.
-        - The value must otherwise be a list of strings.
-        - Names are stripped.
-        - Empty names are rejected.
-        - Duplicate names after stripping are rejected.
-
-        It intentionally does not check whether the names exist on
-        ``post_invoke``. That belongs to routing validation, after the post Tool
-        and its parameter map are known.
-
-        Parameters
-        ----------
-        passthrough_inputs : Optional[list[str]]
-            User-provided passthrough input names.
-
-        Returns
-        -------
-        tuple[str, ...]
-            Normalized passthrough names.
-
-        Raises
-        ------
-        AgentError
-            If the value is not None or list[str], if any name is empty, or if
-            duplicate normalized names are present.
-        """
-        if passthrough_inputs is None:
-            return ()
-
-        if not isinstance(passthrough_inputs, list):
-            raise AgentError("passthrough_inputs must be a list of strings or None.")
-
-        normalized: list[str] = []
-        seen: set[str] = set()
-        duplicates: set[str] = set()
-
-        for index, name in enumerate(passthrough_inputs):
-            if not isinstance(name, str) or not name.strip():
-                raise AgentError(
-                    f"passthrough_inputs[{index}] must be a non-empty string."
-                )
-
-            cleaned_name = name.strip()
-            if cleaned_name in seen:
-                duplicates.add(cleaned_name)
-            else:
-                seen.add(cleaned_name)
-
-            normalized.append(cleaned_name)
-
-        if duplicates:
-            raise AgentError(
-                "passthrough_inputs must not contain duplicate names; "
-                f"got {sorted(duplicates)!r}."
-            )
-
-        return tuple(normalized)
-
-    @staticmethod
     def _resolve_post_result_key(
         *,
         post_result_key: Optional[str],
         post_params: list[ParamSpec],
     ) -> str:
-        """
-        Resolve the post-invoke parameter that receives the raw ``_invoke`` result.
-
-        If ``post_result_key`` is None, the first declared post-invoke parameter
-        is used. If provided, the key must be a non-empty string after stripping.
-
-        This helper only resolves and normalizes the key. It does not check
-        whether the resolved name exists in ``post_params``; that is handled by
-        ``_validate_post_routing_contract``.
-
-        A resolved result key may name any declared post-invoke parameter,
-        including a variadic parameter. The Agent's responsibility is only to
-        route the raw result under the configured key; the post-invoke Tool owns
-        binding and shape validation.
-
-        Parameters
-        ----------
-        post_result_key : Optional[str]
-            User-provided result parameter name, or None to use the first
-            post-invoke parameter.
-        post_params : list[ParamSpec]
-            Declared post-invoke parameters.
-
-        Returns
-        -------
-        str
-            Resolved result key.
-
-        Raises
-        ------
-        AgentError
-            If ``post_params`` is empty, or if an explicit ``post_result_key`` is
-            not a non-empty string.
-        """
+        """Resolve the post-invoke parameter that receives the raw ``_invoke`` result."""
         if not post_params:
             raise AgentError("Agent.post_invoke must expect at least 1 argument")
 
@@ -451,281 +221,210 @@ class Agent(AtomicInvokable):
     def _validate_post_routing_contract(
         *,
         post_result_key: str,
-        passthrough_inputs: tuple[str, ...],
         post_params: list[ParamSpec],
     ) -> None:
-        """
-        Validate the name-level routing contract into ``post_invoke``.
-
-        This helper validates whether the Agent can route values into the
-        configured post-invoke Tool in principle:
-
-        - ``post_result_key`` must name a declared post-invoke parameter.
-        - ``post_result_key`` must not also be configured as a passthrough input.
-        - Every passthrough input must name a declared post-invoke parameter.
-        - Every required, non-variadic post-invoke parameter must be reachable
-          from either ``post_result_key`` or ``passthrough_inputs``.
-
-        This helper intentionally does not validate whether a required
-        passthrough value will actually be present in a particular invocation.
-        Runtime value validation remains the responsibility of the post-invoke
-        Tool and the callable it wraps.
-
-        Parameters
-        ----------
-        post_result_key : str
-            Resolved post-invoke parameter name that receives the raw
-            ``_invoke`` result.
-        passthrough_inputs : tuple[str, ...]
-            Normalized passthrough input names.
-        post_params : list[ParamSpec]
-            Declared post-invoke parameters.
-
-        Raises
-        ------
-        AgentError
-            If routing names are unknown, ambiguous, or insufficient to satisfy
-            required post-invoke parameters.
-        """
-        post_param_map = {param.name: param for param in post_params}
-        declared_post_param_names = set(post_param_map)
-
-        if post_result_key not in declared_post_param_names:
+        """Validate that ``post_result_key`` names a declared post-invoke parameter."""
+        post_param_names = {p.name for p in post_params}
+        if post_result_key not in post_param_names:
             raise AgentError(
                 "post_result_key must name one of post_invoke's declared parameters; "
                 f"got {post_result_key!r}."
             )
 
-        if post_result_key in passthrough_inputs:
-            raise AgentError(
-                "post_result_key must not be one of the passthrough input names."
-            )
+    @staticmethod
+    def _normalize_context_keys(
+        context_keys: list[str] | list[ParamSpec] | None,
+    ) -> list[ParamSpec]:
+        """Normalise ``context_keys`` to a list of KEYWORD_ONLY ParamSpecs.
 
-        unknown_passthrough_inputs = set(passthrough_inputs) - declared_post_param_names
-        if unknown_passthrough_inputs:
-            raise AgentError(
-                "passthrough_inputs must name post_invoke parameters; "
-                f"got unknown passthrough input(s): {sorted(unknown_passthrough_inputs)!r}."
-            )
-
+        ``list[str]``      → KEYWORD_ONLY ParamSpecs with ``default=NO_VAL``.
+        ``list[ParamSpec]`` → coerced to KEYWORD_ONLY (variadic items rejected).
+        ``None``            → ``[]``.
+        Duplicate names and empty strings are rejected.
+        """
+        if context_keys is None:
+            return []
+        if not isinstance(context_keys, list):
+            raise AgentError("context_keys must be a list of str, a list of ParamSpec, or None.")
         variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
-        provided_post_keys = {post_result_key} | set(passthrough_inputs)
-        required_post_keys = {
-            param.name
-            for param in post_params
-            if param.kind not in variadic_kinds
-            and param.default is NO_VAL
-        }
-
-        missing_required = required_post_keys - provided_post_keys
-        if missing_required:
-            raise AgentError(
-                "Agent.post_invoke required parameter(s) are not satisfied by "
-                "post_result_key, passthrough_inputs, or defaults: "
-                f"{sorted(missing_required)!r}"
-            )
+        result: list[ParamSpec] = []
+        seen: set[str] = set()
+        for i, item in enumerate(context_keys):
+            if isinstance(item, str):
+                name = item.strip()
+                if not name:
+                    raise AgentError(f"context_keys[{i}] must be a non-empty string.")
+                param = ParamSpec(
+                    name=name, index=i, kind=ParamSpec.KEYWORD_ONLY,
+                    type="Any", default=NO_VAL,
+                )
+            elif isinstance(item, ParamSpec):
+                if item.kind in variadic_kinds:
+                    raise AgentError(
+                        f"context_keys[{i}] ({item.name!r}) must not be variadic; "
+                        f"got kind {item.kind!r}."
+                    )
+                param = ParamSpec(
+                    name=item.name, index=i, kind=ParamSpec.KEYWORD_ONLY,
+                    type=item.type, default=item.default,
+                )
+            else:
+                raise AgentError(
+                    f"context_keys items must be str or ParamSpec; "
+                    f"got {type(item).__name__} at index {i}."
+                )
+            if param.name in seen:
+                raise AgentError(f"context_keys contains duplicate name {param.name!r}.")
+            seen.add(param.name)
+            result.append(param)
+        return result
 
     @staticmethod
-    def _validate_passthrough_parameter_shapes(
-        *,
-        passthrough_inputs: tuple[str, ...],
-        pre_parameters: list[ParamSpec],
+    def _validate_pre_post_overlap_shapes(
+        pre_params: list[ParamSpec],
         post_params: list[ParamSpec],
     ) -> None:
+        """Validate that overlapping pre/post parameter names have compatible variadic shapes.
+
+        Both must be non-variadic, or both must be the same variadic kind.
+        A mismatch raises ``AgentError``.
         """
-        Validate structural compatibility for configured passthrough parameters.
-
-        Passthrough validation is intentionally shape-focused rather than
-        type-sensitive. The Agent only needs to know whether a passthrough name
-        can be routed deterministically between the Agent input mapping and
-        ``post_invoke``. It does not enforce semantic compatibility between
-        annotation strings.
-
-        Rules
-        -----
-        - A post-only passthrough parameter must be non-variadic, because the
-          Agent grafts post-only passthroughs into its schema as named
-          keyword-only inputs.
-        - If a passthrough name exists in both ``pre_invoke`` and
-          ``post_invoke``, both sides must either be non-variadic or must be the
-          same variadic kind.
-        - Type strings are descriptive metadata and are not compared here.
-
-        Parameters
-        ----------
-        passthrough_inputs : tuple[str, ...]
-            Normalized passthrough input names.
-        pre_parameters : list[ParamSpec]
-            Declared pre-invoke parameters.
-        post_params : list[ParamSpec]
-            Declared post-invoke parameters.
-
-        Raises
-        ------
-        AgentError
-            If a passthrough parameter has an unsupported variadic shape.
-        """
-        pre_param_map = {param.name: param for param in pre_parameters}
-        post_param_map = {param.name: param for param in post_params}
+        pre_map = {p.name: p for p in pre_params}
+        post_map = {p.name: p for p in post_params}
         variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
-
-        for name in passthrough_inputs:
-            post_param = post_param_map.get(name)
-            if post_param is None:
+        for name in pre_map.keys() & post_map.keys():
+            pre = pre_map[name]
+            post = post_map[name]
+            pre_v = pre.kind in variadic_kinds
+            post_v = post.kind in variadic_kinds
+            if pre_v != post_v or (pre_v and pre.kind != post.kind):
                 raise AgentError(
-                    "passthrough_inputs must name post_invoke parameters; "
-                    f"got unknown passthrough input {name!r}."
+                    f"Overlapping pre/post parameter {name!r}: both must be non-variadic "
+                    f"or both must be the same variadic kind; "
+                    f"got {pre.kind!r} (pre_invoke) and {post.kind!r} (post_invoke)."
                 )
 
-            pre_param = pre_param_map.get(name)
-            post_is_variadic = post_param.kind in variadic_kinds
+    @staticmethod
+    def _warn_reserved_name_collisions(
+        pre_params: list[ParamSpec],
+        post_params: list[ParamSpec],
+        context_key_names: frozenset[str],
+    ) -> None:
+        """Warn or raise when a pre/post param name collides with a context key or reserved arg.
 
-            if pre_param is None:
-                if post_is_variadic:
-                    raise AgentError(
-                        "Post-only passthrough inputs must be non-variadic; "
-                        f"got {name!r} with kind {post_param.kind!r}."
-                    )
+        Context-key collisions always warn: the param will never receive a value.
+
+        Reserved-arg collisions are tiered on ``run_id``:
+        - Semantically identical to ``RUN_ID_PARAM`` (name/kind/type/default match): warn
+          (redundant declaration; the framework grafts it automatically).
+        - Semantically different: raise ``AgentError`` (true collision — the caller's
+          param would silently shadow the framework's meaning).
+        """
+        reserved_agent_args = frozenset({"run_id"})
+        all_reserved = context_key_names | reserved_agent_args
+        checked: set[str] = set()
+        all_params = (
+            [(p, "pre_invoke") for p in pre_params]
+            + [(p, "post_invoke") for p in post_params]
+        )
+        for param, source in all_params:
+            if param.name not in all_reserved or param.name in checked:
                 continue
-
-            pre_is_variadic = pre_param.kind in variadic_kinds
-            if pre_is_variadic != post_is_variadic:
-                raise AgentError(
-                    "Overlapping passthrough inputs must both be non-variadic or "
-                    "both be the same variadic kind; "
-                    f"got {name!r} as {pre_param.kind!r} and {post_param.kind!r}."
+            checked.add(param.name)
+            if param.name in context_key_names:
+                warnings.warn(
+                    f"{param.name!r} declared in {source} will be popped from inputs "
+                    "before reaching it (a context key); it will never receive a "
+                    "caller-supplied value.",
+                    UserWarning,
+                    stacklevel=4,
                 )
-
-            if pre_is_variadic and pre_param.kind != post_param.kind:
-                raise AgentError(
-                    "Overlapping variadic passthrough inputs must have the same kind; "
-                    f"got {name!r} as {pre_param.kind!r} and {post_param.kind!r}."
+            elif param.name == "run_id":
+                semantically_equal = (
+                    param.kind == RUN_ID_PARAM.kind
+                    and param.type == RUN_ID_PARAM.type
+                    and param.default == RUN_ID_PARAM.default
+                )
+                if semantically_equal:
+                    warnings.warn(
+                        f"'run_id' declared in {source} is redundant; "
+                        "the framework grafts it automatically.",
+                        UserWarning,
+                        stacklevel=4,
+                    )
+                else:
+                    raise AgentError(
+                        f"'run_id' declared in {source} conflicts with the "
+                        "framework-reserved 'run_id' parameter "
+                        "(kind, type, or default mismatch)."
+                    )
+            else:
+                warnings.warn(
+                    f"{param.name!r} declared in {source} will be popped from inputs "
+                    "before reaching it (a reserved agent argument); it will never "
+                    "receive a caller-supplied value.",
+                    UserWarning,
+                    stacklevel=4,
                 )
 
     @staticmethod
     def _compose_agent_parameters(
         *,
-        pre_parameters: list[ParamSpec],
+        pre_params: list[ParamSpec],
         post_params: list[ParamSpec],
-        passthrough_inputs: tuple[str, ...],
+        result_key: str,
+        context_key_params: list[ParamSpec],
     ) -> list[ParamSpec]:
+        """Compose the agent-facing parameter schema from the four-tier model.
+
+        Graft A: post-only non-result non-variadic params (as KEYWORD_ONLY).
+        Graft B: context_key_params (as KEYWORD_ONLY).
+        Graft C: ``run_id`` (KEYWORD_ONLY, default=None).
+
+        All grafts are inserted before an existing ``**kwargs`` parameter.
+        Pre's ``ParamSpec`` wins on name overlaps with post params.
         """
-        Compose the Agent-facing parameter schema from pre and post lifecycle inputs.
+        composed = list(pre_params)
+        pre_names = {p.name for p in pre_params}
+        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
 
-        The composed Agent schema is pre-invoke-owned by default:
-
-        - All pre-invoke parameters are retained.
-        - Passthrough names that already exist in pre-invoke are not replaced.
-          This preserves the pre-invoke ``ParamSpec`` as the Agent-facing
-          contract, including its default.
-        - Passthrough names that exist only in post-invoke are grafted into the
-          Agent schema as keyword-only parameters.
-        - Grafted keyword-only passthroughs are inserted before an existing
-          ``**kwargs`` parameter if pre-invoke declares one.
-        - The final list is reindexed so it satisfies the ``AtomicInvokable``
-          parameter contract.
-
-        This helper assumes routing and passthrough shape validation have already
-        run. It still raises a clear ``AgentError`` if a passthrough name cannot
-        be found in ``post_params`` so misuse fails explicitly.
-
-        Parameters
-        ----------
-        pre_parameters : list[ParamSpec]
-            Declared pre-invoke parameters.
-        post_params : list[ParamSpec]
-            Declared post-invoke parameters.
-        passthrough_inputs : tuple[str, ...]
-            Normalized passthrough input names.
-
-        Returns
-        -------
-        list[ParamSpec]
-            Reindexed Agent-facing parameter list.
-
-        Raises
-        ------
-        AgentError
-            If a passthrough name does not exist in post-invoke parameters.
-        """
-        pre_param_map = {param.name: param for param in pre_parameters}
-        post_param_map = {param.name: param for param in post_params}
-
-        composed_parameters = list(pre_parameters)
-        grafted_parameters: list[ParamSpec] = []
-
-        for name in passthrough_inputs:
-            if name in pre_param_map:
-                continue
-
-            post_param = post_param_map.get(name)
-            if post_param is None:
-                raise AgentError(
-                    "passthrough_inputs must name post_invoke parameters; "
-                    f"got unknown passthrough input {name!r}."
-                )
-
-            grafted_parameters.append(
-                ParamSpec(
-                    name=post_param.name,
-                    index=0,
-                    kind=ParamSpec.KEYWORD_ONLY,
-                    type=post_param.type,
-                    default=post_param.default,
-                )
-            )
-
-        if grafted_parameters:
-            varkw_index = next(
-                (
-                    index
-                    for index, param in enumerate(composed_parameters)
-                    if param.kind == ParamSpec.VAR_KEYWORD
-                ),
+        def _insert_before_varkw(
+            lst: list[ParamSpec], items: list[ParamSpec]
+        ) -> list[ParamSpec]:
+            if not items:
+                return lst
+            idx = next(
+                (i for i, p in enumerate(lst) if p.kind == ParamSpec.VAR_KEYWORD),
                 None,
             )
+            return lst[:idx] + items + lst[idx:] if idx is not None else lst + items
 
-            if varkw_index is None:
-                composed_parameters.extend(grafted_parameters)
-            else:
-                composed_parameters = (
-                    composed_parameters[:varkw_index]
-                    + grafted_parameters
-                    + composed_parameters[varkw_index:]
+        # Graft A: post-only non-result non-variadic params
+        grafts: list[ParamSpec] = []
+        for param in post_params:
+            if param.name == result_key or param.name in pre_names or param.kind in variadic_kinds:
+                continue
+            grafts.append(
+                ParamSpec(
+                    name=param.name, index=0, kind=ParamSpec.KEYWORD_ONLY,
+                    type=param.type, default=param.default,
                 )
-
-        # Reserve continue_from as a framework-level input parameter.
-        existing_names = {p.name for p in composed_parameters}
-        if "continue_from" in existing_names:
-            raise AgentError(
-                "'continue_from' is a reserved Agent input parameter; "
-                "pre_invoke may not declare a parameter with that name."
             )
-        _varkw_idx = next(
-            (i for i, p in enumerate(composed_parameters) if p.kind == ParamSpec.VAR_KEYWORD),
-            None,
-        )
-        _continue_from_param = ParamSpec(
-            name="continue_from",
-            index=0,
-            kind=ParamSpec.KEYWORD_ONLY,
-            type="str | None",
-            default=None,
-        )
-        if _varkw_idx is None:
-            composed_parameters.append(_continue_from_param)
-        else:
-            composed_parameters.insert(_varkw_idx, _continue_from_param)
+        composed = _insert_before_varkw(composed, grafts)
+
+        # Graft B: context key params (skip any whose name already appears in composed)
+        existing_names = {p.name for p in composed}
+        ck_grafts = [p for p in context_key_params if p.name not in existing_names]
+        composed = _insert_before_varkw(composed, ck_grafts)
+
+        # Graft C: run_id — always the canonical framework version.
+        # Pop any collision (already warned/raised above) then reinsert.
+        composed = [p for p in composed if p.name != "run_id"]
+        composed = _insert_before_varkw(composed, [RUN_ID_PARAM])
 
         return [
-            ParamSpec(
-                name=param.name,
-                index=index,
-                kind=param.kind,
-                type=param.type,
-                default=param.default,
-            )
-            for index, param in enumerate(composed_parameters)
+            ParamSpec(name=p.name, index=i, kind=p.kind, type=p.type, default=p.default)
+            for i, p in enumerate(composed)
         ]
 
     @classmethod
@@ -736,116 +435,69 @@ class Agent(AtomicInvokable):
         agent_name: str,
         pre_parameters: list[ParamSpec],
         post_result_key: Optional[str],
-        passthrough_inputs: Optional[list[str]],
-    ) -> tuple[Tool, str, tuple[str, ...], list[ParamSpec]]:
+        context_keys: list[str] | list[ParamSpec] | None,
+    ) -> tuple[Tool, str, list[ParamSpec], list[ParamSpec]]:
+        """Prepare and validate the full construction-time agent lifecycle contract.
+
+        Steps:
+        1. Normalise post_invoke to a Tool.
+        2. Resolve post_result_key.
+        3. Validate result_key exists in post params.
+        4. Normalise context_keys to ParamSpecs.
+        5. Validate pre/post overlap shapes.
+        6. Warn on reserved-name collisions.
+        7. Compose agent parameters.
+
+        Returns (post_tool, result_key, context_key_params, agent_parameters).
         """
-        Create and validate post-invoke routing and the composed Agent schema.
-
-        This helper prepares the construction-time Agent lifecycle contract:
-
-        1) Normalize ``post_invoke`` into a Tool.
-        2) Normalize configured passthrough input names.
-        3) Resolve the post-invoke result key.
-        4) Validate the name-level post-routing contract.
-        5) Validate passthrough parameter shape.
-        6) Compose the Agent-facing parameter list from pre-invoke parameters
-           plus post-only passthrough grafts.
-
-        The Agent validates routing names and structural shape, not semantic type
-        compatibility. Type annotations remain descriptive metadata; the
-        underlying Tools/callables own runtime value validation.
-
-        Returns
-        -------
-        tuple[Tool, str, tuple[str, ...], list[ParamSpec]]
-            - prepared post-invoke Tool
-            - resolved post_result_key
-            - normalized passthrough input names
-            - composed Agent-facing parameters
-        """
-        post_tool = cls._prepare_post_invoke_tool(
-            candidate=post_invoke,
-            agent_name=agent_name,
+        post_tool = cls._prepare_post_invoke_tool(candidate=post_invoke, agent_name=agent_name)
+        result_key = cls._resolve_post_result_key(
+            post_result_key=post_result_key, post_params=post_tool.parameters
         )
-        post_params = post_tool.parameters
-
-        resolved_passthrough_inputs = cls._normalize_passthrough_inputs(
-            passthrough_inputs
-        )
-        resolved_post_result_key = cls._resolve_post_result_key(
-            post_result_key=post_result_key,
-            post_params=post_params,
-        )
-
         cls._validate_post_routing_contract(
-            post_result_key=resolved_post_result_key,
-            passthrough_inputs=resolved_passthrough_inputs,
-            post_params=post_params,
+            post_result_key=result_key, post_params=post_tool.parameters
         )
-        cls._validate_passthrough_parameter_shapes(
-            passthrough_inputs=resolved_passthrough_inputs,
-            pre_parameters=pre_parameters,
-            post_params=post_params,
+        context_key_params = cls._normalize_context_keys(context_keys)
+        context_key_names = frozenset(p.name for p in context_key_params)
+        cls._validate_pre_post_overlap_shapes(pre_parameters, post_tool.parameters)
+        cls._warn_reserved_name_collisions(
+            pre_parameters, post_tool.parameters, context_key_names
         )
-
         agent_parameters = cls._compose_agent_parameters(
-            pre_parameters=pre_parameters,
-            post_params=post_params,
-            passthrough_inputs=resolved_passthrough_inputs,
+            pre_params=pre_parameters,
+            post_params=post_tool.parameters,
+            result_key=result_key,
+            context_key_params=context_key_params,
         )
-
-        return (
-            post_tool,
-            resolved_post_result_key,
-            resolved_passthrough_inputs,
-            agent_parameters,
-        )
+        return post_tool, result_key, context_key_params, agent_parameters
 
     # ------------------------------------------------------------------ #
     # Agent Properties
     # ------------------------------------------------------------------ #
     @property
+    def description(self) -> str:
+        """Agent description with a ``run_id`` usage note appended.
+
+        The note is added so that when this agent is exposed as a sub-tool the
+        orchestrating LLM knows ``run_id`` is a framework-reserved conversation
+        threading slot, not a general-purpose context-carry parameter.
+        """
+        return (
+            self._description
+            + "\n\n[`run_id` (framework-reserved): pass a UUID run-id string "
+            "to resume from a specific record in this agent's history, or omit "
+            "/ pass None to continue from the agent's most recent checkpoint "
+            "(default).]"
+        )
+
+    @description.setter
+    def description(self, value: str) -> None:
+        AtomicInvokable.description.fset(self, value)
+
+    @property
     def post_result_key(self) -> str:
-        """
-        Post-invoke parameter name that receives the raw ``_invoke`` result.
-
-        If no explicit key was provided at construction time, this is the first
-        declared post-invoke parameter. The key may name any declared
-        post-invoke parameter, including a variadic parameter. The Agent only
-        routes the raw result under this key; the post-invoke Tool owns binding
-        and shape validation.
-        """
+        """Post-invoke parameter name that receives the raw ``_invoke`` result."""
         return self._post_result_key
-
-    @property
-    def passthrough_inputs(self) -> list[str]:
-        """
-        Post-invoke parameter names accepted as Agent inputs and passed through.
-
-        These names are copied from the filtered Agent input mapping into
-        ``post_invoke``. If a passthrough name also exists in ``pre_invoke``,
-        the pre-invoke ``ParamSpec`` owns the Agent-facing schema/default.
-
-        A shallow copy is returned to prevent external mutation of Agent state.
-        """
-        return list(self._passthrough_inputs)
-
-    @property
-    def role_prompt(self) -> str:
-        """Base system prompt supplied when provider-facing messages are rendered."""
-        return self._role_prompt
-
-    @role_prompt.setter
-    def role_prompt(self, value: Optional[str]) -> None:
-        if value is None:
-            self._role_prompt = Agent.DEFAULT_ROLE_PROMPT
-            return
-        if not isinstance(value, str):
-            raise TypeError(
-                f"role_prompt must be of type 'str' or 'None', but got {type(value).__name__}"
-            )
-        cleaned = value.strip()
-        self._role_prompt = cleaned or Agent.DEFAULT_ROLE_PROMPT
 
     @property
     def llm_engine(self) -> LLMEngine:
@@ -860,12 +512,10 @@ class Agent(AtomicInvokable):
 
     @property
     def context_enabled(self) -> bool:
-        """
-        Whether the agent uses turn memory.
+        """Whether the agent feeds prior turns into each invocation.
 
-        If True, prior turns are selected for the protected invocation path and
-        completed invocations are stored as canonical turns. If False, no prior
-        turns are selected and no new turns are recorded.
+        When ``False``, turns are always ``[]`` (fresh conversation) but records
+        are still appended for observability.
         """
         return self._context_enabled
 
@@ -877,14 +527,7 @@ class Agent(AtomicInvokable):
 
     @property
     def records_window(self) -> Optional[int]:
-        """
-        Number of stored turns to select from the tail of turn history.
-
-        None selects all stored turns. 0 selects no prior turns. Stored history is
-        never trimmed by this setting. Selected turns may later be rendered into
-        provider-facing messages by ``_invoke(...)``, ``_ainvoke(...)``, or
-        subclass-specific logic.
-        """
+        """Number of stored turns to select per invocation. ``None`` means all."""
         return self._records_window
 
     @records_window.setter
@@ -895,7 +538,7 @@ class Agent(AtomicInvokable):
 
     @property
     def response_preview_limit(self) -> Optional[int]:
-        """Character limit for rendered assistant responses. None means no truncation."""
+        """Character limit for rendered assistant responses. ``None`` means no truncation."""
         return self._response_preview_limit
 
     @property
@@ -905,86 +548,59 @@ class Agent(AtomicInvokable):
 
     @property
     def records(self) -> List[AgentRecord]:
-        """Return a shallow copy of the stored turn history (never trimmed)."""
+        """Shallow copy of the stored turn history."""
         return list(self._records)
 
     @property
     def pre_invoke(self) -> Tool:
-        """
-        Tool that converts the input mapping into a **prompt string**.
-
-        By default this is a strict identity tool that requires *exactly*:
-            {"prompt": <str>}
-        and returns that string.
-
-        This is configured at construction time. A plain callable provided to the
-        constructor is wrapped in a Tool.
-        """
+        """Tool that converts the input mapping into a prompt string."""
         return self._pre_invoke
 
     @property
     def post_invoke(self) -> Tool:
-        """
-        Tool that converts the raw ``_invoke`` result into the final Agent output.
-
-        At runtime, the Agent calls this Tool with:
-
-        - the raw result under ``post_result_key``; and
-        - configured passthrough inputs copied from the filtered Agent input
-          mapping.
-
-        This lifecycle reference is configured at construction time and is not
-        replaceable through the Agent API.
-        """
+        """Tool that converts the raw ``_invoke`` result into the final agent output."""
         return self._post_invoke
+
+    @property
+    def system_prompts(self) -> dict[str, PromptConfig]:
+        """Shallow copy of the system prompt registry."""
+        return dict(self._system_prompts)
+
+    def update_prompt(self, key: str, config: PromptConfig) -> None:
+        """Register or replace a system prompt by key."""
+        if not isinstance(key, str) or not key.strip():
+            raise AgentError("update_prompt: key must be a non-empty string.")
+        if not isinstance(config, PromptConfig):
+            raise AgentError("update_prompt: config must be a PromptConfig instance.")
+        self._system_prompts[key.strip()] = config
 
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #
-    def build_messages(self, system_prompt: str, turns: List[AgentRecord], prompt: str) -> List[Dict[str, str]]:
+    def build_messages(
+        self,
+        system_prompt: str,
+        turns: List[AgentRecord],
+        prompt: str,
+    ) -> List[Dict[str, str]]:
         """Render provider-facing message dicts from canonical turn inputs.
 
-        This method is the default rendering boundary between Agent-native
-        memory and LLM-engine-facing chat messages. It does not select turns and
-        does not mutate internal history; callers provide the exact turn window
-        to render.
-
-        Each supplied turn is rendered through ``render_turn(...)``, allowing
-        subclasses to preserve richer canonical turn records while customizing
-        their provider-facing representation. The current prompt is appended as
-        the final user message.
-
-        Subclasses may call this method multiple times with different system
-        prompts, turn windows, or current prompts when a more complex invocation
-        requires multiple model calls.
+        Each supplied turn is rendered through ``render_turn``. The current
+        prompt is appended as the final user message.
         """
         messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-
         if turns:
             for turn in turns:
                 messages.extend(self.render_turn(turn))
-
-        user_msg = {"role": "user", "content": prompt}
-        messages.append(user_msg)
-
+        messages.append({"role": "user", "content": prompt})
         return messages
 
     def render_turn(self, turn: AgentRecord) -> List[Dict[str, str]]:
-        """Render one canonical AgentRecord into LLM-facing messages.
+        """Render one canonical ``AgentRecord`` into LLM-facing messages.
 
         The assistant content is selected from either ``turn.generated_response``
         or ``turn.final_result.result`` according to ``assistant_response_source``.
-        The optional ``response_preview_limit`` is applied only to the rendered
-        text; stored turn values are never mutated.
-
-        Subclasses can override this method to preserve richer canonical turn
-        records while controlling their provider-facing representation.
-
-        Notes
-        -----
-        When ``assistant_response_source="final"``, ``turn.final_result`` must
-        not be ``None``. Passing a draft record (where ``final_result`` is
-        ``None``) will raise ``AttributeError``.
+        ``response_preview_limit`` is applied only to the rendered text.
         """
         if not isinstance(turn, AgentRecord):
             raise AgentInvocationError(
@@ -1002,157 +618,62 @@ class Agent(AtomicInvokable):
             self._response_preview_limit is not None
             and len(response_text) > self._response_preview_limit
         ):
-            response_text = response_text[:self._response_preview_limit] + "..."
+            response_text = response_text[: self._response_preview_limit] + "..."
 
         return [
             {"role": "user", "content": turn.user_prompt},
             {"role": "assistant", "content": response_text},
         ]
 
-    def _split_inputs(
+    def _build_context(self, inputs: dict) -> tuple[dict, dict]:
+        """Extract caller-supplied context values from the filtered input dict.
+
+        Pops any key named in ``_context_key_names`` from ``inputs`` into the
+        returned context dict. Subclasses may override to also inject instance-
+        state values that do not appear in the agent schema.
+
+        Returns ``(context, remaining)`` where ``remaining`` is the input dict
+        with context keys removed.
+        """
+        context: dict = {}
+        remaining = dict(inputs)
+        for name in self._context_key_names:
+            if name in remaining:
+                context[name] = remaining.pop(name)
+        return context, remaining
+
+    # ------------------------------------------------------------------ #
+    # Abstract core LLM work
+    # ------------------------------------------------------------------ #
+    @abstractmethod
+    def _invoke(
         self,
-        inputs: Mapping[str, Any],
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        turns: list[AgentRecord],
+        prompt: str,
+        context: dict,
+    ) -> tuple[AgentRecord, dict]:
+        """Sync core LLM call path.
+
+        Receives the selected conversation turns, the current prompt string,
+        and the assembled context dict. Returns a 2-tuple of a draft
+        ``AgentRecord`` (``final_result=None``) and a metadata dict carrying
+        ``"llm_records"`` and ``"llm_model_data"``.
         """
-        Split already-filtered Agent inputs into pre and post-passthrough inputs.
+        ...
 
-        This method assumes ``filter_inputs(...)`` has already run. It
-        materializes defaults from the composed Agent schema before splitting.
+    @abstractmethod
+    async def _ainvoke(
+        self,
+        turns: list[AgentRecord],
+        prompt: str,
+        context: dict,
+    ) -> tuple[AgentRecord, dict]:
+        """Async core LLM call path. Mirror of ``_invoke``."""
+        ...
 
-        This matters for overlapping passthrough names: if the same name exists
-        in both ``pre_invoke`` and ``post_invoke``, the pre-invoke ``ParamSpec``
-        owns the Agent-facing default, so both pre-processing and
-        post-processing receive the same resolved Agent-visible value.
-
-        Returns
-        -------
-        tuple[dict[str, Any], dict[str, Any]]
-            - inputs passed to ``pre_invoke``
-            - passthrough inputs later augmented with the raw result and passed
-              to ``post_invoke``
-        """
-        inputs = dict(inputs)
-
-        for param in self.parameters:
-            if param.kind in {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}:
-                continue
-            if param.name not in inputs and param.default is not NO_VAL:
-                inputs[param.name] = param.default
-
-        pre_param_names = {param.name for param in self._pre_invoke.parameters}
-        pre_inputs = {
-            key: value
-            for key, value in inputs.items()
-            if key in pre_param_names
-        }
-
-        passthrough_inputs = {
-            name: inputs[name]
-            for name in self._passthrough_inputs
-            if name in inputs
-        }
-
-        return pre_inputs, passthrough_inputs
-
-    async def _ainvoke(self, turns: List[AgentRecord], prompt: str) -> tuple[AgentRecord, dict]:
-        """Async internal call path used by ``async_invoke``.
-
-        The protected async contract receives the selected canonical turns plus
-        the current prompt string. This base implementation renders those values
-        into provider-facing messages with ``build_messages(...)``, delegates to
-        the engine's async interface, and returns a 2-tuple of a **draft**
-        ``AgentRecord`` and a metadata dict for this invocation. The draft's
-        ``final_result`` is ``None`` because post-processing has not run yet.
-
-        The metadata dict carries ``llm_records`` and ``llm_model_data``, which
-        ``async_invoke`` passes to ``make_result`` to construct the AgentResult.
-        ``async_invoke`` later completes the draft via
-        ``dataclasses.replace(draft, final_result=agent_result)``.
-
-        Subclasses may override this method to implement more complex async
-        behavior, including delayed rendering, multiple model calls, or alternate
-        system prompts. They must not mutate ``self._records`` directly; memory
-        is committed by ``async_invoke`` after post-processing has produced the
-        final response.
-        """
-        try:
-            logger.debug(f"[Agent - {self.name}]._ainvoke: Invoking LLM asynchronously")
-            messages = self.build_messages(self.role_prompt, turns, prompt)
-            engine_result = await self._llm_engine.async_invoke({"messages": messages})
-            text = engine_result.result
-        except Exception as e:  # pragma: no cover - engine-specific failures
-            raise AgentInvocationError(f"engine async invocation failed: {e}") from e
-
-        if not isinstance(text, str):
-            raise AgentInvocationError(
-                f"engine returned non-string (type={type(text)!r}); a string is required"
-            )
-
-        # Capture the full LLM envelope so the eventual AgentResult can report
-        # model identity and per-generation records without re-deriving them later.
-        llm_record = LLMRecord(messages=(messages[-1],), llm_result=engine_result)
-        draft = AgentRecord(
-            user_prompt=prompt,
-            generated_response=text,
-        )
-        metadata: dict = {
-            "llm_records": (llm_record,),
-            "llm_model_data": engine_result.model_data,
-        }
-        return draft, metadata
-
-    def _invoke(self, turns: List[AgentRecord], prompt: str) -> tuple[AgentRecord, dict]:
-        """Internal call path used by ``invoke``.
-
-        The protected sync contract receives the selected canonical turns plus
-        the current prompt string. This base implementation renders those values
-        into provider-facing messages with ``build_messages(...)``, delegates to
-        the configured LLM engine, and returns a 2-tuple of a **draft**
-        ``AgentRecord`` and a metadata dict for this invocation. The draft's
-        ``final_result`` is ``None`` because post-processing has not run yet.
-
-        The metadata dict carries ``llm_records`` and ``llm_model_data``, which
-        ``invoke`` passes to ``make_result`` to construct the AgentResult.
-        ``invoke`` later completes the draft via
-        ``dataclasses.replace(draft, final_result=agent_result)``.
-
-        Subclasses may override this method to implement more complex behavior,
-        including delayed rendering, multiple model calls, or alternate system
-        prompts. They must not mutate ``self._records`` directly; memory is
-        committed by ``invoke`` after post-processing has produced the final
-        response.
-        """
-        # 1) Call engine (attachments are managed by the engine itself)
-        try:
-            logger.debug(f"[Agent - {self.name}]._invoke: Invoking LLM")
-            messages = self.build_messages(self.role_prompt, turns, prompt)
-            engine_result = self._llm_engine.invoke({"messages": messages})
-            text = engine_result.result
-        except Exception as e:  # pragma: no cover - engine-specific failures
-            raise AgentInvocationError(f"engine invocation failed: {e}") from e
-
-        # 2) Engine contract: base Agent expects a string.
-        if not isinstance(text, str):
-            raise AgentInvocationError(
-                f"engine returned non-string (type={type(text)!r}); a string is required"
-            )
-
-        # 3) Capture the full LLM envelope so the eventual AgentResult can report
-        #    model identity and per-generation records without re-deriving them later.
-        llm_record = LLMRecord(messages=(messages[-1],), llm_result=engine_result)
-
-        # 4) Return the draft AgentRecord (final_result=None until make_result runs)
-        #    alongside the metadata dict that invoke passes to make_result.
-        draft = AgentRecord(
-            user_prompt=prompt,
-            generated_response=text,
-        )
-        metadata: dict = {
-            "llm_records": (llm_record,),
-            "llm_model_data": engine_result.model_data,
-        }
-        return draft, metadata
-
+    # ------------------------------------------------------------------ #
+    # Result construction
+    # ------------------------------------------------------------------ #
     def make_result(
         self,
         result: Any,
@@ -1160,12 +681,10 @@ class Agent(AtomicInvokable):
         ended_at: datetime,
         **result_kwargs: Any,
     ) -> AgentResult:
-        """
-        Construct this Agent's ``AgentResult`` envelope.
+        """Construct this Agent's ``AgentResult`` envelope.
 
         ``result`` is the caller-facing post-processed payload. LLM accounting
-        and model context gathered during the invocation are passed via
-        ``result_kwargs`` from the metadata dict returned by ``_invoke``.
+        is passed via ``result_kwargs`` from ``_invoke``'s metadata dict.
         """
         unexpected = set(result_kwargs) - {"llm_records", "llm_model_data"}
         if unexpected:
@@ -1213,50 +732,29 @@ class Agent(AtomicInvokable):
         run_id: str | None = None,
         turns: int | None = None,
     ) -> list[AgentRecord]:
-        """Walk the ``prev`` chain backward from a target record and return it oldest-first.
+        """Walk the ``prev`` chain from a target record and return it oldest-first.
 
-        This is the canonical entry point for branch-aware turn selection. Linear
-        history (no branching) degenerates to a reversed tail-slice. Branched
-        history returns only the records on the chain leading to the target record,
-        not siblings committed via a different ``continue_from`` invocation.
+        This is the canonical entry point for branch-aware turn selection.
 
         Parameters
         ----------
         run_id:
-            ``run_id`` of the target record to start the walk from. If ``None``,
-            the walk starts from the most recently committed record. If provided
-            and not found in history, ``AgentInvocationError`` is raised.
+            ``run_id`` of the target record. ``None`` starts from the most
+            recently committed record. An unknown string raises
+            ``AgentInvocationError``.
         turns:
-            Maximum number of records to return. ``None`` means return the full
-            chain from the target record back to the root. ``0`` is not valid and
-            always raises ``ValueError`` before any history check.
-
-        Returns
-        -------
-        list[AgentRecord]
-            Records in oldest-first order (i.e. ``list[0]`` is the chain root or
-            earliest record within the requested window).
-
-        Raises
-        ------
-        ValueError
-            If ``turns == 0``.
-        AgentInvocationError
-            If ``run_id`` is provided and no record with that ``run_id`` exists
-            in history.
+            Maximum chain length to return. ``None`` means the full chain.
+            ``0`` always raises ``ValueError``.
         """
-        # 1. turns=0 is always invalid.
         if turns == 0:
             raise ValueError(
                 "get_conversation: turns must be a positive integer or None; "
                 "0 is not valid (the method always returns at least the target record)."
             )
 
-        # 2. Empty history with no specific run_id → nothing to walk.
         if not self._records:
             return []
 
-        # 3. Resolve the starting record.
         if run_id is None:
             start = self._records[-1]
         else:
@@ -1270,7 +768,6 @@ class Agent(AtomicInvokable):
                     "found in agent history."
                 )
 
-        # 4. Walk the prev chain backward, collecting up to `turns` records.
         chain: list[AgentRecord] = []
         current: AgentRecord | None = start
         while current is not None:
@@ -1279,47 +776,36 @@ class Agent(AtomicInvokable):
                 break
             current = current.prev
 
-        # 5. Reverse to oldest-first order and return.
         chain.reverse()
         return chain
 
     async def async_invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
-        """Async analog of ``Agent.invoke``.
+        """Async analog of ``invoke``.
 
-        This version awaits async-capable pre/post tools and the engine instead
-        of pushing the entire sync invoke path into a worker thread. It follows
-        the same lifecycle as ``invoke``:
-
-        1) Filter and split inputs.
-        2) Run ``pre_invoke`` to produce the current prompt string.
-        3) Select the appropriate turn window according to ``records_window`` and
-           ``context_enabled``.
-        4) Delegate ``turns`` and ``prompt`` to ``_ainvoke(...)``, which owns any
-           provider-facing rendering and async generation work, and returns a
-           2-tuple of a draft ``AgentRecord`` (``final_result`` still ``None``)
-           and a metadata dict.
-        5) Run ``post_invoke`` on the draft's generated response and configured
-           passthrough inputs to obtain the final response.
-        6) Construct the ``AgentResult`` via ``make_result(**metadata)``.
-        7) Complete the draft via ``dataclasses.replace(draft, final_result=agent_result)``
-           and commit it to history if ``context_enabled=True``.
-
-        Concurrent calls to the same stateful agent instance may interleave unless the
-        caller serializes them externally or the class is later configured with an async
-        invoke lock.
+        Lifecycle steps mirror ``invoke`` with ``await`` at pre/post and ``_ainvoke``.
         """
         logger.info(f"[Async {self.full_name} started]")
-
-        # Capture the invocation span up front so AgentResult.elapsed_s reflects
-        # the full pre -> LLM -> post pipeline, mirroring LLMEngine.invoke.
         started_at = datetime.now(timezone.utc)
 
+        # ① Filter inputs
         inputs = self.filter_inputs(inputs)
-        # Site A: pop continue_from before _split_inputs so it is not forwarded
-        # to pre_invoke or post_invoke.
-        continue_from = inputs.pop("continue_from", None)
-        pre_inputs, post_inputs = self._split_inputs(inputs)
 
+        # ② Agent args
+        run_id = inputs.pop("run_id", None)
+
+        # ③ Context extraction
+        context, remaining = self._build_context(inputs)
+
+        # ④ Pre-slice / ⑤ Post-slice
+        pre_param_names = {p.name for p in self._pre_invoke.parameters}
+        pre_inputs = {k: v for k, v in remaining.items() if k in pre_param_names}
+        post_param_names = {
+            p.name for p in self._post_invoke.parameters
+            if p.name != self._post_result_key
+        }
+        post_inputs = {k: v for k, v in remaining.items() if k in post_param_names}
+
+        # ⑦ Task prompt
         try:
             logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
             pre_result = await self._pre_invoke.async_invoke(pre_inputs)
@@ -1334,26 +820,23 @@ class Agent(AtomicInvokable):
                 f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
             )
 
-        # Site B: chain-aware turn selection replacing the inline tail-slice.
-        logger.debug(f"Agent.{self.name} selecting turns for class '{type(self).__name__}'")
+        # ⑥ History
+        logger.debug(f"Agent.{self.name} selecting turns")
         turns: list[AgentRecord] = []
-        if self._context_enabled and continue_from != "new":
+        if self._context_enabled:
             if self._records_window != 0:
-                turns = self.get_conversation(
-                    run_id=continue_from,
-                    turns=self._records_window,
-                )
+                turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-        # Delegate selected turns and current prompt to the protected core logic.
-        # Returns a 2-tuple: draft AgentRecord (final_result=None) + metadata dict.
-        logger.debug(f"Agent.{self.name} performing async logic for class '{type(self).__name__}'")
-        draft, metadata = await self._ainvoke(turns=turns, prompt=prompt)
+        # ⑧ Core LLM work
+        logger.debug(f"Agent.{self.name} performing async logic")
+        draft, metadata = await self._ainvoke(turns=turns, prompt=prompt, context=context)
 
         if not isinstance(draft, AgentRecord):
             raise AgentInvocationError(
                 f"_ainvoke returned non-AgentRecord draft (type={type(draft)!r})"
             )
 
+        # ⑨ Output transformation
         try:
             logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
             post_inputs[self._post_result_key] = draft.generated_response
@@ -1364,11 +847,9 @@ class Agent(AtomicInvokable):
             raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
 
         final_response = post_result.result
-
-        # The invocation is complete once post-processing has produced the final
-        # response; this is the natural "ended_at" boundary for the AgentResult.
         ended_at = datetime.now(timezone.utc)
 
+        # ⑩ Result
         agent_result = self.make_result(
             result=final_response,
             started_at=started_at,
@@ -1376,84 +857,58 @@ class Agent(AtomicInvokable):
             **metadata,
         )
 
-        # Complete and store the canonical record only when memory is kept.
-        # Site C: stamp prev with the most recent turn used as context.
-        if self._context_enabled:
-            logger.debug(f"Agent.{self.name} updating history")
-            record = replace(
-                draft,
-                final_result=agent_result,
-                llm_records=metadata["llm_records"],
-                prev=turns[-1] if turns else None,
-            )
-            self._records.append(record)
+        # ⑪ Record — always appended
+        record = replace(
+            draft,
+            final_result=agent_result,
+            llm_records=metadata["llm_records"],
+            prev=turns[-1] if turns else None,
+        )
+        self._records.append(record)
 
         logger.info(f"[Async {self.full_name} finished]")
-
         return agent_result
 
     def invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
-        """Invoke the Agent with a single input mapping.
+        """Invoke the agent with a single input mapping.
 
         Steps
         -----
-        1) Filter the caller-provided mapping through the Agent's input contract.
-        2) Split filtered inputs into ``pre_invoke`` inputs and post-invoke
-           passthrough inputs.
-        3) Run ``pre_invoke(pre_inputs)`` to produce the current prompt string.
-           If the Tool raises ``ToolInvocationError``, it propagates unchanged.
-           Other exceptions are wrapped as ``AgentInvocationError``.
-        4) Select the appropriate turn window according to ``records_window`` and
-           ``context_enabled``.
-        5) Delegate ``turns`` and ``prompt`` to ``_invoke(...)``, which owns any
-           provider-facing rendering and sync generation work, and returns a
-           2-tuple of a draft ``AgentRecord`` (``final_result`` still ``None``)
-           and a metadata dict.
-        6) Run ``post_invoke`` on the draft's generated response and configured
-           passthrough inputs to obtain the final response.
-        7) Construct the ``AgentResult`` via ``make_result(**metadata)``.
-        8) Complete the draft via ``dataclasses.replace(draft, final_result=agent_result)``
-           and commit it to history if ``context_enabled`` is True.
-
-        Parameters
-        ----------
-        inputs : Mapping[str, Any]
-            Input mapping to be adapted to a prompt string via ``pre_invoke``.
-
-        Returns
-        -------
-        AgentResult
-            This invocation's successful-invocation envelope: the post-processed
-            output plus run identity, timing, and the LLM activity gathered while
-            producing it.
-
-        Raises
-        ------
-        TypeError
-            If ``inputs`` is not a Mapping.
-        ToolInvocationError
-            If the pre- or post-invoke Tool rejects the inputs.
-        AgentInvocationError
-            For unexpected runtime errors in Tools or the engine.
+        ① filter_inputs — collect declared keys; inject defaults.
+        ② Pop framework-reserved arg ``run_id``.
+        ③ _build_context — extract context keys into ``context``; remainder stays.
+        ④ Slice ``pre_inputs`` from remaining.
+        ⑤ Slice ``post_inputs`` from remaining (excludes result_key).
+        ⑥ Select conversation turns according to ``context_enabled``.
+        ⑦ pre_invoke → prompt string.
+        ⑧ _invoke(turns, prompt, context) → draft + metadata.
+        ⑨ post_invoke → final result.
+        ⑩ Construct AgentResult.
+        ⑪ Commit AgentRecord unconditionally.
         """
-
-        # main invoke lock
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
-
-            # Capture the invocation span up front so AgentResult.elapsed_s
-            # reflects the full pre -> LLM -> post pipeline, mirroring
-            # LLMEngine.invoke.
             started_at = datetime.now(timezone.utc)
 
-            # Filter inputs.
+            # ① Filter inputs
             inputs = self.filter_inputs(inputs)
-            # Site A: pop continue_from before _split_inputs so it is not
-            # forwarded to pre_invoke or post_invoke.
-            continue_from = inputs.pop("continue_from", None)
-            pre_inputs, post_inputs = self._split_inputs(inputs)
 
-            # Preprocess inputs to prompt string.
+            # ② Agent args
+            run_id = inputs.pop("run_id", None)
+
+            # ③ Context extraction
+            context, remaining = self._build_context(inputs)
+
+            # ④ Pre-slice / ⑤ Post-slice
+            pre_param_names = {p.name for p in self._pre_invoke.parameters}
+            pre_inputs = {k: v for k, v in remaining.items() if k in pre_param_names}
+            post_param_names = {
+                p.name for p in self._post_invoke.parameters
+                if p.name != self._post_result_key
+            }
+            post_inputs = {k: v for k, v in remaining.items() if k in post_param_names}
+
+            # ⑦ Task prompt
             try:
                 logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
                 pre_result = self._pre_invoke.invoke(pre_inputs)
@@ -1468,28 +923,25 @@ class Agent(AtomicInvokable):
                     f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
                 )
 
-            # Site B: chain-aware turn selection replacing the inline tail-slice.
-            logger.debug(f"Agent.{self.name} selecting turns for class '{type(self).__name__}'")
+            # ⑥ History
+            logger.debug(f"Agent.{self.name} selecting turns")
             turns: list[AgentRecord] = []
-            if self._context_enabled and continue_from != "new":
+            if self._context_enabled:
                 if self._records_window != 0:
                     turns = self.get_conversation(
-                        run_id=continue_from,
-                        turns=self._records_window,
+                        run_id=run_id, turns=self._records_window
                     )
 
-            # Delegate selected turns and current prompt to the protected core
-            # logic. Returns a 2-tuple: draft AgentRecord (final_result=None)
-            # + metadata dict that make_result unpacks.
-            logger.debug(f"Agent.{self.name} performing logic for class '{type(self).__name__}'")
-            draft, metadata = self._invoke(turns=turns, prompt=prompt)
+            # ⑧ Core LLM work
+            logger.debug(f"Agent.{self.name} performing logic")
+            draft, metadata = self._invoke(turns=turns, prompt=prompt, context=context)
 
             if not isinstance(draft, AgentRecord):
                 raise AgentInvocationError(
                     f"_invoke returned non-AgentRecord draft (type={type(draft)!r})"
                 )
 
-            # Postprocess raw result.
+            # ⑨ Output transformation
             try:
                 logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
                 post_inputs[self._post_result_key] = draft.generated_response
@@ -1500,12 +952,9 @@ class Agent(AtomicInvokable):
                 raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
 
             final_response = post_result.result
-
-            # The invocation is complete once post-processing has produced the
-            # final response; this is the natural "ended_at" boundary for the
-            # AgentResult.
             ended_at = datetime.now(timezone.utc)
 
+            # ⑩ Result
             agent_result = self.make_result(
                 result=final_response,
                 started_at=started_at,
@@ -1513,21 +962,16 @@ class Agent(AtomicInvokable):
                 **metadata,
             )
 
-            # Complete and store the canonical record only when memory is kept.
-            # Site C: stamp prev with the most recent turn used as context.
-            if self._context_enabled:
-                logger.debug(f"Agent.{self.name} updating history")
-                record = replace(
-                    draft,
-                    final_result=agent_result,
-                    llm_records=metadata["llm_records"],
-                    prev=turns[-1] if turns else None,
-                )
-                self._records.append(record)
+            # ⑪ Record — always appended
+            record = replace(
+                draft,
+                final_result=agent_result,
+                llm_records=metadata["llm_records"],
+                prev=turns[-1] if turns else None,
+            )
+            self._records.append(record)
 
-            # Final logging.
             logger.info(f"[{self.full_name} finished]")
-
             return agent_result
 
     # ------------------------------------------------------------------ #
@@ -1536,12 +980,15 @@ class Agent(AtomicInvokable):
     def to_dict(self) -> Dict[str, Any]:
         """Return a minimal diagnostic snapshot of this agent."""
         d = super().to_dict()
+        d["description"] = self._description  # store raw; augmented form is tool-facing only
         d.update({
-            "role_prompt": self.role_prompt,
+            "system_prompts": {
+                key: {"template": cfg.template, "description": cfg.description}
+                for key, cfg in self._system_prompts.items()
+            },
             "pre_invoke": self.pre_invoke.to_dict(),
             "post_invoke": self.post_invoke.to_dict(),
             "post_result_key": self.post_result_key,
-            "passthrough_inputs": self.passthrough_inputs,
             "llm": self._llm_engine.to_dict(),
             "context_enabled": self.context_enabled,
             "records_window": self.records_window,

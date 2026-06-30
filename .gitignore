@@ -15,6 +15,7 @@ dist/
 atomic_agentic-*/
 *.egg-info/
 .pytest_cache/
+.pytest_tmp/
 .mypy_cache/
 src/atomic_agentic/_version.py
 

@@ -6,7 +6,7 @@ from typing import Any, Mapping
 from dotenv import load_dotenv
 
 from atomic_agentic.a2a import PyA2AtomicClient
-from atomic_agentic.agents import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.exceptions import ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
@@ -47,7 +47,7 @@ pre_invoke_tool = Tool(
     description="Compose a prompt from {topic, style, audience?}. Returns a string prompt.",
 )
 
-agent = Agent(
+agent = BasicAgent(
     name="Writer",
     namespace="agent_wrapped",
     description="Concise writing assistant.",

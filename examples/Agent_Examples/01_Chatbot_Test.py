@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from atomic_agentic.agents import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine, LlamaCppEngine
 
 load_dotenv()
@@ -12,7 +12,7 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 # llm = LlamaCppEngine(repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx = 512, verbose = False, n_threads=16)
 
 # --- define our agent ---
-Agent_Atom = Agent(
+Agent_Atom = BasicAgent(
     name = "Agent_Atom",
     namespace = "examples",
     llm_engine = llm,

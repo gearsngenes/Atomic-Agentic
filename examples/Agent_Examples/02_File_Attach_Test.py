@@ -3,7 +3,7 @@
 #   - OPENAI_API_KEY in your environment (or .env)
 import os, time
 from dotenv import load_dotenv
-from atomic_agentic.agents import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.engines.LLMEngines import GeminiEngine, OpenAIEngine, MistralEngine, LlamaCppEngine
 
 load_dotenv()
@@ -15,13 +15,13 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 # llm = LlamaCppEngine(repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx = 512, verbose = False)
 
 # --- define our agent ---
-agent = Agent(
+agent = BasicAgent(
     name="DocSummarizer",
     namespace="examples",
     description="Summarizes uploaded documents.",
     llm_engine=llm,
     role_prompt="You are a concise technical summarizer.",
-    context_enabled=True,   # enables files/history tracking
+    context_enabled=True,   # enables history tracking
 )
 
 def main():

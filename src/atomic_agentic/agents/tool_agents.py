@@ -106,7 +106,6 @@ from collections.abc import Collection
 from datetime import datetime
 import logging
 import re
-import string
 import json
 from typing import (
     Any,
@@ -119,6 +118,7 @@ import pprint
 
 from .base import Agent
 from .prompts import PLANNER_PROMPT, ORCHESTRATOR_PROMPT
+from ..models.agents.prompts import PromptConfig
 from ..constants.agents import (
     ARGS_FIELD,
     AWAIT_FIELD,
@@ -141,6 +141,7 @@ from ..models.results import LLMModelData
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from ..models.agents.runstates import ToolAgentRunState, PlanActRunState, ReActRunState, ReActStepMeta
 from ..exceptions import (
+    AgentError,
     ToolAgentError,
     ToolDefinitionError,
     ToolInvocationError,
@@ -274,7 +275,7 @@ class ToolAgent(Agent, ABC):
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        role_prompt: str,
+        tool_instructions: str | PromptConfig,
         filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = False,
         *,
@@ -285,7 +286,7 @@ class ToolAgent(Agent, ABC):
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_result_key: Optional[str] = None,
-        passthrough_inputs: Optional[list[str]] = None,
+        prompt_key: str = "tool_instructions",
         records_window: Optional[int] = None,
     ) -> None:
         """
@@ -299,11 +300,12 @@ class ToolAgent(Agent, ABC):
             Human-readable description of this agent's purpose.
         llm_engine : LLMEngine
             Provider-facing LLM engine used for all generation calls.
-        role_prompt : str
-            Template string for the system/role prompt. Must contain the
-            named placeholders ``{TOOLS}``, ``{TOOL_CALLS_LIMIT}``, and
+        tool_instructions : str | PromptConfig
+            System prompt template for tool-calling instructions. Must contain
+            the named placeholders ``{TOOLS}``, ``{TOOL_CALLS_LIMIT}``, and
             ``{CONSTANTS}``; may include additional simple named placeholders.
-            Validated and frozen at construction.
+            Accepts a raw str (wrapped into a PromptConfig inline) or a
+            pre-built PromptConfig. Validated and frozen at construction.
         filter_extraneous_inputs : bool | None
             When ``True``, inputs not declared in ``parameters`` are silently
             dropped before invocation. When ``False``, extraneous inputs raise.
@@ -335,14 +337,35 @@ class ToolAgent(Agent, ABC):
         post_result_key : str | None
             Key under which the agent result is passed to ``post_invoke``
             when ``post_invoke`` is set.
-        passthrough_inputs : list[str] | None
-            Input keys forwarded verbatim to ``post_invoke`` alongside the
-            agent result.
+        prompt_key : str
+            Key used to store the tool instructions PromptConfig in
+            ``_system_prompts``. Defaults to ``"tool_instructions"``.
         records_window : int | None
             Maximum number of prior ``AgentRecord`` turns rendered into LLM
             context. ``None`` means all records are rendered.
         """
-        template = self._validate_role_prompt_template(role_prompt)
+        if isinstance(tool_instructions, str):
+            if not tool_instructions.strip():
+                raise ToolAgentError(
+                    "ToolAgent tool_instructions must be a non-empty str template."
+                )
+            try:
+                config = PromptConfig(
+                    template=tool_instructions.strip(),
+                    description="ToolAgent system instructions",
+                )
+            except (TypeError, ValueError) as exc:
+                raise ToolAgentError(
+                    f"Invalid ToolAgent tool_instructions template: {exc}"
+                ) from exc
+        elif isinstance(tool_instructions, PromptConfig):
+            config = tool_instructions
+        else:
+            raise ToolAgentError(
+                f"ToolAgent tool_instructions must be a str or PromptConfig; "
+                f"got {type(tool_instructions).__name__!r}."
+            )
+        self._validate_tool_prompt_template(config)
 
         super().__init__(
             name=name,
@@ -350,12 +373,11 @@ class ToolAgent(Agent, ABC):
             description=description,
             llm_engine=llm_engine,
             filter_extraneous_inputs=filter_extraneous_inputs,
-            role_prompt=template,
             context_enabled=context_enabled,
+            context_keys=None,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
-            passthrough_inputs=passthrough_inputs,
             records_window=records_window,
             response_preview_limit=response_preview_limit,
         )
@@ -381,28 +403,26 @@ class ToolAgent(Agent, ABC):
         # Always include canonical return tool (avoid collisions by skipping).
         self.register(return_tool, name_collision_mode="skip")
 
+        self._tool_prompt_key: str = prompt_key
+        self._system_prompts[prompt_key] = config
+
     # ------------------------------------------------------------------ #
     # Agent Properties
     # ------------------------------------------------------------------ #
     @property
-    def role_prompt(self) -> str:
-        """
-        ToolAgent role prompt is a template requiring:
-          - {TOOLS}
-          - {TOOL_CALLS_LIMIT}
-          - {CONSTANTS}
-        """
-        template = self._role_prompt
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        try:
-            format_values = {
-                self.TOOLS_FIELD: self.actions_context(),
-                self.LIMIT_FIELD: limit_text,
-                self.CONSTANTS_FIELD: self.constants_context(),
-            }
-            return template.format(**format_values)
-        except Exception as exc:  # pragma: no cover
-            raise ToolAgentError(f"Failed to format ToolAgent role_prompt template: {exc}") from exc
+    def tool_instructions(self) -> str:
+        """Tool instructions template string. Read-only."""
+        return self._system_prompts[self._tool_prompt_key].template
+
+    def update_prompt(self, key: str, config: PromptConfig) -> None:
+        """Register or replace a system prompt. Raises AgentError if key matches the
+        tool instructions key."""
+        if isinstance(key, str) and key.strip() == self._tool_prompt_key:
+            raise AgentError(
+                f"{self._tool_prompt_key!r} is immutable on ToolAgent; "
+                "construct a new ToolAgent to change the tool instructions."
+            )
+        super().update_prompt(key, config)
 
     # ------------------------------------------------------------------ #
     # ToolAgent Properties
@@ -438,6 +458,7 @@ class ToolAgent(Agent, ABC):
                     d[BlackboardSlot.RESULT_FIELD] = self._preview_blackboard_result(
                         slot.result.result
                     )
+                    d["run_id"] = slot.result.run_id
                 result.append(d)
             return result
         else:
@@ -446,6 +467,8 @@ class ToolAgent(Agent, ABC):
                 d = slot.to_dict()
                 d.pop(BlackboardSlot.RESOLVED_ARGS_FIELD)
                 d.pop(BlackboardSlot.RESULT_FIELD)
+                if slot.is_executed():
+                    d["run_id"] = slot.result.run_id
                 result.append(d)
             return result
     
@@ -492,49 +515,26 @@ class ToolAgent(Agent, ABC):
     # Prompt Helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _validate_role_prompt_template(template: Any) -> str:
-        """
-        ToolAgent requires a non-empty role prompt template containing:
-          - {TOOLS}
-          - {TOOL_CALLS_LIMIT}
-          - {CONSTANTS}
-
-        Additional simple named format fields are allowed.
-        """
-        if not isinstance(template, str):
-            raise ToolAgentError(
-                f"ToolAgent role_prompt must be a non-empty str template; got {type(template).__name__!r}."
-            )
-
-        cleaned = template.strip()
-        if not cleaned:
-            raise ToolAgentError("ToolAgent role_prompt template cannot be empty.")
-
-        fmt = string.Formatter()
-        fields: set[str] = set()
-
-        for _literal, field_name, _format_spec, _conversion in fmt.parse(cleaned):
-            if field_name is None:
-                continue
-            if field_name == "":
-                raise ToolAgentError(
-                    "ToolAgent role_prompt template may not use positional fields '{}'. "
-                    "Use named placeholders like {TOOLS}, {TOOL_CALLS_LIMIT}, and {CONSTANTS}."
-                )
-            if any(ch in field_name for ch in ".[]"):
-                raise ToolAgentError(
-                    f"ToolAgent role_prompt template contains unsupported field expression {{{field_name}}}. "
-                    "Only simple named placeholders are supported."
-                )
-            fields.add(field_name)
-
-        missing = ToolAgent.REQUIRED_PROMPT_FIELDS - fields
+    def _validate_tool_prompt_template(config: PromptConfig) -> None:
+        """Verify that config.parameters contains all required tool prompt fields."""
+        param_names = {p.name for p in config.parameters}
+        missing = ToolAgent.REQUIRED_PROMPT_FIELDS - param_names
         if missing:
             raise ToolAgentError(
-                f"ToolAgent role_prompt template missing required placeholder(s): {', '.join(sorted(missing))}."
+                f"ToolAgent tool_instructions template missing required placeholder(s): "
+                f"{', '.join(sorted(missing))}."
             )
 
-        return cleaned
+    def _build_context(self, inputs: dict) -> tuple[dict, dict]:
+        """Extend base context with tool-instruction render inputs from instance state."""
+        context, remaining = super()._build_context(inputs)
+        limit_text = (
+            "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        )
+        context[self.TOOLS_FIELD] = self.actions_context()
+        context[self.LIMIT_FIELD] = limit_text
+        context[self.CONSTANTS_FIELD] = self.constants_context()
+        return context, remaining
 
     # ------------------------------------------------------------------ #
     # Toolbox Helpers
@@ -1722,15 +1722,15 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     # Template Method (FINAL)
     # ------------------------------------------------------------------ #
-    def _invoke(self, turns: List[AgentRecord], prompt: str) -> tuple[ToolAgentRecord, dict]:
+    def _invoke(self, turns: List[AgentRecord], prompt: str, context: dict) -> tuple[ToolAgentRecord, dict]:
         """
         FINAL sync ToolAgent template method.
 
-        Receives selected canonical turns and the current prompt from the base
-        ``Agent.invoke(...)`` lifecycle. This method renders those values into a
-        provider-facing message list once, then runs the ToolAgent template loop,
-        and returns a 2-tuple of a **draft** ``ToolAgentRecord`` (``final_result``
-        is ``None``) and a metadata dict carrying ``llm_records``,
+        Receives selected canonical turns, the current prompt, and the assembled
+        context dict from the base ``Agent.invoke(...)`` lifecycle. Renders the
+        system prompt from context, builds the message list once, then runs the
+        ToolAgent template loop. Returns a 2-tuple of a **draft** ``ToolAgentRecord``
+        (``final_result`` is ``None``) and a metadata dict carrying ``llm_records``,
         ``llm_model_data``, and ``tool_usage``.
 
         The LLMRecord envelopes are accumulated on ``state.llm_records`` across
@@ -1742,7 +1742,8 @@ class ToolAgent(Agent, ABC):
         - ``_initialize_run_state(messages=...)``
         - ``_prepare_next_batch(state)``
         """
-        messages = self.build_messages(self.role_prompt, turns, prompt)
+        system = self._system_prompts[self._tool_prompt_key].render(context)
+        messages = self.build_messages(system, turns, prompt)
 
         if not messages:
             raise ToolAgentError("ToolAgent._invoke requires a non-empty messages list.")
@@ -1814,16 +1815,17 @@ class ToolAgent(Agent, ABC):
         self,
         turns: List[AgentRecord],
         prompt: str,
+        context: dict,
     ) -> tuple[ToolAgentRecord, dict]:
         """
         FINAL async ToolAgent template method.
 
-        Receives selected canonical turns and the current prompt from the base
-        ``Agent.async_invoke(...)`` lifecycle. This method renders those values
-        into a provider-facing message list once, then runs the ToolAgent
-        template loop, and returns a 2-tuple mirroring the sync ``_invoke(...)``
-        contract — see its docstring for details on the draft-record and metadata
-        dict contents.
+        Receives selected canonical turns, the current prompt, and the assembled
+        context dict from the base ``Agent.async_invoke(...)`` lifecycle. Renders
+        the system prompt from context, builds the message list once, then runs
+        the ToolAgent template loop. Returns a 2-tuple mirroring the sync
+        ``_invoke(...)`` contract — see its docstring for details on the
+        draft-record and metadata dict contents.
 
         Mirrors the sync ``_invoke(...)`` loop, but offloads the current sync
         planning hooks to worker threads and awaits the async batch executor for
@@ -1835,7 +1837,8 @@ class ToolAgent(Agent, ABC):
         - ``_ainitialize_run_state(messages=...)`` (async; base default: asyncio.to_thread wrap)
         - ``_aprepare_next_batch(state)`` (async; base default: asyncio.to_thread wrap)
         """
-        messages = self.build_messages(self.role_prompt, turns, prompt)
+        system = self._system_prompts[self._tool_prompt_key].render(context)
+        messages = self.build_messages(system, turns, prompt)
 
         if not messages:
             raise ToolAgentError("ToolAgent._ainvoke requires a non-empty messages list.")
@@ -1996,6 +1999,8 @@ class ToolAgent(Agent, ABC):
                 TOOL_FIELD: slot.tool,
                 ARGS_FIELD: slot.args,
             }
+            if slot.is_executed():
+                step["run_id"] = slot.result.run_id
             if self.peek_at_cache:
                 step["result"] = self._preview_blackboard_result(slot.result.result)
             extracted.append(step)
@@ -2474,7 +2479,6 @@ class PlanActAgent(ToolAgent):
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_result_key: Optional[str] = None,
-        passthrough_inputs: Optional[list[str]] = None,
         records_window: int | None = None,
     ) -> None:
         super().__init__(
@@ -2482,8 +2486,8 @@ class PlanActAgent(ToolAgent):
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
+            tool_instructions=PLANNER_PROMPT,
             filter_extraneous_inputs=filter_extraneous_inputs,
-            role_prompt=PLANNER_PROMPT,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
@@ -2492,7 +2496,7 @@ class PlanActAgent(ToolAgent):
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
-            passthrough_inputs=passthrough_inputs,
+            prompt_key="plan_first",
             records_window=records_window,
         )
 
@@ -2767,7 +2771,11 @@ class PlanActAgent(ToolAgent):
         Constructs the LLMRecord, then applies the full
         parse → validate → convert → normalize → validate pipeline.
         """
-        llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
+        llm_record = LLMRecord(
+            messages=[messages[-1]],
+            llm_result=engine_result,
+            system_prompt_name=self._tool_prompt_key,
+        )
         parsed = self._extract_from_json_string(engine_result.result)
 
         if not isinstance(parsed, list) or not parsed:
@@ -3294,7 +3302,6 @@ class ReActAgent(ToolAgent):
         pre_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_result_key: Optional[str] = None,
-        passthrough_inputs: Optional[list[str]] = None,
         records_window: int | None = None,
     ) -> None:
         super().__init__(
@@ -3302,8 +3309,8 @@ class ReActAgent(ToolAgent):
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
+            tool_instructions=ORCHESTRATOR_PROMPT,
             filter_extraneous_inputs=filter_extraneous_inputs,
-            role_prompt=ORCHESTRATOR_PROMPT,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
@@ -3312,7 +3319,7 @@ class ReActAgent(ToolAgent):
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
-            passthrough_inputs=passthrough_inputs,
+            prompt_key="reason_then_act",
             records_window=records_window,
         )
 
@@ -3398,6 +3405,7 @@ class ReActAgent(ToolAgent):
                 TOOL_FIELD: slot.tool,
                 ARGS_FIELD: slot.args,
                 "result_ref": f"<<__s{idx}__>>",
+                "run_id": slot.result.run_id,
             }
 
             if state.step_meta[idx].observable > 0:
@@ -3457,7 +3465,11 @@ class ReActAgent(ToolAgent):
         Constructs the LLMRecord, parses the JSON payload, and applies the full
         validation pipeline extracted from ``_generate_next_step``.
         """
-        llm_record = LLMRecord(messages=delta, llm_result=engine_result)
+        llm_record = LLMRecord(
+            messages=delta,
+            llm_result=engine_result,
+            system_prompt_name=self._tool_prompt_key,
+        )
         parsed = self._extract_from_json_string(engine_result.result)
 
         if not isinstance(parsed, Mapping):

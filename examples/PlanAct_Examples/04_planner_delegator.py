@@ -12,7 +12,7 @@ import logging
 
 from dotenv import load_dotenv
 
-from atomic_agentic.agents import Agent, PlanActAgent
+from atomic_agentic.agents import BasicAgent, PlanActAgent
 from atomic_agentic.tools.prebuilt import MATH_TOOLS
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 llm_engine = OpenAIEngine(model="gpt-4o-mini")
 
 # ----- Haiku Writer Agent -----
-haiku_agent = Agent(
+haiku_agent = BasicAgent(
     name="HaikuWriter",
     namespace="examples",
     description="Writes Haiku when given a topic.",

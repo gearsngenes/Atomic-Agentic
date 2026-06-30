@@ -5,7 +5,7 @@ import pprint
 from typing import Any
 from dotenv import load_dotenv
 
-from atomic_agentic.agents import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.engines.LLMEngines import OpenAIEngine
 
 load_dotenv()  # Load environment variables from .env file
@@ -28,7 +28,7 @@ def summarize_result(*, result: str) -> dict[str, Any]:
 def main() -> None:
     engine = OpenAIEngine("gpt-4o-mini")
 
-    agent = Agent(
+    agent = BasicAgent(
         name="basic_turn_demo_agent",
         namespace="examples",
         description="Basic Agent demo showing raw/final turn rendering.",
@@ -65,7 +65,7 @@ def main() -> None:
 
     print("\n=== Rendered turn using final assistant response ===")
     # assistant_response_source is read-only after construction; build a view agent for the alternate source
-    final_view = Agent(
+    final_view = BasicAgent(
         name="basic_turn_demo_agent",
         namespace="examples",
         description="Basic Agent demo showing raw/final turn rendering.",

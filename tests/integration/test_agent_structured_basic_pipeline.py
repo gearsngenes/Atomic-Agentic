@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.agents.base import Agent
+from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
@@ -106,8 +106,8 @@ def make_agent(
     engine: StatefulEchoLLMEngine | None = None,
     context_enabled: bool = False,
     records_window: int | None = None,
-) -> Agent:
-    return Agent(
+) -> BasicAgent:
+    return BasicAgent(
         name="writer_agent",
         namespace="integration",
         description="Deterministic writer integration-test agent.",
@@ -125,7 +125,7 @@ def make_structured_agent(
     engine: StatefulEchoLLMEngine | None = None,
     context_enabled: bool = False,
     records_window: int | None = None,
-) -> tuple[StatefulEchoLLMEngine, Agent, StructuredInvokable]:
+) -> tuple[StatefulEchoLLMEngine, BasicAgent, StructuredInvokable]:
     resolved_engine = engine or StatefulEchoLLMEngine()
     agent = make_agent(
         engine=resolved_engine,
@@ -146,7 +146,7 @@ def make_basic_agent_flow(
     engine: StatefulEchoLLMEngine | None = None,
     context_enabled: bool = False,
     records_window: int | None = None,
-) -> tuple[StatefulEchoLLMEngine, Agent, StructuredInvokable, BasicFlow]:
+) -> tuple[StatefulEchoLLMEngine, BasicAgent, StructuredInvokable, BasicFlow]:
     resolved_engine, agent, structured_agent = make_structured_agent(
         engine=engine,
         context_enabled=context_enabled,
@@ -208,7 +208,8 @@ class TestAgentStructuredBasicPipeline:
 
         assert checkpoint.result.child_id == structured_agent.instance_id
         assert checkpoint.result.child_type == "StructuredInvokable"
-        assert agent.records == []
+        # Records are always stored regardless of context_enabled.
+        assert len(agent.records) == 1
 
     def test_structured_agent_can_feed_sequential_flow_step(self) -> None:
         _engine, _agent, structured_agent = make_structured_agent()
@@ -310,7 +311,7 @@ class TestAgentStructuredBasicPipeline:
         assert structured_snapshot["name"] == structured_agent.name
 
         agent_snapshot = structured_snapshot["component"]
-        assert agent_snapshot["type"] == "Agent"
+        assert agent_snapshot["type"] == "BasicAgent"
         assert agent_snapshot["name"] == agent.name
         assert agent_snapshot["role_prompt"] == ROLE_PROMPT
         assert agent_snapshot["context_enabled"] is True

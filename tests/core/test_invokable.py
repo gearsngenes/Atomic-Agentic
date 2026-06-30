@@ -331,6 +331,39 @@ class TestAtomicInvokableFiltering:
 
         assert result == {"extras": {"x": 1}}
 
+    def test_absent_param_with_default_is_injected(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0),
+            make_param("y", 1, default=42),
+        ])
+
+        result = invokable.invoke({"x": 1})
+
+        assert result == {"x": 1, "y": 42}
+
+    def test_present_param_is_not_overwritten_by_default(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0, default=99),
+        ])
+
+        result = invokable.invoke({"x": 7})
+
+        assert result == {"x": 7}
+
+    def test_varargs_params_are_not_default_injected(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0),
+            make_param("args", 1, ParamSpec.VAR_POSITIONAL),
+            make_param("extras", 2, ParamSpec.VAR_KEYWORD),
+        ])
+
+        result = invokable.invoke({"x": 1})
+
+        # VAR_POSITIONAL is absent (no injection, no empty list).
+        # VAR_KEYWORD gets an empty dict from the existing varkwarg merge logic,
+        # not from default injection — our loop skips both variadic kinds.
+        assert result == {"x": 1, "extras": {}}
+
 
 class TestAtomicInvokableFilterFlag:
     @pytest.mark.parametrize("value", [True, False])
