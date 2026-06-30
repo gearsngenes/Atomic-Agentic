@@ -538,6 +538,7 @@ def to_paramspec_list(
                     kind=item.kind,
                     type=item.type,
                     default=item.default,
+                    description=item.description,
                 )
                 for index, item in enumerate(items)
             ]
