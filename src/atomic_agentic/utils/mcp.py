@@ -189,6 +189,9 @@ def _build_mcp_tool_metadata(raw_tool: mcp_types.Tool) -> Dict[str, Any]:
             else:
                 default = None
 
+            raw_desc = meta_schema.get("description")
+            description: str | None = raw_desc.strip() or None if isinstance(raw_desc, str) else None
+
             parameters.append(
                 ParamSpec(
                     name=name,
@@ -196,6 +199,7 @@ def _build_mcp_tool_metadata(raw_tool: mcp_types.Tool) -> Dict[str, Any]:
                     kind="KEYWORD_ONLY",
                     type=_json_schema_type_to_str(meta_schema),
                     default=default,
+                    description=description,
                 )
             )
 

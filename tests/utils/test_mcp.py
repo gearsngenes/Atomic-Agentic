@@ -118,7 +118,7 @@ class TestBuildMcpToolMetadata:
                 "type": "object",
                 "required": ["query"],
                 "properties": {
-                    "query": {"type": "string"},
+                    "query": {"type": "string", "description": "The search query."},
                     "top_k": {"type": "integer", "default": 5},
                     "debug": {"type": "boolean"},
                 },
@@ -145,11 +145,50 @@ class TestBuildMcpToolMetadata:
         assert metadata["raw_metadata"]["title"] == "Search"
 
         params = metadata["parameters"]
-        assert [(p.name, p.kind, p.type, p.default) for p in params] == [
-            ("query", ParamSpec.KEYWORD_ONLY, "str", NO_VAL),
-            ("top_k", ParamSpec.KEYWORD_ONLY, "int", 5),
-            ("debug", ParamSpec.KEYWORD_ONLY, "bool", None),
+        assert [(p.name, p.kind, p.type, p.default, p.description) for p in params] == [
+            ("query", ParamSpec.KEYWORD_ONLY, "str", NO_VAL, "The search query."),
+            ("top_k", ParamSpec.KEYWORD_ONLY, "int", 5, None),
+            ("debug", ParamSpec.KEYWORD_ONLY, "bool", None, None),
         ]
+
+
+class TestBuildMcpToolMetadataDescription:
+    def _make_raw_tool(self, prop_schema: dict) -> SimpleNamespace:
+        return SimpleNamespace(
+            name="t",
+            description="",
+            inputSchema={
+                "type": "object",
+                "required": ["x"],
+                "properties": {"x": prop_schema},
+            },
+            outputSchema=None,
+        )
+
+    def test_property_with_description_string_is_extracted(self) -> None:
+        raw_tool = self._make_raw_tool({"type": "string", "description": "useful context"})
+        params = _build_mcp_tool_metadata(raw_tool)["parameters"]
+        assert params[0].description == "useful context"
+
+    def test_property_without_description_key_yields_none(self) -> None:
+        raw_tool = self._make_raw_tool({"type": "integer"})
+        params = _build_mcp_tool_metadata(raw_tool)["parameters"]
+        assert params[0].description is None
+
+    def test_property_with_non_string_description_yields_none(self) -> None:
+        raw_tool = self._make_raw_tool({"type": "string", "description": 42})
+        params = _build_mcp_tool_metadata(raw_tool)["parameters"]
+        assert params[0].description is None
+
+    def test_property_with_whitespace_only_description_yields_none(self) -> None:
+        raw_tool = self._make_raw_tool({"type": "string", "description": "   "})
+        params = _build_mcp_tool_metadata(raw_tool)["parameters"]
+        assert params[0].description is None
+
+    def test_property_with_description_strips_surrounding_whitespace(self) -> None:
+        raw_tool = self._make_raw_tool({"type": "string", "description": "  trimmed  "})
+        params = _build_mcp_tool_metadata(raw_tool)["parameters"]
+        assert params[0].description == "trimmed"
 
 
 class TestNormalizeMcpCallResult:
