@@ -177,8 +177,14 @@ class AtomicInvokable(ABC):
 
     @property
     def description(self) -> str:
-        """Human-friendly description."""
-        return self._description
+        """Human-friendly description, augmented with per-parameter descriptions when present."""
+        described = [p for p in self._parameters if p.description is not None]
+        if not described:
+            return self._description
+        lines = [self._description, ""]
+        for p in described:
+            lines.append(f"- {p.name}: {p.description}")
+        return "\n".join(lines)
 
     @description.setter
     def description(self, value: str) -> None:
@@ -458,7 +464,7 @@ class AtomicInvokable(ABC):
             "instance_id": self.instance_id,
             "name": self.name,
             "namespace": self.namespace,
-            "description": self.description,
+            "description": self._description,
             "parameters": [spec.to_dict() for spec in self._parameters],
             "return_type": self.return_type,
             "filter_extraneous_inputs": self._filter_extraneous_inputs,
@@ -974,7 +980,9 @@ class StructuredInvokable(AtomicInvokable):
         name="__passthrough_mapping__",
         index=0,
         kind=ParamSpec.VAR_KEYWORD,
-        type="Mapping[str, Any]",)]
+        type="Mapping[str, Any]",
+        description="Passes any dictionary output through unchanged; no field checks or absent-value handling are applied.",
+    )]
 
     def __init__(
         self,
@@ -1061,7 +1069,7 @@ class StructuredInvokable(AtomicInvokable):
         super().__init__(
             name=name or component.name,
             namespace=namespace or component.namespace,  # inherit when not supplied
-            description=description or component.description,
+            description=description or component._description,
             parameters=component.parameters,
             return_type="dict[str, Any]",
             filter_extraneous_inputs=resolved_filter,
@@ -1111,7 +1119,7 @@ class StructuredInvokable(AtomicInvokable):
                 parts.append(part)
 
         schema_summary = ", ".join(parts) if parts else "<empty>"
-        return f"{self._description}\nOutput schema: [{schema_summary}]"
+        return f"{super().description}\nOutput schema: [{schema_summary}]"
 
     @description.setter
     def description(self, value: str) -> None:

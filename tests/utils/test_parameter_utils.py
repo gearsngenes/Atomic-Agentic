@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional, TypedDict
+from typing import Annotated, Any, Optional, TypedDict
 
 import pytest
 
@@ -114,8 +114,8 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert parameters[0].type in {"Union[int, NoneType]", "Optional[int]", "int | None"}
-        assert return_type in {"Union[str, NoneType]", "Optional[str]", "str | None"}
+        assert parameters[0].type in {"Union[int, NoneType]", "Union[int, None]", "Optional[int]", "int | None"}
+        assert return_type in {"Union[str, NoneType]", "Union[str, None]", "Optional[str]", "str | None"}
 
 
 class TestParameterOrderValidation:
@@ -371,3 +371,121 @@ class TestToParamSpecListStringGrammar:
     def test_invalid_string_names_raise_schema_error(self, schema: list[str]) -> None:
         with pytest.raises(SchemaError):
             to_paramspec_list(schema)
+
+
+class TestExtractIOAnnotated:
+    def test_annotated_param_extracts_base_type_and_description(self) -> None:
+        def sample(x: Annotated[str, "the x value"]) -> str:
+            return x
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].type == "str"
+        assert parameters[0].description == "the x value"
+
+    def test_plain_param_has_none_description(self) -> None:
+        def sample(x: int) -> None:
+            pass
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].description is None
+
+    def test_annotated_first_string_metadata_wins(self) -> None:
+        def sample(x: Annotated[int, "first", "second"]) -> None:
+            pass
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].description == "first"
+
+    def test_annotated_non_string_metadata_before_string_is_skipped(self) -> None:
+        def sample(x: Annotated[float, 999, "valid"]) -> None:
+            pass
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].type == "float"
+        assert parameters[0].description == "valid"
+
+    def test_annotated_whitespace_only_description_coerced_to_none(self) -> None:
+        def sample(x: Annotated[str, "   "]) -> None:
+            pass
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].description is None
+
+    def test_annotated_return_type_unwrapped_description_discarded(self) -> None:
+        def sample() -> Annotated[str, "return doc"]:
+            return "x"
+
+        _, return_type = extract_io(sample)
+
+        assert return_type == "str"
+
+    def test_annotated_varargs_description_extracted(self) -> None:
+        def sample(*args: Annotated[int, "positional items"]) -> None:
+            pass
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].kind == ParamSpec.VAR_POSITIONAL
+        assert parameters[0].type == "int"
+        assert parameters[0].description == "positional items"
+
+    def test_annotated_varkwargs_description_extracted(self) -> None:
+        def sample(**kwargs: Annotated[str, "keyword items"]) -> None:
+            pass
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].kind == ParamSpec.VAR_KEYWORD
+        assert parameters[0].description == "keyword items"
+
+    def test_annotated_mixed_described_and_plain_params(self) -> None:
+        def sample(
+            x: Annotated[str, "has description"],
+            y: int,
+            z: Annotated[bool, "also described"] = True,
+        ) -> None:
+            pass
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].description == "has description"
+        assert parameters[1].description is None
+        assert parameters[2].description == "also described"
+
+    def test_annotated_keyword_only_description_extracted(self) -> None:
+        def sample(*, flag: Annotated[bool, "enable feature"]) -> None:
+            pass
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].kind == ParamSpec.KEYWORD_ONLY
+        assert parameters[0].description == "enable feature"
+
+
+class TestToParamSpecListTypedDictAnnotated:
+    def test_typed_dict_annotated_field_extracts_description(self) -> None:
+        class Config(TypedDict):
+            query: Annotated[str, "the search string"]
+            limit: int
+
+        parameters = to_paramspec_list(Config)
+
+        query_param = next(p for p in parameters if p.name == "query")
+        limit_param = next(p for p in parameters if p.name == "limit")
+        assert query_param.type == "str"
+        assert query_param.description == "the search string"
+        assert limit_param.description is None
+
+    def test_typed_dict_plain_fields_have_none_description(self) -> None:
+        class Config(TypedDict):
+            x: int
+            y: str
+
+        parameters = to_paramspec_list(Config)
+
+        assert all(p.description is None for p in parameters)

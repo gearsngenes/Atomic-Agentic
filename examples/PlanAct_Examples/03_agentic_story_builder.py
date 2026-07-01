@@ -80,8 +80,8 @@ if __name__ == "__main__":
     idea = input("\nStory idea: ").strip()
     loops_raw = input("How many review/revision cycles? ").strip()
     loops = int(loops_raw) if loops_raw else 1
-    if loops < 0:
-        raise ValueError("loops must be >= 0")
+    if loops <= 0:
+        raise ValueError("loops must be > 0")
 
     # Enforce a tight tool-call budget for this run:
     # outliner (1) + initial write (1) + loops * (reviewer + writer) (2 * loops) + return (1)

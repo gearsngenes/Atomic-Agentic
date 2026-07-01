@@ -67,7 +67,7 @@ class BasicFlow(Workflow):
         super().__init__(
             name=name or component.name,
             namespace=namespace or component.namespace,  # inherit when not supplied
-            description=description or component.description,
+            description=description or component._description,
             parameters=component.parameters,
             return_type=component.return_type,
             filter_extraneous_inputs=resolved_filter,

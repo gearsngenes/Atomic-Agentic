@@ -49,7 +49,7 @@ Each record contains: step index, tool, args (with placeholders), and run_id.
 run_id is the UUID of that step's result. Records may NOT include raw result values.
 
 Use cache history to understand what has already been computed and what cache indices exist.
-Do NOT invent or guess unseen cache indices (especially if older history is not visible).
+If no "CACHE STEPS" section appears in this conversation, the cache is EMPTY — do NOT use <<__cN__>> for any value of N.
 
 If a step's tool accepts a run_id arg and you want to continue from that step's conversation,
 pass its run_id value as a plain quoted JSON string literal in args.
@@ -64,7 +64,7 @@ To reference prior results or registered constants, use ONLY these placeholders:
 Rules:
 1) Placeholders MUST contain a concrete non-negative integer N (never output a template like "<<__si__>>" or "<<__ci__>>").
 2) No forward refs: <<__sN__>> may only reference N < current step index.
-3) <<__cN__>> may only reference cache indices that exist (prefer indices you have seen in cache history).
+3) <<__cN__>> may only reference cache indices shown in "CACHE STEPS" history. If no cache history is shown, <<__cN__>> is NEVER valid — use <<__sN__>> for all intra-plan output references.
 4) Placeholders may be used as full values or embedded inside strings.
 5) Do NOT use natural-language references like "the previous result". Use placeholders.
 6) Do NOT do inline computation inside args (no math/expressions/function calls). Use tools.

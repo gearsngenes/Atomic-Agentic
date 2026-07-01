@@ -5,6 +5,67 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a15] - 2026-07-01
+
+### Added
+
+- `ParamSpec.description: str | None = None` — new field on the frozen
+  dataclass. Validated on construction (type check, whitespace-strip,
+  empty-string → None); serialized conditionally in `to_dict()` (omitted
+  when None); round-tripped in `from_dict()`; preserved through all
+  `to_paramspec_list` copy paths.
+- `_unwrap_annotated` helper in `utils/parameters.py` — extracts the base
+  type and first bare string from `Annotated[T, ...]` metadata, enabling
+  `Annotated[T, "description string"]` as the AA-native inline description
+  convention for `extract_io`-instrumented callables.
+- `extract_io` now calls `get_type_hints(fn, include_extras=True)` and
+  unwraps `Annotated` types per-parameter and for the return annotation; a
+  `NameError` fallback is preserved. TypedDict path in `to_paramspec_list`
+  gains the same treatment.
+- `_format_annotation` NoneType fix: `type(None)` now renders as `"None"`.
+- `_build_mcp_tool_metadata` in `utils/mcp.py` — extracts per-property
+  descriptions from a FastMCP tool's JSON schema; normalizes non-string and
+  whitespace-only values to None.
+- `AtomicInvokable.description` getter augmented: collects parameters with
+  non-None descriptions and appends a `"- {name}: {description}"` bullet
+  list (blank-line separated). Invokables with no described parameters
+  return `_description` unchanged.
+- `StructuredInvokable.description` getter now calls `super().description`
+  before appending the output-schema summary, so parameter bullets and
+  schema notes stack correctly.
+- `StructuredInvokable.PASSTHROUGH[0]` (`"__passthrough_mapping__"` `ParamSpec`)
+  carries a description explaining its passthrough-without-field-checks
+  semantics.
+- `PLANNER_PROMPT` strengthened: two explicit rules now prohibit
+  `<<__cN__>>` when no "CACHE STEPS" section is visible in the
+  conversation, preventing LLM-generated plans that reference out-of-range
+  cache indices on fresh runs.
+
+### Changed
+
+- `AtomicInvokable.to_dict()` emits `self._description` (raw stored value)
+  rather than the getter output, preventing augmented text from being baked
+  into serialized records or wrapper descriptions.
+- Four double-wrap copy sites updated to use `._description` instead of
+  `.description`: `Tool.__init__`, `toolify()`, `BasicFlow.__init__`, and
+  `StructuredInvokable.__init__`.
+- `_compose_agent_parameters` now preserves `description` when rebuilding
+  `ParamSpec` objects during the four-tier parameter graft.
+- `_warn_reserved_name_collisions` `semantically_equal` check extended to
+  include `param.description == RUN_ID_PARAM.description`.
+- MCP example servers updated to use `Annotated[T, Field(description="...")]`
+  (pydantic `FieldInfo`) for parameter descriptions; `04_MCPProxyTool.py`
+  updated to print parameter descriptions.
+
+### Removed
+
+- `Agent.description` getter and setter override — the base
+  `AtomicInvokable.description` getter now handles all description
+  augmentation; the prior hardcoded `run_id`-usage note appended in the
+  override is removed.
+- `Agent.to_dict()` raw-description guard — now handled uniformly by the
+  base `to_dict()`.
+
 ## [2.0.0a14] - 2026-06-29
 
 ### Added

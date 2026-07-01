@@ -32,11 +32,15 @@ client = MCPClientHub(
 def _show_plan(proxy: MCPProxyTool) -> None:
     print(f"\n-- {proxy.full_name} --")
     print("from:", proxy.namespace)
+    print("description:", proxy.description)
     print("signature:", proxy.signature)
     print("parameters:")
     for param in proxy.parameters:
         default_str = "(no default)" if param.default.__class__.__name__ == "NO_VAL" else f"default={param.default}"
-        print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}")
+        desc_str = f"  # {param.description}" if param.description else ""
+        print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}{desc_str}")
+    print("structured (to_dict):")
+    print(json.dumps(proxy.to_dict(), indent=2, default=str))
 
 def _invoke(proxy: MCPProxyTool, inputs: Mapping[str, Any]) -> None:
     print("inputs:", inputs)

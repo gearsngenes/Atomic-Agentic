@@ -26,6 +26,7 @@ def make_param(
     kind: str = ParamSpec.POSITIONAL_OR_KEYWORD,
     type_: str = "Any",
     default: Any = NO_VAL,
+    description: str | None = None,
 ) -> ParamSpec:
     return ParamSpec(
         name=name,
@@ -33,6 +34,7 @@ def make_param(
         kind=kind,
         type=type_,
         default=default,
+        description=description,
     )
 
 
@@ -744,3 +746,55 @@ class TestStructuredInvokableNamespace:
         )
         si = StructuredInvokable(component=component, namespace="si_ns")
         assert si.namespace == "si_ns"
+
+
+class _DescribedInvokable(AtomicInvokable):
+    """Minimal concrete invokable for testing described-param propagation in SI."""
+
+    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
+        return {}
+
+
+class TestStructuredInvokableDescriptionGetter:
+    def test_no_described_params_output_schema_appends_cleanly(self) -> None:
+        component = Tool(
+            function=echo_value,
+            name="echo",
+            namespace="tests",
+            description="Base desc.",
+        )
+        wrapper = StructuredInvokable(component=component, output_schema=["result"])
+
+        assert wrapper.description == "Base desc.\nOutput schema: [result]"
+
+    def test_described_params_appear_before_output_schema(self) -> None:
+        described_param = make_param("x", 0, description="the x value")
+        component = _DescribedInvokable(
+            name="echo",
+            namespace="tests",
+            description="Base desc.",
+            parameters=[described_param],
+            return_type="Any",
+        )
+        wrapper = StructuredInvokable(component=component, output_schema=["result"])
+
+        desc = wrapper.description
+        assert "- x: the x value" in desc
+        assert desc.index("- x: the x value") < desc.index("Output schema:")
+
+    def test_init_copies_raw_description_not_getter(self) -> None:
+        described_param = make_param("x", 0, description="the x value")
+        component = _DescribedInvokable(
+            name="echo",
+            namespace="tests",
+            description="Base desc.",
+            parameters=[described_param],
+            return_type="Any",
+        )
+        assert component.description != component._description
+
+        wrapper = StructuredInvokable(component=component, output_schema=["result"])
+
+        assert wrapper._description == component._description
+        assert "- x: the x value" in wrapper.description
+        assert wrapper.description.count("- x: the x value") == 1

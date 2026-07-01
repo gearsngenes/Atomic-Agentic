@@ -71,15 +71,17 @@ class ParamSpec:
     kind: str
     type: str
     default: Any = NO_VAL
+    description: str | None = None
 
     def __post_init__(self) -> None:
         """Validate and normalize dataclass fields after initialization."""
-        cleaned_name, validated_index, validated_kind, cleaned_type = (
+        cleaned_name, validated_index, validated_kind, cleaned_type, validated_description = (
             self._validate_init_args(
                 name=self.name,
                 index=self.index,
                 kind=self.kind,
                 type=self.type,
+                description=self.description,
             )
         )
 
@@ -87,6 +89,7 @@ class ParamSpec:
         object.__setattr__(self, "index", validated_index)
         object.__setattr__(self, "kind", validated_kind)
         object.__setattr__(self, "type", cleaned_type)
+        object.__setattr__(self, "description", validated_description)
 
     @classmethod
     def _validate_init_args(
@@ -96,7 +99,8 @@ class ParamSpec:
         index: int,
         kind: str,
         type: str,
-    ) -> tuple[str, int, str, str]:
+        description: str | None = None,
+    ) -> tuple[str, int, str, str, str | None]:
         """Validate and normalize constructor fields before state is finalized."""
         if not isinstance(name, str):
             raise TypeError(
@@ -140,7 +144,14 @@ class ParamSpec:
         if not cleaned_type:
             raise ValueError("ParamSpec.type must be a non-empty string")
 
-        return cleaned_name, index, kind, cleaned_type
+        if description is not None and not isinstance(description, str):
+            raise TypeError(
+                f"ParamSpec.description must be a str or None, got {description.__class__.__name__}"
+            )
+        if isinstance(description, str):
+            description = description.strip() or None
+
+        return cleaned_name, index, kind, cleaned_type, description
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
@@ -152,6 +163,8 @@ class ParamSpec:
         }
         if self.default is not NO_VAL:
             d["default"] = self.default
+        if self.description is not None:
+            d["description"] = self.description
         return d
 
     @classmethod
@@ -170,6 +183,7 @@ class ParamSpec:
         kind = d.get("kind")
         type_str = d.get("type")
         default = d.get("default", NO_VAL)
+        description = d.get("description", None)
 
         if not all(
             isinstance(v, t)
@@ -185,4 +199,4 @@ class ParamSpec:
                 "'kind' (str), and 'type' (str)"
             )
 
-        return cls(name=name, index=idx, kind=kind, type=type_str, default=default)
+        return cls(name=name, index=idx, kind=kind, type=type_str, default=default, description=description)

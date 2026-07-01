@@ -13,6 +13,7 @@ from ..models.parameters import ParamSpec
 RUN_ID_PARAM: ParamSpec = ParamSpec(
     name="run_id", index=0, kind=ParamSpec.KEYWORD_ONLY,
     type="str | None", default=None,
+    description=None
 )
 
 # =============================================================================
