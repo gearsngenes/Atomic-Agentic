@@ -344,6 +344,7 @@ class Agent(AtomicInvokable, ABC):
                     param.kind == RUN_ID_PARAM.kind
                     and param.type == RUN_ID_PARAM.type
                     and param.default == RUN_ID_PARAM.default
+                    and param.description == RUN_ID_PARAM.description
                 )
                 if semantically_equal:
                     warnings.warn(
@@ -423,7 +424,7 @@ class Agent(AtomicInvokable, ABC):
         composed = _insert_before_varkw(composed, [RUN_ID_PARAM])
 
         return [
-            ParamSpec(name=p.name, index=i, kind=p.kind, type=p.type, default=p.default)
+            ParamSpec(name=p.name, index=i, kind=p.kind, type=p.type, default=p.default, description=p.description)
             for i, p in enumerate(composed)
         ]
 
@@ -474,26 +475,6 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Agent Properties
     # ------------------------------------------------------------------ #
-    @property
-    def description(self) -> str:
-        """Agent description with a ``run_id`` usage note appended.
-
-        The note is added so that when this agent is exposed as a sub-tool the
-        orchestrating LLM knows ``run_id`` is a framework-reserved conversation
-        threading slot, not a general-purpose context-carry parameter.
-        """
-        return (
-            self._description
-            + "\n\n[`run_id` (framework-reserved): pass a UUID run-id string "
-            "to resume from a specific record in this agent's history, or omit "
-            "/ pass None to continue from the agent's most recent checkpoint "
-            "(default).]"
-        )
-
-    @description.setter
-    def description(self, value: str) -> None:
-        AtomicInvokable.description.fset(self, value)
-
     @property
     def post_result_key(self) -> str:
         """Post-invoke parameter name that receives the raw ``_invoke`` result."""
@@ -980,7 +961,6 @@ class Agent(AtomicInvokable, ABC):
     def to_dict(self) -> Dict[str, Any]:
         """Return a minimal diagnostic snapshot of this agent."""
         d = super().to_dict()
-        d["description"] = self._description  # store raw; augmented form is tool-facing only
         d.update({
             "system_prompts": {
                 key: {"template": cfg.template, "description": cfg.description}

@@ -146,7 +146,7 @@ class Tool(AtomicInvokable):
         # requires both to resolve to non-empty strings.
         if isinstance(function, AtomicInvokable):
             inferred_name = inferred_name or function.name
-            inferred_description = inferred_description or function.description
+            inferred_description = inferred_description or function._description
         else:
             inferred_name = (
                 inferred_name

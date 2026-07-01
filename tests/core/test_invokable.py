@@ -26,6 +26,7 @@ def make_param(
     *,
     type_: str = "Any",
     default: Any = NO_VAL,
+    description: str | None = None,
 ) -> ParamSpec:
     return ParamSpec(
         name=name,
@@ -33,6 +34,7 @@ def make_param(
         kind=kind,
         type=type_,
         default=default,
+        description=description,
     )
 
 
@@ -601,3 +603,46 @@ class TestAtomicInvokableSerialization:
         data = invokable.to_dict()
 
         assert "signature" not in data
+
+
+class TestAtomicInvokableDescriptionGetter:
+    def test_no_described_params_returns_raw_description(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0),
+            make_param("y", 1),
+        ])
+
+        assert invokable.description == invokable._description
+
+    def test_one_described_param_appends_bullet(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("p1", 0),
+            make_param("p2", 1, description="second param"),
+        ])
+
+        assert invokable.description == "Echo test invokable.\n\n- p2: second param"
+
+    def test_multiple_described_params_append_in_order(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("p1", 0, description="first"),
+            make_param("p2", 1),
+            make_param("p3", 2, description="third"),
+        ])
+
+        assert invokable.description == "Echo test invokable.\n\n- p1: first\n- p3: third"
+
+    def test_all_described_params_all_appear(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, description="alpha"),
+            make_param("b", 1, description="beta"),
+        ])
+
+        assert invokable.description == "Echo test invokable.\n\n- a: alpha\n- b: beta"
+
+    def test_to_dict_description_is_always_raw(self) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("x", 0, description="has a description"),
+        ])
+
+        assert invokable.to_dict()["description"] == invokable._description
+        assert invokable.to_dict()["description"] != invokable.description

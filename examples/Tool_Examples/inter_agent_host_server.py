@@ -34,12 +34,10 @@ def main() -> None:
     trivia_client = PyA2AtomicClient(url=TRIVIA_URL)
     math_client = PyA2AtomicClient(url=MATH_URL)
 
-    planner.register(trivia_client,
-                      remote_name=TRIVIA_REMOTE_NAME,
-                      name_collision_mode="raise")
-    planner.register(math_client,
-                     remote_name=MATH_REMOTE_NAME,
-                     name_collision_mode="raise")
+    planner.batch_register(client=trivia_client,
+                           name_collision_mode="raise")
+    planner.batch_register(client=math_client,
+                           name_collision_mode="raise")
 
     host = PyA2AtomicHost(
         invokables=[planner],

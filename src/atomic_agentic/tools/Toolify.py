@@ -115,7 +115,7 @@ def toolify(
             function=component,
             name=name if name is not None else component.name,
             namespace=namespace if namespace is not None else component.namespace,
-            description=description if description is not None else component.description,
+            description=description if description is not None else component._description,
             filter_extraneous_inputs=resolved_filter,
         )
 

@@ -11,6 +11,7 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
 from atomic_agentic.constants.core import NO_VAL
+from atomic_agentic.constants.agents import RUN_ID_PARAM
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
@@ -930,6 +931,7 @@ class TestAgentContextKeys:
         matching = ParamSpec(
             name="run_id", index=0, kind=ParamSpec.KEYWORD_ONLY,
             type="str | None", default=None,
+            description=RUN_ID_PARAM.description,
         )
         with pytest.warns(UserWarning, match="redundant"):
             Agent._warn_reserved_name_collisions(
@@ -1051,3 +1053,21 @@ class TestAgentContextKeys:
         # Second call's messages should have no prior-turn content
         second_call = engine.calls[1]
         assert len(second_call) == 2  # just system + user from _MinimalAgent
+
+
+class TestAgentDescriptionOverrideRemoval:
+    def test_agent_description_follows_base_getter(self) -> None:
+        agent = make_agent()
+
+        assert agent.description.startswith("Deterministic writer test agent.")
+        assert "- run_id:" in agent.description
+
+    def test_agent_description_contains_run_id_description_text(self) -> None:
+        agent = make_agent()
+
+        assert "Omit or pass None" in agent.description
+
+    def test_agent_to_dict_description_is_raw(self) -> None:
+        agent = make_agent()
+
+        assert agent.to_dict()["description"] == "Deterministic writer test agent."
