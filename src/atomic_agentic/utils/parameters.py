@@ -29,7 +29,7 @@ Private helpers
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Optional, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Callable, Optional, get_args, get_origin, get_type_hints
 
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
 from ..exceptions import SchemaError
@@ -60,6 +60,10 @@ def _format_annotation(ann: Any) -> str:
     # Missing / unknown annotation
     if ann is inspect._empty or ann is None:
         return "Any"
+
+    # NoneType -> "None" to match Python -> None annotation convention
+    if ann is type(None):
+        return "None"
 
     # Forward reference or explicit string annotation
     if isinstance(ann, str):
@@ -98,6 +102,24 @@ def _is_typed_dict_class(obj: Any) -> bool:
         and hasattr(obj, "__annotations__")
         and hasattr(obj, "__total__")
     )
+
+
+def _unwrap_annotated(ann: Any) -> tuple[Any, str | None]:
+    """Separate the base type and optional description from any annotation.
+
+    If ``ann`` is ``Annotated[T, ...]``, returns ``(T, description)`` where
+    ``description`` is the first ``str`` item in the metadata (stripped;
+    empty-after-strip becomes ``None``), or ``None`` if no string is present.
+    For all other annotations returns ``(ann, None)`` unchanged.
+    """
+    if get_origin(ann) is not Annotated:
+        return ann, None
+    args = get_args(ann)
+    base = args[0]
+    description = next((m for m in args[1:] if isinstance(m, str)), None)
+    if description is not None:
+        description = description.strip() or None
+    return base, description
 
 
 def _validate_schema_name(name: str) -> str:
@@ -398,7 +420,24 @@ def extract_io(function: Callable[..., Any]) -> tuple[list[ParamSpec], str]:
     """Extract parameter specifications and return type from a callable.
 
     Builds an ordered list of ``ParamSpec`` objects from a function's signature.
-    Each ``ParamSpec`` is self-sufficient (name, index, kind, type, default).
+    Each ``ParamSpec`` is self-sufficient (name, index, kind, type, default,
+    description).
+
+    Annotation source: ``get_type_hints(function, include_extras=True)`` is
+    attempted first so that ``Annotated[T, "desc"]`` is preserved intact and
+    forward references are resolved. On ``NameError`` (unresolvable forward
+    reference) the call falls back to ``{}``; each parameter then uses
+    ``param.annotation`` from ``inspect.signature`` directly.
+
+    ``Annotated`` handling: ``_unwrap_annotated`` separates the base type from
+    metadata. The first ``str`` item in the metadata becomes
+    ``ParamSpec.description`` (stripped; empty-after-strip → ``None``).
+    ``_format_annotation`` always receives the unwrapped base type.
+
+    Type resolution priority per parameter:
+    1. Unwrapped annotation base type if present.
+    2. ``type(default)`` if annotation absent but default present.
+    3. ``"Any"`` otherwise.
 
     Parameters
     ----------
@@ -409,7 +448,7 @@ def extract_io(function: Callable[..., Any]) -> tuple[list[ParamSpec], str]:
     -------
     tuple[list[ParamSpec], str]
         - List of ``ParamSpec`` objects in signature order.
-        - Return type as a human-readable string.
+        - Return type as a human-readable string (``Annotated`` unwrapped).
 
     Raises
     ------
@@ -420,42 +459,47 @@ def extract_io(function: Callable[..., Any]) -> tuple[list[ParamSpec], str]:
         raise TypeError(f"extract_io expects a callable, got {type(function)!r}")
 
     sig = inspect.signature(function)
+
+    # Prefer resolved hints; fall back to {} on unresolvable forward references.
+    try:
+        hints = get_type_hints(function, include_extras=True)
+    except NameError:
+        hints = {}
+
     parameters: list[ParamSpec] = []
 
     for index, (name, param) in enumerate(sig.parameters.items()):
-        kind_name = param.kind.name  # e.g. "POSITIONAL_ONLY"
-        ann = param.annotation
-        default = param.default
+        kind_name = param.kind.name
+        default   = param.default
 
-        # Decide the source of the type information:
-        # 1) annotation if present,
-        # 2) otherwise the default's type if present,
-        # 3) otherwise "Any".
-        if ann is not inspect._empty:
-            raw_type = ann
+        # Annotation source: resolved hint > raw sig annotation.
+        ann = hints.get(name, param.annotation)
+        base_ann, description = _unwrap_annotated(ann)
+
+        # Type resolution: base_ann > type(default) > "Any".
+        if base_ann is not inspect._empty:
+            raw_type = base_ann
         elif default is not inspect._empty:
             raw_type = type(default)
         else:
             raw_type = inspect._empty
 
-        type_str = _format_annotation(raw_type)
-
-        # Handle default value.
+        type_str    = _format_annotation(raw_type)
         default_val = default if default is not inspect._empty else NO_VAL
 
-        # Create self-sufficient ParamSpec with name.
-        spec = ParamSpec(
+        parameters.append(ParamSpec(
             name=name,
             index=index,
             kind=kind_name,
             type=type_str,
             default=default_val,
-        )
-        parameters.append(spec)
+            description=description,
+        ))
 
-    # Return type: annotation if present, else 'Any'.
-    ret_ann = sig.return_annotation
-    return_type = _format_annotation(ret_ann)
+    # Return type: resolved hint > raw sig annotation; Annotated unwrapped.
+    ret_ann = hints.get("return", sig.return_annotation)
+    base_ret, _ = _unwrap_annotated(ret_ann)
+    return_type = _format_annotation(base_ret)
 
     return parameters, return_type
 
@@ -499,17 +543,18 @@ def to_paramspec_list(
     # TypedDict class -> use field annotations as ParamSpec.type
     # ------------------------------------------------------------------
     if _is_typed_dict_class(schema):
-        hints = get_type_hints(schema)
-        normalized = [
-            ParamSpec(
+        hints = get_type_hints(schema, include_extras=True)
+        normalized = []
+        for index, (name, annotation) in enumerate(hints.items()):
+            base_ann, description = _unwrap_annotated(annotation)
+            normalized.append(ParamSpec(
                 name=name,
                 index=index,
                 kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-                type=_format_annotation(annotation),
+                type=_format_annotation(base_ann),
                 default=NO_VAL,
-            )
-            for index, (name, annotation) in enumerate(hints.items())
-        ]
+                description=description,
+            ))
         _validate_parameter_order(normalized)
         return normalized
 
