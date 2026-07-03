@@ -5,6 +5,65 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a16] - 2026-07-03
+
+### Added
+
+- `fail_fast: bool = True` constructor parameter on `ToolAgent`, `PlanActAgent`,
+  and `ReActAgent`. Default preserves all existing behavior. With `fail_fast=False`,
+  individual tool-call failures are recorded as `FAILED` blackboard slots rather
+  than aborting the run immediately.
+- `ToolAgentResult.exception_records: tuple[tuple[int, Exception], ...]` — reports
+  the global blackboard index and stored exception for every `FAILED` slot produced
+  during a `fail_fast=False` run; empty tuple when `fail_fast=True`.
+- Cascade `FAILED` propagation (`PlanActAgent._prepare_next_batch` and
+  `ReActAgent._apply_react_step_result`): when `fail_fast=False`, any slot whose
+  `args` reference a `FAILED` step via `<<__sN__>>` is cascade-marked `FAILED` and
+  skipped before preparation. Return-step cascade-fail is always fatal regardless
+  of `fail_fast`.
+- FAILED cache-ref detection in `_validate_planned_slots` (`PlanActAgent`) and
+  `_process_next_step_output` (`ReActAgent`): a plan referencing a `<<__cN__>>`
+  slot that is `FAILED` in the persisted cache now raises `ToolAgentError` at
+  plan-processing time, before any execution.
+- `ToolAgent.fail_fast` read-only property.
+- `"fail_fast"` key added to `ToolAgent.to_dict()`.
+- `batch_register`: `remote_names` entries not found on the client now raise
+  `ToolRegistrationError`; previously they were silently ignored.
+
+### Changed
+
+- `update_blackboard` is now called unconditionally at the end of `_invoke` and
+  `_ainvoke`, regardless of `context_enabled`. `context_enabled` continues to
+  control only whether prior-run slots are loaded as `cache_blackboard`.
+  `ToolAgentRecord.blackboard_start` / `blackboard_end` are now always integers.
+- `update_blackboard` persists all non-empty slots — `EXECUTED` and `FAILED` —
+  preserving global index continuity across runs.
+- `render_turn`: when the blackboard span contains `FAILED` slots, the assistant
+  content is split into a `CACHED STEPS` section (executed slots, full data) and
+  a `FAILED STEPS` section (step index, tool name, truncated error string — no
+  args). All-executed spans retain the existing single-section format.
+- `_resolve_placeholders`: cache-ref error message now branches on status —
+  "permanently FAILED" for `FAILED` slots, "not executed" otherwise, removing the
+  misleading "not yet" phrasing for a terminal state.
+- Sync `_invoke` loop violation message corrected: `"prepared_indices"` →
+  `"prepared_steps"` to match the async path and the actual field name.
+- `_validate_react_prepare_state` docstring updated to reflect the relaxed
+  invariant: the previous step must be processed (executed, or `FAILED` when
+  `fail_fast=False`).
+
+### Fixed
+
+- `render_turn` with `peek_at_cache=True` no longer crashes when a `FAILED` slot
+  is present in the blackboard span (`FAILED` slots carry `result = NO_VAL`;
+  result access is now gated inside `is_executed()`).
+
+### Removed
+
+- Dead code DA: unreachable post-`super()` guard in `ReActAgent.__init__`.
+- Dead code DB: unreachable step-mismatch guard in `_apply_react_step_result`.
+- Dead code DC: unreachable return-tool identity check at end of
+  `_normalize_planned_slots`.
+
 ## [2.0.0a15] - 2026-07-01
 
 ### Added

@@ -44,6 +44,14 @@ outliner = BasicAgent(
     role_prompt=OUTLINER_PROMPT,
 )
 
+def writer_pre(outline: str | None = None, revision_notes: str | None = None) -> str:
+    if outline:
+        return f"Here is the story outline to use for your first draft: {outline}"
+    elif revision_notes:
+        return f"Here are the revision notes to apply to your last draft: {revision_notes}"
+    else:
+        raise ValueError("Either outline or revision_notes must be provided.")
+
 writer = BasicAgent(
     name="StoryWriter",
     namespace="examples",
@@ -51,7 +59,11 @@ writer = BasicAgent(
     llm_engine=llm_engine,
     role_prompt=WRITER_PROMPT,
     context_enabled=True,
+    pre_invoke=writer_pre,
 )
+
+def reviewer_pre(draft: str) -> str:
+    return f"Review & edit the below draft:\n```\n{draft}\n```"
 
 reviewer = BasicAgent(
     name="DraftReviewer",
@@ -60,6 +72,7 @@ reviewer = BasicAgent(
     llm_engine=llm_engine,
     role_prompt=REVIEWER_PROMPT,
     context_enabled=True,
+    pre_invoke=reviewer_pre,
 )
 
 orch = PlanActAgent(
@@ -88,13 +101,9 @@ if __name__ == "__main__":
     orch.tool_calls_limit = 2 * loops + 3
 
     task_prompt = (
-        "Do the following task:\n\n"
-        f"1) Create an outline of a story with the outliner, given the following idea: {idea!r}\n"
-        "2) Using the outline created, write a full draft of the story with the writer.\n"
-        "3) Review the story and provide feedback with the reviewer\n"
-        "4) Rewrite the draft by providing the writer with the reviewer feedback.\n"
-        f"5) Repeat steps 3-4 EXACTLY {loops - 1} times more\n"
-        "6) Return the writer's final draft markdown."
+        f"TASK: Write a story based on the following idea: {idea!r}\n"
+        "Use the outliner to generate a structured outline, then write a first draft. "
+        f"Then for {loops} cycles, have the reviewer critique the draft and the writer apply the notes."
     )
 
     print("\n⇢ Planning + execution …")
