@@ -1065,7 +1065,7 @@ class TestAgentDescriptionOverrideRemoval:
     def test_agent_description_contains_run_id_description_text(self) -> None:
         agent = make_agent()
 
-        assert "Omit or pass None" in agent.description
+        assert "Optional UUID hexstring" in agent.description
 
     def test_agent_to_dict_description_is_raw(self) -> None:
         agent = make_agent()

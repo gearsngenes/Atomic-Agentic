@@ -137,6 +137,7 @@ def make_planact_agent(
     blackboard_preview_limit: int | None = None,
     post_invoke: Any = None,
     post_result_key: str | None = None,
+    fail_fast: bool = True,
 ) -> PlanActAgent:
     agent = PlanActAgent(
         name="tests",
@@ -150,6 +151,7 @@ def make_planact_agent(
         blackboard_preview_limit=blackboard_preview_limit,
         post_invoke=post_invoke,
         post_result_key=post_result_key,
+        fail_fast=fail_fast,
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
@@ -165,6 +167,7 @@ def make_react_agent(
     blackboard_preview_limit: int | None = None,
     post_invoke: Any = None,
     post_result_key: str | None = None,
+    fail_fast: bool = True,
 ) -> ReActAgent:
     agent = ReActAgent(
         name="tests",
@@ -178,6 +181,7 @@ def make_react_agent(
         blackboard_preview_limit=blackboard_preview_limit,
         post_invoke=post_invoke,
         post_result_key=post_result_key,
+        fail_fast=fail_fast,
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
@@ -272,6 +276,7 @@ class ScriptedToolAgent(ToolAgent):
         script: list[list[dict[str, Any]]] | None = None,
         tool_instructions: str | PromptConfig = ROLE_TEMPLATE,
         context_enabled: bool = False,
+        fail_fast: bool = True,
         tool_calls_limit: int | None = None,
         peek_at_cache: bool = False,
         response_preview_limit: int | None = None,
@@ -287,6 +292,7 @@ class ScriptedToolAgent(ToolAgent):
             llm_engine=EchoLLMEngine(),
             tool_instructions=tool_instructions,
             context_enabled=context_enabled,
+            fail_fast=fail_fast,
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
             response_preview_limit=response_preview_limit,
@@ -331,6 +337,9 @@ class ScriptedToolAgent(ToolAgent):
             raise ToolAgentError("No scripted batches remain.")
 
         batch = state.batches[state.batch_index]
+        if not batch:
+            raise ToolAgentError(f"ScriptedToolAgent: encountered empty batch at index {state.batch_index}.")
+
         prepared_steps: list[int] = []
 
         for call in batch:
@@ -382,6 +391,7 @@ class PendingPreparedToolAgent(ScriptedToolAgent):
 def make_agent(
     *,
     context_enabled: bool = False,
+    fail_fast: bool = True,
     tool_calls_limit: int | None = None,
     peek_at_cache: bool = False,
     response_preview_limit: int | None = None,
@@ -391,6 +401,7 @@ def make_agent(
 ) -> ScriptedToolAgent:
     return ScriptedToolAgent(
         context_enabled=context_enabled,
+        fail_fast=fail_fast,
         tool_calls_limit=tool_calls_limit,
         peek_at_cache=peek_at_cache,
         response_preview_limit=response_preview_limit,
@@ -593,6 +604,29 @@ class TestToolAgentConstruction:
 
         with pytest.raises(TypeError):
             ScriptedToolAgent(preview_limit=10)  # type: ignore[call-arg]
+
+    def test_fail_fast_defaults_to_true(self) -> None:
+        agent = make_agent()
+        assert agent.fail_fast is True
+
+    def test_fail_fast_false_accepted(self) -> None:
+        agent = make_agent(fail_fast=False)
+        assert agent.fail_fast is False
+
+    def test_fail_fast_property_is_readable(self) -> None:
+        for value in (True, False):
+            agent = make_agent(fail_fast=value)
+            assert agent.fail_fast is value
+
+    def test_fail_fast_is_not_directly_settable(self) -> None:
+        agent = make_agent()
+        with pytest.raises(AttributeError):
+            agent.fail_fast = False  # type: ignore[misc]
+
+    @pytest.mark.parametrize("value", [1, "True", None, 0])
+    def test_fail_fast_rejects_non_bool(self, value: Any) -> None:
+        with pytest.raises(ToolAgentError, match="fail_fast"):
+            make_agent(fail_fast=value)  # type: ignore[arg-type]
 
 
 class TestToolAgentNamespace:
@@ -1356,6 +1390,64 @@ class TestExecutePreparedBatch:
 
         assert updated.prepared_steps == []
 
+    def test_fail_fast_false_marks_all_failures_without_raising(self) -> None:
+        agent = make_agent(fail_fast=False)
+        keys = register_math_tools(agent)
+        slot = prepared_slot(0, keys["fail_tool"], {})
+        state = make_state(running=[slot], prepared_steps=[0])
+
+        agent._execute_prepared_batch(state)  # must not raise
+
+        assert state.running_blackboard[0].status == "failed"
+        assert state.running_blackboard[0].error is not NO_VAL
+        assert state.running_blackboard[0].is_failed() is True
+
+    def test_fail_fast_false_mixed_batch_executes_successes_marks_failures(self) -> None:
+        agent = make_agent(fail_fast=False)
+        keys = register_math_tools(agent)
+        state = make_state(
+            running=[
+                prepared_slot(0, keys["add"], {"x": 1, "y": 2}),
+                prepared_slot(1, keys["fail_tool"], {}),
+            ],
+            prepared_steps=[0, 1],
+        )
+
+        agent._execute_prepared_batch(state)  # must not raise
+
+        assert state.running_blackboard[0].status == "executed"
+        assert state.running_blackboard[0].result.result == 3
+        assert state.running_blackboard[1].status == "failed"
+        assert state.running_blackboard[1].error is not NO_VAL
+
+    def test_fail_fast_false_executed_steps_excludes_failed_slots(self) -> None:
+        agent = make_agent(fail_fast=False)
+        keys = register_math_tools(agent)
+        state = make_state(
+            running=[
+                prepared_slot(0, keys["add"], {"x": 1, "y": 2}),
+                prepared_slot(1, keys["fail_tool"], {}),
+            ],
+            prepared_steps=[0, 1],
+        )
+
+        updated = agent._execute_prepared_batch(state)
+
+        assert 0 in updated.executed_steps
+        assert 1 not in updated.executed_steps
+
+    def test_fail_fast_false_prepared_steps_cleared_after_partial_failure(self) -> None:
+        agent = make_agent(fail_fast=False)
+        keys = register_math_tools(agent)
+        state = make_state(
+            running=[prepared_slot(0, keys["fail_tool"], {})],
+            prepared_steps=[0],
+        )
+
+        updated = agent._execute_prepared_batch(state)
+
+        assert updated.prepared_steps == []
+
 
 class TestAsyncExecutePreparedBatch:
     """Async analog of TestExecutePreparedBatch covering _async_execute_prepared_batch."""
@@ -1493,16 +1585,51 @@ class TestAsyncExecutePreparedBatch:
         assert isinstance(state.running_blackboard[0].error, ToolAgentError)
         assert state.running_blackboard[0].status == "failed"
 
-    def test_return_tool_executed_more_than_once_raises(self) -> None:
-        agent = make_agent()
-        state = make_state(
-            running=[prepared_slot(0, return_tool.full_name, {"val": 2})],
-            prepared_steps=[0],
-        )
-        state.return_value = 1
+    def test_fail_fast_false_marks_all_failures_without_raising(self) -> None:
+        agent = make_agent(fail_fast=False)
+        keys = register_math_tools(agent)
+        slot = prepared_slot(0, keys["fail_tool"], {})
+        state = make_state(running=[slot], prepared_steps=[0])
 
-        with pytest.raises(ToolAgentError, match="return tool executed more than once"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+        asyncio.run(agent._async_execute_prepared_batch(state))  # must not raise
+
+        assert state.running_blackboard[0].status == "failed"
+        assert state.running_blackboard[0].error is not NO_VAL
+        assert state.running_blackboard[0].is_failed() is True
+
+    def test_fail_fast_false_mixed_batch_executes_successes_marks_failures(self) -> None:
+        agent = make_agent(fail_fast=False)
+        keys = register_math_tools(agent)
+        state = make_state(
+            running=[
+                prepared_slot(0, keys["add"], {"x": 1, "y": 2}),
+                prepared_slot(1, keys["fail_tool"], {}),
+            ],
+            prepared_steps=[0, 1],
+        )
+
+        asyncio.run(agent._async_execute_prepared_batch(state))  # must not raise
+
+        assert state.running_blackboard[0].status == "executed"
+        assert state.running_blackboard[0].result.result == 3
+        assert state.running_blackboard[1].status == "failed"
+        assert state.running_blackboard[1].error is not NO_VAL
+
+    def test_fail_fast_false_executed_steps_excludes_failed_slots(self) -> None:
+        agent = make_agent(fail_fast=False)
+        keys = register_math_tools(agent)
+        state = make_state(
+            running=[
+                prepared_slot(0, keys["add"], {"x": 1, "y": 2}),
+                prepared_slot(1, keys["fail_tool"], {}),
+            ],
+            prepared_steps=[0, 1],
+        )
+
+        updated = asyncio.run(agent._async_execute_prepared_batch(state))
+
+        assert 0 in updated.executed_steps
+        assert 1 not in updated.executed_steps
 
 
 class TestScriptedInvokeLoop:
@@ -1521,7 +1648,7 @@ class TestScriptedInvokeLoop:
 
         assert result.result == 50
 
-    def test_context_disabled_does_not_persist_blackboard(self) -> None:
+    def test_context_disabled_does_not_populate_cache_for_llm(self) -> None:
         agent = make_agent(context_enabled=False)
         keys = register_math_tools(agent)
         agent.set_script(
@@ -1532,8 +1659,8 @@ class TestScriptedInvokeLoop:
         )
 
         assert agent.invoke({"prompt": "run"}).result == 5
-        assert agent.blackboard == []
-        # Records are always stored regardless of context_enabled (Pass 4 contract).
+        # update_blackboard always runs; context_enabled only controls cache_blackboard for the LLM.
+        assert len(agent.blackboard) == 2
         assert len(agent.records) == 1
 
     def test_context_enabled_stores_tool_agent_turn_with_blackboard_span(self) -> None:
@@ -1874,6 +2001,25 @@ class TestBlackboardPersistenceAndDisplay:
         assert "RESPONSE:\nlong:abcde..." in response_section
         assert "abcdefghijklmnopqrstuvwxyz" in cached_section
         assert "'long:abcdefghijklmnopqrstuvwxyz'" in cached_section
+
+    def test_context_disabled_invoke_stores_blackboard(self) -> None:
+        agent = make_agent(context_enabled=False)
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
+                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+            ]
+        )
+
+        assert agent.invoke({"prompt": "run"}).result == 3
+
+        board = agent.blackboard
+        assert len(board) == 2
+        assert board[0].tool == keys["add"]
+        assert board[0].status == "executed"
+        assert board[1].tool == return_tool.full_name
+        assert board[1].status == "executed"
 
 
 class TestToolAgentRecordRendering:
@@ -2882,6 +3028,7 @@ class TestToolAgentRecordMetadataContract:
 
         assert isinstance(result, ToolAgentResult)
         assert result.result == 42
+        assert result.exception_records == ()
 
     def test_invoke_tool_usage_records_call_counts(self) -> None:
         """tool_usage on the returned ToolAgentResult reflects non-return call counts."""
@@ -2912,6 +3059,47 @@ class TestToolAgentRecordMetadataContract:
 
         assert isinstance(result, ToolAgentResult)
         assert result.tool_usage == ()
+
+    def test_invoke_result_has_empty_exception_records_on_clean_run(self) -> None:
+        agent = make_agent()
+        agent.set_script(
+            [[{"tool": return_tool.full_name, "args": {"val": 42}}]]
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert isinstance(result, ToolAgentResult)
+        assert result.exception_records == ()
+
+    def test_invoke_result_with_fail_fast_false_and_failure_has_exception_records(self) -> None:
+        agent = make_agent(fail_fast=False)
+        keys = register_math_tools(agent)
+        agent.set_script(
+            [
+                [{"tool": keys["fail_tool"], "args": {}}],
+                [{"tool": return_tool.full_name, "args": {"val": 42}}],
+            ]
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 42
+        assert len(result.exception_records) == 1
+        blackboard_index, error = result.exception_records[0]
+        assert isinstance(blackboard_index, int)
+        assert isinstance(error, Exception)
+
+    def test_blackboard_span_is_integer_when_context_disabled(self) -> None:
+        agent = make_agent(context_enabled=False)
+        agent.set_script(
+            [[{"tool": return_tool.full_name, "args": {"val": 1}}]]
+        )
+
+        agent.invoke({"prompt": "run"})
+
+        record = agent.records[0]
+        assert isinstance(record.blackboard_start, int)
+        assert isinstance(record.blackboard_end, int)
 
 
 class TestAsyncHookDispatch:
@@ -3001,3 +3189,174 @@ class TestAsyncHookDispatch:
         result = asyncio.run(agent.async_invoke({"prompt": "run react"}))
 
         assert result.result == 10
+
+
+# ── TestCascadeFailedPropagation ───────────────────────────────────────────────
+
+class TestCascadeFailedPropagation:
+    """
+    Integration tests for cascade FAILED propagation in PlanActAgent.
+
+    When a tool step fails (fail_fast=False), any later step whose args
+    reference it via <<__sN__>> placeholders is cascade-marked FAILED
+    instead of raising. The return tool always raises when any of its
+    arg dependencies failed.
+    """
+
+    def test_dependent_step_is_cascade_failed_not_raised(self) -> None:
+        """Non-return step with a failed dep is cascade-marked FAILED; run succeeds."""
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.fail_tool", "args": {}},
+                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
+                    {"tool": return_tool.full_name, "args": {"val": 99}},
+                ])
+            ],
+            fail_fast=False,
+        )
+
+        result = agent.invoke({"prompt": "cascade test"})
+
+        assert result.result == 99
+        board = agent.blackboard
+        assert board[0].status == BlackboardSlot.FAILED
+        assert board[1].status == BlackboardSlot.FAILED
+        assert "dependency" in str(board[1].error).lower() or "skipped" in str(board[1].error).lower()
+        assert board[2].status == BlackboardSlot.EXECUTED
+
+    def test_cascade_exception_records_includes_both_slots(self) -> None:
+        """exception_records captures the execution failure and the cascade failure."""
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.fail_tool", "args": {}},
+                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
+                    {"tool": return_tool.full_name, "args": {"val": 99}},
+                ])
+            ],
+            fail_fast=False,
+        )
+
+        result = agent.invoke({"prompt": "cascade exception_records"})
+
+        assert result.result == 99
+        assert len(result.exception_records) == 2
+        indices = [idx for idx, _ in result.exception_records]
+        assert 0 in indices
+        assert 1 in indices
+
+    def test_return_step_with_failed_dep_raises(self) -> None:
+        """Return step depending on a FAILED step raises ToolAgentError."""
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.fail_tool", "args": {}},
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+                ])
+            ],
+            fail_fast=False,
+        )
+
+        with pytest.raises(ToolAgentError, match="return step"):
+            agent.invoke({"prompt": "return cascade raise"})
+
+    def test_chain_cascade_return_raises(self) -> None:
+        """Cascade chain: step 0 fails → step 1 cascade FAILED → return depends on step 1 → raises."""
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.fail_tool", "args": {}},
+                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                ])
+            ],
+            fail_fast=False,
+        )
+
+        with pytest.raises(ToolAgentError, match="return step"):
+            agent.invoke({"prompt": "chain cascade"})
+
+    def test_cascade_does_not_affect_independent_steps(self) -> None:
+        """Steps with no dep on the failed step execute normally; run succeeds."""
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.fail_tool", "args": {}},
+                    {"tool": "Tool.tests.add", "args": {"x": 3, "y": 4}},
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                ])
+            ],
+            fail_fast=False,
+        )
+
+        result = agent.invoke({"prompt": "independent step"})
+
+        assert result.result == 7
+        board = agent.blackboard
+        assert board[0].status == BlackboardSlot.FAILED
+        assert board[1].status == BlackboardSlot.EXECUTED
+        assert board[2].status == BlackboardSlot.EXECUTED
+
+    def test_fail_fast_true_does_not_cascade_raises_immediately(self) -> None:
+        """With fail_fast=True (default), any failure raises ToolInvocationError immediately."""
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.fail_tool", "args": {}},
+                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
+                    {"tool": return_tool.full_name, "args": {"val": 99}},
+                ])
+            ],
+            fail_fast=True,
+        )
+
+        with pytest.raises(ToolInvocationError):
+            agent.invoke({"prompt": "fail_fast=True raises"})
+
+
+# ── TestReActCascadeFailedPropagation ─────────────────────────────────────────
+
+class TestReActCascadeFailedPropagation:
+    """
+    Integration tests for cascade FAILED propagation in ReActAgent.
+
+    When a tool step fails (fail_fast=False), a subsequent LLM-generated
+    step whose args reference it via <<__sN__>> is cascade-marked FAILED in
+    _apply_react_step_result without raising. The return tool always raises
+    when its arg dependencies failed.
+    """
+
+    def test_react_dependent_step_is_cascade_failed(self) -> None:
+        """ReAct: non-return step with a failed dep is cascade-marked FAILED; run succeeds."""
+        agent = make_react_agent(
+            [
+                react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
+                react_step_json(step=1, tool="Tool.tests.add", args={"x": "<<__s0__>>", "y": 2}),
+                react_step_json(step=2, tool=return_tool.full_name, args={"val": 99}, duration=0),
+            ],
+            tool_calls_limit=2,
+            fail_fast=False,
+        )
+
+        result = agent.invoke({"prompt": "react cascade"})
+
+        assert result.result == 99
+        board = agent.blackboard
+        assert board[0].status == BlackboardSlot.FAILED
+        assert board[1].status == BlackboardSlot.FAILED
+        assert board[2].status == BlackboardSlot.EXECUTED
+
+    def test_react_return_step_with_failed_dep_raises(self) -> None:
+        """ReAct: return step depending on a FAILED step raises ToolAgentError."""
+        agent = make_react_agent(
+            [
+                react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
+            ],
+            tool_calls_limit=1,
+            fail_fast=False,
+        )
+
+        with pytest.raises(ToolAgentError, match="return step"):
+            agent.invoke({"prompt": "react return cascade raise"})

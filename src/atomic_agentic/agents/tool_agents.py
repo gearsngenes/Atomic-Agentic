@@ -185,17 +185,17 @@ class ToolAgent(Agent, ABC):
     2. state = _initialize_run_state(messages=messages)  [subclass hook]
     3. while not state.is_done:
         state = _prepare_next_batch(state)              [subclass hook]
+        if prepared_steps is empty → continue           [cascade skip: entire batch was cascade-failed]
         state = _execute_prepared_batch(state)          [base implementation]
         [completion check: if return tool executed, is_done=True]
        (each LLM generation made along the way is captured as an LLMRecord
        and accumulated onto state.llm_records)
-    4. if context_enabled:
-        blackboard_start = len(self._blackboard)
-        state = update_blackboard(state)
+    4. blackboard_start = len(self._blackboard)
+        state = update_blackboard(state)   [always; context_enabled only gates cache_blackboard]
         blackboard_end = len(self._blackboard)
     5. return a 2-tuple of a draft ToolAgentRecord (final_result=None) carrying
        state.return_value, blackboard_start, and blackboard_end; and a metadata
-       dict with llm_records, llm_model_data, and tool_usage.
+       dict with llm_records, llm_model_data, tool_usage, and exception_records.
 
     The draft is complete except for ``final_result``, which is set after
     ``make_result`` runs — ``invoke``/``async_invoke`` complete it via
@@ -238,9 +238,10 @@ class ToolAgent(Agent, ABC):
     **Budget Enforcement**: If ``tool_calls_limit`` is set, non-return tool calls are
         tracked and exceeding the limit raises.
 
-    **Context Persistence**: If ``context_enabled=True``, the completed run blackboard
-        is merged into ``self._blackboard`` and the produced span is stored on the
-        ToolAgentRecord for future rendering.
+    **Context Persistence**: The completed run blackboard is always merged into
+        ``self._blackboard`` (``blackboard_start``/``blackboard_end`` always set on
+        the ``ToolAgentRecord``). If ``context_enabled=True``, those prior slots are
+        also fed into the LLM as context on the next invocation.
 
     Generic Type Parameter
     ~~~~~~~~~~~~~~~~~~~~~~
@@ -279,6 +280,7 @@ class ToolAgent(Agent, ABC):
         filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = False,
         *,
+        fail_fast: bool = True,
         tool_calls_limit: Optional[int] = None,
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
@@ -311,10 +313,16 @@ class ToolAgent(Agent, ABC):
             dropped before invocation. When ``False``, extraneous inputs raise.
             ``None`` inherits the base class default.
         context_enabled : bool
-            When ``True``, the completed run blackboard is merged into the
-            persisted blackboard after each invoke and the produced span is
-            stored on the ``ToolAgentRecord`` for future context rendering.
-            Defaults to ``False``.
+            When ``True``, prior blackboard steps are fed into each invocation
+            as LLM context (``cache_blackboard`` is populated in run state).
+            The blackboard is always persisted after each invoke regardless of
+            this setting. Defaults to ``False``.
+        fail_fast : bool
+            When ``True`` (default), the first tool call failure immediately
+            raises and aborts the run. When ``False``, failing slots are marked
+            ``FAILED`` and the loop continues to execute independent steps;
+            failures are collected in ``ToolAgentResult.exception_records``.
+            Return-tool failures always raise regardless of this setting.
         tool_calls_limit : int | None
             Maximum number of non-return action calls per invoke run.
             ``None`` means unlimited. Must be ``>= 0`` if set.
@@ -385,6 +393,10 @@ class ToolAgent(Agent, ABC):
         self._toolbox: dict[str, AtomicInvokable] = {}
         self._blackboard: list[BlackboardSlot] = []
         self._constants: list[ConstantSpec] = []
+
+        if not isinstance(fail_fast, bool):
+            raise ToolAgentError("fail_fast must be a bool.")
+        self._fail_fast: bool = fail_fast
 
         if type(peek_at_cache) is not bool:
             raise ToolAgentError("peek_at_cache must be a boolean.")
@@ -477,6 +489,11 @@ class ToolAgent(Agent, ABC):
         """Shallow copy of the persisted blackboard slots. Mutations to the
         returned list or its slots do not affect internal agent state."""
         return [slot.copy() for slot in self._blackboard]
+
+    @property
+    def fail_fast(self) -> bool:
+        """When False, individual tool call failures are recorded rather than raised."""
+        return self._fail_fast
 
     @property
     def peek_at_cache(self) -> bool:
@@ -1399,42 +1416,52 @@ class ToolAgent(Agent, ABC):
                 coros.append(tool.async_invoke(slot.resolved_args))
 
             raw_results = await asyncio.gather(*coros, return_exceptions=True)
+            return list(zip(indices, raw_results))
 
-            first_error = next(
-                (
-                    (idx, raw)
-                    for idx, raw in zip(indices, raw_results)
-                    if isinstance(raw, BaseException)
-                ),
-                None,
-            )
+        pairs = run_coro_sync(run_batch())
 
-            if first_error is not None:
-                idx, raw_error = first_error
+        failures = [(idx, raw) for idx, raw in pairs if isinstance(raw, BaseException)]
+        successes = [(idx, raw) for idx, raw in pairs if not isinstance(raw, BaseException)]
 
+        if failures:
+            if self._fail_fast:
+                # Existing behavior: mark first failure and raise immediately.
+                idx, raw_error = failures[0]
                 if isinstance(raw_error, ToolInvocationError):
                     board[idx].error = raw_error
                     board[idx].status = BlackboardSlot.FAILED
                     raise raw_error
-
                 wrapped = ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} for {board[idx].tool!r}: {raw_error}"
+                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
+                    f"for {board[idx].tool!r}: {raw_error}"
                 )
                 board[idx].error = wrapped
                 board[idx].status = BlackboardSlot.FAILED
                 raise wrapped from raw_error
+            else:
+                # fail_fast=False: mark all failures, then check for fatal return-tool failure.
+                for idx, raw_error in failures:
+                    if isinstance(raw_error, ToolInvocationError):
+                        board[idx].error = raw_error
+                    else:
+                        board[idx].error = ToolAgentError(
+                            f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
+                            f"for {board[idx].tool!r}: {raw_error}"
+                        )
+                    board[idx].status = BlackboardSlot.FAILED
 
-            return [(idx, result) for idx, result in zip(indices, raw_results)]
+                # Return-tool failure is always fatal regardless of fail_fast.
+                for idx, raw_error in failures:
+                    if board[idx].tool == RETURN_TOOL_FULL_NAME:
+                        err = board[idx].error
+                        if isinstance(raw_error, ToolInvocationError):
+                            raise err
+                        raise err from raw_error
 
-        results = run_coro_sync(run_batch())
-
-        for idx, tool_result in results:
+        for idx, tool_result in successes:
             board[idx].result = tool_result
             board[idx].error = NO_VAL
             board[idx].status = BlackboardSlot.EXECUTED
-
-        # Post-execution bookkeeping
-        for idx in indices:
             state.executed_steps.add(idx)
 
         state.tool_calls_used += non_return_planned
@@ -1442,8 +1469,10 @@ class ToolAgent(Agent, ABC):
 
         if return_indices:
             ret_idx = return_indices[0]
-            state.return_value = board[ret_idx].result.result
-            state.is_done = True
+            if board[ret_idx].is_executed():
+                state.return_value = board[ret_idx].result.result
+                state.is_done = True
+            # else: return slot failed; already raised above in fail_fast=False path
 
         return state
 
@@ -1553,32 +1582,53 @@ class ToolAgent(Agent, ABC):
 
         raw_results = await asyncio.gather(*coros, return_exceptions=True)
 
-        first_error = next(
-            (
-                (idx, raw)
-                for idx, raw in zip(indices, raw_results)
-                if isinstance(raw, BaseException)
-            ),
-            None,
-        )
+        failures = [
+            (idx, raw)
+            for idx, raw in zip(indices, raw_results)
+            if isinstance(raw, BaseException)
+        ]
+        successes = [
+            (idx, raw)
+            for idx, raw in zip(indices, raw_results)
+            if not isinstance(raw, BaseException)
+        ]
 
-        if first_error is not None:
-            idx, raw_error = first_error
-
-            if isinstance(raw_error, ToolInvocationError):
-                board[idx].error = raw_error
+        if failures:
+            if self._fail_fast:
+                # Existing behavior: mark first failure and raise immediately.
+                idx, raw_error = failures[0]
+                if isinstance(raw_error, ToolInvocationError):
+                    board[idx].error = raw_error
+                    board[idx].status = BlackboardSlot.FAILED
+                    raise raw_error
+                wrapped = ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: tool call failed at index {idx} "
+                    f"for {board[idx].tool!r}: {raw_error}"
+                )
+                board[idx].error = wrapped
                 board[idx].status = BlackboardSlot.FAILED
-                raise raw_error
+                raise wrapped from raw_error
+            else:
+                # fail_fast=False: mark all failures, then check for fatal return-tool failure.
+                for idx, raw_error in failures:
+                    if isinstance(raw_error, ToolInvocationError):
+                        board[idx].error = raw_error
+                    else:
+                        board[idx].error = ToolAgentError(
+                            f"{type(self).__name__}.{self.name}: tool call failed at index {idx} "
+                            f"for {board[idx].tool!r}: {raw_error}"
+                        )
+                    board[idx].status = BlackboardSlot.FAILED
 
-            wrapped = ToolAgentError(
-                f"{type(self).__name__}.{self.name}: tool call failed at index {idx} "
-                f"for {board[idx].tool!r}: {raw_error}"
-            )
-            board[idx].error = wrapped
-            board[idx].status = BlackboardSlot.FAILED
-            raise wrapped from raw_error
+                # Return-tool failure is always fatal regardless of fail_fast.
+                for idx, raw_error in failures:
+                    if board[idx].tool == RETURN_TOOL_FULL_NAME:
+                        err = board[idx].error
+                        if isinstance(raw_error, ToolInvocationError):
+                            raise err
+                        raise err from raw_error
 
-        for idx, tool_result in zip(indices, raw_results):
+        for idx, tool_result in successes:
             board[idx].result = tool_result
             board[idx].error = NO_VAL
             board[idx].status = BlackboardSlot.EXECUTED
@@ -1587,15 +1637,12 @@ class ToolAgent(Agent, ABC):
         state.tool_calls_used += non_return_planned
         state.prepared_steps = []
 
-        for idx in reversed(indices):
-            if board[idx].tool == RETURN_TOOL_FULL_NAME:
-                if state.return_value is not NO_VAL:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: return tool executed more than once."
-                    )
-                state.return_value = board[idx].result.result
+        if return_indices:
+            ret_idx = return_indices[0]
+            if board[ret_idx].is_executed():
+                state.return_value = board[ret_idx].result.result
                 state.is_done = True
-                break
+            # else: return slot failed; already raised above in fail_fast=False path
 
         return state
 
@@ -1604,11 +1651,19 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     def update_blackboard(self, state: ToolAgentRunState) -> ToolAgentRunState:
         """
-        Persist executed run steps into the agent's persisted blackboard cache.
+        Persist all non-empty run slots into the agent's persisted blackboard.
 
-        This method is called at the end of ``invoke()`` if ``context_enabled=True``.
-        It merges the current run's executed steps into the persistent blackboard,
-        enabling future invokes to reference results via cached placeholders.
+        Called unconditionally at the end of ``_invoke()`` and ``_ainvoke()`` —
+        whether or not ``context_enabled`` is set. This mirrors how base ``Agent``
+        always appends ``_records`` regardless of context settings. The
+        ``context_enabled`` flag controls only whether ``cache_blackboard`` is
+        populated in ``_initialize_run_state`` (i.e. whether the LLM sees prior
+        steps as context).
+
+        All non-empty slots (EXECUTED and FAILED) are persisted so that global
+        blackboard indices remain contiguous and correct. FAILED slots are
+        included for index continuity; ``render_turn`` controls whether they
+        are surfaced to the LLM.
 
         Persistence Policy
         ~~~~~~~~~~~~~~~~~~
@@ -1616,8 +1671,9 @@ class ToolAgent(Agent, ABC):
            (slots with no tool assigned)
         2. **Rewrite placeholders**: All ``<<__sN__>>`` step references in appended slots'
            args are rewritten to ``<<__c{new_global_index}__>>`` cache references.
-           This ensures cached args never contain step-local placeholders.
-        3. **Merge into cache**: Append rewritten executed slots to persist them
+           Applied to both EXECUTED and FAILED slots.
+        3. **Merge into cache**: Append all non-empty slots (EXECUTED and FAILED)
+           preserving status. FAILED slots keep their ``error`` and no ``result``.
         4. **Trim cache tail**: Remove trailing empty slots from final cache
 
         Placeholder Rewriting Example
@@ -1688,22 +1744,23 @@ class ToolAgent(Agent, ABC):
                 }
             return obj
 
-        # 2) Append executed running slots as new cache slots with global cache indices.
+        # 2) Append all non-empty running slots with rewritten placeholders and global indices.
+        #    FAILED slots are included so local_i always equals the append offset (B3 fix).
         appended: list[BlackboardSlot] = []
         for local_i, slot in enumerate(running):
-            if not slot.is_executed():
+            if slot.is_empty():
                 continue
 
             new_slot = BlackboardSlot(
-                step = base_len + local_i,
-                tool = slot.tool,
-                args = rewrite_step_to_cache_placeholders(slot.args),
-                resolved_args = slot.resolved_args,
-                result = slot.result,
-                error = slot.error,
-                status = BlackboardSlot.EXECUTED,
-                step_dependencies = slot.step_dependencies,
-                await_step = slot.await_step,
+                step=base_len + local_i,
+                tool=slot.tool,
+                args=rewrite_step_to_cache_placeholders(slot.args),
+                resolved_args=slot.resolved_args,
+                result=slot.result,
+                error=slot.error,
+                status=slot.status,
+                step_dependencies=slot.step_dependencies,
+                await_step=slot.await_step,
             )
             appended.append(new_slot)
 
@@ -1766,22 +1823,27 @@ class ToolAgent(Agent, ABC):
 
             state = self._prepare_next_batch(state)
 
-            # Inline empty-batch check (per design): raise here, not inside helpers.
+            # Empty prepared_steps means all steps in this batch were cascade-failed;
+            # skip execution and loop to the next batch.
             if not state.prepared_steps:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: prepare produced an empty batch (prepared_indices is empty)."
-                )
+                continue
 
             state = self._execute_prepared_batch(state)
 
-        blackboard_start: int | None = None
-        blackboard_end: int | None = None
+        # Always persist run slots — mirrors how base Agent always appends records.
+        # context_enabled only controls cache_blackboard in _initialize_run_state.
+        blackboard_start = len(self._blackboard)
+        state = self.update_blackboard(state)
+        blackboard_end = len(self._blackboard)
 
-        # Persist run outputs into cache if context is enabled.
-        if self.context_enabled:
-            blackboard_start = len(self._blackboard)
-            state = self.update_blackboard(state)
-            blackboard_end = len(self._blackboard)
+        # Collect failures only when fail_fast=False (fail_fast=True would have raised).
+        exception_records: tuple[tuple[int, Exception], ...] = ()
+        if not self._fail_fast:
+            exception_records = tuple(
+                (slot.step, slot.error)
+                for slot in self._blackboard[blackboard_start:blackboard_end]
+                if slot.status == BlackboardSlot.FAILED and isinstance(slot.error, Exception)
+            )
 
         # Derive per-tool call counts from this invocation's running blackboard.
         # Slots are iterated in execution order (first-call order preserved by dict).
@@ -1808,6 +1870,7 @@ class ToolAgent(Agent, ABC):
             "llm_records": tuple(state.llm_records),
             "llm_model_data": state.llm_records[-1].llm_result.model_data,
             "tool_usage": tool_usage,
+            "exception_records": exception_records,
         }
         return draft, metadata
 
@@ -1865,22 +1928,27 @@ class ToolAgent(Agent, ABC):
 
             state = await self._aprepare_next_batch(state)
 
-            # Keep the same empty-batch guard as the sync path.
+            # Empty prepared_steps means all steps in this batch were cascade-failed;
+            # skip execution and loop to the next batch.
             if not state.prepared_steps:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: prepare produced an empty batch "
-                    "(prepared_steps is empty)."
-                )
+                continue
 
             state = await self._async_execute_prepared_batch(state)
 
-        blackboard_start: int | None = None
-        blackboard_end: int | None = None
+        # Always persist run slots — mirrors how base Agent always appends records.
+        # context_enabled only controls cache_blackboard in _initialize_run_state.
+        blackboard_start = len(self._blackboard)
+        state = self.update_blackboard(state)
+        blackboard_end = len(self._blackboard)
 
-        if self.context_enabled:
-            blackboard_start = len(self._blackboard)
-            state = self.update_blackboard(state)
-            blackboard_end = len(self._blackboard)
+        # Collect failures only when fail_fast=False (fail_fast=True would have raised).
+        exception_records: tuple[tuple[int, Exception], ...] = ()
+        if not self._fail_fast:
+            exception_records = tuple(
+                (slot.step, slot.error)
+                for slot in self._blackboard[blackboard_start:blackboard_end]
+                if slot.status == BlackboardSlot.FAILED and isinstance(slot.error, Exception)
+            )
 
         # Derive per-tool call counts from this invocation's running blackboard.
         _counts: dict[str, int] = {}
@@ -1906,6 +1974,7 @@ class ToolAgent(Agent, ABC):
             "llm_records": tuple(state.llm_records),
             "llm_model_data": state.llm_records[-1].llm_result.model_data,
             "tool_usage": tool_usage,
+            "exception_records": exception_records,
         }
         return draft, metadata
 
@@ -1919,11 +1988,11 @@ class ToolAgent(Agent, ABC):
         """
         Construct this ToolAgent's ``ToolAgentResult`` envelope.
 
-        Extends ``Agent.make_result`` with ``tool_usage`` from the metadata dict
-        returned by ``_invoke``. No derivation occurs here — ``tool_usage`` is
-        computed during the execution loop and passed through directly.
+        Extends ``Agent.make_result`` with ``tool_usage`` and ``exception_records``
+        from the metadata dict returned by ``_invoke``. No derivation occurs here —
+        both fields are computed during the execution loop and passed through directly.
         """
-        unexpected = set(result_kwargs) - {"llm_records", "llm_model_data", "tool_usage"}
+        unexpected = set(result_kwargs) - {"llm_records", "llm_model_data", "tool_usage", "exception_records"}
         if unexpected:
             raise ToolAgentError(
                 f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
@@ -1932,6 +2001,7 @@ class ToolAgent(Agent, ABC):
         llm_records = result_kwargs.get("llm_records")
         llm_model_data = result_kwargs.get("llm_model_data")
         tool_usage = result_kwargs.get("tool_usage", ())
+        exception_records = result_kwargs.get("exception_records", ())
 
         if (
             not isinstance(llm_records, tuple)
@@ -1961,6 +2031,7 @@ class ToolAgent(Agent, ABC):
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
             tool_usage=tool_usage,
+            exception_records=exception_records,
         )
 
     def render_turn(self, turn: AgentRecord) -> list[dict[str, str]]:
@@ -2473,6 +2544,7 @@ class PlanActAgent(ToolAgent):
         *,
         context_enabled: bool = False,
         tool_calls_limit: int | None = None,
+        fail_fast: bool = True,
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
         blackboard_preview_limit: Optional[int] = None,
@@ -2490,6 +2562,7 @@ class PlanActAgent(ToolAgent):
             filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
+            fail_fast=fail_fast,
             peek_at_cache=peek_at_cache,
             response_preview_limit=response_preview_limit,
             blackboard_preview_limit=blackboard_preview_limit,
@@ -3112,10 +3185,14 @@ class PlanActAgent(ToolAgent):
            - Validate not already executed or prepared
            - Validate slot is currently planned
            - Validate tool name is set
+           - **Cascade check** (``fail_fast=False`` only): if any ``step_dependencies``
+             entry is FAILED in the running blackboard, the return tool raises immediately;
+             non-return steps are marked FAILED and skipped (not added to prepared_steps)
            - Call ``_resolve_placeholders(slot.args, state=state)``
            - Store resolved args in ``slot.resolved_args``
            - Mark slot ``status="prepared"``
-        5. **Set prepared_steps**: List of all indices in this batch
+        5. **Set prepared_steps**: Indices of steps that passed the cascade check and were
+           prepared; may be empty if all steps in the batch were cascade-failed
         6. **Advance cursor**: Increment ``state.batch_index`` for next iteration
 
         Concurrency
@@ -3162,6 +3239,7 @@ class PlanActAgent(ToolAgent):
         board_len = len(board)
 
         # Resolve args for all steps in the batch; resolver enforces readiness.
+        prepared_in_batch: list[int] = []  # excludes cascade-failed steps; may yield empty prepared_steps
         for i in batch:
             if not isinstance(i, int):
                 raise ToolAgentError(
@@ -3203,6 +3281,30 @@ class PlanActAgent(ToolAgent):
                     f"{type(self).__name__}.{self.name}: step {i} has invalid tool name in running_blackboard."
                 )
 
+            # Cascade-fail: when fail_fast=False, propagate failures through arg dependencies.
+            # Use extract_dependencies(slot.args) rather than slot.step_dependencies because
+            # the return slot's step_dependencies is forced to include ALL prior steps for
+            # scheduling; only steps actually referenced in args need to resolve successfully.
+            if not self._fail_fast:
+                failed_arg_deps = sorted(
+                    d
+                    for d in extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
+                    if board[d].is_failed()
+                )
+                if failed_arg_deps:
+                    dep_str = ", ".join(str(d) for d in failed_arg_deps)
+                    if slot.tool == RETURN_TOOL_FULL_NAME:
+                        raise ToolAgentError(
+                            f"{type(self).__name__}.{self.name}: return step {i} cannot execute; "
+                            f"dependency step(s) {dep_str} failed."
+                        )
+                    slot.error = ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: step {i} skipped — "
+                        f"dependency step(s) {dep_str} failed."
+                    )
+                    slot.status = BlackboardSlot.FAILED
+                    continue
+
             # Resolve placeholders using base resolver (checks cache + executed step readiness).
             slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
 
@@ -3213,8 +3315,9 @@ class PlanActAgent(ToolAgent):
 
             slot.error = NO_VAL
             slot.status = BlackboardSlot.PREPARED
+            prepared_in_batch.append(i)
 
-        state.prepared_steps = sorted(batch)
+        state.prepared_steps = sorted(prepared_in_batch)  # empty when all steps cascade-failed
         state.batch_index += 1
         logger.info(
             f"{self.full_name}: Prepared batch {state.batch_index}/{len(state.batches)} "
@@ -3296,6 +3399,7 @@ class ReActAgent(ToolAgent):
         *,
         context_enabled: bool = False,
         tool_calls_limit: int = 25,
+        fail_fast: bool = True,
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
         blackboard_preview_limit: Optional[int] = None,
@@ -3313,6 +3417,7 @@ class ReActAgent(ToolAgent):
             filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
+            fail_fast=fail_fast,
             peek_at_cache=peek_at_cache,
             response_preview_limit=response_preview_limit,
             blackboard_preview_limit=blackboard_preview_limit,
@@ -3366,7 +3471,10 @@ class ReActAgent(ToolAgent):
             )
         if prefix_len > 0:
             prev = state.running_blackboard[prefix_len - 1]
-            if not prev.is_executed():
+            # With fail_fast=False a previous step may be FAILED rather than EXECUTED;
+            # both count as "processed" and allow generation of the next step.
+            prev_processed = prev.is_executed() or (not self._fail_fast and prev.is_failed())
+            if not prev_processed:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: step {prefix_len - 1} was "
                     f"not executed before the next prepare call "
@@ -3574,9 +3682,15 @@ class ReActAgent(ToolAgent):
         Apply one validated ReAct step generation result to the run state.
 
         Validates the returned tuple fields, decrements observable counters,
-        fills the preallocated running-blackboard slot, resolves placeholders,
-        and advances the cursor. Writes ``step_meta`` instead of the former
-        parallel ``observables``/``descriptions`` lists.
+        fills the preallocated running-blackboard slot, then either cascade-fails
+        the slot (``fail_fast=False`` only) or resolves placeholders and marks it
+        prepared. Advances the cursor and writes ``step_meta``.
+
+        **Cascade path** (``fail_fast=False``): if any ``step_dependencies`` entry
+        is FAILED in the running blackboard, the return tool raises immediately;
+        non-return slots are marked FAILED and the method returns early with
+        ``prepared_steps`` left empty — the ``_invoke`` loop will skip execution
+        and continue to the next generation turn.
         """
         max_duration = len(state.running_blackboard) - prefix_len - 1
 
@@ -3645,6 +3759,32 @@ class ReActAgent(ToolAgent):
         slot.error = NO_VAL
         slot.step_dependencies = generated_slot.step_dependencies
         slot.await_step = generated_slot.await_step
+
+        # Cascade-fail: when fail_fast=False, propagate failures through arg dependencies.
+        # Use extract_dependencies(slot.args) for the same reason as PlanActAgent: only
+        # steps actually referenced in args need to resolve successfully.
+        if not self._fail_fast:
+            board = state.running_blackboard
+            failed_arg_deps = sorted(
+                d
+                for d in extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
+                if board[d].is_failed()
+            )
+            if failed_arg_deps:
+                dep_str = ", ".join(str(d) for d in failed_arg_deps)
+                if slot.tool == RETURN_TOOL_FULL_NAME:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: return step cannot execute; "
+                        f"dependency step(s) {dep_str} failed."
+                    )
+                slot.error = ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: step {prefix_len} skipped — "
+                    f"dependency step(s) {dep_str} failed."
+                )
+                slot.status = BlackboardSlot.FAILED
+                state.step_meta[prefix_len].description = description
+                state.next_step_index = prefix_len + 1
+                return state  # prepared_steps stays []; _invoke loop will skip execute and continue
 
         # Resolve placeholders after stamping the planned slot into the running state.
         slot.resolved_args = self._resolve_placeholders(slot.args, state=state)

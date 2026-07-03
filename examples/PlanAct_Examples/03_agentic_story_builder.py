@@ -102,13 +102,8 @@ if __name__ == "__main__":
 
     task_prompt = (
         f"TASK: Write a story based on the following idea: {idea!r}\n"
-        "INSTRUCTIONS: Write the story by following these steps EXACTLY:\n"
-        "1) Call the story outliner once to create an outline.\n"
-        "2) Then send the outline to the story writer to get a draft draft.\n"
-        "3) Then send the draft to the reviewer to get revision notes.\n"
-        "4) Then send the revision notes to the writer to rewrite the draft.\n"
-        f"5) Repeat steps 3-4 for EXACTLY {loops - 1} more rewrite attempts.\n"
-        "6) Return the writer's final draft."
+        "Use the outliner to generate a structured outline, then write a first draft. "
+        f"Then for {loops} cycles, have the reviewer critique the draft and the writer apply the notes."
     )
 
     print("\n⇢ Planning + execution …")
