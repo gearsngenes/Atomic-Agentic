@@ -872,6 +872,17 @@ class TestToolRegistration:
         with pytest.raises(ValueError, match="remote_names requires a client"):
             agent.batch_register(tools=[add], remote_names=["foo"])
 
+    def test_batch_register_remote_names_not_found_raises(self) -> None:
+        """remote_names entries absent from the client's list raise ToolRegistrationError."""
+        class _StubClient:
+            def list_invokables(self) -> list[str]:
+                return ["Tool.tests.foo"]
+
+        agent = make_agent()
+        stub = _StubClient()
+        with pytest.raises(ToolRegistrationError, match="not found on client"):
+            agent.batch_register(client=stub, remote_names=["Tool.tests.foo", "Tool.tests.bar"])
+
     def test_batch_register_intraset_duplicate_raises(self) -> None:
         """Duplicate full_name in incoming batch always raises regardless of mode."""
         agent = make_agent()
@@ -1760,7 +1771,7 @@ class TestScriptedInvokeLoop:
             script=[[{"tool": return_tool.full_name, "args": {"val": 1}}]]
         )
 
-        with pytest.raises(ToolAgentError, match="prepared_(steps|indices) is non-empty"):
+        with pytest.raises(ToolAgentError, match="prepared_steps is non-empty"):
             agent.invoke({"prompt": "run"})
 
     def test_cached_placeholder_can_be_used_on_later_invoke_when_context_enabled(self) -> None:
@@ -2084,6 +2095,101 @@ class TestToolAgentRecordRendering:
         with pytest.raises(ToolAgentError, match="ToolAgentRecord"):
             agent.render_turn(turn)
 
+
+class TestRenderTurnWithFailedSlots:
+    """
+    Tests for render_turn behaviour when FAILED slots are present in the
+    blackboard span (introduced by fail_fast=False in a16 Pass 1).
+    """
+
+    def _make_agent_with_failed_slot(
+        self,
+        *,
+        peek_at_cache: bool = False,
+        blackboard_preview_limit: int | None = None,
+    ) -> ScriptedToolAgent:
+        """
+        Agent with step 0 = fail_tool (FAILED), step 1 = add (EXECUTED),
+        return uses step 1's result.  context_enabled=True so the span is
+        persisted and render_turn has something to render.
+        """
+        agent = make_agent(
+            context_enabled=True,
+            fail_fast=False,
+            peek_at_cache=peek_at_cache,
+            blackboard_preview_limit=blackboard_preview_limit,
+        )
+        keys = register_math_tools(agent)
+        agent.set_script([
+            [
+                {"tool": "Tool.tests.fail_tool", "args": {}},
+                {"tool": keys["add"], "args": {"x": 3, "y": 4}},
+            ],
+            [{"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}}],
+        ])
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 7
+        return agent
+
+    def test_render_turn_peek_at_cache_with_failed_slot_does_not_crash(self) -> None:
+        """B1 fix: peek_at_cache=True must not crash when a FAILED slot is in the span."""
+        agent = self._make_agent_with_failed_slot(peek_at_cache=True)
+        # Must not raise — FAILED slots' slot.result = NO_VAL must never be
+        # passed to _preview_blackboard_result.
+        rendered = agent.render_turn(agent.records[0])
+        assert rendered is not None
+        assert len(rendered) == 2
+
+    def test_render_turn_mixed_span_shows_cached_and_failed_sections(self) -> None:
+        """Mixed span: both CACHED STEPS and FAILED STEPS sections appear."""
+        agent = self._make_agent_with_failed_slot()
+        content = agent.render_turn(agent.records[0])[1]["content"]
+        assert "CACHED STEPS" in content
+        assert "FAILED STEPS" in content
+        assert "RESPONSE:" in content
+        # RESPONSE must come first.
+        assert content.index("RESPONSE:") < content.index("CACHED STEPS")
+        assert content.index("CACHED STEPS") < content.index("FAILED STEPS")
+
+    def test_render_turn_failed_entries_omit_args_include_tool_and_error(self) -> None:
+        """FAILED STEPS entries contain tool + error but NOT args."""
+        agent = self._make_agent_with_failed_slot()
+        content = agent.render_turn(agent.records[0])[1]["content"]
+        failed_section = content.split("FAILED STEPS")[1]
+        assert "fail_tool" in failed_section
+        assert "'error'" in failed_section
+        # Args key must not appear in the failed section.
+        assert "'args'" not in failed_section
+
+    def test_render_turn_failed_error_truncated_by_preview_limit(self) -> None:
+        """Error strings in FAILED entries are truncated by blackboard_preview_limit."""
+        agent = self._make_agent_with_failed_slot(blackboard_preview_limit=10)
+        content = agent.render_turn(agent.records[0])[1]["content"]
+        failed_section = content.split("FAILED STEPS")[1]
+        # The stored error is ToolInvocationError wrapping RuntimeError("intentional failure").
+        # str(slot.error) = "Tool.tests.fail_tool: invocation failed: intentional failure" (57 chars).
+        # After truncation to blackboard_preview_limit=10: "Tool.tests".
+        assert "invocation failed" not in failed_section  # confirms truncation cut off the tail
+        assert "Tool.test" in failed_section              # a prefix from the first 10 chars is present
+
+    def test_render_turn_all_non_return_steps_failed_return_in_cached_section(self) -> None:
+        """When all non-return steps fail, only return slot appears in CACHED STEPS."""
+        agent = make_agent(context_enabled=True, fail_fast=False)
+        register_math_tools(agent)
+        agent.set_script([
+            [{"tool": "Tool.tests.fail_tool", "args": {}}],          # step 0: FAILED
+            [{"tool": return_tool.full_name, "args": {"val": 99}}],  # step 1: EXECUTED
+        ])
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 99
+        content = agent.render_turn(agent.records[0])[1]["content"]
+        # Return slot executed → CACHED section present.
+        assert "CACHED STEPS" in content
+        # Failed steps → FAILED section present.
+        assert "FAILED STEPS" in content
+        # fail_tool must not appear in the CACHED section (it appears in FAILED).
+        cached_section = content.split("CACHED STEPS")[1].split("FAILED STEPS")[0]
+        assert "fail_tool" not in cached_section
 
 
 class TestParsingHelpers:
@@ -3360,3 +3466,77 @@ class TestReActCascadeFailedPropagation:
 
         with pytest.raises(ToolAgentError, match="return step"):
             agent.invoke({"prompt": "react return cascade raise"})
+
+
+# ── TestFailedCacheRefValidation ──────────────────────────────────────────────
+
+class TestFailedCacheRefValidation:
+    """
+    Tests for FAILED cache-ref detection in _validate_planned_slots (PlanAct)
+    and _process_next_step_output (ReAct).
+
+    Requires two-invoke sequences: first invoke leaves a FAILED slot in the
+    persisted cache (fail_fast=False, context_enabled=True), then a second
+    invoke's plan/step references that FAILED cache slot.
+    """
+
+    def test_validate_planned_slots_rejects_failed_cache_ref(self) -> None:
+        """PlanAct: plan referencing a FAILED cache slot raises at validation time."""
+        agent = make_planact_agent(
+            [
+                # First invoke: step 0 fails; return is independent.
+                json.dumps([
+                    {"tool": "Tool.tests.fail_tool", "args": {}},
+                    {"tool": return_tool.full_name, "args": {"val": 1}},
+                ]),
+                # Second invoke: plan references <<__c0__>> which is FAILED.
+                json.dumps([
+                    {"tool": return_tool.full_name, "args": {"val": "<<__c0__>>"}},
+                ]),
+            ],
+            fail_fast=False,
+            context_enabled=True,
+        )
+        # First invoke succeeds (fail_fast=False, return is independent of failed step).
+        result1 = agent.invoke({"prompt": "first run"})
+        assert result1.result == 1
+        # Second invoke: plan references a FAILED cache slot → raises at validation.
+        with pytest.raises(ToolAgentError, match="FAILED cache"):
+            agent.invoke({"prompt": "second run"})
+
+    def test_process_next_step_output_rejects_failed_cache_ref(self) -> None:
+        """ReAct: a step referencing a FAILED cache slot raises at validation time."""
+        agent = make_react_agent(
+            [
+                # First invoke: step 0 fails; step 1 is return with independent val.
+                react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": 1}, duration=0),
+                # Second invoke: step references <<__c0__>> (FAILED cache slot).
+                react_step_json(step=0, tool="Tool.tests.add", args={"x": "<<__c0__>>", "y": 1}),
+            ],
+            tool_calls_limit=2,
+            fail_fast=False,
+            context_enabled=True,
+        )
+        result1 = agent.invoke({"prompt": "first run"})
+        assert result1.result == 1
+        with pytest.raises(ToolAgentError, match="FAILED cache"):
+            agent.invoke({"prompt": "second run"})
+
+
+# ── TestToolAgentToDictFastFail ───────────────────────────────────────────────
+
+class TestToolAgentToDictFastFail:
+    """Tests that to_dict() includes the fail_fast key."""
+
+    def test_to_dict_includes_fail_fast_true(self) -> None:
+        agent = make_agent(fail_fast=True)
+        d = agent.to_dict()
+        assert "fail_fast" in d
+        assert d["fail_fast"] is True
+
+    def test_to_dict_includes_fail_fast_false(self) -> None:
+        agent = make_agent(fail_fast=False)
+        d = agent.to_dict()
+        assert "fail_fast" in d
+        assert d["fail_fast"] is False

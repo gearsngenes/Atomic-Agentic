@@ -963,6 +963,8 @@ class ToolAgent(Agent, ABC):
             If ``name_collision_mode`` is invalid; if a duplicate full_name
             appears in the incoming batch; if toolification of any item fails;
             or if a toolbox collision is detected under ``"raise"`` mode.
+            Also raised if ``remote_names`` contains entries not present in the
+            client's available tool list.
         """
         name_collision_mode = name_collision_mode.lower().strip()
         if name_collision_mode not in ("raise", "skip", "replace"):
@@ -1023,11 +1025,17 @@ class ToolAgent(Agent, ABC):
             else:
                 available = client.list_invokables()
 
-            names_to_register = (
-                [n for n in available if n in remote_names]
-                if remote_names is not None
-                else available
-            )
+            if remote_names is not None:
+                available_set = set(available)
+                missing = [n for n in remote_names if n not in available_set]
+                if missing:
+                    raise ToolRegistrationError(
+                        f"{type(self).__name__}.{self.name}: remote_names entries not found "
+                        f"on client: {sorted(missing)!r}."
+                    )
+                names_to_register = [n for n in available if n in remote_names]
+            else:
+                names_to_register = available
 
             for remote_name in names_to_register:
                 try:
@@ -1176,7 +1184,10 @@ class ToolAgent(Agent, ABC):
                     f"Cache reference {idx} out of range (cache length={len(cache)})."
                 )
             if not cache[idx].is_executed():
-                raise ToolAgentError(f"Referenced cache {idx} is not yet executed.")
+                status_note = "permanently FAILED" if cache[idx].is_failed() else "not executed"
+                raise ToolAgentError(
+                    f"Referenced cache {idx} is {status_note} and cannot be resolved."
+                )
 
         for idx in sorted(needed_steps):
             if idx < 0 or idx >= len(running):
@@ -1817,7 +1828,7 @@ class ToolAgent(Agent, ABC):
             # Invariant: prepare must not be called with a pending prepared batch.
             if state.prepared_steps:
                 raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: violation: prepared_indices is non-empty before prepare. "
+                    f"{type(self).__name__}.{self.name}: violation: prepared_steps is non-empty before prepare. "
                     f"Execute must follow prepare before preparing again."
                 )
 
@@ -2039,9 +2050,13 @@ class ToolAgent(Agent, ABC):
 
         The base assistant response is rendered through `Agent.render_turn(...)`, preserving
         `assistant_response_source` and `response_preview_limit` behavior. If the turn has
-        a non-empty blackboard span, this method appends a cached-step block containing
-        each produced step's unresolved args. Result previews are included only when
-        `peek_at_cache=True` and are bounded by `blackboard_preview_limit`.
+        a non-empty blackboard span and all slots executed, this method appends a
+        cached-step block (``CACHED STEPS`` section) with each produced step's unresolved args and
+        ``run_id``. When some slots are FAILED (``fail_fast=False``), the output splits into a
+        ``CACHED STEPS`` section for executed slots and a ``FAILED STEPS`` section for failed slots;
+        failed entries include step index, tool name, and truncated error string — no args.
+        Result previews are included only when `peek_at_cache=True` and are bounded by
+        `blackboard_preview_limit`.
         """
         if not isinstance(turn, ToolAgentRecord):
             raise ToolAgentError(
@@ -2063,25 +2078,54 @@ class ToolAgent(Agent, ABC):
                 f"blackboard_length={len(self._blackboard)}."
             )
 
-        extracted: list[dict[str, Any]] = []
-        for slot in self._blackboard[start:end]:
-            step: dict[str, Any] = {
-                STEP_FIELD: slot.step,
-                TOOL_FIELD: slot.tool,
-                ARGS_FIELD: slot.args,
-            }
-            if slot.is_executed():
-                step["run_id"] = slot.result.run_id
-            if self.peek_at_cache:
-                step["result"] = self._preview_blackboard_result(slot.result.result)
-            extracted.append(step)
+        executed: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
 
-        newest_dump = pprint.pformat(extracted, indent=2, width=160, sort_dicts=False)
-        assistant_content = (
-            f"RESPONSE:\n{assistant_response}\n\n"
-            f"CACHED STEPS #{start}-{end - 1} PRODUCED:\n\n"
-            f"{newest_dump}"
-        )
+        for slot in self._blackboard[start:end]:
+            if slot.is_executed():
+                entry: dict[str, Any] = {
+                    STEP_FIELD: slot.step,
+                    TOOL_FIELD: slot.tool,
+                    ARGS_FIELD: slot.args,
+                    "run_id": slot.result.run_id,
+                }
+                if self.peek_at_cache:
+                    entry["result"] = self._preview_blackboard_result(slot.result.result)
+                executed.append(entry)
+            elif slot.is_failed():
+                err_str = str(slot.error)
+                if self.blackboard_preview_limit is not None:
+                    err_str = err_str[:self.blackboard_preview_limit]
+                failed.append({
+                    STEP_FIELD: slot.step,
+                    TOOL_FIELD: slot.tool,
+                    "error": err_str,
+                })
+            # Other statuses (PLANNED, PREPARED, EMPTY) cannot appear in a persisted
+            # blackboard span — silently skipped if present.
+
+        if not failed:
+            # All-executed path: format unchanged.
+            dump = pprint.pformat(executed, indent=2, width=160, sort_dicts=False)
+            assistant_content = (
+                f"RESPONSE:\n{assistant_response}\n\n"
+                f"CACHED STEPS #{start}-{end - 1} PRODUCED:\n\n{dump}"
+            )
+        else:
+            # Mixed path: two-section output.
+            parts = [f"RESPONSE:\n{assistant_response}"]
+            if executed:
+                ex_indices = [e[STEP_FIELD] for e in executed]
+                parts.append(
+                    f"CACHED STEPS {ex_indices} PRODUCED:\n\n"
+                    + pprint.pformat(executed, indent=2, width=160, sort_dicts=False)
+                )
+            fa_indices = [f[STEP_FIELD] for f in failed]
+            parts.append(
+                f"FAILED STEPS {fa_indices}:\n\n"
+                + pprint.pformat(failed, indent=2, width=160, sort_dicts=False)
+            )
+            assistant_content = "\n\n".join(parts)
 
         return [
             user_message,
@@ -2479,6 +2523,7 @@ class ToolAgent(Agent, ABC):
         d = super().to_dict()
         d.update({
             "tool_calls_limit": self.tool_calls_limit,
+            "fail_fast": self._fail_fast,
             "peek_at_cache": self.peek_at_cache,
             "blackboard_preview_limit": self.blackboard_preview_limit,
             "tools": {
@@ -2663,11 +2708,6 @@ class PlanActAgent(ToolAgent):
         return_idx = len(slots) - 1
         return_slot = slots[return_idx]
 
-        if return_slot.tool != return_name:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: normalized plan does not end with return tool."
-            )
-
         # Return is a synthetic finalization step, not a normal data-only step.
         # Force it to depend on every prior step so completion represents the whole plan.
         # This makes the blackboard invariant explicit even though batch compilation also
@@ -2786,6 +2826,15 @@ class PlanActAgent(ToolAgent):
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: plan step {i} references out-of-range cache indices "
                     f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
+                )
+            failed_cache = [
+                idx for idx in cache_refs
+                if 0 <= idx < cache_len and cache_blackboard[idx].is_failed()
+            ]
+            if failed_cache:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: plan step {i} references FAILED cache "
+                    f"slot(s) {sorted(set(failed_cache))!r}; those steps did not produce usable results."
                 )
 
             bad_step_deps = [
@@ -3428,11 +3477,6 @@ class ReActAgent(ToolAgent):
             records_window=records_window,
         )
 
-        # ReAct requires a concrete integer tool_calls_limit so that we can preallocate
-        # a fixed-size running blackboard.
-        if type(tool_calls_limit) is not int or tool_calls_limit < 0:
-            raise ToolAgentError("ReActAgent requires tool_calls_limit to be an int >= 0.")
-
     # ------------------------------------------------------------------ #
     # Tool-Agent Hooks
     # ------------------------------------------------------------------ #
@@ -3452,11 +3496,12 @@ class ReActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     def _validate_react_prepare_state(self, state: ReActRunState) -> None:
         """
-        Validate cursor bounds, prior-step execution, and step_meta length.
+        Validate cursor bounds, prior-step processing, and step_meta length.
 
         Replaces the former ``latest_executed`` validation block: the invariant
-        that the previous step was executed is derived from ``next_step_index - 1``
-        and the slot's status rather than a separate bookkeeping field.
+        that the previous step was processed — executed, or FAILED when
+        ``fail_fast=False`` — is derived from ``next_step_index - 1`` and the
+        slot's status rather than a separate bookkeeping field.
         """
         prefix_len = state.next_step_index
         if type(prefix_len) is not int or prefix_len < 0:
@@ -3656,6 +3701,15 @@ class ReActAgent(ToolAgent):
                 f"{type(self).__name__}.{self.name}: next step references out-of-range cache indices "
                 f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
             )
+        failed_cache = [
+            idx for idx in cache_refs
+            if 0 <= idx < cache_len and cache_blackboard[idx].is_failed()
+        ]
+        if failed_cache:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: next step references FAILED cache "
+                f"slot(s) {sorted(set(failed_cache))!r}; those steps did not produce usable results."
+            )
 
         bad_step_deps = [
             dep for dep in slot.step_dependencies
@@ -3722,12 +3776,6 @@ class ReActAgent(ToolAgent):
             )
 
         description = description.strip()
-
-        if generated_slot.step != prefix_len:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: generated step mismatch: "
-                f"got {generated_slot.step}, expected {prefix_len}."
-            )
 
         if not generated_slot.is_planned():
             raise ToolAgentError(
