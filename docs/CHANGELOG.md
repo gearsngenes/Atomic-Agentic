@@ -5,6 +5,123 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a17] - 2026-07-04
+
+### Added
+
+- `generation_retries: int = 0` constructor parameter on `ToolAgent`, `PlanActAgent`,
+  and `ReActAgent`. `N` means N additional attempts beyond the first; default `0`
+  preserves all existing behavior. Stored as `self._generation_retries`; exposed via
+  `ToolAgent.generation_retries` read-only property. Added to `to_dict()`.
+- `PlanActAgent` generation retry loop inside `_generate_plan` / `_agenerate_plan`:
+  two error categories — JSON-decode failure (raw LLM output injected as context) and
+  spec-validation failure (clean re-serialized plan injected). Each attempt produces its
+  own `LLMRecord`; all are accumulated in `state.llm_records`.
+- `ReActAgent` generation retry loop inside `_generate_next_step` / `_agenerate_next_step`:
+  same two-category feedback scheme. Budget is **shared across all step generations in
+  one invoke** via `ReActRunState.retries_used`. Budget exhaustion mid-run raises
+  `ToolAgentError` regardless of `fail_fast`.
+- `ReActRunState.retries_used: int = 0` field — cumulative retry count across all
+  step-generation turns in a single run.
+- `ToolAgentRunState.valid_cache_indices: frozenset[int]` and `failed_cache_indices:
+  frozenset[int]` — conversation-scoped index sets computed once at run-init time in
+  `_invoke` / `_ainvoke` by walking `ToolAgentRecord.blackboard_start/end` spans in
+  the `turns` chain. Neither set is ever recomputed during a run.
+- `ToolAgent._compute_cache_index_sets(turns)` helper — produces both frozensets from
+  the conversation's `ToolAgentRecord` history; returns empty frozensets when
+  `context_enabled=False`.
+- Three-category cache-ref validation in both `PlanActAgent._validate_planned_slots`
+  and `ReActAgent._process_next_step_output`:
+  1. **Out-of-range** — index does not exist in the cache at all.
+  2. **Failed-in-conversation** — index is in `failed_cache_indices`; error message
+     includes the tool name and stored error string from the slot.
+  3. **Out-of-conversation** — index is in range but was not produced in this
+     conversation (not in either frozenset).
+  All three categories produce retry-injectable feedback strings.
+- `ReActAgent._build_react_messages` (B1): `FAILED` running-blackboard slots are now
+  included in the step snapshot rendered to the LLM, with `status="FAILED"` and
+  `error` fields and no `result_ref`. Previously these slots were silently omitted
+  under `fail_fast=False`, making failures invisible to the LLM for subsequent steps.
+- Pre-gather tool-existence check in `_execute_prepared_batch` (sync path) — validates
+  all tools in the prepared batch before any execution begins, matching the existing
+  async path behavior.
+- `examples/ReAct_Examples/03_context_enabled_reactor.py` — new example demonstrating
+  a context-enabled `ReActAgent` across multiple invocations.
+
+### Changed
+
+- All LLM-facing validation failures in the planning pipeline (`_validate_tool_step_dict`,
+  `_normalize_planned_slots`, `_validate_planned_slots`, `_process_plan_output`,
+  `_process_next_step_output`) now return feedback strings instead of raising
+  `ToolAgentError`. This makes every validation category retryable without special
+  exception handling in the retry loop.
+- `cache_blackboard` on `RunState` is now a snapshot copy
+  (`[slot.copy() for slot in self.blackboard]`), not a live reference to
+  `self._blackboard`. Mutations during a run no longer affect the persisted blackboard.
+- Removed `slot.step = i` mutations in `PlanActAgent._setup_plan_init` and
+  `ReActAgent._initialize_run_state` that were silently mutating persisted blackboard
+  slots as a side effect of starting a run.
+- `max_duration` is now computed once per ReAct step turn in `_prepare_next_batch` /
+  `_aprepare_next_batch` and passed explicitly to both `_build_react_messages` and
+  `_generate_next_step` / `_agenerate_next_step`. Neither method independently
+  recomputes it.
+- `_generate_next_step` and `_agenerate_next_step` now accept and thread
+  `valid_cache_indices` and `failed_cache_indices` into `_process_next_step_output`.
+- Unknown-tool check in `_process_next_step_output` now uses `self.has_tool()` for
+  parity with `PlanActAgent._validate_planned_slots`.
+- `_generate_plan` / `_agenerate_plan` and `_build_planact_run_state` thread frozensets
+  through to `PlanActRunState`.
+- `_extract_from_json_string`: parse failures now raise `json.JSONDecodeError` (was a
+  plain `ToolAgentError`), allowing retry loops to distinguish JSON errors from
+  engine-contract violations cleanly.
+- Running-plan snapshot header in `_build_react_messages` updated to acknowledge that
+  steps may be `EXECUTED` or `FAILED`.
+
+### Fixed
+
+- `_agenerate_plan` JSON-exhaustion error message now matches the sync path:
+  `"Last error: {feedback}"` (was `"Last error is a JSONDecodeError: {exc}"`).
+- `_tool_step_dict_to_slot` docstring corrected — it is a converter, not a field-set
+  validator; upstream `_validate_tool_step_dict` owns field validation.
+- `_compute_cache_index_sets` accessed `self.blackboard` (the property, which returns
+  a full copy of `_blackboard`) twice per slot — once for the length guard, once to
+  read the slot. Both calls replaced with direct `self._blackboard` access. An
+  `ToolAgentError` is now raised for any slot with unexpected status (PLANNED/PREPARED/
+  EMPTY) in a persisted blackboard span — these are framework invariant violations that
+  were previously silently skipped.
+- `_setup_plan_init` (PlanActAgent) and `ReActAgent._initialize_run_state` both
+  constructed `cache_blackboard` as `[slot.copy() for slot in self.blackboard]`.
+  Because `self.blackboard` (the property) already returns copies, this produced
+  copies-of-copies. Replaced with `[slot.copy() for slot in self._blackboard]`.
+- `_apply_react_step_result` no longer independently recomputes `max_duration` — it
+  now receives it as a keyword-only parameter from `_prepare_next_batch` /
+  `_aprepare_next_batch`, which remain the single authoritative computation site.
+- `_validate_tool_step_dict` error message for an invalid `await` value type now names
+  the LLM-facing field `'await'` instead of the internal field name `'await_step'`.
+- `render_turn` all-executed header format standardized to `CACHED STEPS [N, ..., M]
+  PRODUCED:` to match the mixed-path (executed+failed) format (was `CACHED STEPS #N-M
+  PRODUCED:`).
+- `_async_execute_prepared_batch` error message wording unified with the sync path:
+  `"tool call failed at step {idx}"` (was `"at index {idx}"`).
+- `ScriptedToolAgent._initialize_run_state` (test harness): `cache_blackboard` now
+  built with `[slot.copy() for slot in self._blackboard]` instead of `list(self._blackboard)`,
+  preventing test code from holding shared references into agent-internal state.
+
+### Removed
+
+- Dead guard D1: `isinstance(idx, int)` before slot lookup in `_execute_prepared_batch`
+  and `_async_execute_prepared_batch` — `prepared_steps: list[int]` guarantees int
+  indices by contract.
+- Dead guard D2: `isinstance(slot.step, int)` prefix on the step-mismatch check — the
+  `isinstance` prefix inverted the guard (non-int skipped check instead of raising).
+- Dead guard D3: `isinstance(state, ToolAgentRunState)` in `_invoke` / `_ainvoke` —
+  `_initialize_run_state` is abstract; the return type is always a valid subclass.
+- Dead guard D4: `isinstance(state, ReActRunState)` in `_prepare_next_batch` /
+  `_aprepare_next_batch` — internal contract; inconsistent with PlanAct (no such guard).
+- Dead guard D5: `isinstance(generated_slot, BlackboardSlot)` in
+  `_apply_react_step_result` — `_generate_next_step` always returns a validated slot
+  or raises.
+
 ## [2.0.0a16] - 2026-07-03
 
 ### Added

@@ -112,7 +112,6 @@ from typing import (
     Callable,
     Mapping,
     Optional,
-    List,
 )
 import pprint
 
@@ -281,6 +280,7 @@ class ToolAgent(Agent, ABC):
         context_enabled: bool = False,
         *,
         fail_fast: bool = True,
+        generation_retries: int = 0,
         tool_calls_limit: Optional[int] = None,
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
@@ -323,6 +323,11 @@ class ToolAgent(Agent, ABC):
             ``FAILED`` and the loop continues to execute independent steps;
             failures are collected in ``ToolAgentResult.exception_records``.
             Return-tool failures always raise regardless of this setting.
+        generation_retries : int
+            Number of additional LLM generation attempts to make when the plan
+            output cannot be parsed or fails spec validation. ``0`` (default)
+            means a single attempt with no retries; ``N`` means up to ``N``
+            extra attempts beyond the first. Must be a non-negative ``int``.
         tool_calls_limit : int | None
             Maximum number of non-return action calls per invoke run.
             ``None`` means unlimited. Must be ``>= 0`` if set.
@@ -397,6 +402,10 @@ class ToolAgent(Agent, ABC):
         if not isinstance(fail_fast, bool):
             raise ToolAgentError("fail_fast must be a bool.")
         self._fail_fast: bool = fail_fast
+
+        if type(generation_retries) is not int or generation_retries < 0:
+            raise ToolAgentError("generation_retries must be a non-negative int.")
+        self._generation_retries: int = generation_retries
 
         if type(peek_at_cache) is not bool:
             raise ToolAgentError("peek_at_cache must be a boolean.")
@@ -494,6 +503,11 @@ class ToolAgent(Agent, ABC):
     def fail_fast(self) -> bool:
         """When False, individual tool call failures are recorded rather than raised."""
         return self._fail_fast
+
+    @property
+    def generation_retries(self) -> int:
+        """Number of extra generation attempts allowed beyond the first. Read-only."""
+        return self._generation_retries
 
     @property
     def peek_at_cache(self) -> bool:
@@ -1361,10 +1375,6 @@ class ToolAgent(Agent, ABC):
         return_indices: list[int] = []
 
         for idx in indices:
-            if not isinstance(idx, int):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: prepared step index must be int; got {type(idx).__name__!r}."
-                )
             if idx < 0 or idx >= board_len:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: prepared step index {idx} out of range "
@@ -1373,8 +1383,7 @@ class ToolAgent(Agent, ABC):
 
             slot = board[idx]
 
-            # slot.step is plan-local during the run; keep it consistent.
-            if isinstance(slot.step, int) and slot.step != idx:
+            if slot.step != idx:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: running slot step mismatch at index {idx}: slot.step={slot.step}."
                 )
@@ -1410,6 +1419,15 @@ class ToolAgent(Agent, ABC):
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: tool_calls_limit exceeded "
                     f"(limit={self._tool_calls_limit}, used={state.tool_calls_used}, planned={non_return_planned})."
+                )
+
+        # Validate tool existence early — same pre-gather guard as async path.
+        for idx in indices:
+            tool_name = board[idx].tool
+            if not self.has_tool(tool_name):
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: prepared step {idx} "
+                    f"references unknown tool {tool_name!r}."
                 )
 
         async def run_batch() -> list[tuple[int, Any]]:
@@ -1518,11 +1536,6 @@ class ToolAgent(Agent, ABC):
         return_indices: list[int] = []
 
         for idx in indices:
-            if not isinstance(idx, int):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: prepared step index must be int; "
-                    f"got {type(idx).__name__!r}."
-                )
             if idx < 0 or idx >= board_len:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: prepared step index {idx} out of range "
@@ -1531,8 +1544,7 @@ class ToolAgent(Agent, ABC):
 
             slot = board[idx]
 
-            # During a run, slot.step should remain plan-local and match its position.
-            if isinstance(slot.step, int) and slot.step != idx:
+            if slot.step != idx:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: running slot step mismatch at index {idx}: "
                     f"slot.step={slot.step}."
@@ -1613,7 +1625,7 @@ class ToolAgent(Agent, ABC):
                     board[idx].status = BlackboardSlot.FAILED
                     raise raw_error
                 wrapped = ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed at index {idx} "
+                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
                     f"for {board[idx].tool!r}: {raw_error}"
                 )
                 board[idx].error = wrapped
@@ -1626,7 +1638,7 @@ class ToolAgent(Agent, ABC):
                         board[idx].error = raw_error
                     else:
                         board[idx].error = ToolAgentError(
-                            f"{type(self).__name__}.{self.name}: tool call failed at index {idx} "
+                            f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
                             f"for {board[idx].tool!r}: {raw_error}"
                         )
                     board[idx].status = BlackboardSlot.FAILED
@@ -1756,7 +1768,7 @@ class ToolAgent(Agent, ABC):
             return obj
 
         # 2) Append all non-empty running slots with rewritten placeholders and global indices.
-        #    FAILED slots are included so local_i always equals the append offset (B3 fix).
+        #    FAILED slots are included so local_i always equals the append offset.
         appended: list[BlackboardSlot] = []
         for local_i, slot in enumerate(running):
             if slot.is_empty():
@@ -1787,10 +1799,56 @@ class ToolAgent(Agent, ABC):
         self._blackboard = combined
         return state
 
+    def _compute_cache_index_sets(
+        self,
+        turns: list[AgentRecord],
+    ) -> tuple[frozenset[int], frozenset[int]]:
+        """
+        Derive valid and failed cache index sets from the current conversation turns.
+
+        Walks every ``ToolAgentRecord`` in ``turns`` and collects the half-open
+        blackboard span ``[blackboard_start, blackboard_end)``. Executed slots
+        within those spans go into ``valid``; failed slots go into ``failed``.
+        When ``context_enabled=False`` the caller passes an empty turns list
+        (or turns with no blackboard spans), so both sets are empty — consistent
+        with ``cache_blackboard=[]``.
+
+        Steps
+        -----
+        1. Iterate ``turns``.
+        2. Skip non-``ToolAgentRecord`` entries and entries where either boundary
+           is ``None``.
+        3. For each index in ``range(blackboard_start, blackboard_end)``:
+           - If the slot is FAILED → add to ``failed``.
+           - If the slot is EXECUTED → add to ``valid``.
+        4. Return ``(frozenset(valid), frozenset(failed))``.
+        """
+        valid: set[int] = set()
+        failed: set[int] = set()
+        for turn in turns:
+            if not isinstance(turn, ToolAgentRecord):
+                continue
+            if turn.blackboard_start is None or turn.blackboard_end is None:
+                continue
+            for idx in range(turn.blackboard_start, turn.blackboard_end):
+                if idx >= len(self._blackboard):
+                    continue
+                slot = self._blackboard[idx]
+                if slot.is_failed():
+                    failed.add(idx)
+                elif slot.is_executed():
+                    valid.add(idx)
+                else:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: internal error: persisted blackboard "
+                        f"slot {idx} has unexpected status {slot.status!r}; expected EXECUTED or FAILED."
+                    )
+        return frozenset(valid), frozenset(failed)
+
     # ------------------------------------------------------------------ #
     # Template Method (FINAL)
     # ------------------------------------------------------------------ #
-    def _invoke(self, turns: List[AgentRecord], prompt: str, context: dict) -> tuple[ToolAgentRecord, dict]:
+    def _invoke(self, turns: list[AgentRecord], prompt: str, context: dict) -> tuple[ToolAgentRecord, dict]:
         """
         FINAL sync ToolAgent template method.
 
@@ -1816,12 +1874,15 @@ class ToolAgent(Agent, ABC):
         if not messages:
             raise ToolAgentError("ToolAgent._invoke requires a non-empty messages list.")
 
-        state = self._initialize_run_state(messages=messages)
+        # Compute conversation-scoped cache index sets from the turns chain.
+        # Only executed/failed slots from records in this conversation are reachable.
+        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
 
-        if not isinstance(state, ToolAgentRunState):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: _initialize_run_state must return a ToolAgentRunState (or subclass)."
-            )
+        state = self._initialize_run_state(
+            messages=messages,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+        )
 
         while not state.is_done:
             logger.debug(f"{type(self).__name__}.{self.name} has made {state.tool_calls_used} this run")
@@ -1887,7 +1948,7 @@ class ToolAgent(Agent, ABC):
 
     async def _ainvoke(
         self,
-        turns: List[AgentRecord],
+        turns: list[AgentRecord],
         prompt: str,
         context: dict,
     ) -> tuple[ToolAgentRecord, dict]:
@@ -1917,13 +1978,15 @@ class ToolAgent(Agent, ABC):
         if not messages:
             raise ToolAgentError("ToolAgent._ainvoke requires a non-empty messages list.")
 
-        state = await self._ainitialize_run_state(messages=messages)
+        # Compute conversation-scoped cache index sets from the turns chain.
+        # Only executed/failed slots from records in this conversation are reachable.
+        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
 
-        if not isinstance(state, ToolAgentRunState):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: _initialize_run_state must return "
-                "a ToolAgentRunState (or subclass)."
-            )
+        state = await self._ainitialize_run_state(
+            messages=messages,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+        )
 
         while not state.is_done:
             logger.debug(
@@ -2109,7 +2172,7 @@ class ToolAgent(Agent, ABC):
             dump = pprint.pformat(executed, indent=2, width=160, sort_dicts=False)
             assistant_content = (
                 f"RESPONSE:\n{assistant_response}\n\n"
-                f"CACHED STEPS #{start}-{end - 1} PRODUCED:\n\n{dump}"
+                f"CACHED STEPS {list(range(start, end))} PRODUCED:\n\n{dump}"
             )
         else:
             # Mixed path: two-section output.
@@ -2165,12 +2228,16 @@ class ToolAgent(Agent, ABC):
         Raises
         ------
         ToolAgentError
-            If `raw_text` is empty/non-string or no valid JSON array/object can be found.
+            If ``raw_text`` is not a string (engine contract violation).
+        json.JSONDecodeError
+            If ``raw_text`` is empty or contains no decodable JSON array/object.
         """
-        if not isinstance(raw_text, str) or not raw_text.strip():
+        if not isinstance(raw_text, str):
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: LLM returned empty output."
+                f"{type(self).__name__}.{self.name}: LLM returned non-string output."
             )
+        if not raw_text.strip():
+            raise json.JSONDecodeError("LLM returned empty output", "", 0)
 
         text = raw_text.strip()
 
@@ -2201,9 +2268,7 @@ class ToolAgent(Agent, ABC):
                 best_val = val
 
         if best_val is NO_VAL:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: failed to find a valid JSON array/object in LLM output."
-            )
+            raise json.JSONDecodeError("no valid JSON array or object found in LLM output", text, 0)
 
         return best_val
 
@@ -2251,7 +2316,7 @@ class ToolAgent(Agent, ABC):
         allowed_fields: Collection[str],
         required_fields: Collection[str],
         context: str,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | str:
         """
         Validate and normalize one raw LLM-produced ToolAgent step mapping.
 
@@ -2264,6 +2329,15 @@ class ToolAgent(Agent, ABC):
 
         Runtime owns the authoritative step index. Any LLM-provided ``step`` value
         is advisory and is always overwritten with ``expected_step``.
+
+        Returns
+        -------
+        dict[str, Any]
+            Validated and normalized step mapping on success.
+        str
+            LLM-facing feedback string describing the schema violation. No
+            class/name prefix. Returned (not raised) so the caller decides whether
+            to retry.
         """
         if type(expected_step) is not int or expected_step < 0:
             raise ToolAgentError(
@@ -2294,27 +2368,15 @@ class ToolAgent(Agent, ABC):
                 f"allowed_fields; invalid required field(s): {sorted(required_not_allowed)!r}."
             )
 
-        if not isinstance(data, Mapping):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} must be a mapping; "
-                f"got {type(data).__name__!r}."
-            )
-
         data_keys = set(data)
 
         extra = data_keys - allowed
         if extra:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} contains unsupported keys: "
-                f"{sorted(extra)!r}."
-            )
+            return f"plan step {expected_step} contains unsupported keys: {sorted(extra)!r}."
 
         missing = required - data_keys
         if missing:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} missing required keys: "
-                f"{sorted(missing)!r}."
-            )
+            return f"plan step {expected_step} is missing required keys: {sorted(missing)!r}."
 
         normalized = dict(data)
 
@@ -2327,32 +2389,20 @@ class ToolAgent(Agent, ABC):
         tool = normalized.get(TOOL_FIELD, NO_VAL)
         if TOOL_FIELD in normalized or TOOL_FIELD in required:
             if not isinstance(tool, str) or not tool.strip():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: {context} {TOOL_FIELD!r} "
-                    "must be a non-empty string."
-                )
+                return f"plan step {expected_step} 'tool' must be a non-empty string."
 
         args = normalized.get(ARGS_FIELD, NO_VAL)
         if ARGS_FIELD in normalized or ARGS_FIELD in required:
             if not isinstance(args, dict):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: {context} {ARGS_FIELD!r} "
-                    f"must be a dict; got {type(args).__name__!r}."
-                )
+                return f"plan step {expected_step} 'args' must be a dict; got {type(args).__name__!r}."
 
         if AWAIT_FIELD in normalized:
             await_step = normalized[AWAIT_FIELD]
             if type(await_step) is not int or await_step < 0:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: {context} {AWAIT_FIELD!r} "
-                    "must be an int >= 0."
-                )
+                return f"plan step {expected_step} 'await' must be an int >= 0."
 
             if tool == RETURN_TOOL_FULL_NAME:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: return step must not include "
-                    f"{AWAIT_FIELD!r}."
-                )
+                return f"plan step {expected_step} is a return step and must not include 'await_step'."
 
         return normalized
 
@@ -2367,12 +2417,12 @@ class ToolAgent(Agent, ABC):
         """
         Convert a normalized tool-step mapping into a planned BlackboardSlot.
 
-        This method is a conversion guard, not the primary raw-LLM schema
-        validator. It rejects fields outside ``allowed_fields`` and validates the
-        executable slot fields needed to construct a BlackboardSlot.
-
-        Required-field validation should already have happened in
-        ``_validate_tool_step_dict(...)``.
+        This method is a converter, not the primary raw-LLM schema validator.
+        ``allowed_fields`` is validated as a well-formed programmer-supplied set
+        (via ``_normalize_step_field_set``). It does not filter ``data`` — callers
+        are responsible for ensuring ``data`` only contains expected keys before
+        calling this method. Required-field validation should already have happened
+        in ``_validate_tool_step_dict(...)``.
         """
         if type(step) is not int or step < 0:
             raise ToolAgentError(
@@ -2385,54 +2435,18 @@ class ToolAgent(Agent, ABC):
                 f"{type(self).__name__}.{self.name}: context must be a non-empty string."
             )
 
-        allowed = self._normalize_step_field_set(
+        self._normalize_step_field_set(
             allowed_fields,
             name="allowed_fields",
             require_non_empty=True,
         )
 
-        if not isinstance(data, Mapping):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} must be a mapping; "
-                f"got {type(data).__name__!r}."
-            )
-
-        extra = set(data) - allowed
-        if extra:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} contains unsupported keys: "
-                f"{sorted(extra)!r}."
-            )
-
         tool = data.get(TOOL_FIELD, NO_VAL)
         args = data.get(ARGS_FIELD, NO_VAL)
-
-        if not isinstance(tool, str) or not tool.strip():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} {TOOL_FIELD!r} "
-                "must be a non-empty string."
-            )
-
-        if not isinstance(args, dict):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {context} {ARGS_FIELD!r} "
-                f"must be a dict; got {type(args).__name__!r}."
-            )
 
         await_step = NO_VAL
         if AWAIT_FIELD in data:
             await_step = data[AWAIT_FIELD]
-            if type(await_step) is not int or await_step < 0:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: {context} {AWAIT_FIELD!r} "
-                    "must be an int >= 0."
-                )
-
-        if await_step is not NO_VAL and tool == RETURN_TOOL_FULL_NAME:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return step must not include "
-                f"{AWAIT_FIELD!r}."
-            )
 
         deps: set[int] = set(
             extract_dependencies(obj=args, placeholder_pattern=self.STEP_REF_PATTERN)
@@ -2458,7 +2472,13 @@ class ToolAgent(Agent, ABC):
     # Subclass Hooks
     # ------------------------------------------------------------------ #
     @abstractmethod
-    def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> ToolAgentRunState:
+    def _initialize_run_state(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> ToolAgentRunState:
         """
         Initialize and return a run state for this invocation.
 
@@ -2493,6 +2513,8 @@ class ToolAgent(Agent, ABC):
         self,
         *,
         messages: list[dict[str, str]],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
     ) -> ToolAgentRunState:
         """
         Async hook for run-state initialization.
@@ -2500,7 +2522,12 @@ class ToolAgent(Agent, ABC):
         Default offloads the sync hook to a worker thread. Subclasses override
         when the hook contains blocking I/O (e.g. a planning LLM call).
         """
-        return await asyncio.to_thread(self._initialize_run_state, messages=messages)
+        return await asyncio.to_thread(
+            self._initialize_run_state,
+            messages=messages,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+        )
 
     async def _aprepare_next_batch(
         self,
@@ -2524,6 +2551,7 @@ class ToolAgent(Agent, ABC):
         d.update({
             "tool_calls_limit": self.tool_calls_limit,
             "fail_fast": self._fail_fast,
+            "generation_retries": self._generation_retries,
             "peek_at_cache": self.peek_at_cache,
             "blackboard_preview_limit": self.blackboard_preview_limit,
             "tools": {
@@ -2590,6 +2618,7 @@ class PlanActAgent(ToolAgent):
         context_enabled: bool = False,
         tool_calls_limit: int | None = None,
         fail_fast: bool = True,
+        generation_retries: int = 0,
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
         blackboard_preview_limit: Optional[int] = None,
@@ -2608,6 +2637,7 @@ class PlanActAgent(ToolAgent):
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             fail_fast=fail_fast,
+            generation_retries=generation_retries,
             peek_at_cache=peek_at_cache,
             response_preview_limit=response_preview_limit,
             blackboard_preview_limit=blackboard_preview_limit,
@@ -2624,13 +2654,12 @@ class PlanActAgent(ToolAgent):
     def _normalize_planned_slots(
         self,
         planned_slots: list[BlackboardSlot],
-    ) -> list[BlackboardSlot]:
+    ) -> list[BlackboardSlot] | str:
         """
         Normalize a generated PlanAct slot list into final running-blackboard order.
 
         Normalization policy
         --------------------
-        - The plan must contain at least one generated non-return or return slot.
         - At most one return slot may be present.
         - If a return slot is present, it is moved to the end.
         - If no return slot is present, `return(None)` is appended.
@@ -2648,25 +2677,10 @@ class PlanActAgent(ToolAgent):
         -------
         list[BlackboardSlot]
             Normalized planned slots.
-
-        Raises
-        ------
-        ToolAgentError
-            If slots are empty, malformed, or contain multiple return slots.
+        str
+            LLM-facing feedback if the plan contains multiple return steps.
         """
-        if not isinstance(planned_slots, list) or not planned_slots:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: generated plan must contain at least one planned slot."
-            )
-
-        slots: list[BlackboardSlot] = []
-        for i, slot in enumerate(planned_slots):
-            if not isinstance(slot, BlackboardSlot):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: planned slot at index {i} must be a BlackboardSlot; "
-                    f"got {type(slot).__name__!r}."
-                )
-            slots.append(slot.copy())
+        slots: list[BlackboardSlot] = [slot.copy() for slot in planned_slots]
 
         return_name = RETURN_TOOL_FULL_NAME
         return_positions = [
@@ -2675,9 +2689,9 @@ class PlanActAgent(ToolAgent):
         ]
 
         if len(return_positions) > 1:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan contains multiple return steps at positions "
-                f"{return_positions!r}."
+            return (
+                f"plan contains multiple return steps at positions {return_positions!r}. "
+                "Include at most one return step."
             )
 
         if len(return_positions) == 1:
@@ -2723,12 +2737,15 @@ class PlanActAgent(ToolAgent):
         *,
         planned_slots: list[BlackboardSlot],
         cache_blackboard: list[BlackboardSlot],
-    ) -> None:
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> str | None:
         """
         Validate a normalized PlanAct planned-slot list.
 
-        This method validates the final internal representation of the generated
-        plan after return normalization and step-index normalization.
+        Checks only properties that ``_normalize_planned_slots`` does not
+        guarantee: tool existence, step dependency graph, await_step ordering,
+        tool_calls_limit, and cache reference validity.
 
         Parameters
         ----------
@@ -2739,10 +2756,19 @@ class PlanActAgent(ToolAgent):
             Runtime snapshot of persisted cache entries, used for cache-reference
             range validation.
 
+        Returns
+        -------
+        str
+            LLM-facing feedback string describing the first invariant violation
+            found. No class/name prefix.
+        None
+            All invariants satisfied.
+
         Raises
         ------
         ToolAgentError
-            If the planned slot list violates PlanAct planning invariants.
+            If ``planned_slots`` or ``cache_blackboard`` are not lists (entry
+            guard — these are caller-contract violations, not LLM output errors).
         """
         if not isinstance(planned_slots, list) or not planned_slots:
             raise ToolAgentError(
@@ -2755,109 +2781,84 @@ class PlanActAgent(ToolAgent):
             )
 
         return_name = RETURN_TOOL_FULL_NAME
-        return_idx = len(planned_slots) - 1
-
-        for i, slot in enumerate(planned_slots):
-            if not isinstance(slot, BlackboardSlot):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: planned slot {i} must be a BlackboardSlot; "
-                    f"got {type(slot).__name__!r}."
-                )
-
-            if slot.step != i:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: planned slot step mismatch at index {i}: "
-                    f"slot.step={slot.step}."
-                )
-
-            if not slot.is_planned():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: planned slot {i} must have status='planned'; "
-                    f"got {slot.status!r}."
-                )
-
-            if slot.tool is NO_VAL or not isinstance(slot.tool, str) or not slot.tool.strip():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: planned slot {i} has invalid tool name: "
-                    f"{slot.tool!r}."
-                )
-
-            if not self.has_tool(slot.tool):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: unknown tool in plan at step {i}: "
-                    f"{slot.tool!r}."
-                )
-
-            if i < return_idx and slot.tool == return_name:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: return tool must appear only as the final planned slot."
-                )
-
-        if planned_slots[return_idx].tool != return_name:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: final planned slot must be the return tool."
-            )
-
-        expected_return_deps = tuple(range(return_idx))
-        if planned_slots[return_idx].step_dependencies != expected_return_deps:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return step dependencies must be "
-                f"{expected_return_deps!r}; got {planned_slots[return_idx].step_dependencies!r}."
-            )
-
-        limit = self.tool_calls_limit
-        if limit is not None:
-            non_return = sum(
-                1 for slot in planned_slots
-                if slot.tool != return_name
-            )
-            if non_return > limit:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: plan exceeds tool_calls_limit={limit} "
-                    f"(non-return steps={non_return})."
-                )
-
         cache_len = len(cache_blackboard)
 
         for i, slot in enumerate(planned_slots):
+            if not self.has_tool(slot.tool):
+                return (
+                    f"plan step {i} uses an unknown tool: {slot.tool!r}. "
+                    "Use only tools from the available list."
+                )
+
+            # Return slot step_dependencies are synthetic (overwritten by _normalize_planned_slots
+            # to all prior steps); re-extract from args to catch stale or wrong-namespace refs.
+            if slot.tool == return_name:
+                step_refs = extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
+                bad_step_refs = [ref for ref in step_refs if ref < 0 or ref >= i]
+                if bad_step_refs:
+                    return (
+                        f"return step has invalid step references {sorted(set(bad_step_refs))!r} "
+                        f"in args; step refs must be earlier steps in the current plan (< {i})."
+                    )
+            else:
+                bad_step_deps = [dep for dep in slot.step_dependencies if dep < 0 or dep >= i]
+                if bad_step_deps:
+                    return (
+                        f"plan step {i} has invalid step dependencies {sorted(set(bad_step_deps))!r}; "
+                        f"all deps must be earlier steps (< {i})."
+                    )
+
+            if slot.await_step is not NO_VAL and slot.await_step >= i:
+                return (
+                    f"plan step {i} has an invalid await_step {slot.await_step!r}; "
+                    f"await_step must reference an earlier step (< {i})."
+                )
+
             cache_refs = extract_dependencies(slot.args, placeholder_pattern=self.CACHE_REF_PATTERN)
-            bad_cache = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
-            if bad_cache:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: plan step {i} references out-of-range cache indices "
-                    f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
+
+            # Category 1: index outside the cache entirely.
+            out_of_range = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
+            if out_of_range:
+                return (
+                    f"plan step {i} references cache indices that do not exist: "
+                    f"{sorted(set(out_of_range))!r} (cache has {cache_len} entries)."
                 )
-            failed_cache = [
+
+            # Category 2: in-conversation slot that failed — include tool+error.
+            failed_in_conv = [idx for idx in cache_refs if idx in failed_cache_indices]
+            if failed_in_conv:
+                details = "; ".join(
+                    f"entry {idx} ({cache_blackboard[idx].tool}): {cache_blackboard[idx].error}"
+                    for idx in sorted(set(failed_in_conv))
+                )
+                return (
+                    f"plan step {i} references cache entries that failed in this "
+                    f"conversation and cannot be used: {details}."
+                )
+
+            # Category 3: in range but not from this conversation.
+            out_of_conv = [
                 idx for idx in cache_refs
-                if 0 <= idx < cache_len and cache_blackboard[idx].is_failed()
+                if 0 <= idx < cache_len
+                and idx not in valid_cache_indices
+                and idx not in failed_cache_indices
             ]
-            if failed_cache:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: plan step {i} references FAILED cache "
-                    f"slot(s) {sorted(set(failed_cache))!r}; those steps did not produce usable results."
+            if out_of_conv:
+                return (
+                    f"plan step {i} references cache indices not part of this "
+                    f"conversation: {sorted(set(out_of_conv))!r}."
                 )
 
-            bad_step_deps = [
-                dep for dep in slot.step_dependencies
-                if dep < 0 or dep >= i
-            ]
-            if bad_step_deps:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: plan step {i} has illegal deps "
-                    f"{sorted(set(bad_step_deps))!r}; deps must be < {i}."
+        limit = self.tool_calls_limit
+        if limit is not None:
+            non_return = sum(1 for slot in planned_slots if slot.tool != return_name)
+            if non_return > limit:
+                return (
+                    f"plan exceeds the tool_calls_limit of {limit} "
+                    f"(planned {non_return} non-return steps). Reduce the number of tool calls."
                 )
 
-            if slot.await_step is not NO_VAL:
-                if type(slot.await_step) is not int or slot.await_step < 0:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: plan step {i} has invalid await_step "
-                        f"{slot.await_step!r}."
-                    )
-                if slot.await_step >= i:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: plan step {i} has illegal await_step "
-                        f"{slot.await_step!r}; await_step must be < {i}."
-                    )
+        return None
 
     # ------------------------------------------------------------------ #
     # Private helpers
@@ -2874,45 +2875,33 @@ class PlanActAgent(ToolAgent):
             )
         working_messages = [dict(m) for m in messages]
         cache_blackboard: list[BlackboardSlot] = (
-            self.blackboard if self.context_enabled else []
+            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
         )
-        for i, slot in enumerate(cache_blackboard):
-            slot.step = i
         return working_messages, cache_blackboard
 
     def _process_plan_output(
         self,
         *,
-        engine_result: Any,
-        messages: list[dict[str, str]],
+        parsed: Any,
         cache_blackboard: list[BlackboardSlot],
-    ) -> tuple[list[BlackboardSlot], LLMRecord]:
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> list[BlackboardSlot] | str:
         """
-        Parse, validate, and normalize raw LLM plan output into planned slots.
+        Parse, normalize, and validate a pre-extracted plan value into planned slots.
 
-        Constructs the LLMRecord, then applies the full
-        parse → validate → convert → normalize → validate pipeline.
+        Returns ``list[BlackboardSlot]`` on success.  Returns a ``str`` feedback
+        message on any structural or spec-validation failure; the string is written
+        for LLM consumption and is injected as a correction turn on retry.
         """
-        llm_record = LLMRecord(
-            messages=[messages[-1]],
-            llm_result=engine_result,
-            system_prompt_name=self._tool_prompt_key,
-        )
-        parsed = self._extract_from_json_string(engine_result.result)
-
         if not isinstance(parsed, list) or not parsed:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: plan output must be a non-empty JSON array."
-            )
+            return "The plan must be a non-empty JSON array."
 
         planned_slots: list[BlackboardSlot] = []
 
         for i, item in enumerate(parsed):
             if not isinstance(item, Mapping):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: plan item at index {i} must be a JSON object; "
-                    f"got {type(item).__name__!r}."
-                )
+                return f"Step {i} must be a JSON object (dict), not {type(item).__name__!r}."
 
             step_dict = self._validate_tool_step_dict(
                 item,
@@ -2921,6 +2910,9 @@ class PlanActAgent(ToolAgent):
                 required_fields=REQUIRED_PLAN_FIELDS,
                 context="plan step",
             )
+            if isinstance(step_dict, str):
+                return step_dict
+
             slot = self._tool_step_dict_to_slot(
                 step_dict,
                 step=i,
@@ -2929,14 +2921,20 @@ class PlanActAgent(ToolAgent):
             )
             planned_slots.append(slot)
 
-        planned_slots = self._normalize_planned_slots(planned_slots)
+        normalized = self._normalize_planned_slots(planned_slots)
+        if isinstance(normalized, str):
+            return normalized
 
-        self._validate_planned_slots(
-            planned_slots=planned_slots,
+        feedback = self._validate_planned_slots(
+            planned_slots=normalized,
             cache_blackboard=cache_blackboard,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
         )
+        if feedback is not None:
+            return feedback
 
-        return planned_slots, llm_record
+        return normalized
 
     def _build_planact_run_state(
         self,
@@ -2944,7 +2942,9 @@ class PlanActAgent(ToolAgent):
         planned_slots: list[BlackboardSlot],
         working_messages: list[dict[str, str]],
         cache_blackboard: list[BlackboardSlot],
-        llm_record: LLMRecord,
+        llm_records: list[LLMRecord],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
     ) -> PlanActRunState:
         """Validate plan structure, compile batches, and construct PlanActRunState."""
         if not planned_slots:
@@ -2970,7 +2970,9 @@ class PlanActAgent(ToolAgent):
             executed_steps=set(),
             prepared_steps=[],
             tool_calls_used=0,
-            llm_records=[llm_record],
+            llm_records=list(llm_records),
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
             is_done=False,
             return_value=NO_VAL,
             batches=batches,
@@ -2982,85 +2984,190 @@ class PlanActAgent(ToolAgent):
         *,
         messages: list[dict[str, str]],
         cache_blackboard: list[BlackboardSlot],
-    ) -> tuple[list[BlackboardSlot], LLMRecord]:
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> tuple[list[BlackboardSlot], list[LLMRecord]]:
         """
-        Generate, normalize, and validate a complete PlanAct running blackboard.
-
-        This is the PlanAct generation hook. It is intentionally single-shot and
-        fail-fast: no retry logic is performed here.
+        Generate, parse, and validate a complete PlanAct running blackboard, with
+        optional retry on generation failures.
 
         Lifecycle
         ---------
-        1. Generate raw LLM output from the provided messages, capturing the full
-           LLMResult and wrapping it (with the prompt that produced it) in an
-           LLMRecord for the run's accumulated LLM history.
-        2. Extract the largest JSON array/object from the generated text.
-        3. Validate that the extracted value is a non-empty list of mappings.
-        4. Convert each mapping into a planned BlackboardSlot.
-        5. Normalize the planned slot list.
-        6. Validate the final planned slot list.
-        7. Return the final list of planned slots together with the LLMRecord.
+        1. Validate that ``messages`` is non-empty.
+        2. Initialize ``working_messages`` as a mutable copy of ``messages``; initialize
+           ``llm_records`` list and ``retries_used`` counter.
+        3. Loop:
+           a. Call the LLM engine with ``working_messages``; capture ``engine_result``.
+           b. Construct an ``LLMRecord`` from the last working message and
+              ``engine_result``; append to ``llm_records``.
+           c. Try JSON extraction (``_extract_from_json_string``). On failure: check
+              budget; if exhausted re-raise; else inject JSON-error feedback and
+              continue.
+           d. Try spec validation (``_process_plan_output``). On failure: check budget;
+              if exhausted re-raise; else inject spec-error feedback and continue.
+           e. On success: return ``(planned_slots, llm_records)``.
 
         Parameters
         ----------
         messages : list[dict[str, str]]
             LLM-facing messages already built by the base Agent message pipeline.
-
         cache_blackboard : list[BlackboardSlot]
             Snapshot of persisted blackboard entries available to this invoke.
-            Used for validating cache placeholder references.
 
         Returns
         -------
-        tuple[list[BlackboardSlot], LLMRecord]
-            Fully normalized and validated planned slots for the running
-            blackboard, plus the LLMRecord capturing the single generation that
-            produced them.
+        tuple[list[BlackboardSlot], list[LLMRecord]]
+            Fully normalized and validated planned slots, plus one ``LLMRecord`` per
+            generation attempt (including failed attempts).
 
         Raises
         ------
         ToolAgentError
-            If generation output cannot be parsed, converted, normalized, or validated.
-
-        PlanAct raw step schema:
-        - allowed: PLAN_FIELDS
-        - required: REQUIRED_PLAN_FIELDS
-
-        The LLM-provided ``step`` field is advisory. JSON array position is
-        authoritative and is passed as ``expected_step``.
+            If generation output cannot be parsed or validated after all allowed
+            attempts are exhausted, or if ``messages`` is empty.
         """
         if not messages:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: messages must be non-empty."
             )
 
-        engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
-        return self._process_plan_output(
-            engine_result=engine_result,
-            messages=messages,
-            cache_blackboard=cache_blackboard,
-        )
+        working_messages: list[dict[str, str]] = list(messages)
+        llm_records: list[LLMRecord] = []
+        retries_used: int = 0
+
+        while True:
+            engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in working_messages]})
+            raw_output: str = engine_result.result
+
+            # PlanAct delta: the last working message (the current user turn) only.
+            # ReAct uses a 3-element delta (task + snapshot + step-request); PlanAct
+            # is simpler because the system prompt already carries planning context.
+            llm_records.append(LLMRecord(
+                messages=[working_messages[-1]],
+                llm_result=engine_result,
+                system_prompt_name=self._tool_prompt_key,
+            ))
+
+            # JSON extraction
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                feedback = (
+                    f"Your output could not be parsed as valid JSON.\n\n"
+                    f"Decoder error: {exc}\n\n"
+                    f"The response you produced was:\n\n{raw_output}\n\n"
+                    "Produce a correctly formatted JSON array."
+                )
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error is JSONDecodeError: {exc}"
+                    )
+                working_messages.append({"role": "assistant", "content": raw_output})
+                working_messages.append({"role": "user", "content": feedback})
+                retries_used += 1
+                continue
+
+            # Spec validation
+            result = self._process_plan_output(
+                parsed=parsed,
+                cache_blackboard=cache_blackboard,
+                valid_cache_indices=valid_cache_indices,
+                failed_cache_indices=failed_cache_indices,
+            )
+            if isinstance(result, str):
+                feedback = result
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
+                    )
+                plan_repr = json.dumps(parsed, indent=2)
+                working_messages.append({"role": "assistant", "content": plan_repr})
+                working_messages.append({"role": "user", "content": feedback})
+                retries_used += 1
+                continue
+
+            return result, llm_records
 
     async def _agenerate_plan(
         self,
         *,
         messages: list[dict[str, str]],
         cache_blackboard: list[BlackboardSlot],
-    ) -> tuple[list[BlackboardSlot], LLMRecord]:
-        """Async mirror of ``_generate_plan``: uses ``async_invoke`` for the LLM call."""
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> tuple[list[BlackboardSlot], list[LLMRecord]]:
+        """Async mirror of ``_generate_plan``: uses ``async_invoke`` for each LLM call.
+        Retry logic, feedback injection, and return type are identical."""
         if not messages:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: messages must be non-empty."
             )
 
-        engine_result = await self._llm_engine.async_invoke({"messages": [dict(m) for m in messages]})
-        return self._process_plan_output(
-            engine_result=engine_result,
-            messages=messages,
-            cache_blackboard=cache_blackboard,
-        )
+        working_messages: list[dict[str, str]] = list(messages)
+        llm_records: list[LLMRecord] = []
+        retries_used: int = 0
 
-    def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> PlanActRunState:
+        while True:
+            engine_result = await self._llm_engine.async_invoke({"messages": [dict(m) for m in working_messages]})
+            raw_output: str = engine_result.result
+
+            llm_records.append(LLMRecord(
+                messages=[working_messages[-1]],
+                llm_result=engine_result,
+                system_prompt_name=self._tool_prompt_key,
+            ))
+
+            # JSON extraction
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                feedback = (
+                    f"Your output could not be parsed as valid JSON.\n\n"
+                    f"Decoder error: {exc}\n\n"
+                    f"The response you produced was:\n\n{raw_output}\n\n"
+                    "Produce a correctly formatted JSON array."
+                )
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error is JSONDecodeError: {exc}"
+                    )
+                working_messages.append({"role": "assistant", "content": raw_output})
+                working_messages.append({"role": "user", "content": feedback})
+                retries_used += 1
+                continue
+
+            # Spec validation
+            result = self._process_plan_output(
+                parsed=parsed,
+                cache_blackboard=cache_blackboard,
+                valid_cache_indices=valid_cache_indices,
+                failed_cache_indices=failed_cache_indices,
+            )
+            if isinstance(result, str):
+                feedback = result
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
+                    )
+                plan_repr = json.dumps(parsed, indent=2)
+                working_messages.append({"role": "assistant", "content": plan_repr})
+                working_messages.append({"role": "user", "content": feedback})
+                retries_used += 1
+                continue
+
+            return result, llm_records
+
+    def _initialize_run_state(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> PlanActRunState:
         """
         One-shot plan generation and compilation into concurrent batches.
 
@@ -3071,28 +3178,12 @@ class PlanActAgent(ToolAgent):
 
         Execution Steps
         ~~~~~~~~~~~~~~~
-        1. **Snapshot cache** from ``self._blackboard`` if ``context_enabled=True``
-           (persisted results from prior invokes)
-
-        2. **Plan generation**:
-           - Delegates to ``_generate_plan(...)``
-           - The LLM receives the conversation messages
-           - Expected to emit a JSON array of step objects:
-             ``[{"tool": "...", "args": {...}}, ...]``
-           - ``step`` is optional/advisory; JSON array position is authoritative
-           - Optionally, each non-return step can include an "await" field
-
-        3. **Planned slot generation**:
-           - ``_generate_plan(...)`` extracts JSON from the raw LLM text
-           - Validates each raw step object
-           - Converts each step into a ``BlackboardSlot`` with ``status="planned"``
-           - Normalizes return placement and final step indices
-           - Validates tools, cache references, dependencies, and budget
-
-        4. **Batch compilation**:
-           - Topologically sorts slots by ``step_dependencies``
-           - Returns list of batches: each batch's indices execute concurrently
-           - Return is always in its own final batch
+        1. ``_setup_plan_init``: validate messages; copy to working list; snapshot
+           cache blackboard.
+        2. ``_generate_plan``: generate the plan via LLM, returning
+           ``(planned_slots, llm_records)``.
+        3. ``_build_planact_run_state``: compile batches and construct the
+           ``PlanActRunState`` with the generated slots and LLM records.
 
         Parameters
         ----------
@@ -3121,36 +3212,46 @@ class PlanActAgent(ToolAgent):
             - Budget exceeded
         """
         working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
-        planned_slots, llm_record = self._generate_plan(
+        planned_slots, llm_records = self._generate_plan(
             messages=working_messages,
             cache_blackboard=cache_blackboard,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
         )
         return self._build_planact_run_state(
             planned_slots=planned_slots,
             working_messages=working_messages,
             cache_blackboard=cache_blackboard,
-            llm_record=llm_record,
+            llm_records=llm_records,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
         )
 
     async def _ainitialize_run_state(
         self,
         *,
         messages: list[dict[str, str]],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
     ) -> PlanActRunState:
         """
         Async override: uses ``_agenerate_plan`` so the planning LLM call
         goes through ``async_invoke`` rather than a worker thread.
         """
         working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
-        planned_slots, llm_record = await self._agenerate_plan(
+        planned_slots, llm_records = await self._agenerate_plan(
             messages=working_messages,
             cache_blackboard=cache_blackboard,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
         )
         return self._build_planact_run_state(
             planned_slots=planned_slots,
             working_messages=working_messages,
             cache_blackboard=cache_blackboard,
-            llm_record=llm_record,
+            llm_records=llm_records,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
         )
 
     def _compile_batches_from_deps(
@@ -3449,6 +3550,7 @@ class ReActAgent(ToolAgent):
         context_enabled: bool = False,
         tool_calls_limit: int = 25,
         fail_fast: bool = True,
+        generation_retries: int = 0,
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
         blackboard_preview_limit: Optional[int] = None,
@@ -3467,6 +3569,7 @@ class ReActAgent(ToolAgent):
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             fail_fast=fail_fast,
+            generation_retries=generation_retries,
             peek_at_cache=peek_at_cache,
             response_preview_limit=response_preview_limit,
             blackboard_preview_limit=blackboard_preview_limit,
@@ -3497,11 +3600,6 @@ class ReActAgent(ToolAgent):
     def _validate_react_prepare_state(self, state: ReActRunState) -> None:
         """
         Validate cursor bounds, prior-step processing, and step_meta length.
-
-        Replaces the former ``latest_executed`` validation block: the invariant
-        that the previous step was processed — executed, or FAILED when
-        ``fail_fast=False`` — is derived from ``next_step_index - 1`` and the
-        slot's status rather than a separate bookkeeping field.
         """
         prefix_len = state.next_step_index
         if type(prefix_len) is not int or prefix_len < 0:
@@ -3536,43 +3634,61 @@ class ReActAgent(ToolAgent):
         self,
         state: ReActRunState,
         prefix_len: int,
+        *,
+        max_duration: int,
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         """
         Build the working message list and delta for one ReAct step generation.
 
-        Returns ``(working_messages, delta)`` where ``working_messages`` is the
-        full message list to pass to the LLM and ``delta`` is the three-element
-        list used to construct the LLMRecord.
+        ``max_duration`` is pre-computed by the caller and injected here so the
+        prompt and the validator in ``_generate_next_step`` share a single value.
+
+        EXECUTED steps are rendered with ``result_ref``, ``run_id``, and optionally
+        ``observable_result``. FAILED steps are rendered with ``status="FAILED"`` and
+        ``error``; they carry no ``result_ref`` (so the LLM cannot attempt to reference
+        a non-existent result).
+
+        Returns ``(working_messages, delta)``.
         """
         working_messages: list[dict[str, str]] = [dict(m) for m in state.messages]
 
         running_records: list[dict[str, Any]] = []
         for idx in range(prefix_len):
             slot = state.running_blackboard[idx]
-            if not slot.is_executed():
-                continue
 
-            record: dict[str, Any] = {
-                STEP_FIELD: slot.step,
-                DESCRIPTION_FIELD: state.step_meta[idx].description,
-                TOOL_FIELD: slot.tool,
-                ARGS_FIELD: slot.args,
-                "result_ref": f"<<__s{idx}__>>",
-                "run_id": slot.result.run_id,
-            }
+            if slot.is_executed():
+                record: dict[str, Any] = {
+                    STEP_FIELD: slot.step,
+                    DESCRIPTION_FIELD: state.step_meta[idx].description,
+                    TOOL_FIELD: slot.tool,
+                    ARGS_FIELD: slot.args,
+                    "result_ref": f"<<__s{idx}__>>",
+                    "run_id": slot.result.run_id,
+                }
+                if state.step_meta[idx].observable > 0:
+                    record["observable_result"] = self._preview_blackboard_result(slot.result.result)
+                running_records.append(record)
 
-            if state.step_meta[idx].observable > 0:
-                record["observable_result"] = self._preview_blackboard_result(slot.result.result)
-
-            running_records.append(record)
+            elif slot.is_failed():
+                running_records.append({
+                    STEP_FIELD: slot.step,
+                    DESCRIPTION_FIELD: state.step_meta[idx].description,
+                    TOOL_FIELD: slot.tool,
+                    ARGS_FIELD: slot.args,
+                    "status": "FAILED",
+                    "error": str(slot.error),
+                })
+            # Empty/PLANNED slots are not yet part of the running plan; skip.
 
         if running_records:
             running_text = (
                 f"RUNNING PLAN STEPS 0-{prefix_len - 1} SO FAR:\n"
-                "These are the executed steps for the current user task.\n"
-                "Use descriptions to understand what each executed step was intended to do.\n"
-                "Use result_ref placeholders when a new arg needs a prior step value.\n"
-                "observable_result fields are for OBSERVATION ONLY: use them only to choose the next tool or branch.\n"
+                "Steps may be EXECUTED (result available via result_ref) or FAILED "
+                "(error shown; do not reference result_ref for failed steps).\n"
+                "Use descriptions to understand what each step was intended to do.\n"
+                "Use result_ref placeholders when a new arg needs a prior executed step's value.\n"
+                "observable_result fields are for OBSERVATION ONLY: use them only to choose "
+                "the next tool or branch.\n"
                 "Do not copy observable_result values into new args.\n\n"
                 + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
             )
@@ -3583,8 +3699,6 @@ class ReActAgent(ToolAgent):
                 "When steps execute, their results will be available by result_ref "
                 "placeholders like <<__s0__>>."
             )
-
-        max_duration = len(state.running_blackboard) - prefix_len - 1
 
         working_messages.append({"role": "assistant", "content": running_text})
         working_messages.append(
@@ -3606,50 +3720,56 @@ class ReActAgent(ToolAgent):
     def _process_next_step_output(
         self,
         *,
-        engine_result: Any,
-        delta: list[dict[str, str]],
+        parsed: Any,
         expected_step: int,
         cache_blackboard: list[BlackboardSlot],
         max_duration: int,
-    ) -> tuple[BlackboardSlot, int, str, LLMRecord]:
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> tuple[BlackboardSlot, int, str] | str:
         """
-        Parse and validate one ReAct step from raw LLM output.
+        Validate one parsed ReAct step and return the slot, duration, and description.
 
-        Constructs the LLMRecord, parses the JSON payload, and applies the full
-        validation pipeline extracted from ``_generate_next_step``.
+        Receives the already-extracted ``parsed`` value. LLMRecord construction has
+        moved to ``_generate_next_step``. All LLM-facing validation failures return
+        a plain feedback string (no class/name prefix); engine-contract violations
+        raise ``ToolAgentError``.
+
+        Steps
+        -----
+        1. Reject non-Mapping parsed values.
+        2. Build ``raw_payload``; check for unsupported keys.
+        3. Require ``DURATION_FIELD`` and ``DESCRIPTION_FIELD`` present.
+        4. Delegate to ``_validate_tool_step_dict``; propagate string feedback.
+        5. Extract and range-validate ``duration``.
+        6. Extract, type-check, strip, and non-empty-check ``description``.
+        7. Convert to ``BlackboardSlot`` via ``_tool_step_dict_to_slot``.
+        8. Verify tool is registered; unknown tool → feedback string.
+        9. Require return-tool duration == 0.
+        10. Validate cache refs — three categories: out-of-range, failed-in-conv
+            (with tool+error detail), out-of-conv.
+        11. Validate step dependencies are prior-only.
+        12. Return ``(slot, duration, description)``.
         """
-        llm_record = LLMRecord(
-            messages=delta,
-            llm_result=engine_result,
-            system_prompt_name=self._tool_prompt_key,
-        )
-        parsed = self._extract_from_json_string(engine_result.result)
-
+        # 1. Structural check — LLM must return a JSON object, not an array or scalar.
         if not isinstance(parsed, Mapping):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step output must be a JSON object; "
-                f"got {type(parsed).__name__!r}."
-            )
+            return f"next step output must be a JSON object; got {type(parsed).__name__!r}."
 
         raw_payload = dict(parsed)
 
+        # 2. Field-set checks.
         extra = set(raw_payload) - REACT_FIELDS
         if extra:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step contains unsupported keys: "
-                f"{sorted(extra)!r}."
-            )
+            return f"next step contains unsupported keys: {sorted(extra)!r}."
 
+        # 3. Presence checks for ReAct-specific required fields.
         if DURATION_FIELD not in raw_payload:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step missing required key {DURATION_FIELD!r}."
-            )
+            return f"next step missing required key {DURATION_FIELD!r}."
 
         if DESCRIPTION_FIELD not in raw_payload:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step missing required key {DESCRIPTION_FIELD!r}."
-            )
+            return f"next step missing required key {DESCRIPTION_FIELD!r}."
 
+        # 4. Core step-dict validation (tool name, args shape, await_step, etc.).
         step_payload = self._validate_tool_step_dict(
             raw_payload,
             expected_step=expected_step,
@@ -3657,27 +3777,27 @@ class ReActAgent(ToolAgent):
             required_fields=REQUIRED_REACT_FIELDS,
             context="next step",
         )
+        if isinstance(step_payload, str):
+            return step_payload
 
+        # 5. Duration extraction and range check.
         duration = step_payload.pop(DURATION_FIELD)
         if type(duration) is not int or duration < 0 or duration > max_duration:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step {DURATION_FIELD!r} must be an int in "
+            return (
+                f"next step {DURATION_FIELD!r} must be an int in "
                 f"[0, {max_duration}] for expected_step={expected_step}; got {duration!r}."
             )
 
+        # 6. Description extraction, type check, and normalisation.
         description = step_payload.pop(DESCRIPTION_FIELD)
         if type(description) is not str:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step {DESCRIPTION_FIELD!r} must be a string; "
-                f"got {type(description).__name__!r}."
-            )
+            return f"next step {DESCRIPTION_FIELD!r} must be a string; got {type(description).__name__!r}."
 
         description = description.strip()
         if not description:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step {DESCRIPTION_FIELD!r} cannot be empty."
-            )
+            return f"next step {DESCRIPTION_FIELD!r} cannot be empty."
 
+        # 7. Convert to BlackboardSlot — engine contract; let ToolAgentError propagate.
         slot = self._tool_step_dict_to_slot(
             step_payload,
             step=expected_step,
@@ -3685,43 +3805,63 @@ class ReActAgent(ToolAgent):
             context="next step",
         )
 
-        self.get_tool(slot.tool)
+        # 8. Verify tool is registered.
+        if not self.has_tool(slot.tool):
+            return f"next step references unknown tool {slot.tool!r}."
 
+        # 9. Return-tool must use duration 0.
         if slot.tool == RETURN_TOOL_FULL_NAME and duration != 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return tool must use {DURATION_FIELD!r} 0; "
-                f"got {duration!r}."
-            )
+            return f"return tool must use {DURATION_FIELD!r} 0; got {duration!r}."
 
+        # 10. Cache reference validation — three categories.
         cache_len = len(cache_blackboard)
         cache_refs = extract_dependencies(slot.args, placeholder_pattern=self.CACHE_REF_PATTERN)
-        bad_cache = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
-        if bad_cache:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step references out-of-range cache indices "
-                f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
-            )
-        failed_cache = [
-            idx for idx in cache_refs
-            if 0 <= idx < cache_len and cache_blackboard[idx].is_failed()
-        ]
-        if failed_cache:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step references FAILED cache "
-                f"slot(s) {sorted(set(failed_cache))!r}; those steps did not produce usable results."
+
+        # Category 1: index outside the cache entirely.
+        out_of_range = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
+        if out_of_range:
+            return (
+                f"next step references cache indices that do not exist: "
+                f"{sorted(set(out_of_range))!r} (cache has {cache_len} entries)."
             )
 
+        # Category 2: in-conversation slot that failed — include tool+error.
+        failed_in_conv = [idx for idx in cache_refs if idx in failed_cache_indices]
+        if failed_in_conv:
+            details = "; ".join(
+                f"entry {idx} ({cache_blackboard[idx].tool}): {cache_blackboard[idx].error}"
+                for idx in sorted(set(failed_in_conv))
+            )
+            return (
+                f"next step references cache entries that failed in this conversation "
+                f"and cannot be used: {details}."
+            )
+
+        # Category 3: in range but not from this conversation.
+        out_of_conv = [
+            idx for idx in cache_refs
+            if 0 <= idx < cache_len
+            and idx not in valid_cache_indices
+            and idx not in failed_cache_indices
+        ]
+        if out_of_conv:
+            return (
+                f"next step references cache indices not part of this conversation: "
+                f"{sorted(set(out_of_conv))!r}."
+            )
+
+        # 11. Step dependency validation.
         bad_step_deps = [
             dep for dep in slot.step_dependencies
             if dep < 0 or dep >= expected_step
         ]
         if bad_step_deps:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step has illegal deps "
+            return (
+                f"next step has illegal deps "
                 f"{sorted(set(bad_step_deps))!r}; deps must be < {expected_step}."
             )
 
-        return slot, duration, description, llm_record
+        return slot, duration, description
 
     def _apply_react_step_result(
         self,
@@ -3730,7 +3870,9 @@ class ReActAgent(ToolAgent):
         generated_slot: BlackboardSlot,
         observe_duration: int,
         description: str,
-        llm_record: LLMRecord,
+        llm_records: list[LLMRecord],
+        *,
+        max_duration: int,
     ) -> ReActRunState:
         """
         Apply one validated ReAct step generation result to the run state.
@@ -3740,22 +3882,16 @@ class ReActAgent(ToolAgent):
         the slot (``fail_fast=False`` only) or resolves placeholders and marks it
         prepared. Advances the cursor and writes ``step_meta``.
 
+        ``max_duration`` is pre-computed by ``_prepare_next_batch`` /
+        ``_aprepare_next_batch`` and passed in; this method does not recompute it.
+
         **Cascade path** (``fail_fast=False``): if any ``step_dependencies`` entry
         is FAILED in the running blackboard, the return tool raises immediately;
         non-return slots are marked FAILED and the method returns early with
         ``prepared_steps`` left empty — the ``_invoke`` loop will skip execution
         and continue to the next generation turn.
         """
-        max_duration = len(state.running_blackboard) - prefix_len - 1
-
-        if not isinstance(generated_slot, BlackboardSlot):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: _generate_next_step must return "
-                f"(BlackboardSlot, observe_duration, description, LLMRecord); got first "
-                f"item {type(generated_slot).__name__!r}."
-            )
-
-        state.llm_records.append(llm_record)
+        state.llm_records.extend(llm_records)
 
         if type(observe_duration) is not int or observe_duration < 0 or observe_duration > max_duration:
             raise ToolAgentError(
@@ -3850,7 +3986,13 @@ class ReActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Tool-Agent Hooks
     # ------------------------------------------------------------------ #
-    def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> ReActRunState:
+    def _initialize_run_state(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> ReActRunState:
         """
         Initialize run state for a single ReAct invocation.
 
@@ -3862,8 +4004,9 @@ class ReActAgent(ToolAgent):
         Steps
         -----
         1. Validate ``messages`` is non-empty.
-        2. Snapshot the persisted blackboard as ``cache_blackboard`` (empty list
-           when ``context_enabled=False``).
+        2. Snapshot the persisted blackboard as a copy (empty list when
+           ``context_enabled=False``); store ``valid_cache_indices`` and
+           ``failed_cache_indices`` on state.
         3. Copy ``messages`` into a mutable working list.
         4. Pre-allocate a fixed-size ``running_blackboard`` of
            ``tool_calls_limit + 1`` slots — one slot per allowed non-return
@@ -3885,9 +4028,9 @@ class ReActAgent(ToolAgent):
         if not messages:
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
 
-        cache_blackboard = self.blackboard if self.context_enabled else []
-        for i, slot in enumerate(cache_blackboard):
-            slot.step = i
+        cache_blackboard = (
+            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
+        )
 
         working_messages = [dict(m) for m in messages]
 
@@ -3902,6 +4045,8 @@ class ReActAgent(ToolAgent):
             prepared_steps=[],
             tool_calls_used=0,
             llm_records=[],
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
             is_done=False,
             return_value=NO_VAL,
             next_step_index=0,
@@ -3915,72 +4060,65 @@ class ReActAgent(ToolAgent):
         cache_blackboard: list[BlackboardSlot],
         expected_step: int,
         delta: list[dict[str, str]],
-    ) -> tuple[BlackboardSlot, int, str, LLMRecord]:
+        retries_used: int,
+        max_duration: int,
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> tuple[BlackboardSlot, int, str, list[LLMRecord], int]:
         """
-        Generate and validate one ReAct tool step as a planned BlackboardSlot plus
-        observation duration and description.
+        Generate and validate one ReAct tool step, with a bounded retry loop.
 
-        This is the ReAct generation hook. It is intentionally single-shot and
-        fail-fast: no retry logic is performed here.
+        Mirrors ``_generate_plan`` in structure. LLMRecord construction lives here;
+        ``_process_next_step_output`` receives the already-extracted ``parsed`` value.
+        The retry loop catches ``json.JSONDecodeError`` (JSON path) and string returns
+        from ``_process_next_step_output`` (spec-validation path), injecting structured
+        feedback into the working message thread on each failed attempt.
 
-        Lifecycle
-        ---------
-        1. Generate raw LLM output from the provided messages, capturing the full
-           LLMResult and wrapping it (with the prompt that produced it) in an
-           LLMRecord for the run's accumulated LLM history.
-        2. Extract the largest JSON array/object from the generated text.
-        3. Validate that the extracted value is a mapping.
-        4. Extract and validate "duration" as an int within the remaining future
-           step-generation capacity.
-        5. Extract and validate "description" as a non-empty string.
-        6. Normalize the remaining raw step dict using expected_step as authoritative.
-        7. Convert the normalized mapping into a planned BlackboardSlot.
-        8. Validate tool existence.
-        9. Validate return-tool duration is 0.
-        10. Validate cache references against cache_blackboard.
-        11. Validate step dependencies are prior-only.
-        12. Return the planned slot, duration, description, and LLMRecord.
+        ``retries_used`` carries the shared per-run budget consumed by prior step
+        generations. The returned int is the updated value; the caller writes it back
+        to ``state.retries_used``.
+
+        LLMRecord messages convention:
+        - First attempt: ``delta`` (task user + snapshot assistant + step-request user).
+        - Retry attempt N: ``working_messages[-2:]`` (failed-output assistant + feedback user).
+
+        Observable counters are NOT decremented here — only when a step commits in
+        ``_apply_react_step_result``.
+
+        Steps
+        -----
+        1. Contract guards: messages empty, cache_blackboard not a list,
+           expected_step not a non-negative int → raise ToolAgentError.
+        2. Copy ``messages`` to ``working_messages``; ``max_duration`` is pre-computed
+           by the caller and passed in.
+        3. Loop:
+           a. LLM call.
+           b. Construct LLMRecord (``delta`` on first attempt, ``working_messages[-2:]``
+              on retries); append to ``llm_records``.
+           c. JSON extraction — on ``json.JSONDecodeError``: check budget, inject
+              feedback, increment ``retries_used``, continue.
+           d. Spec validation via ``_process_next_step_output`` — on string return:
+              check budget, inject re-serialised step + feedback, increment, continue.
+           e. Success: return ``(slot, duration, description, llm_records, retries_used)``.
 
         Parameters
         ----------
         messages : list[dict[str, str]]
-            LLM-facing messages for this ReAct step.
-
+            Base LLM-facing messages. Copied locally; original unchanged.
         cache_blackboard : list[BlackboardSlot]
-            Snapshot of persisted blackboard entries available to this invoke.
-            Used for validating cache placeholder references.
-
+            Snapshot of persisted prior results for cache-ref validation.
         expected_step : int
-            Authoritative plan-local step index for the generated slot. The raw
-            LLM-produced "step" value is optional/advisory and is overwritten.
-
+            Authoritative plan-local step index.
         delta : list[dict[str, str]]
-            The messages that are new for this specific step call, pre-computed
-            by the caller. Used to construct the LLMRecord for this generation.
-            Typically three messages: the original user task, the running-plan
-            snapshot (assistant), and the step-request stub (user).
+            Pre-computed new messages for the first attempt's LLMRecord.
+        retries_used : int
+            Shared budget counter on entry (retries consumed by prior steps).
 
         Returns
         -------
-        tuple[BlackboardSlot, int, str, LLMRecord]
-            Planned single-step slot, observation duration, step description, and
-            the LLMRecord capturing the single generation that produced them.
-            The slot is not inserted into the running blackboard and placeholders
-            are not resolved here. The duration controls how many future successful
-            step-generation turns may render this step's raw result as observable_result.
-
-        Raises
-        ------
-        ToolAgentError
-            If generation output cannot be parsed, converted, or validated.
-
-
-        ReAct raw step schema:
-        - allowed: REACT_FIELDS
-        - required: REQUIRED_REACT_FIELDS
-
-        ``step`` is allowed but advisory. Runtime normalizes it to
-        ``expected_step``.
+        tuple[BlackboardSlot, int, str, list[LLMRecord], int]
+            Validated slot, duration, description, all LLMRecords for this call
+            (one per attempt), and the updated ``retries_used``.
         """
         if not messages:
             raise ToolAgentError(
@@ -3998,15 +4136,70 @@ class ReActAgent(ToolAgent):
                 f"got {expected_step!r}."
             )
 
-        max_duration = max(0, self._tool_calls_limit - expected_step)
-        engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
-        return self._process_next_step_output(
-            engine_result=engine_result,
-            delta=delta,
-            expected_step=expected_step,
-            cache_blackboard=cache_blackboard,
-            max_duration=max_duration,
-        )
+        working_messages: list[dict[str, str]] = list(messages)
+        llm_records: list[LLMRecord] = []
+
+        while True:
+            engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in working_messages]})
+            raw_output: str = engine_result.result
+
+            # First attempt uses the pre-computed delta; retries use the two injected feedback messages.
+            record_messages = delta if not llm_records else list(working_messages[-2:])
+            llm_records.append(LLMRecord(
+                messages=record_messages,
+                llm_result=engine_result,
+                system_prompt_name=self._tool_prompt_key,
+            ))
+
+            # JSON extraction
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                feedback = (
+                    f"Your output could not be parsed as valid JSON.\n\n"
+                    f"Decoder error: {exc}\n\n"
+                    f"The response you produced was:\n\n{raw_output}\n\n"
+                    "Produce a correctly formatted JSON object."
+                )
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
+                    )
+                working_messages.append({"role": "assistant", "content": raw_output})
+                working_messages.append({"role": "user", "content": feedback})
+                retries_used += 1
+                continue
+
+            # Spec validation
+            result = self._process_next_step_output(
+                parsed=parsed,
+                expected_step=expected_step,
+                cache_blackboard=cache_blackboard,
+                max_duration=max_duration,
+                valid_cache_indices=valid_cache_indices,
+                failed_cache_indices=failed_cache_indices,
+            )
+            if isinstance(result, str):
+                feedback = result
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
+                    )
+                step_repr = json.dumps(parsed, indent=2)
+                working_messages.append({"role": "assistant", "content": step_repr})
+                working_messages.append({"role": "user", "content": (
+                    f"The step you produced contains an error:\n\n"
+                    f"{step_repr}\n\n"
+                    f"Error: {feedback}\n\n"
+                    "Reflect on this and produce a corrected step."
+                )})
+                retries_used += 1
+                continue
+
+            slot, duration, description = result
+            return slot, duration, description, llm_records, retries_used
 
     async def _agenerate_next_step(
         self,
@@ -4015,8 +4208,19 @@ class ReActAgent(ToolAgent):
         cache_blackboard: list[BlackboardSlot],
         expected_step: int,
         delta: list[dict[str, str]],
-    ) -> tuple[BlackboardSlot, int, str, LLMRecord]:
-        """Async mirror of ``_generate_next_step``: uses ``async_invoke`` for the LLM call."""
+        retries_used: int,
+        max_duration: int,
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> tuple[BlackboardSlot, int, str, list[LLMRecord], int]:
+        """
+        Async mirror of ``_generate_next_step``: uses ``async_invoke`` for each LLM call.
+
+        Full async loop — not delegated to ``asyncio.to_thread``. Retry logic,
+        feedback injection, LLMRecord accumulation, and return type are identical
+        to the sync version. The only difference is the LLM call:
+        ``await self._llm_engine.async_invoke(...)``.
+        """
         if not messages:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: messages must be non-empty."
@@ -4033,17 +4237,69 @@ class ReActAgent(ToolAgent):
                 f"got {expected_step!r}."
             )
 
-        max_duration = max(0, self._tool_calls_limit - expected_step)
-        engine_result = await self._llm_engine.async_invoke(
-            {"messages": [dict(m) for m in messages]}
-        )
-        return self._process_next_step_output(
-            engine_result=engine_result,
-            delta=delta,
-            expected_step=expected_step,
-            cache_blackboard=cache_blackboard,
-            max_duration=max_duration,
-        )
+        working_messages: list[dict[str, str]] = list(messages)
+        llm_records: list[LLMRecord] = []
+
+        while True:
+            engine_result = await self._llm_engine.async_invoke(
+                {"messages": [dict(m) for m in working_messages]}
+            )
+            raw_output: str = engine_result.result
+
+            record_messages = delta if not llm_records else list(working_messages[-2:])
+            llm_records.append(LLMRecord(
+                messages=record_messages,
+                llm_result=engine_result,
+                system_prompt_name=self._tool_prompt_key,
+            ))
+
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                feedback = (
+                    f"Your output could not be parsed as valid JSON.\n\n"
+                    f"Decoder error: {exc}\n\n"
+                    f"The response you produced was:\n\n{raw_output}\n\n"
+                    "Produce a correctly formatted JSON object."
+                )
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
+                    )
+                working_messages.append({"role": "assistant", "content": raw_output})
+                working_messages.append({"role": "user", "content": feedback})
+                retries_used += 1
+                continue
+
+            result = self._process_next_step_output(
+                parsed=parsed,
+                expected_step=expected_step,
+                cache_blackboard=cache_blackboard,
+                max_duration=max_duration,
+                valid_cache_indices=valid_cache_indices,
+                failed_cache_indices=failed_cache_indices,
+            )
+            if isinstance(result, str):
+                feedback = result
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
+                    )
+                step_repr = json.dumps(parsed, indent=2)
+                working_messages.append({"role": "assistant", "content": step_repr})
+                working_messages.append({"role": "user", "content": (
+                    f"The step you produced contains an error:\n\n"
+                    f"{step_repr}\n\n"
+                    f"Error: {feedback}\n\n"
+                    "Reflect on this and produce a corrected step."
+                )})
+                retries_used += 1
+                continue
+
+            slot, duration, description = result
+            return slot, duration, description, llm_records, retries_used
 
     def _prepare_next_batch(self, state: ReActRunState) -> ReActRunState:
         """
@@ -4068,11 +4324,6 @@ class ReActAgent(ToolAgent):
         The temporary running-plan messages do not persist between turns; state.messages
         remains the static base message list for this invoke.
         """
-        if not isinstance(state, ReActRunState):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: _prepare_next_batch requires a ReActRunState."
-            )
-
         if state.prepared_steps:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
@@ -4080,16 +4331,25 @@ class ReActAgent(ToolAgent):
 
         prefix_len = state.next_step_index
         self._validate_react_prepare_state(state)
-        working_messages, delta = self._build_react_messages(state, prefix_len)
+        max_duration = max(0, self._tool_calls_limit - prefix_len)
+        working_messages, delta = self._build_react_messages(state, prefix_len, max_duration=max_duration)
 
-        generated_slot, observe_duration, description, llm_record = self._generate_next_step(
-            messages=working_messages,
-            cache_blackboard=state.cache_blackboard,
-            expected_step=prefix_len,
-            delta=delta,
+        generated_slot, observe_duration, description, llm_records, new_retries_used = (
+            self._generate_next_step(
+                messages=working_messages,
+                cache_blackboard=state.cache_blackboard,
+                expected_step=prefix_len,
+                delta=delta,
+                retries_used=state.retries_used,
+                max_duration=max_duration,
+                valid_cache_indices=state.valid_cache_indices,
+                failed_cache_indices=state.failed_cache_indices,
+            )
         )
+        state.retries_used = new_retries_used
         return self._apply_react_step_result(
-            state, prefix_len, generated_slot, observe_duration, description, llm_record
+            state, prefix_len, generated_slot, observe_duration, description, llm_records,
+            max_duration=max_duration,
         )
 
     async def _aprepare_next_batch(self, state: ReActRunState) -> ReActRunState:
@@ -4097,11 +4357,6 @@ class ReActAgent(ToolAgent):
         Async override: uses ``_agenerate_next_step`` so the per-step LLM call
         goes through ``async_invoke`` rather than a worker thread.
         """
-        if not isinstance(state, ReActRunState):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: _aprepare_next_batch requires a ReActRunState."
-            )
-
         if state.prepared_steps:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
@@ -4109,14 +4364,23 @@ class ReActAgent(ToolAgent):
 
         prefix_len = state.next_step_index
         self._validate_react_prepare_state(state)
-        working_messages, delta = self._build_react_messages(state, prefix_len)
+        max_duration = max(0, self._tool_calls_limit - prefix_len)
+        working_messages, delta = self._build_react_messages(state, prefix_len, max_duration=max_duration)
 
-        generated_slot, observe_duration, description, llm_record = await self._agenerate_next_step(
-            messages=working_messages,
-            cache_blackboard=state.cache_blackboard,
-            expected_step=prefix_len,
-            delta=delta,
+        generated_slot, observe_duration, description, llm_records, new_retries_used = (
+            await self._agenerate_next_step(
+                messages=working_messages,
+                cache_blackboard=state.cache_blackboard,
+                expected_step=prefix_len,
+                delta=delta,
+                retries_used=state.retries_used,
+                max_duration=max_duration,
+                valid_cache_indices=state.valid_cache_indices,
+                failed_cache_indices=state.failed_cache_indices,
+            )
         )
+        state.retries_used = new_retries_used
         return self._apply_react_step_result(
-            state, prefix_len, generated_slot, observe_duration, description, llm_record
+            state, prefix_len, generated_slot, observe_duration, description, llm_records,
+            max_duration=max_duration,
         )

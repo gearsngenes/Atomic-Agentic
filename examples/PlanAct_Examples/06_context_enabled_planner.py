@@ -24,6 +24,7 @@ my_planner = PlanActAgent(
     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
     context_enabled=True,
     peek_at_cache=True,
+    generation_retries=3,
 )
 
 my_planner.batch_register(MATH_TOOLS)
