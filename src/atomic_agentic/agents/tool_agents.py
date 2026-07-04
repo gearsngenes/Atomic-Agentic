@@ -3036,7 +3036,7 @@ class PlanActAgent(ToolAgent):
                 if retries_used >= self._generation_retries:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
+                        f"after {retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
                     )
                 working_messages.append({"role": "assistant", "content": raw_output})
                 working_messages.append({"role": "user", "content": feedback})
@@ -3452,6 +3452,7 @@ class ReActAgent(ToolAgent):
         context_enabled: bool = False,
         tool_calls_limit: int = 25,
         fail_fast: bool = True,
+        generation_retries: int = 0,
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
         blackboard_preview_limit: Optional[int] = None,
@@ -3470,6 +3471,7 @@ class ReActAgent(ToolAgent):
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
             fail_fast=fail_fast,
+            generation_retries=generation_retries,
             peek_at_cache=peek_at_cache,
             response_preview_limit=response_preview_limit,
             blackboard_preview_limit=blackboard_preview_limit,
@@ -3609,56 +3611,53 @@ class ReActAgent(ToolAgent):
     def _process_next_step_output(
         self,
         *,
-        engine_result: Any,
-        delta: list[dict[str, str]],
+        parsed: Any,
         expected_step: int,
         cache_blackboard: list[BlackboardSlot],
         max_duration: int,
-    ) -> tuple[BlackboardSlot, int, str, LLMRecord]:
+    ) -> tuple[BlackboardSlot, int, str] | str:
         """
-        Parse and validate one ReAct step from raw LLM output.
+        Validate one parsed ReAct step and return the slot, duration, and description.
 
-        Constructs the LLMRecord, parses the JSON payload, and applies the full
-        validation pipeline extracted from ``_generate_next_step``.
+        Receives the already-extracted ``parsed`` value. LLMRecord construction has
+        moved to ``_generate_next_step``. All LLM-facing validation failures return
+        a plain feedback string (no class/name prefix); engine-contract violations
+        raise ``ToolAgentError``.
+
+        Steps
+        -----
+        1. Reject non-Mapping parsed values.
+        2. Build ``raw_payload``; check for unsupported keys.
+        3. Require ``DURATION_FIELD`` and ``DESCRIPTION_FIELD`` present.
+        4. Delegate to ``_validate_tool_step_dict``; propagate string feedback.
+        5. Extract and range-validate ``duration``.
+        6. Extract, type-check, strip, and non-empty-check ``description``.
+        7. Convert to ``BlackboardSlot`` via ``_tool_step_dict_to_slot``.
+        8. Verify tool is registered; unknown tool → feedback string.
+        9. Require return-tool duration == 0.
+        10. Validate cache refs (range and FAILED).
+        11. Validate step dependencies are prior-only.
+        12. Return ``(slot, duration, description)``.
         """
-        llm_record = LLMRecord(
-            messages=delta,
-            llm_result=engine_result,
-            system_prompt_name=self._tool_prompt_key,
-        )
-        # Pass 2: replace this guard with retry logic when ReAct gains generation_retries.
-        try:
-            parsed = self._extract_from_json_string(engine_result.result)
-        except json.JSONDecodeError as exc:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: failed to parse next step output as JSON: {exc}"
-            ) from exc
-
+        # 1. Structural check — LLM must return a JSON object, not an array or scalar.
         if not isinstance(parsed, Mapping):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step output must be a JSON object; "
-                f"got {type(parsed).__name__!r}."
-            )
+            return f"next step output must be a JSON object; got {type(parsed).__name__!r}."
 
         raw_payload = dict(parsed)
 
+        # 2. Field-set checks.
         extra = set(raw_payload) - REACT_FIELDS
         if extra:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step contains unsupported keys: "
-                f"{sorted(extra)!r}."
-            )
+            return f"next step contains unsupported keys: {sorted(extra)!r}."
 
+        # 3. Presence checks for ReAct-specific required fields.
         if DURATION_FIELD not in raw_payload:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step missing required key {DURATION_FIELD!r}."
-            )
+            return f"next step missing required key {DURATION_FIELD!r}."
 
         if DESCRIPTION_FIELD not in raw_payload:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step missing required key {DESCRIPTION_FIELD!r}."
-            )
+            return f"next step missing required key {DESCRIPTION_FIELD!r}."
 
+        # 4. Core step-dict validation (tool name, args shape, await_step, etc.).
         step_payload = self._validate_tool_step_dict(
             raw_payload,
             expected_step=expected_step,
@@ -3666,32 +3665,27 @@ class ReActAgent(ToolAgent):
             required_fields=REQUIRED_REACT_FIELDS,
             context="next step",
         )
-        # Pass 2: replace this guard with retry logic when ReAct gains generation_retries.
         if isinstance(step_payload, str):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: {step_payload}"
-            )
+            return step_payload
 
+        # 5. Duration extraction and range check.
         duration = step_payload.pop(DURATION_FIELD)
         if type(duration) is not int or duration < 0 or duration > max_duration:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step {DURATION_FIELD!r} must be an int in "
+            return (
+                f"next step {DURATION_FIELD!r} must be an int in "
                 f"[0, {max_duration}] for expected_step={expected_step}; got {duration!r}."
             )
 
+        # 6. Description extraction, type check, and normalisation.
         description = step_payload.pop(DESCRIPTION_FIELD)
         if type(description) is not str:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step {DESCRIPTION_FIELD!r} must be a string; "
-                f"got {type(description).__name__!r}."
-            )
+            return f"next step {DESCRIPTION_FIELD!r} must be a string; got {type(description).__name__!r}."
 
         description = description.strip()
         if not description:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step {DESCRIPTION_FIELD!r} cannot be empty."
-            )
+            return f"next step {DESCRIPTION_FIELD!r} cannot be empty."
 
+        # 7. Convert to BlackboardSlot — engine contract; let ToolAgentError propagate.
         slot = self._tool_step_dict_to_slot(
             step_payload,
             step=expected_step,
@@ -3699,20 +3693,21 @@ class ReActAgent(ToolAgent):
             context="next step",
         )
 
-        self.get_tool(slot.tool)
+        # 8. Verify tool is registered.
+        if self._toolbox.get(slot.tool) is None:
+            return f"next step references unknown tool {slot.tool!r}."
 
+        # 9. Return-tool must use duration 0.
         if slot.tool == RETURN_TOOL_FULL_NAME and duration != 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return tool must use {DURATION_FIELD!r} 0; "
-                f"got {duration!r}."
-            )
+            return f"return tool must use {DURATION_FIELD!r} 0; got {duration!r}."
 
+        # 10. Cache reference validation.
         cache_len = len(cache_blackboard)
         cache_refs = extract_dependencies(slot.args, placeholder_pattern=self.CACHE_REF_PATTERN)
         bad_cache = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
         if bad_cache:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step references out-of-range cache indices "
+            return (
+                f"next step references out-of-range cache indices "
                 f"{sorted(set(bad_cache))!r} (cache length={cache_len})."
             )
         failed_cache = [
@@ -3720,22 +3715,23 @@ class ReActAgent(ToolAgent):
             if 0 <= idx < cache_len and cache_blackboard[idx].is_failed()
         ]
         if failed_cache:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step references FAILED cache "
-                f"slot(s) {sorted(set(failed_cache))!r}; those steps did not produce usable results."
+            return (
+                f"next step references FAILED cache slot(s) "
+                f"{sorted(set(failed_cache))!r}; those steps did not produce usable results."
             )
 
+        # 11. Step dependency validation.
         bad_step_deps = [
             dep for dep in slot.step_dependencies
             if dep < 0 or dep >= expected_step
         ]
         if bad_step_deps:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: next step has illegal deps "
+            return (
+                f"next step has illegal deps "
                 f"{sorted(set(bad_step_deps))!r}; deps must be < {expected_step}."
             )
 
-        return slot, duration, description, llm_record
+        return slot, duration, description
 
     def _apply_react_step_result(
         self,
@@ -3744,7 +3740,7 @@ class ReActAgent(ToolAgent):
         generated_slot: BlackboardSlot,
         observe_duration: int,
         description: str,
-        llm_record: LLMRecord,
+        llm_records: list[LLMRecord],
     ) -> ReActRunState:
         """
         Apply one validated ReAct step generation result to the run state.
@@ -3765,11 +3761,11 @@ class ReActAgent(ToolAgent):
         if not isinstance(generated_slot, BlackboardSlot):
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: _generate_next_step must return "
-                f"(BlackboardSlot, observe_duration, description, LLMRecord); got first "
+                f"(BlackboardSlot, observe_duration, description, list[LLMRecord], int); got first "
                 f"item {type(generated_slot).__name__!r}."
             )
 
-        state.llm_records.append(llm_record)
+        state.llm_records.extend(llm_records)
 
         if type(observe_duration) is not int or observe_duration < 0 or observe_duration > max_duration:
             raise ToolAgentError(
@@ -3929,72 +3925,61 @@ class ReActAgent(ToolAgent):
         cache_blackboard: list[BlackboardSlot],
         expected_step: int,
         delta: list[dict[str, str]],
-    ) -> tuple[BlackboardSlot, int, str, LLMRecord]:
+        retries_used: int,
+    ) -> tuple[BlackboardSlot, int, str, list[LLMRecord], int]:
         """
-        Generate and validate one ReAct tool step as a planned BlackboardSlot plus
-        observation duration and description.
+        Generate and validate one ReAct tool step, with a bounded retry loop.
 
-        This is the ReAct generation hook. It is intentionally single-shot and
-        fail-fast: no retry logic is performed here.
+        Mirrors ``_generate_plan`` in structure. LLMRecord construction lives here;
+        ``_process_next_step_output`` receives the already-extracted ``parsed`` value.
+        The retry loop catches ``json.JSONDecodeError`` (JSON path) and string returns
+        from ``_process_next_step_output`` (spec-validation path), injecting structured
+        feedback into the working message thread on each failed attempt.
 
-        Lifecycle
-        ---------
-        1. Generate raw LLM output from the provided messages, capturing the full
-           LLMResult and wrapping it (with the prompt that produced it) in an
-           LLMRecord for the run's accumulated LLM history.
-        2. Extract the largest JSON array/object from the generated text.
-        3. Validate that the extracted value is a mapping.
-        4. Extract and validate "duration" as an int within the remaining future
-           step-generation capacity.
-        5. Extract and validate "description" as a non-empty string.
-        6. Normalize the remaining raw step dict using expected_step as authoritative.
-        7. Convert the normalized mapping into a planned BlackboardSlot.
-        8. Validate tool existence.
-        9. Validate return-tool duration is 0.
-        10. Validate cache references against cache_blackboard.
-        11. Validate step dependencies are prior-only.
-        12. Return the planned slot, duration, description, and LLMRecord.
+        ``retries_used`` carries the shared per-run budget consumed by prior step
+        generations. The returned int is the updated value; the caller writes it back
+        to ``state.retries_used``.
+
+        LLMRecord messages convention:
+        - First attempt: ``delta`` (task user + snapshot assistant + step-request user).
+        - Retry attempt N: ``working_messages[-2:]`` (failed-output assistant + feedback user).
+
+        Observable counters are NOT decremented here — only when a step commits in
+        ``_apply_react_step_result``.
+
+        Steps
+        -----
+        1. Contract guards: messages empty, cache_blackboard not a list,
+           expected_step not a non-negative int → raise ToolAgentError.
+        2. Compute ``max_duration``; copy ``messages`` to ``working_messages``.
+        3. Loop:
+           a. LLM call.
+           b. Construct LLMRecord (``delta`` on first attempt, ``working_messages[-2:]``
+              on retries); append to ``llm_records``.
+           c. JSON extraction — on ``json.JSONDecodeError``: check budget, inject
+              feedback, increment ``retries_used``, continue.
+           d. Spec validation via ``_process_next_step_output`` — on string return:
+              check budget, inject re-serialised step + feedback, increment, continue.
+           e. Success: return ``(slot, duration, description, llm_records, retries_used)``.
 
         Parameters
         ----------
         messages : list[dict[str, str]]
-            LLM-facing messages for this ReAct step.
-
+            Base LLM-facing messages. Copied locally; original unchanged.
         cache_blackboard : list[BlackboardSlot]
-            Snapshot of persisted blackboard entries available to this invoke.
-            Used for validating cache placeholder references.
-
+            Snapshot of persisted prior results for cache-ref validation.
         expected_step : int
-            Authoritative plan-local step index for the generated slot. The raw
-            LLM-produced "step" value is optional/advisory and is overwritten.
-
+            Authoritative plan-local step index.
         delta : list[dict[str, str]]
-            The messages that are new for this specific step call, pre-computed
-            by the caller. Used to construct the LLMRecord for this generation.
-            Typically three messages: the original user task, the running-plan
-            snapshot (assistant), and the step-request stub (user).
+            Pre-computed new messages for the first attempt's LLMRecord.
+        retries_used : int
+            Shared budget counter on entry (retries consumed by prior steps).
 
         Returns
         -------
-        tuple[BlackboardSlot, int, str, LLMRecord]
-            Planned single-step slot, observation duration, step description, and
-            the LLMRecord capturing the single generation that produced them.
-            The slot is not inserted into the running blackboard and placeholders
-            are not resolved here. The duration controls how many future successful
-            step-generation turns may render this step's raw result as observable_result.
-
-        Raises
-        ------
-        ToolAgentError
-            If generation output cannot be parsed, converted, or validated.
-
-
-        ReAct raw step schema:
-        - allowed: REACT_FIELDS
-        - required: REQUIRED_REACT_FIELDS
-
-        ``step`` is allowed but advisory. Runtime normalizes it to
-        ``expected_step``.
+        tuple[BlackboardSlot, int, str, list[LLMRecord], int]
+            Validated slot, duration, description, all LLMRecords for this call
+            (one per attempt), and the updated ``retries_used``.
         """
         if not messages:
             raise ToolAgentError(
@@ -4013,14 +3998,68 @@ class ReActAgent(ToolAgent):
             )
 
         max_duration = max(0, self._tool_calls_limit - expected_step)
-        engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in messages]})
-        return self._process_next_step_output(
-            engine_result=engine_result,
-            delta=delta,
-            expected_step=expected_step,
-            cache_blackboard=cache_blackboard,
-            max_duration=max_duration,
-        )
+        working_messages: list[dict[str, str]] = list(messages)
+        llm_records: list[LLMRecord] = []
+
+        while True:
+            engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in working_messages]})
+            raw_output: str = engine_result.result
+
+            # First attempt uses the pre-computed delta; retries use the two injected feedback messages.
+            record_messages = delta if not llm_records else list(working_messages[-2:])
+            llm_records.append(LLMRecord(
+                messages=record_messages,
+                llm_result=engine_result,
+                system_prompt_name=self._tool_prompt_key,
+            ))
+
+            # JSON extraction
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                feedback = (
+                    f"Your output could not be parsed as valid JSON.\n\n"
+                    f"Decoder error: {exc}\n\n"
+                    f"The response you produced was:\n\n{raw_output}\n\n"
+                    "Produce a correctly formatted JSON object."
+                )
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
+                    )
+                working_messages.append({"role": "assistant", "content": raw_output})
+                working_messages.append({"role": "user", "content": feedback})
+                retries_used += 1
+                continue
+
+            # Spec validation
+            result = self._process_next_step_output(
+                parsed=parsed,
+                expected_step=expected_step,
+                cache_blackboard=cache_blackboard,
+                max_duration=max_duration,
+            )
+            if isinstance(result, str):
+                feedback = result
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
+                    )
+                step_repr = json.dumps(parsed, indent=2)
+                working_messages.append({"role": "assistant", "content": step_repr})
+                working_messages.append({"role": "user", "content": (
+                    f"The step you produced contains an error:\n\n"
+                    f"{step_repr}\n\n"
+                    f"Error: {feedback}\n\n"
+                    "Reflect on this and produce a corrected step."
+                )})
+                retries_used += 1
+                continue
+
+            slot, duration, description = result
+            return slot, duration, description, llm_records, retries_used
 
     async def _agenerate_next_step(
         self,
@@ -4029,8 +4068,16 @@ class ReActAgent(ToolAgent):
         cache_blackboard: list[BlackboardSlot],
         expected_step: int,
         delta: list[dict[str, str]],
-    ) -> tuple[BlackboardSlot, int, str, LLMRecord]:
-        """Async mirror of ``_generate_next_step``: uses ``async_invoke`` for the LLM call."""
+        retries_used: int,
+    ) -> tuple[BlackboardSlot, int, str, list[LLMRecord], int]:
+        """
+        Async mirror of ``_generate_next_step``: uses ``async_invoke`` for each LLM call.
+
+        Full async loop — not delegated to ``asyncio.to_thread``. Retry logic,
+        feedback injection, LLMRecord accumulation, and return type are identical
+        to the sync version. The only difference is the LLM call:
+        ``await self._llm_engine.async_invoke(...)``.
+        """
         if not messages:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: messages must be non-empty."
@@ -4048,16 +4095,67 @@ class ReActAgent(ToolAgent):
             )
 
         max_duration = max(0, self._tool_calls_limit - expected_step)
-        engine_result = await self._llm_engine.async_invoke(
-            {"messages": [dict(m) for m in messages]}
-        )
-        return self._process_next_step_output(
-            engine_result=engine_result,
-            delta=delta,
-            expected_step=expected_step,
-            cache_blackboard=cache_blackboard,
-            max_duration=max_duration,
-        )
+        working_messages: list[dict[str, str]] = list(messages)
+        llm_records: list[LLMRecord] = []
+
+        while True:
+            engine_result = await self._llm_engine.async_invoke(
+                {"messages": [dict(m) for m in working_messages]}
+            )
+            raw_output: str = engine_result.result
+
+            record_messages = delta if not llm_records else list(working_messages[-2:])
+            llm_records.append(LLMRecord(
+                messages=record_messages,
+                llm_result=engine_result,
+                system_prompt_name=self._tool_prompt_key,
+            ))
+
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                feedback = (
+                    f"Your output could not be parsed as valid JSON.\n\n"
+                    f"Decoder error: {exc}\n\n"
+                    f"The response you produced was:\n\n{raw_output}\n\n"
+                    "Produce a correctly formatted JSON object."
+                )
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
+                    )
+                working_messages.append({"role": "assistant", "content": raw_output})
+                working_messages.append({"role": "user", "content": feedback})
+                retries_used += 1
+                continue
+
+            result = self._process_next_step_output(
+                parsed=parsed,
+                expected_step=expected_step,
+                cache_blackboard=cache_blackboard,
+                max_duration=max_duration,
+            )
+            if isinstance(result, str):
+                feedback = result
+                if retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
+                    )
+                step_repr = json.dumps(parsed, indent=2)
+                working_messages.append({"role": "assistant", "content": step_repr})
+                working_messages.append({"role": "user", "content": (
+                    f"The step you produced contains an error:\n\n"
+                    f"{step_repr}\n\n"
+                    f"Error: {feedback}\n\n"
+                    "Reflect on this and produce a corrected step."
+                )})
+                retries_used += 1
+                continue
+
+            slot, duration, description = result
+            return slot, duration, description, llm_records, retries_used
 
     def _prepare_next_batch(self, state: ReActRunState) -> ReActRunState:
         """
@@ -4096,14 +4194,18 @@ class ReActAgent(ToolAgent):
         self._validate_react_prepare_state(state)
         working_messages, delta = self._build_react_messages(state, prefix_len)
 
-        generated_slot, observe_duration, description, llm_record = self._generate_next_step(
-            messages=working_messages,
-            cache_blackboard=state.cache_blackboard,
-            expected_step=prefix_len,
-            delta=delta,
+        generated_slot, observe_duration, description, llm_records, new_retries_used = (
+            self._generate_next_step(
+                messages=working_messages,
+                cache_blackboard=state.cache_blackboard,
+                expected_step=prefix_len,
+                delta=delta,
+                retries_used=state.retries_used,
+            )
         )
+        state.retries_used = new_retries_used
         return self._apply_react_step_result(
-            state, prefix_len, generated_slot, observe_duration, description, llm_record
+            state, prefix_len, generated_slot, observe_duration, description, llm_records
         )
 
     async def _aprepare_next_batch(self, state: ReActRunState) -> ReActRunState:
@@ -4125,12 +4227,16 @@ class ReActAgent(ToolAgent):
         self._validate_react_prepare_state(state)
         working_messages, delta = self._build_react_messages(state, prefix_len)
 
-        generated_slot, observe_duration, description, llm_record = await self._agenerate_next_step(
-            messages=working_messages,
-            cache_blackboard=state.cache_blackboard,
-            expected_step=prefix_len,
-            delta=delta,
+        generated_slot, observe_duration, description, llm_records, new_retries_used = (
+            await self._agenerate_next_step(
+                messages=working_messages,
+                cache_blackboard=state.cache_blackboard,
+                expected_step=prefix_len,
+                delta=delta,
+                retries_used=state.retries_used,
+            )
         )
+        state.retries_used = new_retries_used
         return self._apply_react_step_result(
-            state, prefix_len, generated_slot, observe_duration, description, llm_record
+            state, prefix_len, generated_slot, observe_duration, description, llm_records
         )

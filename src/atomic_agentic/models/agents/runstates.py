@@ -193,6 +193,11 @@ class ReActRunState(ToolAgentRunState):
         Both fields are written by ``_prepare_next_batch`` /
         ``_aprepare_next_batch`` at the index of the slot being prepared.
 
+    retries_used : int
+        Cumulative retry attempts consumed across all step generations in this
+        run. Incremented by ``_generate_next_step`` on each failed attempt;
+        checked against ``self._generation_retries`` before permitting a retry.
+
     Workflow
     ~~~~~~~~
     Iteration k:
@@ -218,3 +223,4 @@ class ReActRunState(ToolAgentRunState):
     """
     next_step_index: int = 0
     step_meta: list[ReActStepMeta] = field(default_factory=list)
+    retries_used: int = 0

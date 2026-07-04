@@ -170,6 +170,7 @@ def make_react_agent(
     post_invoke: Any = None,
     post_result_key: str | None = None,
     fail_fast: bool = True,
+    generation_retries: int = 0,
 ) -> ReActAgent:
     agent = ReActAgent(
         name="tests",
@@ -184,6 +185,7 @@ def make_react_agent(
         post_invoke=post_invoke,
         post_result_key=post_result_key,
         fail_fast=fail_fast,
+        generation_retries=generation_retries,
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
@@ -3735,3 +3737,199 @@ class TestToolAgentToDictFastFail:
     def test_to_dict_generation_retries_reflects_construction_value(self) -> None:
         agent = ScriptedToolAgent(generation_retries=2)
         assert agent.to_dict()["generation_retries"] == 2
+
+
+# ── TestReActGenerationRetry ──────────────────────────────────────────────────
+
+class TestReActGenerationRetry:
+    """Retry loop in _generate_next_step/_agenerate_next_step: shared budget, feedback, LLMRecord accumulation."""
+
+    INVALID_JSON = "this is not json at all"
+
+    # A structurally invalid step: references a tool that doesn't exist.
+    INVALID_STEP_WRONG_TOOL = react_step_json(
+        step=0, tool="Tool.tests.nonexistent", args={}, duration=0
+    )
+
+    VALID_STEP_0 = react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=1)
+    VALID_RETURN = react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0)
+    VALID_RETURN_LITERAL = react_step_json(step=0, tool=return_tool.full_name, args={"val": 42}, duration=0)
+
+    def test_zero_retries_raises_on_first_bad_json(self) -> None:
+        """generation_retries=0 (default): bad JSON raises immediately."""
+        agent = make_react_agent([self.INVALID_JSON])
+        with pytest.raises(ToolAgentError):
+            agent.invoke({"prompt": "run"})
+
+    def test_zero_retries_emits_one_llm_call_before_raise(self) -> None:
+        """generation_retries=0: exactly one LLM call is made before raising."""
+        engine = ScriptedLLMEngine([self.INVALID_JSON])
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=0,
+        )
+        with pytest.raises(ToolAgentError):
+            agent.invoke({"prompt": "run"})
+        assert len(engine.calls) == 1
+
+    def test_json_error_retry_succeeds_on_second_call(self) -> None:
+        """generation_retries=1: bad JSON on first call, valid step on second; run completes."""
+        agent = make_react_agent(
+            [self.INVALID_JSON, self.VALID_RETURN_LITERAL],
+            generation_retries=1,
+        )
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 42
+
+    def test_json_error_retry_stores_two_llm_records(self) -> None:
+        """Two attempts on a single step produce two LLMRecords."""
+        engine = ScriptedLLMEngine([self.INVALID_JSON, self.VALID_RETURN_LITERAL])
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+        )
+        agent.invoke({"prompt": "run"})
+        assert len(agent.records[-1].llm_records) == 2
+
+    def test_spec_error_retry_succeeds_on_second_call(self) -> None:
+        """generation_retries=1: unknown tool on first step attempt; valid step on second."""
+        agent = make_react_agent(
+            [self.INVALID_STEP_WRONG_TOOL, self.VALID_RETURN_LITERAL],
+            generation_retries=1,
+        )
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 42
+
+    def test_spec_error_retry_stores_two_llm_records(self) -> None:
+        """Spec-validation failure + successful retry = two LLMRecords for that step."""
+        engine = ScriptedLLMEngine([self.INVALID_STEP_WRONG_TOOL, self.VALID_RETURN_LITERAL])
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+        )
+        register_math_tools(agent)  # type: ignore[arg-type]
+        agent.invoke({"prompt": "run"})
+        assert len(agent.records[-1].llm_records) == 2
+
+    def test_budget_exhausted_raises_after_all_attempts(self) -> None:
+        """generation_retries=1: both attempts return invalid JSON → ToolAgentError."""
+        agent = make_react_agent(
+            [self.INVALID_JSON, self.INVALID_JSON],
+            generation_retries=1,
+        )
+        with pytest.raises(ToolAgentError):
+            agent.invoke({"prompt": "run"})
+
+    def test_budget_exhausted_records_all_llm_calls(self) -> None:
+        """All attempts (including the failing ones) are recorded as LLM calls."""
+        engine = ScriptedLLMEngine([self.INVALID_JSON, self.INVALID_JSON])
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+        )
+        with pytest.raises(ToolAgentError):
+            agent.invoke({"prompt": "run"})
+        assert len(engine.calls) == 2
+
+    def test_json_feedback_appended_to_working_messages(self) -> None:
+        """On JSON-decode failure the retry call receives more messages than the first call."""
+        engine = ScriptedLLMEngine([self.INVALID_JSON, self.VALID_RETURN_LITERAL])
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+        )
+        agent.invoke({"prompt": "run"})
+        assert len(engine.calls[1]) > len(engine.calls[0])
+        last_msg = engine.calls[1][-1]
+        assert last_msg["role"] == "user"
+        assert "could not be parsed" in last_msg["content"]
+
+    def test_spec_feedback_contains_reserialised_step_not_raw_string(self) -> None:
+        """On spec-validation failure the retry user message contains the re-serialised step."""
+        engine = ScriptedLLMEngine([self.INVALID_STEP_WRONG_TOOL, self.VALID_RETURN_LITERAL])
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+        )
+        register_math_tools(agent)  # type: ignore[arg-type]
+        agent.invoke({"prompt": "run"})
+        last_msg = engine.calls[1][-1]
+        assert last_msg["role"] == "user"
+        assert "unknown tool" in last_msg["content"]
+
+    def test_shared_budget_across_steps(self) -> None:
+        """Retries consumed by step 0 reduce availability for step 1."""
+        # generation_retries=1: step 0 uses the 1 retry (bad JSON → valid step).
+        # Step 1 (return) immediately gets bad JSON; no retries left → ToolAgentError.
+        agent = make_react_agent(
+            [self.INVALID_JSON, self.VALID_STEP_0, self.INVALID_JSON],
+            generation_retries=1,
+            tool_calls_limit=3,
+        )
+        with pytest.raises(ToolAgentError, match="budget exhausted"):
+            agent.invoke({"prompt": "run"})
+
+    def test_llm_records_accumulate_all_attempts(self) -> None:
+        """Total LLMRecords equals the sum of all attempt counts across all steps."""
+        # step 0: 2 attempts (1 retry); return step: 1 attempt. Total = 3.
+        engine = ScriptedLLMEngine([
+            self.INVALID_JSON,       # step 0 attempt 1 — bad JSON
+            self.VALID_STEP_0,       # step 0 attempt 2 — succeeds
+            self.VALID_RETURN,       # return step — succeeds first try
+        ])
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+            tool_calls_limit=3,
+        )
+        register_math_tools(agent)  # type: ignore[arg-type]
+        agent.invoke({"prompt": "run"})
+        assert len(agent.records[-1].llm_records) == 3
+
+    def test_observable_counters_stable_during_retries(self) -> None:
+        """Observable counters on prior steps do not decrement during a retry attempt."""
+        # step 0: valid, duration=2 (observable for 2 future successful generations).
+        # return step: 1 failed attempt (bad JSON) before succeeding.
+        # observable for step 0 must still be 2 after the failed retry, and 1 after the success.
+        engine = ScriptedLLMEngine([
+            self.VALID_STEP_0,           # step 0: observable=1 (duration=1)
+            self.INVALID_JSON,           # return step attempt 1: fails → no counter decrement
+            self.VALID_RETURN,           # return step attempt 2: succeeds → decrements
+        ])
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+            tool_calls_limit=3,
+        )
+        register_math_tools(agent)  # type: ignore[arg-type]
+        agent.invoke({"prompt": "run"})
+        # After the run: step 0 had observable=1, which was decremented exactly once
+        # (by the successful return-step generation). It should now be 0.
+        record = agent.records[-1]
+        # The run completed; step 0's observable was decremented once (by the successful commit),
+        # not twice (which would happen if the failed retry also decremented it).
+        assert len(record.llm_records) == 3  # 1 (step0) + 1 (failed return) + 1 (success return)
