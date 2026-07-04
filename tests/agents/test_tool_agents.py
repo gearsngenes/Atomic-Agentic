@@ -327,7 +327,7 @@ class ScriptedToolAgent(ToolAgent):
 
         return ScriptedRunState(
             messages=[dict(message) for message in messages],
-            cache_blackboard=list(self._blackboard),
+            cache_blackboard=[slot.copy() for slot in self._blackboard],
             running_blackboard=running_blackboard,
             executed_steps=set(),
             prepared_steps=[],
@@ -1610,7 +1610,7 @@ class TestAsyncExecutePreparedBatch:
         slot = prepared_slot(0, keys["add"], {"x": 1})
         state = make_state(running=[slot], prepared_steps=[0])
 
-        with pytest.raises(ToolAgentError, match="tool call failed at index 0"):
+        with pytest.raises(ToolAgentError, match="tool call failed at step 0"):
             asyncio.run(agent._async_execute_prepared_batch(state))
 
         assert isinstance(state.running_blackboard[0].error, ToolAgentError)
@@ -2066,7 +2066,7 @@ class TestToolAgentRecordRendering:
         assert [message["role"] for message in rendered] == ["user", "assistant"]
         assert rendered[0]["content"] == "run"
         assert rendered[1]["content"].startswith("RESPONSE:")
-        assert "CACHED STEPS #0-1 PRODUCED" in rendered[1]["content"]
+        assert "CACHED STEPS [0, 1] PRODUCED" in rendered[1]["content"]
         assert "'run_id'" in rendered[1]["content"]
 
     def test_render_turn_uses_blackboard_span_only_for_that_turn(self) -> None:
@@ -2092,8 +2092,8 @@ class TestToolAgentRecordRendering:
         first_rendered = agent.render_turn(agent.records[0])[1]["content"]
         second_rendered = agent.render_turn(agent.records[1])[1]["content"]
 
-        assert "CACHED STEPS #0-1 PRODUCED" in first_rendered
-        assert "CACHED STEPS #2-3 PRODUCED" in second_rendered
+        assert "CACHED STEPS [0, 1] PRODUCED" in first_rendered
+        assert "CACHED STEPS [2, 3] PRODUCED" in second_rendered
         assert "Tool.tests.add" in first_rendered
         assert "Tool.tests.multiply" not in first_rendered
         assert "Tool.tests.multiply" in second_rendered
@@ -3978,11 +3978,34 @@ class TestExecutePreparedBatchEarlyValidation:
         assert updated.running_blackboard[0].result.result == 7
 
 
+# ── TestAwaitFieldKeyInErrors ────────────────────────────────────────────────
+
+class TestAwaitFieldKeyInErrors:
+    """B-5: _validate_tool_step_dict uses the LLM-facing 'await' key, not internal 'await_step'."""
+
+    def test_invalid_await_type_error_uses_await_key(self) -> None:
+        """_validate_tool_step_dict error for bad 'await' value names 'await', not 'await_step'."""
+        agent = make_planact_agent([], context_enabled=False)
+        # _process_plan_output calls _validate_tool_step_dict; the await type error
+        # fires before tool-existence lookup so no tools need to be registered.
+        plan = [{"tool": return_tool.full_name, "args": {"val": None}, "await": "not_an_int"}]
+        result = agent._process_plan_output(
+            parsed=plan,
+            cache_blackboard=[],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
+        )
+        assert isinstance(result, str)
+        assert "'await'" in result
+        assert "'await_step'" not in result
+
+
 # ── TestMaxDurationSingleSource ──────────────────────────────────────────────
 
 class TestMaxDurationSingleSource:
-    """B3: max_duration is computed once in _prepare_next_batch and flows to both
-    _build_react_messages and _generate_next_step; neither method re-derives it."""
+    """B3/B-7: max_duration is computed once in _prepare_next_batch and flows to both
+    _build_react_messages, _generate_next_step, and _apply_react_step_result; none
+    re-derive it independently."""
 
     def test_max_duration_limits_step_at_budget_boundary(self) -> None:
         """A step with duration == remaining budget is accepted."""
@@ -4012,6 +4035,27 @@ class TestMaxDurationSingleSource:
         )
         result = agent.invoke({"prompt": "run"})
         assert result.result == 3
+
+    def test_apply_react_step_result_accepts_max_duration_param(self) -> None:
+        """_apply_react_step_result takes max_duration as a kwarg; no independent recomputation."""
+        import inspect
+        sig = inspect.signature(ReActAgent._apply_react_step_result)
+        params = sig.parameters
+        assert "max_duration" in params
+        assert params["max_duration"].kind == inspect.Parameter.KEYWORD_ONLY
+
+    def test_max_duration_flows_from_prepare_to_apply(self) -> None:
+        """observe_duration == max_duration at budget boundary is accepted end-to-end."""
+        agent = make_react_agent(
+            [
+                # prefix_len=0, tool_calls_limit=1 → max_duration = max(0, 1-0) = 1; duration=1 OK.
+                react_step_json(step=0, tool="Tool.tests.add", args={"x": 2, "y": 3}, duration=1),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
+            ],
+            tool_calls_limit=1,
+        )
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 5
 
 
 # ── TestCacheRefValidation ───────────────────────────────────────────────────

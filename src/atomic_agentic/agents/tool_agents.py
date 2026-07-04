@@ -1625,7 +1625,7 @@ class ToolAgent(Agent, ABC):
                     board[idx].status = BlackboardSlot.FAILED
                     raise raw_error
                 wrapped = ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed at index {idx} "
+                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
                     f"for {board[idx].tool!r}: {raw_error}"
                 )
                 board[idx].error = wrapped
@@ -1638,7 +1638,7 @@ class ToolAgent(Agent, ABC):
                         board[idx].error = raw_error
                     else:
                         board[idx].error = ToolAgentError(
-                            f"{type(self).__name__}.{self.name}: tool call failed at index {idx} "
+                            f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
                             f"for {board[idx].tool!r}: {raw_error}"
                         )
                     board[idx].status = BlackboardSlot.FAILED
@@ -1768,7 +1768,7 @@ class ToolAgent(Agent, ABC):
             return obj
 
         # 2) Append all non-empty running slots with rewritten placeholders and global indices.
-        #    FAILED slots are included so local_i always equals the append offset (B3 fix).
+        #    FAILED slots are included so local_i always equals the append offset.
         appended: list[BlackboardSlot] = []
         for local_i, slot in enumerate(running):
             if slot.is_empty():
@@ -1831,12 +1831,18 @@ class ToolAgent(Agent, ABC):
             if turn.blackboard_start is None or turn.blackboard_end is None:
                 continue
             for idx in range(turn.blackboard_start, turn.blackboard_end):
-                if idx < len(self.blackboard):
-                    slot = self.blackboard[idx]
-                    if slot.is_failed():
-                        failed.add(idx)
-                    elif slot.is_executed():
-                        valid.add(idx)
+                if idx >= len(self._blackboard):
+                    continue
+                slot = self._blackboard[idx]
+                if slot.is_failed():
+                    failed.add(idx)
+                elif slot.is_executed():
+                    valid.add(idx)
+                else:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: internal error: persisted blackboard "
+                        f"slot {idx} has unexpected status {slot.status!r}; expected EXECUTED or FAILED."
+                    )
         return frozenset(valid), frozenset(failed)
 
     # ------------------------------------------------------------------ #
@@ -2166,7 +2172,7 @@ class ToolAgent(Agent, ABC):
             dump = pprint.pformat(executed, indent=2, width=160, sort_dicts=False)
             assistant_content = (
                 f"RESPONSE:\n{assistant_response}\n\n"
-                f"CACHED STEPS #{start}-{end - 1} PRODUCED:\n\n{dump}"
+                f"CACHED STEPS {list(range(start, end))} PRODUCED:\n\n{dump}"
             )
         else:
             # Mixed path: two-section output.
@@ -2393,7 +2399,7 @@ class ToolAgent(Agent, ABC):
         if AWAIT_FIELD in normalized:
             await_step = normalized[AWAIT_FIELD]
             if type(await_step) is not int or await_step < 0:
-                return f"plan step {expected_step} 'await_step' must be an int >= 0."
+                return f"plan step {expected_step} 'await' must be an int >= 0."
 
             if tool == RETURN_TOOL_FULL_NAME:
                 return f"plan step {expected_step} is a return step and must not include 'await_step'."
@@ -2869,7 +2875,7 @@ class PlanActAgent(ToolAgent):
             )
         working_messages = [dict(m) for m in messages]
         cache_blackboard: list[BlackboardSlot] = (
-            [slot.copy() for slot in self.blackboard] if self.context_enabled else []
+            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
         )
         return working_messages, cache_blackboard
 
@@ -3865,6 +3871,8 @@ class ReActAgent(ToolAgent):
         observe_duration: int,
         description: str,
         llm_records: list[LLMRecord],
+        *,
+        max_duration: int,
     ) -> ReActRunState:
         """
         Apply one validated ReAct step generation result to the run state.
@@ -3874,14 +3882,15 @@ class ReActAgent(ToolAgent):
         the slot (``fail_fast=False`` only) or resolves placeholders and marks it
         prepared. Advances the cursor and writes ``step_meta``.
 
+        ``max_duration`` is pre-computed by ``_prepare_next_batch`` /
+        ``_aprepare_next_batch`` and passed in; this method does not recompute it.
+
         **Cascade path** (``fail_fast=False``): if any ``step_dependencies`` entry
         is FAILED in the running blackboard, the return tool raises immediately;
         non-return slots are marked FAILED and the method returns early with
         ``prepared_steps`` left empty — the ``_invoke`` loop will skip execution
         and continue to the next generation turn.
         """
-        max_duration = len(state.running_blackboard) - prefix_len - 1
-
         state.llm_records.extend(llm_records)
 
         if type(observe_duration) is not int or observe_duration < 0 or observe_duration > max_duration:
@@ -4020,7 +4029,7 @@ class ReActAgent(ToolAgent):
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
 
         cache_blackboard = (
-            [slot.copy() for slot in self.blackboard] if self.context_enabled else []
+            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
         )
 
         working_messages = [dict(m) for m in messages]
@@ -4339,7 +4348,8 @@ class ReActAgent(ToolAgent):
         )
         state.retries_used = new_retries_used
         return self._apply_react_step_result(
-            state, prefix_len, generated_slot, observe_duration, description, llm_records
+            state, prefix_len, generated_slot, observe_duration, description, llm_records,
+            max_duration=max_duration,
         )
 
     async def _aprepare_next_batch(self, state: ReActRunState) -> ReActRunState:
@@ -4371,5 +4381,6 @@ class ReActAgent(ToolAgent):
         )
         state.retries_used = new_retries_used
         return self._apply_react_step_result(
-            state, prefix_len, generated_slot, observe_duration, description, llm_records
+            state, prefix_len, generated_slot, observe_duration, description, llm_records,
+            max_duration=max_duration,
         )

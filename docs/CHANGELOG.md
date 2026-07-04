@@ -83,6 +83,29 @@ Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
   `"Last error: {feedback}"` (was `"Last error is a JSONDecodeError: {exc}"`).
 - `_tool_step_dict_to_slot` docstring corrected — it is a converter, not a field-set
   validator; upstream `_validate_tool_step_dict` owns field validation.
+- `_compute_cache_index_sets` accessed `self.blackboard` (the property, which returns
+  a full copy of `_blackboard`) twice per slot — once for the length guard, once to
+  read the slot. Both calls replaced with direct `self._blackboard` access. An
+  `ToolAgentError` is now raised for any slot with unexpected status (PLANNED/PREPARED/
+  EMPTY) in a persisted blackboard span — these are framework invariant violations that
+  were previously silently skipped.
+- `_setup_plan_init` (PlanActAgent) and `ReActAgent._initialize_run_state` both
+  constructed `cache_blackboard` as `[slot.copy() for slot in self.blackboard]`.
+  Because `self.blackboard` (the property) already returns copies, this produced
+  copies-of-copies. Replaced with `[slot.copy() for slot in self._blackboard]`.
+- `_apply_react_step_result` no longer independently recomputes `max_duration` — it
+  now receives it as a keyword-only parameter from `_prepare_next_batch` /
+  `_aprepare_next_batch`, which remain the single authoritative computation site.
+- `_validate_tool_step_dict` error message for an invalid `await` value type now names
+  the LLM-facing field `'await'` instead of the internal field name `'await_step'`.
+- `render_turn` all-executed header format standardized to `CACHED STEPS [N, ..., M]
+  PRODUCED:` to match the mixed-path (executed+failed) format (was `CACHED STEPS #N-M
+  PRODUCED:`).
+- `_async_execute_prepared_batch` error message wording unified with the sync path:
+  `"tool call failed at step {idx}"` (was `"at index {idx}"`).
+- `ScriptedToolAgent._initialize_run_state` (test harness): `cache_blackboard` now
+  built with `[slot.copy() for slot in self._blackboard]` instead of `list(self._blackboard)`,
+  preventing test code from holding shared references into agent-internal state.
 
 ### Removed
 
