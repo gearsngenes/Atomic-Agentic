@@ -78,6 +78,17 @@ class ToolAgentRunState:
         lazily during the loop (e.g. ReAct's per-step planning) — and appended to as
         further generations occur. Read exactly once, at loop-close, to populate the
         draft ``ToolAgentRecord``'s ``llm_records`` tuple.
+
+    **valid_cache_indices** : frozenset[int]
+        Cache-blackboard indices reachable in this conversation — entries that are
+        EXECUTED and belong to a record in the current ``turns`` chain. Computed once
+        in ``_invoke``/``_ainvoke`` from ``turns``; empty when ``context_enabled=False``.
+        Used by validation methods instead of re-deriving per call.
+
+    **failed_cache_indices** : frozenset[int]
+        Cache-blackboard indices that belong to this conversation but whose slots have
+        FAILED status. Disjoint with ``valid_cache_indices``. Referenced during
+        generation to produce targeted LLM feedback.
     """
     messages: list[dict[str, str]]
 
@@ -93,6 +104,10 @@ class ToolAgentRunState:
     # Bookkeeping:
     tool_calls_used: int = 0  # non-return calls executed in this run
     llm_records: list[LLMRecord] = field(default_factory=list)
+
+    # Conversation-scoped cache index sets; computed once in _invoke/_ainvoke.
+    valid_cache_indices: frozenset[int] = field(default_factory=frozenset)
+    failed_cache_indices: frozenset[int] = field(default_factory=frozenset)
 
     # Completion:
     is_done: bool = False

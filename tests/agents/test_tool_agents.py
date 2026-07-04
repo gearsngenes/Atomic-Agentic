@@ -316,6 +316,8 @@ class ScriptedToolAgent(ToolAgent):
         self,
         *,
         messages: list[dict[str, str]],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
     ) -> ScriptedRunState:
         total_steps = sum(len(batch) for batch in self.script)
         running_blackboard = [BlackboardSlot(step=index) for index in range(total_steps)]
@@ -333,6 +335,8 @@ class ScriptedToolAgent(ToolAgent):
             is_done=False,
             return_value=NO_VAL,
             llm_records=[llm_record],
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
             batches=[[dict(call) for call in batch] for batch in self.script],
             batch_index=0,
             next_step_index=0,
@@ -379,7 +383,13 @@ class ScriptedToolAgent(ToolAgent):
 
 
 class BadInitializeToolAgent(ScriptedToolAgent):
-    def _initialize_run_state(self, *, messages: list[dict[str, str]]) -> Any:
+    def _initialize_run_state(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> Any:
         return {"bad": "state"}
 
 
@@ -388,8 +398,14 @@ class PendingPreparedToolAgent(ScriptedToolAgent):
         self,
         *,
         messages: list[dict[str, str]],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
     ) -> ScriptedRunState:
-        state = super()._initialize_run_state(messages=messages)
+        state = super()._initialize_run_state(
+            messages=messages,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+        )
         state.prepared_steps = [0]
         return state
 
@@ -1320,16 +1336,6 @@ class TestExecutePreparedBatch:
         with pytest.raises(ToolAgentError, match="duplicates"):
             agent._execute_prepared_batch(state)
 
-    def test_non_int_prepared_step_raises(self) -> None:
-        agent = make_agent()
-        state = make_state(
-            running=[BlackboardSlot(step=0)],
-            prepared_steps=["0"],  # type: ignore[list-item]
-        )
-
-        with pytest.raises(ToolAgentError, match="must be int"):
-            agent._execute_prepared_batch(state)
-
     def test_out_of_range_prepared_step_raises(self) -> None:
         agent = make_agent()
         state = make_state(running=[], prepared_steps=[0])
@@ -1532,16 +1538,6 @@ class TestAsyncExecutePreparedBatch:
         )
 
         with pytest.raises(ToolAgentError, match="duplicates"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
-
-    def test_non_int_prepared_step_raises(self) -> None:
-        agent = make_agent()
-        state = make_state(
-            running=[BlackboardSlot(step=0)],
-            prepared_steps=["0"],  # type: ignore[list-item]
-        )
-
-        with pytest.raises(ToolAgentError, match="must be int"):
             asyncio.run(agent._async_execute_prepared_batch(state))
 
     def test_out_of_range_prepared_step_raises(self) -> None:
@@ -1782,12 +1778,6 @@ class TestScriptedInvokeLoop:
         agent.set_script([[]])
 
         with pytest.raises(ToolAgentError, match="empty batch"):
-            agent.invoke({"prompt": "run"})
-
-    def test_initialize_run_state_wrong_type_raises(self) -> None:
-        agent = BadInitializeToolAgent(script=[])
-
-        with pytest.raises(ToolAgentError, match="must return a ToolAgentRunState"):
             agent.invoke({"prompt": "run"})
 
     def test_pending_prepared_steps_before_prepare_raises(self) -> None:
@@ -2347,7 +2337,9 @@ class TestPlanActAgent:
         )
 
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "plan"}]
+            messages=[{"role": "user", "content": "plan"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
         )
 
         assert state.batches == [[0, 1], [2]]
@@ -2421,7 +2413,7 @@ class TestPlanActAgent:
             ]
         )
 
-        with pytest.raises(ToolAgentError, match="out-of-range cache"):
+        with pytest.raises(ToolAgentError, match="cache indices that do not exist"):
             agent.invoke({"prompt": "run plan"})
 
     def test_rejects_future_step_dependency(self) -> None:
@@ -2508,7 +2500,9 @@ class TestPlanActAgent:
         )
 
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "plan"}]
+            messages=[{"role": "user", "content": "plan"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
         )
 
         assert state.running_blackboard[0].status == "planned"
@@ -2531,7 +2525,9 @@ class TestPlanActAgent:
             ]
         )
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "plan"}]
+            messages=[{"role": "user", "content": "plan"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
         )
 
         updated = agent._prepare_next_batch(state)
@@ -2554,7 +2550,9 @@ class TestPlanActAgent:
         )
 
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "plan"}]
+            messages=[{"role": "user", "content": "plan"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
         )
 
         assert [slot.step for slot in state.running_blackboard] == [0, 1]
@@ -2574,7 +2572,9 @@ class TestPlanActAgent:
         )
 
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "plan"}]
+            messages=[{"role": "user", "content": "plan"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
         )
 
         assert [slot.step for slot in state.running_blackboard] == [0, 1]
@@ -2948,7 +2948,9 @@ class TestReActAgent:
             tool_calls_limit=1,
         )
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "react"}]
+            messages=[{"role": "user", "content": "react"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
         )
 
         updated = agent._prepare_next_batch(state)
@@ -3006,7 +3008,9 @@ class TestReActAgent:
             tool_calls_limit=1,
         )
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "react"}]
+            messages=[{"role": "user", "content": "react"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
         )
 
         updated = agent._prepare_next_batch(state)
@@ -3085,7 +3089,9 @@ class TestReActAgent:
             tool_calls_limit=2,
         )
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "react"}]
+            messages=[{"role": "user", "content": "react"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
         )
 
         updated = agent._prepare_next_batch(state)
@@ -3113,7 +3119,9 @@ class TestReActAgent:
             tool_calls_limit=2,
         )
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "react"}]
+            messages=[{"role": "user", "content": "react"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
         )
         state.next_step_index = 1
         state.running_blackboard[0] = executed_slot(0, 5)
@@ -3221,12 +3229,6 @@ class TestToolAgentAsyncBaseLoop:
         assert state.running_blackboard[0].error is not NO_VAL
         assert state.running_blackboard[0].status == "failed"
         assert state.running_blackboard[0].is_failed() is True
-
-    def test_async_initialize_run_state_wrong_type_raises(self) -> None:
-        agent = BadInitializeToolAgent(script=[])
-
-        with pytest.raises(ToolAgentError, match="must return a ToolAgentRunState"):
-            asyncio.run(agent.async_invoke({"prompt": "run"}))
 
     def test_async_prepare_empty_batch_raises(self) -> None:
         agent = make_agent()
@@ -3658,7 +3660,7 @@ class TestFailedCacheRefValidation:
         result1 = agent.invoke({"prompt": "first run"})
         assert result1.result == 1
         # Second invoke: plan references a FAILED cache slot → raises at validation.
-        with pytest.raises(ToolAgentError, match="failed cache slot"):
+        with pytest.raises(ToolAgentError, match="failed in this conversation"):
             agent.invoke({"prompt": "second run"})
 
     def test_validate_planned_slots_rejects_stale_step_ref_in_return(self) -> None:
@@ -3707,7 +3709,7 @@ class TestFailedCacheRefValidation:
         )
         result1 = agent.invoke({"prompt": "first run"})
         assert result1.result == 1
-        with pytest.raises(ToolAgentError, match="FAILED cache"):
+        with pytest.raises(ToolAgentError, match="failed in this conversation"):
             agent.invoke({"prompt": "second run"})
 
 
@@ -3933,3 +3935,240 @@ class TestReActGenerationRetry:
         # The run completed; step 0's observable was decremented once (by the successful commit),
         # not twice (which would happen if the failed retry also decremented it).
         assert len(record.llm_records) == 3  # 1 (step0) + 1 (failed return) + 1 (success return)
+
+
+# ── TestExecutePreparedBatchEarlyValidation ───────────────────────────────────
+
+class TestExecutePreparedBatchEarlyValidation:
+    """I1: sync _execute_prepared_batch pre-validates tool existence before the gather."""
+
+    def test_unknown_tool_raises_before_any_execution(self) -> None:
+        """Unknown tool in batch raises ToolAgentError before any tool runs."""
+        agent = make_agent()
+        keys = register_math_tools(agent)
+
+        state = make_state(
+            running=[
+                prepared_slot(0, keys["add"], {"x": 1, "y": 2}),
+                prepared_slot(1, "Tool.tests.no_such_tool", {}),
+            ],
+            prepared_steps=[0, 1],
+        )
+
+        with pytest.raises(ToolAgentError, match="no_such_tool"):
+            agent._execute_prepared_batch(state)
+
+        # Neither slot should have executed — early exit before the gather.
+        assert state.running_blackboard[0].is_empty() or state.running_blackboard[0].is_prepared()
+        assert state.running_blackboard[1].is_empty() or state.running_blackboard[1].is_prepared()
+
+    def test_known_tools_proceed_normally(self) -> None:
+        """Batch with all valid tools executes without raising."""
+        agent = make_agent()
+        keys = register_math_tools(agent)
+
+        state = make_state(
+            running=[
+                prepared_slot(0, keys["add"], {"x": 3, "y": 4}),
+            ],
+            prepared_steps=[0],
+        )
+
+        updated = agent._execute_prepared_batch(state)
+        assert updated.running_blackboard[0].result.result == 7
+
+
+# ── TestMaxDurationSingleSource ──────────────────────────────────────────────
+
+class TestMaxDurationSingleSource:
+    """B3: max_duration is computed once in _prepare_next_batch and flows to both
+    _build_react_messages and _generate_next_step; neither method re-derives it."""
+
+    def test_max_duration_limits_step_at_budget_boundary(self) -> None:
+        """A step with duration == remaining budget is accepted."""
+        agent = make_react_agent(
+            [
+                # Step 0: duration=2 with tool_calls_limit=3 → max_duration=3; fine.
+                react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=2),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
+            ],
+            tool_calls_limit=3,
+        )
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 3
+
+    def test_step_exceeding_max_duration_triggers_retry(self) -> None:
+        """A step with duration > remaining budget is rejected (validation error → retry)."""
+        agent = make_react_agent(
+            [
+                # Step 0 bad: duration=5 when only 2 slots remain (prefix_len=0, limit=2).
+                react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=5),
+                # Step 0 good: corrected on retry.
+                react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=1),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
+            ],
+            tool_calls_limit=2,
+            generation_retries=1,
+        )
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 3
+
+
+# ── TestCacheRefValidation ───────────────────────────────────────────────────
+
+from atomic_agentic.models.agents.runstates import ReActRunState, ReActStepMeta
+
+
+class TestCacheRefValidation:
+    """Three-category cache-ref validation for PlanAct and ReAct, plus B1 FAILED step visibility."""
+
+    # ── PlanAct out-of-range ────────────────────────────────────────────────
+
+    def test_planact_out_of_range_cache_ref_raises(self) -> None:
+        """PlanAct: cache index beyond cache length raises with 'do not exist' message."""
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": return_tool.full_name, "args": {"val": "<<__c5__>>"}},
+                ]),
+            ],
+            context_enabled=False,
+        )
+        with pytest.raises(ToolAgentError, match="cache indices that do not exist"):
+            agent.invoke({"prompt": "run"})
+
+    # ── PlanAct out-of-conversation ──────────────────────────────────────────
+
+    def test_planact_out_of_conv_cache_ref_raises(self) -> None:
+        """PlanAct: cache index in range but not in either frozenset raises."""
+        agent = make_planact_agent([], context_enabled=True)
+        # Seed a slot in the blackboard (simulates a prior-session entry).
+        prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
+        agent._blackboard.append(prior_slot)
+
+        # Build the cache_blackboard as _setup_plan_init would (since context_enabled=True).
+        cache_blackboard = [prior_slot.copy()]
+
+        # Parse a plan that references cache index 0.
+        plan_json = json.dumps([{"tool": return_tool.full_name, "args": {"val": "<<__c0__>>"}}])
+        parsed = json.loads(plan_json)
+
+        # Both frozensets are empty — index 0 is in-range but not from this conversation.
+        result = agent._process_plan_output(
+            parsed=parsed,
+            cache_blackboard=cache_blackboard,
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
+        )
+        assert isinstance(result, str)
+        assert "not part of this conversation" in result
+
+    # ── PlanAct failed-in-conversation (already in TestFailedCacheRefValidation) ──
+
+    # ── ReAct out-of-range ───────────────────────────────────────────────────
+
+    def test_react_out_of_range_cache_ref_raises(self) -> None:
+        """ReAct: cache index beyond cache length raises with 'do not exist' message."""
+        agent = make_react_agent(
+            [
+                react_step_json(step=0, tool="Tool.tests.add", args={"x": "<<__c99__>>", "y": 1}),
+            ],
+            tool_calls_limit=1,
+            context_enabled=False,
+        )
+        with pytest.raises(ToolAgentError, match="cache indices that do not exist"):
+            agent.invoke({"prompt": "run"})
+
+    # ── ReAct out-of-conversation ────────────────────────────────────────────
+
+    def test_react_out_of_conv_cache_ref_raises(self) -> None:
+        """ReAct: in-range cache index not in either frozenset raises."""
+        agent = make_react_agent([], context_enabled=True, tool_calls_limit=1)
+        prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
+        agent._blackboard.append(prior_slot)
+
+        # Build a step referencing cache index 0.
+        parsed = json.loads(react_step_json(step=0, tool="Tool.tests.add", args={"x": "<<__c0__>>", "y": 1}))
+        cache_blackboard = [prior_slot.copy()]
+
+        result = agent._process_next_step_output(
+            parsed=parsed,
+            expected_step=0,
+            cache_blackboard=cache_blackboard,
+            max_duration=1,
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
+        )
+        assert isinstance(result, str)
+        assert "not part of this conversation" in result
+
+    # ── B1: FAILED step visible in ReAct snapshot ───────────────────────────
+
+    def test_failed_step_appears_in_react_snapshot(self) -> None:
+        """B1: under fail_fast=False, a FAILED running-blackboard slot is rendered
+        with status='FAILED' and error in the snapshot passed to the next step."""
+        agent = make_react_agent(
+            [
+                react_step_json(step=0, tool="Tool.tests.fail_tool", args={}, duration=0),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": 99}, duration=0),
+            ],
+            tool_calls_limit=2,
+            fail_fast=False,
+        )
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 99
+
+        # Build the snapshot for prefix_len=1 (after step 0 fails, before step 1 is generated).
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "react"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
+        )
+        # Manually seed a FAILED slot at index 0 to simulate the post-failure state.
+        failed_slot = BlackboardSlot(
+            step=0,
+            tool="Tool.tests.fail_tool",
+            args={},
+            error=RuntimeError("intentional failure"),
+            status=BlackboardSlot.FAILED,
+        )
+        state.running_blackboard[0] = failed_slot
+        state.step_meta[0] = ReActStepMeta(observable=0, description="Test fail step.")
+
+        working_messages, _ = agent._build_react_messages(state, prefix_len=1, max_duration=1)
+        # working_messages[-2] is the assistant turn with the running-plan snapshot.
+        snapshot_text = working_messages[-2]["content"]
+
+        assert "FAILED" in snapshot_text
+        assert "intentional failure" in snapshot_text
+
+    def test_executed_step_carries_no_failed_status_in_snapshot(self) -> None:
+        """B1: a successfully EXECUTED step does not get status=FAILED in the snapshot."""
+        agent = make_react_agent(
+            [
+                react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=1),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
+            ],
+            tool_calls_limit=2,
+        )
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 3
+
+        # Build snapshot after step 0 executed — check no FAILED markers.
+        state = agent._initialize_run_state(
+            messages=[{"role": "user", "content": "react"}],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
+        )
+        # After invoke, the blackboard is persisted; index 0 is the executed add step.
+        exec_slot = agent.blackboard[0]
+        state.running_blackboard[0] = exec_slot
+        state.step_meta[0] = ReActStepMeta(observable=0, description="Add two numbers.")
+
+        working_messages, _ = agent._build_react_messages(state, prefix_len=1, max_duration=1)
+        # working_messages[-2] is the assistant turn with the running-plan snapshot.
+        snapshot_text = working_messages[-2]["content"]
+
+        assert "result_ref" in snapshot_text
+        # No slot-level "status" key should appear (only FAILED slots get that field).
+        assert "'status'" not in snapshot_text
