@@ -138,6 +138,7 @@ def make_planact_agent(
     post_invoke: Any = None,
     post_result_key: str | None = None,
     fail_fast: bool = True,
+    generation_retries: int = 0,
 ) -> PlanActAgent:
     agent = PlanActAgent(
         name="tests",
@@ -152,6 +153,7 @@ def make_planact_agent(
         post_invoke=post_invoke,
         post_result_key=post_result_key,
         fail_fast=fail_fast,
+        generation_retries=generation_retries,
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
@@ -277,6 +279,7 @@ class ScriptedToolAgent(ToolAgent):
         tool_instructions: str | PromptConfig = ROLE_TEMPLATE,
         context_enabled: bool = False,
         fail_fast: bool = True,
+        generation_retries: int = 0,
         tool_calls_limit: int | None = None,
         peek_at_cache: bool = False,
         response_preview_limit: int | None = None,
@@ -293,6 +296,7 @@ class ScriptedToolAgent(ToolAgent):
             tool_instructions=tool_instructions,
             context_enabled=context_enabled,
             fail_fast=fail_fast,
+            generation_retries=generation_retries,
             tool_calls_limit=tool_calls_limit,
             peek_at_cache=peek_at_cache,
             response_preview_limit=response_preview_limit,
@@ -627,6 +631,24 @@ class TestToolAgentConstruction:
     def test_fail_fast_rejects_non_bool(self, value: Any) -> None:
         with pytest.raises(ToolAgentError, match="fail_fast"):
             make_agent(fail_fast=value)  # type: ignore[arg-type]
+
+    def test_generation_retries_defaults_to_zero(self) -> None:
+        agent = make_agent()
+        assert agent.generation_retries == 0
+
+    def test_generation_retries_accepted(self) -> None:
+        agent = ScriptedToolAgent(generation_retries=3)
+        assert agent.generation_retries == 3
+
+    def test_generation_retries_property_is_not_directly_settable(self) -> None:
+        agent = make_agent()
+        with pytest.raises(AttributeError):
+            agent.generation_retries = 1  # type: ignore[misc]
+
+    @pytest.mark.parametrize("value", [-1, "1", 1.5, True, None])
+    def test_generation_retries_rejects_invalid(self, value: Any) -> None:
+        with pytest.raises(ToolAgentError, match="generation_retries"):
+            ScriptedToolAgent(generation_retries=value)  # type: ignore[arg-type]
 
 
 class TestToolAgentNamespace:
@@ -2249,7 +2271,7 @@ class TestParsingHelpers:
     def test_extract_from_json_string_rejects_invalid_text(self, raw: str) -> None:
         agent = make_agent()
 
-        with pytest.raises(ToolAgentError):
+        with pytest.raises(json.JSONDecodeError):
             agent._extract_from_json_string(raw)
 
     def test_extract_from_json_string_skips_unparseable_candidates(self) -> None:
@@ -2346,7 +2368,7 @@ class TestPlanActAgent:
     def test_rejects_plan_output_that_is_not_a_json_array(self) -> None:
         agent = make_planact_agent(['{"not": "a list"}'])
 
-        with pytest.raises(ToolAgentError, match="plan output must be a non-empty JSON array"):
+        with pytest.raises(ToolAgentError, match="plan must be a non-empty JSON array"):
             agent.invoke({"prompt": "run plan"})
 
     def test_rejects_plan_item_that_is_not_a_json_object(self) -> None:
@@ -2413,7 +2435,7 @@ class TestPlanActAgent:
             ]
         )
 
-        with pytest.raises(ToolAgentError, match="illegal deps"):
+        with pytest.raises(ToolAgentError, match="invalid step dependencies"):
             agent.invoke({"prompt": "run plan"})
 
     def test_context_enabled_can_reference_cached_result_on_next_invoke(self) -> None:
@@ -2568,7 +2590,7 @@ class TestPlanActAgent:
             ]
         )
 
-        with pytest.raises(ToolAgentError, match="return step must not include 'await'"):
+        with pytest.raises(ToolAgentError, match="return step and must not include"):
             agent.invoke({"prompt": "run plan"})
 
     def test_async_invoke_executes_plan_and_returns_value(self) -> None:
@@ -2599,6 +2621,139 @@ class TestPlanActAgent:
 
         for rec in agent.records[-1].llm_records:
             assert rec.system_prompt_name == "plan_first"
+
+
+# ── TestPlanActGenerationRetry ─────────────────────────────────────────────────
+
+class TestPlanActGenerationRetry:
+    """Retry loop in _generate_plan/_agenerate_plan: budget, feedback, LLMRecord accumulation."""
+
+    VALID_PLAN = json.dumps([
+        {"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
+        {"step": 1, "tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+    ])
+
+    VALID_PLAN_RETURN_ONLY = json.dumps([
+        {"step": 0, "tool": return_tool.full_name, "args": {"val": 42}},
+    ])
+
+    INVALID_JSON = "this is not json at all"
+
+    INVALID_PLAN_WRONG_TOOL = json.dumps([
+        {"step": 0, "tool": "Tool.tests.nonexistent", "args": {}},
+        {"step": 1, "tool": return_tool.full_name, "args": {"val": 0}},
+    ])
+
+    def test_zero_retries_raises_on_first_bad_json(self) -> None:
+        agent = make_planact_agent([self.INVALID_JSON])
+        with pytest.raises(ToolAgentError):
+            agent.invoke({"prompt": "run"})
+
+    def test_zero_retries_emits_one_llm_call_before_raise(self) -> None:
+        engine = ScriptedLLMEngine([self.INVALID_JSON])
+        agent = PlanActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=0,
+        )
+        with pytest.raises(ToolAgentError):
+            agent.invoke({"prompt": "run"})
+        assert len(engine.calls) == 1
+
+    def test_json_error_retry_succeeds_on_second_call(self) -> None:
+        agent = make_planact_agent(
+            [self.INVALID_JSON, self.VALID_PLAN],
+            generation_retries=1,
+        )
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 3
+
+    def test_json_error_retry_stores_two_llm_records(self) -> None:
+        engine = ScriptedLLMEngine([self.INVALID_JSON, self.VALID_PLAN_RETURN_ONLY])
+        agent = PlanActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+        )
+        agent.invoke({"prompt": "run"})
+        assert len(agent.records[-1].llm_records) == 2
+
+    def test_spec_error_retry_succeeds_on_second_call(self) -> None:
+        agent = make_planact_agent(
+            [self.INVALID_PLAN_WRONG_TOOL, self.VALID_PLAN],
+            generation_retries=1,
+        )
+        result = agent.invoke({"prompt": "run"})
+        assert result.result == 3
+
+    def test_spec_error_retry_stores_two_llm_records(self) -> None:
+        engine = ScriptedLLMEngine([self.INVALID_PLAN_WRONG_TOOL, self.VALID_PLAN_RETURN_ONLY])
+        agent = PlanActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+        )
+        register_math_tools(agent)  # type: ignore[arg-type]
+        agent.invoke({"prompt": "run"})
+        assert len(agent.records[-1].llm_records) == 2
+
+    def test_budget_exhausted_raises_after_all_attempts(self) -> None:
+        agent = make_planact_agent(
+            [self.INVALID_JSON, self.INVALID_JSON],
+            generation_retries=1,
+        )
+        with pytest.raises(ToolAgentError):
+            agent.invoke({"prompt": "run"})
+
+    def test_budget_exhausted_records_all_llm_calls_before_raise(self) -> None:
+        engine = ScriptedLLMEngine([self.INVALID_JSON, self.INVALID_JSON])
+        agent = PlanActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+        )
+        with pytest.raises(ToolAgentError):
+            agent.invoke({"prompt": "run"})
+        assert len(engine.calls) == 2
+
+    def test_json_feedback_appended_to_working_messages(self) -> None:
+        engine = ScriptedLLMEngine([self.INVALID_JSON, self.VALID_PLAN_RETURN_ONLY])
+        agent = PlanActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+        )
+        agent.invoke({"prompt": "run"})
+        assert len(engine.calls[1]) > len(engine.calls[0])
+        last_msg = engine.calls[1][-1]
+        assert last_msg["role"] == "user"
+        assert "could not be parsed" in last_msg["content"]
+
+    def test_spec_feedback_contains_reserialised_plan_not_resolved_args(self) -> None:
+        engine = ScriptedLLMEngine([self.INVALID_PLAN_WRONG_TOOL, self.VALID_PLAN_RETURN_ONLY])
+        agent = PlanActAgent(
+            name="tests",
+            namespace="tests",
+            description=".",
+            llm_engine=engine,
+            generation_retries=1,
+        )
+        register_math_tools(agent)  # type: ignore[arg-type]
+        agent.invoke({"prompt": "run"})
+        last_msg = engine.calls[1][-1]
+        assert last_msg["role"] == "user"
+        assert "unknown tool" in last_msg["content"]
+        assert "resolved_args" not in last_msg["content"]
 
 
 class TestReActAgent:
@@ -3501,7 +3656,37 @@ class TestFailedCacheRefValidation:
         result1 = agent.invoke({"prompt": "first run"})
         assert result1.result == 1
         # Second invoke: plan references a FAILED cache slot → raises at validation.
-        with pytest.raises(ToolAgentError, match="FAILED cache"):
+        with pytest.raises(ToolAgentError, match="failed cache slot"):
+            agent.invoke({"prompt": "second run"})
+
+    def test_validate_planned_slots_rejects_stale_step_ref_in_return(self) -> None:
+        """PlanAct: return step using <<__sN__>> where N >= plan length raises at validation.
+
+        Reproduces the bug where _normalize_planned_slots overwrites return-slot
+        step_dependencies to all-prior-steps, masking a stale global step index
+        in the args that then blows up at _resolve_placeholders during execution.
+        """
+        # First invoke produces step 0 in the blackboard (global index 0).
+        # Second invoke's return step mistakenly references <<__s1__>> (index 1 in
+        # a 1-step plan — out of range; only <<__s0__>> is valid).
+        agent = make_planact_agent(
+            [
+                # First invoke: one real step + return.
+                json.dumps([
+                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+                ]),
+                # Second invoke: single return step uses stale index 1 (out of range).
+                json.dumps([
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                ]),
+            ],
+            context_enabled=True,
+        )
+        result1 = agent.invoke({"prompt": "first run"})
+        assert result1.result == 3
+        # Second invoke: return step has <<__s1__>> in a 1-slot plan (only index 0 valid).
+        with pytest.raises(ToolAgentError, match="return step has invalid step references"):
             agent.invoke({"prompt": "second run"})
 
     def test_process_next_step_output_rejects_failed_cache_ref(self) -> None:
@@ -3527,7 +3712,7 @@ class TestFailedCacheRefValidation:
 # ── TestToolAgentToDictFastFail ───────────────────────────────────────────────
 
 class TestToolAgentToDictFastFail:
-    """Tests that to_dict() includes the fail_fast key."""
+    """Tests that to_dict() includes the fail_fast and generation_retries keys."""
 
     def test_to_dict_includes_fail_fast_true(self) -> None:
         agent = make_agent(fail_fast=True)
@@ -3540,3 +3725,13 @@ class TestToolAgentToDictFastFail:
         d = agent.to_dict()
         assert "fail_fast" in d
         assert d["fail_fast"] is False
+
+    def test_to_dict_includes_generation_retries_default(self) -> None:
+        agent = make_agent()
+        d = agent.to_dict()
+        assert "generation_retries" in d
+        assert d["generation_retries"] == 0
+
+    def test_to_dict_generation_retries_reflects_construction_value(self) -> None:
+        agent = ScriptedToolAgent(generation_retries=2)
+        assert agent.to_dict()["generation_retries"] == 2
