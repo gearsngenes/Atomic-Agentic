@@ -60,7 +60,7 @@ from ..engines.LLMEngines import LLMEngine
 from ..exceptions import ToolAgentError
 from ..models.agents import ReActRunState, ReActStepMeta
 from ..models.agents import BlackboardSlot
-from ..models.agents.records import LLMRecord
+from ..models.agents.records import AgentRecord, LLMRecord
 from ..utils.agents import extract_dependencies
 
 # --------------------------------------------------------------------------- #
@@ -152,16 +152,14 @@ class ReActAgent(ToolAgent):
         ``tool_calls_limit`` defaults to ``25`` and must be a concrete integer
         >= 0 — ``None`` is not accepted because the running blackboard is
         pre-allocated to ``tool_calls_limit + 1`` slots at initialization.
-        ``tool_instructions`` and ``prompt_key`` are not exposed: they are
-        hard-wired to the built-in orchestrator prompt and the
-        ``"reason_then_act"`` key respectively.
+        ``"reason_then_act"`` is the key under which the built-in orchestrator
+        prompt is registered in ``self._system_prompts``.
         """
         super().__init__(
             name=name,
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
-            tool_instructions=ORCHESTRATOR_PROMPT,
             filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
@@ -173,9 +171,9 @@ class ReActAgent(ToolAgent):
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
-            prompt_key="reason_then_act",
             records_window=records_window,
         )
+        self._system_prompts["reason_then_act"] = ORCHESTRATOR_PROMPT
 
     # ------------------------------------------------------------------ #
     # Property Overrides
@@ -587,32 +585,32 @@ class ReActAgent(ToolAgent):
     def _initialize_run_state(
         self,
         *,
-        messages: list[dict[str, str]],
+        turns: list[AgentRecord],
+        prompt: str,
+        context: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ReActRunState:
         """
         Initialize run state for a single ReAct invocation.
 
-        Satisfies the ``ToolAgent._initialize_run_state`` abstract hook. Unlike
-        ``PlanActAgent``, ReAct performs no LLM call at initialization — the
-        running blackboard is pre-allocated and step planning is deferred to
-        ``_prepare_next_batch`` / ``_aprepare_next_batch``.
+        Renders the orchestrator system prompt from instance state, builds the
+        full message list, then pre-allocates the fixed-size running blackboard.
+        Unlike ``PlanActAgent``, ReAct performs no LLM call at initialization —
+        step planning is deferred to ``_prepare_next_batch``.
 
         Steps
         -----
-        1. Validate ``messages`` is non-empty.
-        2. Snapshot the persisted blackboard as a copy (empty list when
+        1. Render ``self._system_prompts["reason_then_act"]`` with TOOLS/LIMIT/
+           CONSTANTS assembled from instance state; call ``build_messages``.
+        2. Validate ``messages`` is non-empty.
+        3. Snapshot the persisted blackboard as a copy (empty list when
            ``context_enabled=False``); store ``valid_cache_indices`` and
            ``failed_cache_indices`` on state.
-        3. Copy ``messages`` into a mutable working list.
-        4. Pre-allocate a fixed-size ``running_blackboard`` of
-           ``tool_calls_limit + 1`` slots — one slot per allowed non-return
-           call plus one slot for the mandatory return call.
-        5. Initialize ``step_meta`` as a list of ``ReActStepMeta()`` instances
-           of the same length as ``running_blackboard``.
-        6. Construct and return ``ReActRunState`` with empty ``llm_records``
-           (records are appended by each ``_prepare_next_batch`` call).
+        4. Copy ``messages`` into a mutable working list.
+        5. Pre-allocate a fixed-size ``running_blackboard`` of
+           ``tool_calls_limit + 1`` slots.
+        6. Initialize ``step_meta`` and construct ``ReActRunState``.
 
         Returns
         -------
@@ -621,8 +619,16 @@ class ReActAgent(ToolAgent):
         Raises
         ------
         ToolAgentError
-            If ``messages`` is empty.
+            If the built message list is empty.
         """
+        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        render_context = {
+            ToolAgent.TOOLS_FIELD: self.actions_context(),
+            ToolAgent.LIMIT_FIELD: limit_text,
+            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
+        }
+        system = self._system_prompts["reason_then_act"].render(render_context)
+        messages = self.build_messages(system, turns, prompt)
         if not messages:
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
 
@@ -746,7 +752,7 @@ class ReActAgent(ToolAgent):
             llm_records.append(LLMRecord(
                 messages=record_messages,
                 llm_result=engine_result,
-                system_prompt_name=self._tool_prompt_key,
+                system_prompt_name="reason_then_act",
             ))
 
             # JSON extraction
@@ -848,7 +854,7 @@ class ReActAgent(ToolAgent):
             llm_records.append(LLMRecord(
                 messages=record_messages,
                 llm_result=engine_result,
-                system_prompt_name=self._tool_prompt_key,
+                system_prompt_name="reason_then_act",
             ))
 
             try:

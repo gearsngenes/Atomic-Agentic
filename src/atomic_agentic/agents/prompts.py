@@ -7,8 +7,10 @@
 # These prompts live beside the ToolAgent protocol constants because they define
 # the LLM-facing side of the same parser/runtime contract.
 
+from ..models.agents.prompts import PromptConfig
 
-PLANNER_PROMPT = """\
+PLANNER_PROMPT = PromptConfig(
+    template="""\
 # OBJECTIVE
 You are a strict PLANNER.
 1) From the full conversation history (user requests + prior assistant messages), infer the user's CURRENT intended goal.
@@ -114,10 +116,13 @@ Output:
   {{ "step": 2, "tool": "Tool.Console.print", "args": {{ "value": "done" }}, "await": 1 }},
   {{ "step": 3, "tool": "Tool.ToolAgents.return", "args": {{ "val": "<<__s1__>>" }} }}
 ]
-"""
+""",
+    description="PlanActAgent one-shot planning prompt.",
+)
 
 
-ORCHESTRATOR_PROMPT = """\
+ORCHESTRATOR_PROMPT = PromptConfig(
+    template="""\
 # OBJECTIVE
 You are a strict ORCHESTRATOR in a ReAct-style loop.
 Infer the user's current task from the conversation messages.
@@ -254,4 +259,6 @@ RUNNING PLAN STEPS 0-0 SO FAR:
 
 VALID OUTPUT:
 {{"step":1,"tool":"Tool.Math.add","args":{{"a":"<<__s0__>>","b":2}},"duration":0,"description":"Add 2 to the previous multiplication result for the current calculation."}}
-"""
+""",
+    description="ReActAgent iterative step-orchestration prompt.",
+)

@@ -54,7 +54,7 @@ from ..engines.LLMEngines import LLMEngine
 from ..exceptions import ToolAgentError
 from ..models.agents import PlanActRunState
 from ..models.agents import BlackboardSlot
-from ..models.agents.records import LLMRecord
+from ..models.agents.records import AgentRecord, LLMRecord
 from ..utils.agents import extract_dependencies
 
 logger = logging.getLogger(__name__)
@@ -127,17 +127,15 @@ class PlanActAgent(ToolAgent):
         """
         Initialize a PlanActAgent.
 
-        ``tool_instructions`` and ``prompt_key`` are not exposed: they are
-        hard-wired to the built-in planning prompt and the ``"plan_first"`` key
-        respectively. All other parameters are forwarded verbatim to
-        ``ToolAgent.__init__``.
+        ``"plan_first"`` is the key under which the built-in planning prompt is
+        registered in ``self._system_prompts``. All other parameters are
+        forwarded verbatim to ``ToolAgent.__init__``.
         """
         super().__init__(
             name=name,
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
-            tool_instructions=PLANNER_PROMPT,
             filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
             tool_calls_limit=tool_calls_limit,
@@ -149,9 +147,9 @@ class PlanActAgent(ToolAgent):
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
-            prompt_key="plan_first",
             records_window=records_window,
         )
+        self._system_prompts["plan_first"] = PLANNER_PROMPT
 
     # ------------------------------------------------------------------ #
     # Initialization
@@ -557,7 +555,7 @@ class PlanActAgent(ToolAgent):
             llm_records.append(LLMRecord(
                 messages=[working_messages[-1]],
                 llm_result=engine_result,
-                system_prompt_name=self._tool_prompt_key,
+                system_prompt_name="plan_first",
             ))
 
             # JSON extraction
@@ -628,7 +626,7 @@ class PlanActAgent(ToolAgent):
             llm_records.append(LLMRecord(
                 messages=[working_messages[-1]],
                 llm_result=engine_result,
-                system_prompt_name=self._tool_prompt_key,
+                system_prompt_name="plan_first",
             ))
 
             # JSON extraction
@@ -676,53 +674,51 @@ class PlanActAgent(ToolAgent):
     def _initialize_run_state(
         self,
         *,
-        messages: list[dict[str, str]],
+        turns: list[AgentRecord],
+        prompt: str,
+        context: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> PlanActRunState:
         """
         One-shot plan generation and compilation into concurrent batches.
 
-        This PlanActAgent-specific initialization method performs the run-local setup
-        for a complete planning cycle, delegates plan generation/normalization/validation
-        to `_generate_plan(...)`, and pre-compiles the resulting planned slots into
+        Renders the planning system prompt from instance state, builds the full
+        message list, then delegates plan generation/normalization/validation to
+        ``_generate_plan(...)`` and compiles the resulting planned slots into
         topologically-sorted concurrent batches.
 
         Execution Steps
         ~~~~~~~~~~~~~~~
-        1. ``_setup_plan_init``: validate messages; copy to working list; snapshot
+        1. Render ``self._system_prompts["plan_first"]`` with TOOLS/LIMIT/CONSTANTS
+           assembled from instance state; call ``build_messages`` to produce messages.
+        2. ``_setup_plan_init``: validate messages; copy to working list; snapshot
            cache blackboard.
-        2. ``_generate_plan``: generate the plan via LLM, returning
+        3. ``_generate_plan``: generate the plan via LLM, returning
            ``(planned_slots, llm_records)``.
-        3. ``_build_planact_run_state``: compile batches and construct the
+        4. ``_build_planact_run_state``: compile batches and construct the
            ``PlanActRunState`` with the generated slots and LLM records.
-
-        Parameters
-        ----------
-        messages : list[dict[str, str]]
-            LLM conversation history to pass to the planner.
 
         Returns
         -------
         PlanActRunState
-            Initialized state ready for the base template-method loop:
-            - cache_blackboard populated with prior results when context_enabled=True
-            - running_blackboard populated with planned BlackboardSlot objects
-            - batches list with topologically-sorted concurrent batches
-            - batch_index=0 (first batch)
+            Initialized state ready for the base template-method loop.
 
         Raises
         ------
         ToolAgentError
-            On any of:
-            - Empty messages
-            - Empty or invalid plan from LLM
-            - Multiple return steps
-            - Unknown tool references
-            - Out-of-range placeholder references
-            - Invalid plan dependencies
-            - Budget exceeded
+            On any of: empty messages, empty or invalid plan, multiple return steps,
+            unknown tool references, out-of-range placeholder references, invalid plan
+            dependencies, or budget exceeded.
         """
+        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        render_context = {
+            ToolAgent.TOOLS_FIELD: self.actions_context(),
+            ToolAgent.LIMIT_FIELD: limit_text,
+            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
+        }
+        system = self._system_prompts["plan_first"].render(render_context)
+        messages = self.build_messages(system, turns, prompt)
         working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
         planned_slots, llm_records = self._generate_plan(
             messages=working_messages,
@@ -742,7 +738,9 @@ class PlanActAgent(ToolAgent):
     async def _ainitialize_run_state(
         self,
         *,
-        messages: list[dict[str, str]],
+        turns: list[AgentRecord],
+        prompt: str,
+        context: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> PlanActRunState:
@@ -750,6 +748,14 @@ class PlanActAgent(ToolAgent):
         Async override: uses ``_agenerate_plan`` so the planning LLM call
         goes through ``async_invoke`` rather than a worker thread.
         """
+        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        render_context = {
+            ToolAgent.TOOLS_FIELD: self.actions_context(),
+            ToolAgent.LIMIT_FIELD: limit_text,
+            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
+        }
+        system = self._system_prompts["plan_first"].render(render_context)
+        messages = self.build_messages(system, turns, prompt)
         working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
         planned_slots, llm_records = await self._agenerate_plan(
             messages=working_messages,
