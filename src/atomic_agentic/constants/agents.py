@@ -20,7 +20,7 @@ RUN_ID_PARAM: ParamSpec = ParamSpec(
 # ToolAgent LLM-output JSON fields
 # =============================================================================
 # Used by:
-# - agents/tool_agents.py: generated step validation and BlackboardSlot creation
+# - agents/planact.py, agents/react.py: generated step validation and BlackboardSlot creation
 # - models/agents/blackboard_models.py: BlackboardSlot.from_dict support
 #
 # These fields are centralized because ToolAgent prompt contracts and parser/
@@ -87,7 +87,7 @@ REQUIRED_REACT_FIELDS = REQUIRED_BASE_STEP_FIELDS | frozenset(
 # ToolAgent canonical return-tool identity
 # =============================================================================
 # Used by:
-# - agents/tool_agents.py: construction and registration of the executable return_tool
+# - agents/toolagent.py: construction and registration of the executable return_tool
 # - ToolAgent prompt finalization instructions requiring Tool.ToolAgents.return
 # - tests around planner/ReAct final return behavior
 #
