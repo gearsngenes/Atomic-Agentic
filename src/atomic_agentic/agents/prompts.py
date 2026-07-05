@@ -2,7 +2,7 @@
 # ToolAgent prompts
 # =============================================================================
 # Used by:
-# - agents/tool_agents.py: PlanActAgent and ReActAgent default role prompts
+# - agents/planact.py, agents/react.py: PlanActAgent and ReActAgent default role prompts
 #
 # These prompts live beside the ToolAgent protocol constants because they define
 # the LLM-facing side of the same parser/runtime contract.
