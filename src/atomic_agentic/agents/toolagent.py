@@ -127,6 +127,7 @@ from ..constants.agents import (
 )
 
 from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from ..models.agents.prompts import PromptConfig
 from ..models.results.agents import ToolAgentResult, ToolUsageRecord
 from ..models.results import LLMModelData
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
@@ -336,7 +337,7 @@ class ToolAgent(Agent, ABC):
             llm_engine=llm_engine,
             filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
-            context_keys=None,
+            context_properties=None,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
@@ -1833,7 +1834,7 @@ class ToolAgent(Agent, ABC):
         )
 
         draft = ToolAgentRecord(
-            user_prompt=prompt,
+            user_prompt=PromptConfig(template=prompt, description=""),
             generated_response=state.return_value,
             blackboard_start=blackboard_start,
             blackboard_end=blackboard_end,
@@ -1935,7 +1936,7 @@ class ToolAgent(Agent, ABC):
         )
 
         draft = ToolAgentRecord(
-            user_prompt=prompt,
+            user_prompt=PromptConfig(template=prompt, description=""),
             generated_response=state.return_value,
             blackboard_start=blackboard_start,
             blackboard_end=blackboard_end,

@@ -82,9 +82,9 @@ class TestPromptConfigConstruction:
         assert cfg.parameters[0].default is NO_VAL
 
     @pytest.mark.parametrize("bad_placeholder", ["{}", "{0}", "{a.b}", "{x[0]}"])
-    def test_non_identifier_placeholder_raises(self, bad_placeholder: str) -> None:
-        with pytest.raises(ValueError, match="unsupported placeholder"):
-            PromptConfig(template=f"Hello {bad_placeholder}.", description="d")
+    def test_non_identifier_placeholder_is_silently_skipped(self, bad_placeholder: str) -> None:
+        cfg = PromptConfig(template=f"Hello {bad_placeholder}.", description="d")
+        assert cfg.parameters == ()
 
     def test_non_str_template_raises(self) -> None:
         with pytest.raises(TypeError, match="template must be a str"):
@@ -146,3 +146,42 @@ class TestPromptConfigRender:
         result = cfg.render({"role": "assistant", "irrelevant": "ignored"})
 
         assert result == "You are a assistant."
+
+    @pytest.mark.parametrize(
+        ("template", "expected"),
+        [
+            ("example json {'a':b} and {INPUT_HERE}", "example json {'a':b} and {INPUT_HERE}"),
+            ("No placeholders at all.", "No placeholders at all."),
+            ("{}", "{}"),
+            ("{0}", "{0}"),
+        ],
+    )
+    def test_non_identifier_expressions_pass_through_as_literal_text(
+        self, template: str, expected: str
+    ) -> None:
+        cfg = PromptConfig(template=template, description="d")
+        assert cfg.render({}) == expected
+
+    def test_mixed_identifier_and_non_identifier_in_one_template(self) -> None:
+        cfg = PromptConfig(template="Hello {name}! JSON: {'a':1}", description="d")
+        assert cfg.parameters[0].name == "name"
+        assert cfg.render({"name": "world"}) == "Hello world! JSON: {'a':1}"
+
+
+class TestPromptConfigToDict:
+    def test_to_dict_returns_template_description_and_empty_defaults(self) -> None:
+        cfg = PromptConfig(template="You are a {role}.", description="my label")
+        result = cfg.to_dict()
+        assert result == {"template": "You are a {role}.", "description": "my label", "defaults": {}}
+
+    def test_to_dict_includes_defaults_for_optional_params(self) -> None:
+        cfg = PromptConfig(
+            template="Respond in {language}.",
+            description="lang",
+            defaults={"language": "English"},
+        )
+        assert cfg.to_dict()["defaults"] == {"language": "English"}
+
+    def test_to_dict_excludes_required_params_from_defaults(self) -> None:
+        cfg = PromptConfig(template="You are a {role} expert in {domain}.", description="d")
+        assert cfg.to_dict()["defaults"] == {}

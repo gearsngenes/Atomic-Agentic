@@ -1617,7 +1617,7 @@ class TestToolAgentRecordRendering:
     def test_render_turn_raises_for_non_tool_agent_turn(self) -> None:
         agent = make_agent()
         turn = AgentRecord(
-            user_prompt="run",
+            user_prompt=PromptConfig(template="run", description=""),
             generated_response="raw",
         )
 
@@ -1846,7 +1846,7 @@ class TestToolAgentRecordMetadataContract:
     def test_render_turn_with_none_span_returns_base_user_assistant_pair(self) -> None:
         agent = make_agent()
         turn = ToolAgentRecord(
-            user_prompt="run",
+            user_prompt=PromptConfig(template="run", description=""),
             generated_response="raw response",
             blackboard_start=None,
             blackboard_end=None,
@@ -1862,7 +1862,7 @@ class TestToolAgentRecordMetadataContract:
     def test_render_turn_with_empty_span_returns_base_user_assistant_pair(self) -> None:
         agent = make_agent()
         turn = ToolAgentRecord(
-            user_prompt="run",
+            user_prompt=PromptConfig(template="run", description=""),
             generated_response="raw response",
             blackboard_start=0,
             blackboard_end=0,
@@ -1878,7 +1878,7 @@ class TestToolAgentRecordMetadataContract:
     def test_render_turn_rejects_span_beyond_current_blackboard(self) -> None:
         agent = make_agent()
         turn = ToolAgentRecord(
-            user_prompt="run",
+            user_prompt=PromptConfig(template="run", description=""),
             generated_response="raw response",
             blackboard_start=0,
             blackboard_end=1,

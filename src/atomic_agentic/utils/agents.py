@@ -3,7 +3,31 @@ from __future__ import annotations
 import re
 from typing import Any
 
-__all__ = ["extract_dependencies"]
+from ..models.parameters import ParamSpec
+from ..constants.core import NO_VAL
+
+__all__ = ["build_context_description", "extract_dependencies"]
+
+
+def build_context_description(params: list[ParamSpec]) -> str:
+    """Build the auto-generated description for the ``context`` schema param."""
+    required = [p for p in params if p.default is NO_VAL]
+    optional = [p for p in params if p.default is not NO_VAL]
+    parts: list[str] = []
+    if required:
+        entries = "; ".join(
+            f"'{p.name}' ({p.type})" + (f" — {p.description}" if p.description else "")
+            for p in required
+        )
+        parts.append(f"Required: {entries}")
+    if optional:
+        entries = "; ".join(
+            f"'{p.name}' ({p.type}, default={p.default!r})"
+            + (f" — {p.description}" if p.description else "")
+            for p in optional
+        )
+        parts.append(f"Optional: {entries}")
+    return ". ".join(parts)
 
 
 def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:

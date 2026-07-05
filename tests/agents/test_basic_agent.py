@@ -121,28 +121,29 @@ class TestBasicAgentRolePrompt:
 
 
 class TestBasicAgentContextKeys:
-    def test_role_prompt_placeholders_appear_in_agent_schema(self) -> None:
+    def test_role_prompt_placeholder_grafts_context_param_in_schema(self) -> None:
         config = PromptConfig(template="You are a {persona} assistant.", description="d")
         agent = make_basic_agent(role_prompt=config)
 
         names = [p.name for p in agent.parameters]
-        assert "persona" in names
+        assert "context" in names
+        assert "persona" not in names
 
-    def test_role_prompt_placeholder_is_keyword_only_in_schema(self) -> None:
+    def test_context_param_is_keyword_only_in_schema(self) -> None:
         config = PromptConfig(template="You are a {persona} assistant.", description="d")
         agent = make_basic_agent(role_prompt=config)
 
-        persona_param = next(p for p in agent.parameters if p.name == "persona")
-        assert persona_param.kind == "KEYWORD_ONLY"
+        context_param = next(p for p in agent.parameters if p.name == "context")
+        assert context_param.kind == "KEYWORD_ONLY"
 
     def test_static_role_prompt_produces_no_context_keys(self) -> None:
         agent = make_basic_agent(role_prompt="You are a generic assistant.")
 
-        # Only expect: prompt, run_id (no context keys)
+        # Only expect: prompt, run_id (no context param with static role prompt)
         names = [p.name for p in agent.parameters]
         assert names == ["prompt", "run_id"]
 
-    def test_placeholder_default_injected_from_prompt_config(self) -> None:
+    def test_placeholder_default_described_in_context_param_description(self) -> None:
         config = PromptConfig(
             template="Speak as {persona}.",
             description="d",
@@ -150,8 +151,9 @@ class TestBasicAgentContextKeys:
         )
         agent = make_basic_agent(role_prompt=config)
 
-        persona_param = next(p for p in agent.parameters if p.name == "persona")
-        assert persona_param.default == "a helper"
+        context_param = next(p for p in agent.parameters if p.name == "context")
+        assert "persona" in context_param.description
+        assert "a helper" in context_param.description
 
 
 class TestBasicAgentInvoke:
@@ -171,7 +173,7 @@ class TestBasicAgentInvoke:
         config = PromptConfig(template="You are a {persona}.", description="d")
         agent = make_basic_agent(engine=engine, role_prompt=config)
 
-        agent.invoke({"prompt": "Speak.", "persona": "pirate"})
+        agent.invoke({"prompt": "Speak.", "context": {"persona": "pirate"}})
 
         assert engine.calls[0][0]["content"] == "You are a pirate."
 
@@ -189,7 +191,7 @@ class TestBasicAgentInvoke:
         agent.invoke({"prompt": "What is AI?"})
 
         assert len(agent.records) == 1
-        assert agent.records[0].user_prompt == "What is AI?"
+        assert agent.records[0].user_prompt.template == "What is AI?"
 
     def test_invoke_record_llm_record_has_system_prompt_name_role(self) -> None:
         agent = make_basic_agent()

@@ -39,8 +39,8 @@ class BasicAgent(Agent):
     ``BasicAgent`` is the simplest ``Agent`` subclass: one role prompt, one LLM
     call per invocation. The ``role_prompt`` may contain ``{placeholder}`` slots
     whose names are auto-discovered and wired into the agent schema as
-    KEYWORD_ONLY ``context_keys`` — callers supply them directly, and they are
-    passed through to ``PromptConfig.render`` at invocation time.
+    KEYWORD_ONLY ``context_properties`` — callers supply them via a single
+    ``context: dict`` param that is forwarded to ``PromptConfig.render`` at invocation time.
 
     ``role_prompt`` is immutable after construction. Use ``update_prompt`` to
     manage any additional prompts; writes to the ``"role"`` key are rejected.
@@ -76,7 +76,7 @@ class BasicAgent(Agent):
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
-            context_keys=list(config.parameters),
+            context_properties=list(config.parameters),
             records_window=records_window,
             response_preview_limit=response_preview_limit,
             assistant_response_source=assistant_response_source,
@@ -127,7 +127,10 @@ class BasicAgent(Agent):
             llm_result=engine_result,
             system_prompt_name="role",
         )
-        draft = AgentRecord(user_prompt=prompt, generated_response=text)
+        draft = AgentRecord(
+            user_prompt=PromptConfig(template=prompt, description=""),
+            generated_response=text,
+        )
         return draft, {
             "llm_records": (llm_record,),
             "llm_model_data": engine_result.model_data,
@@ -153,7 +156,10 @@ class BasicAgent(Agent):
             llm_result=engine_result,
             system_prompt_name="role",
         )
-        draft = AgentRecord(user_prompt=prompt, generated_response=text)
+        draft = AgentRecord(
+            user_prompt=PromptConfig(template=prompt, description=""),
+            generated_response=text,
+        )
         return draft, {
             "llm_records": (llm_record,),
             "llm_model_data": engine_result.model_data,
