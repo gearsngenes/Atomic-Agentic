@@ -5,6 +5,30 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a18] - 2026-07-04
+
+### Changed
+
+- `agents/tool_agents.py` split into three dedicated modules:
+  `agents/toolagent.py` (base `ToolAgent` only), `agents/planact.py`
+  (`PlanActAgent`), and `agents/react.py` (`ReActAgent`). No behavior changes.
+- `agents/__init__.py` updated to re-export `ToolAgent`, `PlanActAgent`, and
+  `ReActAgent` from their new module locations. Public import surface unchanged.
+- Test suite reorganized to mirror the module split: `tests/agents/conftest.py`
+  (shared fixtures), `test_tool_agent.py`, `test_planact.py`, `test_react.py`.
+  Monolithic `test_tool_agents.py` deleted.
+- Module docstrings added to `planact.py` and `react.py`; `__init__` docstrings
+  added to both subclasses; `toolagent.py` module docstring updated with file
+  paths for concrete subclasses; minor documentation normalization across all
+  three files (section labels, separator style, missing parameter entries).
+
+### Fixed
+
+- `planact.py` and `react.py`: `NO_VAL` now imported from `..constants.core`
+  (was incorrectly referenced via `..core`, which does not re-export it).
+- `react.py`: `import pprint` (module) replaces `from pprint import pprint`
+  (function), fixing an `AttributeError` on `pprint.pformat(...)`.
+
 ## [2.0.0a17] - 2026-07-04
 
 ### Added
