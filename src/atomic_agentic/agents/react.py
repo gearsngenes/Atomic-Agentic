@@ -189,7 +189,7 @@ class ReActAgent(ToolAgent):
         prompt is operational machinery and must not be replaced post-construction.
         All other keys are forwarded to the base implementation.
         """
-        if key == "reason_then_act":
+        if key.strip() == "reason_then_act":
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: "
                 "'reason_then_act' is the built-in orchestrator instruction prompt "

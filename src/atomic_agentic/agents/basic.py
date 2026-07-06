@@ -132,9 +132,9 @@ class BasicAgent(Agent):
         3. Extract new role params from ``config.parameters``; raise if any name
            overlaps with a current ``_extra_context_properties`` name.
         4. Delegate to ``super().update_prompt`` to store the config.
-        5. Rebuild ``_context_properties`` as the union of the new role params
-           and the unchanged ``_extra_context_properties``.
-        6. Call ``_update_context_param()`` to refresh the schema description.
+        5. Re-index the union of new role params and unchanged
+           ``_extra_context_properties`` via ``_set_context_properties``,
+           which stores and refreshes the schema description atomically.
         """
         # ① Key validation.
         if not isinstance(key, str) or not key.strip():
@@ -171,10 +171,9 @@ class BasicAgent(Agent):
         1. Normalize ``properties`` via ``normalize_context_properties``.
         2. Raise ``AgentError`` if any new name overlaps with a current
            role-prompt placeholder name.
-        3. Store the new ``_extra_context_properties``.
-        4. Rebuild ``_context_properties`` as the union of current role params
-           and the new extras.
-        5. Call ``_update_context_param()`` to refresh the schema description.
+        3. Store the new ``_extra_context_properties``; re-index the union of
+           current role params and the new extras via ``_set_context_properties``,
+           which stores and refreshes the schema description atomically.
         """
         # ① Normalize.
         new_extra = normalize_context_properties(properties)

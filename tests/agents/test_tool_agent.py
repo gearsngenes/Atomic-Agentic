@@ -2153,6 +2153,7 @@ class TestToolAgentContextProperties:
         agent = ScriptedToolAgent(context_enabled=True, context_properties=[prop])
         agent.set_context_properties(None)
         assert agent._context_properties == ()
+        assert "context" in [p.name for p in agent.parameters]
 
 
 # ── TestPlanActAgentUpdatePromptGuard ────────────────────────────────────────
@@ -2163,6 +2164,12 @@ class TestPlanActAgentUpdatePromptGuard:
         config = PromptConfig(template="replaced", description="replacement")
         with pytest.raises(ToolAgentError, match="plan_first"):
             agent.update_prompt("plan_first", config)
+
+    def test_update_prompt_plan_first_padded_raises(self) -> None:
+        agent = make_planact_agent([])
+        config = PromptConfig(template="replaced", description="replacement")
+        with pytest.raises(ToolAgentError, match="plan_first"):
+            agent.update_prompt("  plan_first  ", config)
 
     def test_update_prompt_other_key_allowed(self) -> None:
         agent = make_planact_agent([])
@@ -2179,6 +2186,12 @@ class TestReActAgentUpdatePromptGuard:
         config = PromptConfig(template="replaced", description="replacement")
         with pytest.raises(ToolAgentError, match="reason_then_act"):
             agent.update_prompt("reason_then_act", config)
+
+    def test_update_prompt_reason_then_act_padded_raises(self) -> None:
+        agent = make_react_agent([])
+        config = PromptConfig(template="replaced", description="replacement")
+        with pytest.raises(ToolAgentError, match="reason_then_act"):
+            agent.update_prompt("  reason_then_act  ", config)
 
     def test_update_prompt_other_key_allowed(self) -> None:
         agent = make_react_agent([])

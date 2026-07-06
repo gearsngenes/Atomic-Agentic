@@ -165,7 +165,7 @@ class PlanActAgent(ToolAgent):
         is operational machinery and must not be replaced post-construction.
         All other keys are forwarded to the base implementation.
         """
-        if key == "plan_first":
+        if key.strip() == "plan_first":
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: "
                 "'plan_first' is the built-in planning instruction prompt and cannot "
