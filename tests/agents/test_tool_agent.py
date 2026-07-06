@@ -35,6 +35,7 @@ from conftest import (
 )
 
 from atomic_agentic.agents.toolagent import ToolAgent, extract_dependencies, return_tool
+from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.models.agents.runstates import ToolAgentRunState
@@ -62,91 +63,35 @@ class TestToolAgentConstruction:
         assert agent.has_tool(return_tool.full_name)
         assert agent.get_tool(return_tool.full_name) is return_tool
 
-    def test_tool_instructions_property_returns_template(self) -> None:
-        agent = make_agent()
-        assert agent.tool_instructions == ROLE_TEMPLATE
-
-    def test_build_context_populates_tools_limit_constants(self) -> None:
-        agent = make_agent(tool_calls_limit=3)
-        register_math_tools(agent)
-
-        context, _ = agent._build_context({})
-
-        assert ToolAgent.TOOLS_FIELD in context
-        assert ToolAgent.LIMIT_FIELD in context
-        assert ToolAgent.CONSTANTS_FIELD in context
-        assert "3" in context[ToolAgent.LIMIT_FIELD]
-        assert agent._tool_prompt_key not in context
-
-    def test_build_context_unlimited_when_no_limit(self) -> None:
-        agent = make_agent()
-        context, _ = agent._build_context({})
-        assert context[ToolAgent.LIMIT_FIELD] == "unlimited"
-
-    def test_custom_prompt_key_stored_and_accessible(self) -> None:
-        agent = ScriptedToolAgent(prompt_key="custom_key")
-        assert agent._tool_prompt_key == "custom_key"
-        assert "custom_key" in agent.system_prompts
-
-    def test_tool_instructions_accepts_prompt_config_directly(self) -> None:
-        config = PromptConfig(template=ROLE_TEMPLATE, description="pre-built config")
-        agent = ScriptedToolAgent(tool_instructions=config)
-        assert agent.tool_instructions == ROLE_TEMPLATE
-
-    def test_update_prompt_rejects_tool_prompt_key(self) -> None:
-        agent = make_agent()
-        replacement = PromptConfig(template=ROLE_TEMPLATE, description="replacement")
-        with pytest.raises(AgentError):
-            agent.update_prompt(agent._tool_prompt_key, replacement)
-
     def test_update_prompt_accepts_other_key(self) -> None:
         agent = make_agent()
         config = PromptConfig(template="hello", description="other")
         agent.update_prompt("other_key", config)
         assert "other_key" in agent.system_prompts
 
-    def test_tool_prompt_missing_tools_placeholder_raises(self) -> None:
-        config = PromptConfig(
-            template="Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS}",
-            description="missing TOOLS",
-        )
-        with pytest.raises(ToolAgentError, match="TOOLS"):
-            ScriptedToolAgent._validate_tool_prompt_template(config)
+    def test_scripted_tool_agent_registers_prompt_in_system_prompts(self) -> None:
+        agent = make_agent()
+        assert "tool_instructions" in agent.system_prompts
+        assert isinstance(agent.system_prompts["tool_instructions"], PromptConfig)
+        assert agent.system_prompts["tool_instructions"].template == ROLE_TEMPLATE
 
-    def test_tool_prompt_missing_tool_calls_limit_placeholder_raises(self) -> None:
-        config = PromptConfig(
-            template="Tools: {TOOLS} Constants: {CONSTANTS}",
-            description="missing TOOL_CALLS_LIMIT",
-        )
-        with pytest.raises(ToolAgentError, match="TOOL_CALLS_LIMIT"):
-            ScriptedToolAgent._validate_tool_prompt_template(config)
+    def test_planact_agent_registers_prompt_in_system_prompts(self) -> None:
+        from atomic_agentic.agents.prompts import PLANNER_PROMPT
+        agent = make_planact_agent([])
+        assert "plan_first" in agent.system_prompts
+        assert agent.system_prompts["plan_first"] is PLANNER_PROMPT
 
-    def test_tool_prompt_missing_constants_placeholder_raises(self) -> None:
-        config = PromptConfig(
-            template="Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT}",
-            description="missing CONSTANTS",
-        )
-        with pytest.raises(ToolAgentError, match="CONSTANTS"):
-            ScriptedToolAgent._validate_tool_prompt_template(config)
+    def test_react_agent_registers_prompt_in_system_prompts(self) -> None:
+        from atomic_agentic.agents.prompts import ORCHESTRATOR_PROMPT
+        agent = make_react_agent([])
+        assert "reason_then_act" in agent.system_prompts
+        assert agent.system_prompts["reason_then_act"] is ORCHESTRATOR_PROMPT
 
-    def test_tool_prompt_extra_simple_placeholder_is_allowed(self) -> None:
-        config = PromptConfig(
-            template="Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS} Extra: {EXTRA}",
-            description="extra field",
-        )
-        ScriptedToolAgent._validate_tool_prompt_template(config)  # must not raise
-
-    def test_constructor_positional_placeholder_raises_tool_agent_error(self) -> None:
-        with pytest.raises(ToolAgentError):
-            ScriptedToolAgent(
-                tool_instructions="Tools: {TOOLS} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS} {}"
-            )
-
-    def test_constructor_field_expression_raises_tool_agent_error(self) -> None:
-        with pytest.raises(ToolAgentError):
-            ScriptedToolAgent(
-                tool_instructions="Tools: {TOOLS.name} Limit: {TOOL_CALLS_LIMIT} Constants: {CONSTANTS}"
-            )
+    def test_update_prompt_accepts_previously_guarded_key(self) -> None:
+        agent = make_agent()
+        replacement = PromptConfig(template=ROLE_TEMPLATE, description="replacement")
+        agent.update_prompt("tool_instructions", replacement)
+        assert agent.system_prompts["tool_instructions"] is replacement
 
     @pytest.mark.parametrize("value", [None, 0, 1, 5])
     def test_tool_calls_limit_accepts_none_and_non_negative_int(
@@ -670,8 +615,7 @@ class TestConstantRegistration:
         agent = make_agent()
         agent.register_constant("THRESHOLD", 0.9, "Decision threshold.")
 
-        context, _ = agent._build_context({})
-        constants_block = context[ToolAgent.CONSTANTS_FIELD]
+        constants_block = agent.constants_context()
 
         assert "THRESHOLD" in constants_block
         assert "Type: float" in constants_block
@@ -1281,7 +1225,7 @@ class TestScriptedInvokeLoop:
         assert len(agent.records) == 1
         turn = agent.records[0]
         assert isinstance(turn, ToolAgentRecord)
-        assert turn.user_prompt == "run"
+        assert turn.user_prompt.template == "run"
         assert turn.generated_response == 5
         assert turn.final_result.result == 5
         assert turn.blackboard_start == 0
@@ -1674,7 +1618,7 @@ class TestToolAgentRecordRendering:
     def test_render_turn_raises_for_non_tool_agent_turn(self) -> None:
         agent = make_agent()
         turn = AgentRecord(
-            user_prompt="run",
+            user_prompt=PromptConfig(template="run", description=""),
             generated_response="raw",
         )
 
@@ -1903,7 +1847,7 @@ class TestToolAgentRecordMetadataContract:
     def test_render_turn_with_none_span_returns_base_user_assistant_pair(self) -> None:
         agent = make_agent()
         turn = ToolAgentRecord(
-            user_prompt="run",
+            user_prompt=PromptConfig(template="run", description=""),
             generated_response="raw response",
             blackboard_start=None,
             blackboard_end=None,
@@ -1919,7 +1863,7 @@ class TestToolAgentRecordMetadataContract:
     def test_render_turn_with_empty_span_returns_base_user_assistant_pair(self) -> None:
         agent = make_agent()
         turn = ToolAgentRecord(
-            user_prompt="run",
+            user_prompt=PromptConfig(template="run", description=""),
             generated_response="raw response",
             blackboard_start=0,
             blackboard_end=0,
@@ -1935,7 +1879,7 @@ class TestToolAgentRecordMetadataContract:
     def test_render_turn_rejects_span_beyond_current_blackboard(self) -> None:
         agent = make_agent()
         turn = ToolAgentRecord(
-            user_prompt="run",
+            user_prompt=PromptConfig(template="run", description=""),
             generated_response="raw response",
             blackboard_start=0,
             blackboard_end=1,
@@ -2187,5 +2131,71 @@ class TestExecutePreparedBatchEarlyValidation:
         assert updated.running_blackboard[0].result.result == 7
 
 
-# ── TestAwaitFieldKeyInErrors ────────────────────────────────────────────────
+# ── TestToolAgentContextProperties ──────────────────────────────────────────
+
+class TestToolAgentContextProperties:
+    def test_context_properties_at_construction_adds_graft_d(self) -> None:
+        prop = ParamSpec(name="user_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="The user identifier.")
+        agent = ScriptedToolAgent(context_enabled=True, context_properties=[prop])
+        param_names = [p.name for p in agent.parameters]
+        assert "context" in param_names
+
+    def test_set_context_properties_refreshes_description(self) -> None:
+        prop = ParamSpec(name="user_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="The user identifier.")
+        agent = ScriptedToolAgent(context_enabled=True, context_properties=[prop])
+        new_prop = ParamSpec(name="session_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="Active session.")
+        agent.set_context_properties([new_prop])
+        context_param = next(p for p in agent.parameters if p.name == "context")
+        assert "session_id" in context_param.description
+
+    def test_set_context_properties_none_clears_properties(self) -> None:
+        prop = ParamSpec(name="user_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="The user identifier.")
+        agent = ScriptedToolAgent(context_enabled=True, context_properties=[prop])
+        agent.set_context_properties(None)
+        assert agent._context_properties == ()
+        assert "context" in [p.name for p in agent.parameters]
+
+
+# ── TestPlanActAgentUpdatePromptGuard ────────────────────────────────────────
+
+class TestPlanActAgentUpdatePromptGuard:
+    def test_update_prompt_plan_first_raises(self) -> None:
+        agent = make_planact_agent([])
+        config = PromptConfig(template="replaced", description="replacement")
+        with pytest.raises(ToolAgentError, match="plan_first"):
+            agent.update_prompt("plan_first", config)
+
+    def test_update_prompt_plan_first_padded_raises(self) -> None:
+        agent = make_planact_agent([])
+        config = PromptConfig(template="replaced", description="replacement")
+        with pytest.raises(ToolAgentError, match="plan_first"):
+            agent.update_prompt("  plan_first  ", config)
+
+    def test_update_prompt_other_key_allowed(self) -> None:
+        agent = make_planact_agent([])
+        config = PromptConfig(template="some extra prompt", description="extra")
+        agent.update_prompt("extra_instructions", config)
+        assert "extra_instructions" in agent.system_prompts
+
+
+# ── TestReActAgentUpdatePromptGuard ─────────────────────────────────────────
+
+class TestReActAgentUpdatePromptGuard:
+    def test_update_prompt_reason_then_act_raises(self) -> None:
+        agent = make_react_agent([])
+        config = PromptConfig(template="replaced", description="replacement")
+        with pytest.raises(ToolAgentError, match="reason_then_act"):
+            agent.update_prompt("reason_then_act", config)
+
+    def test_update_prompt_reason_then_act_padded_raises(self) -> None:
+        agent = make_react_agent([])
+        config = PromptConfig(template="replaced", description="replacement")
+        with pytest.raises(ToolAgentError, match="reason_then_act"):
+            agent.update_prompt("  reason_then_act  ", config)
+
+    def test_update_prompt_other_key_allowed(self) -> None:
+        agent = make_react_agent([])
+        config = PromptConfig(template="some extra prompt", description="extra")
+        agent.update_prompt("extra_instructions", config)
+        assert "extra_instructions" in agent.system_prompts
 

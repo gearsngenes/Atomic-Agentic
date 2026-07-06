@@ -222,7 +222,8 @@ class TestReActAgent:
             tool_calls_limit=1,
         )
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "react"}],
+            turns=[],
+            prompt="react",
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -282,7 +283,8 @@ class TestReActAgent:
             tool_calls_limit=1,
         )
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "react"}],
+            turns=[],
+            prompt="react",
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -363,7 +365,8 @@ class TestReActAgent:
             tool_calls_limit=2,
         )
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "react"}],
+            turns=[],
+            prompt="react",
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -393,7 +396,8 @@ class TestReActAgent:
             tool_calls_limit=2,
         )
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "react"}],
+            turns=[],
+            prompt="react",
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -861,7 +865,8 @@ class TestCacheRefValidation:
 
         # Build the snapshot for prefix_len=1 (after step 0 fails, before step 1 is generated).
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "react"}],
+            turns=[],
+            prompt="react",
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -897,7 +902,8 @@ class TestCacheRefValidation:
 
         # Build snapshot after step 0 executed — check no FAILED markers.
         state = agent._initialize_run_state(
-            messages=[{"role": "user", "content": "react"}],
+            turns=[],
+            prompt="react",
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )

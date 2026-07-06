@@ -17,17 +17,16 @@ class PromptConfig:
     from that template.
 
     Construction only requires ``template`` and ``description``. Named
-    ``{placeholder}`` slots are extracted at construction time and become
-    ``KEYWORD_ONLY`` ``ParamSpec`` entries in ``parameters``, ordered by
-    first appearance. Duplicate placeholders produce a single entry.
+    ``{placeholder}`` slots that are valid Python identifiers are extracted at
+    construction time and become ``KEYWORD_ONLY`` ``ParamSpec`` entries in
+    ``parameters``, ordered by first appearance. Duplicate placeholders produce
+    a single entry. Non-identifier expressions (``{}``, ``{0}``,
+    ``{obj.attr}``, ``{x[0]}``) are silently skipped and passed through as
+    literal text during rendering.
 
     ``defaults`` maps placeholder names to their default values. Any key
     in ``defaults`` that is not found in the template raises ``ValueError``
     at construction.
-
-    Only simple named placeholders are supported. Positional (``{}``,
-    ``{0}``) and attribute/index expressions (``{obj.attr}``, ``{x[0]}``)
-    raise ``ValueError`` at construction.
 
     ``description`` is a human-readable label for prompt-handoff and
     selection scenarios — it is not used during rendering.
@@ -56,18 +55,15 @@ class PromptConfig:
                 f"got {type(defaults).__name__}"
             )
 
-        # discover placeholder names in template order, deduplicating
+        # Discover identifier placeholder names in template order, deduplicating.
+        # Non-identifier expressions are skipped here and handled in render().
         names: list[str] = []
         seen: set[str] = set()
         for _, field_name, _, _ in string.Formatter().parse(self.template):
             if field_name is None:
                 continue
             if not field_name.isidentifier():
-                raise ValueError(
-                    f"PromptConfig: template contains unsupported placeholder "
-                    f"{{{field_name!r}}}. Only simple named keyword placeholders "
-                    "are allowed (no positional, attribute, or index expressions)."
-                )
+                continue
             if field_name not in seen:
                 names.append(field_name)
                 seen.add(field_name)
@@ -97,10 +93,11 @@ class PromptConfig:
 
         For each declared parameter: use the caller-supplied value if present;
         fill the declared default if absent and optional; raise ``ValueError``
-        if absent and required. Variables not declared in ``self.parameters``
-        are ignored even if present in ``inputs``.
+        if absent and required. Non-identifier brace expressions not in
+        ``self.parameters`` are passed through as literal text.
         """
         format_dict: dict[str, Any] = {}
+        param_names = {p.name for p in self.parameters}
         for param in self.parameters:
             if param.name in inputs:
                 format_dict[param.name] = inputs[param.name]
@@ -111,4 +108,38 @@ class PromptConfig:
                     f"PromptConfig.render: required parameter {param.name!r} "
                     "is missing from inputs."
                 )
-        return self.template.format(**format_dict)
+        parts: list[str] = []
+        for literal_text, field_name, format_spec, conversion in string.Formatter().parse(self.template):
+            if literal_text:
+                parts.append(literal_text)
+            if field_name is None:
+                continue
+            if field_name in param_names:
+                val = format_dict[field_name]
+                if conversion == "r":
+                    val = repr(val)
+                elif conversion == "s":
+                    val = str(val)
+                elif conversion == "a":
+                    val = ascii(val)
+                parts.append(format(val, format_spec) if format_spec else str(val))
+            else:
+                expr = field_name
+                if conversion:
+                    expr += f"!{conversion}"
+                if format_spec:
+                    expr += f":{format_spec}"
+                parts.append("{" + expr + "}")
+        return "".join(parts)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a serializable representation of this config."""
+        return {
+            "template": self.template,
+            "description": self.description,
+            "defaults": {
+                p.name: p.default
+                for p in self.parameters
+                if p.default is not NO_VAL
+            },
+        }

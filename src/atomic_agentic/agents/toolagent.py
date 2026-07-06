@@ -118,7 +118,6 @@ from typing import (
 import pprint
 
 from .base import Agent
-from ..models.agents.prompts import PromptConfig
 from ..constants.agents import (
     ARGS_FIELD,
     AWAIT_FIELD,
@@ -128,12 +127,13 @@ from ..constants.agents import (
 )
 
 from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from ..models.parameters import ParamSpec
+from ..models.agents.prompts import PromptConfig
 from ..models.results.agents import ToolAgentResult, ToolUsageRecord
 from ..models.results import LLMModelData
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from ..models.agents.runstates import ToolAgentRunState
 from ..exceptions import (
-    AgentError,
     ToolAgentError,
     ToolInvocationError,
     ToolRegistrationError,
@@ -166,25 +166,24 @@ class ToolAgent(Agent, ABC):
 
     Template-Method Loop
     --------------------
-    The ``_invoke(turns, prompt)`` and ``_ainvoke(turns, prompt)`` methods are
-    FINAL; subclasses should not override them. They receive the selected
-    canonical turns and current prompt from the base ``Agent`` lifecycle, render a
-    provider-facing message list once with ``build_messages(...)``, and then run
-    the existing ToolAgent template loop::
+    The ``_invoke(turns, prompt, context)`` and ``_ainvoke(turns, prompt, context)``
+    methods are FINAL; subclasses should not override them. They receive the selected
+    canonical turns, current prompt, and assembled context dict from the base
+    ``Agent`` lifecycle, then run the ToolAgent template loop::
 
-    1. messages = build_messages(role_prompt, turns, prompt)
-    2. state = _initialize_run_state(messages=messages)  [subclass hook]
-    3. while not state.is_done:
+    1. state = _initialize_run_state(turns=turns, prompt=prompt, context=context, ...)
+                                                              [subclass hook]
+    2. while not state.is_done:
         state = _prepare_next_batch(state)              [subclass hook]
         if prepared_steps is empty → continue           [cascade skip: entire batch was cascade-failed]
         state = _execute_prepared_batch(state)          [base implementation]
         [completion check: if return tool executed, is_done=True]
        (each LLM generation made along the way is captured as an LLMRecord
        and accumulated onto state.llm_records)
-    4. blackboard_start = len(self._blackboard)
+    3. blackboard_start = len(self._blackboard)
         state = update_blackboard(state)   [always; context_enabled only gates cache_blackboard]
         blackboard_end = len(self._blackboard)
-    5. return a 2-tuple of a draft ToolAgentRecord (final_result=None) carrying
+    4. return a 2-tuple of a draft ToolAgentRecord (final_result=None) carrying
        state.return_value, blackboard_start, and blackboard_end; and a metadata
        dict with llm_records, llm_model_data, tool_usage, and exception_records.
 
@@ -198,9 +197,11 @@ class ToolAgent(Agent, ABC):
     -------------------------
     Subclasses must implement two abstract methods:
 
-    **_initialize_run_state(messages)** → ``RS`` (TypeVar[ToolAgentRunState])
-        Initialize and return a run state for this invoke. Must:
-        - Copy incoming LLM-facing messages into run-local state
+    **_initialize_run_state(turns, prompt, context, ...)** → ``RS`` (TypeVar[ToolAgentRunState])
+        Initialize and return a run state for this invoke. Receives the raw turns,
+        prompt, and context from the base lifecycle. Must:
+        - Render the system prompt from instance state (tools, limit, constants)
+        - Call ``build_messages(system, turns, prompt)`` to produce LLM messages
         - Snapshot cached blackboard entries if context is enabled
         - Create an appropriate running blackboard
         - Initialize ``executed_steps``, ``prepared_steps``, and completion state
@@ -243,14 +244,6 @@ class ToolAgent(Agent, ABC):
     LIMIT_FIELD = "TOOL_CALLS_LIMIT"
     CONSTANTS_FIELD = "CONSTANTS"
 
-    REQUIRED_PROMPT_FIELDS = frozenset(
-        {
-            TOOLS_FIELD,
-            LIMIT_FIELD,
-            CONSTANTS_FIELD,
-        }
-    )
-
     STEP_REF_PATTERN: re.Pattern[str] = re.compile(
     r"<<__s(\d+)__>>"
     )
@@ -267,9 +260,9 @@ class ToolAgent(Agent, ABC):
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        tool_instructions: str | PromptConfig,
         filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = False,
+        context_properties: list[str] | list[ParamSpec] | None = None,
         *,
         fail_fast: bool = True,
         generation_retries: int = 0,
@@ -280,7 +273,6 @@ class ToolAgent(Agent, ABC):
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_result_key: Optional[str] = None,
-        prompt_key: str = "tool_instructions",
         records_window: Optional[int] = None,
     ) -> None:
         """
@@ -294,12 +286,6 @@ class ToolAgent(Agent, ABC):
             Human-readable description of this agent's purpose.
         llm_engine : LLMEngine
             Provider-facing LLM engine used for all generation calls.
-        tool_instructions : str | PromptConfig
-            System prompt template for tool-calling instructions. Must contain
-            the named placeholders ``{TOOLS}``, ``{TOOL_CALLS_LIMIT}``, and
-            ``{CONSTANTS}``; may include additional simple named placeholders.
-            Accepts a raw str (wrapped into a PromptConfig inline) or a
-            pre-built PromptConfig. Validated and frozen at construction.
         filter_extraneous_inputs : bool | None
             When ``True``, inputs not declared in ``parameters`` are silently
             dropped before invocation. When ``False``, extraneous inputs raise.
@@ -342,36 +328,10 @@ class ToolAgent(Agent, ABC):
         post_result_key : str | None
             Key under which the agent result is passed to ``post_invoke``
             when ``post_invoke`` is set.
-        prompt_key : str
-            Key used to store the tool instructions PromptConfig in
-            ``_system_prompts``. Defaults to ``"tool_instructions"``.
         records_window : int | None
             Maximum number of prior ``AgentRecord`` turns rendered into LLM
             context. ``None`` means all records are rendered.
         """
-        if isinstance(tool_instructions, str):
-            if not tool_instructions.strip():
-                raise ToolAgentError(
-                    "ToolAgent tool_instructions must be a non-empty str template."
-                )
-            try:
-                config = PromptConfig(
-                    template=tool_instructions.strip(),
-                    description="ToolAgent system instructions",
-                )
-            except (TypeError, ValueError) as exc:
-                raise ToolAgentError(
-                    f"Invalid ToolAgent tool_instructions template: {exc}"
-                ) from exc
-        elif isinstance(tool_instructions, PromptConfig):
-            config = tool_instructions
-        else:
-            raise ToolAgentError(
-                f"ToolAgent tool_instructions must be a str or PromptConfig; "
-                f"got {type(tool_instructions).__name__!r}."
-            )
-        self._validate_tool_prompt_template(config)
-
         super().__init__(
             name=name,
             namespace=namespace,
@@ -379,7 +339,7 @@ class ToolAgent(Agent, ABC):
             llm_engine=llm_engine,
             filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
-            context_keys=None,
+            context_properties=context_properties,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
@@ -415,27 +375,6 @@ class ToolAgent(Agent, ABC):
 
         # Always include canonical return tool (avoid collisions by skipping).
         self.register(return_tool, name_collision_mode="skip")
-
-        self._tool_prompt_key: str = prompt_key
-        self._system_prompts[prompt_key] = config
-
-    # ------------------------------------------------------------------ #
-    # Agent Properties
-    # ------------------------------------------------------------------ #
-    @property
-    def tool_instructions(self) -> str:
-        """Tool instructions template string. Read-only."""
-        return self._system_prompts[self._tool_prompt_key].template
-
-    def update_prompt(self, key: str, config: PromptConfig) -> None:
-        """Register or replace a system prompt. Raises AgentError if key matches the
-        tool instructions key."""
-        if isinstance(key, str) and key.strip() == self._tool_prompt_key:
-            raise AgentError(
-                f"{self._tool_prompt_key!r} is immutable on ToolAgent; "
-                "construct a new ToolAgent to change the tool instructions."
-            )
-        super().update_prompt(key, config)
 
     # ------------------------------------------------------------------ #
     # ToolAgent Properties
@@ -534,31 +473,6 @@ class ToolAgent(Agent, ABC):
         """Clear the stored turn history and the persisted blackboard."""
         super().clear_memory()
         self._blackboard.clear()
-    # ------------------------------------------------------------------ #
-    # Prompt Helpers
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _validate_tool_prompt_template(config: PromptConfig) -> None:
-        """Verify that config.parameters contains all required tool prompt fields."""
-        param_names = {p.name for p in config.parameters}
-        missing = ToolAgent.REQUIRED_PROMPT_FIELDS - param_names
-        if missing:
-            raise ToolAgentError(
-                f"ToolAgent tool_instructions template missing required placeholder(s): "
-                f"{', '.join(sorted(missing))}."
-            )
-
-    def _build_context(self, inputs: dict) -> tuple[dict, dict]:
-        """Extend base context with tool-instruction render inputs from instance state."""
-        context, remaining = super()._build_context(inputs)
-        limit_text = (
-            "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        )
-        context[self.TOOLS_FIELD] = self.actions_context()
-        context[self.LIMIT_FIELD] = limit_text
-        context[self.CONSTANTS_FIELD] = self.constants_context()
-        return context, remaining
-
     # ------------------------------------------------------------------ #
     # Toolbox Helpers
     # ------------------------------------------------------------------ #
@@ -1845,33 +1759,29 @@ class ToolAgent(Agent, ABC):
         FINAL sync ToolAgent template method.
 
         Receives selected canonical turns, the current prompt, and the assembled
-        context dict from the base ``Agent.invoke(...)`` lifecycle. Renders the
-        system prompt from context, builds the message list once, then runs the
+        context dict from the base ``Agent.invoke(...)`` lifecycle, then runs the
         ToolAgent template loop. Returns a 2-tuple of a **draft** ``ToolAgentRecord``
         (``final_result`` is ``None``) and a metadata dict carrying ``llm_records``,
         ``llm_model_data``, and ``tool_usage``.
 
-        The LLMRecord envelopes are accumulated on ``state.llm_records`` across
-        the planning loop and transferred to the metadata dict at return time.
-        ``invoke`` later completes the draft via
+        System-prompt rendering and message construction are delegated entirely to
+        ``_initialize_run_state``; this method receives and forwards ``turns``,
+        ``prompt``, and ``context`` without interpreting them. LLMRecord envelopes
+        are accumulated on ``state.llm_records`` across the loop and transferred to
+        the metadata dict at return time. ``invoke`` later completes the draft via
         ``dataclasses.replace(draft, final_result=agent_result)``.
 
         Subclasses should not override this method. They should implement:
-        - ``_initialize_run_state(messages=...)``
+        - ``_initialize_run_state(turns=..., prompt=..., context=..., ...)``
         - ``_prepare_next_batch(state)``
         """
-        system = self._system_prompts[self._tool_prompt_key].render(context)
-        messages = self.build_messages(system, turns, prompt)
-
-        if not messages:
-            raise ToolAgentError("ToolAgent._invoke requires a non-empty messages list.")
-
         # Compute conversation-scoped cache index sets from the turns chain.
         # Only executed/failed slots from records in this conversation are reachable.
         valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
 
         state = self._initialize_run_state(
-            messages=messages,
+            turns=turns,
+            prompt=prompt,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )
@@ -1925,7 +1835,7 @@ class ToolAgent(Agent, ABC):
         )
 
         draft = ToolAgentRecord(
-            user_prompt=prompt,
+            user_prompt=PromptConfig(template=prompt, description=""),
             generated_response=state.return_value,
             blackboard_start=blackboard_start,
             blackboard_end=blackboard_end,
@@ -1948,34 +1858,29 @@ class ToolAgent(Agent, ABC):
         FINAL async ToolAgent template method.
 
         Receives selected canonical turns, the current prompt, and the assembled
-        context dict from the base ``Agent.async_invoke(...)`` lifecycle. Renders
-        the system prompt from context, builds the message list once, then runs
+        context dict from the base ``Agent.async_invoke(...)`` lifecycle, then runs
         the ToolAgent template loop. Returns a 2-tuple mirroring the sync
         ``_invoke(...)`` contract — see its docstring for details on the
         draft-record and metadata dict contents.
 
-        Mirrors the sync ``_invoke(...)`` loop, but offloads the current sync
-        planning hooks to worker threads and awaits the async batch executor for
-        tool execution.
+        System-prompt rendering and message construction are delegated to
+        ``_ainitialize_run_state``; this method forwards ``turns``, ``prompt``,
+        and ``context`` without interpreting them. Mirrors the sync ``_invoke(...)``
+        loop but awaits the async batch executor for tool execution.
 
         Subclasses should not override this method. They should implement:
-        - ``_initialize_run_state(messages=...)``
+        - ``_initialize_run_state(turns=..., prompt=..., context=..., ...)``
         - ``_prepare_next_batch(state)``
-        - ``_ainitialize_run_state(messages=...)`` (async; base default: asyncio.to_thread wrap)
+        - ``_ainitialize_run_state(turns=..., prompt=..., context=..., ...)`` (async; base default: asyncio.to_thread wrap)
         - ``_aprepare_next_batch(state)`` (async; base default: asyncio.to_thread wrap)
         """
-        system = self._system_prompts[self._tool_prompt_key].render(context)
-        messages = self.build_messages(system, turns, prompt)
-
-        if not messages:
-            raise ToolAgentError("ToolAgent._ainvoke requires a non-empty messages list.")
-
         # Compute conversation-scoped cache index sets from the turns chain.
         # Only executed/failed slots from records in this conversation are reachable.
         valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
 
         state = await self._ainitialize_run_state(
-            messages=messages,
+            turns=turns,
+            prompt=prompt,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )
@@ -2031,7 +1936,7 @@ class ToolAgent(Agent, ABC):
         )
 
         draft = ToolAgentRecord(
-            user_prompt=prompt,
+            user_prompt=PromptConfig(template=prompt, description=""),
             generated_response=state.return_value,
             blackboard_start=blackboard_start,
             blackboard_end=blackboard_end,
@@ -2467,19 +2372,26 @@ class ToolAgent(Agent, ABC):
     def _initialize_run_state(
         self,
         *,
-        messages: list[dict[str, str]],
+        turns: list[AgentRecord],
+        prompt: str,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ToolAgentRunState:
         """
         Initialize and return a run state for this invocation.
 
+        Receives the selected canonical turns and rendered user prompt from the
+        base Agent lifecycle. Implementations are responsible for rendering the
+        system prompt, building the full message list via ``build_messages(...)``,
+        and initializing all run-state bookkeeping.
+
         Implementations should:
-        - copy the incoming LLM-facing messages into run-local state
+        - render the system prompt from instance state (tools, limit, constants)
+        - call ``self.build_messages(system, turns, prompt)`` to produce messages
         - snapshot persisted blackboard entries if context is enabled
         - allocate an appropriate running blackboard for current-run tool calls
         - initialize execution bookkeeping such as executed_steps, prepared_steps,
-        tool_calls_used, is_done, and return_value
+          tool_calls_used, is_done, and return_value
         """
         raise NotImplementedError
 
@@ -2504,7 +2416,8 @@ class ToolAgent(Agent, ABC):
     async def _ainitialize_run_state(
         self,
         *,
-        messages: list[dict[str, str]],
+        turns: list[AgentRecord],
+        prompt: str,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ToolAgentRunState:
@@ -2516,7 +2429,8 @@ class ToolAgent(Agent, ABC):
         """
         return await asyncio.to_thread(
             self._initialize_run_state,
-            messages=messages,
+            turns=turns,
+            prompt=prompt,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )

@@ -11,12 +11,13 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.constants.agents import RUN_ID_PARAM
+from atomic_agentic.constants.agents import RUN_ID_PARAM, CONTEXT_PARAM
 from atomic_agentic.engines.LLMEngines import LLMEngine
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results import LLMModelData, TokenUsage
+from atomic_agentic.utils.agents import normalize_context_properties
 
 
 ROLE_PROMPT = "You are a deterministic test writer."
@@ -48,7 +49,10 @@ class _MinimalAgent(Agent):
             messages=({"role": "user", "content": prompt},),
             llm_result=engine_result,
         )
-        draft = AgentRecord(user_prompt=prompt, generated_response=engine_result.result)
+        draft = AgentRecord(
+            user_prompt=PromptConfig(template=prompt, description=""),
+            generated_response=engine_result.result,
+        )
         return draft, {
             "llm_records": (llm_record,),
             "llm_model_data": engine_result.model_data,
@@ -70,7 +74,10 @@ class _MinimalAgent(Agent):
             messages=({"role": "user", "content": prompt},),
             llm_result=engine_result,
         )
-        draft = AgentRecord(user_prompt=prompt, generated_response=engine_result.result)
+        draft = AgentRecord(
+            user_prompt=PromptConfig(template=prompt, description=""),
+            generated_response=engine_result.result,
+        )
         return draft, {
             "llm_records": (llm_record,),
             "llm_model_data": engine_result.model_data,
@@ -420,6 +427,27 @@ class TestAgentPostInvokeRouting:
 
         assert agent.post_result_key == "items"
 
+    def test_post_result_key_context_raises(self) -> None:
+        def post_with_context_key(context: dict) -> dict:
+            return context
+
+        with pytest.raises(AgentError, match="framework-reserved"):
+            make_agent(post_invoke=post_with_context_key, post_result_key="context")
+
+    def test_post_result_key_run_id_raises(self) -> None:
+        def post_with_run_id_key(run_id: str, result: str) -> str:
+            return result
+
+        with pytest.raises(AgentError, match="framework-reserved"):
+            make_agent(post_invoke=post_with_run_id_key, post_result_key="run_id")
+
+    def test_auto_resolved_result_key_reserved_raises(self) -> None:
+        def post_context_first(context: dict) -> dict:
+            return context
+
+        with pytest.raises(AgentError, match="framework-reserved"):
+            make_agent(post_invoke=post_context_first)
+
 
 class TestAgentContext:
     def test_context_disabled_does_not_resend_history_but_still_stores_records(self) -> None:
@@ -548,8 +576,8 @@ class TestAgentContext:
         assert second_call_messages[-1]["content"] == "Write about second topic in a plain tone."
 
         assert len(agent.records) == 2
-        assert agent.records[0].user_prompt == "Write about first topic in a plain tone."
-        assert agent.records[1].user_prompt == "Write about second topic in a plain tone."
+        assert agent.records[0].user_prompt.template == "Write about first topic in a plain tone."
+        assert agent.records[1].user_prompt.template == "Write about second topic in a plain tone."
 
     def test_clear_memory_removes_stored_history(self) -> None:
         engine = StatefulEchoLLMEngine()
@@ -574,7 +602,7 @@ class TestAgentValidation:
     def test_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
         agent = make_agent(pre_invoke=bad_pre_invoke)
 
-        with pytest.raises(AgentInvocationError, match="pre_invoke returned non-string"):
+        with pytest.raises(AgentInvocationError, match="pre_invoke returned non-string/non-PromptConfig"):
             agent.invoke({"topic": "pytest"})
 
     def test_post_invoke_with_one_defaulted_parameter_is_allowed(self) -> None:
@@ -751,7 +779,7 @@ class TestAgentAsyncInvoke:
     def test_async_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
         agent = make_agent(pre_invoke=bad_pre_invoke)
 
-        with pytest.raises(AgentInvocationError, match="pre_invoke returned non-string"):
+        with pytest.raises(AgentInvocationError, match="pre_invoke returned non-string/non-PromptConfig"):
             asyncio.run(agent.async_invoke({"topic": "pytest"}))
 
     def test_async_engine_non_string_response_raises_agent_invocation_error(self) -> None:
@@ -840,15 +868,15 @@ class TestAgentMutableRuntimeProperties:
         }
 
 
-class TestAgentContextKeys:
-    """Tests for Pass 4 abstract Agent features: context_keys, _build_context, update_prompt."""
+class TestAgentContextProperties:
+    """Tests for context_properties, Graft D schema, and collision checks."""
 
-    def test_normalize_context_keys_none_returns_empty_list(self) -> None:
-        result = Agent._normalize_context_keys(None)
+    def test_normalize_context_properties_none_returns_empty_list(self) -> None:
+        result = normalize_context_properties(None)
         assert result == []
 
-    def test_normalize_context_keys_str_list_produces_keyword_only_paramspecs(self) -> None:
-        result = Agent._normalize_context_keys(["alpha", "beta"])
+    def test_normalize_context_properties_str_list_produces_keyword_only_paramspecs(self) -> None:
+        result = normalize_context_properties(["alpha", "beta"])
 
         assert len(result) == 2
         assert result[0].name == "alpha"
@@ -856,76 +884,109 @@ class TestAgentContextKeys:
         assert result[0].default is NO_VAL
         assert result[1].name == "beta"
 
-    def test_normalize_context_keys_paramspec_list_coerced_to_keyword_only(self) -> None:
+    def test_normalize_context_properties_paramspec_list_coerced_to_keyword_only(self) -> None:
         specs = [
             ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
         ]
-        result = Agent._normalize_context_keys(specs)
+        result = normalize_context_properties(specs)
 
         assert result[0].kind == ParamSpec.KEYWORD_ONLY
 
-    def test_normalize_context_keys_rejects_variadic_paramspec(self) -> None:
+    def test_normalize_context_properties_rejects_variadic_paramspec(self) -> None:
         specs = [
             ParamSpec(name="items", index=0, kind=ParamSpec.VAR_POSITIONAL, type="Any", default=NO_VAL),
         ]
         with pytest.raises(AgentError, match="variadic"):
-            Agent._normalize_context_keys(specs)
+            normalize_context_properties(specs)
 
-    def test_normalize_context_keys_rejects_duplicate_names(self) -> None:
+    def test_normalize_context_properties_rejects_duplicate_names(self) -> None:
         with pytest.raises(AgentError, match="duplicate"):
-            Agent._normalize_context_keys(["x", "x"])
+            normalize_context_properties(["x", "x"])
 
-    def test_normalize_context_keys_rejects_empty_string(self) -> None:
+    def test_normalize_context_properties_rejects_empty_string(self) -> None:
         with pytest.raises(AgentError, match="non-empty"):
-            Agent._normalize_context_keys([""])
+            normalize_context_properties([""])
 
-    def test_context_keys_appear_in_agent_schema(self) -> None:
+    def test_normalize_context_properties_accepts_reserved_framework_names(self) -> None:
+        # "context" and "run_id" are reserved agent *parameters*, but context_properties
+        # are keys inside the context dict — a separate namespace, so no conflict.
+        result = normalize_context_properties(["context", "run_id"])
+        assert [p.name for p in result] == ["context", "run_id"]
+
+    def test_context_properties_grafts_single_context_dict_param(self) -> None:
         agent = _MinimalAgent(
             name="ctx_agent",
             namespace="tests",
             description="d",
             llm_engine=StatefulEchoLLMEngine(),
-            context_keys=["persona", "style"],
+            context_properties=["persona", "style"],
         )
 
         names = [p.name for p in agent.parameters]
         kinds = {p.name: p.kind for p in agent.parameters}
 
-        assert "persona" in names
-        assert "style" in names
-        assert kinds["persona"] == "KEYWORD_ONLY"
-        assert kinds["style"] == "KEYWORD_ONLY"
+        assert "context" in names
+        assert kinds["context"] == "KEYWORD_ONLY"
+        assert "persona" not in names
+        assert "style" not in names
 
-    def test_build_context_pops_declared_keys_from_inputs(self) -> None:
+    def test_context_dict_param_appears_before_run_id(self) -> None:
         agent = _MinimalAgent(
             name="ctx_agent",
             namespace="tests",
             description="d",
             llm_engine=StatefulEchoLLMEngine(),
-            context_keys=["persona"],
+            context_properties=["persona"],
         )
+        names = [p.name for p in agent.parameters]
+        assert names.index("context") < names.index("run_id")
 
-        inputs = {"prompt": "hello", "persona": "pirate"}
-        context, remaining = agent._build_context(inputs)
+    def test_no_context_properties_does_not_graft_context_param(self) -> None:
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+        )
+        names = [p.name for p in agent.parameters]
+        assert "context" not in names
 
-        assert context == {"persona": "pirate"}
-        assert "persona" not in remaining
-        assert "prompt" in remaining
-
-    def test_build_context_leaves_undeclared_keys_in_remaining(self) -> None:
+    def test_required_context_property_missing_raises_agent_invocation_error(self) -> None:
         agent = _MinimalAgent(
             name="ctx_agent",
             namespace="tests",
             description="d",
             llm_engine=StatefulEchoLLMEngine(),
-            context_keys=["persona"],
+            context_properties=[
+                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default=NO_VAL),
+            ],
         )
+        with pytest.raises(AgentInvocationError, match="lang"):
+            agent.invoke({"prompt": "hello"})
 
-        inputs = {"prompt": "hello", "extra": "value"}
-        context, remaining = agent._build_context(inputs)
+    def test_required_context_property_provided_does_not_raise(self) -> None:
+        agent = _MinimalAgent(
+            name="ctx_agent",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            context_properties=[
+                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default=NO_VAL),
+            ],
+        )
+        result = agent.invoke({"prompt": "hello", "context": {"lang": "English"}})
+        assert result is not None
 
-        assert context == {}
-        assert remaining == {"prompt": "hello", "extra": "value"}
+    def test_context_stored_on_agent_record_after_invoke(self) -> None:
+        agent = _MinimalAgent(
+            name="ctx_agent",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            context_properties=["lang"],
+        )
+        agent.invoke({"prompt": "hello", "context": {"lang": "English"}})
+        assert agent.records[0].context == {"lang": "English"}
 
     def test_warn_reserved_name_collisions_run_id_semantic_match_warns(self) -> None:
         matching = ParamSpec(
@@ -937,7 +998,6 @@ class TestAgentContextKeys:
             Agent._warn_reserved_name_collisions(
                 pre_params=[matching],
                 post_params=[],
-                context_key_names=frozenset(),
             )
 
     def test_warn_reserved_name_collisions_run_id_semantic_mismatch_raises(self) -> None:
@@ -949,22 +1009,35 @@ class TestAgentContextKeys:
             Agent._warn_reserved_name_collisions(
                 pre_params=[clashing],
                 post_params=[],
-                context_key_names=frozenset(),
             )
 
-    def test_warn_reserved_name_collisions_warns_on_context_key_collision(self) -> None:
-        def pre_with_persona(persona: str, prompt: str) -> str:
-            return f"{persona}: {prompt}"
+    def test_warn_reserved_name_collisions_context_no_description_raises(self) -> None:
+        # context: dict with no description does not share the CONTEXT_PARAM description
+        # root → description mismatch → raises, not warns.
+        ctx_no_desc = ParamSpec(
+            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
+            type="dict", default={},
+        )
+        with pytest.raises(AgentError, match="description mismatch"):
+            Agent._warn_reserved_name_collisions(pre_params=[ctx_no_desc], post_params=[])
 
-        with pytest.warns(UserWarning, match="persona"):
-            _MinimalAgent(
-                name="warn_agent",
-                namespace="tests",
-                description="d",
-                llm_engine=StatefulEchoLLMEngine(),
-                pre_invoke=pre_with_persona,
-                context_keys=["persona"],
-            )
+    def test_warn_reserved_name_collisions_context_matching_description_warns(self) -> None:
+        ctx_desc_prefix = CONTEXT_PARAM.description.split("{")[0]
+        matching = ParamSpec(
+            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
+            type="dict", default={},
+            description=ctx_desc_prefix + " Required: 'lang' (str)",
+        )
+        with pytest.warns(UserWarning, match="redundant"):
+            Agent._warn_reserved_name_collisions(pre_params=[matching], post_params=[])
+
+    def test_warn_reserved_name_collisions_context_incompatible_type_raises(self) -> None:
+        bad_type = ParamSpec(
+            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
+            type="str", default=NO_VAL,
+        )
+        with pytest.raises(AgentError, match="type mismatch"):
+            Agent._warn_reserved_name_collisions(pre_params=[bad_type], post_params=[])
 
     def test_validate_pre_post_overlap_shapes_mismatch_raises(self) -> None:
         pre = [
@@ -1053,6 +1126,170 @@ class TestAgentContextKeys:
         # Second call's messages should have no prior-turn content
         second_call = engine.calls[1]
         assert len(second_call) == 2  # just system + user from _MinimalAgent
+
+
+class TestAgentCollisionCheckerCompleteness:
+    """Tests for _warn_reserved_name_collisions evaluating every (param, source) pair."""
+
+    def test_pre_compatible_post_incompatible_context_raises(self) -> None:
+        # pre has context with matching description (compatible → warns); post has context: str
+        # (type mismatch → raises). Verifies post is evaluated independently even after pre warned.
+        ctx_desc_prefix = CONTEXT_PARAM.description.split("{")[0]
+        pre_ctx = ParamSpec(
+            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
+            type="dict", default={},
+            description=ctx_desc_prefix,
+        )
+        post_ctx_bad = ParamSpec(
+            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
+            type="str", default=NO_VAL,
+        )
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            with pytest.raises(AgentError, match="type mismatch"):
+                Agent._warn_reserved_name_collisions(
+                    pre_params=[pre_ctx],
+                    post_params=[post_ctx_bad],
+                )
+        # pre_invoke should have produced the redundant warning before post raised
+        assert any("redundant" in str(warning.message) for warning in w)
+
+    def test_both_compatible_context_warns_twice(self) -> None:
+        ctx_desc_prefix = CONTEXT_PARAM.description.split("{")[0]
+        pre_ctx = ParamSpec(
+            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
+            type="dict", default={},
+            description=ctx_desc_prefix,
+        )
+        post_ctx = ParamSpec(
+            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
+            type="dict", default={},
+            description=ctx_desc_prefix + " extra detail",
+        )
+        with pytest.warns(UserWarning, match="redundant") as w:
+            Agent._warn_reserved_name_collisions(
+                pre_params=[pre_ctx],
+                post_params=[post_ctx],
+            )
+        assert len(w) == 2
+
+
+class TestAgentContextIsolation:
+    """Tests that context is always a fresh dict per invocation (not shared mutable default)."""
+
+    def test_omitted_context_does_not_share_state_across_invocations(self) -> None:
+        agent = _MinimalAgent(
+            name="ctx_agent",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            context_properties=["lang"],
+        )
+        # First call omits context (required property — must be provided):
+        # so use an optional property instead
+        agent2 = _MinimalAgent(
+            name="ctx_agent2",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            context_properties=[
+                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY,
+                          type="str", default="English"),
+            ],
+        )
+        agent2.invoke({"prompt": "hello"})
+        agent2.invoke({"prompt": "world"})
+        assert agent2.records[0].context is not agent2.records[1].context
+
+
+class TestAgentRenderTurnGuards:
+    """Tests for render_turn defensive checks."""
+
+    def test_render_turn_final_source_on_draft_record_raises(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = make_agent(
+            engine=engine,
+            assistant_response_source="final",
+        )
+        draft = AgentRecord(
+            user_prompt=PromptConfig(template="hello", description=""),
+            generated_response="raw text",
+            final_result=None,
+        )
+        with pytest.raises(AgentInvocationError, match="final_result is None"):
+            agent.render_turn(draft)
+
+    def test_render_turn_replays_context_into_template(self) -> None:
+        engine = StatefulEchoLLMEngine()
+        agent = make_agent(engine=engine, context_enabled=True)
+
+        from atomic_agentic.models.agents.prompts import PromptConfig as PC
+        from dataclasses import replace as dc_replace
+        from atomic_agentic.models.results.agents import AgentResult
+        from datetime import datetime, timezone, timedelta
+        from atomic_agentic.models.results import LLMModelData, TokenUsage
+
+        # Craft a completed record with a template that has a placeholder
+        cfg = PC(template="Task for {user}: do something.", description="")
+        result = AgentResult(
+            result="done",
+            invoker_id="test-agent",
+            started_at=datetime.now(timezone.utc),
+            ended_at=datetime.now(timezone.utc) + timedelta(seconds=1),
+            llm_token_usage=(TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2),),
+            llm_model_data=LLMModelData(provider="test"),
+        )
+        from atomic_agentic.models.agents.records import LLMRecord
+        from atomic_agentic.models.results import LLMResult
+        llm_result = LLMResult(
+            result="done",
+            invoker_id="engine-1",
+            started_at=datetime.now(timezone.utc),
+            ended_at=datetime.now(timezone.utc) + timedelta(seconds=1),
+            token_usage=TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2),
+            model_data=LLMModelData(provider="test"),
+        )
+        record = AgentRecord(
+            user_prompt=cfg,
+            generated_response="raw",
+            context={"user": "Alice"},
+            final_result=result,
+            llm_records=(LLMRecord(
+                messages=({"role": "user", "content": "Task for Alice: do something."},),
+                llm_result=llm_result,
+            ),),
+        )
+        rendered = agent.render_turn(record)
+        assert rendered[0]["content"] == "Task for Alice: do something."
+
+
+class TestAgentAsyncContextProperties:
+    """Tests for context_properties through async_invoke."""
+
+    def test_async_required_context_property_missing_raises(self) -> None:
+        agent = _MinimalAgent(
+            name="ctx_agent",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            context_properties=[
+                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY,
+                          type="str", default=NO_VAL),
+            ],
+        )
+        with pytest.raises(AgentInvocationError, match="lang"):
+            asyncio.run(agent.async_invoke({"prompt": "hello"}))
+
+    def test_async_context_stored_on_record(self) -> None:
+        agent = _MinimalAgent(
+            name="ctx_agent",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            context_properties=["lang"],
+        )
+        asyncio.run(agent.async_invoke({"prompt": "hello", "context": {"lang": "English"}}))
+        assert agent.records[0].context == {"lang": "English"}
 
 
 class TestAgentDescriptionOverrideRemoval:

@@ -26,14 +26,16 @@ from ..models.parameters import ParamSpec
 from ..constants.core import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..models.results import AgentResult, LLMModelData
-from ..tools import Tool, toolify
+from ..tools import toolify
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..models.agents.prompts import PromptConfig
 
 logger = logging.getLogger(__name__)
 
 from .tools import identity_pre_tool, identity_post_tool
-from ..constants.agents import RUN_ID_PARAM
+from ..constants.agents import RUN_ID_PARAM, CONTEXT_PARAM
+from ..utils.agents import build_context_description, normalize_context_properties
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent
@@ -53,8 +55,7 @@ class Agent(AtomicInvokable, ABC):
 
     1. ``filter_inputs`` collects declared keys and injects defaults.
     2. Framework-reserved args (``run_id``) are popped.
-    3. ``_build_context`` extracts declared context keys (and any
-       instance-state values added by a subclass override) into ``context``.
+    3. ``context`` is popped from inputs; required context properties are validated.
     4. Remaining inputs are sliced into ``pre_inputs`` and ``post_inputs``.
     5. Turns are selected from history if ``context_enabled`` is True.
     6. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
@@ -68,7 +69,7 @@ class Agent(AtomicInvokable, ABC):
 
     - All ``pre_invoke`` parameters.
     - Post-only non-result non-variadic parameters, grafted as KEYWORD_ONLY.
-    - ``context_keys`` parameters, grafted as KEYWORD_ONLY.
+    - ``context: dict = {}`` (KEYWORD_ONLY), when ``context_properties`` is non-empty.
     - ``run_id`` (KEYWORD_ONLY, default None).
 
     ``context_enabled``
@@ -93,15 +94,17 @@ class Agent(AtomicInvokable, ABC):
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
         post_result_key: Optional[str] = None,
-        context_keys: list[str] | list[ParamSpec] | None = None,
+        context_properties: list[str] | list[ParamSpec] | None = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
 
-        # Prepare pre_invoke Tool.
+        # ── Pre-invoke ───────────────────────────────────────────────────────
         if pre_invoke is None:
             pre_tool = identity_pre_tool
+        elif isinstance(pre_invoke, AtomicInvokable):
+            pre_tool = pre_invoke
         else:
             pre_tool = toolify(
                 pre_invoke,
@@ -109,30 +112,68 @@ class Agent(AtomicInvokable, ABC):
                 namespace=name,
                 description=f"The tool that preprocesses inputs into a string for Agent {name}",
             )
-
-        if pre_tool.return_type.lower() not in {"any", "str"}:
+        if pre_tool.return_type.lower() not in {"any", "str", "promptconfig"}:
             raise AgentError(
-                "Agent.pre_invoke must return a type 'str'|'any' after updating pre_invoke"
+                "Agent.pre_invoke must return a type 'str'|'any'|'promptconfig'"
             )
 
-        # Prepare post_invoke Tool, context_keys, and composed Agent schema.
-        post_tool, resolved_post_result_key, context_key_params, agent_parameters = (
-            self._prepare_agent_lifecycle_config(
-                post_invoke=post_invoke,
-                agent_name=name,
-                pre_parameters=pre_tool.parameters,
-                post_result_key=post_result_key,
-                context_keys=context_keys,
+        # ── Post-invoke ──────────────────────────────────────────────────────
+        if post_invoke is None:
+            post_tool = identity_post_tool
+        elif isinstance(post_invoke, AtomicInvokable):
+            post_tool = post_invoke
+        else:
+            post_tool = toolify(
+                post_invoke,
+                name="post_invoke",
+                namespace=name,
+                description=f"The tool that postprocesses outputs of Agent {name}",
             )
+        if len(post_tool.parameters) == 0:
+            raise AgentError("Agent.post_invoke must expect at least 1 argument")
+
+        # ── Post result key ──────────────────────────────────────────────────
+        _RESERVED = frozenset({"context", "run_id"})
+        _post_params = list(post_tool.parameters)
+        if post_result_key is None:
+            resolved_post_result_key = _post_params[0].name
+            if resolved_post_result_key in _RESERVED:
+                raise AgentError(
+                    f"post_invoke's first parameter is named {resolved_post_result_key!r}, "
+                    "which is a framework-reserved name; supply an explicit post_result_key "
+                    "pointing to a non-reserved parameter."
+                )
+        else:
+            if not isinstance(post_result_key, str) or not post_result_key.strip():
+                raise AgentError("post_result_key must be None or a non-empty string.")
+            resolved_post_result_key = post_result_key.strip()
+            if resolved_post_result_key in _RESERVED:
+                raise AgentError(
+                    f"post_result_key {resolved_post_result_key!r} is a framework-reserved "
+                    "name ('context' and 'run_id' cannot serve as the result routing key)."
+                )
+            if resolved_post_result_key not in {p.name for p in _post_params}:
+                raise AgentError(
+                    "post_result_key must name one of post_invoke's declared parameters; "
+                    f"got {resolved_post_result_key!r}."
+                )
+
+        # ── Schema composition ───────────────────────────────────────────────
+        context_property_params = normalize_context_properties(context_properties)
+        self._validate_pre_post_overlap_shapes(list(pre_tool.parameters), _post_params)
+        self._warn_reserved_name_collisions(list(pre_tool.parameters), _post_params)
+        agent_parameters = self._compose_agent_parameters(
+            pre_params=list(pre_tool.parameters),
+            post_params=_post_params,
+            result_key=resolved_post_result_key,
+            context_property_params=context_property_params,
         )
 
         # Store lifecycle components.
         self._pre_invoke = pre_tool
         self._post_invoke = post_tool
         self._post_result_key = resolved_post_result_key
-        self._context_key_names: frozenset[str] = frozenset(
-            p.name for p in context_key_params
-        )
+        self._context_properties: tuple[ParamSpec, ...] = tuple(context_property_params)
 
         # System prompt registry — subclasses populate after super().__init__.
         self._system_prompts: dict[str, PromptConfig] = {}
@@ -176,109 +217,6 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Agent lifecycle configuration and validation
     # ------------------------------------------------------------------ #
-    @classmethod
-    def _prepare_post_invoke_tool(
-        cls,
-        *,
-        candidate: Optional[Union[Callable, AtomicInvokable]],
-        agent_name: str,
-    ) -> Tool:
-        """Normalize the configured post-invoke component into a Tool."""
-        if candidate is None:
-            post_tool = identity_post_tool
-        else:
-            post_tool = toolify(
-                candidate,
-                name="post_invoke",
-                namespace=agent_name,
-                description=f"The tool that postprocesses outputs of Agent {agent_name}",
-            )
-
-        if len(post_tool.parameters) == 0:
-            raise AgentError("Agent.post_invoke must expect at least 1 argument")
-
-        return post_tool
-
-    @staticmethod
-    def _resolve_post_result_key(
-        *,
-        post_result_key: Optional[str],
-        post_params: list[ParamSpec],
-    ) -> str:
-        """Resolve the post-invoke parameter that receives the raw ``_invoke`` result."""
-        if not post_params:
-            raise AgentError("Agent.post_invoke must expect at least 1 argument")
-
-        if post_result_key is None:
-            return post_params[0].name
-
-        if not isinstance(post_result_key, str) or not post_result_key.strip():
-            raise AgentError("post_result_key must be None or a non-empty string.")
-
-        return post_result_key.strip()
-
-    @staticmethod
-    def _validate_post_routing_contract(
-        *,
-        post_result_key: str,
-        post_params: list[ParamSpec],
-    ) -> None:
-        """Validate that ``post_result_key`` names a declared post-invoke parameter."""
-        post_param_names = {p.name for p in post_params}
-        if post_result_key not in post_param_names:
-            raise AgentError(
-                "post_result_key must name one of post_invoke's declared parameters; "
-                f"got {post_result_key!r}."
-            )
-
-    @staticmethod
-    def _normalize_context_keys(
-        context_keys: list[str] | list[ParamSpec] | None,
-    ) -> list[ParamSpec]:
-        """Normalise ``context_keys`` to a list of KEYWORD_ONLY ParamSpecs.
-
-        ``list[str]``      → KEYWORD_ONLY ParamSpecs with ``default=NO_VAL``.
-        ``list[ParamSpec]`` → coerced to KEYWORD_ONLY (variadic items rejected).
-        ``None``            → ``[]``.
-        Duplicate names and empty strings are rejected.
-        """
-        if context_keys is None:
-            return []
-        if not isinstance(context_keys, list):
-            raise AgentError("context_keys must be a list of str, a list of ParamSpec, or None.")
-        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
-        result: list[ParamSpec] = []
-        seen: set[str] = set()
-        for i, item in enumerate(context_keys):
-            if isinstance(item, str):
-                name = item.strip()
-                if not name:
-                    raise AgentError(f"context_keys[{i}] must be a non-empty string.")
-                param = ParamSpec(
-                    name=name, index=i, kind=ParamSpec.KEYWORD_ONLY,
-                    type="Any", default=NO_VAL,
-                )
-            elif isinstance(item, ParamSpec):
-                if item.kind in variadic_kinds:
-                    raise AgentError(
-                        f"context_keys[{i}] ({item.name!r}) must not be variadic; "
-                        f"got kind {item.kind!r}."
-                    )
-                param = ParamSpec(
-                    name=item.name, index=i, kind=ParamSpec.KEYWORD_ONLY,
-                    type=item.type, default=item.default,
-                )
-            else:
-                raise AgentError(
-                    f"context_keys items must be str or ParamSpec; "
-                    f"got {type(item).__name__} at index {i}."
-                )
-            if param.name in seen:
-                raise AgentError(f"context_keys contains duplicate name {param.name!r}.")
-            seen.add(param.name)
-            result.append(param)
-        return result
-
     @staticmethod
     def _validate_pre_post_overlap_shapes(
         pre_params: list[ParamSpec],
@@ -308,38 +246,27 @@ class Agent(AtomicInvokable, ABC):
     def _warn_reserved_name_collisions(
         pre_params: list[ParamSpec],
         post_params: list[ParamSpec],
-        context_key_names: frozenset[str],
     ) -> None:
-        """Warn or raise when a pre/post param name collides with a context key or reserved arg.
+        """Warn or raise when a pre/post param name collides with a reserved framework arg.
 
-        Context-key collisions always warn: the param will never receive a value.
+        ``run_id`` collisions:
+        - Semantically identical to ``RUN_ID_PARAM`` (kind, type, default, description): warn.
+        - Any mismatch: raise ``AgentError`` (true collision).
 
-        Reserved-arg collisions are tiered on ``run_id``:
-        - Semantically identical to ``RUN_ID_PARAM`` (name/kind/type/default match): warn
-          (redundant declaration; the framework grafts it automatically).
-        - Semantically different: raise ``AgentError`` (true collision — the caller's
-          param would silently shadow the framework's meaning).
+        ``context`` collisions:
+        - Compatible (dict-typed and description shares CONTEXT_PARAM root): warn (redundant).
+        - Any mismatch (wrong type or description root differs): raise ``AgentError``.
         """
-        reserved_agent_args = frozenset({"run_id"})
-        all_reserved = context_key_names | reserved_agent_args
-        checked: set[str] = set()
+        reserved_agent_args = frozenset({"run_id", "context"})
         all_params = (
             [(p, "pre_invoke") for p in pre_params]
             + [(p, "post_invoke") for p in post_params]
         )
         for param, source in all_params:
-            if param.name not in all_reserved or param.name in checked:
+            if param.name not in reserved_agent_args:
                 continue
-            checked.add(param.name)
-            if param.name in context_key_names:
-                warnings.warn(
-                    f"{param.name!r} declared in {source} will be popped from inputs "
-                    "before reaching it (a context key); it will never receive a "
-                    "caller-supplied value.",
-                    UserWarning,
-                    stacklevel=4,
-                )
-            elif param.name == "run_id":
+
+            if param.name == "run_id":
                 semantically_equal = (
                     param.kind == RUN_ID_PARAM.kind
                     and param.type == RUN_ID_PARAM.type
@@ -359,14 +286,30 @@ class Agent(AtomicInvokable, ABC):
                         "framework-reserved 'run_id' parameter "
                         "(kind, type, or default mismatch)."
                     )
-            else:
-                warnings.warn(
-                    f"{param.name!r} declared in {source} will be popped from inputs "
-                    "before reaching it (a reserved agent argument); it will never "
-                    "receive a caller-supplied value.",
-                    UserWarning,
-                    stacklevel=4,
+
+            elif param.name == "context":
+                type_str = (param.type or "").lower()
+                ctx_type = CONTEXT_PARAM.type.lower()
+                type_compatible = (
+                    type_str in {ctx_type, "any"}
+                    or type_str.startswith(ctx_type)
+                    or param.type is NO_VAL
                 )
+                ctx_desc_prefix = CONTEXT_PARAM.description.split("{")[0]
+                desc_compatible = (param.description or "").startswith(ctx_desc_prefix)
+                if type_compatible and desc_compatible:
+                    warnings.warn(
+                        f"'context' declared in {source} is redundant; "
+                        "the framework grafts it automatically.",
+                        UserWarning,
+                        stacklevel=4,
+                    )
+                else:
+                    raise AgentError(
+                        f"'context' declared in {source} conflicts with the "
+                        "framework-reserved 'context' parameter "
+                        f"({'type' if not type_compatible else 'description'} mismatch)."
+                    )
 
     @staticmethod
     def _compose_agent_parameters(
@@ -374,12 +317,13 @@ class Agent(AtomicInvokable, ABC):
         pre_params: list[ParamSpec],
         post_params: list[ParamSpec],
         result_key: str,
-        context_key_params: list[ParamSpec],
+        context_property_params: list[ParamSpec],
     ) -> list[ParamSpec]:
         """Compose the agent-facing parameter schema from the four-tier model.
 
         Graft A: post-only non-result non-variadic params (as KEYWORD_ONLY).
-        Graft B: context_key_params (as KEYWORD_ONLY).
+        Graft D: one ``context: dict = {}`` KEYWORD_ONLY param, only when
+                 ``context_property_params`` is non-empty.
         Graft C: ``run_id`` (KEYWORD_ONLY, default=None).
 
         All grafts are inserted before an existing ``**kwargs`` parameter.
@@ -413,10 +357,17 @@ class Agent(AtomicInvokable, ABC):
             )
         composed = _insert_before_varkw(composed, grafts)
 
-        # Graft B: context key params (skip any whose name already appears in composed)
-        existing_names = {p.name for p in composed}
-        ck_grafts = [p for p in context_key_params if p.name not in existing_names]
-        composed = _insert_before_varkw(composed, ck_grafts)
+        # Graft D: single context dict param when context_properties declared
+        if context_property_params:
+            existing_names = {p.name for p in composed}
+            if CONTEXT_PARAM.name not in existing_names:
+                desc = build_context_description(context_property_params)
+                prop_suffix = f" {desc}" if desc else ""
+                full_desc = CONTEXT_PARAM.description.replace(
+                    "{context_property_descriptions}", prop_suffix
+                )
+                context_graft = replace(CONTEXT_PARAM, description=full_desc)
+                composed = _insert_before_varkw(composed, [context_graft])
 
         # Graft C: run_id — always the canonical framework version.
         # Pop any collision (already warned/raised above) then reinsert.
@@ -428,49 +379,50 @@ class Agent(AtomicInvokable, ABC):
             for i, p in enumerate(composed)
         ]
 
-    @classmethod
-    def _prepare_agent_lifecycle_config(
-        cls,
-        *,
-        post_invoke: Optional[Union[Callable, AtomicInvokable]],
-        agent_name: str,
-        pre_parameters: list[ParamSpec],
-        post_result_key: Optional[str],
-        context_keys: list[str] | list[ParamSpec] | None,
-    ) -> tuple[Tool, str, list[ParamSpec], list[ParamSpec]]:
-        """Prepare and validate the full construction-time agent lifecycle contract.
+    # ------------------------------------------------------------------ #
+    # Schema helpers
+    # ------------------------------------------------------------------ #
+    def _update_context_param(self) -> None:
+        """Refresh the ``context`` param description in the agent schema.
 
-        Steps:
-        1. Normalise post_invoke to a Tool.
-        2. Resolve post_result_key.
-        3. Validate result_key exists in post params.
-        4. Normalise context_keys to ParamSpecs.
-        5. Validate pre/post overlap shapes.
-        6. Warn on reserved-name collisions.
-        7. Compose agent parameters.
+        Rebuilds the description from the current ``_context_properties`` and
+        replaces the matching entry in ``_parameters`` in-place. No-op if the
+        schema contains no ``context`` param (Graft D was never applied).
 
-        Returns (post_tool, result_key, context_key_params, agent_parameters).
+        Only the ``description`` field is mutated; all structural fields
+        (name, type, default, kind, index) are preserved.
         """
-        post_tool = cls._prepare_post_invoke_tool(candidate=post_invoke, agent_name=agent_name)
-        result_key = cls._resolve_post_result_key(
-            post_result_key=post_result_key, post_params=post_tool.parameters
+        if not any(p.name == CONTEXT_PARAM.name for p in self._parameters):
+            return
+        desc = build_context_description(list(self._context_properties))
+        prop_suffix = f" {desc}" if desc else ""
+        full_desc = CONTEXT_PARAM.description.replace(
+            "{context_property_descriptions}", prop_suffix
         )
-        cls._validate_post_routing_contract(
-            post_result_key=result_key, post_params=post_tool.parameters
+        self._parameters = [
+            replace(p, description=full_desc) if p.name == CONTEXT_PARAM.name else p
+            for p in self._parameters
+        ]
+
+    def _set_context_properties(self, params: list[ParamSpec]) -> None:
+        """Re-index, store, and refresh the context schema description."""
+        self._context_properties = tuple(
+            replace(p, index=i) for i, p in enumerate(params)
         )
-        context_key_params = cls._normalize_context_keys(context_keys)
-        context_key_names = frozenset(p.name for p in context_key_params)
-        cls._validate_pre_post_overlap_shapes(pre_parameters, post_tool.parameters)
-        cls._warn_reserved_name_collisions(
-            pre_parameters, post_tool.parameters, context_key_names
-        )
-        agent_parameters = cls._compose_agent_parameters(
-            pre_params=pre_parameters,
-            post_params=post_tool.parameters,
-            result_key=result_key,
-            context_key_params=context_key_params,
-        )
-        return post_tool, result_key, context_key_params, agent_parameters
+        self._update_context_param()
+
+    def set_context_properties(
+        self,
+        properties: list[str] | list[ParamSpec] | None,
+    ) -> None:
+        """Replace context properties and refresh the schema description.
+
+        Normalizes ``properties`` via ``normalize_context_properties`` then
+        delegates storage and description refresh to ``_set_context_properties``.
+        Subclasses with multiple context sources (e.g. ``BasicAgent``) override
+        this method to raise — use their specific mutation endpoints instead.
+        """
+        self._set_context_properties(normalize_context_properties(properties))
 
     # ------------------------------------------------------------------ #
     # Agent Properties
@@ -533,13 +485,13 @@ class Agent(AtomicInvokable, ABC):
         return list(self._records)
 
     @property
-    def pre_invoke(self) -> Tool:
-        """Tool that converts the input mapping into a prompt string."""
+    def pre_invoke(self) -> AtomicInvokable:
+        """Invokable that converts the input mapping into a prompt string."""
         return self._pre_invoke
 
     @property
-    def post_invoke(self) -> Tool:
-        """Tool that converts the raw ``_invoke`` result into the final agent output."""
+    def post_invoke(self) -> AtomicInvokable:
+        """Invokable that converts the raw ``_invoke`` result into the final agent output."""
         return self._post_invoke
 
     @property
@@ -588,6 +540,11 @@ class Agent(AtomicInvokable, ABC):
                 f"render_turn expected AgentRecord, got {type(turn)!r}"
             )
 
+        if self._assistant_response_source == "final" and turn.final_result is None:
+            raise AgentInvocationError(
+                "render_turn: assistant_response_source='final' but this record's "
+                "final_result is None (record is a draft and has not been committed)."
+            )
         response = (
             turn.generated_response
             if self._assistant_response_source == "raw"
@@ -602,26 +559,9 @@ class Agent(AtomicInvokable, ABC):
             response_text = response_text[: self._response_preview_limit] + "..."
 
         return [
-            {"role": "user", "content": turn.user_prompt},
+            {"role": "user", "content": turn.user_prompt.render(turn.context)},
             {"role": "assistant", "content": response_text},
         ]
-
-    def _build_context(self, inputs: dict) -> tuple[dict, dict]:
-        """Extract caller-supplied context values from the filtered input dict.
-
-        Pops any key named in ``_context_key_names`` from ``inputs`` into the
-        returned context dict. Subclasses may override to also inject instance-
-        state values that do not appear in the agent schema.
-
-        Returns ``(context, remaining)`` where ``remaining`` is the input dict
-        with context keys removed.
-        """
-        context: dict = {}
-        remaining = dict(inputs)
-        for name in self._context_key_names:
-            if name in remaining:
-                context[name] = remaining.pop(name)
-        return context, remaining
 
     # ------------------------------------------------------------------ #
     # Abstract core LLM work
@@ -774,34 +714,54 @@ class Agent(AtomicInvokable, ABC):
         # ② Agent args
         run_id = inputs.pop("run_id", None)
 
-        # ③ Context extraction
-        context, remaining = self._build_context(inputs)
+        # ③ Context extraction + required-property validation
+        context = dict(inputs.pop("context", {}))
+        for _cp in self._context_properties:
+            if _cp.default is NO_VAL and _cp.name not in context:
+                raise AgentInvocationError(
+                    f"Required context property {_cp.name!r} is missing from the "
+                    "caller-supplied 'context' dict."
+                )
+            elif _cp.default is not NO_VAL and _cp.name not in context:
+                context[_cp.name] = _cp.default
 
-        # ④ Pre-slice / ⑤ Post-slice
+        # ④ Pre-slice
         pre_param_names = {p.name for p in self._pre_invoke.parameters}
-        pre_inputs = {k: v for k, v in remaining.items() if k in pre_param_names}
+        pre_inputs = {k: v for k, v in inputs.items() if k in pre_param_names}
+        if "context" in pre_param_names:
+            pre_inputs["context"] = context
+
+        # ⑤ Post-slice
         post_param_names = {
             p.name for p in self._post_invoke.parameters
             if p.name != self._post_result_key
         }
-        post_inputs = {k: v for k, v in remaining.items() if k in post_param_names}
+        post_inputs = {k: v for k, v in inputs.items() if k in post_param_names}
+        if "context" in post_param_names:
+            post_inputs["context"] = context
 
-        # ⑦ Task prompt
+        # ⑥ Task prompt
         try:
             logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
             pre_result = await self._pre_invoke.async_invoke(pre_inputs)
-            prompt = pre_result.result
+            raw_prompt = pre_result.result
         except ToolInvocationError:
             raise
         except Exception as e:  # pragma: no cover
             raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
 
-        if not isinstance(prompt, str):
+        if isinstance(raw_prompt, PromptConfig):
+            user_prompt_config = raw_prompt
+        elif isinstance(raw_prompt, str):
+            user_prompt_config = PromptConfig(template=raw_prompt, description="")
+        else:
             raise AgentInvocationError(
-                f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
+                f"pre_invoke returned non-string/non-PromptConfig result "
+                f"(type={type(raw_prompt)!r}); a prompt string or PromptConfig is required"
             )
+        prompt = user_prompt_config.render(context)
 
-        # ⑥ History
+        # ⑦ History
         logger.debug(f"Agent.{self.name} selecting turns")
         turns: list[AgentRecord] = []
         if self._context_enabled:
@@ -838,9 +798,11 @@ class Agent(AtomicInvokable, ABC):
             **metadata,
         )
 
-        # ⑪ Record — always appended
+        # ⑪ Record — always appended; set authoritative user_prompt + context
         record = replace(
             draft,
+            user_prompt=user_prompt_config,
+            context=context,
             final_result=agent_result,
             llm_records=metadata["llm_records"],
             prev=turns[-1] if turns else None,
@@ -857,15 +819,15 @@ class Agent(AtomicInvokable, ABC):
         -----
         ① filter_inputs — collect declared keys; inject defaults.
         ② Pop framework-reserved arg ``run_id``.
-        ③ _build_context — extract context keys into ``context``; remainder stays.
-        ④ Slice ``pre_inputs`` from remaining.
-        ⑤ Slice ``post_inputs`` from remaining (excludes result_key).
-        ⑥ Select conversation turns according to ``context_enabled``.
-        ⑦ pre_invoke → prompt string.
+        ③ Pop ``context``; validate required context properties.
+        ④ Slice ``pre_inputs`` from remaining; inject ``context`` if declared.
+        ⑤ Slice ``post_inputs`` from remaining; inject ``context`` if declared.
+        ⑥ pre_invoke → PromptConfig or str; normalize to PromptConfig; render prompt.
+        ⑦ Select conversation turns according to ``context_enabled``.
         ⑧ _invoke(turns, prompt, context) → draft + metadata.
         ⑨ post_invoke → final result.
         ⑩ Construct AgentResult.
-        ⑪ Commit AgentRecord unconditionally.
+        ⑪ Commit AgentRecord unconditionally (sets user_prompt + context on record).
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
@@ -877,34 +839,54 @@ class Agent(AtomicInvokable, ABC):
             # ② Agent args
             run_id = inputs.pop("run_id", None)
 
-            # ③ Context extraction
-            context, remaining = self._build_context(inputs)
+            # ③ Context extraction + required-property validation
+            context = dict(inputs.pop("context", {}))
+            for _cp in self._context_properties:
+                if _cp.default is NO_VAL and _cp.name not in context:
+                    raise AgentInvocationError(
+                        f"Required context property {_cp.name!r} is missing from the "
+                        "caller-supplied 'context' dict."
+                    )
+                elif _cp.default is not NO_VAL and _cp.name not in context:
+                    context[_cp.name] = _cp.default
 
-            # ④ Pre-slice / ⑤ Post-slice
+            # ④ Pre-slice
             pre_param_names = {p.name for p in self._pre_invoke.parameters}
-            pre_inputs = {k: v for k, v in remaining.items() if k in pre_param_names}
+            pre_inputs = {k: v for k, v in inputs.items() if k in pre_param_names}
+            if "context" in pre_param_names:
+                pre_inputs["context"] = context
+
+            # ⑤ Post-slice
             post_param_names = {
                 p.name for p in self._post_invoke.parameters
                 if p.name != self._post_result_key
             }
-            post_inputs = {k: v for k, v in remaining.items() if k in post_param_names}
+            post_inputs = {k: v for k, v in inputs.items() if k in post_param_names}
+            if "context" in post_param_names:
+                post_inputs["context"] = context
 
-            # ⑦ Task prompt
+            # ⑥ Task prompt
             try:
                 logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
                 pre_result = self._pre_invoke.invoke(pre_inputs)
-                prompt = pre_result.result
+                raw_prompt = pre_result.result
             except ToolInvocationError:
                 raise
             except Exception as e:  # pragma: no cover
                 raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
 
-            if not isinstance(prompt, str):
+            if isinstance(raw_prompt, PromptConfig):
+                user_prompt_config = raw_prompt
+            elif isinstance(raw_prompt, str):
+                user_prompt_config = PromptConfig(template=raw_prompt, description="")
+            else:
                 raise AgentInvocationError(
-                    f"pre_invoke returned non-string (type={type(prompt)!r}); a prompt string is required"
+                    f"pre_invoke returned non-string/non-PromptConfig result "
+                    f"(type={type(raw_prompt)!r}); a prompt string or PromptConfig is required"
                 )
+            prompt = user_prompt_config.render(context)
 
-            # ⑥ History
+            # ⑦ History
             logger.debug(f"Agent.{self.name} selecting turns")
             turns: list[AgentRecord] = []
             if self._context_enabled:
@@ -943,9 +925,11 @@ class Agent(AtomicInvokable, ABC):
                 **metadata,
             )
 
-            # ⑪ Record — always appended
+            # ⑪ Record — always appended; set authoritative user_prompt + context
             record = replace(
                 draft,
+                user_prompt=user_prompt_config,
+                context=context,
                 final_result=agent_result,
                 llm_records=metadata["llm_records"],
                 prev=turns[-1] if turns else None,

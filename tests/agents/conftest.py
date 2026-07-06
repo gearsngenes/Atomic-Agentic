@@ -274,8 +274,8 @@ class ScriptedToolAgent(ToolAgent):
         self,
         *,
         script: list[list[dict[str, Any]]] | None = None,
-        tool_instructions: str | PromptConfig = ROLE_TEMPLATE,
         context_enabled: bool = False,
+        context_properties: Any = None,
         fail_fast: bool = True,
         generation_retries: int = 0,
         tool_calls_limit: int | None = None,
@@ -284,15 +284,14 @@ class ScriptedToolAgent(ToolAgent):
         blackboard_preview_limit: int | None = None,
         post_invoke: Any = None,
         post_result_key: str | None = None,
-        prompt_key: str = "tool_instructions",
     ) -> None:
         super().__init__(
             name="tests",
             namespace="tests",
             description="Scripted ToolAgent for unit tests.",
             llm_engine=EchoLLMEngine(),
-            tool_instructions=tool_instructions,
             context_enabled=context_enabled,
+            context_properties=context_properties,
             fail_fast=fail_fast,
             generation_retries=generation_retries,
             tool_calls_limit=tool_calls_limit,
@@ -301,7 +300,10 @@ class ScriptedToolAgent(ToolAgent):
             blackboard_preview_limit=blackboard_preview_limit,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
-            prompt_key=prompt_key,
+        )
+        self._system_prompts["tool_instructions"] = PromptConfig(
+            template=ROLE_TEMPLATE,
+            description="Scripted test agent tool instructions.",
         )
         self.script = script or []
 
@@ -311,10 +313,20 @@ class ScriptedToolAgent(ToolAgent):
     def _initialize_run_state(
         self,
         *,
-        messages: list[dict[str, str]],
+        turns: list[AgentRecord],
+        prompt: str,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ScriptedRunState:
+        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        render_ctx = {
+            ToolAgent.TOOLS_FIELD: self.actions_context(),
+            ToolAgent.LIMIT_FIELD: limit_text,
+            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
+        }
+        system = self._system_prompts["tool_instructions"].render(render_ctx)
+        messages = self.build_messages(system, turns, prompt)
+
         total_steps = sum(len(batch) for batch in self.script)
         running_blackboard = [BlackboardSlot(step=index) for index in range(total_steps)]
 
@@ -382,7 +394,8 @@ class BadInitializeToolAgent(ScriptedToolAgent):
     def _initialize_run_state(
         self,
         *,
-        messages: list[dict[str, str]],
+        turns: list[AgentRecord],
+        prompt: str,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> Any:
@@ -393,12 +406,14 @@ class PendingPreparedToolAgent(ScriptedToolAgent):
     def _initialize_run_state(
         self,
         *,
-        messages: list[dict[str, str]],
+        turns: list[AgentRecord],
+        prompt: str,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ScriptedRunState:
         state = super()._initialize_run_state(
-            messages=messages,
+            turns=turns,
+            prompt=prompt,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )
