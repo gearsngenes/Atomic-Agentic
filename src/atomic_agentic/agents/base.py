@@ -26,7 +26,7 @@ from ..models.parameters import ParamSpec
 from ..constants.core import NO_VAL
 from ..engines.LLMEngines import LLMEngine
 from ..models.results import AgentResult, LLMModelData
-from ..tools import Tool, toolify
+from ..tools import toolify
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..models.agents.prompts import PromptConfig
 
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 from .tools import identity_pre_tool, identity_post_tool
 from ..constants.agents import RUN_ID_PARAM, CONTEXT_PARAM
-from ..utils.agents import build_context_description
+from ..utils.agents import build_context_description, normalize_context_properties
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -159,7 +159,7 @@ class Agent(AtomicInvokable, ABC):
                 )
 
         # ── Schema composition ───────────────────────────────────────────────
-        context_property_params = self._normalize_context_properties(context_properties)
+        context_property_params = normalize_context_properties(context_properties)
         self._validate_pre_post_overlap_shapes(list(pre_tool.parameters), _post_params)
         self._warn_reserved_name_collisions(list(pre_tool.parameters), _post_params)
         agent_parameters = self._compose_agent_parameters(
@@ -217,54 +217,6 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Agent lifecycle configuration and validation
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _normalize_context_properties(
-        context_properties: list[str] | list[ParamSpec] | None,
-    ) -> list[ParamSpec]:
-        """Normalise ``context_properties`` to a list of KEYWORD_ONLY ParamSpecs.
-
-        ``list[str]``      → KEYWORD_ONLY ParamSpecs with ``default=NO_VAL``.
-        ``list[ParamSpec]`` → coerced to KEYWORD_ONLY (variadic items rejected).
-        ``None``            → ``[]``.
-        Duplicate names and empty strings are rejected.
-        """
-        if context_properties is None:
-            return []
-        if not isinstance(context_properties, list):
-            raise AgentError("context_properties must be a list of str, a list of ParamSpec, or None.")
-        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
-        result: list[ParamSpec] = []
-        seen: set[str] = set()
-        for i, item in enumerate(context_properties):
-            if isinstance(item, str):
-                name = item.strip()
-                if not name:
-                    raise AgentError(f"context_properties[{i}] must be a non-empty string.")
-                param = ParamSpec(
-                    name=name, index=i, kind=ParamSpec.KEYWORD_ONLY,
-                    type="Any", default=NO_VAL,
-                )
-            elif isinstance(item, ParamSpec):
-                if item.kind in variadic_kinds:
-                    raise AgentError(
-                        f"context_properties[{i}] ({item.name!r}) must not be variadic; "
-                        f"got kind {item.kind!r}."
-                    )
-                param = ParamSpec(
-                    name=item.name, index=i, kind=ParamSpec.KEYWORD_ONLY,
-                    type=item.type, default=item.default, description=item.description,
-                )
-            else:
-                raise AgentError(
-                    f"context_properties items must be str or ParamSpec; "
-                    f"got {type(item).__name__} at index {i}."
-                )
-            if param.name in seen:
-                raise AgentError(f"context_properties contains duplicate name {param.name!r}.")
-            seen.add(param.name)
-            result.append(param)
-        return result
-
     @staticmethod
     def _validate_pre_post_overlap_shapes(
         pre_params: list[ParamSpec],
@@ -435,14 +387,11 @@ class Agent(AtomicInvokable, ABC):
 
         Rebuilds the description from the current ``_context_properties`` and
         replaces the matching entry in ``_parameters`` in-place. No-op if the
-        schema contains no ``context`` param (i.e. Graft D was never applied).
+        schema contains no ``context`` param (Graft D was never applied).
 
-        Only the ``description`` field is mutated; names, types, defaults, kinds,
-        and indices are all preserved, so ``AtomicInvokable``'s invariants hold
-        without re-running construction validation.
+        Only the ``description`` field is mutated; all structural fields
+        (name, type, default, kind, index) are preserved.
         """
-        if not self._context_properties:
-            return
         if not any(p.name == CONTEXT_PARAM.name for p in self._parameters):
             return
         desc = build_context_description(list(self._context_properties))
