@@ -275,6 +275,7 @@ class ScriptedToolAgent(ToolAgent):
         *,
         script: list[list[dict[str, Any]]] | None = None,
         context_enabled: bool = False,
+        context_properties: Any = None,
         fail_fast: bool = True,
         generation_retries: int = 0,
         tool_calls_limit: int | None = None,
@@ -290,6 +291,7 @@ class ScriptedToolAgent(ToolAgent):
             description="Scripted ToolAgent for unit tests.",
             llm_engine=EchoLLMEngine(),
             context_enabled=context_enabled,
+            context_properties=context_properties,
             fail_fast=fail_fast,
             generation_retries=generation_retries,
             tool_calls_limit=tool_calls_limit,
@@ -313,7 +315,6 @@ class ScriptedToolAgent(ToolAgent):
         *,
         turns: list[AgentRecord],
         prompt: str,
-        context: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ScriptedRunState:
@@ -395,7 +396,6 @@ class BadInitializeToolAgent(ScriptedToolAgent):
         *,
         turns: list[AgentRecord],
         prompt: str,
-        context: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> Any:
@@ -408,14 +408,12 @@ class PendingPreparedToolAgent(ScriptedToolAgent):
         *,
         turns: list[AgentRecord],
         prompt: str,
-        context: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ScriptedRunState:
         state = super()._initialize_run_state(
             turns=turns,
             prompt=prompt,
-            context=context,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )

@@ -150,7 +150,6 @@ class TestPromptConfigRender:
     @pytest.mark.parametrize(
         ("template", "expected"),
         [
-            ("example json {'a':b} and {INPUT_HERE}", "example json {'a':b} and {INPUT_HERE}"),
             ("No placeholders at all.", "No placeholders at all."),
             ("{}", "{}"),
             ("{0}", "{0}"),

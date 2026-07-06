@@ -404,6 +404,26 @@ class Agent(AtomicInvokable, ABC):
             for p in self._parameters
         ]
 
+    def _set_context_properties(self, params: list[ParamSpec]) -> None:
+        """Re-index, store, and refresh the context schema description."""
+        self._context_properties = tuple(
+            replace(p, index=i) for i, p in enumerate(params)
+        )
+        self._update_context_param()
+
+    def set_context_properties(
+        self,
+        properties: list[str] | list[ParamSpec] | None,
+    ) -> None:
+        """Replace context properties and refresh the schema description.
+
+        Normalizes ``properties`` via ``normalize_context_properties`` then
+        delegates storage and description refresh to ``_set_context_properties``.
+        Subclasses with multiple context sources (e.g. ``BasicAgent``) override
+        this method to raise — use their specific mutation endpoints instead.
+        """
+        self._set_context_properties(normalize_context_properties(properties))
+
     # ------------------------------------------------------------------ #
     # Agent Properties
     # ------------------------------------------------------------------ #

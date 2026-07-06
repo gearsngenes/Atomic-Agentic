@@ -35,3 +35,4 @@ src/atomic_agentic/*/*/__pycache__/
 
 # local workspace
 .claude/
+.idea/

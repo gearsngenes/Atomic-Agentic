@@ -35,6 +35,7 @@ from conftest import (
 )
 
 from atomic_agentic.agents.toolagent import ToolAgent, extract_dependencies, return_tool
+from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.models.agents.runstates import ToolAgentRunState
@@ -1224,7 +1225,7 @@ class TestScriptedInvokeLoop:
         assert len(agent.records) == 1
         turn = agent.records[0]
         assert isinstance(turn, ToolAgentRecord)
-        assert turn.user_prompt == "run"
+        assert turn.user_prompt.template == "run"
         assert turn.generated_response == 5
         assert turn.final_result.result == 5
         assert turn.blackboard_start == 0
@@ -2130,5 +2131,58 @@ class TestExecutePreparedBatchEarlyValidation:
         assert updated.running_blackboard[0].result.result == 7
 
 
-# ── TestAwaitFieldKeyInErrors ────────────────────────────────────────────────
+# ── TestToolAgentContextProperties ──────────────────────────────────────────
+
+class TestToolAgentContextProperties:
+    def test_context_properties_at_construction_adds_graft_d(self) -> None:
+        prop = ParamSpec(name="user_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="The user identifier.")
+        agent = ScriptedToolAgent(context_enabled=True, context_properties=[prop])
+        param_names = [p.name for p in agent.parameters]
+        assert "context" in param_names
+
+    def test_set_context_properties_refreshes_description(self) -> None:
+        prop = ParamSpec(name="user_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="The user identifier.")
+        agent = ScriptedToolAgent(context_enabled=True, context_properties=[prop])
+        new_prop = ParamSpec(name="session_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="Active session.")
+        agent.set_context_properties([new_prop])
+        context_param = next(p for p in agent.parameters if p.name == "context")
+        assert "session_id" in context_param.description
+
+    def test_set_context_properties_none_clears_properties(self) -> None:
+        prop = ParamSpec(name="user_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="The user identifier.")
+        agent = ScriptedToolAgent(context_enabled=True, context_properties=[prop])
+        agent.set_context_properties(None)
+        assert agent._context_properties == ()
+
+
+# ── TestPlanActAgentUpdatePromptGuard ────────────────────────────────────────
+
+class TestPlanActAgentUpdatePromptGuard:
+    def test_update_prompt_plan_first_raises(self) -> None:
+        agent = make_planact_agent([])
+        config = PromptConfig(template="replaced", description="replacement")
+        with pytest.raises(ToolAgentError, match="plan_first"):
+            agent.update_prompt("plan_first", config)
+
+    def test_update_prompt_other_key_allowed(self) -> None:
+        agent = make_planact_agent([])
+        config = PromptConfig(template="some extra prompt", description="extra")
+        agent.update_prompt("extra_instructions", config)
+        assert "extra_instructions" in agent.system_prompts
+
+
+# ── TestReActAgentUpdatePromptGuard ─────────────────────────────────────────
+
+class TestReActAgentUpdatePromptGuard:
+    def test_update_prompt_reason_then_act_raises(self) -> None:
+        agent = make_react_agent([])
+        config = PromptConfig(template="replaced", description="replacement")
+        with pytest.raises(ToolAgentError, match="reason_then_act"):
+            agent.update_prompt("reason_then_act", config)
+
+    def test_update_prompt_other_key_allowed(self) -> None:
+        agent = make_react_agent([])
+        config = PromptConfig(template="some extra prompt", description="extra")
+        agent.update_prompt("extra_instructions", config)
+        assert "extra_instructions" in agent.system_prompts
 

@@ -393,3 +393,20 @@ class TestBasicAgentSerialization:
         agent = make_basic_agent()
         data = agent.to_dict()
         assert data["extra_context_properties"] == []
+
+
+class TestBasicAgentSetContextProperties:
+    def test_set_context_properties_raises(self) -> None:
+        agent = make_basic_agent()
+        with pytest.raises(AgentError):
+            agent.set_context_properties(None)
+
+    def test_set_context_properties_raises_on_list_input(self) -> None:
+        agent = make_basic_agent()
+        with pytest.raises(AgentError):
+            agent.set_context_properties([])
+
+    def test_set_context_properties_error_mentions_endpoints(self) -> None:
+        agent = make_basic_agent()
+        with pytest.raises(AgentError, match="set_extra_context_properties|update_prompt"):
+            agent.set_context_properties(["prop_a"])

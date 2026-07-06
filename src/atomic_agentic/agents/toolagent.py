@@ -127,6 +127,7 @@ from ..constants.agents import (
 )
 
 from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from ..models.parameters import ParamSpec
 from ..models.agents.prompts import PromptConfig
 from ..models.results.agents import ToolAgentResult, ToolUsageRecord
 from ..models.results import LLMModelData
@@ -261,6 +262,7 @@ class ToolAgent(Agent, ABC):
         llm_engine: LLMEngine,
         filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = False,
+        context_properties: list[str] | list[ParamSpec] | None = None,
         *,
         fail_fast: bool = True,
         generation_retries: int = 0,
@@ -337,7 +339,7 @@ class ToolAgent(Agent, ABC):
             llm_engine=llm_engine,
             filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
-            context_properties=None,
+            context_properties=context_properties,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
@@ -1780,7 +1782,6 @@ class ToolAgent(Agent, ABC):
         state = self._initialize_run_state(
             turns=turns,
             prompt=prompt,
-            context=context,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )
@@ -1880,7 +1881,6 @@ class ToolAgent(Agent, ABC):
         state = await self._ainitialize_run_state(
             turns=turns,
             prompt=prompt,
-            context=context,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )
@@ -2374,17 +2374,16 @@ class ToolAgent(Agent, ABC):
         *,
         turns: list[AgentRecord],
         prompt: str,
-        context: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ToolAgentRunState:
         """
         Initialize and return a run state for this invocation.
 
-        Receives the selected canonical turns, rendered user prompt, and assembled
-        context dict from the base Agent lifecycle. Implementations are responsible
-        for rendering the system prompt, building the full message list via
-        ``build_messages(...)``, and initializing all run-state bookkeeping.
+        Receives the selected canonical turns and rendered user prompt from the
+        base Agent lifecycle. Implementations are responsible for rendering the
+        system prompt, building the full message list via ``build_messages(...)``,
+        and initializing all run-state bookkeeping.
 
         Implementations should:
         - render the system prompt from instance state (tools, limit, constants)
@@ -2419,7 +2418,6 @@ class ToolAgent(Agent, ABC):
         *,
         turns: list[AgentRecord],
         prompt: str,
-        context: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ToolAgentRunState:
@@ -2433,7 +2431,6 @@ class ToolAgent(Agent, ABC):
             self._initialize_run_state,
             turns=turns,
             prompt=prompt,
-            context=context,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )

@@ -17,6 +17,7 @@ from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results import LLMModelData, TokenUsage
+from atomic_agentic.utils.agents import normalize_context_properties
 
 
 ROLE_PROMPT = "You are a deterministic test writer."
@@ -871,11 +872,11 @@ class TestAgentContextProperties:
     """Tests for context_properties, Graft D schema, and collision checks."""
 
     def test_normalize_context_properties_none_returns_empty_list(self) -> None:
-        result = Agent._normalize_context_properties(None)
+        result = normalize_context_properties(None)
         assert result == []
 
     def test_normalize_context_properties_str_list_produces_keyword_only_paramspecs(self) -> None:
-        result = Agent._normalize_context_properties(["alpha", "beta"])
+        result = normalize_context_properties(["alpha", "beta"])
 
         assert len(result) == 2
         assert result[0].name == "alpha"
@@ -887,7 +888,7 @@ class TestAgentContextProperties:
         specs = [
             ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
         ]
-        result = Agent._normalize_context_properties(specs)
+        result = normalize_context_properties(specs)
 
         assert result[0].kind == ParamSpec.KEYWORD_ONLY
 
@@ -896,20 +897,20 @@ class TestAgentContextProperties:
             ParamSpec(name="items", index=0, kind=ParamSpec.VAR_POSITIONAL, type="Any", default=NO_VAL),
         ]
         with pytest.raises(AgentError, match="variadic"):
-            Agent._normalize_context_properties(specs)
+            normalize_context_properties(specs)
 
     def test_normalize_context_properties_rejects_duplicate_names(self) -> None:
         with pytest.raises(AgentError, match="duplicate"):
-            Agent._normalize_context_properties(["x", "x"])
+            normalize_context_properties(["x", "x"])
 
     def test_normalize_context_properties_rejects_empty_string(self) -> None:
         with pytest.raises(AgentError, match="non-empty"):
-            Agent._normalize_context_properties([""])
+            normalize_context_properties([""])
 
     def test_normalize_context_properties_accepts_reserved_framework_names(self) -> None:
         # "context" and "run_id" are reserved agent *parameters*, but context_properties
         # are keys inside the context dict — a separate namespace, so no conflict.
-        result = Agent._normalize_context_properties(["context", "run_id"])
+        result = normalize_context_properties(["context", "run_id"])
         assert [p.name for p in result] == ["context", "run_id"]
 
     def test_context_properties_grafts_single_context_dict_param(self) -> None:

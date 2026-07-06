@@ -106,6 +106,22 @@ class BasicAgent(Agent):
         config = normalize_role_prompt(value, self.DEFAULT_ROLE_PROMPT)
         self.update_prompt("role", config)
 
+    def set_context_properties(
+        self,
+        properties: list[str] | list[ParamSpec] | None,
+    ) -> None:
+        """Raise — ``BasicAgent`` context properties have two sources.
+
+        Use ``set_extra_context_properties(...)`` to replace the extra portion,
+        or ``update_prompt('role', config)`` / ``role_prompt`` setter to swap
+        the role-derived portion.
+        """
+        raise AgentError(
+            "Cannot set context properties directly on BasicAgent: "
+            "_context_properties is always the union of role-derived and extra params. "
+            "Use set_extra_context_properties() or update_prompt('role', ...) instead."
+        )
+
     def update_prompt(self, key: str, config: PromptConfig) -> None:
         """Allow updates to the ``'role'`` prompt only.
 
@@ -142,9 +158,8 @@ class BasicAgent(Agent):
                 )
         # ④ Store via base (validates config type, writes _system_prompts["role"]).
         super().update_prompt(key, config)
-        # ⑤ Rebuild union and refresh description.
-        self._context_properties = tuple(new_role_params + list(self._extra_context_properties))
-        self._update_context_param()
+        # ⑤ Re-index union, store, and refresh description.
+        self._set_context_properties(new_role_params + list(self._extra_context_properties))
 
     def set_extra_context_properties(
         self,
@@ -171,11 +186,10 @@ class BasicAgent(Agent):
                     f"extra_context_properties name {p.name!r} overlaps with a "
                     "role-prompt placeholder; use non-overlapping names."
                 )
-        # ③ Store new extras; rebuild union; refresh.
+        # ③ Store new extras; re-index union, store, and refresh.
         self._extra_context_properties = tuple(new_extra)
         role_params = list(self._system_prompts["role"].parameters)
-        self._context_properties = tuple(role_params + new_extra)
-        self._update_context_param()
+        self._set_context_properties(role_params + new_extra)
 
     # ------------------------------------------------------------------ #
     # Core LLM work
