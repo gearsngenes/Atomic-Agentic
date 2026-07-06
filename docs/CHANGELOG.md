@@ -5,6 +5,73 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a19] - 2026-07-04
+
+### Added
+
+- `context_properties: list[str] | list[ParamSpec] | None` constructor parameter
+  on all agent types (`BasicAgent`, `ToolAgent`, `PlanActAgent`, `ReActAgent`).
+  Declares which entries a caller must supply (required) or may optionally supply
+  (with defaults) in the `context` dict input. Missing required properties raise
+  `AgentInvocationError` before `pre_invoke` runs; optional properties have their
+  defaults injected into the context dict automatically.
+- `Agent.set_context_properties(properties)` — public API for post-construction
+  context schema updates. Normalizes, re-indexes, stores, and refreshes the
+  `context` parameter description in one call. `ToolAgent` subclasses inherit
+  directly; `BasicAgent` overrides to raise (use `set_extra_context_properties()`
+  or `update_prompt("role", ...)` instead).
+- `BasicAgent.extra_context_properties` constructor parameter and
+  `set_extra_context_properties(properties)` mutation method for declaring context
+  schema entries beyond what the role prompt auto-discovers.
+- `BasicAgent.role_prompt` setter — accepts `str | PromptConfig | None`; delegates
+  to `update_prompt("role", ...)`.
+- `AgentRecord.context: dict` — the context dict at invocation time is now stored
+  on every record, enabling exact replay of prompt rendering from history.
+- `normalize_context_properties` and `normalize_role_prompt` exported from
+  `atomic_agentic.utils.agents`.
+- `PlanActAgent.update_prompt` guard: raises `ToolAgentError` when key is
+  `"plan_first"` (the built-in planning prompt). Other keys pass through to base.
+- `ReActAgent.update_prompt` guard: raises `ToolAgentError` when key is
+  `"reason_then_act"` (the built-in orchestrator prompt). Other keys pass through
+  to base.
+- `AtomicInvokable` instances passed as `pre_invoke` or `post_invoke` are stored
+  as-is; raw callables still go through `toolify()`.
+- `PromptConfig.to_dict()` serialization method.
+
+### Changed
+
+- **Context parameter model redesigned.** `context_keys: list[str]` replaced by
+  `context_properties: list[str] | list[ParamSpec] | None`. Callers no longer
+  pass each context entry as an individual keyword argument — a single
+  `context: dict` parameter carries all context entries.
+- `AgentRecord.user_prompt` type changed from `str` to `PromptConfig`. The
+  pre-render config is stored on the record; `render_turn()` re-renders it against
+  the stored context dict for exact replay.
+- `BasicAgent.update_prompt` behavior changed: `"role"` key is now **allowed**
+  (triggers context schema rebuild); any other key **raises** `AgentError`.
+  Previously `"role"` raised and other keys were accepted.
+- `ToolAgent`, `PlanActAgent`, `ReActAgent` system prompt ownership fully migrated
+  to subclass hooks. `tool_instructions` and `prompt_key` constructor parameters
+  removed from `ToolAgent`; `PlanActAgent` owns `"plan_first"` and `ReActAgent`
+  owns `"reason_then_act"` in their respective `_system_prompts` registries.
+- `PromptConfig.render()` passes non-identifier brace expressions (`{0}`, `{}`,
+  `{'a':b}`) through as literal text rather than raising.
+- `_initialize_run_state` hook signature on `ToolAgent`, `PlanActAgent`, and
+  `ReActAgent` loses the `context: dict` parameter — it was silently ignored in
+  all concrete implementations.
+- `post_result_key` now rejects `"context"` and `"run_id"` (reserved agent
+  parameter names).
+
+### Fixed
+
+- `BasicAgent` context property rebuild now correctly re-indexes the combined
+  role + extra param list. Previously two independent zero-based index ranges were
+  concatenated without normalization, producing colliding indices.
+- `invoke` and `async_invoke` context dict is always a fresh copy, preventing
+  aliasing against the `ParamSpec` default `{}` sentinel.
+- Optional context property default injection now present on the sync `invoke`
+  path (was missing; `async_invoke` already had it).
+
 ## [2.0.0a18] - 2026-07-04
 
 ### Changed
