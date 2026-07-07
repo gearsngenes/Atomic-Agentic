@@ -20,8 +20,11 @@ from typing import (
 
 # ~~~Provider SDK Imports~~~
 # OpenAI
-try: from openai import OpenAI
-except ImportError: OpenAI = None
+try:
+    from openai import OpenAI, AsyncOpenAI
+except ImportError:
+    OpenAI = None
+    AsyncOpenAI = None
 # Google
 try: from google import genai
 except ImportError: genai = None
@@ -51,6 +54,14 @@ from ..models.results import (
     RemoteLLMModelData,
     TokenUsage,
 )
+from ..utils.core import run_coro_sync
+from ..constants.engines import (
+    ILLEGAL_ATTACHMENT_EXTS,
+    ENGINE_ILLEGAL_MIME_PREFIXES,
+    OPENAI_IMAGE_EXTS,
+    OPENAI_ALLOWED_EXTS,
+)
+from ..utils.engines import validate_attachment_path
 
 __all__ = [
     "GeminiEngine",
@@ -116,18 +127,9 @@ class LLMEngine(AtomicInvokable, ABC):
     ``clear_attachments`` and are snapshotted for each call.
     """
 
-    # Attachment policy defaults
-    # --------------------------
-    # Subclasses are expected to override `allowed_attachment_exts` with the set
-    # of extensions their provider can meaningfully consume (e.g. {".pdf", ".png"}).
-    # `illegal_attachment_exts` is a coarse security/robustness guard applied
-    # before provider-specific checks.
-    illegal_attachment_exts: set[str] = {
-        ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z",
-        ".exe", ".dll", ".so", ".bin", ".o",
-        ".db", ".sqlite",
-        ".h5", ".pt", ".pth", ".onnx",
-    }
+    # Attachment policy — coarse safety/robustness guard applied before
+    # provider-specific checks. Sourced from constants.engines.
+    illegal_attachment_exts: set[str] = ILLEGAL_ATTACHMENT_EXTS
     allowed_attachment_exts: Optional[set[str]] = None
 
     def __init__(
@@ -308,7 +310,7 @@ class LLMEngine(AtomicInvokable, ABC):
         Async analog of ``invoke``. Does not acquire ``_invoke_lock``
         (``threading.RLock`` would block the event loop).
         """
-        logger.info("[%s started]", self.full_name)
+        logger.info("[Async %s started]", self.full_name)
         started_at = datetime.now(timezone.utc)
 
         try:
@@ -331,7 +333,7 @@ class LLMEngine(AtomicInvokable, ABC):
                 model_data=model_data,
             )
 
-            logger.info("[%s finished]", self.full_name)
+            logger.info("[Async %s finished]", self.full_name)
             return result
 
         except LLMEngineError:
@@ -669,6 +671,22 @@ class OpenAIEngine(LLMEngine):
     """
     OpenAI adapter using the Responses API.
 
+    Client model
+    ------------
+    A single ``_client`` attribute holds either an ``OpenAI`` or
+    ``AsyncOpenAI`` instance. Sync/async routing is determined at call time
+    via ``isinstance(self._client, AsyncOpenAI)``:
+
+    - ``AsyncOpenAI`` injected: ``_call_provider`` bridges to the async path
+      via ``run_coro_sync``; ``_call_provider_async`` awaits natively.
+    - ``OpenAI`` injected (or built from kwargs): ``_call_provider`` calls
+      directly; ``_call_provider_async`` offloads to a thread via
+      ``asyncio.to_thread``.
+
+    ``_upload_file`` and ``_on_detach`` also use ``isinstance`` to route
+    file-API calls, wrapping async file operations in ``run_coro_sync``
+    when needed.
+
     File policy
     -----------
     Attachments are persistent engine state:
@@ -699,70 +717,74 @@ class OpenAIEngine(LLMEngine):
     identity from ``self.model``.
     """
 
-    # Image extensions that map to `input_image`
-    _IMAGE_EXTS: tuple[str, ...] = (
-        ".png", ".jpg", ".jpeg",
-        ".webp", ".gif", ".bmp",
-        ".tif", ".tiff", ".heic",
-    )
-
-    # Text/code-ish extensions we are willing to inline as text.
-    _TEXT_EXTS: tuple[str, ...] = (
-        ".txt", ".md", ".rst", ".log",
-        ".json", ".jsonl", ".yaml", ".yml",
-        ".csv", ".tsv", ".py", ".ipynb",
-        ".js", ".ts", ".jsx", ".tsx",
-        ".java", ".c", ".cpp", ".h",
-        ".hpp", ".rs", ".go", ".rb",
-        ".php", ".cs", ".html", ".htm",
-        ".xml",
-    )
-
-    # Extra illegal extensions for this provider (merged with base `illegal_attachment_exts`)
-    _ILLEGAL_EXTS: set[str] = {
-        ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z", # archives
-        ".exe", ".dll", ".so", ".bin", ".o",          # executables/binaries
-        ".db", ".sqlite",                             # databases
-        ".h5", ".pt", ".pth", ".onnx",                # model weights
-    }
-
-    # MIME prefixes we never accept even if extension would otherwise pass.
-    _ILLEGAL_MIME_PREFIXES: tuple[str, ...] = ("audio/", "video/")
-
     def __init__(
         self,
         model: str,
-        api_key: Optional[str] = None,
-        temperature: float = 0.1,
-        inline_cutoff_chars: int = 200_000,
-        extra_illegal_exts: Optional[set[str]] = None,
-        *,
-        name: Optional[str] = None,
+        name: str | None = None,
         namespace: str = "llm",
         description: str = "OpenAI LLM Engine",
+        client: OpenAI | AsyncOpenAI | None = None,
+        temperature: float | None = 0.1,
+        max_output_tokens: int | None = None,
+        reasoning: dict[str, str] | None = None,
+        truncation: str | None = None,
+        inline_cutoff_chars: int = 200_000,
+        *,
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
         max_retries: int = 2,
         retry_backoff_base: float = 0.5,
         retry_backoff_max: float = 8.0,
+        **client_kwargs: Any,
     ) -> None:
         """
         Parameters
         ----------
         model:
-            OpenAI model identifier (e.g. "gpt-4.1", "gpt-4o-mini").
-        api_key:
-            Optional API key; if omitted, `OPENAI_API_KEY` from the environment is used.
+            OpenAI model identifier (e.g. ``"gpt-4.1"``, ``"gpt-4o-mini"``).
+        name:
+            Optional human-friendly engine name; defaults to ``openai_{model}``
+            with non-identifier characters replaced by underscores.
+        namespace:
+            Grouping label; inherited by the base engine as ``"llm"`` by default.
+        description:
+            Human-readable description for this engine instance.
+        client:
+            Pre-built ``OpenAI`` or ``AsyncOpenAI`` client. When provided, it is
+            used directly and no client is constructed from ``client_kwargs``.
+            When ``None``, a sync ``OpenAI(**client_kwargs)`` is built. An injected
+            ``AsyncOpenAI`` routes sync calls through ``run_coro_sync``; an injected
+            ``OpenAI`` routes async calls through ``asyncio.to_thread``.
         temperature:
-            Sampling temperature (ignored for certain reasoning models if not applicable).
+            Responses API sampling temperature. Pass ``None`` to omit the parameter
+            entirely (required for reasoning models).
+        max_output_tokens:
+            Optional maximum number of output tokens to generate.
+        reasoning:
+            Optional reasoning configuration dict (e.g. ``{"effort": "high"}``).
+            When set, ``temperature`` is suppressed regardless of its value.
+        truncation:
+            Optional truncation strategy string (e.g. ``"auto"``).
         inline_cutoff_chars:
-            Maximum number of characters to inline from text/code attachments.
-        extra_illegal_exts:
-            Optional set of additional extensions to reject at `attach` time.
-        name, namespace, description, filter_extraneous_inputs, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
-            Template-method engine configuration (see `_primitives.LLMEngine`).
+            Maximum characters to inline from text/code attachments.
+        filter_extraneous_inputs:
+            Whether to silently drop inputs not declared in the engine's schema.
+        timeout_seconds:
+            Per-call timeout inserted into the client's ``timeout`` option via
+            ``setdefault`` (user-supplied ``timeout`` in ``client_kwargs`` wins).
+        max_retries, retry_backoff_base, retry_backoff_max:
+            Shared ``LLMEngine`` retry/backoff configuration.
+        **client_kwargs:
+            Additional keyword arguments forwarded verbatim to ``OpenAI(...)``
+            during client construction. Common uses: ``api_key``, ``base_url``,
+            ``organization``. Not forwarded when ``client`` is injected directly.
         """
-        sanitized_name = (name or f"openai_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_").replace(".", "_")
+        # Step 1 — Name sanitization and base init.
+        sanitized_name = (
+            (name or f"openai_{model}")
+            .replace(":", "_").replace("-", "_")
+            .replace(" ", "_").replace(".", "_")
+        )
         super().__init__(
             name=sanitized_name,
             namespace=namespace,
@@ -774,31 +796,28 @@ class OpenAIEngine(LLMEngine):
             retry_backoff_max=retry_backoff_max,
         )
 
+        # Step 2 — SDK presence check.
         if OpenAI is None:
             raise RuntimeError(
                 "OpenAIEngine requires the `openai` package; install `openai` to use it."
             )
 
-        # Honor the base engine's timeout knob when constructing the OpenAI client.
-        # The official SDK exposes a `timeout` option for this.
-        self._llm = OpenAI(
-            api_key=api_key or os.getenv("OPENAI_API_KEY"),
-            timeout=self._timeout_seconds,
+        # Step 3 — Build shared client kwargs; seed timeout from the base-engine knob.
+        _ckw = dict(client_kwargs)
+        _ckw.setdefault("timeout", self._timeout_seconds)
+
+        # Step 4 — Single client: injected as-is or built sync from kwargs.
+        self._client: OpenAI | AsyncOpenAI = (
+            client if client is not None else OpenAI(**_ckw)
         )
 
+        # Step 5 — Store model and Responses API config.
         self.model = model
-        self.temperature = float(temperature)
+        self.temperature = temperature
+        self._max_output_tokens = max_output_tokens
+        self._reasoning = reasoning
+        self._truncation = truncation
         self._inline_cutoff_chars = int(inline_cutoff_chars)
-
-        # Merge illegal extension policy with base defaults + any user-supplied extras.
-        merged_illegal = set(self.illegal_attachment_exts) | set(self._ILLEGAL_EXTS)
-        if extra_illegal_exts:
-            merged_illegal |= set(extra_illegal_exts)
-        self.illegal_attachment_exts = merged_illegal
-
-        # Positive allow-list: PDFs + known image + text/code extensions.
-        allowed = set(self._TEXT_EXTS) | set(self._IMAGE_EXTS) | {".pdf"}
-        self.allowed_attachment_exts = allowed
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -814,16 +833,21 @@ class OpenAIEngine(LLMEngine):
 
     def _validate_attachment_path(self, path: str) -> None:
         """
-        Extend the base validation with MIME-type checks (reject audio/video).
-        """
-        super()._validate_attachment_path(path)
+        Validate `path` against the OpenAI illegal-ext set and MIME-prefix rules.
 
-        mime, _ = mimetypes.guess_type(path)
-        mime = mime or ""
-        if any(mime.startswith(pref) for pref in self._ILLEGAL_MIME_PREFIXES):
-            raise LLMEngineError(
-                f"OpenAIEngine.attach: MIME type {mime!r} is not supported"
+        Delegates to the shared ``validate_attachment_path`` utility, which
+        checks existence, extension, allow-list membership, and MIME prefixes.
+        Converts ``ValueError`` from the helper into ``LLMEngineError``.
+        """
+        try:
+            validate_attachment_path(
+                path,
+                illegal_exts=ILLEGAL_ATTACHMENT_EXTS,
+                allowed_exts=OPENAI_ALLOWED_EXTS,
+                illegal_mime_prefixes=ENGINE_ILLEGAL_MIME_PREFIXES,
             )
+        except ValueError as exc:
+            raise LLMEngineError(str(exc)) from exc
 
     def _build_provider_payload(
         self,
@@ -881,28 +905,56 @@ class OpenAIEngine(LLMEngine):
 
         return payload
 
-    def _call_provider(self, payload: Dict[str, Any]) -> Any:
+    def _build_call_kwargs(self, payload: dict[str, Any]) -> dict[str, Any]:
         """
-        Perform a single Responses API call using the pre-built payload.
+        Build the shared Responses API kwargs from a pre-built payload dict.
 
-        Retries + backoff are handled by the base `_call_with_retries` wrapper.
+        Used by both sync and async call methods to avoid duplication.
+
+        Temperature gate: ``temperature`` is only forwarded when it is not
+        ``None`` AND ``reasoning`` is not set — reasoning-mode models reject
+        the ``temperature`` parameter.
         """
         blocks = payload["blocks"]
         instructions = payload.get("instructions")
 
-        kwargs: Dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "model": self.model,
             "input": blocks,
         }
         if instructions:
             kwargs["instructions"] = instructions
-
-        # For non-reasoning models, respect temperature; for some `gpt-5`-class
-        # models this may be ignored or overridden by the provider.
-        if "gpt-5" not in self.model.lower():
+        if self.temperature is not None and self._reasoning is None:
             kwargs["temperature"] = self.temperature
+        if self._max_output_tokens is not None:
+            kwargs["max_output_tokens"] = self._max_output_tokens
+        if self._reasoning is not None:
+            kwargs["reasoning"] = self._reasoning
+        if self._truncation is not None:
+            kwargs["truncation"] = self._truncation
+        return kwargs
 
-        return self._llm.responses.create(**kwargs)
+    def _call_provider(self, payload: Dict[str, Any]) -> Any:
+        """
+        Perform a single Responses API call using the pre-built payload.
+
+        Routes via ``run_coro_sync`` when the injected client is ``AsyncOpenAI``.
+        """
+        if isinstance(self._client, AsyncOpenAI):
+            return run_coro_sync(
+                self._client.responses.create(**self._build_call_kwargs(payload))
+            )
+        return self._client.responses.create(**self._build_call_kwargs(payload))
+
+    async def _call_provider_async(self, payload: Dict[str, Any]) -> Any:
+        """
+        Native async Responses API call.
+
+        Falls back to ``asyncio.to_thread`` when only a sync client is available.
+        """
+        if isinstance(self._client, AsyncOpenAI):
+            return await self._client.responses.create(**self._build_call_kwargs(payload))
+        return await asyncio.to_thread(self._call_provider, payload)
 
     def _extract_text(self, response: Any) -> str:
         """
@@ -1024,7 +1076,10 @@ class OpenAIEngine(LLMEngine):
         if not file_id:
             return
         try:
-            self._llm.files.delete(file_id)
+            if isinstance(self._client, AsyncOpenAI):
+                run_coro_sync(self._client.files.delete(file_id))
+            else:
+                self._client.files.delete(file_id)
         except Exception:
             return
 
@@ -1044,7 +1099,7 @@ class OpenAIEngine(LLMEngine):
 
         if ext == ".pdf" or mime == "application/pdf":
             return "pdf"
-        if ext in self._IMAGE_EXTS or mime.startswith("image/"):
+        if ext in OPENAI_IMAGE_EXTS or mime.startswith("image/"):
             return "image"
         return "text"
 
@@ -1112,7 +1167,12 @@ class OpenAIEngine(LLMEngine):
         We use purpose="assistants" which is appropriate for model context files.
         """
         with open(path, "rb") as fp:
-            f = self._llm.files.create(file=fp, purpose="assistants")
+            if isinstance(self._client, AsyncOpenAI):
+                f = run_coro_sync(
+                    self._client.files.create(file=fp, purpose="assistants")
+                )
+            else:
+                f = self._client.files.create(file=fp, purpose="assistants")
         return str(f.id)
 
     def _attach_local_path(
@@ -1131,7 +1191,7 @@ class OpenAIEngine(LLMEngine):
         mime = mime or ""
         lower = path.lower()
         is_pdf = mime == "application/pdf" or lower.endswith(".pdf")
-        is_image = mime.startswith("image/") or lower.endswith(self._IMAGE_EXTS)
+        is_image = mime.startswith("image/") or lower.endswith(OPENAI_IMAGE_EXTS)
 
         if is_pdf:
             file_id = self._upload_file(path)
@@ -1159,12 +1219,18 @@ class OpenAIEngine(LLMEngine):
         """
         Diagnostic snapshot for OpenAIEngine, without secrets.
 
-        Includes model, temperature, and inline cutoff in addition to base engine info.
+        Includes model, Responses API config, and inline cutoff in addition to
+        base engine info. Does not expose ``client_kwargs`` contents (which may
+        include API keys).
         """
         base = super().to_dict()
         base.update({
+            "type": "OpenAIEngine",
             "model": self.model,
             "temperature": self.temperature,
+            "max_output_tokens": self._max_output_tokens,
+            "reasoning": self._reasoning,
+            "truncation": self._truncation,
             "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return base

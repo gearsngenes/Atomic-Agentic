@@ -370,6 +370,7 @@ class TestLLMEngineImmutability:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
         engine = OpenAIEngine(model="gpt-4o-mini", inline_cutoff_chars=500)
 
         assert engine.inline_cutoff_chars == 500
@@ -424,9 +425,8 @@ class TestLLMEngineImmutability:
 class FakeOpenAIClient:
     instances: list["FakeOpenAIClient"] = []
 
-    def __init__(self, api_key: str | None = None, timeout: float | None = None) -> None:
-        self.api_key = api_key
-        self.timeout = timeout
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
         self.responses = SimpleNamespace(create=self._create_response)
         self.files = SimpleNamespace(
             create=self._create_file,
@@ -447,6 +447,20 @@ class FakeOpenAIClient:
         self.deleted_files.append(file_id)
 
 
+class FakeAsyncOpenAIClient:
+    instances: list["FakeAsyncOpenAIClient"] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.responses = SimpleNamespace(create=self._create_response)
+        self.response_calls: list[dict[str, Any]] = []
+        FakeAsyncOpenAIClient.instances.append(self)
+
+    async def _create_response(self, **kwargs: Any) -> Any:
+        self.response_calls.append(kwargs)
+        return SimpleNamespace(output_text=" openai async text ")
+
+
 class TestOpenAIEngine:
     def test_missing_openai_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(llm_module, "OpenAI", None)
@@ -459,23 +473,78 @@ class TestOpenAIEngine:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         FakeOpenAIClient.instances.clear()
+        FakeAsyncOpenAIClient.instances.clear()
         monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(
             model="gpt-4o-mini",
-            api_key="secret",
+            api_key="secret",        # flows through client_kwargs
             timeout_seconds=12.0,
         )
 
-        fake = FakeOpenAIClient.instances[-1]
+        # Only ONE sync client constructed — no async client built.
+        assert len(FakeOpenAIClient.instances) == 1
+        assert len(FakeAsyncOpenAIClient.instances) == 0
 
+        fake = FakeOpenAIClient.instances[-1]
         assert engine.name == "openai_gpt_4o_mini"
-        assert fake.api_key == "secret"
-        assert fake.timeout == 12.0
+        assert fake.kwargs["api_key"] == "secret"
+        assert fake.kwargs["timeout"] == 12.0   # setdefault from timeout_seconds
+        assert engine._client is fake
+
+    def test_sync_client_injection_skips_construction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+
+        injected = FakeOpenAIClient()
+        count_before = len(FakeOpenAIClient.instances)
+
+        engine = OpenAIEngine(model="gpt-4o-mini", client=injected)
+
+        # No additional sync client constructed.
+        assert len(FakeOpenAIClient.instances) == count_before
+        assert engine._client is injected
+
+    def test_async_client_injection_skips_construction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeAsyncOpenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+
+        injected = FakeAsyncOpenAIClient()
+        count_before = len(FakeAsyncOpenAIClient.instances)
+
+        engine = OpenAIEngine(model="gpt-4o-mini", client=injected)
+
+        # No additional async client constructed.
+        assert len(FakeAsyncOpenAIClient.instances) == count_before
+        assert engine._client is injected
+
+    def test_async_client_routes_sync_via_run_coro_sync(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeAsyncOpenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+
+        injected = FakeAsyncOpenAIClient()
+        engine = OpenAIEngine(model="gpt-4o-mini", client=injected)
+
+        response = engine._call_provider({"blocks": [], "instructions": None})
+
+        # Async client's response_calls populated via run_coro_sync.
+        assert injected.response_calls
+        assert engine._extract_text(response) == " openai async text "
 
     def test_openai_payload_helpers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeOpenAIClient.instances.clear()
         monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini")
 
@@ -504,6 +573,7 @@ class TestOpenAIEngine:
     def test_openai_call_provider_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeOpenAIClient.instances.clear()
         monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini", temperature=0.25)
         response = engine._call_provider(
@@ -520,6 +590,61 @@ class TestOpenAIEngine:
         assert fake.response_calls[-1]["instructions"] == "system"
         assert fake.response_calls[-1]["temperature"] == 0.25
 
+    def test_call_provider_kwargs_temperature_and_new_params(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        FakeAsyncOpenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+
+        engine = OpenAIEngine(
+            model="gpt-4o-mini",
+            temperature=0.5,
+            max_output_tokens=512,
+            truncation="auto",
+        )
+        engine._call_provider({"blocks": [], "instructions": None})
+        call = FakeOpenAIClient.instances[-1].response_calls[-1]
+
+        assert call["temperature"] == 0.5
+        assert call["max_output_tokens"] == 512
+        assert call["truncation"] == "auto"
+        assert "reasoning" not in call
+
+    def test_call_provider_reasoning_suppresses_temperature(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        FakeAsyncOpenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+
+        engine = OpenAIEngine(
+            model="o3-mini",
+            temperature=0.7,             # set, but should be suppressed
+            reasoning={"effort": "high"},
+        )
+        engine._call_provider({"blocks": [], "instructions": None})
+        call = FakeOpenAIClient.instances[-1].response_calls[-1]
+
+        assert "temperature" not in call
+        assert call["reasoning"] == {"effort": "high"}
+
+    def test_call_provider_temperature_none_not_sent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        FakeAsyncOpenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+
+        engine = OpenAIEngine(model="gpt-4o-mini", temperature=None)
+        engine._call_provider({"blocks": [], "instructions": None})
+        call = FakeOpenAIClient.instances[-1].response_calls[-1]
+
+        assert "temperature" not in call
+
     @pytest.mark.parametrize(
         ("filename", "expected"),
         [
@@ -535,6 +660,7 @@ class TestOpenAIEngine:
         expected: str,
     ) -> None:
         monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini")
 
@@ -545,6 +671,7 @@ class TestOpenAIEngine:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(
             model="gpt-4o-mini",
@@ -558,6 +685,9 @@ class TestOpenAIEngine:
         assert data["type"] == "OpenAIEngine"
         assert data["model"] == "gpt-4o-mini"
         assert data["temperature"] == 0.33
+        assert data["max_output_tokens"] is None    # default
+        assert data["reasoning"] is None            # default
+        assert data["truncation"] is None           # default
         assert data["inline_cutoff_chars"] == 123
         assert "secret" not in str(data)
 
@@ -601,6 +731,7 @@ class FakeGenAIClient:
 class TestOpenAIExtractTokenUsage:
     def _engine(self, monkeypatch: pytest.MonkeyPatch) -> OpenAIEngine:
         monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
         return OpenAIEngine(model="gpt-4o-mini")
 
     def _usage(
