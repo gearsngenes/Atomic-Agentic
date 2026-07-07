@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 # ~~~Standard Library Imports~~~
+import asyncio
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 import logging
@@ -20,19 +21,19 @@ from typing import (
 # ~~~Provider SDK Imports~~~
 # OpenAI
 try: from openai import OpenAI
-except: OpenAI = None
+except ImportError: OpenAI = None
 # Google
 try: from google import genai
-except: genai = None
+except ImportError: genai = None
 # Mistral
 try: from mistralai import Mistral
-except: Mistral = None
+except ImportError: Mistral = None
 # Llama-CPP-Python
 try: from llama_cpp import Llama
-except: Llama = None
+except ImportError: Llama = None
 # Hugging Face Hub
 try: from huggingface_hub import hf_hub_download
-except: hf_hub_download = None
+except ImportError: hf_hub_download = None
 
 # ~~~Local Imports~~~
 from ..core.Invokable import AtomicInvokable
@@ -302,6 +303,42 @@ class LLMEngine(AtomicInvokable, ABC):
             except Exception as exc:
                 raise LLMEngineError(f"{self.name}.invoke failed") from exc
 
+    async def async_invoke(self, inputs: Mapping[str, Any]) -> LLMResult:
+        """
+        Async analog of ``invoke``. Does not acquire ``_invoke_lock``
+        (``threading.RLock`` would block the event loop).
+        """
+        logger.info("[%s started]", self.full_name)
+        started_at = datetime.now(timezone.utc)
+
+        try:
+            filtered_inputs = self.filter_inputs(inputs)
+            messages = filtered_inputs.get("messages")
+            if not isinstance(messages, list):
+                raise LLMEngineError(
+                    "LLMEngine.async_invoke: 'messages' input must be a list"
+                )
+
+            response = await self._call_model_async(messages)
+            text, token_usage, model_data = self.extract(response)
+            ended_at = datetime.now(timezone.utc)
+
+            result = self.make_result(
+                result=text,
+                started_at=started_at,
+                ended_at=ended_at,
+                token_usage=token_usage,
+                model_data=model_data,
+            )
+
+            logger.info("[%s finished]", self.full_name)
+            return result
+
+        except LLMEngineError:
+            raise
+        except Exception as exc:
+            raise LLMEngineError(f"{self.name}.async_invoke failed") from exc
+
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
@@ -318,6 +355,13 @@ class LLMEngine(AtomicInvokable, ABC):
         attachments = dict(self._attachments)
         payload = self._build_provider_payload(normalized, attachments)
         return self._call_with_retries(payload)
+
+    async def _call_model_async(self, messages: List[Dict[str, Any]]) -> Any:
+        """Async analog of ``_call_model``; calls ``_call_with_retries_async``."""
+        normalized = self._normalize_messages(messages)
+        attachments = dict(self._attachments)
+        payload = self._build_provider_payload(normalized, attachments)
+        return await self._call_with_retries_async(payload)
 
     def extract(self, response: Any) -> tuple[str, TokenUsage, LLMModelData]:
         """
@@ -480,6 +524,35 @@ class LLMEngine(AtomicInvokable, ABC):
                 )
                 time.sleep(sleep)
 
+    async def _call_with_retries_async(self, payload: Any) -> Any:
+        """
+        Async analog of ``_call_with_retries``; uses ``await asyncio.sleep``
+        so the event loop is not blocked during backoff waits.
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return await self._call_provider_async(payload)
+            except LLMEngineError:
+                raise
+            except Exception as exc:
+                if not self._should_retry(exc, attempt):
+                    raise
+                sleep = min(
+                    self._retry_backoff_base * (2 ** (attempt - 1)),
+                    self._retry_backoff_max,
+                )
+                sleep *= random.uniform(0.8, 1.2)
+                logger.debug(
+                    "LLMEngine %s attempt %d failed with %r; retrying in %.2fs",
+                    self.name,
+                    attempt,
+                    exc,
+                    sleep,
+                )
+                await asyncio.sleep(sleep)
+
     def _should_retry(self, exc: Exception, attempt: int) -> bool:
         """
         Decide whether a failed `_call_provider` should be retried.
@@ -516,6 +589,14 @@ class LLMEngine(AtomicInvokable, ABC):
         """
         raise NotImplementedError
 
+    async def _call_provider_async(self, payload: Any) -> Any:
+        """
+        Async provider call. Default wraps the sync ``_call_provider`` in a
+        worker thread. Remote engine subclasses override with a native async
+        client in Passes 2–4.
+        """
+        return await asyncio.to_thread(self._call_provider, payload)
+
     @abstractmethod
     def _extract_text(self, response: Any) -> str:
         """
@@ -543,27 +624,21 @@ class LLMEngine(AtomicInvokable, ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         """
         Prepare a local path for reuse with this engine.
 
-        Implementations typically:
-        - validate the path and extension vs provider capabilities,
-        - perform any remote upload or inlining,
-        - return an opaque metadata mapping used later by `_build_provider_payload`.
+        The base implementation rejects all attachments. Remote engine subclasses
+        override this to perform provider-specific upload or inlining.
         """
-        raise NotImplementedError
-    
-    @abstractmethod
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        """
-        Hook called when an attachment is detached.
+        raise LLMEngineError(
+            f"{type(self).__name__} does not support attachments; "
+            "use plain text in messages instead."
+        )
 
-        Subclasses must implement provider-specific cleanup (e.g. remote file
-        deletion). Errors should be swallowed — detach is best-effort.
-        """
-        raise NotImplementedError
+    def _on_detach(self, meta: Mapping[str, Any]) -> None:
+        """Hook called when an attachment is detached. No-op by default."""
+        return None
 
 
     # --------------------------------------------------------------------- #
@@ -2342,25 +2417,6 @@ class LlamaCppEngine(LLMEngine):
             provider="llama_cpp",
             model_path=self._model_path,
         )
-
-    # ------------------------------------------------------------------ #
-    # Attachments: explicitly unsupported
-    # ------------------------------------------------------------------ #
-
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
-        """
-        Attachments are not supported for local llama.cpp models.
-
-        Any call to `attach(path)` will fail via this method.
-        """
-        raise LLMEngineError(
-            f"{type(self).__name__} does not support attachments; "
-            "use plain text in messages instead."
-        )
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        """No-op detach hook for llama.cpp (attachments unsupported)."""
-        return None
 
     # ------------------------------------------------------------------ #
     # Introspection
