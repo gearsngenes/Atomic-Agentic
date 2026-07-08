@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import pprint
@@ -6,7 +6,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import BasicAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()  # Load environment variables from .env file
 

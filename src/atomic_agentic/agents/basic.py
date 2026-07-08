@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Literal, Mapping, Optional, Union
+from typing import Any, Callable, Literal, Optional
 
 import logging
 
 from ..exceptions import AgentError, AgentInvocationError
-from ..engines.LLMEngines import LLMEngine
+from ..llm.base import LLMEngine
 from ..models.parameters import ParamSpec
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..models.agents.prompts import PromptConfig

@@ -1,11 +1,11 @@
-import json
+﻿import json
 import logging
 
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.agents import ReActAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -104,10 +104,10 @@ out_dir = Path("examples/output_markdowns")
 out_dir.mkdir(exist_ok=True)
 filepath = out_dir / "ReAct_Code.py"
 filepath.write_text(result, encoding="utf-8")
-print(f"\n✓ Final Draft code saved to: {filepath.resolve()}")
+print(f"\nâœ“ Final Draft code saved to: {filepath.resolve()}")
 filepath = out_dir / "ReAct_Blackboard.txt"
 filepath.write_text(pformat(orchestrator.blackboard), encoding="utf-8")
-print(f"\n✓ Blackboard content saved to: {filepath.resolve()}")
+print(f"\nâœ“ Blackboard content saved to: {filepath.resolve()}")
 filepath = out_dir / "ReAct_Record.json"
 filepath.write_text(serialized_record, encoding="utf-8")
-print(f"\n✓ Serialized record saved to: {filepath.resolve()}")
+print(f"\nâœ“ Serialized record saved to: {filepath.resolve()}")

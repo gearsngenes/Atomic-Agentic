@@ -1,10 +1,10 @@
-# example_doc_summarizer.py
+﻿# example_doc_summarizer.py
 # Requires:
 #   - OPENAI_API_KEY in your environment (or .env)
 import os, time
 from dotenv import load_dotenv
 from atomic_agentic.agents import BasicAgent
-from atomic_agentic.engines.LLMEngines import GeminiEngine, OpenAIEngine, MistralEngine, LlamaCppEngine
+from atomic_agentic.llm import GeminiEngine, OpenAIEngine, MistralEngine, LlamaCppEngine
 
 load_dotenv()
 

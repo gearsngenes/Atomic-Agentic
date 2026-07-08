@@ -50,7 +50,7 @@ from ..constants.agents import (
 )
 from ..core import AtomicInvokable
 from ..constants.core import NO_VAL
-from ..engines.LLMEngines import LLMEngine
+from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError
 from ..models.agents import PlanActRunState
 from ..models.agents import BlackboardSlot

@@ -1,4 +1,4 @@
-# 05_Auto_Graft_Test.py
+﻿# 05_Auto_Graft_Test.py
 """
 Demonstrates post-invoke parameter auto-grafting (v2.0.0a14+).
 
@@ -11,11 +11,11 @@ alongside the normal user inputs; the agent routes them to post_invoke without
 any extra configuration.
 
 Schema produced by this agent:
-  prompt            (POSITIONAL_OR_KEYWORD, required)   ← identity pre_invoke
-  audience          (POSITIONAL_OR_KEYWORD, default "general reader")  ← pre_invoke
-  output_label      (KEYWORD_ONLY, default "answer")    ← auto-grafted from post_invoke
-  include_metadata  (KEYWORD_ONLY, default True)        ← auto-grafted from post_invoke
-  run_id            (KEYWORD_ONLY, default None)        ← framework-reserved
+  prompt            (POSITIONAL_OR_KEYWORD, required)   â† identity pre_invoke
+  audience          (POSITIONAL_OR_KEYWORD, default "general reader")  â† pre_invoke
+  output_label      (KEYWORD_ONLY, default "answer")    â† auto-grafted from post_invoke
+  include_metadata  (KEYWORD_ONLY, default True)        â† auto-grafted from post_invoke
+  run_id            (KEYWORD_ONLY, default None)        â† framework-reserved
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import BasicAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 
 
 load_dotenv()
@@ -55,7 +55,7 @@ def package_response(
 
     ``raw_answer`` receives the agent's raw generated text (the result key).
     ``output_label`` and ``include_metadata`` are auto-grafted into the agent
-    schema — callers supply them as regular inputs, no extra configuration needed.
+    schema â€” callers supply them as regular inputs, no extra configuration needed.
     """
     payload: dict[str, Any] = {
         output_label: raw_answer.strip(),
@@ -84,7 +84,7 @@ def main() -> None:
         pre_invoke=build_prompt,
         post_invoke=package_response,
         post_result_key="raw_answer",
-        # No passthrough_inputs needed — output_label and include_metadata
+        # No passthrough_inputs needed â€” output_label and include_metadata
         # are auto-grafted from package_response into the agent schema.
     )
 
@@ -94,7 +94,7 @@ def main() -> None:
         default = "(required)" if param.default.__class__.__name__ == "_NO_VAL" else repr(param.default)
         print(f"  {param.name:<20} {param.kind:<25} default={default}")
 
-    # Invoke with a custom output_label — passed as a regular input.
+    # Invoke with a custom output_label â€” passed as a regular input.
     result = agent.invoke(
         {
             "prompt": "What is agent memory?",

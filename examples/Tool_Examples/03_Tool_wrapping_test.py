@@ -1,4 +1,4 @@
-"""
+﻿"""
 Base Tool demo: wrapping an Agent directly as a Tool.
 
 This mirrors the deprecated AdapterTool from v1.x example, but uses the v1.4-style base Tool support
@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from atomic_agentic.tools import Tool
 from atomic_agentic.exceptions import ToolInvocationError, AgentInvocationError
 from atomic_agentic.agents import BasicAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 import logging
 
 load_dotenv()  # take environment variables from .env file (if exists)

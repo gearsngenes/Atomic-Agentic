@@ -1,4 +1,4 @@
-"""06_context_enabled_planner.py
+﻿"""06_context_enabled_planner.py
 
 Interactive PlanActAgent with context memory enabled.
 
@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.tools.prebuilt import MATH_TOOLS
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)

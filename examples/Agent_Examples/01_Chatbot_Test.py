@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 from atomic_agentic.agents import BasicAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine, GeminiEngine, MistralEngine, LlamaCppEngine
+from atomic_agentic.llm import OpenAIEngine, GeminiEngine, MistralEngine, LlamaCppEngine
 
 load_dotenv()
 

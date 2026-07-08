@@ -9,10 +9,14 @@ from typing import Any, Mapping
 import pytest
 from google.genai import types as _real_genai_types
 
-llm_module = importlib.import_module("atomic_agentic.engines.LLMEngines")
+base_module = importlib.import_module("atomic_agentic.llm.base")
+openai_module = importlib.import_module("atomic_agentic.llm.openai_engine")
+gemini_module = importlib.import_module("atomic_agentic.llm.gemini_engine")
+mistral_module = importlib.import_module("atomic_agentic.llm.mistral_engine")
+llama_module = importlib.import_module("atomic_agentic.llm.llama_engine")
 
 from atomic_agentic.exceptions import LLMEngineError
-from atomic_agentic.engines.LLMEngines import (
+from atomic_agentic.llm import (
     GeminiEngine,
     LlamaCppEngine,
     LLMEngine,
@@ -209,8 +213,8 @@ class TestLLMEngineMessagesAndInvoke:
 
 class TestLLMEngineRetries:
     def test_timeout_error_retries_then_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module.time, "sleep", lambda _: None)
-        monkeypatch.setattr(llm_module.random, "uniform", lambda _low, _high: 1.0)
+        monkeypatch.setattr(base_module.time, "sleep", lambda _: None)
+        monkeypatch.setattr(base_module.random, "uniform", lambda _low, _high: 1.0)
 
         engine = FakeLLMEngine(
             max_retries=1,
@@ -226,8 +230,8 @@ class TestLLMEngineRetries:
         assert engine.call_count == 2
 
     def test_connection_error_retries_then_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module.time, "sleep", lambda _: None)
-        monkeypatch.setattr(llm_module.random, "uniform", lambda _low, _high: 1.0)
+        monkeypatch.setattr(base_module.time, "sleep", lambda _: None)
+        monkeypatch.setattr(base_module.random, "uniform", lambda _low, _high: 1.0)
 
         engine = FakeLLMEngine(
             max_retries=1,
@@ -243,7 +247,7 @@ class TestLLMEngineRetries:
         assert engine.call_count == 2
 
     def test_llm_engine_error_does_not_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module.time, "sleep", lambda _: None)
+        monkeypatch.setattr(base_module.time, "sleep", lambda _: None)
 
         engine = FakeLLMEngine(
             max_retries=3,
@@ -256,7 +260,7 @@ class TestLLMEngineRetries:
         assert engine.call_count == 1
 
     def test_non_retryable_error_does_not_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module.time, "sleep", lambda _: None)
+        monkeypatch.setattr(base_module.time, "sleep", lambda _: None)
 
         engine = FakeLLMEngine(
             max_retries=3,
@@ -371,8 +375,8 @@ class TestLLMEngineImmutability:
     def test_openai_inline_cutoff_chars_is_read_only(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
         engine = OpenAIEngine(model="gpt-4o-mini", inline_cutoff_chars=500)
 
         assert engine.inline_cutoff_chars == 500
@@ -383,7 +387,7 @@ class TestLLMEngineImmutability:
     def test_mistral_inline_cutoff_chars_is_read_only(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
         engine = MistralEngine(model="mistral-small-latest", inline_cutoff_chars=300)
 
         assert engine.inline_cutoff_chars == 300
@@ -434,9 +438,9 @@ class FakeAsyncOpenAIClient:
 
 class TestOpenAIEngine:
     def test_missing_openai_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module, "OpenAI", None)
+        monkeypatch.setattr(openai_module, "OpenAI", None)
 
-        with pytest.raises(RuntimeError, match="openai"):
+        with pytest.raises(LLMEngineError, match="openai"):
             OpenAIEngine(model="gpt_test")
 
     def test_constructor_uses_fake_client_and_sanitizes_name(
@@ -445,8 +449,8 @@ class TestOpenAIEngine:
     ) -> None:
         FakeOpenAIClient.instances.clear()
         FakeAsyncOpenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(
             model="gpt-4o-mini",
@@ -468,8 +472,8 @@ class TestOpenAIEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeOpenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         injected = FakeOpenAIClient()
         count_before = len(FakeOpenAIClient.instances)
@@ -484,8 +488,8 @@ class TestOpenAIEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeAsyncOpenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         injected = FakeAsyncOpenAIClient()
         count_before = len(FakeAsyncOpenAIClient.instances)
@@ -500,8 +504,8 @@ class TestOpenAIEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeAsyncOpenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         injected = FakeAsyncOpenAIClient()
         engine = OpenAIEngine(model="gpt-4o-mini", client=injected)
@@ -514,8 +518,8 @@ class TestOpenAIEngine:
 
     def test_openai_payload_helpers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeOpenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini")
 
@@ -543,8 +547,8 @@ class TestOpenAIEngine:
 
     def test_openai_call_provider_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeOpenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini", temperature=0.25)
         response = engine._call_provider(
@@ -566,8 +570,8 @@ class TestOpenAIEngine:
     ) -> None:
         FakeOpenAIClient.instances.clear()
         FakeAsyncOpenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(
             model="gpt-4o-mini",
@@ -588,8 +592,8 @@ class TestOpenAIEngine:
     ) -> None:
         FakeOpenAIClient.instances.clear()
         FakeAsyncOpenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(
             model="o3-mini",
@@ -607,8 +611,8 @@ class TestOpenAIEngine:
     ) -> None:
         FakeOpenAIClient.instances.clear()
         FakeAsyncOpenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini", temperature=None)
         engine._call_provider({"blocks": [], "instructions": None})
@@ -630,8 +634,8 @@ class TestOpenAIEngine:
         filename: str,
         expected: str,
     ) -> None:
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(model="gpt-4o-mini")
 
@@ -641,8 +645,8 @@ class TestOpenAIEngine:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
 
         engine = OpenAIEngine(
             model="gpt-4o-mini",
@@ -698,8 +702,8 @@ class FakeGenAIClient:
 
 class TestOpenAIExtractTokenUsage:
     def _engine(self, monkeypatch: pytest.MonkeyPatch) -> OpenAIEngine:
-        monkeypatch.setattr(llm_module, "OpenAI", FakeOpenAIClient)
-        monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
         return OpenAIEngine(model="gpt-4o-mini")
 
     def _usage(
@@ -790,16 +794,16 @@ class FakeGenAI:
 
 class TestGeminiEngine:
     def test_missing_genai_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module, "genai", None)
+        monkeypatch.setattr(gemini_module, "genai", None)
 
-        with pytest.raises(RuntimeError, match="google-genai"):
+        with pytest.raises(LLMEngineError, match="google-genai"):
             GeminiEngine(model="gemini_test")
 
     def test_constructor_builds_client_from_kwargs(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
         engine = GeminiEngine(
             model="gemini-2.5-flash",
@@ -816,7 +820,7 @@ class TestGeminiEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
         injected = FakeGenAIClient()
         count_before = len(FakeGenAIClient.instances)
@@ -829,7 +833,7 @@ class TestGeminiEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
         engine = GeminiEngine(model="gemini-2.5-flash")
         messages = [
@@ -849,7 +853,7 @@ class TestGeminiEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
         engine = GeminiEngine(model="gemini-2.5-flash")
         file_obj = SimpleNamespace(name="f1", uri="gs://fake/f1", mime_type="text/plain")
@@ -875,7 +879,7 @@ class TestGeminiEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
         engine = GeminiEngine(model="gemini-2.5-flash", temperature=0.4)
         messages = [
@@ -901,7 +905,7 @@ class TestGeminiEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
         engine = GeminiEngine(model="gemini-2.5-flash")
         payload = engine._build_provider_payload(
@@ -918,7 +922,7 @@ class TestGeminiEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
         engine = GeminiEngine(model="gemini-2.5-flash", temperature=None)
         cfg = engine._build_generate_config(None)
@@ -929,7 +933,7 @@ class TestGeminiEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
-        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
         engine = GeminiEngine(
             model="gemini-2.5-flash",
@@ -942,7 +946,7 @@ class TestGeminiEngine:
     def test_gemini_to_dict_includes_non_secret_config(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+        monkeypatch.setattr(gemini_module, "genai", FakeGenAI)
 
         engine = GeminiEngine(
             model="gemini-2.5-flash",
@@ -1004,7 +1008,7 @@ class FakeMistralClient:
 
 class TestMistralEngine:
     def test_missing_mistral_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module, "Mistral", None)
+        monkeypatch.setattr(mistral_module, "Mistral", None)
 
         with pytest.raises(LLMEngineError, match="mistralai"):
             MistralEngine(model="mistral_test")
@@ -1013,7 +1017,7 @@ class TestMistralEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeMistralClient.instances.clear()
-        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
 
         engine = MistralEngine(
             model="mistral-small-latest",
@@ -1031,7 +1035,7 @@ class TestMistralEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeMistralClient.instances.clear()
-        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
         injected = FakeMistralClient()
         FakeMistralClient.instances.clear()
 
@@ -1044,7 +1048,7 @@ class TestMistralEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeMistralClient.instances.clear()
-        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
 
         engine = MistralEngine(model="mistral-small-latest", temperature=0.3)
         payload = {"messages": [{"role": "user", "content": "hello"}]}
@@ -1062,7 +1066,7 @@ class TestMistralEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeMistralClient.instances.clear()
-        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
 
         engine = MistralEngine(model="mistral-small-latest", temperature=None)
         payload = {"messages": [{"role": "user", "content": "hi"}]}
@@ -1085,14 +1089,14 @@ class TestMistralEngine:
         filename: str,
         expected: str,
     ) -> None:
-        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
 
         engine = MistralEngine(model="mistral-small-latest")
 
         assert engine._classify_kind(filename) == expected
 
     def test_mistral_ensure_user_parts(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
 
         engine = MistralEngine(model="mistral-small-latest")
         messages = [{"role": "assistant", "content": "hello"}]
@@ -1110,7 +1114,7 @@ class TestMistralEngine:
 
     def test_mistral_payload_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeMistralClient.instances.clear()
-        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
 
         engine = MistralEngine(
             model="mistral-small-latest",
@@ -1141,7 +1145,7 @@ class TestMistralEngine:
         assert fake.complete_calls[-1]["model"] == "mistral-small-latest"
 
     def test_mistral_extract_text_from_chunk_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
 
         engine = MistralEngine(model="mistral-small-latest")
         response = SimpleNamespace(
@@ -1163,7 +1167,7 @@ class TestMistralEngine:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        monkeypatch.setattr(mistral_module, "Mistral", FakeMistralClient)
 
         engine = MistralEngine(
             model="mistral-small-latest",
@@ -1201,7 +1205,7 @@ class FakeLlama:
 
 class TestLlamaCppEngine:
     def test_missing_llama_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module, "Llama", None)
+        monkeypatch.setattr(llama_module, "Llama", None)
 
         with pytest.raises(LLMEngineError, match="llama-cpp-python"):
             LlamaCppEngine(model_path="model.gguf")
@@ -1210,14 +1214,14 @@ class TestLlamaCppEngine:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         with pytest.raises(LLMEngineError, match="requires either"):
             LlamaCppEngine()
 
     def test_constructor_uses_local_model_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeLlama.instances.clear()
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         engine = LlamaCppEngine(
             model_path="model.gguf",
@@ -1239,7 +1243,7 @@ class TestLlamaCppEngine:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         FakeLlama.instances.clear()
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         download_calls: list[dict[str, Any]] = []
         resolved_path = "/cache/org/repo/model.gguf"
@@ -1248,7 +1252,7 @@ class TestLlamaCppEngine:
             download_calls.append(kwargs)
             return resolved_path
 
-        monkeypatch.setattr(llm_module, "hf_hub_download", fake_hf_hub_download)
+        monkeypatch.setattr(llama_module, "hf_hub_download", fake_hf_hub_download)
 
         engine = LlamaCppEngine(
             repo_id="org/repo",
@@ -1267,7 +1271,7 @@ class TestLlamaCppEngine:
 
     def test_llama_payload_call_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
         FakeLlama.instances.clear()
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         engine = LlamaCppEngine(model_path="model.gguf")
         messages = [{"role": "user", "content": "Hello"}]
@@ -1281,7 +1285,7 @@ class TestLlamaCppEngine:
         assert engine._extract_text(response) == "llama text"
 
     def test_llama_extract_text_rejects_bad_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         engine = LlamaCppEngine(model_path="model.gguf")
 
@@ -1289,7 +1293,7 @@ class TestLlamaCppEngine:
             engine._extract_text({"bad": "shape"})
 
     def test_llama_attachments_are_not_supported(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         engine = LlamaCppEngine(model_path="model.gguf")
 
@@ -1300,7 +1304,7 @@ class TestLlamaCppEngine:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         engine = LlamaCppEngine(
             model_path="model.gguf",
@@ -1328,7 +1332,7 @@ class TestLlamaCppEngine:
     def test_llamacpp_source_params_are_read_only(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
         engine = LlamaCppEngine(model_path="model.gguf")
 
         assert engine.model_path == "model.gguf"
@@ -1342,7 +1346,7 @@ class TestLlamaCppEngine:
     def test_llamacpp_model_load_params_are_read_only(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
         engine = LlamaCppEngine(model_path="model.gguf", n_ctx=2048, verbose=True)
 
         assert engine.n_ctx == 2048
@@ -1356,7 +1360,7 @@ class TestLlamaCppEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeLlama.instances.clear()
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         LlamaCppEngine(
             model_path="model.gguf",
@@ -1372,7 +1376,7 @@ class TestLlamaCppEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeLlama.instances.clear()
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         engine = LlamaCppEngine(
             model_path="model.gguf",
@@ -1401,7 +1405,7 @@ class TestLlamaCppEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeLlama.instances.clear()
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         engine = LlamaCppEngine(model_path="model.gguf")
         engine._call_provider({"messages": [{"role": "user", "content": "hi"}]})
@@ -1415,7 +1419,7 @@ class TestLlamaCppEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeLlama.instances.clear()
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        monkeypatch.setattr(llama_module, "Llama", FakeLlama)
 
         download_calls: list[dict[str, Any]] = []
 
@@ -1423,7 +1427,7 @@ class TestLlamaCppEngine:
             download_calls.append(kwargs)
             return "/cache/model.gguf"
 
-        monkeypatch.setattr(llm_module, "hf_hub_download", fake_hf_hub_download)
+        monkeypatch.setattr(llama_module, "hf_hub_download", fake_hf_hub_download)
 
         LlamaCppEngine(
             repo_id="org/repo",

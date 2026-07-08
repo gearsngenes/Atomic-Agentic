@@ -24,7 +24,7 @@ from ..exceptions import (
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..constants.core import NO_VAL
-from ..engines.LLMEngines import LLMEngine
+from ..llm.base import LLMEngine
 from ..models.results import AgentResult, LLMModelData
 from ..tools import toolify
 from ..models.agents.records import AgentRecord, LLMRecord

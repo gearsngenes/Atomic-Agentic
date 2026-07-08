@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from google import genai
 from mistralai.client import Mistral
-from atomic_agentic.engines.LLMEngines import GeminiEngine, LlamaCppEngine, MistralEngine, OpenAIEngine
+from atomic_agentic.llm import GeminiEngine, LlamaCppEngine, MistralEngine, OpenAIEngine
 import logging
 from pprint import pprint
 

@@ -141,7 +141,7 @@ from ..exceptions import (
 from ..constants.core import IDENTIFIER_PATTERN_TEXT
 from ..core.Invokable import AtomicInvokable
 from ..constants.core import NO_VAL
-from ..engines.LLMEngines import LLMEngine
+from ..llm.base import LLMEngine
 from ..tools import toolify
 from ..mcp import MCPClientHub
 from ..a2a import PyA2AtomicClient
