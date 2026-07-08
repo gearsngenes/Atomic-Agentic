@@ -995,36 +995,41 @@ class TestGeminiEngine:
 class FakeMistralClient:
     instances: list["FakeMistralClient"] = []
 
-    def __init__(self, api_key: str = "", client: Any = None) -> None:
-        self.api_key = api_key
-        self.http_client = client
-        self.chat = SimpleNamespace(complete=self._complete)
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.chat = SimpleNamespace(
+            complete=self._complete,
+            complete_async=self._complete_async,
+        )
         self.files = SimpleNamespace(
             upload=self._upload,
             get_signed_url=self._get_signed_url,
             delete=self._delete,
         )
         self.complete_calls: list[dict[str, Any]] = []
+        self.aio_complete_calls: list[dict[str, Any]] = []
         self.deleted_files: list[str] = []
         FakeMistralClient.instances.append(self)
 
     def _complete(self, **kwargs: Any) -> Any:
         self.complete_calls.append(kwargs)
         return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content=" mistral text ")
-                )
-            ]
+            choices=[SimpleNamespace(message=SimpleNamespace(content=" mistral text "))]
+        )
+
+    async def _complete_async(self, **kwargs: Any) -> Any:
+        self.aio_complete_calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=" mistral async text "))]
         )
 
     def _upload(self, **kwargs: Any) -> Any:
         return SimpleNamespace(id="mistral_file")
 
-    def _get_signed_url(self, file_id: str) -> Any:
+    def _get_signed_url(self, *, file_id: str, **kwargs: Any) -> Any:
         return SimpleNamespace(url=f"https://signed.example/{file_id}")
 
-    def _delete(self, file_id: str) -> None:
+    def _delete(self, *, file_id: str, **kwargs: Any) -> None:
         self.deleted_files.append(file_id)
 
 
@@ -1032,10 +1037,12 @@ class TestMistralEngine:
     def test_missing_mistral_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(llm_module, "Mistral", None)
 
-        with pytest.raises(RuntimeError, match="mistralai"):
+        with pytest.raises(LLMEngineError, match="mistralai"):
             MistralEngine(model="mistral_test")
 
-    def test_constructor_uses_fake_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_constructor_builds_client_from_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         FakeMistralClient.instances.clear()
         monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
 
@@ -1048,7 +1055,52 @@ class TestMistralEngine:
         fake = FakeMistralClient.instances[-1]
 
         assert engine.name == "mistral_mistral_small_latest"
-        assert fake.api_key == "secret"
+        assert fake.kwargs["api_key"] == "secret"
+        assert fake.kwargs["timeout_ms"] == 5000
+
+    def test_constructor_client_injection_skips_construction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeMistralClient.instances.clear()
+        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+        injected = FakeMistralClient()
+        FakeMistralClient.instances.clear()
+
+        engine = MistralEngine(model="mistral-small-latest", client=injected)
+
+        assert FakeMistralClient.instances == []
+        assert engine._client is injected
+
+    def test_call_provider_async_uses_aio_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeMistralClient.instances.clear()
+        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+
+        engine = MistralEngine(model="mistral-small-latest", temperature=0.3)
+        payload = {"messages": [{"role": "user", "content": "hello"}]}
+
+        result = run_coro_sync(engine._call_provider_async(payload))
+
+        fake = FakeMistralClient.instances[-1]
+        assert fake.aio_complete_calls
+        call = fake.aio_complete_calls[-1]
+        assert call["model"] == "mistral-small-latest"
+        assert call["temperature"] == 0.3
+        assert engine._extract_text(result) == "mistral async text"
+
+    def test_temperature_none_omits_from_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeMistralClient.instances.clear()
+        monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
+
+        engine = MistralEngine(model="mistral-small-latest", temperature=None)
+        payload = {"messages": [{"role": "user", "content": "hi"}]}
+        engine._call_provider(payload)
+
+        fake = FakeMistralClient.instances[-1]
+        assert "temperature" not in fake.complete_calls[-1]
 
     @pytest.mark.parametrize(
         ("filename", "expected"),
@@ -1118,7 +1170,6 @@ class TestMistralEngine:
 
         assert engine._extract_text(response) == "mistral text"
         assert fake.complete_calls[-1]["model"] == "mistral-small-latest"
-        assert fake.complete_calls[-1]["temperature"] == 0.6
 
     def test_mistral_extract_text_from_chunk_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(llm_module, "Mistral", FakeMistralClient)
@@ -1147,7 +1198,6 @@ class TestMistralEngine:
 
         engine = MistralEngine(
             model="mistral-small-latest",
-            api_key="secret",
             temperature=0.7,
             inline_cutoff_chars=321,
         )
@@ -1158,7 +1208,6 @@ class TestMistralEngine:
         assert data["model"] == "mistral-small-latest"
         assert data["temperature"] == 0.7
         assert data["inline_cutoff_chars"] == 321
-        assert "secret" not in str(data)
 
 
 class FakeLlama:

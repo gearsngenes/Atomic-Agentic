@@ -29,7 +29,7 @@ except ImportError:
 try: from google import genai
 except ImportError: genai = None
 # Mistral
-try: from mistralai import Mistral
+try: from mistralai.client import Mistral
 except ImportError: Mistral = None
 # Llama-CPP-Python
 try: from llama_cpp import Llama
@@ -58,6 +58,7 @@ from ..utils.core import run_coro_sync
 from ..constants.engines import (
     ILLEGAL_ATTACHMENT_EXTS,
     ENGINE_ILLEGAL_MIME_PREFIXES,
+    MISTRAL_IMAGE_EXTS,
     OPENAI_IMAGE_EXTS,
     OPENAI_ALLOWED_EXTS,
 )
@@ -1710,60 +1711,61 @@ class MistralEngine(LLMEngine):
        `_on_detach`, which calls `client.files.delete(file_id=...)`.
     """
 
-    _IMAGE_EXTS: tuple[str, ...] = (
-        ".png", ".jpg", ".jpeg",
-        ".webp", ".gif", ".bmp",
-        ".tif", ".tiff", ".heic",
-    )
-    _ILLEGAL_EXTS: set[str] = {
-        ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z",  # archives
-        ".exe", ".dll", ".so", ".bin", ".o",  # executables/binaries
-        ".db", ".sqlite",  # databases
-        ".h5", ".pt", ".pth", ".onnx",  # model weights
-    }
-    _ILLEGAL_MIME_PREFIXES: tuple[str, ...] = ("audio/", "video/")
-
     def __init__(
         self,
-        model: str = "mistral-medium-latest",
-        api_key: Optional[str] = None,
-        temperature: float = 0.1,
-        inline_cutoff_chars: int = 200_000,
-        extra_illegal_exts: Optional[set[str]] = None,
-        *,
-        name: Optional[str] = None,
+        model: str,
+        name: str | None = None,
         namespace: str = "llm",
         description: str = "Mistral LLM Engine",
+        client: Mistral | None = None,
+        temperature: float | None = 0.1,
+        inline_cutoff_chars: int = 200_000,
+        *,
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
         max_retries: int = 2,
         retry_backoff_base: float = 0.5,
         retry_backoff_max: float = 8.0,
+        **client_kwargs: Any,
     ) -> None:
         """
         Parameters
         ----------
-        model : str
-            Mistral model identifier (e.g. ``"mistral-medium-latest"``).
-        api_key : str | None
-            Optional API key; if omitted, ``MISTRAL_API_KEY`` from the
-            environment is used.
-        temperature : float
-            Sampling temperature for text generation.
-        inline_cutoff_chars : int
-            Maximum number of characters to inline from text/code attachments.
-        extra_illegal_exts : set[str] | None
-            Optional set of additional extensions to reject at ``attach`` time.
-        name, namespace, description, filter_extraneous_inputs, timeout_seconds,
-        max_retries, retry_backoff_base, retry_backoff_max :
-            Template-method engine configuration (see ``LLMEngine``).
+        model:
+            Mistral model identifier (e.g. ``"mistral-small-latest"``).
+        name:
+            Optional human-friendly engine name; defaults to ``mistral_{model}``
+            with non-identifier characters replaced by underscores.
+        namespace:
+            Grouping label; inherited by the base engine as ``"llm"`` by default.
+        description:
+            Human-readable description for this engine instance.
+        client:
+            Pre-built ``Mistral`` client. When provided, used directly and no
+            client is constructed from ``client_kwargs``. ``Mistral`` exposes
+            both sync (``.chat.complete``) and async (``.chat.complete_async``)
+            paths on the same object — no isinstance routing is needed.
+        temperature:
+            Sampling temperature for text generation. ``None`` omits the kwarg
+            entirely, letting the SDK apply its own default sentinel.
+        inline_cutoff_chars:
+            Maximum characters to inline from text/code attachments.
+        filter_extraneous_inputs, timeout_seconds, max_retries,
+        retry_backoff_base, retry_backoff_max:
+            Shared ``LLMEngine`` configuration (see base class).
+        **client_kwargs:
+            Additional keyword arguments forwarded to ``Mistral(...)`` during
+            client construction. Common uses: ``api_key``, ``server_url``,
+            ``timeout_ms``. A default ``timeout_ms`` is seeded from
+            ``timeout_seconds`` unless supplied explicitly. Not forwarded when
+            ``client`` is injected.
         """
-        if Mistral is None:
-            raise RuntimeError(
-                "MistralEngine requires the `mistralai` package to be installed."
-            )
-
-        sanitized_name = (name or f"mistral_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
+        # 1. Name sanitization + super init.
+        sanitized_name = (
+            (name or f"mistral_{model}")
+            .replace(":", "_").replace("-", "_")
+            .replace(" ", "_").replace(".", "_")
+        )
         super().__init__(
             name=sanitized_name,
             namespace=namespace,
@@ -1775,22 +1777,23 @@ class MistralEngine(LLMEngine):
             retry_backoff_max=retry_backoff_max,
         )
 
-        import httpx
+        # 2. SDK presence check.
+        if Mistral is None:
+            raise LLMEngineError(
+                "MistralEngine requires the `mistralai` package to be installed."
+            )
 
-        self._client = Mistral(
-            api_key=api_key or os.getenv("MISTRAL_API_KEY", ""),
-            client=httpx.Client(timeout=self._timeout_seconds),
-        )
+        # 3. Build _ckw + seed timeout_ms default from the base-engine knob.
+        _ckw = dict(client_kwargs)
+        _ckw.setdefault("timeout_ms", int(self._timeout_seconds * 1000))
+
+        # 4. Single client: injected as-is or built from kwargs.
+        self._client: Mistral = client if client is not None else Mistral(**_ckw)
+
+        # 5. Store model and generation config.
         self.model = model
-        self.temperature = float(temperature)
+        self.temperature = temperature
         self._inline_cutoff_chars = int(inline_cutoff_chars)
-
-        # Merge subclass-specific illegal extensions into the base policy.
-        merged_illegal = set(self.illegal_attachment_exts) | set(self._ILLEGAL_EXTS)
-        if extra_illegal_exts:
-            merged_illegal |= set(extra_illegal_exts)
-        self.illegal_attachment_exts = merged_illegal
-        # We leave allowed_attachment_exts as None (blacklist-based policy).
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -1806,21 +1809,20 @@ class MistralEngine(LLMEngine):
 
     def _validate_attachment_path(self, path: str) -> None:
         """
-        Extend the base validation with Mistral-specific MIME-type checks.
+        Validate ``path`` against the shared illegal-ext set and MIME-prefix rules.
 
-        Base `_validate_attachment_path` has already ensured that `path` exists,
-        is a file, and passes the coarse extension policy. Here we reject
-        audio/video upfront; other illegal types are controlled by
-        `illegal_attachment_exts`.
+        Delegates to ``validate_attachment_path`` (blacklist-only policy; no
+        positive allow-list). Converts ``ValueError`` to ``LLMEngineError``.
         """
-        super()._validate_attachment_path(path)
-
-        mime, _ = mimetypes.guess_type(path)
-        mime = mime or ""
-        if any(mime.startswith(pref) for pref in self._ILLEGAL_MIME_PREFIXES):
-            raise LLMEngineError(
-                f"MistralEngine.attach: MIME type {mime!r} is not supported"
+        try:
+            validate_attachment_path(
+                path,
+                illegal_exts=ILLEGAL_ATTACHMENT_EXTS,
+                allowed_exts=None,
+                illegal_mime_prefixes=ENGINE_ILLEGAL_MIME_PREFIXES,
             )
+        except ValueError as exc:
+            raise LLMEngineError(str(exc)) from exc
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         """
@@ -1967,15 +1969,34 @@ class MistralEngine(LLMEngine):
 
     def _call_provider(self, payload: Any) -> Any:
         """
-        Single Mistral chat completion call.
+        Single synchronous Mistral chat completion call.
 
-        Retries and error wrapping are handled by the shared `LLMEngine` template.
+        Retries and error-wrapping are handled by the shared ``LLMEngine`` template.
+        Temperature is omitted when ``None`` so the SDK applies its own default.
         """
-        return self._client.chat.complete(
-            model=self.model,
-            messages=payload["messages"],
-            temperature=self.temperature,
-        )
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": payload["messages"],
+        }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        return self._client.chat.complete(**kwargs)
+
+    async def _call_provider_async(self, payload: Any) -> Any:
+        """
+        Native async Mistral chat completion call via ``chat.complete_async``.
+
+        ``Mistral`` (v2.6.0+) exposes both sync and async paths on the same
+        object — no thread offload or isinstance routing needed. Temperature is
+        omitted when ``None`` so the SDK applies its own default.
+        """
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": payload["messages"],
+        }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        return await self._client.chat.complete_async(**kwargs)
 
     def _extract_text(self, response: Any) -> str:
         """
@@ -2057,7 +2078,7 @@ class MistralEngine(LLMEngine):
 
         if ext == ".pdf" or mime == "application/pdf":
             return "pdf"
-        if ext in self._IMAGE_EXTS or mime.startswith("image/"):
+        if ext in MISTRAL_IMAGE_EXTS or mime.startswith("image/"):
             return "image"
         # Fallback: treat as text/code and attempt to inline.
         return "text"

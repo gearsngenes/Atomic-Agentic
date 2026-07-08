@@ -25,8 +25,8 @@ dependencies = [
   "python-a2a>=0.5.10,<0.6",
   "httpx>=0.28.1,<0.29",
   "openai>=2.15,<3",
-  "google-genai>=1.64",
-  "mistralai>=1.12,<2",
+  "google-genai>=2.10.0,<3",
+  "mistralai>=2.6.0,<3",
 ]
 
 [project.optional-dependencies]
