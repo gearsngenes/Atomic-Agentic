@@ -1240,6 +1240,16 @@ class GeminiEngine(LLMEngine):
     """
     Google Gemini adapter using the Google Gen AI SDK.
 
+    Client model
+    ------------
+    A single ``_client`` attribute holds a ``genai.Client`` instance.
+    ``genai.Client`` exposes both sync (``client.models``) and async
+    (``client.aio.models``) paths — no isinstance routing is needed.
+
+    ``client=None`` builds ``genai.Client(**client_kwargs)`` with
+    ``http_options.timeout`` seeded from ``timeout_seconds`` (in milliseconds,
+    as required by the SDK). An injected client is used as-is.
+
     Flow per call
     -------------
     1) Engine-level attachments are prepared via ``attach(path)``:
@@ -1273,48 +1283,62 @@ class GeminiEngine(LLMEngine):
     ``_get_model_data`` returns configured model identity from ``self.model``.
     """
 
-    # Extra illegal extensions for this provider (merged with base `illegal_attachment_exts`)
-    _ILLEGAL_EXTS: set[str] = {
-        ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z",  # archives
-        ".exe", ".dll", ".so", ".bin", ".o",  # executables/binaries
-        ".db", ".sqlite",  # databases
-        ".h5", ".pt", ".pth", ".onnx",  # model weights
-    }
-
-    # MIME prefixes we never accept even if extension would otherwise pass.
-    _ILLEGAL_MIME_PREFIXES: tuple[str, ...] = ("audio/", "video/")
-
     def __init__(
         self,
         model: str,
-        api_key: Optional[str] = None,
-        temperature: float = 0.1,
-        extra_illegal_exts: Optional[set[str]] = None,
-        *,
-        name: Optional[str] = None,
+        name: str | None = None,
         namespace: str = "llm",
         description: str = "Gemini LLM Engine",
+        client: genai.Client | None = None,
+        temperature: float | None = 0.1,
+        max_output_tokens: int | None = None,
+        thinking_config: dict[str, Any] | None = None,
+        *,
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
         max_retries: int = 2,
         retry_backoff_base: float = 0.5,
         retry_backoff_max: float = 8.0,
+        **client_kwargs: Any,
     ) -> None:
         """
         Parameters
         ----------
         model:
-            Gemini model identifier (e.g. "gemini-2.5-flash", "gemini-2.0-pro").
-        api_key:
-            Optional API key. If omitted, the client uses the GOOGLE_API_KEY
-            environment variable.
+            Gemini model identifier (e.g. ``"gemini-2.5-flash"``, ``"gemini-2.0-pro"``).
+        name:
+            Optional human-friendly engine name; defaults to ``gemini_{model}`` with
+            non-identifier characters replaced by underscores.
+        namespace:
+            Grouping label; inherited by the base engine as ``"llm"`` by default.
+        description:
+            Human-readable description for this engine instance.
+        client:
+            Pre-built ``genai.Client``. When provided, used directly; no client is
+            constructed from ``client_kwargs``. The same client handles both sync
+            (``client.models``) and async (``client.aio.models``) paths.
         temperature:
-            Sampling temperature for text generation.
-        extra_illegal_exts:
-            Optional set of additional extensions to reject at `attach` time.
-        name, namespace, description, filter_extraneous_inputs, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
-            Template-method engine configuration (see `_primitives.LLMEngine`).
+            Sampling temperature passed to ``GenerateContentConfig``. ``None`` omits
+            the parameter entirely.
+        max_output_tokens:
+            Optional maximum number of output tokens. Maps to
+            ``GenerateContentConfig.max_output_tokens``.
+        thinking_config:
+            Optional thinking configuration dict (e.g.
+            ``{"thinking_budget": 2000}`` or ``{"thinking_level": "high"}``).
+            Expanded into ``genai.types.ThinkingConfig(**thinking_config)`` at call
+            time. ``None`` omits the field.
+        filter_extraneous_inputs, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
+            Shared ``LLMEngine`` configuration (see base class).
+        **client_kwargs:
+            Additional keyword arguments forwarded verbatim to ``genai.Client(...)``
+            during client construction. Common uses: ``api_key``, ``credentials``,
+            ``project``, ``location``, ``vertexai``, ``http_options``. A default
+            ``http_options={"timeout": <ms>}`` is seeded from ``timeout_seconds``
+            unless ``http_options`` is supplied explicitly. Not forwarded when
+            ``client`` is injected.
         """
+        # Step 1 — Name sanitization and base init.
         sanitized_name = (name or f"gemini_{model}").replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
         super().__init__(
             name=sanitized_name,
@@ -1327,35 +1351,25 @@ class GeminiEngine(LLMEngine):
             retry_backoff_max=retry_backoff_max,
         )
 
+        # Step 2 — SDK presence check.
         if genai is None:
             raise RuntimeError(
                 "GeminiEngine requires the `google-genai` package; "
                 "install `google-genai` to use it."
             )
 
-        # Honor the base engine's timeout knob via http_options.
-        # The SDK accepts a plain dict for HTTP options.
-        http_options: Dict[str, Any] = {
-            "timeout": int(self._timeout_seconds * 1000),  # ms
-        }
+        # Step 3 — Build client kwargs; seed http_options.timeout (milliseconds).
+        _ckw = dict(client_kwargs)
+        _ckw.setdefault("http_options", {"timeout": int(self._timeout_seconds * 1000)})
 
-        client_kwargs: Dict[str, Any] = {"http_options": http_options}
-        if api_key is not None:
-            client_kwargs["api_key"] = api_key
+        # Step 4 — Single client: injected as-is or built from kwargs.
+        self._client: genai.Client = client if client is not None else genai.Client(**_ckw)
 
-        self._client = genai.Client(**client_kwargs)
+        # Step 5 — Store model and generation config.
         self.model = model
-        self.temperature = float(temperature)
-
-        # Merge coarse illegal extension policy with base defaults + any user-supplied extras.
-        merged_illegal = set(self.illegal_attachment_exts) | set(self._ILLEGAL_EXTS)
-        if extra_illegal_exts:
-            merged_illegal |= set(extra_illegal_exts)
-        self.illegal_attachment_exts = merged_illegal
-
-        # Gemini supports a wide range of file types; we stick with a blacklist +
-        # MIME filter instead of a strict allow-list, so `allowed_attachment_exts`
-        # stays as None.
+        self.temperature = temperature
+        self._max_output_tokens = max_output_tokens
+        self._thinking_config = thinking_config
 
     # ------------------------------------------------------------------ #
     # Attachment validation & preparation
@@ -1363,20 +1377,21 @@ class GeminiEngine(LLMEngine):
 
     def _validate_attachment_path(self, path: str) -> None:
         """
-        Extend the base validation with Gemini-specific MIME-type checks.
+        Validate ``path`` against the shared illegal-ext set and MIME-prefix rules.
 
-        Base validation has already ensured that `path` exists, is a file,
-        and passes the coarse extension policy. Here we reject audio/video
-        upfront; other illegal types are controlled by `illegal_attachment_exts`.
+        Gemini uses a blacklist-only policy (no positive allow-list). Delegates
+        to ``validate_attachment_path``; converts ``ValueError`` to
+        ``LLMEngineError``.
         """
-        super()._validate_attachment_path(path)
-
-        mime, _ = mimetypes.guess_type(path)
-        mime = mime or ""
-        if any(mime.startswith(pref) for pref in self._ILLEGAL_MIME_PREFIXES):
-            raise LLMEngineError(
-                f"GeminiEngine.attach: MIME type {mime!r} is not supported"
+        try:
+            validate_attachment_path(
+                path,
+                illegal_exts=ILLEGAL_ATTACHMENT_EXTS,
+                allowed_exts=None,
+                illegal_mime_prefixes=ENGINE_ILLEGAL_MIME_PREFIXES,
             )
+        except ValueError as exc:
+            raise LLMEngineError(str(exc)) from exc
 
     def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
         """
@@ -1444,53 +1459,119 @@ class GeminiEngine(LLMEngine):
     # Template hooks for invocation
     # ------------------------------------------------------------------ #
 
+    def _build_content_list(
+        self,
+        messages: List[Dict[str, str]],
+        attachments: Mapping[str, Mapping[str, Any]],
+    ) -> List[genai.types.Content]:
+        """
+        Build a ``list[Content]`` for ``generate_content`` from normalized messages
+        and the current attachments snapshot.
+
+        Non-system messages are wrapped in ``Content(role=..., parts=[...])`` with
+        ``role`` mapped as ``'user'`` for user turns and ``'model'`` for assistant
+        turns. Attachment parts (uploaded files via ``Part.from_uri``; inlined text
+        via ``Part.from_text``) are prepended to the first user ``Content``'s
+        ``parts`` list. If no user turn is present, a standalone leading
+        ``Content(role='user', parts=attachment_parts)`` is inserted.
+        """
+        # 1. Build attachment_parts list.
+        attachment_parts: List[Any] = []
+        for _path, meta in attachments.items():
+            if meta.get("uploaded") and meta.get("file_obj") is not None:
+                file_obj = meta["file_obj"]
+                attachment_parts.append(
+                    genai.types.Part.from_uri(
+                        file_uri=file_obj.uri,
+                        mime_type=meta.get("mime") or file_obj.mime_type,
+                    )
+                )
+            elif meta.get("inlined") and meta.get("inlined_text"):
+                attachment_parts.append(
+                    genai.types.Part.from_text(text=str(meta["inlined_text"]))
+                )
+
+        # 2. Build contents list with role mapping; inject attachments into first user turn.
+        contents: List[Any] = []
+        attachment_injected = False
+        for m in messages:
+            role = m.get("role", "").lower()
+            if role == "system":
+                continue
+            gemini_role = "model" if role == "assistant" else "user"
+            text = m.get("content") or ""
+            if not text:
+                continue
+            parts: List[Any] = []
+            if gemini_role == "user" and attachment_parts and not attachment_injected:
+                parts.extend(attachment_parts)
+                attachment_injected = True
+            parts.append(genai.types.Part.from_text(text=text))
+            contents.append(genai.types.Content(role=gemini_role, parts=parts))
+
+        # 3. If no user turn was present, insert a standalone leading Content for attachments.
+        if attachment_parts and not attachment_injected:
+            contents.insert(0, genai.types.Content(role="user", parts=attachment_parts))
+
+        return contents
+
     def _build_provider_payload(
         self,
         messages: List[Dict[str, str]],
         attachments: Mapping[str, Mapping[str, Any]],
     ) -> Dict[str, Any]:
         """
-        Build the payload for `client.models.generate_content`.
+        Build the payload for ``generate_content`` from normalized messages and the
+        current attachments snapshot.
 
-        - `messages` are normalized chat turns (role/content strings).
-        - `attachments` is a snapshot of the engine's attachment metadata.
-
-        Attachments are added first so they are available to all subsequent
-        text turns, followed by the plain text messages in order.
+        System messages are extracted into ``system_instruction`` for
+        ``GenerateContentConfig``; all other turns are returned as
+        ``list[Content]`` via ``_build_content_list``.
         """
         system_instruction = self._collect_system(messages)
-        flat_texts = self._collect_non_system_texts(messages)
-
-        contents: List[Any] = []
-
-        # Attach uploaded files first so they are available for all text turns.
-        for path, meta in attachments.items():
-            if meta.get("uploaded") and meta.get("file_obj") is not None:
-                contents.append(meta["file_obj"])
-            elif meta.get("inlined") and meta.get("inlined_text"):
-                contents.append(str(meta["inlined_text"]))
-
-        # Then append plain text turns in order.
-        contents.extend([t for t in flat_texts if t])
-
+        contents = self._build_content_list(messages, attachments)
         return {
             "system_instruction": system_instruction,
             "contents": contents,
         }
 
-    def _call_provider(self, payload: Dict[str, Any]) -> Any:
+    def _build_generate_config(
+        self,
+        system_instruction: str | None,
+    ) -> genai.types.GenerateContentConfig:
         """
-        Perform a single `models.generate_content` call.
+        Build a ``GenerateContentConfig`` from stored engine params and the per-call
+        ``system_instruction``. Fields are omitted when their stored value is ``None``.
+        """
+        cfg: Dict[str, Any] = {}
+        if system_instruction:
+            cfg["system_instruction"] = system_instruction
+        if self.temperature is not None:
+            cfg["temperature"] = self.temperature
+        if self._max_output_tokens is not None:
+            cfg["max_output_tokens"] = self._max_output_tokens
+        if self._thinking_config is not None:
+            cfg["thinking_config"] = genai.types.ThinkingConfig(**self._thinking_config)
+        return genai.types.GenerateContentConfig(**cfg)
 
-        Retries and backoff are handled by the base `_call_with_retries` wrapper.
-        """
-        # Use GenerateContentConfig to carry temperature and system instruction.
-        cfg = genai.types.GenerateContentConfig(
-            temperature=self.temperature,
-            system_instruction=payload.get("system_instruction") or None,
+    def _call_provider(self, payload: Dict[str, Any]) -> Any:
+        """Perform a single synchronous ``models.generate_content`` call."""
+        cfg = self._build_generate_config(payload.get("system_instruction"))
+        return self._client.models.generate_content(
+            model=self.model,
+            contents=payload["contents"],
+            config=cfg,
         )
 
-        return self._client.models.generate_content(
+    async def _call_provider_async(self, payload: Dict[str, Any]) -> Any:
+        """
+        Native async ``generate_content`` call via ``client.aio.models``.
+
+        No thread offload needed — ``genai.Client`` exposes both sync and async
+        paths on the same object.
+        """
+        cfg = self._build_generate_config(payload.get("system_instruction"))
+        return await self._client.aio.models.generate_content(
             model=self.model,
             contents=payload["contents"],
             config=cfg,
@@ -1577,26 +1658,6 @@ class GeminiEngine(LLMEngine):
         joined = "\n\n".join(parts).strip()
         return joined or None
 
-    def _collect_non_system_texts(
-        self, messages: List[Dict[str, str]]
-    ) -> List[str]:
-        """
-        Return a list of non-system message content strings, preserving order.
-
-        For Gemini's flat ``contents`` call style only the content string is
-        kept; the ``role`` key (user vs. assistant) is discarded and not
-        represented in the output.
-        """
-        out: List[str] = []
-        for m in messages:
-            role = (m.get("role") or "").lower()
-            if role == "system":
-                continue
-            txt = m.get("content") or ""
-            if txt:
-                out.append(txt)
-        return out
-
     def _upload_path(self, path: str) -> Any:
         """
         Upload a local path via the Gemini Files API and return the File object.
@@ -1612,7 +1673,7 @@ class GeminiEngine(LLMEngine):
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Diagnostic snapshot for GeminiEngine: provider + model + temperature.
+        Diagnostic snapshot for GeminiEngine: provider + model + generation config.
 
         Keeps output minimal to avoid leaking client or API keys.
         """
@@ -1620,6 +1681,8 @@ class GeminiEngine(LLMEngine):
         base.update({
             "model": self.model,
             "temperature": self.temperature,
+            "max_output_tokens": self._max_output_tokens,
+            "thinking_config": self._thinking_config,
         })
         return base
 

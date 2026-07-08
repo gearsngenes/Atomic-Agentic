@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 import pytest
+from google.genai import types as _real_genai_types
 
 llm_module = importlib.import_module("atomic_agentic.engines.LLMEngines")
 
@@ -19,6 +20,7 @@ from atomic_agentic.engines.LLMEngines import (
     OpenAIEngine,
 )
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
+from atomic_agentic.utils.core import run_coro_sync
 
 
 class FakeLLMEngine(LLMEngine):
@@ -692,39 +694,36 @@ class TestOpenAIEngine:
         assert "secret" not in str(data)
 
 
-class FakeGenerateContentConfig:
-    def __init__(
-        self,
-        *,
-        temperature: float,
-        system_instruction: str | None = None,
-    ) -> None:
-        self.temperature = temperature
-        self.system_instruction = system_instruction
-
-
 class FakeGenAIClient:
     instances: list["FakeGenAIClient"] = []
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.models = SimpleNamespace(generate_content=self._generate_content)
+        self.aio = SimpleNamespace(
+            models=SimpleNamespace(generate_content=self._generate_content_async)
+        )
         self.files = SimpleNamespace(
             upload=self._upload_file,
             delete=self._delete_file,
         )
         self.generate_calls: list[dict[str, Any]] = []
+        self.aio_generate_calls: list[dict[str, Any]] = []
         self.deleted_files: list[str] = []
         FakeGenAIClient.instances.append(self)
 
     def _generate_content(self, **kwargs: Any) -> Any:
         self.generate_calls.append(kwargs)
-        return SimpleNamespace(text=" gemini text ")
+        return SimpleNamespace(text=" gemini text ", usage_metadata=None)
 
-    def _upload_file(self, file: str) -> Any:
-        return SimpleNamespace(name="gemini_file")
+    async def _generate_content_async(self, **kwargs: Any) -> Any:
+        self.aio_generate_calls.append(kwargs)
+        return SimpleNamespace(text=" gemini async text ", usage_metadata=None)
 
-    def _delete_file(self, name: str) -> None:
+    def _upload_file(self, *, file: str) -> Any:
+        return SimpleNamespace(name="gemini_file", uri="gs://fake/gemini_file", mime_type="text/plain")
+
+    def _delete_file(self, *, name: str) -> None:
         self.deleted_files.append(name)
 
 
@@ -813,7 +812,11 @@ class FakeGenAI:
     Client = FakeGenAIClient
 
     class types:
-        GenerateContentConfig = FakeGenerateContentConfig
+        GenerateContentConfig = _real_genai_types.GenerateContentConfig
+        Content = _real_genai_types.Content
+        Part = _real_genai_types.Part
+        FileData = _real_genai_types.FileData
+        ThinkingConfig = _real_genai_types.ThinkingConfig
 
 
 class TestGeminiEngine:
@@ -823,67 +826,152 @@ class TestGeminiEngine:
         with pytest.raises(RuntimeError, match="google-genai"):
             GeminiEngine(model="gemini_test")
 
-    def test_constructor_uses_fake_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_constructor_builds_client_from_kwargs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         FakeGenAIClient.instances.clear()
         monkeypatch.setattr(llm_module, "genai", FakeGenAI)
 
         engine = GeminiEngine(
             model="gemini-2.5-flash",
-            api_key="secret",
             timeout_seconds=7.0,
+            api_key="secret",
         )
-
         fake = FakeGenAIClient.instances[-1]
 
         assert engine.name == "gemini_gemini_2_5_flash"
         assert fake.kwargs["api_key"] == "secret"
         assert fake.kwargs["http_options"] == {"timeout": 7000}
 
-    def test_gemini_payload_helpers_and_call_provider(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_constructor_client_injection_skips_construction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+
+        injected = FakeGenAIClient()
+        count_before = len(FakeGenAIClient.instances)
+        engine = GeminiEngine(model="gemini-2.5-flash", client=injected)
+
+        assert len(FakeGenAIClient.instances) == count_before
+        assert engine._client is injected
+
+    def test_build_content_list_maps_roles_and_skips_system(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+
+        engine = GeminiEngine(model="gemini-2.5-flash")
+        messages = [
+            {"role": "system", "content": "Sys."},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+        ]
+        contents = engine._build_content_list(messages, {})
+
+        assert len(contents) == 2
+        assert contents[0].role == "user"
+        assert contents[0].parts[0].text == "Hello"
+        assert contents[1].role == "model"
+        assert contents[1].parts[0].text == "Hi"
+
+    def test_build_content_list_injects_attachments_into_first_user_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+
+        engine = GeminiEngine(model="gemini-2.5-flash")
+        file_obj = SimpleNamespace(name="f1", uri="gs://fake/f1", mime_type="text/plain")
+        attachments = {
+            "file.txt": {"uploaded": True, "file_obj": file_obj, "mime": "text/plain"},
+            "note.txt": {"inlined": True, "inlined_text": "Inline!"},
+        }
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+        ]
+        contents = engine._build_content_list(messages, attachments)
+
+        assert len(contents) == 2
+        first_parts = contents[0].parts
+        assert len(first_parts) == 3  # file Part + inline Part + text Part
+        assert first_parts[0].file_data.file_uri == "gs://fake/f1"
+        assert first_parts[1].text == "Inline!"
+        assert first_parts[2].text == "Hello"
+        assert contents[1].role == "model"
+
+    def test_call_provider_uses_sync_path(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         FakeGenAIClient.instances.clear()
         monkeypatch.setattr(llm_module, "genai", FakeGenAI)
 
         engine = GeminiEngine(model="gemini-2.5-flash", temperature=0.4)
-
         messages = [
-            {"role": "system", "content": "System one."},
+            {"role": "system", "content": "Sys."},
             {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi"},
         ]
-        file_obj = SimpleNamespace(name="file_1")
+        payload = engine._build_provider_payload(messages, {})
 
-        payload = engine._build_provider_payload(
-            messages,
-            {
-                "file.txt": {"uploaded": True, "file_obj": file_obj},
-                "inline.txt": {"inlined": True, "inlined_text": "Inline content"},
-            },
-        )
-
-        assert payload["system_instruction"] == "System one."
-        assert payload["contents"] == [
-            file_obj,
-            "Inline content",
-            "Hello",
-            "Hi",
-        ]
+        assert payload["system_instruction"] == "Sys."
+        assert len(payload["contents"]) == 1
+        assert payload["contents"][0].role == "user"
 
         response = engine._call_provider(payload)
         fake = FakeGenAIClient.instances[-1]
         call = fake.generate_calls[-1]
 
-        assert engine._extract_text(response) == " gemini text "
         assert call["model"] == "gemini-2.5-flash"
-        assert call["contents"] == payload["contents"]
         assert call["config"].temperature == 0.4
-        assert call["config"].system_instruction == "System one."
+        assert call["config"].system_instruction == "Sys."
+        assert engine._extract_text(response) == " gemini text "
+
+    def test_call_provider_async_uses_aio_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+
+        engine = GeminiEngine(model="gemini-2.5-flash")
+        payload = engine._build_provider_payload(
+            [{"role": "user", "content": "Hi"}], {}
+        )
+        response = run_coro_sync(engine._call_provider_async(payload))
+        fake = FakeGenAIClient.instances[-1]
+
+        assert fake.aio_generate_calls        # aio path was hit
+        assert not fake.generate_calls         # sync path was NOT hit
+        assert engine._extract_text(response) == " gemini async text "
+
+    def test_temperature_none_omits_from_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+
+        engine = GeminiEngine(model="gemini-2.5-flash", temperature=None)
+        cfg = engine._build_generate_config(None)
+
+        assert cfg.temperature is None
+
+    def test_thinking_config_passed_to_generate_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeGenAIClient.instances.clear()
+        monkeypatch.setattr(llm_module, "genai", FakeGenAI)
+
+        engine = GeminiEngine(
+            model="gemini-2.5-flash",
+            thinking_config={"thinking_budget": 1024},
+        )
+        cfg = engine._build_generate_config(None)
+
+        assert cfg.thinking_config.thinking_budget == 1024
 
     def test_gemini_to_dict_includes_non_secret_config(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(llm_module, "genai", FakeGenAI)
 
@@ -891,13 +979,16 @@ class TestGeminiEngine:
             model="gemini-2.5-flash",
             api_key="secret",
             temperature=0.2,
+            max_output_tokens=512,
+            thinking_config={"thinking_budget": 100},
         )
-
         data = engine.to_dict()
 
         assert data["type"] == "GeminiEngine"
         assert data["model"] == "gemini-2.5-flash"
         assert data["temperature"] == 0.2
+        assert data["max_output_tokens"] == 512
+        assert data["thinking_config"] == {"thinking_budget": 100}
         assert "secret" not in str(data)
 
 
