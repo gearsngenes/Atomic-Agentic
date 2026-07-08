@@ -2213,97 +2213,88 @@ class LlamaCppEngine(LLMEngine):
 
     def __init__(
         self,
-        model_path: Optional[str] = None,
-        repo_id: Optional[str] = None,
-        filename: Optional[str] = None,
-        revision: Optional[str] = None,
-        cache_dir: Optional[str] = None,
-        local_dir: Optional[str] = None,
-        local_files_only: bool = False,
-        hf_token: Optional[Union[str, bool]] = None,
-        force_download: bool = False,
-        n_ctx: int = 2048,
-        n_threads: Optional[int] = None,
-        n_threads_batch: Optional[int] = None,
-        n_gpu_layers: Optional[int] = None,
-        chat_format: Optional[str] = None,
-        verbose: bool = False,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        top_p: Optional[float] = None,
-        stop: Optional[Union[str, List[str]]] = None,
-        *,
-        name: Optional[str] = None,
+        # ── AtomicInvokable identity ──────────────────────────────────────────
+        name: str | None = None,
         namespace: str = "llm",
         description: str = "Llama.cpp LLM Engine",
+        # ── Model source ──────────────────────────────────────────────────────
+        model_path: str | None = None,
+        repo_id: str | None = None,
+        filename: str | None = None,
+        # ── Llama constructor config (explicit surface) ───────────────────────
+        n_ctx: int = 2048,
+        verbose: bool = False,
+        # ── Generation defaults — applied at every create_chat_completion call ─
+        temperature: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        min_p: float | None = None,
+        max_tokens: int | None = None,
+        repeat_penalty: float | None = None,
+        seed: int | None = None,
+        stop: str | list[str] | None = None,
+        *,
+        # ── HF download options — only used when loading via Hub ─────────────
+        subfolder: str | None = None,
+        revision: str | None = None,
+        hf_token: str | bool | None = None,
+        cache_dir: str | None = None,
+        local_dir: str | None = None,
+        local_files_only: bool = False,
+        # ── Base engine config ────────────────────────────────────────────────
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 30.0,
         max_retries: int = 2,
         retry_backoff_base: float = 0.5,
         retry_backoff_max: float = 8.0,
+        # ── Remaining Llama constructor params forwarded verbatim ─────────────
+        **llama_kwargs: Any,
     ) -> None:
         """
         Parameters
         ----------
-        model_path:
-            Direct path to a local GGUF/GGML model file. If provided, no
-            Hugging Face download is performed.
-        repo_id:
-            Optional Hugging Face repo ID used with ``filename`` when
-            ``model_path`` is omitted.
-        filename:
-            Model filename within ``repo_id`` when resolving from Hugging Face.
-        revision:
-            Optional Hugging Face branch, tag, or commit hash to resolve.
-        cache_dir:
-            Optional Hugging Face cache root. Keeps Hugging Face cache layout.
-        local_dir:
-            Optional human-readable local directory where the model file should
-            be materialized.
-        local_files_only:
-            If True, resolve only from local cache/files and do not download.
-        hf_token:
-            Optional Hugging Face auth token. ``True`` means use the locally
-            configured Hugging Face token.
-        force_download:
-            If True, re-download the file even if a cached copy exists.
-
-        n_ctx:
-            Context window size to configure on the llama.cpp model.
-        n_threads:
-            Optional number of CPU threads to use for token generation.
-        n_threads_batch:
-            Optional number of threads to use for batching/prompt processing.
-        n_gpu_layers:
-            Optional number of model layers to offload to GPU.
-        chat_format:
-            Optional llama-cpp-python chat format name used to serialize
-            role/content messages for local inference.
-        verbose:
-            If True, enable verbose logging from the underlying llama.cpp runtime.
-
-        temperature:
-            Optional default sampling temperature for chat completions.
-        max_tokens:
-            Optional default maximum generated-token count.
-        top_p:
-            Optional default nucleus sampling value.
-        stop:
-            Optional default stop sequence or stop-sequence list.
-
         name:
             Optional human-friendly engine name; defaults to ``"llama_cpp"``.
-        description:
-            Human-friendly description for this engine instance.
-        filter_extraneous_inputs:
-            Whether to filter extraneous dict-first inputs.
-        timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
-            Shared ``LLMEngine`` retry/introspection configuration.
+        namespace, description:
+            Shared ``AtomicInvokable`` identity fields.
+        model_path:
+            Direct path to a local GGUF/GGML model file.
+        repo_id:
+            Hugging Face repo ID used with ``filename`` when ``model_path`` is
+            omitted.
+        filename:
+            Model filename within ``repo_id`` when resolving from Hugging Face.
+        n_ctx:
+            Context window size; overrides Llama's default of 512.
+        verbose:
+            Verbose logging flag; overrides Llama's default of True.
+        temperature, top_k, top_p, min_p, max_tokens, repeat_penalty, seed, stop:
+            Generation defaults applied at every ``create_chat_completion`` call.
+            ``None`` omits the parameter from the call.
+        subfolder:
+            Optional subfolder within the HF repo (for repos with nested files).
+        revision:
+            Optional HF branch, tag, or commit hash.
+        hf_token:
+            Optional HF auth token; ``True`` uses the locally configured token.
+        cache_dir:
+            Optional HF cache root directory.
+        local_dir:
+            Optional local directory where the model file is materialized.
+        local_files_only:
+            If True, resolve only from local cache; do not download.
+        filter_extraneous_inputs, timeout_seconds, max_retries,
+        retry_backoff_base, retry_backoff_max:
+            Shared ``LLMEngine`` configuration.
+        **llama_kwargs:
+            Additional keyword arguments forwarded verbatim to ``Llama(...)``.
+            Covers the full llama-cpp-python constructor surface: ``n_gpu_layers``,
+            ``n_threads``, ``flash_attn``, ``chat_format``, ``use_mmap``, etc.
         """
+        # 1. Name sanitization + super init
         sanitized_name = (
             name or "llama_cpp"
         ).replace(":", "_").replace("-", "_").replace(" ", "_").replace(".", "_")
-
         super().__init__(
             name=sanitized_name,
             namespace=namespace,
@@ -2315,40 +2306,30 @@ class LlamaCppEngine(LLMEngine):
             retry_backoff_max=retry_backoff_max,
         )
 
+        # 2. SDK presence check
         if Llama is None:
-            raise RuntimeError("LlamaCppEngine requires the `llama-cpp-python` package.")
+            raise LLMEngineError(
+                "LlamaCppEngine requires the `llama-cpp-python` package."
+            )
 
-        llama_kwargs: Dict[str, Any] = {
-            "n_ctx": int(n_ctx),
-            "verbose": bool(verbose),
-        }
-        if n_threads is not None:
-            llama_kwargs["n_threads"] = int(n_threads)
-        if n_threads_batch is not None:
-            llama_kwargs["n_threads_batch"] = int(n_threads_batch)
-        if n_gpu_layers is not None:
-            llama_kwargs["n_gpu_layers"] = int(n_gpu_layers)
-        if chat_format is not None:
-            llama_kwargs["chat_format"] = chat_format
-
+        # 3. Resolve model path
         if model_path:
             resolved_model_path = model_path
         elif repo_id and filename:
             if hf_hub_download is None:
-                raise RuntimeError(
+                raise LLMEngineError(
                     "LlamaCppEngine requires the `huggingface_hub` package when "
                     "`repo_id` and `filename` are used."
                 )
-
             resolved_model_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,
+                subfolder=subfolder,
                 revision=revision,
                 cache_dir=cache_dir,
                 local_dir=local_dir,
                 local_files_only=bool(local_files_only),
                 token=hf_token,
-                force_download=bool(force_download),
             )
         else:
             raise LLMEngineError(
@@ -2356,31 +2337,30 @@ class LlamaCppEngine(LLMEngine):
                 "`repo_id` and `filename`."
             )
 
+        # 4. Build Llama instance
+        self._llm = Llama(
+            model_path=str(resolved_model_path),
+            n_ctx=int(n_ctx),
+            verbose=bool(verbose),
+            **llama_kwargs,
+        )
+
+        # 5. Store config
         self._model_path = str(resolved_model_path)
         self._repo_id = repo_id
         self._filename = filename
-        self._revision = revision
-        self._cache_dir = cache_dir
-        self._local_dir = local_dir
-        self._local_files_only = bool(local_files_only)
-        self._force_download = bool(force_download)
         self._has_hf_token = hf_token is not None
-
         self._n_ctx = int(n_ctx)
-        self._n_threads = int(n_threads) if n_threads is not None else None
-        self._n_threads_batch = (
-            int(n_threads_batch) if n_threads_batch is not None else None
-        )
-        self._n_gpu_layers = int(n_gpu_layers) if n_gpu_layers is not None else None
-        self._chat_format = chat_format
         self._verbose = bool(verbose)
-
+        self._llama_kwargs = dict(llama_kwargs)
         self.temperature = float(temperature) if temperature is not None else None
-        self.max_tokens = int(max_tokens) if max_tokens is not None else None
+        self.top_k = int(top_k) if top_k is not None else None
         self.top_p = float(top_p) if top_p is not None else None
+        self.min_p = float(min_p) if min_p is not None else None
+        self.max_tokens = int(max_tokens) if max_tokens is not None else None
+        self.repeat_penalty = float(repeat_penalty) if repeat_penalty is not None else None
+        self.seed = int(seed) if seed is not None else None
         self.stop = stop
-
-        self._llm = Llama(model_path=self._model_path, **llama_kwargs)
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -2402,54 +2382,9 @@ class LlamaCppEngine(LLMEngine):
         return self._filename
 
     @property
-    def revision(self) -> Optional[str]:
-        """Hugging Face revision used at download; fixed at construction."""
-        return self._revision
-
-    @property
-    def cache_dir(self) -> Optional[str]:
-        """Hugging Face cache root used at download; fixed at construction."""
-        return self._cache_dir
-
-    @property
-    def local_dir(self) -> Optional[str]:
-        """Local directory where the model was materialized; fixed at construction."""
-        return self._local_dir
-
-    @property
-    def local_files_only(self) -> bool:
-        """Whether only local files were used at download; fixed at construction."""
-        return self._local_files_only
-
-    @property
-    def force_download(self) -> bool:
-        """Whether a forced re-download was requested; fixed at construction."""
-        return self._force_download
-
-    @property
     def n_ctx(self) -> int:
         """Context window size passed to Llama at construction."""
         return self._n_ctx
-
-    @property
-    def n_threads(self) -> Optional[int]:
-        """CPU thread count passed to Llama at construction."""
-        return self._n_threads
-
-    @property
-    def n_threads_batch(self) -> Optional[int]:
-        """Batch CPU thread count passed to Llama at construction."""
-        return self._n_threads_batch
-
-    @property
-    def n_gpu_layers(self) -> Optional[int]:
-        """GPU layer count passed to Llama at construction."""
-        return self._n_gpu_layers
-
-    @property
-    def chat_format(self) -> Optional[str]:
-        """Chat format name passed to Llama at construction."""
-        return self._chat_format
 
     @property
     def verbose(self) -> bool:
@@ -2481,16 +2416,21 @@ class LlamaCppEngine(LLMEngine):
 
         Retries and error-wrapping are handled by `LLMEngine._call_with_retries`.
         """
-        if getattr(self, "_llm", None) is None:
-            raise LLMEngineError("LlamaCppEngine: model is not loaded.")
-
         chat_kwargs: Dict[str, Any] = {}
         if self.temperature is not None:
             chat_kwargs["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            chat_kwargs["max_tokens"] = self.max_tokens
+        if self.top_k is not None:
+            chat_kwargs["top_k"] = self.top_k
         if self.top_p is not None:
             chat_kwargs["top_p"] = self.top_p
+        if self.min_p is not None:
+            chat_kwargs["min_p"] = self.min_p
+        if self.max_tokens is not None:
+            chat_kwargs["max_tokens"] = self.max_tokens
+        if self.repeat_penalty is not None:
+            chat_kwargs["repeat_penalty"] = self.repeat_penalty
+        if self.seed is not None:
+            chat_kwargs["seed"] = self.seed
         if self.stop is not None:
             chat_kwargs["stop"] = self.stop
 
@@ -2576,7 +2516,7 @@ class LlamaCppEngine(LLMEngine):
         """
         Diagnostic snapshot for LlamaCppEngine.
 
-        Includes non-secret model source, model-load, compute, and generation
+        Includes non-secret model source, model-load config, and generation
         defaults. The Hugging Face token value is never serialized.
         """
         base = super().to_dict()
@@ -2584,21 +2524,17 @@ class LlamaCppEngine(LLMEngine):
             "model_path": self._model_path,
             "repo_id": self._repo_id,
             "filename": self._filename,
-            "revision": self._revision,
-            "cache_dir": self._cache_dir,
-            "local_dir": self._local_dir,
-            "local_files_only": self._local_files_only,
-            "force_download": self._force_download,
             "has_hf_token": self._has_hf_token,
             "n_ctx": self._n_ctx,
-            "n_threads": self._n_threads,
-            "n_threads_batch": self._n_threads_batch,
-            "n_gpu_layers": self._n_gpu_layers,
-            "chat_format": self._chat_format,
             "verbose": self._verbose,
+            "llama_kwargs": dict(self._llama_kwargs),
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "top_k": self.top_k,
             "top_p": self.top_p,
+            "min_p": self.min_p,
+            "max_tokens": self.max_tokens,
+            "repeat_penalty": self.repeat_penalty,
+            "seed": self.seed,
             "stop": self.stop,
         })
         return base

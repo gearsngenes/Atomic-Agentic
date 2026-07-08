@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from google import genai
 from mistralai.client import Mistral
-from atomic_agentic.engines.LLMEngines import GeminiEngine, MistralEngine, OpenAIEngine
+from atomic_agentic.engines.LLMEngines import GeminiEngine, LlamaCppEngine, MistralEngine, OpenAIEngine
 import logging
 from pprint import pprint
 
@@ -32,6 +32,18 @@ mistral_engine = MistralEngine(
     client=Mistral(api_key=os.getenv("MISTRAL_API_KEY")),
 )
 
+# --- LlamaCpp: no native async — offloads to asyncio.to_thread ---
+# llama-cpp-python is a synchronous C++ binding with no async surface.
+# async_invoke dispatches to a thread pool so it participates in gather
+# without blocking the event loop, but gains no I/O concurrency benefit.
+llama_engine = LlamaCppEngine(
+    repo_id="unsloth/phi-4-GGUF",
+    filename="phi-4-Q4_K_M.gguf",
+    n_ctx=512,
+    verbose=False,
+    n_threads=4,
+)
+
 messages = [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "What is the capital of France?"},
@@ -39,11 +51,12 @@ messages = [
 
 
 async def main() -> None:
-    # Run all three engines concurrently — same async_invoke interface for all.
-    openai_result, gemini_result, mistral_result = await asyncio.gather(
+    # Run all four engines concurrently — same async_invoke interface for all.
+    openai_result, gemini_result, mistral_result, llama_result = await asyncio.gather(
         openai_engine.async_invoke({"messages": messages}),
         gemini_engine.async_invoke({"messages": messages}),
         mistral_engine.async_invoke({"messages": messages}),
+        llama_engine.async_invoke({"messages": messages}),
     )
 
     print("=== OpenAI ===")
@@ -60,6 +73,11 @@ async def main() -> None:
     print(mistral_result.result)
     print("\nMistral RESULT OBJECT:")
     pprint(mistral_result)
+
+    print("\n=== LlamaCpp ===")
+    print(llama_result.result)
+    print("\nLlamaCpp RESULT OBJECT:")
+    pprint(llama_result)
 
 
 asyncio.run(main())

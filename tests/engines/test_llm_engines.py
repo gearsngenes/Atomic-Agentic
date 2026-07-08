@@ -391,37 +391,6 @@ class TestLLMEngineImmutability:
         with pytest.raises(AttributeError):
             engine.inline_cutoff_chars = 999  # type: ignore[misc]
 
-    def test_llamacpp_source_params_are_read_only(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
-        engine = LlamaCppEngine(model_path="model.gguf")
-
-        assert engine.model_path == "model.gguf"
-        assert engine.repo_id is None
-
-        for attr in (
-            "model_path", "repo_id", "filename", "revision",
-            "cache_dir", "local_dir", "local_files_only", "force_download",
-        ):
-            with pytest.raises(AttributeError):
-                setattr(engine, attr, None)
-
-    def test_llamacpp_model_load_params_are_read_only(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
-        engine = LlamaCppEngine(model_path="model.gguf", n_ctx=2048, verbose=True)
-
-        assert engine.n_ctx == 2048
-        assert engine.verbose is True
-
-        for attr in (
-            "n_ctx", "n_threads", "n_threads_batch",
-            "n_gpu_layers", "chat_format", "verbose",
-        ):
-            with pytest.raises(AttributeError):
-                setattr(engine, attr, None)
 
 
 class FakeOpenAIClient:
@@ -1221,13 +1190,12 @@ class FakeLlama:
     def create_chat_completion(self, **kwargs: Any) -> dict[str, Any]:
         self.chat_completion_calls.append(kwargs)
         return {
-            "choices": [
-                {
-                    "message": {
-                        "content": " llama text ",
-                    }
-                }
-            ]
+            "choices": [{"message": {"content": " llama text "}}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
         }
 
 
@@ -1235,7 +1203,7 @@ class TestLlamaCppEngine:
     def test_missing_llama_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(llm_module, "Llama", None)
 
-        with pytest.raises(RuntimeError, match="llama-cpp-python"):
+        with pytest.raises(LLMEngineError, match="llama-cpp-python"):
             LlamaCppEngine(model_path="model.gguf")
 
     def test_requires_model_path_or_repo_and_filename(
@@ -1254,8 +1222,8 @@ class TestLlamaCppEngine:
         engine = LlamaCppEngine(
             model_path="model.gguf",
             n_ctx=4096,
-            n_threads=4,
             verbose=True,
+            n_threads=4,
         )
 
         fake = FakeLlama.instances[-1]
@@ -1263,8 +1231,8 @@ class TestLlamaCppEngine:
         assert engine.name == "llama_cpp"
         assert fake.kwargs["model_path"] == "model.gguf"
         assert fake.kwargs["n_ctx"] == 4096
-        assert fake.kwargs["n_threads"] == 4
         assert fake.kwargs["verbose"] is True
+        assert fake.kwargs["n_threads"] == 4
 
     def test_constructor_resolves_repo_and_filename_via_hf_hub_download(
         self,
@@ -1294,6 +1262,7 @@ class TestLlamaCppEngine:
         assert engine.model_path == resolved_path
         assert download_calls[-1]["repo_id"] == "org/repo"
         assert download_calls[-1]["filename"] == "model.gguf"
+        assert "subfolder" in download_calls[-1]
         assert fake.kwargs["model_path"] == resolved_path
 
     def test_llama_payload_call_and_extract_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1337,6 +1306,9 @@ class TestLlamaCppEngine:
             model_path="model.gguf",
             n_ctx=1024,
             verbose=True,
+            n_gpu_layers=32,
+            temperature=0.7,
+            top_k=40,
         )
 
         data = engine.to_dict()
@@ -1347,3 +1319,116 @@ class TestLlamaCppEngine:
         assert data["filename"] is None
         assert data["n_ctx"] == 1024
         assert data["verbose"] is True
+        assert data["llama_kwargs"] == {"n_gpu_layers": 32}
+        assert data["temperature"] == 0.7
+        assert data["top_k"] == 40
+        assert "n_threads" not in data
+        assert "n_gpu_layers" not in data
+
+    def test_llamacpp_source_params_are_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        engine = LlamaCppEngine(model_path="model.gguf")
+
+        assert engine.model_path == "model.gguf"
+        assert engine.repo_id is None
+        assert engine.filename is None
+
+        for attr in ("model_path", "repo_id", "filename"):
+            with pytest.raises(AttributeError):
+                setattr(engine, attr, None)
+
+    def test_llamacpp_model_load_params_are_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+        engine = LlamaCppEngine(model_path="model.gguf", n_ctx=2048, verbose=True)
+
+        assert engine.n_ctx == 2048
+        assert engine.verbose is True
+
+        for attr in ("n_ctx", "verbose"):
+            with pytest.raises(AttributeError):
+                setattr(engine, attr, None)
+
+    def test_llama_kwargs_forwarded_to_llama_constructor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeLlama.instances.clear()
+        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+
+        LlamaCppEngine(
+            model_path="model.gguf",
+            n_gpu_layers=32,
+            flash_attn=True,
+        )
+
+        fake = FakeLlama.instances[-1]
+        assert fake.kwargs["n_gpu_layers"] == 32
+        assert fake.kwargs["flash_attn"] is True
+
+    def test_generation_params_set_sent_to_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeLlama.instances.clear()
+        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+
+        engine = LlamaCppEngine(
+            model_path="model.gguf",
+            temperature=0.5,
+            top_k=40,
+            top_p=0.9,
+            min_p=0.05,
+            max_tokens=256,
+            repeat_penalty=1.1,
+            seed=42,
+            stop=["</s>"],
+        )
+        engine._call_provider({"messages": [{"role": "user", "content": "hi"}]})
+
+        call = FakeLlama.instances[-1].chat_completion_calls[-1]
+        assert call["temperature"] == 0.5
+        assert call["top_k"] == 40
+        assert call["top_p"] == 0.9
+        assert call["min_p"] == 0.05
+        assert call["max_tokens"] == 256
+        assert call["repeat_penalty"] == 1.1
+        assert call["seed"] == 42
+        assert call["stop"] == ["</s>"]
+
+    def test_generation_params_none_omit_from_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeLlama.instances.clear()
+        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+
+        engine = LlamaCppEngine(model_path="model.gguf")
+        engine._call_provider({"messages": [{"role": "user", "content": "hi"}]})
+
+        call = FakeLlama.instances[-1].chat_completion_calls[-1]
+        for param in ("temperature", "top_k", "top_p", "min_p",
+                      "max_tokens", "repeat_penalty", "seed", "stop"):
+            assert param not in call, f"{param!r} should be omitted when None"
+
+    def test_hf_subfolder_forwarded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeLlama.instances.clear()
+        monkeypatch.setattr(llm_module, "Llama", FakeLlama)
+
+        download_calls: list[dict[str, Any]] = []
+
+        def fake_hf_hub_download(**kwargs: Any) -> str:
+            download_calls.append(kwargs)
+            return "/cache/model.gguf"
+
+        monkeypatch.setattr(llm_module, "hf_hub_download", fake_hf_hub_download)
+
+        LlamaCppEngine(
+            repo_id="org/repo",
+            filename="model.gguf",
+            subfolder="gguf",
+        )
+
+        assert download_calls[-1]["subfolder"] == "gguf"
