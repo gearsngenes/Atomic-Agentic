@@ -136,7 +136,7 @@ orchestration. Those responsibilities belong to agents.
 Agents may also use Tools to interact with their environment.
 
 ``` python
-from atomic_agentic.agents import Agent
+from atomic_agentic.agents import BasicAgent
 from atomic_agentic.llm import OpenAIEngine
 
 accounts = [
@@ -157,7 +157,7 @@ Desired Sector to invest: {sector.capitalize()}
 
 engine = OpenAIEngine(model="gpt-4o-mini")
 
-advisor = Agent(
+advisor = BasicAgent(
     name="finance_advisor",
     description="Investment advisor.",
     llm_engine=engine,
@@ -229,11 +229,11 @@ See the `StructuredInvokable` docstring for advanced options (absent value handl
 Workflows orchestrate Atomic-Agentic primitives into deterministic pipelines. They provide patterns for composition, branching, iteration, and parallelism, enabling you to build complex agentic systems from modular components.
 
 **Workflow classes include:**
-- `BasicFlow` â€“ wraps a single component
-- `SequentialFlow` â€“ chains steps in sequence
-- `ParallelFlow` â€“ runs branches concurrently
-- `RoutingFlow` â€“ routes input to a selected branch
-- `IterativeFlow` â€“ loops until a judge condition is met
+- `BasicFlow` — wraps a single component
+- `SequentialFlow` — chains steps in sequence
+- `ParallelFlow` — runs branches concurrently
+- `RoutingFlow` — routes input to a selected branch
+- `IterativeFlow` — loops until a judge condition is met
 
 **Note:**
 Workflows return typed result envelopes (`*FlowResult`) with `.result` and full run metadata. Use `StructuredInvokable` explicitly when you need to project a step's output dict to a fixed schema â€” workflow steps themselves do not apply schema projection.
@@ -250,7 +250,7 @@ v2 is a deliberate breaking-change line with two headline improvements:
 **Reorganized package structure.** `src/atomic_agentic/` is now
 organized into concern-based layers â€” `exceptions/`, `constants/`,
 `models/`, and `utils/` sit below the domain packages (`agents/`,
-`tools/`, `workflows/`, `engines/`, `mcp/`, `a2a/`), with `core/`
+`tools/`, `workflows/`, `llm/`, `mcp/`, `a2a/`), with `core/`
 holding only the shared invocation contract. The dependency topology
 is explicit and there are no cross-layer back-edges.
 
@@ -265,59 +265,61 @@ and provenance. Workflows return typed `*FlowResult` envelopes
 (`SequentialFlowResult`, `IterativeFlowResult`, etc.) with per-run
 history accessible via checkpoint helpers.
 
-For a full breakdown of breaking changes and a v1â†’v2 migration guide:
-- [`docs/MIGRATION.md`](docs/MIGRATION.md) â€” v1â†’v2 migration guide *(coming soon)*
+For a full breakdown of breaking changes and a v1→v2 migration guide:
+- [`docs/MIGRATION.md`](docs/MIGRATION.md) â€” v1→v2 migration guide *(coming soon)*
 - [`docs/CHANGELOG.md`](docs/CHANGELOG.md) â€” full release history
 
 ------------------------------------------------------------------------
 
 ## Repository Structure
 
-    Atomic-Agentic/
-    â”œâ”€â”€ examples/
-    â”‚   â”œâ”€â”€ Agent_Examples/
-    â”‚   â”œâ”€â”€ Agentic_Research/
-    â”‚   â”œâ”€â”€ Invokable_Examples/
-    â”‚   â”œâ”€â”€ LLM_Examples/
-    â”‚   â”œâ”€â”€ PlanAct_Examples/
-    â”‚   â”œâ”€â”€ ReAct_Examples/
-    â”‚   â”œâ”€â”€ Tool_Examples/
-    â”‚   â””â”€â”€ Workflow_Examples/
-    â”‚
-    â”œâ”€â”€ docs/
-    â”‚   â””â”€â”€ CHANGELOG.md
-    â”‚
-    â”œâ”€â”€ images/
-    â”‚
-    â”œâ”€â”€ src/
-    â”‚   â””â”€â”€ atomic_agentic/
-    â”‚       â”œâ”€â”€ a2a/
-    â”‚       â”œâ”€â”€ agents/
-    â”‚       â”œâ”€â”€ constants/
-    â”‚       â”œâ”€â”€ core/
-    â”‚       â”œâ”€â”€ engines/
-    â”‚       â”œâ”€â”€ exceptions/
-    â”‚       â”œâ”€â”€ mcp/
-    â”‚       â”œâ”€â”€ models/
-    â”‚       â”œâ”€â”€ tools/
-    â”‚       â”œâ”€â”€ utils/
-    â”‚       â”œâ”€â”€ workflows/
-    â”‚       â”œâ”€â”€ __init__.py
-    â”‚       â”œâ”€â”€ _version.py
-    â”‚       â””â”€â”€ py.typed
-    â”‚
-    â”œâ”€â”€ tests/
-    â”œâ”€â”€ README.md
-    â”œâ”€â”€ pyproject.toml
-    â””â”€â”€ requirements.txt
+```
+Atomic-Agentic/
+|-- examples/
+|   |-- Agent_Examples/
+|   |-- Agentic_Research/
+|   |-- Invokable_Examples/
+|   |-- LLM_Examples/
+|   |-- PlanAct_Examples/
+|   |-- ReAct_Examples/
+|   |-- Tool_Examples/
+|   |-- Workflow_Examples/
+|
+|-- docs/
+|   |-- CHANGELOG.md
+|
+|-- images/
+|
+|-- src/
+|   |-- atomic_agentic/
+|       |-- a2a/
+|       |-- agents/
+|       |-- constants/
+|       |-- core/
+|       |-- exceptions/
+|       |-- llm/
+|       |-- mcp/
+|       |-- models/
+|       |-- tools/
+|       |-- utils/
+|       |-- workflows/
+|       |-- __init__.py
+|       |-- _version.py
+|       |-- py.typed
+|
+|-- tests/
+|-- README.md
+|-- pyproject.toml
+|-- requirements.txt
+```
 
 ### Package topology
 
 The subpackages of `src/atomic_agentic/` form a strict layered
-dependency hierarchy â€” no back-edges:
+dependency hierarchy — no back-edges:
 
 ```
-{exceptions, constants} â†’ models â†’ utils â†’ core â†’ {agents, tools, workflows, engines, mcp, a2a}
+{exceptions, constants} → models → utils → core → {agents, tools, workflows, llm, mcp, a2a}
 ```
 
 | Layer | Packages | What lives here |
@@ -326,7 +328,7 @@ dependency hierarchy â€” no back-edges:
 | Data | `models/` | Dataclasses: `ParamSpec`, runtime records, result envelopes, workflow checkpoints |
 | Functions | `utils/` | Pure functions: async bridging, parameter ops, MCP and agent helpers |
 | Contract | `core/` | Shared invocation contract: `AtomicInvokable`, `Command`, `StructuredInvokable` |
-| Domain | `agents/`, `tools/`, `workflows/`, `engines/`, `mcp/`, `a2a/` | Behavior implementations |
+| Domain | `agents/`, `tools/`, `workflows/`, `llm/`, `mcp/`, `a2a/` | Behavior implementations |
 
 ------------------------------------------------------------------------
 
