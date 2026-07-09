@@ -343,6 +343,34 @@ class TestAnthropicEngine:
         )
         assert engine._extract_text(response) == "Answer here"
 
+    def test_extract_text_joins_multiple_blocks_with_default_empty_separator(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        response = SimpleNamespace(
+            content=[
+                SimpleNamespace(type="text", text="Hello"),
+                SimpleNamespace(type="text", text="World"),
+            ],
+            usage=_fake_usage(),
+        )
+        assert engine._extract_text(response) == "HelloWorld"
+
+    def test_extract_text_uses_custom_block_separator(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8", block_separator="---")
+        response = SimpleNamespace(
+            content=[
+                SimpleNamespace(type="text", text="Hello"),
+                SimpleNamespace(type="text", text="World"),
+            ],
+            usage=_fake_usage(),
+        )
+        assert engine._extract_text(response) == "Hello---World"
+
     def test_extract_text_empty_content_returns_empty_string(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -428,6 +456,7 @@ class TestAnthropicEngine:
             max_output_tokens=1024,
             temperature=0.3,
             stop_sequences=["END"],
+            block_separator="---",
         )
         d = engine.to_dict()
         assert d["type"] == "AnthropicEngine"
@@ -435,6 +464,7 @@ class TestAnthropicEngine:
         assert d["max_output_tokens"] == 1024
         assert d["temperature"] == 0.3
         assert d["stop_sequences"] == ["END"]
+        assert d["block_separator"] == "---"
         assert "client" not in d
 
     # -- Attachment pipeline ---------------------------------------------------

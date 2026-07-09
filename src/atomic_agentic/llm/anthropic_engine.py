@@ -73,6 +73,13 @@ class AnthropicEngine(LLMEngine):
     messages form the ``messages=`` list.  ``max_tokens`` is always sent
     (required by Anthropic).  ``temperature``, ``top_p``, ``top_k``,
     ``stop_sequences``, and ``thinking`` are omitted when ``None``.
+    ``block_separator`` (default ``""``) controls how multiple response text
+    blocks are rejoined into the returned string — relevant when a response
+    contains more than one ``text`` block (e.g. Anthropic citations, which
+    can split a response into interleaved cited/uncited blocks). Defaults to
+    no inserted separator, matching Anthropic's own text-reconstruction
+    convention (the streaming SDK's ``text_stream`` concatenates raw text
+    deltas across content-block boundaries with nothing inserted).
     """
 
     def __init__(
@@ -88,6 +95,7 @@ class AnthropicEngine(LLMEngine):
         top_k: int | None = None,
         stop_sequences: list[str] | None = None,
         thinking_config: dict[str, Any] | None = None,
+        block_separator: str = "",
         *,
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
@@ -134,6 +142,7 @@ class AnthropicEngine(LLMEngine):
         self.top_k = top_k
         self.stop_sequences = stop_sequences
         self.thinking_config = thinking_config
+        self.block_separator = block_separator
 
     # ------------------------------------------------------------------ #
     # Client routing
@@ -219,8 +228,8 @@ class AnthropicEngine(LLMEngine):
     # ------------------------------------------------------------------ #
 
     def _extract_text(self, response: Any) -> str:
-        """Return generated text by joining all ``TextBlock`` parts; empty string on refusal."""
-        return "\n\n".join(
+        """Return generated text by joining all ``TextBlock`` parts with ``block_separator``; empty string on refusal."""
+        return self.block_separator.join(
             block.text for block in response.content if block.type == "text"
         )
 
@@ -326,5 +335,6 @@ class AnthropicEngine(LLMEngine):
             "top_k": self.top_k,
             "stop_sequences": self.stop_sequences,
             "thinking_config": self.thinking_config,
+            "block_separator": self.block_separator,
         })
         return d
