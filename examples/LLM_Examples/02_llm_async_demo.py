@@ -1,10 +1,17 @@
 import asyncio
 import os
 from dotenv import load_dotenv
+from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 from google import genai
 from mistralai.client import Mistral
-from atomic_agentic.llm import GeminiEngine, LlamaCppEngine, MistralEngine, OpenAIEngine
+from atomic_agentic.llm import (
+    AnthropicEngine,
+    GeminiEngine,
+    LlamaCppEngine,
+    MistralEngine,
+    OpenAIEngine,
+)
 import logging
 from pprint import pprint
 
@@ -32,6 +39,13 @@ mistral_engine = MistralEngine(
     client=Mistral(api_key=os.getenv("MISTRAL_API_KEY")),
 )
 
+# --- Anthropic: inject AsyncAnthropic for native async ---
+# Passing AsyncAnthropic routes all calls through the async path natively.
+anthropic_engine = AnthropicEngine(
+    model="claude-sonnet-4-6",
+    client=AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY")),
+)
+
 # --- LlamaCpp: no native async — offloads to asyncio.to_thread ---
 # llama-cpp-python is a synchronous C++ binding with no async surface.
 # async_invoke dispatches to a thread pool so it participates in gather
@@ -51,11 +65,12 @@ messages = [
 
 
 async def main() -> None:
-    # Run all four engines concurrently — same async_invoke interface for all.
-    openai_result, gemini_result, mistral_result, llama_result = await asyncio.gather(
+    # Run all five engines concurrently — same async_invoke interface for all.
+    openai_result, gemini_result, mistral_result, anthropic_result, llama_result = await asyncio.gather(
         openai_engine.async_invoke({"messages": messages}),
         gemini_engine.async_invoke({"messages": messages}),
         mistral_engine.async_invoke({"messages": messages}),
+        anthropic_engine.async_invoke({"messages": messages}),
         llama_engine.async_invoke({"messages": messages}),
     )
 
@@ -73,6 +88,11 @@ async def main() -> None:
     print(mistral_result.result)
     print("\nMistral RESULT OBJECT:")
     pprint(mistral_result)
+
+    print("\n=== Anthropic ===")
+    print(anthropic_result.result)
+    print("\nAnthropic RESULT OBJECT:")
+    pprint(anthropic_result)
 
     print("\n=== LlamaCpp ===")
     print(llama_result.result)

@@ -41,3 +41,29 @@ MISTRAL_IMAGE_EXTS: tuple[str, ...] = (
     ".png", ".jpg", ".jpeg",
     ".webp", ".gif",
 )
+
+# ── Anthropic ─────────────────────────────────────────────────────────────────
+# Inline base64 only (Files API deferred — still in beta).
+# Images: PNG, JPG/JPEG, GIF, WEBP.
+# Documents: PDF (base64), plain-text files (document/text source type).
+
+ANTHROPIC_IMAGE_EXTS: tuple[str, ...] = (
+    ".png", ".jpg", ".jpeg",
+    ".gif", ".webp",
+)
+
+ANTHROPIC_DOCUMENT_EXTS: tuple[str, ...] = (".pdf",)
+
+ANTHROPIC_TEXT_EXTS: tuple[str, ...] = (
+    ".txt", ".md", ".rst", ".log",
+    ".csv", ".tsv",
+    ".json", ".yaml", ".yml",
+    ".py", ".js", ".ts",
+    ".html", ".xml",
+)
+
+ANTHROPIC_ALLOWED_EXTS: frozenset[str] = (
+    frozenset(ANTHROPIC_IMAGE_EXTS)
+    | frozenset(ANTHROPIC_DOCUMENT_EXTS)
+    | frozenset(ANTHROPIC_TEXT_EXTS)
+)

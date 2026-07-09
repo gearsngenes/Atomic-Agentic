@@ -26,7 +26,7 @@ from ..models.results import (
     LLMResult,
     TokenUsage,
 )
-from ..constants.engines import (
+from ..constants.llm import (
     ILLEGAL_ATTACHMENT_EXTS
 )
 

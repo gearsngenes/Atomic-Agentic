@@ -11,6 +11,7 @@ __all__ = [
     "GeminiTokenUsage",
     "MistralTokenUsage",
     "LlamaCppTokenUsage",
+    "AnthropicTokenUsage",
     "LLMModelData",
     "RemoteLLMModelData",
     "LocalLLMModelData",
@@ -177,6 +178,32 @@ class LlamaCppTokenUsage(TokenUsage):
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
         _validate_optional_token_count("response_tokens", self.response_tokens)
+
+
+@dataclass(frozen=True, slots=True)
+class AnthropicTokenUsage(TokenUsage):
+    """
+    Anthropic Messages API token-usage details.
+
+    ``cache_creation_input_tokens`` and ``cache_read_input_tokens`` are
+    prompt-cache accounting fields; they are subsets of billed input cost
+    and are not additive to ``input_tokens``. ``thinking_tokens`` is a
+    subset of ``generated_tokens`` produced by extended thinking.
+    """
+
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    thinking_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        TokenUsage.__post_init__(self)
+        _validate_optional_token_count(
+            "cache_creation_input_tokens", self.cache_creation_input_tokens
+        )
+        _validate_optional_token_count(
+            "cache_read_input_tokens", self.cache_read_input_tokens
+        )
+        _validate_optional_token_count("thinking_tokens", self.thinking_tokens)
 
 
 # --------------------------------------------------------------------------- #

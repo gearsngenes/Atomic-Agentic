@@ -5,6 +5,7 @@ from .commands import CommandResult
 from .structured import StructuredResult
 from .agents import AgentResult, ToolAgentResult, ToolUsageRecord
 from .llm import (
+    AnthropicTokenUsage,
     GeminiTokenUsage,
     LlamaCppModelData,
     LlamaCppTokenUsage,
@@ -28,6 +29,7 @@ from .workflows import (
 
 __all__ = [
     "AtomicResult",
+    "AnthropicTokenUsage",
     "ToolResult",
     "MCPToolResult",
     "PyA2AtomicToolResult",

@@ -15,7 +15,7 @@ from typing import (
 )
 
 from .base import LLMEngine
-from ..constants.engines import (
+from ..constants.llm import (
     ILLEGAL_ATTACHMENT_EXTS,
     ENGINE_ILLEGAL_MIME_PREFIXES,
 )
