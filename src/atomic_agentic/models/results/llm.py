@@ -85,22 +85,38 @@ class TokenUsage:
 
     total_tokens:
         Total usage count. Must equal ``input_tokens + generated_tokens``.
+
+    response_tokens:
+        Visible-reply token count — the subset of ``generated_tokens``
+        actually surfaced to the caller, excluding hidden reasoning/thinking
+        tokens. Required and always populated: trivially equal to
+        ``generated_tokens`` for providers with no reasoning-token concept,
+        or derived by subtraction where one exists. Must not exceed
+        ``generated_tokens``.
     """
 
     input_tokens: int
     generated_tokens: int
     total_tokens: int
+    response_tokens: int
 
     def __post_init__(self) -> None:
         _validate_token_count("input_tokens", self.input_tokens)
         _validate_token_count("generated_tokens", self.generated_tokens)
         _validate_token_count("total_tokens", self.total_tokens)
+        _validate_token_count("response_tokens", self.response_tokens)
 
         expected_total = self.input_tokens + self.generated_tokens
         if self.total_tokens != expected_total:
             raise ValueError(
                 "total_tokens must equal input_tokens + generated_tokens; "
                 f"expected {expected_total}, got {self.total_tokens}."
+            )
+
+        if self.response_tokens > self.generated_tokens:
+            raise ValueError(
+                "response_tokens must not exceed generated_tokens; "
+                f"got {self.response_tokens} > {self.generated_tokens}."
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -113,18 +129,15 @@ class OpenAITokenUsage(TokenUsage):
     """
     OpenAI Responses API token-usage details.
 
-    ``response_tokens`` is derived from ``generated_tokens`` minus known hidden
-    reasoning tokens. ``cached_tokens`` is an input-token subset and is not
-    additive to ``input_tokens``.
+    ``cached_tokens`` is an input-token subset and is not additive to
+    ``input_tokens``.
     """
 
-    response_tokens: int | None = None
     cached_tokens: int | None = None
     reasoning_tokens: int | None = None
 
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
-        _validate_optional_token_count("response_tokens", self.response_tokens)
         _validate_optional_token_count("cached_tokens", self.cached_tokens)
         _validate_optional_token_count("reasoning_tokens", self.reasoning_tokens)
 
@@ -133,19 +146,18 @@ class OpenAITokenUsage(TokenUsage):
 class GeminiTokenUsage(TokenUsage):
     """
     Gemini token-usage details preserved from GenerateContent usage metadata.
+
+    The base ``response_tokens`` field represents what was previously
+    ``candidates_token_count`` here — Gemini natively reports this value
+    rather than requiring derivation, unlike OpenAI/Anthropic/LiteLLM.
     """
 
-    candidates_token_count: int | None = None
     thoughts_token_count: int | None = None
     tool_use_prompt_token_count: int | None = None
     cached_content_token_count: int | None = None
 
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
-        _validate_optional_token_count(
-            "candidates_token_count",
-            self.candidates_token_count,
-        )
         _validate_optional_token_count("thoughts_token_count", self.thoughts_token_count)
         _validate_optional_token_count(
             "tool_use_prompt_token_count",
@@ -161,24 +173,16 @@ class GeminiTokenUsage(TokenUsage):
 class MistralTokenUsage(TokenUsage):
     """Mistral token-usage details preserved from chat completion usage."""
 
-    response_tokens: int | None = None
     cached_tokens: int | None = None
 
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
-        _validate_optional_token_count("response_tokens", self.response_tokens)
         _validate_optional_token_count("cached_tokens", self.cached_tokens)
 
 
 @dataclass(frozen=True, slots=True)
 class LlamaCppTokenUsage(TokenUsage):
     """llama-cpp-python token-usage details preserved from chat completion usage."""
-
-    response_tokens: int | None = None
-
-    def __post_init__(self) -> None:
-        TokenUsage.__post_init__(self)
-        _validate_optional_token_count("response_tokens", self.response_tokens)
 
 
 @dataclass(frozen=True, slots=True)

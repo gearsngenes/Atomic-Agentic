@@ -6,10 +6,12 @@ import os
 from typing import Any, Dict, List, Mapping
 
 try:
-    from anthropic import Anthropic, AsyncAnthropic
+    from anthropic import Anthropic, AsyncAnthropic, APIConnectionError, APIStatusError
 except ImportError:
-    Anthropic = None       # type: ignore[assignment,misc]
-    AsyncAnthropic = None  # type: ignore[assignment,misc]
+    Anthropic = None            # type: ignore[assignment,misc]
+    AsyncAnthropic = None       # type: ignore[assignment,misc]
+    APIConnectionError = None   # type: ignore[assignment,misc]
+    APIStatusError = None       # type: ignore[assignment,misc]
 
 from .base import LLMEngine
 from ..constants.llm import (
@@ -62,7 +64,7 @@ class AnthropicEngine(LLMEngine):
     - Text / code files → UTF-8 ``document/text`` content blocks
       (no base64 required).
 
-    Attachment blocks are prepended to the first user-turn ``content`` list
+    Attachment blocks are appended to the last user-turn ``content`` list
     in ``_build_provider_payload``.  ``_on_detach`` is a no-op.
 
     Invocation
@@ -96,6 +98,7 @@ class AnthropicEngine(LLMEngine):
         stop_sequences: list[str] | None = None,
         thinking_config: dict[str, Any] | None = None,
         block_separator: str = "",
+        inline_cutoff_chars: int = 200_000,
         *,
         filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
@@ -104,6 +107,54 @@ class AnthropicEngine(LLMEngine):
         retry_backoff_max: float = 8.0,
         **client_kwargs: Any,
     ) -> None:
+        """
+        Parameters
+        ----------
+        model:
+            Anthropic model identifier (e.g. ``"claude-sonnet-4-6"``).
+        name:
+            Optional human-friendly engine name; defaults to
+            ``anthropic_{model}`` with non-identifier characters replaced by
+            underscores.
+        namespace:
+            Grouping label; defaults to ``"llm"``.
+        description:
+            Human-readable description for this engine instance.
+        client:
+            Pre-built ``Anthropic`` or ``AsyncAnthropic`` client. When
+            provided, used directly; when ``None``, a sync
+            ``Anthropic(**client_kwargs)`` is built.
+        max_output_tokens:
+            Always sent as ``max_tokens=`` (required by the Anthropic API).
+        temperature:
+            Sampling temperature. ``None`` omits the parameter entirely.
+        top_p, top_k:
+            Optional sampling parameters; omitted when ``None``.
+        stop_sequences:
+            Optional list of stop strings; omitted when ``None``.
+        thinking_config:
+            Optional extended-thinking configuration dict (e.g.
+            ``{"type": "adaptive"}``); sent as ``thinking=``, omitted when
+            ``None``.
+        block_separator:
+            Controls how multiple response text blocks are rejoined into the
+            returned string (relevant for citation-bearing responses).
+            Defaults to ``""`` (no inserted separator).
+        inline_cutoff_chars:
+            Maximum characters to inline from text/code attachments.
+        filter_extraneous_inputs:
+            Whether to silently drop inputs not declared in the engine's
+            schema.
+        timeout_seconds:
+            Per-call timeout inserted into the client's ``timeout`` option.
+        max_retries, retry_backoff_base, retry_backoff_max:
+            Shared ``LLMEngine`` retry/backoff configuration.
+        **client_kwargs:
+            Additional keyword arguments forwarded verbatim to
+            ``Anthropic(...)`` during client construction. Common uses:
+            ``api_key``, ``base_url``. Not forwarded when ``client`` is
+            injected directly.
+        """
         # 1. Name sanitization + super init
         sanitized = (name or f"anthropic_{model}").replace(":", "_").replace(
             "-", "_").replace(" ", "_").replace(".", "_")
@@ -143,6 +194,15 @@ class AnthropicEngine(LLMEngine):
         self.stop_sequences = stop_sequences
         self.thinking_config = thinking_config
         self.block_separator = block_separator
+        self._inline_cutoff_chars = int(inline_cutoff_chars)
+
+    # ------------------------------------------------------------------ #
+    # Properties
+    # ------------------------------------------------------------------ #
+    @property
+    def inline_cutoff_chars(self) -> int:
+        """Max characters inlined from text attachments; fixed at construction."""
+        return self._inline_cutoff_chars
 
     # ------------------------------------------------------------------ #
     # Client routing
@@ -160,6 +220,19 @@ class AnthropicEngine(LLMEngine):
             return await self._client.messages.create(**payload)
         return await asyncio.to_thread(self._call_provider, payload)
 
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        """
+        Retry on Anthropic connection/timeout errors and on retryable HTTP
+        status codes (429, 500, 502, 503, 504) from ``APIStatusError``.
+        """
+        if attempt > self._max_retries:
+            return False
+        if isinstance(exc, APIConnectionError):
+            return True
+        if isinstance(exc, APIStatusError):
+            return exc.status_code in {429, 500, 502, 503, 504}
+        return False
+
     # ------------------------------------------------------------------ #
     # Payload construction
     # ------------------------------------------------------------------ #
@@ -174,8 +247,9 @@ class AnthropicEngine(LLMEngine):
         current attachments snapshot.
 
         Lifecycle: (1) partition system vs. conversation; (2) convert to
-        Anthropic content-list format; (3) prepend attachment blocks to first
-        user turn; (4) assemble final payload dict with optional generation params.
+        Anthropic content-list format; (3) append attachment blocks to the
+        last user turn; (4) assemble final payload dict with optional
+        generation params.
         """
         # 1. Partition system vs. conversation messages
         system_parts = [
@@ -191,17 +265,18 @@ class AnthropicEngine(LLMEngine):
                 content = [{"type": "text", "text": content}]
             anthropic_msgs.append({"role": m["role"], "content": content})
 
-        # 3. Prepend attachment blocks to first user turn
+        # 3. Append attachment blocks to the last user turn
         blocks = list(attachments.values())
         if blocks:
             idx = next(
-                (i for i, m in enumerate(anthropic_msgs) if m["role"] == "user"),
+                (i for i in range(len(anthropic_msgs) - 1, -1, -1)
+                 if anthropic_msgs[i]["role"] == "user"),
                 None,
             )
             if idx is not None:
-                anthropic_msgs[idx]["content"] = blocks + anthropic_msgs[idx]["content"]
+                anthropic_msgs[idx]["content"] = anthropic_msgs[idx]["content"] + blocks
             else:
-                anthropic_msgs.insert(0, {"role": "user", "content": blocks})
+                anthropic_msgs.append({"role": "user", "content": blocks})
 
         # 4. Assemble payload
         payload: dict[str, Any] = {
@@ -238,20 +313,33 @@ class AnthropicEngine(LLMEngine):
         Map ``response.usage`` to ``AnthropicTokenUsage``.
 
         ``total_tokens`` is derived as ``input_tokens + output_tokens`` (Anthropic
-        does not provide a pre-summed total). Cache and thinking fields are read
-        from ``usage`` attributes; absent fields default to ``None``.
+        does not provide a pre-summed total). ``response_tokens`` is derived as
+        ``output_tokens`` minus any thinking-token subset. Cache and thinking
+        fields are read from ``usage`` attributes; absent fields default to
+        ``None``.
         """
         u = response.usage
         inp = u.input_tokens
         gen = u.output_tokens
-        details = getattr(u, "output_tokens_details", None) or {}
+
+        # `output_tokens_details` is either `None` or a real
+        # `anthropic.OutputTokensDetails` Pydantic object (never a dict) —
+        # `getattr` avoids assuming dict-style `.get()` access, which crashes
+        # on the real object whenever extended thinking actually populates it.
+        details = getattr(u, "output_tokens_details", None)
+        thinking_tokens = (
+            getattr(details, "thinking_tokens", None) if details is not None else None
+        )
+        response_tokens = gen - (thinking_tokens or 0)
+
         return AnthropicTokenUsage(
             input_tokens=inp,
             generated_tokens=gen,
             total_tokens=inp + gen,
+            response_tokens=response_tokens,
             cache_creation_input_tokens=getattr(u, "cache_creation_input_tokens", None),
             cache_read_input_tokens=getattr(u, "cache_read_input_tokens", None),
-            thinking_tokens=details.get("thinking_tokens"),
+            thinking_tokens=thinking_tokens,
         )
 
     def _get_model_data(self) -> RemoteLLMModelData:
@@ -279,44 +367,54 @@ class AnthropicEngine(LLMEngine):
         Build an inline Anthropic content block for ``path`` (no upload).
 
         Images → base64 ``image`` block; PDFs → base64 ``document`` block;
-        text/code → UTF-8 ``document/text`` block.
+        text/code → UTF-8 ``document/text`` block, truncated at
+        ``inline_cutoff_chars``.
         """
-        ext = os.path.splitext(path)[1].lower()
+        try:
+            ext = os.path.splitext(path)[1].lower()
 
-        if ext in ANTHROPIC_IMAGE_EXTS:
-            with open(path, "rb") as fh:
-                data = base64.b64encode(fh.read()).decode()
-            return {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": _MIME_MAP[ext],
-                    "data": data,
-                },
-            }
+            if ext in ANTHROPIC_IMAGE_EXTS:
+                with open(path, "rb") as fh:
+                    data = base64.b64encode(fh.read()).decode()
+                return {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": _MIME_MAP[ext],
+                        "data": data,
+                    },
+                }
 
-        if ext in ANTHROPIC_DOCUMENT_EXTS:
-            with open(path, "rb") as fh:
-                data = base64.b64encode(fh.read()).decode()
+            if ext in ANTHROPIC_DOCUMENT_EXTS:
+                with open(path, "rb") as fh:
+                    data = base64.b64encode(fh.read()).decode()
+                return {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": _MIME_MAP[ext],
+                        "data": data,
+                    },
+                }
+
+            # Text / code — document/text source (no base64 needed)
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            if len(text) > self._inline_cutoff_chars:
+                text = text[: self._inline_cutoff_chars] + "\n…[truncated]\n"
             return {
                 "type": "document",
                 "source": {
-                    "type": "base64",
-                    "media_type": _MIME_MAP[ext],
-                    "data": data,
+                    "type": "text",
+                    "data": text,
                 },
             }
-
-        # Text / code — document/text source (no base64 needed)
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-        return {
-            "type": "document",
-            "source": {
-                "type": "text",
-                "data": text,
-            },
-        }
+        except LLMEngineError:
+            raise
+        except Exception as exc:
+            raise LLMEngineError(
+                f"AnthropicEngine._prepare_attachment failed for {path!r}"
+            ) from exc
 
     def _on_detach(self, meta: Any) -> None:
         """No-op — inline attachments leave no server-side state to clean up."""
@@ -336,5 +434,6 @@ class AnthropicEngine(LLMEngine):
             "stop_sequences": self.stop_sequences,
             "thinking_config": self.thinking_config,
             "block_separator": self.block_separator,
+            "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return d

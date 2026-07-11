@@ -273,6 +273,7 @@ class TestLlamaCppTokenUsage:
         assert result.input_tokens == 8
         assert result.generated_tokens == 4
         assert result.total_tokens == 12
+        assert result.response_tokens == 4
 
     def test_missing_usage_key_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
@@ -288,3 +289,14 @@ class TestLlamaCppTokenUsage:
         engine = _make_engine(monkeypatch)
         with pytest.raises(LLMEngineError, match="unexpected usage shape"):
             engine._extract_token_usage({"choices": [], "usage": {"wrong_key": 1}})
+
+
+class TestLlamaCppShouldRetry:
+    def test_retries_blindly_within_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch, max_retries=2)
+        assert engine._should_retry(ValueError("anything"), attempt=1) is True
+        assert engine._should_retry(RuntimeError("anything"), attempt=2) is True
+
+    def test_stops_once_budget_exhausted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch, max_retries=2)
+        assert engine._should_retry(ValueError("anything"), attempt=3) is False

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from google.genai import errors as genai_errors
 from google.genai import types as _real_genai_types
 
 gemini_module = importlib.import_module("atomic_agentic.llm.gemini_engine")
@@ -121,7 +122,7 @@ class TestGeminiEngine:
         assert contents[1].role == "model"
         assert contents[1].parts[0].text == "Hi"
 
-    def test_build_content_list_injects_attachments_into_first_user_turn(
+    def test_build_content_list_appends_attachments_to_last_user_turn(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         engine = _make_engine(monkeypatch)
@@ -139,10 +140,28 @@ class TestGeminiEngine:
         assert len(contents) == 2
         first_parts = contents[0].parts
         assert len(first_parts) == 3
-        assert first_parts[0].file_data.file_uri == "gs://fake/f1"
-        assert first_parts[1].text == "Inline!"
-        assert first_parts[2].text == "Hello"
+        assert first_parts[0].text == "Hello"
+        assert first_parts[1].file_data.file_uri == "gs://fake/f1"
+        assert first_parts[2].text == "Inline!"
         assert contents[1].role == "model"
+
+    def test_build_content_list_attachments_land_in_last_user_turn_not_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        file_obj = SimpleNamespace(name="f1", uri="gs://fake/f1", mime_type="text/plain")
+        attachments = {"file.txt": {"uploaded": True, "file_obj": file_obj, "mime": "text/plain"}}
+        messages = [
+            {"role": "user", "content": "First"},
+            {"role": "assistant", "content": "Reply"},
+            {"role": "user", "content": "Second"},
+        ]
+
+        contents = engine._build_content_list(messages, attachments)
+
+        assert len(contents[0].parts) == 1  # first user turn untouched
+        assert len(contents[2].parts) == 2  # last user turn gets the attachment
+        assert contents[2].parts[1].file_data.file_uri == "gs://fake/f1"
 
     def test_build_content_list_standalone_attachment_when_no_user_turn(
         self, monkeypatch: pytest.MonkeyPatch
@@ -154,9 +173,9 @@ class TestGeminiEngine:
 
         contents = engine._build_content_list(messages, attachments)
 
-        # First Content should be the standalone user role with attachment
-        assert contents[0].role == "user"
-        assert contents[0].parts[0].file_data.file_uri == "gs://fake/f1"
+        # No user turn exists — a standalone trailing user Content is appended.
+        assert contents[-1].role == "user"
+        assert contents[-1].parts[0].file_data.file_uri == "gs://fake/f1"
 
     def test_call_provider_uses_sync_path(
         self, monkeypatch: pytest.MonkeyPatch
@@ -248,6 +267,30 @@ class TestGeminiEngine:
         messages = [{"role": "user", "content": "Hello"}]
         assert engine._collect_system(messages) is None
 
+    def test_should_retry_server_error_always_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch, max_retries=2)
+        exc = genai_errors.ServerError(500, {"message": "srv"}, None)
+        assert engine._should_retry(exc, attempt=1) is True
+
+    def test_should_retry_client_error_only_on_429(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch, max_retries=2)
+        rate_limited = genai_errors.ClientError(429, {"message": "rl"}, None)
+        bad_request = genai_errors.ClientError(400, {"message": "bad"}, None)
+
+        assert engine._should_retry(rate_limited, attempt=1) is True
+        assert engine._should_retry(bad_request, attempt=1) is False
+
+    def test_should_retry_respects_max_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch, max_retries=2)
+        exc = genai_errors.ServerError(500, {"message": "srv"}, None)
+        assert engine._should_retry(exc, attempt=3) is False
+
 
 class TestGeminiAttachments:
     def test_validate_attachment_path_rejects_illegal_ext(
@@ -323,6 +366,25 @@ class TestGeminiTokenUsage:
         assert result.input_tokens == 10
         assert result.total_tokens == 25
         assert result.generated_tokens == 15
+        assert result.response_tokens == 15
+
+    def test_extract_token_usage_response_tokens_falls_back_when_candidates_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        usage = SimpleNamespace(
+            prompt_token_count=10,
+            total_token_count=25,
+            candidates_token_count=None,
+            thoughts_token_count=None,
+            tool_use_prompt_token_count=None,
+            cached_content_token_count=None,
+        )
+        response = SimpleNamespace(usage_metadata=usage)
+
+        result = engine._extract_token_usage(response)
+
+        assert result.response_tokens == result.generated_tokens == 15
 
     def test_extract_token_usage_none_raises(
         self, monkeypatch: pytest.MonkeyPatch

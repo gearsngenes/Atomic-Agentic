@@ -302,6 +302,15 @@ class LlamaCppEngine(LLMEngine):
             **chat_kwargs,
         )
 
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        """
+        Local llama.cpp inference has no network layer, so there is no
+        status-code or connection-error signal to discriminate transient
+        from permanent failures. Deliberate policy: retry blindly, bounded
+        only by the shared attempt budget.
+        """
+        return attempt <= self._max_retries
+
     def _extract_text(self, response: Any) -> str:
         """
         Extract assistant text from a llama.cpp chat completion response.

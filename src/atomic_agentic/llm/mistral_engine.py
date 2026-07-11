@@ -3,8 +3,10 @@ from __future__ import annotations
 import mimetypes
 try:
     from mistralai.client import Mistral
+    from mistralai.client import errors as mistral_errors
 except ImportError:
     Mistral = None
+    mistral_errors = None
 import os
 from typing import (
     Any,
@@ -341,6 +343,21 @@ class MistralEngine(LLMEngine):
             kwargs["temperature"] = self.temperature
         return await self._client.chat.complete_async(**kwargs)
 
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        """
+        Retry on ``NoResponseError`` (no HTTP response received at all) and
+        on retryable HTTP status codes (429, 500, 502, 503, 504) from
+        ``SDKError.raw_response``.
+        """
+        if attempt > self._max_retries:
+            return False
+        if isinstance(exc, mistral_errors.NoResponseError):
+            return True
+        if isinstance(exc, mistral_errors.SDKError):
+            status = getattr(getattr(exc, "raw_response", None), "status_code", None)
+            return status in {429, 500, 502, 503, 504}
+        return False
+
     def _extract_text(self, response: Any) -> str:
         """
         Extract assistant text from a Mistral chat completion response.
@@ -377,7 +394,12 @@ class MistralEngine(LLMEngine):
             raise LLMEngineError("Mistral usage missing total_tokens.")
 
         cached_tokens = None
-        prompt_tokens_details = usage.prompt_tokens_details
+        # The real mistralai.UsageInfo model never declares
+        # prompt_tokens_details as an attribute at all (verified empirically
+        # against the installed SDK) — plain attribute access raises
+        # AttributeError on every real response. getattr with a default
+        # makes this genuinely optional instead of assumed-present.
+        prompt_tokens_details = getattr(usage, "prompt_tokens_details", None)
         if prompt_tokens_details is not None:
             if isinstance(prompt_tokens_details, Mapping):
                 cached_tokens = prompt_tokens_details.get("cached_tokens")

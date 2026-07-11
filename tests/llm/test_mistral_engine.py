@@ -4,6 +4,7 @@ import importlib
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 mistral_module = importlib.import_module("atomic_agentic.llm.mistral_engine")
@@ -307,6 +308,9 @@ class TestMistralAttachments:
         assert fake.deleted_files == []
 
 
+_NO_DETAILS = object()  # sentinel: "attribute genuinely absent", not "set to None"
+
+
 class TestMistralTokenUsage:
     def _make_usage(
         self,
@@ -314,24 +318,39 @@ class TestMistralTokenUsage:
         prompt_tokens: int | None = 10,
         completion_tokens: int | None = 5,
         total_tokens: int | None = 15,
-        prompt_tokens_details: Any = None,
+        prompt_tokens_details: Any = _NO_DETAILS,
     ) -> Any:
-        return SimpleNamespace(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            prompt_tokens_details=prompt_tokens_details,
-        )
+        # B2 regression fixture: the real mistralai.UsageInfo model never
+        # declares prompt_tokens_details as an attribute at all (verified
+        # empirically against the installed SDK) — by default this fixture
+        # must NOT set the attribute either, unlike the old fixture which
+        # always set it (defaulting to None) and masked the real
+        # AttributeError crash.
+        kwargs: dict[str, Any] = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+        if prompt_tokens_details is not _NO_DETAILS:
+            kwargs["prompt_tokens_details"] = prompt_tokens_details
+        return SimpleNamespace(**kwargs)
 
-    def test_happy_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_happy_path_with_no_prompt_tokens_details_attribute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # B2 regression: usage genuinely lacks prompt_tokens_details as an
+        # attribute (matching the real mistralai.UsageInfo shape) — must not
+        # crash with AttributeError.
         engine = _make_engine(monkeypatch)
         response = SimpleNamespace(usage=self._make_usage())
+        assert not hasattr(response.usage, "prompt_tokens_details")
 
         result = engine._extract_token_usage(response)
 
         assert result.input_tokens == 10
         assert result.generated_tokens == 5
         assert result.total_tokens == 15
+        assert result.response_tokens == 5
         assert result.cached_tokens is None
 
     def test_usage_none_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -377,3 +396,37 @@ class TestMistralTokenUsage:
         result = engine._extract_token_usage(response)
 
         assert result.cached_tokens == 7
+
+
+class TestMistralShouldRetry:
+    def _status_error(self, status_code: int) -> Any:
+        from mistralai.client import errors as mistral_errors
+
+        request = httpx.Request("POST", "https://example.com")
+        response = httpx.Response(status_code=status_code, request=request)
+        return mistral_errors.SDKError("error", raw_response=response)
+
+    def test_no_response_error_always_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mistralai.client import errors as mistral_errors
+
+        engine = _make_engine(monkeypatch, max_retries=2)
+        exc = mistral_errors.NoResponseError()
+        assert engine._should_retry(exc, attempt=1) is True
+
+    def test_retryable_status_codes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch, max_retries=2)
+        for code in (429, 500, 502, 503, 504):
+            assert engine._should_retry(self._status_error(code), attempt=1) is True
+
+    def test_non_retryable_status_code(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = _make_engine(monkeypatch, max_retries=2)
+        assert engine._should_retry(self._status_error(400), attempt=1) is False
+
+    def test_respects_max_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mistralai.client import errors as mistral_errors
+
+        engine = _make_engine(monkeypatch, max_retries=2)
+        exc = mistral_errors.NoResponseError()
+        assert engine._should_retry(exc, attempt=3) is False

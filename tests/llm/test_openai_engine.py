@@ -5,6 +5,8 @@ import importlib
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
+import openai
 import pytest
 
 openai_module = importlib.import_module("atomic_agentic.llm.openai_engine")
@@ -390,14 +392,59 @@ class TestOpenAIExtractTokenUsage:
             engine._extract_token_usage(response)
 
     def test_negative_response_tokens_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A negative response_tokens value now fails TokenUsage's own
+        # >= 0 field validation (base class), not an OpenAIEngine-level
+        # LLMEngineError — it never reaches the separate "exceeds
+        # generated_tokens" invariant since -3 is caught first.
         engine = self._engine(monkeypatch)
         response = SimpleNamespace(usage=self._usage(
             output_tokens=2,
             output_tokens_details=SimpleNamespace(reasoning_tokens=5),
         ))
 
-        with pytest.raises(LLMEngineError, match="negative"):
+        with pytest.raises(ValueError, match="response_tokens must be >= 0"):
             engine._extract_token_usage(response)
+
+
+class TestOpenAIShouldRetry:
+    def _engine(self, monkeypatch: pytest.MonkeyPatch) -> OpenAIEngine:
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+        return OpenAIEngine(model="gpt-4o-mini", max_retries=2)
+
+    def _status_error(self, status_code: int) -> openai.APIStatusError:
+        request = httpx.Request("POST", "https://example.com")
+        response = httpx.Response(status_code=status_code, request=request)
+        return openai.APIStatusError("error", response=response, body=None)
+
+    def test_connection_error_is_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = self._engine(monkeypatch)
+        request = httpx.Request("POST", "https://example.com")
+        exc = openai.APIConnectionError(request=request)
+
+        assert engine._should_retry(exc, attempt=1) is True
+
+    def test_retryable_status_codes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = self._engine(monkeypatch)
+        for code in (429, 500, 502, 503, 504):
+            assert engine._should_retry(self._status_error(code), attempt=1) is True
+
+    def test_non_retryable_status_code(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = self._engine(monkeypatch)
+        assert engine._should_retry(self._status_error(400), attempt=1) is False
+
+    def test_generic_exception_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = self._engine(monkeypatch)
+        assert engine._should_retry(ValueError("bad"), attempt=1) is False
+
+    def test_attempt_exceeding_max_retries_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = self._engine(monkeypatch)
+        request = httpx.Request("POST", "https://example.com")
+        exc = openai.APIConnectionError(request=request)
+
+        assert engine._should_retry(exc, attempt=3) is False
 
 
 class TestOpenAIAttachments:

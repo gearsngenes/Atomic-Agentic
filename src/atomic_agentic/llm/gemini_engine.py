@@ -3,8 +3,10 @@ from __future__ import annotations
 import mimetypes
 try:
     from google import genai
+    from google.genai import errors as genai_errors
 except ImportError:
     genai = None
+    genai_errors = None
 import os
 from typing import (
     Any,
@@ -266,8 +268,8 @@ class GeminiEngine(LLMEngine):
         Non-system messages are wrapped in ``Content(role=..., parts=[...])`` with
         ``role`` mapped as ``'user'`` for user turns and ``'model'`` for assistant
         turns. Attachment parts (uploaded files via ``Part.from_uri``; inlined text
-        via ``Part.from_text``) are prepended to the first user ``Content``'s
-        ``parts`` list. If no user turn is present, a standalone leading
+        via ``Part.from_text``) are appended to the last user ``Content``'s
+        ``parts`` list. If no user turn is present, a standalone trailing
         ``Content(role='user', parts=attachment_parts)`` is inserted.
         """
         # 1. Build attachment_parts list.
@@ -286,9 +288,8 @@ class GeminiEngine(LLMEngine):
                     genai.types.Part.from_text(text=str(meta["inlined_text"]))
                 )
 
-        # 2. Build contents list with role mapping; inject attachments into first user turn.
+        # 2. Build contents list with role mapping (no attachment injection yet).
         contents: List[Any] = []
-        attachment_injected = False
         for m in messages:
             role = m.get("role", "").lower()
             if role == "system":
@@ -297,16 +298,23 @@ class GeminiEngine(LLMEngine):
             text = m.get("content") or ""
             if not text:
                 continue
-            parts: List[Any] = []
-            if gemini_role == "user" and attachment_parts and not attachment_injected:
-                parts.extend(attachment_parts)
-                attachment_injected = True
-            parts.append(genai.types.Part.from_text(text=text))
-            contents.append(genai.types.Content(role=gemini_role, parts=parts))
+            contents.append(genai.types.Content(
+                role=gemini_role,
+                parts=[genai.types.Part.from_text(text=text)],
+            ))
 
-        # 3. If no user turn was present, insert a standalone leading Content for attachments.
-        if attachment_parts and not attachment_injected:
-            contents.insert(0, genai.types.Content(role="user", parts=attachment_parts))
+        # 3. Append attachment_parts to the last user Content (backward scan);
+        #    insert a standalone trailing Content if no user turn exists.
+        if attachment_parts:
+            idx = next(
+                (i for i in range(len(contents) - 1, -1, -1)
+                 if contents[i].role == "user"),
+                None,
+            )
+            if idx is not None:
+                contents[idx].parts = list(contents[idx].parts) + attachment_parts
+            else:
+                contents.append(genai.types.Content(role="user", parts=attachment_parts))
 
         return contents
 
@@ -372,6 +380,19 @@ class GeminiEngine(LLMEngine):
             config=cfg,
         )
 
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        """
+        Retry on ``genai_errors.ServerError`` (5xx) unconditionally, and on
+        ``ClientError`` (4xx) only when its ``.code`` is 429 (rate limit).
+        """
+        if attempt > self._max_retries:
+            return False
+        if isinstance(exc, genai_errors.ServerError):
+            return True
+        if isinstance(exc, genai_errors.ClientError):
+            return exc.code == 429
+        return False
+
     def _extract_text(self, response: Any) -> str:
         """
         Extract the assistant's textual reply from a Gen AI SDK response object.
@@ -415,11 +436,20 @@ class GeminiEngine(LLMEngine):
                 "prompt_token_count."
             )
 
+        # Gemini natively reports candidates_token_count as the visible-reply
+        # token count; fall back to generated_tokens if it's ever absent,
+        # since base response_tokens is a required field.
+        response_tokens = (
+            usage.candidates_token_count
+            if usage.candidates_token_count is not None
+            else generated_tokens
+        )
+
         return GeminiTokenUsage(
             input_tokens=input_tokens,
             generated_tokens=generated_tokens,
             total_tokens=total_tokens,
-            candidates_token_count=usage.candidates_token_count,
+            response_tokens=response_tokens,
             thoughts_token_count=usage.thoughts_token_count,
             tool_use_prompt_token_count=usage.tool_use_prompt_token_count,
             cached_content_token_count=usage.cached_content_token_count,

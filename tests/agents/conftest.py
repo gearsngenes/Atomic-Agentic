@@ -62,7 +62,12 @@ class EchoLLMEngine(LLMEngine):
         return str(response)
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(input_tokens=10, generated_tokens=5, total_tokens=15)
+        return TokenUsage(
+            input_tokens=10, generated_tokens=5, total_tokens=15, response_tokens=5
+        )
+
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        return False
 
     def _get_model_data(self) -> LLMModelData:
         return LLMModelData(provider="echo")
@@ -103,7 +108,12 @@ class ScriptedLLMEngine(LLMEngine):
         return str(response)
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(input_tokens=10, generated_tokens=5, total_tokens=15)
+        return TokenUsage(
+            input_tokens=10, generated_tokens=5, total_tokens=15, response_tokens=5
+        )
+
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        return False
 
     def _get_model_data(self) -> LLMModelData:
         return LLMModelData(provider="scripted")
@@ -214,7 +224,9 @@ def make_llm_result(*, text: str = "generated text", invoker_id: str = "engine-1
         invoker_id=invoker_id,
         started_at=started_at,
         ended_at=started_at + timedelta(seconds=1),
-        token_usage=TokenUsage(input_tokens=10, generated_tokens=5, total_tokens=15),
+        token_usage=TokenUsage(
+            input_tokens=10, generated_tokens=5, total_tokens=15, response_tokens=5
+        ),
         model_data=LLMModelData(provider="test"),
     )
 

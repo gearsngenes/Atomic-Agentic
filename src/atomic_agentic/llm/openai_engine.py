@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import mimetypes
 try:
-    from openai import AsyncOpenAI, OpenAI
+    from openai import AsyncOpenAI, OpenAI, APIConnectionError, APIStatusError
 except ImportError:
     AsyncOpenAI = None
     OpenAI = None
+    APIConnectionError = None
+    APIStatusError = None
 import os
 from typing import (
     Any,
@@ -325,6 +327,19 @@ class OpenAIEngine(LLMEngine):
             return await self._client.responses.create(**self._build_call_kwargs(payload))
         return await asyncio.to_thread(self._call_provider, payload)
 
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        """
+        Retry on OpenAI connection/timeout errors and on retryable HTTP
+        status codes (429, 500, 502, 503, 504) from ``APIStatusError``.
+        """
+        if attempt > self._max_retries:
+            return False
+        if isinstance(exc, APIConnectionError):
+            return True
+        if isinstance(exc, APIStatusError):
+            return exc.status_code in {429, 500, 502, 503, 504}
+        return False
+
     def _extract_text(self, response: Any) -> str:
         """
         Extract the assistant's textual reply from a Responses API response object.
@@ -361,11 +376,6 @@ class OpenAIEngine(LLMEngine):
         reasoning_tokens = output_details.reasoning_tokens if output_details is not None else 0
 
         response_tokens = usage.output_tokens - reasoning_tokens
-        if response_tokens < 0:
-            raise LLMEngineError(
-                "OpenAI response usage produced a negative response token count "
-                "after subtracting reasoning_tokens from output_tokens."
-            )
 
         input_details = usage.input_tokens_details
         cached_tokens = input_details.cached_tokens if input_details is not None else None
@@ -594,7 +604,6 @@ class OpenAIEngine(LLMEngine):
         """
         base = super().to_dict()
         base.update({
-            "type": "OpenAIEngine",
             "model": self.model,
             "temperature": self.temperature,
             "max_output_tokens": self._max_output_tokens,

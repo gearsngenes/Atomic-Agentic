@@ -264,7 +264,7 @@ class LLMEngine(AtomicInvokable, ABC):
             except LLMEngineError:
                 raise
             except Exception as exc:
-                raise LLMEngineError(f"{self.name}.invoke failed") from exc
+                raise LLMEngineError(f"{self.name}.invoke failed: {exc}") from exc
 
     async def async_invoke(self, inputs: Mapping[str, Any]) -> LLMResult:
         """
@@ -300,7 +300,7 @@ class LLMEngine(AtomicInvokable, ABC):
         except LLMEngineError:
             raise
         except Exception as exc:
-            raise LLMEngineError(f"{self.name}.async_invoke failed") from exc
+            raise LLMEngineError(f"{self.name}.async_invoke failed: {exc}") from exc
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -516,25 +516,21 @@ class LLMEngine(AtomicInvokable, ABC):
                 )
                 await asyncio.sleep(sleep)
 
+    # --------------------------------------------------------------------- #
+    # Abstract Helpers
+    # --------------------------------------------------------------------- #
+    @abstractmethod
     def _should_retry(self, exc: Exception, attempt: int) -> bool:
         """
         Decide whether a failed `_call_provider` should be retried.
 
-        Default policy:
-        - Do not exceed `self._max_retries`.
-        - Retry on basic timeout/connection-style errors.
-        Subclasses may override this to recognize provider-specific error types.
+        Every engine must recognize its own provider SDK's real transient-error
+        shape (connection/timeout errors, retryable HTTP status codes) — there
+        is no cross-provider default, since no two SDKs in this family share
+        one exception hierarchy. Implementations should still respect
+        `attempt <= self._max_retries` as the outer bound.
         """
-        if attempt > self._max_retries:
-            return False
-
-        # Simple baseline: retry on common transient conditions. We avoid importing
-        # provider SDK exceptions here; subclasses can override for finer control.
-        return isinstance(exc, (TimeoutError, ConnectionError))
-
-    # --------------------------------------------------------------------- #
-    # Abstract Helpers
-    # --------------------------------------------------------------------- #
+        raise NotImplementedError
     @abstractmethod
     def _build_provider_payload(self, messages: List[Dict[str, str]], attachments: Mapping[str, Mapping[str, Any]]) -> Any:
         """

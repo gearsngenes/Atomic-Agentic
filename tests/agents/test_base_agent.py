@@ -132,7 +132,12 @@ class StatefulEchoLLMEngine(LLMEngine):
         return f"{self.prefix}: {response['latest_user']}"
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
+        return TokenUsage(
+            input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
+        )
+
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        return False
 
     def _get_model_data(self) -> LLMModelData:
         return LLMModelData(provider="stateful-echo")
@@ -1236,7 +1241,11 @@ class TestAgentRenderTurnGuards:
             invoker_id="test-agent",
             started_at=datetime.now(timezone.utc),
             ended_at=datetime.now(timezone.utc) + timedelta(seconds=1),
-            llm_token_usage=(TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2),),
+            llm_token_usage=(
+                TokenUsage(
+                    input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
+                ),
+            ),
             llm_model_data=LLMModelData(provider="test"),
         )
         from atomic_agentic.models.agents.records import LLMRecord
@@ -1246,7 +1255,9 @@ class TestAgentRenderTurnGuards:
             invoker_id="engine-1",
             started_at=datetime.now(timezone.utc),
             ended_at=datetime.now(timezone.utc) + timedelta(seconds=1),
-            token_usage=TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2),
+            token_usage=TokenUsage(
+                input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
+            ),
             model_data=LLMModelData(provider="test"),
         )
         record = AgentRecord(

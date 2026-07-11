@@ -281,7 +281,7 @@ class TestLiteLLMEngine:
 
         assert payload["organization"] == "org-123"
 
-    def test_attachment_blocks_prepended_convert_string_content_to_list(
+    def test_attachment_blocks_appended_convert_string_content_to_list(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
@@ -291,11 +291,31 @@ class TestLiteLLMEngine:
 
         payload = engine._build_provider_payload(msgs, {"img.png": fake_block})
 
-        first_content = payload["messages"][0]["content"]
-        assert first_content[0] is fake_block
-        assert first_content[1] == {"type": "text", "text": "Describe this."}
+        content = payload["messages"][0]["content"]
+        assert content[0] == {"type": "text", "text": "Describe this."}
+        assert content[1] is fake_block
 
-    def test_attachment_inserts_bare_user_turn_when_none_exists(
+    def test_attachment_blocks_land_in_last_user_turn_not_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        fake_block = {"type": "text", "text": "notes"}
+        msgs = [
+            {"role": "user", "content": "First question."},
+            {"role": "assistant", "content": "First answer."},
+            {"role": "user", "content": "Second question."},
+        ]
+
+        payload = engine._build_provider_payload(msgs, {"notes.txt": fake_block})
+
+        assert payload["messages"][0]["content"] == "First question."
+        assert payload["messages"][2]["content"] == [
+            {"type": "text", "text": "Second question."},
+            fake_block,
+        ]
+
+    def test_attachment_appends_bare_user_turn_when_none_exists(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
@@ -305,8 +325,8 @@ class TestLiteLLMEngine:
 
         payload = engine._build_provider_payload(msgs, {"notes.txt": fake_block})
 
-        assert payload["messages"][0]["role"] == "user"
-        assert payload["messages"][0]["content"] == [fake_block]
+        assert payload["messages"][-1]["role"] == "user"
+        assert payload["messages"][-1]["content"] == [fake_block]
 
     # ── _extract_text ────────────────────────────────────────────────────────
 
@@ -344,6 +364,7 @@ class TestLiteLLMEngine:
         assert usage.input_tokens == 10
         assert usage.generated_tokens == 20
         assert usage.total_tokens == 30
+        assert usage.response_tokens == 20
 
     def test_extract_token_usage_all_none_when_details_absent(
         self, monkeypatch: pytest.MonkeyPatch
@@ -399,6 +420,8 @@ class TestLiteLLMEngine:
         assert usage.cached_tokens == 50
         assert usage.cache_creation_tokens == 25
         assert usage.reasoning_tokens == 15
+        # response_tokens is plain subtraction: generated_tokens (20) - reasoning (15)
+        assert usage.response_tokens == 5
 
     # ── _get_model_data ──────────────────────────────────────────────────────
 
@@ -422,7 +445,15 @@ class TestLiteLLMEngine:
         assert d["provider"] == "openai"
         assert d["model"] == "gpt-4o-mini"
         assert d["temperature"] == 0.3
+        assert d["inline_cutoff_chars"] == 200_000
         assert "api_key" not in d
+
+    def test_timeout_seconds_default_matches_other_remote_engines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        assert engine.timeout_seconds == 600.0
 
     # ── Attachment pipeline ──────────────────────────────────────────────────
 
@@ -503,3 +534,70 @@ class TestLiteLLMEngine:
 
         with pytest.raises(LLMEngineError):
             engine._validate_attachment_path(str(docx))
+
+    def test_prepare_attachment_wraps_unexpected_exception(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        # A directory named "notes.txt" triggers a natural OSError
+        # (IsADirectoryError) when the text branch tries to open() it.
+        bad_path = tmp_path / "notes.txt"
+        bad_path.mkdir()
+
+        with pytest.raises(LLMEngineError, match="_prepare_attachment failed"):
+            engine._prepare_attachment(str(bad_path))
+
+    def test_prepare_attachment_truncates_long_text(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini", inline_cutoff_chars=10)
+        txt = tmp_path / "long.txt"
+        txt.write_text("a" * 50, encoding="utf-8")
+
+        block = engine._prepare_attachment(str(txt))
+
+        assert block["text"].startswith("a" * 10)
+        assert "truncated" in block["text"]
+
+
+class TestLiteLLMShouldRetry:
+    def _engine(self, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> LiteLLMEngine:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        return LiteLLMEngine(model="gpt-4o-mini", **kwargs)
+
+    def test_retryable_named_exceptions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from litellm.exceptions import (
+            APIConnectionError,
+            BadGatewayError,
+            InternalServerError,
+            RateLimitError,
+            ServiceUnavailableError,
+            Timeout,
+        )
+
+        engine = self._engine(monkeypatch, max_retries=2)
+        for exc_cls in (
+            RateLimitError,
+            Timeout,
+            APIConnectionError,
+            ServiceUnavailableError,
+            InternalServerError,
+            BadGatewayError,
+        ):
+            exc = exc_cls(
+                message="boom", model="gpt-4o-mini", llm_provider="openai"
+            )
+            assert engine._should_retry(exc, attempt=1) is True
+
+    def test_non_retryable_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine = self._engine(monkeypatch, max_retries=2)
+        assert engine._should_retry(ValueError("bad"), attempt=1) is False
+
+    def test_respects_max_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from litellm.exceptions import Timeout
+
+        engine = self._engine(monkeypatch, max_retries=2)
+        exc = Timeout(message="boom", model="gpt-4o-mini", llm_provider="openai")
+        assert engine._should_retry(exc, attempt=3) is False

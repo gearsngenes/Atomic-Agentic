@@ -55,7 +55,9 @@ class FakeLLMEngine(LLMEngine):
         return response["text"]
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
+        return TokenUsage(
+            input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
+        )
 
     def _get_model_data(self) -> LLMModelData:
         return LLMModelData(provider="fake")
@@ -68,6 +70,11 @@ class FakeLLMEngine(LLMEngine):
 
     def _on_detach(self, meta: Mapping[str, Any]) -> None:
         self.detach_calls.append(meta)
+
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        if attempt > self._max_retries:
+            return False
+        return isinstance(exc, (TimeoutError, ConnectionError))
 
 
 class TestLLMEngineConstruction:
@@ -346,6 +353,30 @@ class TestLLMEngineAttachments:
 
         assert engine.attachments == {}
         assert len(engine.detach_calls) == 2
+
+
+class TestLLMEngineAbstractShouldRetry:
+    def test_missing_should_retry_override_raises_type_error(self) -> None:
+        class IncompleteEngine(LLMEngine):
+            def _build_provider_payload(self, messages, attachments):
+                return {}
+
+            def _call_provider(self, payload):
+                return {"text": ""}
+
+            def _extract_text(self, response):
+                return ""
+
+            def _extract_token_usage(self, response):
+                return TokenUsage(
+                    input_tokens=0, generated_tokens=0, total_tokens=0, response_tokens=0
+                )
+
+            def _get_model_data(self):
+                return LLMModelData(provider="incomplete")
+
+        with pytest.raises(TypeError):
+            IncompleteEngine()
 
 
 class TestLLMEngineImmutability:

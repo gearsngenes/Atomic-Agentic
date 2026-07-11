@@ -24,6 +24,7 @@ def make_token_usage(*, input_tokens: int = 10, generated_tokens: int = 5) -> To
         input_tokens=input_tokens,
         generated_tokens=generated_tokens,
         total_tokens=input_tokens + generated_tokens,
+        response_tokens=generated_tokens,
     )
 
 
