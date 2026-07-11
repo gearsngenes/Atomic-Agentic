@@ -1,4 +1,4 @@
-"""
+﻿"""
 05_IterativeFlow.py
 
 Beginner-friendly IterativeFlow example.
@@ -10,7 +10,7 @@ from pathlib import Path
 from pprint import pprint
 from dotenv import load_dotenv
 from atomic_agentic.agents import BasicAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.tools import toolify
 from atomic_agentic import StructuredInvokable
 from atomic_agentic.workflows import IterativeFlow

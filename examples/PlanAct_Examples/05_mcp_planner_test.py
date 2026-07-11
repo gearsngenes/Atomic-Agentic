@@ -1,4 +1,4 @@
-"""05_mcp_planner_test.py
+﻿"""05_mcp_planner_test.py
 
 PlanActAgent planning against a local MCP server.
 
@@ -10,7 +10,7 @@ Updated to use PlanActAgent (formerly PlannerAgent).
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.mcp import MCPClientHub
 
 load_dotenv()

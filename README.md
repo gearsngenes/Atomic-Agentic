@@ -1,4 +1,4 @@
-# Atomic-Agentic
+﻿# Atomic-Agentic
 
 ## Introduction
 
@@ -111,7 +111,7 @@ message-based interface. They receive a sequence of messages and
 generate the next response message.
 
 ``` python
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 
 engine = OpenAIEngine(model="gpt-4o-mini")
 
@@ -136,8 +136,8 @@ orchestration. Those responsibilities belong to agents.
 Agents may also use Tools to interact with their environment.
 
 ``` python
-from atomic_agentic.agents import Agent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.agents import BasicAgent
+from atomic_agentic.llm import OpenAIEngine
 
 accounts = [
     {"name": "Alice Johnson", "birthdate": "1985-03-15", "account_balance": 15750.50, "annual_interest_rate": 0.025},
@@ -157,7 +157,7 @@ Desired Sector to invest: {sector.capitalize()}
 
 engine = OpenAIEngine(model="gpt-4o-mini")
 
-advisor = Agent(
+advisor = BasicAgent(
     name="finance_advisor",
     description="Investment advisor.",
     llm_engine=engine,
@@ -182,7 +182,7 @@ Atomic-Agentic also supports autonomous **tool-calling agent classes**.
 
 ```python
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.tools.prebuilt import MATH_TOOLS
 
 engine = OpenAIEngine(model="gpt-4.1-mini")
@@ -229,14 +229,14 @@ See the `StructuredInvokable` docstring for advanced options (absent value handl
 Workflows orchestrate Atomic-Agentic primitives into deterministic pipelines. They provide patterns for composition, branching, iteration, and parallelism, enabling you to build complex agentic systems from modular components.
 
 **Workflow classes include:**
-- `BasicFlow` – wraps a single component
-- `SequentialFlow` – chains steps in sequence
-- `ParallelFlow` – runs branches concurrently
-- `RoutingFlow` – routes input to a selected branch
-- `IterativeFlow` – loops until a judge condition is met
+- `BasicFlow` — wraps a single component
+- `SequentialFlow` — chains steps in sequence
+- `ParallelFlow` — runs branches concurrently
+- `RoutingFlow` — routes input to a selected branch
+- `IterativeFlow` — loops until a judge condition is met
 
 **Note:**
-Workflows return typed result envelopes (`*FlowResult`) with `.result` and full run metadata. Use `StructuredInvokable` explicitly when you need to project a step's output dict to a fixed schema — workflow steps themselves do not apply schema projection.
+Workflows return typed result envelopes (`*FlowResult`) with `.result` and full run metadata. Use `StructuredInvokable` explicitly when you need to project a step's output dict to a fixed schema â€” workflow steps themselves do not apply schema projection.
 
 **For practical workflow usage and advanced patterns, see the examples in:**
 `examples/Workflow_Examples/`
@@ -248,15 +248,15 @@ Workflows return typed result envelopes (`*FlowResult`) with `.result` and full 
 v2 is a deliberate breaking-change line with two headline improvements:
 
 **Reorganized package structure.** `src/atomic_agentic/` is now
-organized into concern-based layers — `exceptions/`, `constants/`,
+organized into concern-based layers â€” `exceptions/`, `constants/`,
 `models/`, and `utils/` sit below the domain packages (`agents/`,
-`tools/`, `workflows/`, `engines/`, `mcp/`, `a2a/`), with `core/`
+`tools/`, `workflows/`, `llm/`, `mcp/`, `a2a/`), with `core/`
 holding only the shared invocation contract. The dependency topology
 is explicit and there are no cross-layer back-edges.
 
-**AtomicResult-family return contract.** Every `AtomicInvokable` —
+**AtomicResult-family return contract.** Every `AtomicInvokable` â€”
 Tool, Agent, ToolAgent, Workflow, Engine, Command, StructuredInvokable
-— now returns a typed `AtomicResult`-family envelope from
+â€” now returns a typed `AtomicResult`-family envelope from
 `invoke()`/`async_invoke()`. The `.result` field is always the
 caller-facing payload; envelope fields (`run_id`, `started_at`,
 `ended_at`, `elapsed_s`, `invoker_id`, and subclass-specific fields
@@ -266,50 +266,52 @@ and provenance. Workflows return typed `*FlowResult` envelopes
 history accessible via checkpoint helpers.
 
 For a full breakdown of breaking changes and a v1→v2 migration guide:
-- [`docs/MIGRATION.md`](docs/MIGRATION.md) — v1→v2 migration guide *(coming soon)*
-- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — full release history
+- [`docs/MIGRATION.md`](docs/MIGRATION.md) â€” v1→v2 migration guide *(coming soon)*
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) â€” full release history
 
 ------------------------------------------------------------------------
 
 ## Repository Structure
 
-    Atomic-Agentic/
-    ├── examples/
-    │   ├── Agent_Examples/
-    │   ├── Agentic_Research/
-    │   ├── Invokable_Examples/
-    │   ├── LLM_Examples/
-    │   ├── PlanAct_Examples/
-    │   ├── ReAct_Examples/
-    │   ├── Tool_Examples/
-    │   └── Workflow_Examples/
-    │
-    ├── docs/
-    │   └── CHANGELOG.md
-    │
-    ├── images/
-    │
-    ├── src/
-    │   └── atomic_agentic/
-    │       ├── a2a/
-    │       ├── agents/
-    │       ├── constants/
-    │       ├── core/
-    │       ├── engines/
-    │       ├── exceptions/
-    │       ├── mcp/
-    │       ├── models/
-    │       ├── tools/
-    │       ├── utils/
-    │       ├── workflows/
-    │       ├── __init__.py
-    │       ├── _version.py
-    │       └── py.typed
-    │
-    ├── tests/
-    ├── README.md
-    ├── pyproject.toml
-    └── requirements.txt
+```
+Atomic-Agentic/
+|-- examples/
+|   |-- Agent_Examples/
+|   |-- Agentic_Research/
+|   |-- Invokable_Examples/
+|   |-- LLM_Examples/
+|   |-- PlanAct_Examples/
+|   |-- ReAct_Examples/
+|   |-- Tool_Examples/
+|   |-- Workflow_Examples/
+|
+|-- docs/
+|   |-- CHANGELOG.md
+|
+|-- images/
+|
+|-- src/
+|   |-- atomic_agentic/
+|       |-- a2a/
+|       |-- agents/
+|       |-- constants/
+|       |-- core/
+|       |-- exceptions/
+|       |-- llm/
+|       |-- mcp/
+|       |-- models/
+|       |-- tools/
+|       |-- utils/
+|       |-- workflows/
+|       |-- __init__.py
+|       |-- _version.py
+|       |-- py.typed
+|
+|-- tests/
+|-- README.md
+|-- pyproject.toml
+|-- requirements.txt
+```
 
 ### Package topology
 
@@ -317,7 +319,7 @@ The subpackages of `src/atomic_agentic/` form a strict layered
 dependency hierarchy — no back-edges:
 
 ```
-{exceptions, constants} → models → utils → core → {agents, tools, workflows, engines, mcp, a2a}
+{exceptions, constants} → models → utils → core → {agents, tools, workflows, llm, mcp, a2a}
 ```
 
 | Layer | Packages | What lives here |
@@ -326,7 +328,7 @@ dependency hierarchy — no back-edges:
 | Data | `models/` | Dataclasses: `ParamSpec`, runtime records, result envelopes, workflow checkpoints |
 | Functions | `utils/` | Pure functions: async bridging, parameter ops, MCP and agent helpers |
 | Contract | `core/` | Shared invocation contract: `AtomicInvokable`, `Command`, `StructuredInvokable` |
-| Domain | `agents/`, `tools/`, `workflows/`, `engines/`, `mcp/`, `a2a/` | Behavior implementations |
+| Domain | `agents/`, `tools/`, `workflows/`, `llm/`, `mcp/`, `a2a/` | Behavior implementations |
 
 ------------------------------------------------------------------------
 

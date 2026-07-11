@@ -1,0 +1,37 @@
+# LiteLLM proxy config for 03_litellm_engine_demo.py.
+#
+# Start the proxy first, in a separate terminal:
+#   litellm --config examples/LLM_Examples/litellm_proxy_config.yaml --port 4000
+#
+# Requires LITELLM_MASTER_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY,
+# GOOGLE_API_KEY (or GEMINI_API_KEY), and MISTRAL_API_KEY set in the
+# environment the proxy process is launched from (e.g. in .env, then launch
+# via `dotenv run -- litellm --config ...`).
+#
+# Aliases below name the *role*, not the provider, to demonstrate that
+# LiteLLMEngine(provider="litellm_proxy", model=<alias>) decouples what the
+# caller asks for from which provider/model actually answers it.
+
+model_list:
+  - model_name: fast-model
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: smart-model
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: creative-model
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GOOGLE_API_KEY
+
+  - model_name: budget-model
+    litellm_params:
+      model: mistral/mistral-small-latest
+      api_key: os.environ/MISTRAL_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from typing import Any, Mapping
@@ -9,7 +9,7 @@ from atomic_agentic.a2a import PyA2AtomicClient
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.exceptions import ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.mcp import MCPClientHub
 from atomic_agentic.tools import Tool, batch_toolify, toolify
 
@@ -24,7 +24,7 @@ def add_scale(a: int, b: int, scale: float = 1.0) -> float:
 def summarize(text: str, limit: int = 40) -> str:
     """Truncate text to `limit` chars with ellipsis."""
     s = str(text)
-    return s if len(s) <= limit else s[: max(0, limit - 1)] + "…"
+    return s if len(s) <= limit else s[: max(0, limit - 1)] + "â€¦"
 
 
 pre_wrapped_tool = Tool(

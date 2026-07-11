@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Mapping
 import warnings
@@ -12,7 +12,7 @@ from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.constants.agents import RUN_ID_PARAM, CONTEXT_PARAM
-from atomic_agentic.engines.LLMEngines import LLMEngine
+from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.parameters import ParamSpec
@@ -23,9 +23,9 @@ from atomic_agentic.utils.agents import normalize_context_properties
 ROLE_PROMPT = "You are a deterministic test writer."
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Minimal concrete Agent fixture (for abstract-API tests)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class _MinimalAgent(Agent):
     """Trivial concrete Agent used to test abstract Agent construction and API.
 
@@ -84,9 +84,9 @@ class _MinimalAgent(Agent):
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Test engine and helper functions
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class StatefulEchoLLMEngine(LLMEngine):
     """Concrete deterministic LLMEngine for Agent tests.
 
@@ -132,7 +132,12 @@ class StatefulEchoLLMEngine(LLMEngine):
         return f"{self.prefix}: {response['latest_user']}"
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
+        return TokenUsage(
+            input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
+        )
+
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        return False
 
     def _get_model_data(self) -> LLMModelData:
         return LLMModelData(provider="stateful-echo")
@@ -252,9 +257,9 @@ def make_agent(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Test classes
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class TestAgentPipeline:
     def test_pre_invoke_shapes_prompt_and_post_invoke_packages_result(self) -> None:
         engine = StatefulEchoLLMEngine()
@@ -909,7 +914,7 @@ class TestAgentContextProperties:
 
     def test_normalize_context_properties_accepts_reserved_framework_names(self) -> None:
         # "context" and "run_id" are reserved agent *parameters*, but context_properties
-        # are keys inside the context dict — a separate namespace, so no conflict.
+        # are keys inside the context dict â€” a separate namespace, so no conflict.
         result = normalize_context_properties(["context", "run_id"])
         assert [p.name for p in result] == ["context", "run_id"]
 
@@ -1013,7 +1018,7 @@ class TestAgentContextProperties:
 
     def test_warn_reserved_name_collisions_context_no_description_raises(self) -> None:
         # context: dict with no description does not share the CONTEXT_PARAM description
-        # root → description mismatch → raises, not warns.
+        # root â†’ description mismatch â†’ raises, not warns.
         ctx_no_desc = ParamSpec(
             name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
             type="dict", default={},
@@ -1132,8 +1137,8 @@ class TestAgentCollisionCheckerCompleteness:
     """Tests for _warn_reserved_name_collisions evaluating every (param, source) pair."""
 
     def test_pre_compatible_post_incompatible_context_raises(self) -> None:
-        # pre has context with matching description (compatible → warns); post has context: str
-        # (type mismatch → raises). Verifies post is evaluated independently even after pre warned.
+        # pre has context with matching description (compatible â†’ warns); post has context: str
+        # (type mismatch â†’ raises). Verifies post is evaluated independently even after pre warned.
         ctx_desc_prefix = CONTEXT_PARAM.description.split("{")[0]
         pre_ctx = ParamSpec(
             name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
@@ -1185,7 +1190,7 @@ class TestAgentContextIsolation:
             llm_engine=StatefulEchoLLMEngine(),
             context_properties=["lang"],
         )
-        # First call omits context (required property — must be provided):
+        # First call omits context (required property â€” must be provided):
         # so use an optional property instead
         agent2 = _MinimalAgent(
             name="ctx_agent2",
@@ -1236,7 +1241,11 @@ class TestAgentRenderTurnGuards:
             invoker_id="test-agent",
             started_at=datetime.now(timezone.utc),
             ended_at=datetime.now(timezone.utc) + timedelta(seconds=1),
-            llm_token_usage=(TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2),),
+            llm_token_usage=(
+                TokenUsage(
+                    input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
+                ),
+            ),
             llm_model_data=LLMModelData(provider="test"),
         )
         from atomic_agentic.models.agents.records import LLMRecord
@@ -1246,7 +1255,9 @@ class TestAgentRenderTurnGuards:
             invoker_id="engine-1",
             started_at=datetime.now(timezone.utc),
             ended_at=datetime.now(timezone.utc) + timedelta(seconds=1),
-            token_usage=TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2),
+            token_usage=TokenUsage(
+                input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
+            ),
             model_data=LLMModelData(provider="test"),
         )
         record = AgentRecord(

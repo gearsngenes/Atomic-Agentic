@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Mapping
 
@@ -9,15 +9,15 @@ from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.engines.LLMEngines import LLMEngine
+from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.results import LLMModelData, TokenUsage
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Test engine
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class EchoLLMEngine(LLMEngine):
     """Deterministic echo engine that records all message batches received."""
 
@@ -48,7 +48,12 @@ class EchoLLMEngine(LLMEngine):
         return f"{self.prefix}: {response['latest_user']}"
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
+        return TokenUsage(
+            input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
+        )
+
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        return False
 
     def _get_model_data(self) -> LLMModelData:
         return LLMModelData(provider="echo")
@@ -78,9 +83,9 @@ def make_basic_agent(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Tests
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class TestBasicAgentRolePrompt:
     def test_none_role_prompt_uses_default(self) -> None:
         agent = make_basic_agent(role_prompt=None)

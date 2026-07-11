@@ -1,9 +1,9 @@
-from dotenv import load_dotenv
+﻿from dotenv import load_dotenv
 from pathlib import Path
 import logging
 
 from atomic_agentic.agents import BasicAgent, PlanActAgent
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -15,8 +15,8 @@ You are the *Story Outliner*.
 Input: story_idea (one sentence).
 Output: **JSON only** with keys:
   working_title, premise,
-  characters [ {{name, motivation, conflict}} … ],
-  scenes     [ {{title, purpose}} … ]
+  characters [ {{name, motivation, conflict}} â€¦ ],
+  scenes     [ {{title, purpose}} â€¦ ]
 """.strip()
 
 WRITER_PROMPT = """
@@ -106,7 +106,7 @@ if __name__ == "__main__":
         f"Then for {loops} cycles, have the reviewer critique the draft and the writer apply the notes."
     )
 
-    print("\n⇢ Planning + execution …")
+    print("\nâ‡¢ Planning + execution â€¦")
     final_draft_md = orch.invoke({"prompt": task_prompt}).result
 
     print("\n========== FINAL DRAFT ==========\n")
@@ -116,4 +116,4 @@ if __name__ == "__main__":
     out_dir.mkdir(exist_ok=True)
     filepath = out_dir / "planact_story.md"
     filepath.write_text(final_draft_md, encoding="utf-8")
-    print(f"\n✓ Story saved to: {filepath.resolve()}")
+    print(f"\nâœ“ Story saved to: {filepath.resolve()}")

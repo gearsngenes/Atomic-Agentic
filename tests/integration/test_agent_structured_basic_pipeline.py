@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.agents.basic import BasicAgent
-from atomic_agentic.engines.LLMEngines import LLMEngine
+from atomic_agentic.llm import LLMEngine
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.results import LLMModelData, TokenUsage
@@ -67,7 +67,12 @@ class StatefulEchoLLMEngine(LLMEngine):
         return f"{self.prefix}: {response['latest_user']}"
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(input_tokens=1, generated_tokens=1, total_tokens=2)
+        return TokenUsage(
+            input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
+        )
+
+    def _should_retry(self, exc: Exception, attempt: int) -> bool:
+        return False
 
     def _get_model_data(self) -> LLMModelData:
         return LLMModelData(provider="stateful-echo")

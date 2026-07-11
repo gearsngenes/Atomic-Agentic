@@ -1,4 +1,4 @@
-"""04_planner_delegator.py
+﻿"""04_planner_delegator.py
 
 Three planning agents demonstrating delegation:
 
@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from atomic_agentic.agents import BasicAgent, PlanActAgent
 from atomic_agentic.tools.prebuilt import MATH_TOOLS
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)

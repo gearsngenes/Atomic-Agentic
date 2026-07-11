@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from collections.abc import Callable
@@ -12,8 +12,10 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 from atomic_agentic.exceptions import LLMEngineError
-from atomic_agentic.engines.LLMEngines import (
+from atomic_agentic.llm import (
+    AnthropicEngine,
     GeminiEngine,
+    LiteLLMEngine,
     LLMEngine,
     MistralEngine,
     OpenAIEngine,
@@ -110,10 +112,47 @@ def _mistral_engine() -> LLMEngine:
         pytest.skip(str(exc))
 
 
+def _anthropic_engine() -> LLMEngine:
+    _skip_if_live_tests_disabled()
+
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        pytest.skip("ANTHROPIC_API_KEY is not set.")
+
+    try:
+        return AnthropicEngine(
+            model=os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
+            temperature=None,
+            timeout_seconds=60,
+            max_retries=0,
+        )
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+
+
+def _litellm_engine() -> LLMEngine:
+    _skip_if_live_tests_disabled()
+
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        pytest.skip("ANTHROPIC_API_KEY is not set.")
+
+    try:
+        return LiteLLMEngine(
+            model=os.getenv("AA_TEST_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
+            provider="anthropic",
+            temperature=0,
+            timeout_seconds=60,
+            max_retries=0,
+        )
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+
+
 ENGINE_BUILDERS: list[tuple[str, Callable[[], LLMEngine]]] = [
     ("openai", _openai_engine),
     ("gemini", _gemini_engine),
     ("mistral", _mistral_engine),
+    ("anthropic", _anthropic_engine),
+    ("litellm", _litellm_engine),
 ]
 
 

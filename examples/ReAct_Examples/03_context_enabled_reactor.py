@@ -1,4 +1,4 @@
-"""03_context_enabled_reactor.py
+﻿"""03_context_enabled_reactor.py
 
 Interactive ReActAgent with context memory enabled.
 
@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from atomic_agentic.agents import ReActAgent
 from atomic_agentic.tools.prebuilt import MATH_TOOLS
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)

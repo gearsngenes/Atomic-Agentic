@@ -1,17 +1,17 @@
-from dotenv import load_dotenv
+﻿from dotenv import load_dotenv
 import logging
 import math
 
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.tools.prebuilt import MATH_TOOLS, CONSOLE_TOOLS
-from atomic_agentic.engines.LLMEngines import OpenAIEngine
+from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 print("Testing Task Decomposition and Printing capabilities")
 
-# ──────────────────────────  SET-UP  ───────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€  SET-UP  â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 llm_engine = OpenAIEngine(model="gpt-4o-mini")
 agent = PlanActAgent(
     name="Test_PlanAct",
@@ -28,7 +28,7 @@ agent.batch_register(CONSOLE_TOOLS)
 # Register the pi constant
 agent.register_constant("PI", math.pi, "Mathematical constant `pi`")
 
-# ──────────────────────────  TASK  ─────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€  TASK  â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 task_prompt = """
 1) Compute the area of a circle with a radius of 5 [A(r) = pi * r^2].
 2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
@@ -37,7 +37,7 @@ task_prompt = """
 Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN ORDER ABOVE.
 """
 
-print("\n⇢ Executing math demo …")
+print("\nâ‡¢ Executing math demo â€¦")
 result = agent.invoke({"prompt": task_prompt})
 from pprint import pprint
 print("\n=== FINAL AGENT RESULT ===")

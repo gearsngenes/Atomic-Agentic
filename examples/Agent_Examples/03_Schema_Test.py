@@ -1,4 +1,4 @@
-"""
+﻿"""
 Example: Custom pre-invoke Tool with its own schema (Lesson Plan Composer)
 
 This script shows how to define a custom pre-invoke Tool that expects a specific
@@ -14,7 +14,7 @@ Usage:
 """
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.tools import Tool
-from atomic_agentic.engines.LLMEngines import OpenAIEngine  # swap for another engine if desired
+from atomic_agentic.llm import OpenAIEngine  # swap for another engine if desired
 from typing import List, Optional
 from dotenv import load_dotenv
 
@@ -66,7 +66,7 @@ def lesson_prompt_strict(
 strict_tool = Tool(
     function=lesson_prompt_strict,
     name="lesson_prompt_strict",
-    description="Strict schema: {grade_level, subject, topic, duration_min?, objectives[], constraints[]?, tone?} → prompt",
+    description="Strict schema: {grade_level, subject, topic, duration_min?, objectives[], constraints[]?, tone?} â†’ prompt",
 )
 
 
@@ -132,9 +132,9 @@ def main(use_permissive: bool = False) -> None:
         pre_invoke=(permissive_tool if use_permissive else strict_tool),
     )
 
-    # 3) Prepare inputs (MAPPING ONLY!). Match the Tool’s schema.
+    # 3) Prepare inputs (MAPPING ONLY!). Match the Toolâ€™s schema.
     inputs = {
-        "grade_level": "Middle School (6–8)",
+        "grade_level": "Middle School (6â€“8)",
         "subject": "Science",
         "topic": "Magnetic fields and flux",
         "duration_min": 50,

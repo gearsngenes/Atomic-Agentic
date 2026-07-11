@@ -5,6 +5,95 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a20] - 2026-07-11
+
+### Added
+
+- `AnthropicEngine` — new `llm/` adapter using the Anthropic Messages API.
+  Single injected/auto-built `Anthropic`/`AsyncAnthropic` client; inline-only
+  attachment pipeline (base64 image/PDF/document blocks, no Files API yet);
+  `thinking_config`, `stop_sequences`, `top_p`, `top_k` request-level knobs;
+  `block_separator` constructor param controlling how multiple response text
+  blocks are rejoined (defaults to `""`, matching Anthropic's own
+  streaming-SDK text-reconstruction convention).
+- `LiteLLMEngine` — new `llm/` adapter over litellm's `completion`/
+  `acompletion`, the first genuinely provider-agnostic gateway in this
+  family. No injectable client (litellm exposes bare module functions);
+  `provider`/`model` combine at call time into litellm's `f"{provider}/
+  {model}"` convention; `drop_params` constructor knob controls whether
+  litellm silently drops or raises on provider-unsupported generation
+  params; inline attachment pipeline mirrors `AnthropicEngine`'s, with a
+  documented gap for inline PDF attachments against `provider="mistral"`.
+- `LLMEngine` base gained native async infrastructure: `_call_provider_async`,
+  `_call_model_async`, `_call_with_retries_async`, and `async_invoke` (mirrors
+  the sync path; remote engines override with native async SDK clients where
+  available).
+- `TokenUsage.response_tokens: int` — new required base field: the
+  visible-reply token count, distinct from hidden reasoning/thinking tokens
+  folded into `generated_tokens`. Populated by every engine (trivial equality
+  for providers with no reasoning concept, exact subtraction/native passthrough
+  otherwise).
+- `AnthropicTokenUsage`, `LiteLLMTokenUsage` result records.
+- Per-engine `_should_retry` overrides recognizing each provider SDK's real
+  transient-error shape (connection/timeout exceptions, retryable HTTP status
+  codes) — the shared base default never matched any real provider exception
+  hierarchy and was effectively dead code.
+- `inline_cutoff_chars` constructor param added to `AnthropicEngine` and
+  `LiteLLMEngine`, matching the existing OpenAI/Mistral text-attachment
+  truncation behavior.
+- `constants/llm.py` and `utils/llm.py` (renamed from `constants/engines.py` /
+  `utils/engines.py`): shared attachment extension/MIME-prefix policy and the
+  `validate_attachment_path` helper used by every engine.
+
+### Changed
+
+- `engines/LLMEngines.py` split into a dedicated `llm/` package with one
+  module per provider (`base.py`, `openai_engine.py`, `gemini_engine.py`,
+  `mistral_engine.py`, `llama_engine.py`, plus the two new adapters above).
+  Clean break, no compatibility shim.
+- `OpenAIEngine`, `GeminiEngine`, `MistralEngine` repaired and upgraded to the
+  new async infrastructure: single injectable sync-or-async client with
+  isinstance-based call routing, `temperature: float | None` (omits the
+  param when `None` instead of a fragile model-name string match), broken/
+  bare exception handling replaced with real SDK exception types.
+- `LlamaCppEngine` constructor overhauled: identity params moved to the top
+  of the signature, generation defaults made explicit and `None`-omitted,
+  Hugging Face download options made keyword-only, remaining Llama
+  constructor surface absorbed into `**llama_kwargs`.
+- Attachment placement standardized across all five remote engines: content
+  is now appended to the **last** user turn (previously a 3-vs-2 split
+  between prepending to the first user turn and appending to the last).
+- `LiteLLMEngine`'s `timeout_seconds` default changed from 30s to 600s,
+  matching every other remote engine.
+- `LLMEngine.invoke`/`async_invoke` now include the original exception's
+  message text in the wrapped `LLMEngineError`, not just a generic
+  "...invoke failed" string.
+
+### Fixed
+
+- **`MistralEngine._extract_token_usage` crashed on every real call** —
+  accessed `usage.prompt_tokens_details` as a plain attribute, which the real
+  `mistralai.UsageInfo` model never declares. Masked in tests by a
+  `SimpleNamespace` fixture that always had the attribute present.
+- **`AnthropicEngine._extract_token_usage` crashed whenever extended
+  thinking actually returned thinking-token data** — called `.get(...)` on
+  `output_tokens_details`, which the real SDK types as a Pydantic model with
+  no `.get()` method, not a dict.
+- Inconsistent attachment-error wrapping: `AnthropicEngine`/`LiteLLMEngine`
+  now wrap unexpected `_prepare_attachment` exceptions into `LLMEngineError`,
+  matching the existing `OpenAIEngine`/`MistralEngine` behavior.
+- `OpenAIEngine.to_dict()` no longer hardcodes a redundant `"type"` key
+  (the base `to_dict()` already sets it generically).
+
+### Removed
+
+- `engines/LLMEngines.py` (fully replaced by the `llm/` package split).
+- 13+ dead read-only accessor properties on `LlamaCppEngine`.
+- Redundant per-subclass `response_tokens` declarations on
+  `OpenAITokenUsage`/`MistralTokenUsage`/`LlamaCppTokenUsage`, and
+  `GeminiTokenUsage.candidates_token_count` (now the base `response_tokens`
+  field, populated natively for Gemini).
+
 ## [2.0.0a19] - 2026-07-04
 
 ### Added

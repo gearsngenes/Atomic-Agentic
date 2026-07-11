@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 import asyncio
@@ -51,7 +51,7 @@ from atomic_agentic.exceptions import (
 )
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.engines.LLMEngines import LLMEngine
+from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from atomic_agentic.tools import Tool
 from atomic_agentic.core.Invokable import AtomicInvokable
@@ -1415,7 +1415,7 @@ class TestBlackboardPersistenceAndDisplay:
                 [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
             ]
         )
-        # Script is set but agent is NOT invoked — slots remain in planned/empty state.
+        # Script is set but agent is NOT invoked â€” slots remain in planned/empty state.
         serialized = agent.blackboard_serialized(peek=False)
         for slot_dict in serialized:
             assert "run_id" not in slot_dict
@@ -1664,7 +1664,7 @@ class TestRenderTurnWithFailedSlots:
     def test_render_turn_peek_at_cache_with_failed_slot_does_not_crash(self) -> None:
         """B1 fix: peek_at_cache=True must not crash when a FAILED slot is in the span."""
         agent = self._make_agent_with_failed_slot(peek_at_cache=True)
-        # Must not raise — FAILED slots' slot.result = NO_VAL must never be
+        # Must not raise â€” FAILED slots' slot.result = NO_VAL must never be
         # passed to _preview_blackboard_result.
         rendered = agent.render_turn(agent.records[0])
         assert rendered is not None
@@ -1713,9 +1713,9 @@ class TestRenderTurnWithFailedSlots:
         result = agent.invoke({"prompt": "run"})
         assert result.result == 99
         content = agent.render_turn(agent.records[0])[1]["content"]
-        # Return slot executed → CACHED section present.
+        # Return slot executed â†’ CACHED section present.
         assert "CACHED STEPS" in content
-        # Failed steps → FAILED section present.
+        # Failed steps â†’ FAILED section present.
         assert "FAILED STEPS" in content
         # fail_tool must not appear in the CACHED section (it appears in FAILED).
         cached_section = content.split("CACHED STEPS")[1].split("FAILED STEPS")[0]
@@ -2008,7 +2008,7 @@ class TestAsyncHookDispatch:
         assert type(agent)._aprepare_next_batch is not ToolAgent._aprepare_next_batch
 
     def test_scripted_toolagent_async_invoke_uses_base_hook_defaults(self) -> None:
-        # ScriptedToolAgent inherits the asyncio.to_thread defaults — full async_invoke works.
+        # ScriptedToolAgent inherits the asyncio.to_thread defaults â€” full async_invoke works.
         agent = make_agent()
         keys = register_math_tools(agent)
         agent.set_script(
@@ -2023,7 +2023,7 @@ class TestAsyncHookDispatch:
         assert result.result == 5
 
     def test_planact_async_invoke_uses_agenerate_plan(self) -> None:
-        # Full async_invoke via PlanActAgent exercises _ainitialize_run_state → _agenerate_plan.
+        # Full async_invoke via PlanActAgent exercises _ainitialize_run_state â†’ _agenerate_plan.
         agent = make_planact_agent(
             [
                 json.dumps([
@@ -2038,7 +2038,7 @@ class TestAsyncHookDispatch:
         assert result.result == 10
 
     def test_react_async_invoke_uses_agenerate_next_step(self) -> None:
-        # Full async_invoke via ReActAgent exercises _aprepare_next_batch → _agenerate_next_step.
+        # Full async_invoke via ReActAgent exercises _aprepare_next_batch â†’ _agenerate_next_step.
         agent = make_react_agent(
             [
                 react_step_json(
@@ -2062,7 +2062,7 @@ class TestAsyncHookDispatch:
         assert result.result == 10
 
 
-# ── TestCascadeFailedPropagation ───────────────────────────────────────────────
+# â”€â”€ TestCascadeFailedPropagation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestToolAgentToDictFastFail:
     """Tests that to_dict() includes the fail_fast and generation_retries keys."""
@@ -2090,7 +2090,7 @@ class TestToolAgentToDictFastFail:
         assert agent.to_dict()["generation_retries"] == 2
 
 
-# ── TestReActGenerationRetry ──────────────────────────────────────────────────
+# â”€â”€ TestReActGenerationRetry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestExecutePreparedBatchEarlyValidation:
     """I1: sync _execute_prepared_batch pre-validates tool existence before the gather."""
@@ -2111,7 +2111,7 @@ class TestExecutePreparedBatchEarlyValidation:
         with pytest.raises(ToolAgentError, match="no_such_tool"):
             agent._execute_prepared_batch(state)
 
-        # Neither slot should have executed — early exit before the gather.
+        # Neither slot should have executed â€” early exit before the gather.
         assert state.running_blackboard[0].is_empty() or state.running_blackboard[0].is_prepared()
         assert state.running_blackboard[1].is_empty() or state.running_blackboard[1].is_prepared()
 
@@ -2131,7 +2131,7 @@ class TestExecutePreparedBatchEarlyValidation:
         assert updated.running_blackboard[0].result.result == 7
 
 
-# ── TestToolAgentContextProperties ──────────────────────────────────────────
+# â”€â”€ TestToolAgentContextProperties â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestToolAgentContextProperties:
     def test_context_properties_at_construction_adds_graft_d(self) -> None:
@@ -2156,7 +2156,7 @@ class TestToolAgentContextProperties:
         assert "context" in [p.name for p in agent.parameters]
 
 
-# ── TestPlanActAgentUpdatePromptGuard ────────────────────────────────────────
+# â”€â”€ TestPlanActAgentUpdatePromptGuard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestPlanActAgentUpdatePromptGuard:
     def test_update_prompt_plan_first_raises(self) -> None:
@@ -2178,7 +2178,7 @@ class TestPlanActAgentUpdatePromptGuard:
         assert "extra_instructions" in agent.system_prompts
 
 
-# ── TestReActAgentUpdatePromptGuard ─────────────────────────────────────────
+# â”€â”€ TestReActAgentUpdatePromptGuard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TestReActAgentUpdatePromptGuard:
     def test_update_prompt_reason_then_act_raises(self) -> None:
