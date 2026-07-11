@@ -67,3 +67,30 @@ ANTHROPIC_ALLOWED_EXTS: frozenset[str] = (
     | frozenset(ANTHROPIC_DOCUMENT_EXTS)
     | frozenset(ANTHROPIC_TEXT_EXTS)
 )
+
+# ── LiteLLM ───────────────────────────────────────────────────────────────────
+# Inline base64 only, via litellm's generic image_url/file/text content
+# blocks. Images: PNG, JPG/JPEG, GIF, WEBP. Documents: PDF (base64; not
+# supported when provider == "mistral" — see LiteLLMEngine._prepare_attachment).
+# Text/code: same set as ANTHROPIC_TEXT_EXTS.
+
+LITELLM_IMAGE_EXTS: tuple[str, ...] = (
+    ".png", ".jpg", ".jpeg",
+    ".gif", ".webp",
+)
+
+LITELLM_DOCUMENT_EXTS: tuple[str, ...] = (".pdf",)
+
+LITELLM_TEXT_EXTS: tuple[str, ...] = (
+    ".txt", ".md", ".rst", ".log",
+    ".csv", ".tsv",
+    ".json", ".yaml", ".yml",
+    ".py", ".js", ".ts",
+    ".html", ".xml",
+)
+
+LITELLM_ALLOWED_EXTS: frozenset[str] = (
+    frozenset(LITELLM_IMAGE_EXTS)
+    | frozenset(LITELLM_DOCUMENT_EXTS)
+    | frozenset(LITELLM_TEXT_EXTS)
+)

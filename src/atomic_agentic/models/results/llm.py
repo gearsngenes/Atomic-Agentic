@@ -12,6 +12,7 @@ __all__ = [
     "MistralTokenUsage",
     "LlamaCppTokenUsage",
     "AnthropicTokenUsage",
+    "LiteLLMTokenUsage",
     "LLMModelData",
     "RemoteLLMModelData",
     "LocalLLMModelData",
@@ -204,6 +205,37 @@ class AnthropicTokenUsage(TokenUsage):
             "cache_read_input_tokens", self.cache_read_input_tokens
         )
         _validate_optional_token_count("thinking_tokens", self.thinking_tokens)
+
+
+@dataclass(frozen=True, slots=True)
+class LiteLLMTokenUsage(TokenUsage):
+    """
+    LiteLLM-normalized token-usage details.
+
+    litellm's own ``Usage`` object already normalizes raw per-provider usage
+    into one shape before it reaches engine code — no per-provider subclass
+    is needed here, unlike the raw-SDK case that justified
+    ``AnthropicTokenUsage``. ``cached_tokens`` and ``cache_creation_tokens``
+    are prompt-cache accounting fields read from
+    ``usage.prompt_tokens_details``; both are subsets of billed input cost
+    and are not additive to ``input_tokens``. ``reasoning_tokens`` is a
+    subset of ``generated_tokens`` read from
+    ``usage.completion_tokens_details``. For Anthropic models specifically,
+    litellm computes ``reasoning_tokens`` as its own token-count estimate off
+    extracted thinking text, not a value Anthropic's API reports directly.
+    """
+
+    cached_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    reasoning_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        TokenUsage.__post_init__(self)
+        _validate_optional_token_count("cached_tokens", self.cached_tokens)
+        _validate_optional_token_count(
+            "cache_creation_tokens", self.cache_creation_tokens
+        )
+        _validate_optional_token_count("reasoning_tokens", self.reasoning_tokens)
 
 
 # --------------------------------------------------------------------------- #

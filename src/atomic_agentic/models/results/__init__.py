@@ -7,6 +7,7 @@ from .agents import AgentResult, ToolAgentResult, ToolUsageRecord
 from .llm import (
     AnthropicTokenUsage,
     GeminiTokenUsage,
+    LiteLLMTokenUsage,
     LlamaCppModelData,
     LlamaCppTokenUsage,
     LLMModelData,
@@ -30,6 +31,7 @@ from .workflows import (
 __all__ = [
     "AtomicResult",
     "AnthropicTokenUsage",
+    "LiteLLMTokenUsage",
     "ToolResult",
     "MCPToolResult",
     "PyA2AtomicToolResult",
