@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
@@ -114,6 +115,83 @@ class TestMCPClientHubConstruction:
             MCPClientHub("stdio", command="python", args=["server.py", 1])  # type: ignore[list-item]
 
 
+class TestMCPClientHubConstructionExtras:
+    def test_defaults_are_none(self) -> None:
+        hub = MCPClientHub("stdio", command="python")
+
+        assert hub.read_timeout_seconds is None
+        assert hub.client_kwargs is None
+        assert hub.session_kwargs is None
+
+    def test_read_timeout_seconds_is_coerced_to_float(self) -> None:
+        hub = MCPClientHub("stdio", command="python", read_timeout_seconds=5)
+
+        assert hub.read_timeout_seconds == 5.0
+
+    def test_client_kwargs_and_session_kwargs_are_stored(self) -> None:
+        hub = MCPClientHub(
+            "stdio",
+            command="python",
+            client_kwargs={"cwd": "/tmp"},
+            session_kwargs={"client_info": None},
+        )
+
+        assert hub.client_kwargs == {"cwd": "/tmp"}
+        assert hub.session_kwargs == {"client_info": None}
+
+    @pytest.mark.parametrize("param_name", ["client_kwargs", "session_kwargs"])
+    def test_non_mapping_kwargs_raise(self, param_name: str) -> None:
+        with pytest.raises(ValueError, match=f"{param_name} must be a mapping"):
+            MCPClientHub("stdio", command="python", **{param_name: "bad"})  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("param_name", ["client_kwargs", "session_kwargs"])
+    def test_kwargs_properties_are_immutable_mapping(self, param_name: str) -> None:
+        hub = MCPClientHub("stdio", command="python", **{param_name: {"a": 1}})
+
+        with pytest.raises(TypeError):
+            getattr(hub, param_name)["a"] = 2  # type: ignore[index]
+
+    def test_streamable_http_headers_and_http_client_collide(self) -> None:
+        with pytest.raises(ValueError, match="Cannot set both headers"):
+            MCPClientHub(
+                "streamable_http",
+                endpoint="http://localhost:8000/mcp",
+                headers={"Authorization": "Bearer x"},
+                client_kwargs={"http_client": object()},
+            )
+
+    def test_streamable_http_headers_alone_is_fine(self) -> None:
+        hub = MCPClientHub(
+            "streamable_http",
+            endpoint="http://localhost:8000/mcp",
+            headers={"Authorization": "Bearer x"},
+        )
+
+        assert hub.headers == {"Authorization": "Bearer x"}
+
+    def test_streamable_http_client_kwargs_without_http_client_is_fine(self) -> None:
+        hub = MCPClientHub(
+            "streamable_http",
+            endpoint="http://localhost:8000/mcp",
+            headers={"Authorization": "Bearer x"},
+            client_kwargs={"terminate_on_close": False},
+        )
+
+        assert hub.client_kwargs == {"terminate_on_close": False}
+
+    def test_collision_check_does_not_apply_to_sse(self) -> None:
+        sentinel = object()
+        hub = MCPClientHub(
+            "sse",
+            endpoint="http://localhost:8000/sse",
+            headers={"Authorization": "Bearer x"},
+            client_kwargs={"http_client": sentinel},
+        )
+
+        assert hub.headers == {"Authorization": "Bearer x"}
+        assert hub.client_kwargs["http_client"] is sentinel
+
+
 class TestMCPClientHubHeaders:
     def test_scalar_header_values_are_normalized(self) -> None:
         hub = MCPClientHub(
@@ -205,6 +283,11 @@ class TestMCPClientHubLocalHelpers:
             "args": ["server.py"],
             "has_headers": True,
             "header_keys": ["X-Test"],
+            "read_timeout_seconds": None,
+            "has_client_kwargs": False,
+            "client_kwargs_keys": [],
+            "has_session_kwargs": False,
+            "session_kwargs_keys": [],
         }
 
     def test_unpack_transport_streams_accepts_two_tuple(self) -> None:
@@ -285,16 +368,15 @@ class TestMCPClientHubOperationsWithoutRealServer:
 
 
 class TestMCPClientHubRefresh:
-    def test_refresh_without_headers_is_noop(self) -> None:
+    def test_refresh_with_nothing_provided_raises(self) -> None:
         hub = MCPClientHub(
             "sse",
             endpoint="http://localhost:8000/sse",
             headers={"X-Old": "yes"},
         )
 
-        hub.refresh()
-
-        assert hub.headers == {"X-Old": "yes"}
+        with pytest.raises(ValueError, match="requires at least one of"):
+            hub.refresh()
 
     def test_refresh_with_headers_updates_stored_headers(self) -> None:
         hub = MCPClientHub("sse", endpoint="http://localhost:8000/sse")
@@ -308,6 +390,58 @@ class TestMCPClientHubRefresh:
 
         with pytest.raises(ValueError, match="headers must be a mapping"):
             hub.refresh(headers="bad")  # type: ignore[arg-type]
+
+    def test_refresh_client_kwargs_alone_updates_only_client_kwargs(self) -> None:
+        hub = MCPClientHub(
+            "sse",
+            endpoint="http://localhost:8000/sse",
+            headers={"X-Old": "yes"},
+            session_kwargs={"client_info": None},
+        )
+
+        hub.refresh(client_kwargs={"timeout": 10})
+
+        assert hub.client_kwargs == {"timeout": 10}
+        assert hub.headers == {"X-Old": "yes"}
+        assert hub.session_kwargs == {"client_info": None}
+
+    def test_refresh_session_kwargs_alone_updates_only_session_kwargs(self) -> None:
+        hub = MCPClientHub(
+            "sse",
+            endpoint="http://localhost:8000/sse",
+            headers={"X-Old": "yes"},
+            client_kwargs={"timeout": 10},
+        )
+
+        hub.refresh(session_kwargs={"client_info": None})
+
+        assert hub.session_kwargs == {"client_info": None}
+        assert hub.headers == {"X-Old": "yes"}
+        assert hub.client_kwargs == {"timeout": 10}
+
+    def test_refresh_replaces_client_kwargs_wholesale_not_merged(self) -> None:
+        hub = MCPClientHub("sse", endpoint="http://localhost:8000/sse")
+
+        hub.refresh(client_kwargs={"a": 1})
+        hub.refresh(client_kwargs={"b": 2})
+
+        assert hub.client_kwargs == {"b": 2}
+
+    def test_refresh_client_kwargs_validation_applies(self) -> None:
+        hub = MCPClientHub("sse", endpoint="http://localhost:8000/sse")
+
+        with pytest.raises(ValueError, match="client_kwargs must be a mapping"):
+            hub.refresh(client_kwargs="bad")  # type: ignore[arg-type]
+
+    def test_refresh_revalidates_streamable_http_collision(self) -> None:
+        hub = MCPClientHub(
+            "streamable_http",
+            endpoint="http://localhost:8000/mcp",
+            headers={"Authorization": "Bearer x"},
+        )
+
+        with pytest.raises(ValueError, match="Cannot set both headers"):
+            hub.refresh(client_kwargs={"http_client": object()})
 
 
 class FakeAsyncCM:
@@ -380,3 +514,139 @@ class TestAwithSessionErrorWrapping:
 
         with pytest.raises(MCPConnectionError, match="Failed MCP operation"):
             asyncio.run(hub._awith_session(op))
+
+
+class RecordingCall:
+    """Captures every (args, kwargs) call and delegates to a return-value factory."""
+
+    def __init__(self, return_value_factory: Callable[..., Any]) -> None:
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self._return_value_factory = return_value_factory
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        return self._return_value_factory(*args, **kwargs)
+
+
+async def _identity_op(session: Any) -> Any:
+    return session
+
+
+class TestAwithSessionKwargsForwarding:
+    """
+    Proves client_kwargs/session_kwargs/read_timeout_seconds actually reach
+    the underlying transport constructors and ClientSession, by
+    monkeypatching those symbols with recording fakes (same style as
+    `TestAwithSessionErrorWrapping._make_hub`).
+    """
+
+    def test_stdio_forwards_client_kwargs_to_server_params(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        recorder = RecordingCall(lambda **kwargs: SimpleNamespace(**kwargs))
+        monkeypatch.setattr(client_hub_module, "StdioServerParameters", recorder)
+        monkeypatch.setattr(
+            client_hub_module,
+            "stdio_client",
+            lambda server: FakeAsyncCM(("read", "write")),
+        )
+        monkeypatch.setattr(
+            client_hub_module, "ClientSession", lambda *a, **k: FakeRealSession()
+        )
+
+        hub = MCPClientHub("stdio", command="python", client_kwargs={"cwd": "/tmp"})
+        asyncio.run(hub._awith_session(_identity_op))
+
+        _, kwargs = recorder.calls[0]
+        assert kwargs["command"] == "python"
+        assert kwargs["cwd"] == "/tmp"
+
+    def test_sse_forwards_client_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        recorder = RecordingCall(lambda **kwargs: FakeAsyncCM(("read", "write")))
+        monkeypatch.setattr(client_hub_module, "sse_client", recorder)
+        monkeypatch.setattr(
+            client_hub_module, "ClientSession", lambda *a, **k: FakeRealSession()
+        )
+
+        hub = MCPClientHub(
+            "sse",
+            endpoint="http://localhost:8000/sse",
+            client_kwargs={"timeout": 10},
+        )
+        asyncio.run(hub._awith_session(_identity_op))
+
+        _, kwargs = recorder.calls[0]
+        assert kwargs["url"] == "http://localhost:8000/sse"
+        assert kwargs["timeout"] == 10
+
+    def test_streamable_http_forwards_client_kwargs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        recorder = RecordingCall(lambda **kwargs: FakeAsyncCM(("read", "write")))
+        monkeypatch.setattr(client_hub_module, "streamable_http_client", recorder)
+        monkeypatch.setattr(
+            client_hub_module, "ClientSession", lambda *a, **k: FakeRealSession()
+        )
+
+        hub = MCPClientHub(
+            "streamable_http",
+            endpoint="http://localhost:8000/mcp",
+            client_kwargs={"terminate_on_close": False},
+        )
+        asyncio.run(hub._awith_session(_identity_op))
+
+        _, kwargs = recorder.calls[0]
+        assert kwargs["url"] == "http://localhost:8000/mcp"
+        assert kwargs["terminate_on_close"] is False
+
+    def test_client_session_forwards_read_timeout_and_session_kwargs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            client_hub_module,
+            "stdio_client",
+            lambda server: FakeAsyncCM(("read", "write")),
+        )
+        recorder = RecordingCall(lambda *a, **k: FakeRealSession())
+        monkeypatch.setattr(client_hub_module, "ClientSession", recorder)
+
+        hub = MCPClientHub(
+            "stdio",
+            command="python",
+            read_timeout_seconds=12.5,
+            session_kwargs={"client_info": None},
+        )
+        asyncio.run(hub._awith_session(_identity_op))
+
+        _, kwargs = recorder.calls[0]
+        assert kwargs["read_timeout_seconds"] == timedelta(seconds=12.5)
+        assert kwargs["client_info"] is None
+
+    def test_foreign_client_kwargs_key_is_wrapped_as_connection_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fake_sse_client(
+            url: str,
+            headers: dict[str, Any] | None = None,
+            timeout: float = 5,
+            sse_read_timeout: float = 300,
+        ) -> FakeAsyncCM:
+            return FakeAsyncCM(("read", "write"))
+
+        monkeypatch.setattr(client_hub_module, "sse_client", fake_sse_client)
+        monkeypatch.setattr(
+            client_hub_module, "ClientSession", lambda *a, **k: FakeRealSession()
+        )
+
+        hub = MCPClientHub(
+            "sse",
+            endpoint="http://localhost:8000/sse",
+            client_kwargs={"env": {"X": "1"}},
+        )
+
+        with pytest.raises(MCPConnectionError, match="Failed MCP operation"):
+            asyncio.run(hub._awith_session(_identity_op))
