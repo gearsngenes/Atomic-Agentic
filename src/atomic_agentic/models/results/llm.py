@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Any
 
+from ...utils.core import dataclass_record_to_dict
 from .atomic import AtomicResult
 
 __all__ = [
@@ -19,46 +20,6 @@ __all__ = [
     "LlamaCppModelData",
     "LLMResult",
 ]
-
-
-# --------------------------------------------------------------------------- #
-# Shared validation / serialization helpers
-# --------------------------------------------------------------------------- #
-def _validate_token_count(field_name: str, value: int) -> None:
-    """Validate one required token-count field."""
-    if type(value) is not int:
-        raise TypeError(
-            f"{field_name} must be an int, got {type(value).__name__}."
-        )
-    if value < 0:
-        raise ValueError(f"{field_name} must be >= 0.")
-
-
-def _validate_optional_token_count(field_name: str, value: int | None) -> None:
-    """Validate one optional provider-specific token-count field."""
-    if value is None:
-        return
-    _validate_token_count(field_name, value)
-
-
-def _normalize_required_string(field_name: str, value: str) -> str:
-    """Validate and normalize a required non-empty string field."""
-    if not isinstance(value, str):
-        raise TypeError(
-            f"{field_name} must be a str, got {type(value).__name__}."
-        )
-
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must be a non-empty string.")
-
-    return normalized
-
-
-def _dataclass_record_to_dict(record: Any) -> dict[str, Any]:
-    """Serialize a dataclass record including its concrete class name."""
-    data = {field.name: getattr(record, field.name) for field in fields(record)}
-    return {"type": type(record).__name__, **data}
 
 
 # --------------------------------------------------------------------------- #
@@ -100,11 +61,28 @@ class TokenUsage:
     total_tokens: int
     response_tokens: int
 
+    @staticmethod
+    def _validate_token_count(field_name: str, value: int) -> None:
+        """Validate one required token-count field."""
+        if type(value) is not int:
+            raise TypeError(
+                f"{field_name} must be an int, got {type(value).__name__}."
+            )
+        if value < 0:
+            raise ValueError(f"{field_name} must be >= 0.")
+
+    @staticmethod
+    def _validate_optional_token_count(field_name: str, value: int | None) -> None:
+        """Validate one optional provider-specific token-count field."""
+        if value is None:
+            return
+        TokenUsage._validate_token_count(field_name, value)
+
     def __post_init__(self) -> None:
-        _validate_token_count("input_tokens", self.input_tokens)
-        _validate_token_count("generated_tokens", self.generated_tokens)
-        _validate_token_count("total_tokens", self.total_tokens)
-        _validate_token_count("response_tokens", self.response_tokens)
+        self._validate_token_count("input_tokens", self.input_tokens)
+        self._validate_token_count("generated_tokens", self.generated_tokens)
+        self._validate_token_count("total_tokens", self.total_tokens)
+        self._validate_token_count("response_tokens", self.response_tokens)
 
         expected_total = self.input_tokens + self.generated_tokens
         if self.total_tokens != expected_total:
@@ -121,7 +99,7 @@ class TokenUsage:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
-        return _dataclass_record_to_dict(self)
+        return dataclass_record_to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,8 +116,8 @@ class OpenAITokenUsage(TokenUsage):
 
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
-        _validate_optional_token_count("cached_tokens", self.cached_tokens)
-        _validate_optional_token_count("reasoning_tokens", self.reasoning_tokens)
+        self._validate_optional_token_count("cached_tokens", self.cached_tokens)
+        self._validate_optional_token_count("reasoning_tokens", self.reasoning_tokens)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,12 +136,12 @@ class GeminiTokenUsage(TokenUsage):
 
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
-        _validate_optional_token_count("thoughts_token_count", self.thoughts_token_count)
-        _validate_optional_token_count(
+        self._validate_optional_token_count("thoughts_token_count", self.thoughts_token_count)
+        self._validate_optional_token_count(
             "tool_use_prompt_token_count",
             self.tool_use_prompt_token_count,
         )
-        _validate_optional_token_count(
+        self._validate_optional_token_count(
             "cached_content_token_count",
             self.cached_content_token_count,
         )
@@ -177,7 +155,7 @@ class MistralTokenUsage(TokenUsage):
 
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
-        _validate_optional_token_count("cached_tokens", self.cached_tokens)
+        self._validate_optional_token_count("cached_tokens", self.cached_tokens)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,13 +180,13 @@ class AnthropicTokenUsage(TokenUsage):
 
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
-        _validate_optional_token_count(
+        self._validate_optional_token_count(
             "cache_creation_input_tokens", self.cache_creation_input_tokens
         )
-        _validate_optional_token_count(
+        self._validate_optional_token_count(
             "cache_read_input_tokens", self.cache_read_input_tokens
         )
-        _validate_optional_token_count("thinking_tokens", self.thinking_tokens)
+        self._validate_optional_token_count("thinking_tokens", self.thinking_tokens)
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,11 +213,11 @@ class LiteLLMTokenUsage(TokenUsage):
 
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
-        _validate_optional_token_count("cached_tokens", self.cached_tokens)
-        _validate_optional_token_count(
+        self._validate_optional_token_count("cached_tokens", self.cached_tokens)
+        self._validate_optional_token_count(
             "cache_creation_tokens", self.cache_creation_tokens
         )
-        _validate_optional_token_count("reasoning_tokens", self.reasoning_tokens)
+        self._validate_optional_token_count("reasoning_tokens", self.reasoning_tokens)
 
 
 # --------------------------------------------------------------------------- #
@@ -256,16 +234,30 @@ class LLMModelData:
 
     provider: str
 
+    @staticmethod
+    def _normalize_required_string(field_name: str, value: str) -> str:
+        """Validate and normalize a required non-empty string field."""
+        if not isinstance(value, str):
+            raise TypeError(
+                f"{field_name} must be a str, got {type(value).__name__}."
+            )
+
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"{field_name} must be a non-empty string.")
+
+        return normalized
+
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "provider",
-            _normalize_required_string("provider", self.provider),
+            self._normalize_required_string("provider", self.provider),
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
-        return _dataclass_record_to_dict(self)
+        return dataclass_record_to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,7 +271,7 @@ class RemoteLLMModelData(LLMModelData):
         object.__setattr__(
             self,
             "model_name",
-            _normalize_required_string("model_name", self.model_name),
+            self._normalize_required_string("model_name", self.model_name),
         )
 
 
@@ -299,7 +291,7 @@ class LlamaCppModelData(LocalLLMModelData):
         object.__setattr__(
             self,
             "model_path",
-            _normalize_required_string("model_path", self.model_path),
+            self._normalize_required_string("model_path", self.model_path),
         )
 
 

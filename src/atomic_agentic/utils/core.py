@@ -3,15 +3,30 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Awaitable, Mapping
+from dataclasses import fields
 from types import MappingProxyType
 from typing import Any
 
 from ..constants.core import HeaderValue, T
 
 __all__ = [
+    "dataclass_record_to_dict",
     "normalize_headers",
     "run_coro_sync",
 ]
+
+
+def dataclass_record_to_dict(record: Any) -> dict[str, Any]:
+    """
+    Serialize a dataclass record into a plain dict, tagged with its concrete
+    class name.
+
+    Generic leaf serializer for frozen dataclass records across the package
+    (e.g. token-usage and model-identity records). Assumes ``record`` is a
+    dataclass instance; this is not a validation boundary.
+    """
+    data = {field.name: getattr(record, field.name) for field in fields(record)}
+    return {"type": type(record).__name__, **data}
 
 
 async def _await_value(awaitable: Awaitable[T]) -> T:
