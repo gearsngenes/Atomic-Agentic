@@ -17,6 +17,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from ..constants.core import HeaderValue, T
+from ..exceptions import MCPConnectionError, MCPToolError
 from ..utils.core import run_coro_sync, normalize_headers
 from ..utils.mcp import (
     _build_mcp_tool_metadata,
@@ -133,20 +134,16 @@ class MCPClientHub:
         }
 
     def list_tools(self) -> Dict[str, Dict[str, Any]]:
-        return run_coro_sync(self._alist_tools())
+        """Sync wrapper over async_list_tools()."""
+        return run_coro_sync(self.async_list_tools())
 
     def call_tool(
         self,
         remote_name: str,
         inputs: Mapping[str, Any],
     ) -> Dict[str, Any]:
-        resolved_remote_name = str(remote_name).strip()
-        if not resolved_remote_name:
-            raise RuntimeError("remote_name must be a non-empty string.")
-        if not isinstance(inputs, Mapping):
-            raise RuntimeError("inputs must be a mapping.")
-
-        return run_coro_sync(self._acall_tool(resolved_remote_name, inputs))
+        """Sync wrapper over async_call_tool(), which owns input validation."""
+        return run_coro_sync(self.async_call_tool(remote_name, inputs))
 
     def _unpack_transport_streams(self, transport: Any) -> tuple[Any, Any]:
         if isinstance(transport, tuple):
@@ -157,7 +154,7 @@ class MCPClientHub:
                 read_stream, write_stream, _ = transport
                 return read_stream, write_stream
 
-        raise RuntimeError(
+        raise MCPConnectionError(
             f"Unexpected transport stream shape for {self.transport_mode}: {type(transport)!r}"
         )
 
@@ -168,9 +165,6 @@ class MCPClientHub:
         try:
             async with AsyncExitStack() as stack:
                 if self.transport_mode == "stdio":
-                    if self.command is None:
-                        raise RuntimeError("stdio transport requires command.")
-
                     server_params = StdioServerParameters(
                         command=self.command,
                         args=list(self.args or ()),
@@ -178,16 +172,10 @@ class MCPClientHub:
                     client_context = stdio_client(server_params)
 
                 elif self.transport_mode == "sse":
-                    if self.endpoint is None:
-                        raise RuntimeError("sse transport requires endpoint.")
-
                     headers_dict = dict(self.headers) if self.headers is not None else None
                     client_context = sse_client(url=self.endpoint, headers=headers_dict)
 
                 else:
-                    if self.endpoint is None:
-                        raise RuntimeError("streamable_http transport requires endpoint.")
-
                     if self.headers is not None:
                         http_client = await stack.enter_async_context(
                             httpx.AsyncClient(
@@ -211,17 +199,23 @@ class MCPClientHub:
                 await session.initialize()
                 return await operation(session)
 
+        except (MCPConnectionError, MCPToolError):
+            # Already typed by `operation` (list/call_tool) — propagate as-is
+            # rather than re-wrapping into a generic connection error.
+            raise
         except Exception as exc:
-            raise RuntimeError(
+            raise MCPConnectionError(
                 f"Failed MCP operation ({self.transport_mode}): {exc}"
             ) from exc
 
-    async def _alist_tools(self) -> Dict[str, Dict[str, Any]]:
+    async def async_list_tools(self) -> Dict[str, Dict[str, Any]]:
+        """Native async implementation — public so async callers can await
+        it directly instead of paying for run_coro_sync's thread bridging."""
         async def _op(session: ClientSession) -> Dict[str, Dict[str, Any]]:
             try:
                 tools_result = await session.list_tools()
             except Exception as exc:
-                raise RuntimeError(f"Failed to list MCP tools: {exc}") from exc
+                raise MCPConnectionError(f"Failed to list MCP tools: {exc}") from exc
 
             raw_tools = getattr(tools_result, "tools", tools_result)
             result: dict[str, dict[str, Any]] = {}
@@ -236,20 +230,29 @@ class MCPClientHub:
 
         return await self._awith_session(_op)
 
-    async def _acall_tool(
+    async def async_call_tool(
         self,
         remote_name: str,
         inputs: Mapping[str, Any],
     ) -> Dict[str, Any]:
+        """Native async implementation — public so async callers can await
+        it directly instead of paying for run_coro_sync's thread bridging.
+        Owns input validation; `call_tool` no longer duplicates it."""
+        resolved_remote_name = str(remote_name).strip()
+        if not resolved_remote_name:
+            raise ValueError("remote_name must be a non-empty string.")
+        if not isinstance(inputs, Mapping):
+            raise ValueError("inputs must be a mapping.")
+
         async def _op(session: ClientSession) -> Dict[str, Any]:
             try:
                 raw_result = await session.call_tool(
-                    remote_name,
+                    resolved_remote_name,
                     arguments=dict(inputs),
                 )
             except Exception as exc:
-                raise RuntimeError(
-                    f"Failed to call MCP tool '{remote_name}': {exc}"
+                raise MCPToolError(
+                    f"Failed to call MCP tool '{resolved_remote_name}': {exc}"
                 ) from exc
 
             return _normalize_mcp_call_result(raw_result)

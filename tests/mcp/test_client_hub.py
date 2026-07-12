@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import importlib
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
 import pytest
 
+from atomic_agentic.exceptions import MCPConnectionError, MCPToolError
 from atomic_agentic.mcp.MCPClientHub import MCPClientHub
+
+client_hub_module = importlib.import_module("atomic_agentic.mcp.MCPClientHub")
 
 
 class FakeSession:
@@ -42,6 +47,16 @@ class FakeSession:
             structuredContent={"result": arguments},
             isError=False,
         )
+
+
+class FailingListSession(FakeSession):
+    async def list_tools(self) -> Any:
+        raise ValueError("boom")
+
+
+class FailingCallSession(FakeSession):
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        raise ValueError("boom")
 
 
 class FakeHub(MCPClientHub):
@@ -208,7 +223,7 @@ class TestMCPClientHubLocalHelpers:
     def test_unpack_transport_streams_rejects_bad_shape(self) -> None:
         hub = MCPClientHub("stdio", command="python")
 
-        with pytest.raises(RuntimeError, match="Unexpected transport stream shape"):
+        with pytest.raises(MCPConnectionError, match="Unexpected transport stream shape"):
             hub._unpack_transport_streams(("only-one",))
 
 
@@ -247,14 +262,26 @@ class TestMCPClientHubOperationsWithoutRealServer:
     def test_call_tool_rejects_blank_remote_name(self) -> None:
         hub = FakeHub(FakeSession(), transport_mode="stdio", command="python")
 
-        with pytest.raises(RuntimeError, match="remote_name"):
+        with pytest.raises(ValueError, match="remote_name"):
             hub.call_tool("   ", {"query": "hello"})
 
     def test_call_tool_rejects_non_mapping_inputs(self) -> None:
         hub = FakeHub(FakeSession(), transport_mode="stdio", command="python")
 
-        with pytest.raises(RuntimeError, match="inputs"):
+        with pytest.raises(ValueError, match="inputs"):
             hub.call_tool("search", ["not", "mapping"])  # type: ignore[arg-type]
+
+    def test_list_tools_wraps_session_failure_as_connection_error(self) -> None:
+        hub = FakeHub(FailingListSession(), transport_mode="stdio", command="python")
+
+        with pytest.raises(MCPConnectionError, match="Failed to list MCP tools"):
+            hub.list_tools()
+
+    def test_call_tool_wraps_session_failure_as_tool_error(self) -> None:
+        hub = FakeHub(FailingCallSession(), transport_mode="stdio", command="python")
+
+        with pytest.raises(MCPToolError, match="Failed to call MCP tool 'search'"):
+            hub.call_tool("search", {"query": "hello"})
 
 
 class TestMCPClientHubRefresh:
@@ -281,3 +308,75 @@ class TestMCPClientHubRefresh:
 
         with pytest.raises(ValueError, match="headers must be a mapping"):
             hub.refresh(headers="bad")  # type: ignore[arg-type]
+
+
+class FakeAsyncCM:
+    """Minimal async context manager yielding a fixed value."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    async def __aenter__(self) -> Any:
+        return self._value
+
+    async def __aexit__(self, *exc_info: Any) -> bool:
+        return False
+
+
+class FakeRealSession:
+    """Stands in for `mcp.ClientSession` — just enough surface for
+    `_awith_session` to reach `operation(session)`."""
+
+    async def initialize(self) -> None:
+        return None
+
+    async def __aenter__(self) -> "FakeRealSession":
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> bool:
+        return False
+
+
+class TestAwithSessionErrorWrapping:
+    """
+    Exercises the *real* (non-`FakeHub`-overridden) `_awith_session` by
+    monkeypatching `stdio_client`/`ClientSession` at module scope so setup
+    trivially succeeds without a real subprocess/server. Proves the
+    double-wrap fix: exceptions already typed by `operation` pass through
+    unwrapped; anything else gets wrapped as `MCPConnectionError`.
+    """
+
+    def _make_hub(self, monkeypatch: pytest.MonkeyPatch) -> MCPClientHub:
+        monkeypatch.setattr(
+            client_hub_module,
+            "stdio_client",
+            lambda server_params: FakeAsyncCM(("read", "write")),
+        )
+        monkeypatch.setattr(
+            client_hub_module, "ClientSession", lambda *a, **k: FakeRealSession()
+        )
+        return MCPClientHub("stdio", command="python")
+
+    def test_typed_exception_from_operation_passes_through_unwrapped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        hub = self._make_hub(monkeypatch)
+
+        async def op(session: Any) -> Any:
+            raise MCPToolError("Failed to call MCP tool 'x': boom")
+
+        with pytest.raises(MCPToolError, match=r"^Failed to call MCP tool 'x': boom$"):
+            asyncio.run(hub._awith_session(op))
+
+    def test_unexpected_exception_from_operation_is_wrapped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        hub = self._make_hub(monkeypatch)
+
+        async def op(session: Any) -> Any:
+            raise ValueError("boom")
+
+        with pytest.raises(MCPConnectionError, match="Failed MCP operation"):
+            asyncio.run(hub._awith_session(op))

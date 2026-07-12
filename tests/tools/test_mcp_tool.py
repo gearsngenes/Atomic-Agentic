@@ -108,7 +108,7 @@ class FakeMCPClientHub(MCPClientHub):
         self.calls.append((remote_name, dict(inputs)))
         return self.result
 
-    async def _acall_tool(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
+    async def async_call_tool(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
         self.async_calls.append((remote_name, dict(inputs)))
         if self.async_error is not None:
             raise self.async_error
@@ -407,7 +407,7 @@ class TestMCPProxyToolInvocation:
 
 
 class TestMCPProxyToolAsync:
-    def test_async_invoke_calls_fake_acall_tool_and_extracts_result(self) -> None:
+    def test_async_invoke_calls_fake_async_call_tool_and_extracts_result(self) -> None:
         hub = FakeMCPClientHub(
             async_result={
                 "structuredContent": {"result": "async answer"},
@@ -506,24 +506,12 @@ class TestMCPProxyToolHeaders:
 
         assert tool.headers == hub.headers
 
-    def test_headers_setter_updates_client_hub(self) -> None:
+    def test_headers_has_no_setter(self) -> None:
         hub = FakeMCPClientHub()
         tool = make_tool(hub=hub)
 
-        tool.headers = {"Authorization": "Bearer token"}
-
-        assert hub.headers == {"Authorization": "Bearer token"}
-
-    def test_headers_setter_does_not_mutate_schema(self) -> None:
-        hub = FakeMCPClientHub()
-        tool = make_tool(hub=hub)
-        original_parameters = tool.parameters
-        original_return_type = tool.return_type
-
-        tool.headers = {"X-Test": "yes"}
-
-        assert tool.parameters == original_parameters
-        assert tool.return_type == original_return_type
+        with pytest.raises(AttributeError):
+            tool.headers = {"Authorization": "Bearer token"}  # type: ignore[misc]
 
 
 class TestMCPProxyToolHeadersAndSerialization:

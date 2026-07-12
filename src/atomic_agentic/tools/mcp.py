@@ -133,11 +133,12 @@ class MCPProxyTool(Tool):
 
     @property
     def headers(self) -> Mapping[str, str] | None:
-        return self.client_hub.headers
+        """Read-only view of the underlying client hub's headers.
 
-    @headers.setter
-    def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
-        self.client_hub.headers = value
+        Mutate via ``self.client_hub.headers = ...`` directly — lifecycle
+        belongs to the client, not this wrapper.
+        """
+        return self.client_hub.headers
 
     @property
     def mcpdata(self) -> Dict[str, Any]:
@@ -232,7 +233,7 @@ class MCPProxyTool(Tool):
             )
 
         try:
-            raw_result = await self.client_hub._acall_tool(self.remote_name, kwargs)
+            raw_result = await self.client_hub.async_call_tool(self.remote_name, kwargs)
         except ToolInvocationError:
             raise
         except Exception as exc:

@@ -71,6 +71,25 @@ class RemoteInvocationError(Exception):
         self.function_name: str = function_name
 
 
+class MCPError(RuntimeError):
+    """Base exception for MCP transport/protocol errors.
+
+    Subclasses RuntimeError to match this codebase's existing convention for
+    domain error types that supersede a previously-bare RuntimeError (see
+    LLMEngineError) — callers doing `except RuntimeError` upstream still
+    catch these.
+    """
+
+
+class MCPConnectionError(MCPError):
+    """Raised when MCP transport/session establishment fails, or a
+    non-tool-specific protocol operation (e.g. listing tools) fails."""
+
+
+class MCPToolError(MCPError):
+    """Raised when a specific remote MCP tool invocation fails server-side."""
+
+
 __all__ = [
     "LLMEngineError",
     "ToolError",
@@ -86,4 +105,7 @@ __all__ = [
     "PackagingError",
     "ExecutionError",
     "RemoteInvocationError",
+    "MCPError",
+    "MCPConnectionError",
+    "MCPToolError",
 ]
