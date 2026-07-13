@@ -130,11 +130,13 @@ class PyA2AtomicTool(Tool):
 
     @property
     def headers(self) -> Mapping[str, str] | None:
-        return self._client.headers
+        """Read-only view of the underlying client's headers.
 
-    @headers.setter
-    def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
-        self._client.headers = value
+        Mutate via ``self.client.headers = ...`` directly, or
+        ``self.client.refresh(...)`` — lifecycle belongs to the client, not
+        this wrapper.
+        """
+        return self._client.headers
 
     @property
     def agent_card(self) -> Any:

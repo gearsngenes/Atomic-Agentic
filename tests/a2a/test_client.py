@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 from types import SimpleNamespace
 from typing import Any
@@ -10,12 +11,21 @@ client_module = importlib.import_module("atomic_agentic.a2a.PyA2AtomicClient")
 
 from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
 from atomic_agentic.a2a.PyA2AtomicHost import PYA2A_RESULT_KEY
+from atomic_agentic.exceptions import PyA2AtomicConnectionError, RemoteInvocationError
 
 
 class FakeA2AClient:
-    def __init__(self, url: str, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        timeout: float = 600,
+        google_a2a_compatible: bool = False,
+    ) -> None:
         self.url = url
         self.headers = headers
+        self.timeout = timeout
+        self._use_google_a2a = google_a2a_compatible
         self.sent_messages: list[Any] = []
         self.agent_card = SimpleNamespace(name="fake_agent")
         self.next_payload: dict[str, Any] = {}
@@ -27,6 +37,12 @@ class FakeA2AClient:
     def _fetch_agent_card(self) -> Any:
         self.fetch_card_call_count += 1
         return self.agent_card
+
+    def use_google_a2a_format(self, use_google_format: bool = True) -> None:
+        self._use_google_a2a = use_google_format
+
+    def is_using_google_a2a_format(self) -> bool:
+        return self._use_google_a2a
 
     def send_message(self, message: Any) -> Any:
         self.sent_messages.append(message)
@@ -46,8 +62,15 @@ class FakeA2AClientFactory:
         self,
         url: str,
         headers: dict[str, str] | None = None,
+        timeout: float = 600,
+        google_a2a_compatible: bool = False,
     ) -> FakeA2AClient:
-        client = FakeA2AClient(url, headers=headers)
+        client = FakeA2AClient(
+            url,
+            headers=headers,
+            timeout=timeout,
+            google_a2a_compatible=google_a2a_compatible,
+        )
         self.instances.append(client)
         return client
 
@@ -110,6 +133,31 @@ class TestPyA2AtomicClientConstruction:
         with pytest.raises(ValueError, match="url"):
             PyA2AtomicClient(url)
 
+    def test_timeout_and_google_a2a_compatible_defaults(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient("http://example.test/a2a")
+
+        assert client.timeout == 600
+        assert client.google_a2a_compatible is False
+
+    def test_timeout_and_google_a2a_compatible_forwarded(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient(
+            "http://example.test/a2a",
+            timeout=45,
+            google_a2a_compatible=True,
+        )
+        fake = latest_fake_client(fake_client_factory)
+
+        assert client.timeout == 45
+        assert client.google_a2a_compatible is True
+        assert fake.timeout == 45
+        assert fake.is_using_google_a2a_format() is True
+
     def test_headers_are_normalized_and_hidden_in_to_dict(
         self,
         fake_client_factory: FakeA2AClientFactory,
@@ -129,6 +177,8 @@ class TestPyA2AtomicClientConstruction:
         assert data["url"] == "http://example.test/a2a"
         assert data["has_headers"] is True
         assert data["header_keys"] == ["Authorization", "X-Test"]
+        assert data["timeout"] == 600
+        assert data["google_a2a_compatible"] is False
         assert data["agent_name"] == "fake_agent"
         assert "Bearer secret" not in str(data)
 
@@ -253,7 +303,7 @@ class TestPyA2AtomicClientFunctionCalls:
 
         fake.send_message = send_message  # type: ignore[method-assign]
 
-        with pytest.raises(RuntimeError, match="expected function_response"):
+        with pytest.raises(PyA2AtomicConnectionError, match="expected function_response"):
             client._send_function_call(function_name="echo", parameters={})
 
     def test_send_function_call_rejects_non_mapping_payload(
@@ -270,7 +320,7 @@ class TestPyA2AtomicClientFunctionCalls:
 
         fake.send_message = send_message  # type: ignore[method-assign]
 
-        with pytest.raises(RuntimeError, match="must be a mapping"):
+        with pytest.raises(PyA2AtomicConnectionError, match="must be a mapping"):
             client._send_function_call(function_name="echo", parameters={})
 
     def test_send_function_call_wraps_send_message_errors(
@@ -285,7 +335,7 @@ class TestPyA2AtomicClientFunctionCalls:
 
         fake.send_message = send_message  # type: ignore[method-assign]
 
-        with pytest.raises(RuntimeError, match="send_message failed"):
+        with pytest.raises(PyA2AtomicConnectionError, match="send_message failed"):
             client._send_function_call(function_name="echo", parameters={})
 
 
@@ -323,7 +373,7 @@ class TestPyA2AtomicClientPublicAPI:
             }
         }
 
-        with pytest.raises(RuntimeError, match="non-string"):
+        with pytest.raises(PyA2AtomicConnectionError, match="non-string"):
             client.list_invokables()
 
     def test_list_invokables_rejects_non_mapping_metadata(
@@ -334,7 +384,7 @@ class TestPyA2AtomicClientPublicAPI:
         fake = latest_fake_client(fake_client_factory)
         fake.next_payload = {"echo": "bad"}
 
-        with pytest.raises(RuntimeError, match="non-mapping metadata"):
+        with pytest.raises(PyA2AtomicConnectionError, match="non-mapping metadata"):
             client.list_invokables()
 
     def test_get_invokable_metadata_validates_required_keys(
@@ -374,7 +424,7 @@ class TestPyA2AtomicClientPublicAPI:
         fake = latest_fake_client(fake_client_factory)
         fake.next_payload = {"name": "echo"}
 
-        with pytest.raises(RuntimeError, match="missing required key"):
+        with pytest.raises(PyA2AtomicConnectionError, match="missing required key"):
             client.get_invokable_metadata("echo")
 
     def test_call_invokable_returns_raw_payload(
@@ -428,7 +478,7 @@ class TestPyA2AtomicClientPublicAPI:
 
         assert client.call_invokable("echo", {}) == {"some_key": 123}
 
-    def test_error_payload_raises_runtime_error(
+    def test_error_payload_raises_remote_invocation_error(
         self,
         fake_client_factory: FakeA2AClientFactory,
     ) -> None:
@@ -439,8 +489,12 @@ class TestPyA2AtomicClientPublicAPI:
             "error_type": "ValueError",
         }
 
-        with pytest.raises(RuntimeError, match="ValueError"):
+        with pytest.raises(RemoteInvocationError) as exc_info:
             client.list_invokables()
+
+        assert str(exc_info.value) == "boom"
+        assert exc_info.value.error_type == "ValueError"
+        assert exc_info.value.function_name == "list_invokables"
 
     def test_error_payload_defaults_error_type(
         self,
@@ -453,12 +507,26 @@ class TestPyA2AtomicClientPublicAPI:
             "error_type": "",
         }
 
-        with pytest.raises(RuntimeError, match="RemoteError"):
+        with pytest.raises(RemoteInvocationError) as exc_info:
             client.list_invokables()
+
+        assert exc_info.value.error_type == "RemoteError"
 
 
 class TestPyA2AtomicClientRefresh:
-    def test_refresh_without_headers_refetches_card_without_changing_headers(
+    def test_refresh_with_nothing_provided_raises(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient(
+            "http://example.test/a2a",
+            headers={"X-Old": "yes"},
+        )
+
+        with pytest.raises(ValueError, match="requires at least one of"):
+            client.refresh()
+
+    def test_refresh_timeout_only_updates_timeout_and_refetches(
         self,
         fake_client_factory: FakeA2AClientFactory,
     ) -> None:
@@ -468,11 +536,42 @@ class TestPyA2AtomicClientRefresh:
         )
         fake = latest_fake_client(fake_client_factory)
 
-        client.refresh()
+        client.refresh(timeout=45)
 
+        assert client.timeout == 45
+        assert fake.timeout == 45
         assert client.headers == {"X-Old": "yes"}
         assert len(fake_client_factory.instances) == 1
         assert fake.fetch_card_call_count == 1
+
+    def test_refresh_google_a2a_compatible_only_updates_flag_and_refetches(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient("http://example.test/a2a")
+        fake = latest_fake_client(fake_client_factory)
+
+        client.refresh(google_a2a_compatible=True)
+
+        assert client.google_a2a_compatible is True
+        assert fake.is_using_google_a2a_format() is True
+        assert len(fake_client_factory.instances) == 1
+        assert fake.fetch_card_call_count == 1
+
+    def test_refresh_agent_card_fetch_failure_raises_connection_error(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient("http://example.test/a2a")
+        fake = latest_fake_client(fake_client_factory)
+
+        def failing_fetch() -> Any:
+            raise ValueError("boom")
+
+        fake._fetch_agent_card = failing_fetch  # type: ignore[method-assign]
+
+        with pytest.raises(PyA2AtomicConnectionError, match="failed to refresh agent card"):
+            client.refresh(timeout=45)
 
     def test_refresh_with_headers_updates_and_refetches(
         self,
@@ -496,6 +595,39 @@ class TestPyA2AtomicClientRefresh:
         fake = latest_fake_client(fake_client_factory)
         fake.agent_card = SimpleNamespace(name="updated_agent")
 
-        client.refresh()
+        client.refresh(timeout=600)
 
         assert client.agent_card.name == "updated_agent"
+
+
+class TestPyA2AtomicClientAsyncCreate:
+    def test_async_create_constructs_and_fetches_card(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = asyncio.run(PyA2AtomicClient.async_create("http://example.test/a2a"))
+        fake = latest_fake_client(fake_client_factory)
+
+        assert isinstance(client, PyA2AtomicClient)
+        assert client.url == "http://example.test/a2a"
+        assert client.agent_card.name == "fake_agent"
+        assert len(fake_client_factory.instances) == 1
+        assert fake.url == "http://example.test/a2a"
+
+    def test_async_create_forwards_timeout_and_google_a2a_compatible(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = asyncio.run(
+            PyA2AtomicClient.async_create(
+                "http://example.test/a2a",
+                timeout=45,
+                google_a2a_compatible=True,
+            )
+        )
+        fake = latest_fake_client(fake_client_factory)
+
+        assert client.timeout == 45
+        assert client.google_a2a_compatible is True
+        assert fake.timeout == 45
+        assert fake.is_using_google_a2a_format() is True

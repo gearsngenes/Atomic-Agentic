@@ -408,13 +408,12 @@ class TestPyA2AtomicToolErrorHandling:
 
 
 class TestPyA2AtomicToolHeadersAndSerialization:
-    def test_headers_setter_updates_client_headers(self) -> None:
+    def test_headers_has_no_setter(self) -> None:
         client = FakePyA2AtomicClient()
         tool = make_tool(client=client)
 
-        tool.headers = {"Authorization": "Bearer token"}
-
-        assert client.headers == {"Authorization": "Bearer token"}
+        with pytest.raises(AttributeError):
+            tool.headers = {"Authorization": "Bearer token"}  # type: ignore[misc]
 
     def test_url_headers_and_agent_card_proxy_through_client(self) -> None:
         client = FakePyA2AtomicClient(
