@@ -135,7 +135,7 @@ def main() -> None:
     show_plan(callable_tool)
     invoke_with_inputs(callable_tool, {"a": 2, "b": 3, "scale": 10})
 
-    print("\n[3] Tool -> same Tool instance, updated in place when overrides are provided")
+    print("\n[3] Tool -> new Tool instance wrapping the same function, with overrides applied")
     updated_tool = toolify(
         pre_wrapped_tool,
         namespace="local_demo_updated",

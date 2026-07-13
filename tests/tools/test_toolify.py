@@ -180,7 +180,7 @@ class FakeMCPClientHub(MCPClientHub):
         self.calls.append((remote_name, dict(inputs)))
         return self.result
 
-    async def _acall_tool(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
+    async def async_call_tool(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
         self.calls.append((remote_name, dict(inputs)))
         return self.result
 

@@ -71,6 +71,45 @@ class RemoteInvocationError(Exception):
         self.function_name: str = function_name
 
 
+class MCPError(RuntimeError):
+    """Base exception for MCP transport/protocol errors.
+
+    Subclasses RuntimeError to match this codebase's existing convention for
+    domain error types that supersede a previously-bare RuntimeError (see
+    LLMEngineError) — callers doing `except RuntimeError` upstream still
+    catch these.
+    """
+
+
+class MCPConnectionError(MCPError):
+    """Raised when MCP transport/session establishment fails, or a
+    non-tool-specific protocol operation (e.g. listing tools) fails."""
+
+
+class MCPToolError(MCPError):
+    """Raised when a specific remote MCP tool invocation fails server-side."""
+
+
+class PyA2AtomicError(RuntimeError):
+    """Base exception for PyA2Atomic transport/protocol errors.
+
+    Named PyA2Atomic (matching PyA2AtomicClient/PyA2AtomicHost/
+    PyA2AtomicTool), not A2A* — the python_a2a dependency already exports
+    its own A2AError/A2AConnectionError hierarchy with the same names but
+    a different base (plain Exception, not RuntimeError); reusing those
+    names here would make tracebacks genuinely ambiguous about which
+    library raised what. Subclasses RuntimeError to match this codebase's
+    existing convention for domain error types that supersede a
+    previously-bare RuntimeError (see LLMEngineError, MCPError) — callers
+    doing `except RuntimeError` upstream still catch these.
+    """
+
+
+class PyA2AtomicConnectionError(PyA2AtomicError):
+    """Raised when PyA2Atomic agent-card refresh fails, message transport
+    fails, or a remote response doesn't match the expected protocol shape."""
+
+
 __all__ = [
     "LLMEngineError",
     "ToolError",
@@ -86,4 +125,9 @@ __all__ = [
     "PackagingError",
     "ExecutionError",
     "RemoteInvocationError",
+    "MCPError",
+    "MCPConnectionError",
+    "MCPToolError",
+    "PyA2AtomicError",
+    "PyA2AtomicConnectionError",
 ]

@@ -5,6 +5,83 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a21] - 2026-07-12
+
+### Added
+
+- `MCPClientHub` — `read_timeout_seconds`, `client_kwargs`, `session_kwargs`
+  constructor params: `client_kwargs` forwards into whichever transport
+  constructor is active (`StdioServerParameters`/`sse_client`/
+  `streamable_http_client`); `session_kwargs` + converted
+  `read_timeout_seconds` forward into `ClientSession`.
+- `MCPClientHub.async_list_tools`/`async_call_tool` — public API (renamed
+  from private `_alist_tools`/`_acall_tool`); `call_tool`/`list_tools` are
+  now thin sync wrappers over these.
+- `MCPError`, `MCPConnectionError`, `MCPToolError` typed exceptions.
+- `PyA2AtomicClient` — `timeout: float = 600`, `google_a2a_compatible: bool
+  = False` constructor params (matching `A2AClient`'s full signature), with
+  read-only `timeout`/`google_a2a_compatible` properties.
+- `PyA2AtomicClient.async_create(...)` — non-blocking construction
+  (including the agent-card fetch) via `asyncio.to_thread`.
+- `PyA2AtomicError`, `PyA2AtomicConnectionError` typed exceptions.
+- `PyA2AtomicHost` — dict-form construction (`invokables: Mapping[str,
+  AtomicInvokable]`) and `register(invokable, remote_name=None)`: the
+  registry key is now a registry-local `remote_name` alias, independent of
+  an invokable's intrinsic `.name`. Reserved wire function names
+  (`list_invokables`, `get_invokable_metadata`) are now rejected as
+  `remote_name`s across all registration paths.
+- `dataclass_record_to_dict` — public util in `utils/core.py` (relocated).
+
+### Changed
+
+- `MCPClientHub.refresh(headers=None, client_kwargs=None,
+  session_kwargs=None)` — raises `ValueError` if all three are `None`;
+  each provided bucket wholesale-replaces the corresponding stored value.
+- `PyA2AtomicClient.refresh(headers=None, timeout=None,
+  google_a2a_compatible=None)` — raises `ValueError` if all three are
+  `None`; mutates the existing `A2AClient` in place rather than
+  reconstructing a new one.
+- `PyA2AtomicHost`'s `get_invokable_metadata`/`list_invokables` responses
+  report the registry key (remote name) in their `"name"` field, not
+  necessarily the invokable's intrinsic `.name`.
+
+### Fixed
+
+- MCP and A2A transport/protocol/tool failures now raise typed exceptions
+  instead of a bare `RuntimeError`, letting callers distinguish connection
+  failures from malformed responses from remote-side errors.
+- `PyA2AtomicClient.__init__` no longer silently swallows a construction-time
+  agent-card fetch failure (removed unreachable dead-code try/except around
+  a method that can never raise).
+- `PyA2AtomicHost` no longer silently drops invokables that share an
+  intrinsic `.name` across different namespaces — same-name invokables can
+  now be registered under distinct `remote_name`s.
+- `MCPClientHub._awith_session` no longer double-wraps exceptions that were
+  already typed by the inner operation.
+- `MCPClientHub.async_call_tool`'s input validation now runs consistently
+  on both the sync and async call paths (previously async-only calls could
+  bypass it).
+- **`MCPClientHub.refresh()` and `PyA2AtomicClient.refresh()` no longer
+  partially apply a failed refresh.** Both previously mutated stored
+  state before the one step that could fail (a validation check /  the
+  agent-card re-fetch), so a raised exception left the new — possibly
+  invalid — config committed anyway. Both now validate/roll back before
+  any state change is visible to callers.
+- `PyA2AtomicClient.url` now reflects the live transport endpoint instead
+  of a value cached at construction — `python_a2a`'s `A2AClient` rewrites
+  its own endpoint after a successful call, which the cached copy never
+  picked up.
+- `examples/Tool_Examples/04_MCPProxyTool.py`'s required-parameter display
+  used an incorrect sentinel check and always showed a bogus default value
+  for required params.
+
+### Removed
+
+- `MCPProxyTool.headers` setter (getter-only; mutate via
+  `client_hub.headers = ...` or `client_hub.refresh(...)`).
+- `PyA2AtomicTool.headers` setter (getter-only; mutate via `client.headers
+  = ...` or `client.refresh(...)`).
+
 ## [2.0.0a20] - 2026-07-11
 
 ### Added

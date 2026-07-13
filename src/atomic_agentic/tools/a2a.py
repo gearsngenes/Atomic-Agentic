@@ -34,11 +34,13 @@ class PyA2AtomicTool(Tool):
     - description: user-supplied description, otherwise remote metadata description,
       otherwise remote agent card description, otherwise a stub
 
-    Refresh semantics
-    -----------------
-    Refresh only re-fetches remote metadata, updates the call binding, and rebuilds
-    the schema. It does NOT automatically mutate the local AA-facing name, namespace,
-    or description after construction.
+    Lifecycle
+    ---------
+    This proxy has no refresh()/mutation lifecycle of its own — it is
+    constructed once against the remote metadata available at that time.
+    To pick up remote-side changes (rotated headers, updated agent card),
+    call `self.client.refresh(...)` directly; lifecycle belongs to the
+    client, not this wrapper.
     """
 
     def __init__(
@@ -130,11 +132,13 @@ class PyA2AtomicTool(Tool):
 
     @property
     def headers(self) -> Mapping[str, str] | None:
-        return self._client.headers
+        """Read-only view of the underlying client's headers.
 
-    @headers.setter
-    def headers(self, value: Mapping[str, HeaderValue] | None) -> None:
-        self._client.headers = value
+        Mutate via ``self.client.headers = ...`` directly, or
+        ``self.client.refresh(...)`` — lifecycle belongs to the client, not
+        this wrapper.
+        """
+        return self._client.headers
 
     @property
     def agent_card(self) -> Any:
