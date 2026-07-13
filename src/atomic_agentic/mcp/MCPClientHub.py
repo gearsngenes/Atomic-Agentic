@@ -102,6 +102,12 @@ class MCPClientHub:
             session_kwargs, param_name="session_kwargs"
         )
 
+        self._validate_streamable_http_collision(
+            transport_mode=mode,
+            headers=normalized_headers,
+            client_kwargs=normalized_client_kwargs,
+        )
+
         self._transport_mode: Literal["stdio", "sse", "streamable_http"] = mode
         self._endpoint: str | None = normalized_endpoint
         self._command: str | None = normalized_command
@@ -110,8 +116,6 @@ class MCPClientHub:
         self._read_timeout_seconds: float | None = normalized_read_timeout_seconds
         self._client_kwargs: Dict[str, Any] | None = normalized_client_kwargs
         self._session_kwargs: Dict[str, Any] | None = normalized_session_kwargs
-
-        self._validate_streamable_http_collision()
 
     @staticmethod
     def _normalize_kwargs_mapping(
@@ -126,14 +130,22 @@ class MCPClientHub:
             raise ValueError(f"{param_name} must be a mapping when provided.")
         return dict(value)
 
-    def _validate_streamable_http_collision(self) -> None:
+    @staticmethod
+    def _validate_streamable_http_collision(
+        *,
+        transport_mode: str,
+        headers: Mapping[str, str] | None,
+        client_kwargs: Mapping[str, Any] | None,
+    ) -> None:
         """Raise if headers and client_kwargs['http_client'] both target the
-        same auth surface under transport_mode="streamable_http"."""
+        same auth surface under transport_mode="streamable_http". Takes
+        explicit candidate values (not self.*) so callers can validate
+        before committing a mutation."""
         if (
-            self._transport_mode == "streamable_http"
-            and self._headers is not None
-            and self._client_kwargs is not None
-            and "http_client" in self._client_kwargs
+            transport_mode == "streamable_http"
+            and headers is not None
+            and client_kwargs is not None
+            and "http_client" in client_kwargs
         ):
             raise ValueError(
                 "Cannot set both headers and client_kwargs['http_client'] "
@@ -192,7 +204,9 @@ class MCPClientHub:
         connection to refresh, only stored config consumed by the next call.
         Each provided bucket wholesale-replaces its stored value (never
         merged). Raises if none of headers/client_kwargs/session_kwargs are
-        provided, since a no-op refresh() is a caller bug.
+        provided, since a no-op refresh() is a caller bug. Validation runs
+        against the resolved candidate values before anything is committed,
+        so a failed refresh() leaves stored config untouched.
         """
         if headers is None and client_kwargs is None and session_kwargs is None:
             raise ValueError(
@@ -200,18 +214,29 @@ class MCPClientHub:
                 "or session_kwargs; none were provided."
             )
 
-        if headers is not None:
-            self._headers = normalize_headers(headers)
-        if client_kwargs is not None:
-            self._client_kwargs = self._normalize_kwargs_mapping(
-                client_kwargs, param_name="client_kwargs"
-            )
-        if session_kwargs is not None:
-            self._session_kwargs = self._normalize_kwargs_mapping(
-                session_kwargs, param_name="session_kwargs"
-            )
+        resolved_headers = (
+            normalize_headers(headers) if headers is not None else self._headers
+        )
+        resolved_client_kwargs = (
+            self._normalize_kwargs_mapping(client_kwargs, param_name="client_kwargs")
+            if client_kwargs is not None
+            else self._client_kwargs
+        )
+        resolved_session_kwargs = (
+            self._normalize_kwargs_mapping(session_kwargs, param_name="session_kwargs")
+            if session_kwargs is not None
+            else self._session_kwargs
+        )
 
-        self._validate_streamable_http_collision()
+        self._validate_streamable_http_collision(
+            transport_mode=self._transport_mode,
+            headers=resolved_headers,
+            client_kwargs=resolved_client_kwargs,
+        )
+
+        self._headers = resolved_headers
+        self._client_kwargs = resolved_client_kwargs
+        self._session_kwargs = resolved_session_kwargs
 
     def to_dict(self) -> Dict[str, Any]:
         return {

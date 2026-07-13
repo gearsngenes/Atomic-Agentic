@@ -443,6 +443,27 @@ class TestMCPClientHubRefresh:
         with pytest.raises(ValueError, match="Cannot set both headers"):
             hub.refresh(client_kwargs={"http_client": object()})
 
+    def test_refresh_collision_failure_does_not_mutate_stored_state(self) -> None:
+        """A refresh() call that fails validation must leave headers/
+        client_kwargs/session_kwargs exactly as they were — not partially
+        applied despite the raise."""
+        hub = MCPClientHub(
+            "streamable_http",
+            endpoint="http://localhost:8000/mcp",
+            headers={"Authorization": "Bearer x"},
+            session_kwargs={"client_info": None},
+        )
+
+        with pytest.raises(ValueError, match="Cannot set both headers"):
+            hub.refresh(
+                client_kwargs={"http_client": object()},
+                session_kwargs={"client_info": "changed"},
+            )
+
+        assert hub.headers == {"Authorization": "Bearer x"}
+        assert hub.client_kwargs is None
+        assert hub.session_kwargs == {"client_info": None}
+
 
 class FakeAsyncCM:
     """Minimal async context manager yielding a fixed value."""

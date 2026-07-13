@@ -22,7 +22,7 @@ class FakeA2AClient:
         timeout: float = 600,
         google_a2a_compatible: bool = False,
     ) -> None:
-        self.url = url
+        self.endpoint_url = url
         self.headers = headers
         self.timeout = timeout
         self._use_google_a2a = google_a2a_compatible
@@ -125,13 +125,27 @@ class TestPyA2AtomicClientConstruction:
 
         assert client.url == "http://example.test/a2a"
         assert client.agent_card.name == "fake_agent"
-        assert fake.url == "http://example.test/a2a"
+        assert fake.endpoint_url == "http://example.test/a2a"
         assert fake.headers is None
 
     @pytest.mark.parametrize("url", ["", "   "])
     def test_invalid_url_raises(self, url: str) -> None:
         with pytest.raises(ValueError, match="url"):
             PyA2AtomicClient(url)
+
+    def test_url_reflects_live_client_endpoint(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        """python_a2a's A2AClient rewrites its own endpoint_url after a
+        successful call (trying URL variants); `url` must read that live
+        value, not a copy cached at construction time."""
+        client = PyA2AtomicClient("http://example.test/a2a")
+        fake = latest_fake_client(fake_client_factory)
+
+        fake.endpoint_url = "http://example.test/a2a/tasks/send"
+
+        assert client.url == "http://example.test/a2a/tasks/send"
 
     def test_timeout_and_google_a2a_compatible_defaults(
         self,
@@ -573,6 +587,39 @@ class TestPyA2AtomicClientRefresh:
         with pytest.raises(PyA2AtomicConnectionError, match="failed to refresh agent card"):
             client.refresh(timeout=45)
 
+    def test_refresh_agent_card_fetch_failure_rolls_back_all_mutations(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        """A failed refresh() must leave headers/timeout/google_a2a_compatible
+        exactly as they were — not silently applied despite the raise."""
+        client = PyA2AtomicClient(
+            "http://example.test/a2a",
+            headers={"X-Old": "yes"},
+            timeout=30,
+            google_a2a_compatible=False,
+        )
+        fake = latest_fake_client(fake_client_factory)
+
+        def failing_fetch() -> Any:
+            raise ValueError("boom")
+
+        fake._fetch_agent_card = failing_fetch  # type: ignore[method-assign]
+
+        with pytest.raises(PyA2AtomicConnectionError):
+            client.refresh(
+                headers={"X-New": "yes"},
+                timeout=99,
+                google_a2a_compatible=True,
+            )
+
+        assert client.headers == {"X-Old": "yes"}
+        assert fake.headers == {"X-Old": "yes"}
+        assert client.timeout == 30
+        assert fake.timeout == 30
+        assert client.google_a2a_compatible is False
+        assert fake.is_using_google_a2a_format() is False
+
     def test_refresh_with_headers_updates_and_refetches(
         self,
         fake_client_factory: FakeA2AClientFactory,
@@ -612,7 +659,7 @@ class TestPyA2AtomicClientAsyncCreate:
         assert client.url == "http://example.test/a2a"
         assert client.agent_card.name == "fake_agent"
         assert len(fake_client_factory.instances) == 1
-        assert fake.url == "http://example.test/a2a"
+        assert fake.endpoint_url == "http://example.test/a2a"
 
     def test_async_create_forwards_timeout_and_google_a2a_compatible(
         self,

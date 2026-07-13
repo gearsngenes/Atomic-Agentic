@@ -53,11 +53,11 @@ class PyA2AtomicClient:
         if not isinstance(url, str) or not url.strip():
             raise ValueError("url must be a non-empty string.")
 
-        self._url: str = url.strip()
+        resolved_url = url.strip()
         self._headers: Mapping[str, str] | None = normalize_headers(headers)
 
         self._client = A2AClient(
-            self._url,
+            resolved_url,
             headers=dict(self._headers) if self._headers is not None else None,
             timeout=float(timeout),
             google_a2a_compatible=google_a2a_compatible,
@@ -72,7 +72,11 @@ class PyA2AtomicClient:
     # ------------------------------------------------------------------ #
     @property
     def url(self) -> str:
-        return self._url
+        """Live endpoint URL. python_a2a's A2AClient rewrites its own
+        endpoint_url after a successful call (trying URL variants like
+        `/a2a` or `/tasks/send`), so this reads the client's current value
+        rather than the originally-supplied construction argument."""
+        return self._client.endpoint_url
 
     @property
     def headers(self) -> Mapping[str, str] | None:
@@ -104,13 +108,20 @@ class PyA2AtomicClient:
         public attributes; google_a2a_compatible has a public setter) — no
         new client instance is created. Raises if headers, timeout, and
         google_a2a_compatible are all None, since a no-op refresh() is a
-        caller bug.
+        caller bug. If the agent-card re-fetch fails, all mutations are
+        rolled back before raising, so a failed refresh() leaves the client
+        exactly as it was.
         """
         if headers is None and timeout is None and google_a2a_compatible is None:
             raise ValueError(
                 "refresh() requires at least one of headers, timeout, or "
                 "google_a2a_compatible; none were provided."
             )
+
+        previous_headers = self._headers
+        previous_client_headers = self._client.headers
+        previous_timeout = self._client.timeout
+        previous_google_a2a_compatible = self._client.is_using_google_a2a_format()
 
         if headers is not None:
             self._headers = normalize_headers(headers)
@@ -123,8 +134,12 @@ class PyA2AtomicClient:
         try:
             self._agent_card = self._client._fetch_agent_card()
         except Exception as exc:
+            self._headers = previous_headers
+            self._client.headers = previous_client_headers
+            self._client.timeout = previous_timeout
+            self._client.use_google_a2a_format(previous_google_a2a_compatible)
             raise PyA2AtomicConnectionError(
-                f"{type(self).__name__}: failed to refresh agent card from {self._url!r}: {exc}"
+                f"{type(self).__name__}: failed to refresh agent card from {self.url!r}: {exc}"
             ) from exc
 
     @classmethod
@@ -227,7 +242,7 @@ class PyA2AtomicClient:
     def to_dict(self) -> dict[str, Any]:
         return {
             "type": type(self).__name__,
-            "url": self._url,
+            "url": self.url,
             "has_headers": self._headers is not None,
             "header_keys": sorted(self._headers.keys()) if self._headers is not None else [],
             "timeout": self.timeout,

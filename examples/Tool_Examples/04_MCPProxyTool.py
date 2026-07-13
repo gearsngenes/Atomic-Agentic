@@ -18,6 +18,7 @@ import sys
 from atomic_agentic.tools import MCPProxyTool
 from atomic_agentic.mcp import MCPClientHub
 from atomic_agentic.exceptions import ToolInvocationError
+from atomic_agentic.constants.core import NO_VAL
 
 
 TRANSPORT_MODE: Literal["stdio", "sse", "streamable_http"] = "stdio"
@@ -68,7 +69,7 @@ def _show_plan(proxy: MCPProxyTool) -> None:
     print("signature:", proxy.signature)
     print("parameters:")
     for param in proxy.parameters:
-        default_str = "(no default)" if param.default.__class__.__name__ == "NO_VAL" else f"default={param.default}"
+        default_str = "(no default)" if param.default is NO_VAL else f"default={param.default}"
         desc_str = f"  # {param.description}" if param.description else ""
         print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}{desc_str}")
     print("structured (to_dict):")
