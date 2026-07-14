@@ -646,3 +646,44 @@ class TestAtomicInvokableDescriptionGetter:
 
         assert invokable.to_dict()["description"] == invokable._description
         assert invokable.to_dict()["description"] != invokable.description
+
+
+class _ExtraDescriptionChild(EchoInvokable):
+    def _extra_description(self) -> str:
+        return "child extra"
+
+
+class _ExtraDescriptionGrandchild(_ExtraDescriptionChild):
+    def _extra_description(self) -> str:
+        parent = super()._extra_description()
+        return f"{parent}\ngrandchild extra"
+
+
+class TestExtraDescriptionHook:
+    def test_default_extra_description_is_empty(self) -> None:
+        invokable = make_invokable()
+
+        assert invokable._extra_description() == ""
+        assert invokable.description == invokable._description
+
+    def test_subclass_extra_description_appends_after_base(self) -> None:
+        invokable = _ExtraDescriptionChild(
+            name="child",
+            namespace="tests",
+            description="Child base.",
+            parameters=[make_param("x", 0)],
+            return_type="Any",
+        )
+
+        assert invokable.description == "Child base.\nchild extra"
+
+    def test_two_level_super_chaining_preserves_ancestor_extra(self) -> None:
+        invokable = _ExtraDescriptionGrandchild(
+            name="grandchild",
+            namespace="tests",
+            description="GC base.",
+            parameters=[make_param("x", 0)],
+            return_type="Any",
+        )
+
+        assert invokable.description == "GC base.\nchild extra\ngrandchild extra"

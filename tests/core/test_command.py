@@ -65,6 +65,19 @@ class TestCommandConstruction:
         assert command.description == "Add 2 and 3."
         assert command.signature == "Command.tests.add_two_and_three() -> int"
 
+    def test_surfaces_executor_extra_description(self) -> None:
+        tool = make_add_tool()
+        executor = StructuredInvokable(component=tool, output_schema=["result"])
+
+        command = Command(
+            executor=executor,
+            fixed_inputs={"a": 2, "b": 3},
+            name="add_two_and_three",
+            description="Add 2 and 3.",
+        )
+
+        assert command.description == "Add 2 and 3.\nOutput schema: [result]"
+
     def test_defaults_identity_when_name_and_description_are_omitted(self) -> None:
         executor = make_add_tool()
 

@@ -177,20 +177,53 @@ class AtomicInvokable(ABC):
 
     @property
     def description(self) -> str:
-        """Human-friendly description, augmented with per-parameter descriptions when present."""
+        """
+        Human-friendly description, augmented with per-parameter bullets and
+        subclass/wrapper extras when present.
+
+        1. Start from `self._description` as the base text.
+        2. Collect parameters with a non-None `.description`, in declaration
+           order.
+        3. If any exist, append a blank-line-separated `- name: description`
+           bullet block; otherwise this step is a no-op.
+        4. Call `self._extra_description()`; if non-empty, append it with a
+           single newline separator; otherwise this step is a no-op.
+        """
+        text = self._description
+
+        # Step 2-3: conditional per-parameter bullet block
         described = [p for p in self._parameters if p.description is not None]
-        if not described:
-            return self._description
-        lines = [self._description, ""]
-        for p in described:
-            lines.append(f"- {p.name}: {p.description}")
-        return "\n".join(lines)
+        if described:
+            bullets = "\n".join(f"- {p.name}: {p.description}" for p in described)
+            text = f"{text}\n\n{bullets}"
+
+        # Step 4: conditional subclass/wrapper extra content
+        extra = self._extra_description()
+        if extra:
+            text = f"{text}\n{extra}"
+
+        return text
 
     @description.setter
     def description(self, value: str) -> None:
         if not isinstance(value, str) or not value.strip():
             raise ValueError("description must be a non-empty string")
         self._description = value.strip()
+
+    def _extra_description(self) -> str:
+        """
+        Override point for wrapper/subclass-specific description additions.
+
+        Default is `""` (no extra content). Subclasses that wrap another
+        `AtomicInvokable` instance by composition (e.g. `self._component`,
+        `self._executor`) must chain into *that wrapped instance's*
+        `_extra_description()` — never `super()` — since wrapping is
+        composition, not inheritance, and `super()` cannot reach an unrelated
+        class's override. Ordinary (non-wrapper) subclasses may use
+        `super()._extra_description()` normally to preserve an ancestor
+        class's own extra content.
+        """
+        return ""
 
     @property
     def namespace(self) -> str:
@@ -827,6 +860,19 @@ class Command(AtomicInvokable):
         return dict(self._fixed_inputs)
 
     # ---------------------------------------------------------------- #
+    # Description composition
+    # ---------------------------------------------------------------- #
+    def _extra_description(self) -> str:
+        """
+        Surfaces the wrapped executor's own extra description verbatim.
+
+        Returns `self._executor._extra_description()` unchanged. `Command`
+        adds no descriptive content of its own — its synthetic
+        construction-time `description` text is unrelated to this chain.
+        """
+        return self._executor._extra_description()
+
+    # ---------------------------------------------------------------- #
     # Construction validation
     # ---------------------------------------------------------------- #
     @staticmethod
@@ -1102,9 +1148,21 @@ class StructuredInvokable(AtomicInvokable):
         """The wrapped component."""
         return self._component
 
-    @property
-    def description(self) -> str:
-        """The seed description plus a schema summary."""
+    def _extra_description(self) -> str:
+        """
+        Chains the wrapped component's own extra description with this
+        wrapper's output-schema summary.
+
+        1. Build the output-schema summary exactly as before: `*name` for
+           VAR_POSITIONAL, `**name` for VAR_KEYWORD, `name` or
+           `name={default!r}` otherwise, `", "`-joined, or `"<empty>"` if the
+           schema has no entries.
+        2. Call `self._component._extra_description()` — the wrapped
+           instance's own extra description, not `super()` (composition, not
+           inheritance).
+        3. If that call returns non-empty, return it followed by the schema
+           summary on a new line; otherwise return the schema summary alone.
+        """
         parts: list[str] = []
 
         for spec in self._output_schema:
@@ -1119,18 +1177,10 @@ class StructuredInvokable(AtomicInvokable):
                 parts.append(part)
 
         schema_summary = ", ".join(parts) if parts else "<empty>"
-        return f"{super().description}\nOutput schema: [{schema_summary}]"
+        schema = f"Output schema: [{schema_summary}]"
 
-    @description.setter
-    def description(self, value: str) -> None:
-        """Set the seed description."""
-        if not isinstance(value, str):
-            raise TypeError(
-                f"description must be a string, got {type(value).__name__}"
-            )
-        if not value.strip():
-            raise ValueError("description cannot be empty")
-        self._description = value.strip()
+        wrapped = self._component._extra_description()
+        return f"{wrapped}\n{schema}" if wrapped else schema
 
     @property
     def output_schema(self) -> list[ParamSpec]:
