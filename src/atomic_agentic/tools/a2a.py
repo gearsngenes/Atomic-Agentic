@@ -148,6 +148,15 @@ class PyA2AtomicTool(Tool):
     def remote_metadata(self) -> dict[str, Any]:
         return dict(self._remote_metadata)
 
+    def _extra_description(self) -> str:
+        """Surface the remote invokable's own extra description verbatim.
+
+        Read from the one-time `remote_metadata` snapshot captured at
+        construction - there is no live remote instance to chain into across
+        the wire. `.get(..., "")` tolerates an older host predating this field.
+        """
+        return self._remote_metadata.get("extra_description", "")
+
     # ------------------------------------------------------------------ #
     # Signature Building (Template Method)
     # ------------------------------------------------------------------ #

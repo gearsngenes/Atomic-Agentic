@@ -61,6 +61,38 @@ def make_scalar_invokable(name: str = "scalar") -> ScalarInvokable:
     )
 
 
+class DescribedInvokable(AtomicInvokable):
+    """Has a described parameter and non-empty extra content - proves the
+    host payload stops double-baking bullets and now carries extra_description."""
+
+    def invoke(self, inputs: Mapping[str, Any]) -> AtomicResult:
+        started_at = datetime.now(timezone.utc)
+        filtered = self.filter_inputs(inputs)
+        ended_at = datetime.now(timezone.utc)
+        return self.make_result(filtered, started_at, ended_at)
+
+    def _extra_description(self) -> str:
+        return "Output schema: [value]"
+
+
+def make_described_invokable(name: str = "described") -> DescribedInvokable:
+    return DescribedInvokable(
+        name=name,
+        namespace="tests",
+        description="Described invokable.",
+        parameters=[
+            ParamSpec(
+                name="value",
+                index=0,
+                kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                type="Any",
+                description="The value to echo back.",
+            )
+        ],
+        return_type="dict[str, Any]",
+    )
+
+
 def make_message(content: Any) -> SimpleNamespace:
     return SimpleNamespace(
         content=content,
@@ -371,6 +403,45 @@ class TestPyA2AtomicHostPayloads:
 
         with pytest.raises(KeyError, match="Unknown invokable"):
             host._invoke_registered_invokable("missing", {})
+
+
+class TestPyA2AtomicHostDescriptionPropagation:
+    def test_metadata_payload_sends_raw_description_not_rendered(self) -> None:
+        invokable = make_described_invokable("described")
+        host = PyA2AtomicHost(
+            [invokable],
+            name="test_host",
+            description="Test host.",
+        )
+
+        metadata = host._get_invokable_metadata_payload("described")
+
+        assert metadata["description"] == invokable._description
+        assert metadata["description"] != invokable.description
+        assert "- value:" not in metadata["description"]
+
+    def test_metadata_payload_carries_extra_description(self) -> None:
+        invokable = make_described_invokable("described")
+        host = PyA2AtomicHost(
+            [invokable],
+            name="test_host",
+            description="Test host.",
+        )
+
+        metadata = host._get_invokable_metadata_payload("described")
+
+        assert metadata["extra_description"] == "Output schema: [value]"
+
+    def test_metadata_payload_extra_description_empty_by_default(self) -> None:
+        host = PyA2AtomicHost(
+            [make_invokable("echo")],
+            name="test_host",
+            description="Test host.",
+        )
+
+        metadata = host._get_invokable_metadata_payload("echo")
+
+        assert metadata["extra_description"] == ""
 
 
 class TestPyA2AtomicHostMessageHandling:

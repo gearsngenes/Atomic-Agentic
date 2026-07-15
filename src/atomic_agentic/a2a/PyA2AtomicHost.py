@@ -359,11 +359,15 @@ class PyA2AtomicHost(A2AServer):
             raise KeyError(f"Unknown invokable {name!r}.")
         return {
             "name": name,
-            "description": invokable.description,
+            # Raw description, not the rendered getter - the receiving proxy
+            # derives its own parameter-bullet block from the separately-sent
+            # `parameters` list, so sending rendered text here would double it.
+            "description": invokable._description,
             "parameters": [spec.to_dict() for spec in invokable.parameters],
             "return_type": invokable.return_type,
             "filter_extraneous_inputs": invokable.filter_extraneous_inputs,
             "invokable_type": type(invokable).__name__,
+            "extra_description": invokable._extra_description(),
         }
 
     def _invoke_registered_invokable(
