@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.constants.core import NO_VAL
+from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.exceptions import ExecutionError, ValidationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.workflows import IterativeFlowResult
@@ -246,6 +247,39 @@ class TestIterativeFlowConstruction:
 
         with pytest.raises(ValueError):
             flow.max_iterations = 0
+
+
+def make_structured_step(name: str, output_schema: list[str]) -> StructuredInvokable:
+    def step(count: int) -> dict[str, int]:
+        return {"count": count}
+
+    tool = Tool(
+        function=step,
+        name=name,
+        namespace="tests",
+        description=f"Step {name}.",
+    )
+    return StructuredInvokable(
+        component=tool,
+        output_schema=output_schema,
+        name=f"structured_{name}",
+        description=f"Structured step {name}.",
+    )
+
+
+class TestIterativeFlowExtraDescription:
+    def test_surfaces_loop_body_extra_description_plus_iteration_bound(self) -> None:
+        step = make_structured_step("counter", ["count"])
+        flow = make_iterative_flow(body_steps=[step], max_iterations=5)
+
+        assert flow._extra_description() == (
+            "Output schema: [count]\nRuns up to 5 iteration(s)."
+        )
+
+    def test_states_iteration_bound_only_when_loop_body_has_no_extra_description(self) -> None:
+        flow = make_iterative_flow(max_iterations=2)
+
+        assert flow._extra_description() == "Runs up to 2 iteration(s)."
 
 
 class TestIterativeFlowSyncInvoke:

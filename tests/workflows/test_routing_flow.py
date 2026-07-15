@@ -270,6 +270,67 @@ class TestRoutingFlowConstruction:
         assert flow2.return_type == "dict[str, Any] | str"
 
 
+def make_structured_branch(tag: str, output_schema: list[str] | None) -> StructuredInvokable:
+    def select(value: Any) -> Any:
+        return {"branch": tag, "value": value}
+
+    tool = Tool(
+        function=select,
+        name=f"branch_{tag}",
+        namespace="tests",
+        description=f"Branch {tag}.",
+    )
+    return StructuredInvokable(
+        component=tool,
+        output_schema=output_schema,
+        name=f"structured_branch_{tag}",
+        description=f"Structured branch {tag}.",
+    )
+
+
+class TestRoutingFlowExtraDescription:
+    def test_unanimous_non_empty_extra_appends_shared_content(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            namespace="tests",
+            description="Routing test flow.",
+            branches=[
+                make_structured_branch("a", ["value"]),
+                make_structured_branch("b", ["value"]),
+            ],
+            router=make_structured_router(0),
+        )
+
+        assert flow._extra_description() == (
+            "Selects 1 of 2 branches at runtime.\nOutput schema: [value]"
+        )
+
+    def test_divergent_extras_state_branch_count_only(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            namespace="tests",
+            description="Routing test flow.",
+            branches=[
+                make_structured_branch("a", ["value"]),
+                make_branch("b"),
+            ],
+            router=make_structured_router(0),
+        )
+
+        assert flow._extra_description() == "Selects 1 of 2 branches at runtime."
+
+    def test_unanimous_empty_extra_states_branch_count_only(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            namespace="tests",
+            description="Routing test flow.",
+            branches=[make_branch("a"), make_branch("b")],
+            router=make_structured_router(0),
+        )
+
+        assert flow._extra_description() == "Selects 1 of 2 branches at runtime."
+
+
 class TestRoutingFlowSyncInvokeListBranches:
     def test_invoke_routes_to_int_selected_branch(self) -> None:
         flow = make_list_routing_flow(1)

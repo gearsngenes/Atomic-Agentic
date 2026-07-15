@@ -135,6 +135,26 @@ class ParallelFlow(Workflow):
         """Return the fixed dict output keys, if ``output_type='dict'``."""
         return list(self._output_names) if self._output_names is not None else None
 
+    def _extra_description(self) -> str:
+        """Describe the fixed output projection shape.
+
+        A branch's own extra description is only inlined in the SCALAR case,
+        where the result IS that one branch's payload verbatim (a true 1:1
+        passthrough, not an aggregation). DICT/LIST/TUPLE/SET describe
+        structural shape facts instead of inlining any branch content.
+        """
+        if self._output_type == self.SCALAR:
+            return self._branches[self._output_indices[0]]._extra_description()
+
+        if self._output_type == self.DICT:
+            entries = ", ".join(
+                f"{name} ({self._branches[index].return_type})"
+                for name, index in zip(self._output_names, self._output_indices)
+            )
+            return f"Returns a dict of {len(self._output_indices)} keys: {entries}"
+
+        return f"Returns a {self._output_type} of {len(self._output_indices)} branch outputs."
+
     # ------------------------------------------------------------------ #
     # Internal normalization / configuration helpers
     # ------------------------------------------------------------------ #

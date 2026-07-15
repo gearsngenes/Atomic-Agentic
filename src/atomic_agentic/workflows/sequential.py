@@ -137,6 +137,15 @@ class SequentialFlow(Workflow):
         """Fixed step index whose result becomes the outer flow result."""
         return self._return_index
 
+    def _extra_description(self) -> str:
+        """Chain into the return-index step's own extra description verbatim.
+
+        Mirrors how `return_type` is sourced at construction — the step
+        selected by `return_index` is what produces this flow's result
+        payload each run.
+        """
+        return self._steps[self._return_index]._extra_description()
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #

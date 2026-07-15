@@ -161,6 +161,26 @@ class RoutingFlow(Workflow):
         """Return the fixed normalized router."""
         return self._router
 
+    def _extra_description(self) -> str:
+        """State the fixed branch count; inline shared branch content when unanimous.
+
+        Since only one branch executes per run, a labeled per-branch dump
+        would misrepresent which content applies to any given invocation. A
+        branch's own extra description is appended only when every
+        configured branch agrees exactly and the shared value is non-empty.
+        """
+        branch_values = (
+            list(self._branches.values())
+            if isinstance(self._branches, dict)
+            else list(self._branches)
+        )
+        extras = [b._extra_description() for b in branch_values]
+        base = f"Selects 1 of {len(branch_values)} branches at runtime."
+
+        if all(e == extras[0] for e in extras) and extras[0]:
+            return f"{base}\n{extras[0]}"
+        return base
+
     # ------------------------------------------------------------------ #
     # Public retrieval helper
     # ------------------------------------------------------------------ #

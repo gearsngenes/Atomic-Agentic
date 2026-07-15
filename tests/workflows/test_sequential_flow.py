@@ -183,6 +183,25 @@ class TestSequentialFlowConstruction:
             flow.return_index = 0  # type: ignore[misc]
 
 
+class TestSequentialFlowExtraDescription:
+    def test_surfaces_return_index_step_extra_description(self) -> None:
+        flow = make_three_step_flow(return_index=1)
+
+        assert flow._extra_description() == "Output schema: [second]"
+        assert flow.description == "Sequential test flow.\nOutput schema: [second]"
+
+    def test_empty_when_return_index_step_has_no_extra_description(self) -> None:
+        flow = SequentialFlow(
+            name="sequential_flow",
+            namespace="tests",
+            description="Sequential test flow.",
+            steps=[EchoWorkflow()],
+        )
+
+        assert flow._extra_description() == ""
+        assert flow.description == flow._description
+
+
 class TestSequentialFlowSyncInvoke:
     def test_invoke_returns_sequential_flow_result(self) -> None:
         flow = make_three_step_flow(return_index=1)

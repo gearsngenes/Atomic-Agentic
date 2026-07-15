@@ -81,6 +81,14 @@ class BasicFlow(Workflow):
         """The wrapped executable component."""
         return self._component
 
+    def _extra_description(self) -> str:
+        """Chain into the wrapped component's own extra description verbatim.
+
+        `BasicFlow` always wraps exactly one `AtomicInvokable`, so this is an
+        unconditional direct delegation, never `super()`.
+        """
+        return self._component._extra_description()
+
     # ------------------------------------------------------------------ #
     # Result construction
     # ------------------------------------------------------------------ #
