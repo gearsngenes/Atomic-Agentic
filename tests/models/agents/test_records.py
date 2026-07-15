@@ -262,7 +262,7 @@ class TestAgentRecord:
             generated_response="raw",
         )
         assert record.to_dict() == {
-            "user_prompt": {"template": "run", "description": "", "defaults": {}},
+            "user_prompt": {"template": "run", "description": "", "parameters": []},
             "context": {},
             "generated_response": "raw",
             "final_result": None,
@@ -278,7 +278,7 @@ class TestAgentRecord:
             final_result=agent_result,
         )
         d = record.to_dict()
-        assert d["user_prompt"] == {"template": "run", "description": "", "defaults": {}}
+        assert d["user_prompt"] == {"template": "run", "description": "", "parameters": []}
         assert d["generated_response"] == "raw"
         assert d["final_result"] == agent_result.to_dict()
 
@@ -408,7 +408,7 @@ class TestToolAgentRecord:
             blackboard_end=6,
         )
         assert record.to_dict() == {
-            "user_prompt": {"template": "run tools", "description": "", "defaults": {}},
+            "user_prompt": {"template": "run tools", "description": "", "parameters": []},
             "context": {},
             "generated_response": 42,
             "final_result": None,

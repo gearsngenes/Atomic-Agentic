@@ -275,7 +275,7 @@ class TestBasicAgentContextKeys:
         config = PromptConfig(
             template="Speak as {persona}.",
             description="d",
-            defaults={"persona": "a helper"},
+            field_specs={"persona": {"default": "a helper"}},
         )
         agent = make_basic_agent(role_prompt=config)
 

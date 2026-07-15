@@ -7,6 +7,8 @@ import pytest
 from atomic_agentic.exceptions import SchemaError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.utils.parameters import (
+    _normalize_prompt_template,
+    _try_parse_clean_field,
     _validate_parameter_order,
     extract_io,
     is_valid_parameter_order,
@@ -489,3 +491,132 @@ class TestToParamSpecListTypedDictAnnotated:
         parameters = to_paramspec_list(Config)
 
         assert all(p.description is None for p in parameters)
+
+
+class TestTryParseCleanField:
+    def test_bare_identifier(self) -> None:
+        assert _try_parse_clean_field("role") == "role"
+
+    def test_identifier_with_conversion(self) -> None:
+        assert _try_parse_clean_field("role!r") == "role"
+
+    def test_identifier_with_format_spec(self) -> None:
+        assert _try_parse_clean_field("age:>10") == "age"
+
+    def test_identifier_with_conversion_and_format_spec(self) -> None:
+        assert _try_parse_clean_field("role!r:>10") == "role"
+
+    def test_empty_string_is_not_clean(self) -> None:
+        assert _try_parse_clean_field("") is None
+
+    def test_digit_leading_is_not_clean(self) -> None:
+        assert _try_parse_clean_field("0") is None
+
+    def test_dotted_access_is_not_clean(self) -> None:
+        assert _try_parse_clean_field("obj.attr") is None
+
+    def test_indexed_access_is_not_clean(self) -> None:
+        assert _try_parse_clean_field("x[0]") is None
+
+    def test_invalid_conversion_flag_is_not_clean(self) -> None:
+        assert _try_parse_clean_field("name!z") is None
+
+    def test_conversion_flag_with_no_char_is_not_clean(self) -> None:
+        assert _try_parse_clean_field("name!") is None
+
+    def test_trailing_garbage_after_identifier_is_not_clean(self) -> None:
+        assert _try_parse_clean_field("name garbage") is None
+
+
+class TestNormalizePromptTemplate:
+    def test_plain_identifier_fields_discovered_and_preserved(self) -> None:
+        normalized, discovered = _normalize_prompt_template(
+            "You are a {role} expert in {domain}."
+        )
+        assert normalized == "You are a {role} expert in {domain}."
+        assert discovered == ["role", "domain"]
+
+    def test_duplicate_placeholder_deduplicated_in_first_appearance_order(self) -> None:
+        normalized, discovered = _normalize_prompt_template(
+            "Hello {name}, I said hello {name}!"
+        )
+        assert normalized == "Hello {name}, I said hello {name}!"
+        assert discovered == ["name"]
+
+    def test_conversion_and_format_spec_preserved(self) -> None:
+        normalized, discovered = _normalize_prompt_template(
+            "Quote: {role!r} and spec: {age:>10}."
+        )
+        assert normalized == "Quote: {role!r} and spec: {age:>10}."
+        assert discovered == ["role", "age"]
+
+    def test_stray_unmatched_open_brace_never_raises(self) -> None:
+        normalized, discovered = _normalize_prompt_template(
+            "you are an expert on the history of the { character"
+        )
+        assert discovered == []
+        assert normalized.format() == (
+            "you are an expert on the history of the { character"
+        )
+
+    def test_stray_unmatched_close_brace_never_raises(self) -> None:
+        normalized, discovered = _normalize_prompt_template(
+            "this has a } lone brace."
+        )
+        assert discovered == []
+        assert normalized.format() == "this has a } lone brace."
+
+    def test_already_escaped_literal_passes_through_unchanged(self) -> None:
+        normalized, discovered = _normalize_prompt_template(
+            "Return JSON like {{ \"result\": \"value\" }}."
+        )
+        assert normalized == "Return JSON like {{ \"result\": \"value\" }}."
+        assert discovered == []
+        assert normalized.format() == 'Return JSON like { "result": "value" }.'
+
+    def test_unescaped_json_is_escaped_and_round_trips(self) -> None:
+        raw = 'Return JSON like { "result": "value" }.'
+        normalized, discovered = _normalize_prompt_template(raw)
+        assert discovered == []
+        assert normalized.format() == raw
+
+    def test_empty_braces_are_escaped_not_discovered(self) -> None:
+        normalized, discovered = _normalize_prompt_template("Empty {} braces.")
+        assert discovered == []
+        assert normalized.format() == "Empty {} braces."
+
+    def test_digit_index_is_escaped_not_discovered(self) -> None:
+        normalized, discovered = _normalize_prompt_template("Index {0} value.")
+        assert discovered == []
+        assert normalized.format() == "Index {0} value."
+
+    def test_dotted_and_indexed_access_escaped_not_discovered(self) -> None:
+        normalized, discovered = _normalize_prompt_template(
+            "Dotted {obj.attr} and indexed {x[0]}."
+        )
+        assert discovered == []
+        assert normalized.format() == "Dotted {obj.attr} and indexed {x[0]}."
+
+    def test_nested_format_spec_whole_span_escaped_not_discovered(self) -> None:
+        raw = "Nested spec: {value:{width}} done."
+        normalized, discovered = _normalize_prompt_template(raw)
+        assert discovered == []
+        assert normalized.format() == raw
+
+    def test_deeply_nested_stray_braces_never_raise_and_round_trip(self) -> None:
+        raw = "Multiple stray: { { {ok} } }"
+        normalized, discovered = _normalize_prompt_template(raw)
+        assert discovered == []
+        assert normalized.format() == raw
+
+    def test_invalid_conversion_flag_field_is_escaped_not_discovered(self) -> None:
+        normalized, discovered = _normalize_prompt_template("Bad: {name!z} here.")
+        assert discovered == []
+        assert normalized.format() == "Bad: {name!z} here."
+
+    def test_renormalizing_normalized_template_is_idempotent(self) -> None:
+        raw = 'Mixed { "a": 1 } and {role} and {value:{width}} and stray {.'
+        normalized_once, discovered_once = _normalize_prompt_template(raw)
+        normalized_twice, discovered_twice = _normalize_prompt_template(normalized_once)
+        assert normalized_twice == normalized_once
+        assert discovered_twice == discovered_once

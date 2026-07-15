@@ -24,14 +24,21 @@ Private helpers
 - ``_format_annotation``, ``_is_typed_dict_class``, ``_validate_schema_name``,
   ``_paramspec_list_from_strings`` — low-level helpers consumed by the public
   functions above.
+- ``_normalize_prompt_template``, ``_try_parse_clean_field`` — template-string
+  field discovery/escaping for ``PromptConfig``
+  (``models/agents/prompts.py``). Imported directly by that module — a
+  one-directional exception to the usual ``models -> utils`` ordering, mirroring
+  the existing ``models/results/llm.py -> utils/core.py`` precedent; no cycle
+  results since this module has no dependency on ``models/agents/``.
 """
 
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Annotated, Any, Callable, Optional, get_args, get_origin, get_type_hints
 
-from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
+from ..constants.core import IDENTIFIER_PATTERN, IDENTIFIER_PATTERN_TEXT, NO_VAL
 from ..exceptions import SchemaError
 from ..models.parameters import ParamSpec
 
@@ -409,6 +416,117 @@ def _validate_parameter_order(parameters: list[ParamSpec]) -> None:
         ):
             # Separate section; no positional trailing-default rule applies here.
             continue
+
+
+def _try_parse_clean_field(inner: str) -> str | None:
+    """Return the identifier name if ``inner`` is a clean, self-contained field.
+
+    ``inner`` is the text strictly between one outer ``'{'`` and its matching
+    top-level ``'}'``, already confirmed by the caller to contain no further
+    nested braces. Accepts ``name``, ``name!conv`` (``conv`` one of ``r``/
+    ``s``/``a``), ``name:spec``, or ``name!conv:spec``. Anything else (empty,
+    non-identifier leading text, invalid conversion flag, trailing garbage
+    after a recognized piece) returns ``None``.
+    """
+    match = re.match(IDENTIFIER_PATTERN_TEXT, inner)
+    if not match:
+        return None
+
+    name = match.group(0)
+    rest = inner[match.end():]
+
+    if rest.startswith("!"):
+        if len(rest) < 2 or rest[1] not in ("r", "s", "a"):
+            return None
+        rest = rest[2:]
+
+    if rest.startswith(":"):
+        rest = ""
+
+    if rest:
+        return None
+
+    return name
+
+
+def _normalize_prompt_template(template: str) -> tuple[str, list[str]]:
+    """Normalize a raw prompt template and discover its identifier fields.
+
+    Scans ``template`` once. Clean, self-contained identifier fields (see
+    ``_try_parse_clean_field``) are kept single-braced and their names are
+    discovered in first-appearance order, deduplicated. Every other brace
+    region — non-identifier shapes (``{}``, ``{0}``, ``{obj.attr}``,
+    ``{x[0]}``), fields nested inside other fields, unbalanced/stray braces —
+    is escaped into inert literal text (whole-span, not partially recovered).
+    Already-doubled literal escapes (``{{``/``}}``) pass through unchanged,
+    so re-normalizing an already-normalized template is a no-op. Never raises
+    regardless of input shape.
+    """
+    i = 0
+    n = len(template)
+    out: list[str] = []
+    discovered: list[str] = []
+    seen: set[str] = set()
+
+    while i < n:
+        ch = template[i]
+
+        if ch == "{":
+            if i + 1 < n and template[i + 1] == "{":
+                out.append("{{")
+                i += 2
+                continue
+
+            # Find the matching top-level close, tracking nested depth.
+            depth = 1
+            j = i + 1
+            nested = False
+            while j < n and depth > 0:
+                if template[j] == "{":
+                    depth += 1
+                    nested = True
+                elif template[j] == "}":
+                    depth -= 1
+                j += 1
+
+            if depth != 0:
+                # Unbalanced: no matching close found before end of string.
+                # Escape just this one stray brace and resume scanning.
+                out.append("{{")
+                i += 1
+                continue
+
+            span = template[i:j]
+            if not nested:
+                name = _try_parse_clean_field(template[i + 1 : j - 1])
+                if name is not None:
+                    out.append(span)
+                    if name not in seen:
+                        seen.add(name)
+                        discovered.append(name)
+                    i = j
+                    continue
+
+            # Not a clean self-contained identifier field: escape the whole
+            # span (including any nested content) into inert literal text.
+            out.append(span.replace("{", "{{").replace("}", "}}"))
+            i = j
+            continue
+
+        if ch == "}":
+            if i + 1 < n and template[i + 1] == "}":
+                out.append("}}")
+                i += 2
+                continue
+            # Orphan close brace with no opener: escape it alone.
+            out.append("}}")
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out), discovered
 
 
 # ---------------------------------------------------------------------------
