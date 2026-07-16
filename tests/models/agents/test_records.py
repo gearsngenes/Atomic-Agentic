@@ -8,13 +8,7 @@ import pytest
 
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
-from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.constants.core import NO_VAL
-
-
-def pc(template: str) -> PromptConfig:
-    """Shorthand for constructing a bare PromptConfig in tests."""
-    return PromptConfig(template=template, description="")
 from atomic_agentic.models.results import AtomicResult, LLMModelData, LLMResult, TokenUsage
 from atomic_agentic.models.results.agents import AgentResult
 
@@ -240,17 +234,17 @@ class TestLLMRecord:
 class TestAgentRecord:
     def test_valid_record_stores_prompt_and_response(self) -> None:
         record = AgentRecord(
-            user_prompt=pc("write a summary"),
+            user_prompt="write a summary",
             generated_response="raw assistant text",
         )
-        assert record.user_prompt == pc("write a summary")
+        assert record.user_prompt == "write a summary"
         assert record.generated_response == "raw assistant text"
         assert record.final_result is None
 
     def test_final_result_accepts_agent_result(self) -> None:
         agent_result = make_agent_result()
         record = AgentRecord(
-            user_prompt=pc("run"),
+            user_prompt="run",
             generated_response="raw",
             final_result=agent_result,
         )
@@ -258,12 +252,12 @@ class TestAgentRecord:
 
     def test_to_dict_with_none_final_result(self) -> None:
         record = AgentRecord(
-            user_prompt=pc("run"),
+            user_prompt="run",
             generated_response="raw",
         )
         assert record.to_dict() == {
-            "user_prompt": {"template": "run", "description": "", "parameters": []},
-            "context": {},
+            "user_prompt": "run",
+            "inputs": {},
             "generated_response": "raw",
             "final_result": None,
             "llm_records": [],
@@ -273,50 +267,50 @@ class TestAgentRecord:
     def test_to_dict_with_agent_result(self) -> None:
         agent_result = make_agent_result(value="done")
         record = AgentRecord(
-            user_prompt=pc("run"),
+            user_prompt="run",
             generated_response="raw",
             final_result=agent_result,
         )
         d = record.to_dict()
-        assert d["user_prompt"] == {"template": "run", "description": "", "parameters": []}
+        assert d["user_prompt"] == "run"
         assert d["generated_response"] == "raw"
         assert d["final_result"] == agent_result.to_dict()
 
-    def test_to_dict_includes_context_field(self) -> None:
+    def test_to_dict_includes_inputs_field(self) -> None:
         record = AgentRecord(
-            user_prompt=pc("run"),
+            user_prompt="run",
             generated_response="raw",
-            context={"lang": "English"},
+            inputs={"lang": "English"},
         )
-        assert record.to_dict()["context"] == {"lang": "English"}
+        assert record.to_dict()["inputs"] == {"lang": "English"}
 
-    def test_context_shallow_copied_on_construction(self) -> None:
+    def test_inputs_shallow_copied_on_construction(self) -> None:
         ctx = {"key": "val"}
-        record = AgentRecord(user_prompt=pc("x"), generated_response="y", context=ctx)
+        record = AgentRecord(user_prompt="x", generated_response="y", inputs=ctx)
         ctx["key"] = "mutated"
-        assert record.context["key"] == "val"
+        assert record.inputs["key"] == "val"
 
-    def test_rejects_non_prompt_config_user_prompt(self) -> None:
+    def test_rejects_non_string_user_prompt(self) -> None:
         with pytest.raises(TypeError, match="user_prompt"):
             AgentRecord(user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
 
-    def test_rejects_string_user_prompt(self) -> None:
-        with pytest.raises(TypeError, match="user_prompt"):
-            AgentRecord(user_prompt="plain string", generated_response="raw")  # type: ignore[arg-type]
+    def test_accepts_string_user_prompt(self) -> None:
+        record = AgentRecord(user_prompt="plain string", generated_response="raw")
+        assert record.user_prompt == "plain string"
 
     def test_is_frozen(self) -> None:
-        record = AgentRecord(user_prompt=pc("run"), generated_response="raw")
+        record = AgentRecord(user_prompt="run", generated_response="raw")
         with pytest.raises(FrozenInstanceError):
             record.generated_response = "other"  # type: ignore[misc]
 
     def test_llm_records_defaults_to_empty_tuple(self) -> None:
-        record = AgentRecord(user_prompt=pc("hi"), generated_response="there")
+        record = AgentRecord(user_prompt="hi", generated_response="there")
         assert record.llm_records == ()
 
     def test_llm_records_populated_on_completed_record(self) -> None:
         llm_rec = make_llm_record()
         record = AgentRecord(
-            user_prompt=pc("hi"),
+            user_prompt="hi",
             generated_response="there",
             llm_records=(llm_rec,),
         )
@@ -325,7 +319,7 @@ class TestAgentRecord:
     def test_llm_records_normalizes_list_to_tuple(self) -> None:
         llm_rec = make_llm_record()
         record = AgentRecord(
-            user_prompt=pc("hi"),
+            user_prompt="hi",
             generated_response="there",
             llm_records=[llm_rec],
         )
@@ -334,7 +328,7 @@ class TestAgentRecord:
     def test_rejects_non_llm_record_item_in_llm_records(self) -> None:
         with pytest.raises(TypeError, match="LLMRecord"):
             AgentRecord(
-                user_prompt=pc("hi"),
+                user_prompt="hi",
                 generated_response="there",
                 llm_records=("not a record",),
             )
@@ -342,7 +336,7 @@ class TestAgentRecord:
     def test_to_dict_includes_llm_records(self) -> None:
         llm_rec = make_llm_record()
         record = AgentRecord(
-            user_prompt=pc("hi"),
+            user_prompt="hi",
             generated_response="there",
             llm_records=(llm_rec,),
         )
@@ -352,46 +346,46 @@ class TestAgentRecord:
         assert d["llm_records"] == [llm_rec.to_dict()]
 
     def test_prev_defaults_to_none(self) -> None:
-        record = AgentRecord(user_prompt=pc("x"), generated_response="y")
+        record = AgentRecord(user_prompt="x", generated_response="y")
         assert record.prev is None
 
     def test_prev_accepts_agent_record_instance(self) -> None:
         completed = AgentRecord(
-            user_prompt=pc("first"),
+            user_prompt="first",
             generated_response="response",
             final_result=make_agent_result(),
         )
-        record = AgentRecord(user_prompt=pc("second"), generated_response="r2", prev=completed)
+        record = AgentRecord(user_prompt="second", generated_response="r2", prev=completed)
         assert record.prev is completed
 
     def test_prev_rejects_non_agent_record(self) -> None:
         with pytest.raises(TypeError, match="prev"):
-            AgentRecord(user_prompt=pc("x"), generated_response="y", prev="bad")  # type: ignore[arg-type]
+            AgentRecord(user_prompt="x", generated_response="y", prev="bad")  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("bad_prev", [0, "string", object(), []])
     def test_prev_rejects_non_agent_record_parametrize(self, bad_prev: Any) -> None:
         with pytest.raises(TypeError, match="prev"):
-            AgentRecord(user_prompt=pc("x"), generated_response="y", prev=bad_prev)  # type: ignore[arg-type]
+            AgentRecord(user_prompt="x", generated_response="y", prev=bad_prev)  # type: ignore[arg-type]
 
     def test_to_dict_prev_run_id_is_none_when_no_prev(self) -> None:
-        record = AgentRecord(user_prompt=pc("x"), generated_response="y")
+        record = AgentRecord(user_prompt="x", generated_response="y")
         assert record.to_dict()["prev_run_id"] is None
 
     def test_to_dict_prev_run_id_matches_prev_final_result_run_id(self) -> None:
         agent_result = make_agent_result()
         prev_record = AgentRecord(
-            user_prompt=pc("first"),
+            user_prompt="first",
             generated_response="r1",
             final_result=agent_result,
         )
-        record = AgentRecord(user_prompt=pc("second"), generated_response="r2", prev=prev_record)
+        record = AgentRecord(user_prompt="second", generated_response="r2", prev=prev_record)
         assert record.to_dict()["prev_run_id"] == agent_result.run_id
 
 
 class TestToolAgentRecord:
     def test_is_an_agent_record(self) -> None:
         record = ToolAgentRecord(
-            user_prompt=pc("run tools"),
+            user_prompt="run tools",
             generated_response=42,
             blackboard_start=3,
             blackboard_end=6,
@@ -402,14 +396,14 @@ class TestToolAgentRecord:
 
     def test_to_dict_includes_blackboard_span_fields(self) -> None:
         record = ToolAgentRecord(
-            user_prompt=pc("run tools"),
+            user_prompt="run tools",
             generated_response=42,
             blackboard_start=3,
             blackboard_end=6,
         )
         assert record.to_dict() == {
-            "user_prompt": {"template": "run tools", "description": "", "parameters": []},
-            "context": {},
+            "user_prompt": "run tools",
+            "inputs": {},
             "generated_response": 42,
             "final_result": None,
             "llm_records": [],
@@ -420,7 +414,7 @@ class TestToolAgentRecord:
 
     def test_to_dict_blackboard_span_defaults_to_none(self) -> None:
         record = ToolAgentRecord(
-            user_prompt=pc("run tools"),
+            user_prompt="run tools",
             generated_response=42,
         )
         d = record.to_dict()
@@ -429,7 +423,7 @@ class TestToolAgentRecord:
 
     def test_blackboard_span_defaults_to_none(self) -> None:
         record = ToolAgentRecord(
-            user_prompt=pc("run without context"),
+            user_prompt="run without context",
             generated_response="raw",
         )
         assert record.blackboard_start is None
@@ -440,7 +434,7 @@ class TestToolAgentRecord:
             ToolAgentRecord(user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
 
     def test_is_frozen(self) -> None:
-        record = ToolAgentRecord(user_prompt=pc("run"), generated_response="raw")
+        record = ToolAgentRecord(user_prompt="run", generated_response="raw")
         with pytest.raises(FrozenInstanceError):
             record.blackboard_start = 1  # type: ignore[misc]
 

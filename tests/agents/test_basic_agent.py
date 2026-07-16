@@ -319,7 +319,7 @@ class TestBasicAgentInvoke:
         agent.invoke({"prompt": "What is AI?"})
 
         assert len(agent.records) == 1
-        assert agent.records[0].user_prompt.template == "What is AI?"
+        assert agent.records[0].user_prompt == "What is AI?"
 
     def test_invoke_record_llm_record_has_system_prompt_name_role(self) -> None:
         agent = make_basic_agent()

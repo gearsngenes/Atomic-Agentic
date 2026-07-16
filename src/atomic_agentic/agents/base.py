@@ -112,9 +112,9 @@ class Agent(AtomicInvokable, ABC):
                 namespace=name,
                 description=f"The tool that preprocesses inputs into a string for Agent {name}",
             )
-        if pre_tool.return_type.lower() not in {"any", "str", "promptconfig"}:
+        if pre_tool.return_type.lower() not in {"any", "str"}:
             raise AgentError(
-                "Agent.pre_invoke must return a type 'str'|'any'|'promptconfig'"
+                "Agent.pre_invoke must return a type 'str'|'any'"
             )
 
         # ── Post-invoke ──────────────────────────────────────────────────────
@@ -559,7 +559,7 @@ class Agent(AtomicInvokable, ABC):
             response_text = response_text[: self._response_preview_limit] + "..."
 
         return [
-            {"role": "user", "content": turn.user_prompt.render(turn.context)},
+            {"role": "user", "content": turn.user_prompt},
             {"role": "assistant", "content": response_text},
         ]
 
@@ -750,16 +750,12 @@ class Agent(AtomicInvokable, ABC):
         except Exception as e:  # pragma: no cover
             raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
 
-        if isinstance(raw_prompt, PromptConfig):
-            user_prompt_config = raw_prompt
-        elif isinstance(raw_prompt, str):
-            user_prompt_config = PromptConfig(template=raw_prompt, description="")
-        else:
+        if not isinstance(raw_prompt, str):
             raise AgentInvocationError(
-                f"pre_invoke returned non-string/non-PromptConfig result "
-                f"(type={type(raw_prompt)!r}); a prompt string or PromptConfig is required"
+                f"pre_invoke returned a non-string result "
+                f"(type={type(raw_prompt)!r}); a prompt string is required"
             )
-        prompt = user_prompt_config.render(context)
+        prompt = raw_prompt
 
         # ⑦ History
         logger.debug(f"Agent.{self.name} selecting turns")
@@ -798,11 +794,11 @@ class Agent(AtomicInvokable, ABC):
             **metadata,
         )
 
-        # ⑪ Record — always appended; set authoritative user_prompt + context
+        # ⑪ Record — always appended; set authoritative user_prompt + inputs
         record = replace(
             draft,
-            user_prompt=user_prompt_config,
-            context=context,
+            user_prompt=prompt,
+            inputs=context,
             final_result=agent_result,
             llm_records=metadata["llm_records"],
             prev=turns[-1] if turns else None,
@@ -822,12 +818,12 @@ class Agent(AtomicInvokable, ABC):
         ③ Pop ``context``; validate required context properties.
         ④ Slice ``pre_inputs`` from remaining; inject ``context`` if declared.
         ⑤ Slice ``post_inputs`` from remaining; inject ``context`` if declared.
-        ⑥ pre_invoke → PromptConfig or str; normalize to PromptConfig; render prompt.
+        ⑥ pre_invoke → str (validated); used directly as prompt.
         ⑦ Select conversation turns according to ``context_enabled``.
         ⑧ _invoke(turns, prompt, context) → draft + metadata.
         ⑨ post_invoke → final result.
         ⑩ Construct AgentResult.
-        ⑪ Commit AgentRecord unconditionally (sets user_prompt + context on record).
+        ⑪ Commit AgentRecord unconditionally (sets user_prompt + inputs on record).
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
@@ -875,16 +871,12 @@ class Agent(AtomicInvokable, ABC):
             except Exception as e:  # pragma: no cover
                 raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
 
-            if isinstance(raw_prompt, PromptConfig):
-                user_prompt_config = raw_prompt
-            elif isinstance(raw_prompt, str):
-                user_prompt_config = PromptConfig(template=raw_prompt, description="")
-            else:
+            if not isinstance(raw_prompt, str):
                 raise AgentInvocationError(
-                    f"pre_invoke returned non-string/non-PromptConfig result "
-                    f"(type={type(raw_prompt)!r}); a prompt string or PromptConfig is required"
+                    f"pre_invoke returned a non-string result "
+                    f"(type={type(raw_prompt)!r}); a prompt string is required"
                 )
-            prompt = user_prompt_config.render(context)
+            prompt = raw_prompt
 
             # ⑦ History
             logger.debug(f"Agent.{self.name} selecting turns")
@@ -925,11 +917,11 @@ class Agent(AtomicInvokable, ABC):
                 **metadata,
             )
 
-            # ⑪ Record — always appended; set authoritative user_prompt + context
+            # ⑪ Record — always appended; set authoritative user_prompt + inputs
             record = replace(
                 draft,
-                user_prompt=user_prompt_config,
-                context=context,
+                user_prompt=prompt,
+                inputs=context,
                 final_result=agent_result,
                 llm_records=metadata["llm_records"],
                 prev=turns[-1] if turns else None,

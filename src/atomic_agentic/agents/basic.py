@@ -218,7 +218,7 @@ class BasicAgent(Agent):
             system_prompt_name="role",
         )
         draft = AgentRecord(
-            user_prompt=PromptConfig(template=prompt, description=""),
+            user_prompt=prompt,
             generated_response=text,
         )
         return draft, {
@@ -247,7 +247,7 @@ class BasicAgent(Agent):
             system_prompt_name="role",
         )
         draft = AgentRecord(
-            user_prompt=PromptConfig(template=prompt, description=""),
+            user_prompt=prompt,
             generated_response=text,
         )
         return draft, {

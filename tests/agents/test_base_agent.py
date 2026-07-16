@@ -50,7 +50,7 @@ class _MinimalAgent(Agent):
             llm_result=engine_result,
         )
         draft = AgentRecord(
-            user_prompt=PromptConfig(template=prompt, description=""),
+            user_prompt=prompt,
             generated_response=engine_result.result,
         )
         return draft, {
@@ -75,7 +75,7 @@ class _MinimalAgent(Agent):
             llm_result=engine_result,
         )
         draft = AgentRecord(
-            user_prompt=PromptConfig(template=prompt, description=""),
+            user_prompt=prompt,
             generated_response=engine_result.result,
         )
         return draft, {
@@ -581,8 +581,8 @@ class TestAgentContext:
         assert second_call_messages[-1]["content"] == "Write about second topic in a plain tone."
 
         assert len(agent.records) == 2
-        assert agent.records[0].user_prompt.template == "Write about first topic in a plain tone."
-        assert agent.records[1].user_prompt.template == "Write about second topic in a plain tone."
+        assert agent.records[0].user_prompt == "Write about first topic in a plain tone."
+        assert agent.records[1].user_prompt == "Write about second topic in a plain tone."
 
     def test_clear_memory_removes_stored_history(self) -> None:
         engine = StatefulEchoLLMEngine()
@@ -607,7 +607,7 @@ class TestAgentValidation:
     def test_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
         agent = make_agent(pre_invoke=bad_pre_invoke)
 
-        with pytest.raises(AgentInvocationError, match="pre_invoke returned non-string/non-PromptConfig"):
+        with pytest.raises(AgentInvocationError, match="pre_invoke returned a non-string result"):
             agent.invoke({"topic": "pytest"})
 
     def test_post_invoke_with_one_defaulted_parameter_is_allowed(self) -> None:
@@ -784,7 +784,7 @@ class TestAgentAsyncInvoke:
     def test_async_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
         agent = make_agent(pre_invoke=bad_pre_invoke)
 
-        with pytest.raises(AgentInvocationError, match="pre_invoke returned non-string/non-PromptConfig"):
+        with pytest.raises(AgentInvocationError, match="pre_invoke returned a non-string result"):
             asyncio.run(agent.async_invoke({"topic": "pytest"}))
 
     def test_async_engine_non_string_response_raises_agent_invocation_error(self) -> None:
@@ -991,7 +991,7 @@ class TestAgentContextProperties:
             context_properties=["lang"],
         )
         agent.invoke({"prompt": "hello", "context": {"lang": "English"}})
-        assert agent.records[0].context == {"lang": "English"}
+        assert agent.records[0].inputs == {"lang": "English"}
 
     def test_warn_reserved_name_collisions_run_id_semantic_match_warns(self) -> None:
         matching = ParamSpec(
@@ -1204,7 +1204,7 @@ class TestAgentContextIsolation:
         )
         agent2.invoke({"prompt": "hello"})
         agent2.invoke({"prompt": "world"})
-        assert agent2.records[0].context is not agent2.records[1].context
+        assert agent2.records[0].inputs is not agent2.records[1].inputs
 
 
 class TestAgentRenderTurnGuards:
@@ -1217,61 +1217,12 @@ class TestAgentRenderTurnGuards:
             assistant_response_source="final",
         )
         draft = AgentRecord(
-            user_prompt=PromptConfig(template="hello", description=""),
+            user_prompt="hello",
             generated_response="raw text",
             final_result=None,
         )
         with pytest.raises(AgentInvocationError, match="final_result is None"):
             agent.render_turn(draft)
-
-    def test_render_turn_replays_context_into_template(self) -> None:
-        engine = StatefulEchoLLMEngine()
-        agent = make_agent(engine=engine, context_enabled=True)
-
-        from atomic_agentic.models.agents.prompts import PromptConfig as PC
-        from dataclasses import replace as dc_replace
-        from atomic_agentic.models.results.agents import AgentResult
-        from datetime import datetime, timezone, timedelta
-        from atomic_agentic.models.results import LLMModelData, TokenUsage
-
-        # Craft a completed record with a template that has a placeholder
-        cfg = PC(template="Task for {user}: do something.", description="")
-        result = AgentResult(
-            result="done",
-            invoker_id="test-agent",
-            started_at=datetime.now(timezone.utc),
-            ended_at=datetime.now(timezone.utc) + timedelta(seconds=1),
-            llm_token_usage=(
-                TokenUsage(
-                    input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
-                ),
-            ),
-            llm_model_data=LLMModelData(provider="test"),
-        )
-        from atomic_agentic.models.agents.records import LLMRecord
-        from atomic_agentic.models.results import LLMResult
-        llm_result = LLMResult(
-            result="done",
-            invoker_id="engine-1",
-            started_at=datetime.now(timezone.utc),
-            ended_at=datetime.now(timezone.utc) + timedelta(seconds=1),
-            token_usage=TokenUsage(
-                input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
-            ),
-            model_data=LLMModelData(provider="test"),
-        )
-        record = AgentRecord(
-            user_prompt=cfg,
-            generated_response="raw",
-            context={"user": "Alice"},
-            final_result=result,
-            llm_records=(LLMRecord(
-                messages=({"role": "user", "content": "Task for Alice: do something."},),
-                llm_result=llm_result,
-            ),),
-        )
-        rendered = agent.render_turn(record)
-        assert rendered[0]["content"] == "Task for Alice: do something."
 
 
 class TestAgentAsyncContextProperties:
@@ -1300,7 +1251,7 @@ class TestAgentAsyncContextProperties:
             context_properties=["lang"],
         )
         asyncio.run(agent.async_invoke({"prompt": "hello", "context": {"lang": "English"}}))
-        assert agent.records[0].context == {"lang": "English"}
+        assert agent.records[0].inputs == {"lang": "English"}
 
 
 class TestAgentDescriptionOverrideRemoval:
