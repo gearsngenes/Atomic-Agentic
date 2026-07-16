@@ -15,12 +15,26 @@ Public surface
 - ``is_valid_parameter_order`` — bool predicate: ``True`` if the list satisfies
   Python-compatible ordering rules, ``False`` on ``SchemaError``, propagates
   ``TypeError``.
+- ``semantically_compatible``, ``semantically_identical`` — same-name
+  compatibility/identity checks between two ``ParamSpec`` instances.
+- ``parameter_overlap``, ``parameter_collisions`` — partition the names shared
+  between two ``ParamSpec`` lists into compatible-overlap vs. true-collision.
+- ``variadic_compatible`` — detects a same-kind variadic (``*args``/``**kwargs``)
+  declared independently by two sources under different names, a case
+  name-based overlap/collision checking can't see.
+- ``insert_by_category`` — batch-inserts new ``ParamSpec`` items into an
+  already-valid composed list at the position that preserves a valid
+  Python-style ordering.
 
 Private helpers
 ---------------
 - ``_validate_parameter_order`` — raise-or-return-None enforcement of the same
   rules; used internally by ``to_paramspec_list`` and directly by call sites that
   want the error (``Invokable``, workflow constructors).
+- ``_KIND_PRIORITY`` — shared kind-priority table used by both
+  ``_validate_parameter_order`` and ``_insertion_category``.
+- ``_insertion_category`` — sort key (kind priority, default tier) consumed by
+  ``insert_by_category``.
 - ``_format_annotation``, ``_is_typed_dict_class``, ``_validate_schema_name``,
   ``_paramspec_list_from_strings`` — low-level helpers consumed by the public
   functions above.
@@ -42,7 +56,17 @@ from ..constants.core import IDENTIFIER_PATTERN, IDENTIFIER_PATTERN_TEXT, NO_VAL
 from ..exceptions import SchemaError
 from ..models.parameters import ParamSpec
 
-__all__ = ["extract_io", "to_paramspec_list", "is_valid_parameter_order"]
+__all__ = [
+    "extract_io",
+    "to_paramspec_list",
+    "is_valid_parameter_order",
+    "semantically_compatible",
+    "semantically_identical",
+    "parameter_overlap",
+    "parameter_collisions",
+    "variadic_compatible",
+    "insert_by_category",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +315,17 @@ def _paramspec_list_from_strings(items: list[str]) -> list[ParamSpec]:
     return normalized
 
 
+# Shared kind-priority table, derived from ParamSpec._VALID_KINDS (already in
+# priority order) rather than a second hardcoded literal list -- ParamSpec
+# stays the single source of truth for the kind vocabulary and its ordering.
+# ``_validate_parameter_order`` uses this directly for the non-decreasing-kind
+# check; ``_insertion_category`` builds a finer (kind, default-tier) key on
+# top of it for ``insert_by_category``.
+_KIND_PRIORITY: dict[str, int] = {
+    kind: priority for priority, kind in enumerate(ParamSpec._VALID_KINDS)
+}
+
+
 def _validate_parameter_order(parameters: list[ParamSpec]) -> None:
     """Enforce Python-compatible parameter ordering rules, raising on any violation.
 
@@ -336,14 +371,6 @@ def _validate_parameter_order(parameters: list[ParamSpec]) -> None:
     # ------------------------------------------------------------------
     # Kind ordering
     # ------------------------------------------------------------------
-    kind_order = {
-        ParamSpec.POSITIONAL_ONLY: 0,
-        ParamSpec.POSITIONAL_OR_KEYWORD: 1,
-        ParamSpec.VAR_POSITIONAL: 2,
-        ParamSpec.KEYWORD_ONLY: 3,
-        ParamSpec.VAR_KEYWORD: 4,
-    }
-
     last_priority = -1
     last_kind: str | None = None
     seen_varpos = False
@@ -352,10 +379,10 @@ def _validate_parameter_order(parameters: list[ParamSpec]) -> None:
     for index, spec in enumerate(parameters):
         kind = spec.kind
 
-        if kind not in kind_order:
+        if kind not in _KIND_PRIORITY:
             raise SchemaError(f"Unknown parameter kind: {kind!r} at index {index}")
 
-        priority = kind_order[kind]
+        priority = _KIND_PRIORITY[kind]
         if priority < last_priority:
             raise SchemaError(
                 f"Invalid parameter order at index {index}: "
@@ -739,3 +766,146 @@ def is_valid_parameter_order(parameters: list[ParamSpec]) -> bool:
         return True
     except SchemaError:
         return False
+
+
+def semantically_compatible(a: ParamSpec, b: ParamSpec) -> bool:
+    """Whether two same-named ``ParamSpec``s are compatible enough to merge.
+
+    Type must match exactly, or either side may be ``"Any"``. Kind must be
+    compatible: any two non-variadic kinds are compatible with each other
+    (e.g. ``POSITIONAL_ONLY`` and ``KEYWORD_ONLY``), while
+    ``VAR_POSITIONAL``/``VAR_KEYWORD`` are only compatible with the exact
+    same variadic kind. Name equality is the caller's responsibility — this
+    checks compatibility of a pair already known to share a name (see
+    ``parameter_overlap``/``parameter_collisions``).
+    """
+    type_compatible = a.type == b.type or a.type == "Any" or b.type == "Any"
+
+    variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
+    a_variadic = a.kind in variadic_kinds
+    b_variadic = b.kind in variadic_kinds
+    if a_variadic or b_variadic:
+        kind_compatible = a_variadic and b_variadic and a.kind == b.kind
+    else:
+        kind_compatible = True
+
+    return type_compatible and kind_compatible
+
+
+def semantically_identical(a: ParamSpec, b: ParamSpec) -> bool:
+    """Whether two ``ParamSpec``s are identical in every field but ``index``.
+
+    A strict refinement of ``semantically_compatible``: identical params are
+    always compatible, but compatible params need not be identical.
+    """
+    return (
+        a.name == b.name
+        and a.type == b.type
+        and a.kind == b.kind
+        and a.default == b.default
+        and a.description == b.description
+    )
+
+
+def parameter_overlap(
+    source_a: list[ParamSpec], source_b: list[ParamSpec]
+) -> list[str]:
+    """Names present in both lists that are ``semantically_compatible``.
+
+    Returns names in ``source_a``'s order. Together with
+    ``parameter_collisions``, partitions every name shared between the two
+    lists — no name appears in both outputs, none are left unclassified.
+    """
+    b_by_name = {p.name: p for p in source_b}
+    return [
+        spec.name
+        for spec in source_a
+        if spec.name in b_by_name and semantically_compatible(spec, b_by_name[spec.name])
+    ]
+
+
+def parameter_collisions(
+    source_a: list[ParamSpec], source_b: list[ParamSpec]
+) -> list[str]:
+    """Names present in both lists that are NOT ``semantically_compatible``.
+
+    Returns names in ``source_a``'s order. See ``parameter_overlap`` for the
+    partition property the two functions satisfy together.
+    """
+    b_by_name = {p.name: p for p in source_b}
+    return [
+        spec.name
+        for spec in source_a
+        if spec.name in b_by_name and not semantically_compatible(spec, b_by_name[spec.name])
+    ]
+
+
+def variadic_compatible(
+    source_a: list[ParamSpec],
+    source_b: list[ParamSpec],
+    shared_names: set[str],
+) -> bool:
+    """Whether ``source_a``/``source_b``'s variadic declarations can merge safely.
+
+    Catches what name-based overlap/collision checking can't see: both
+    sources independently declaring a same-kind variadic parameter under
+    different names. A name already in ``shared_names`` is assumed already
+    accounted for by the ordinary overlap/collision path, so it is excluded
+    here regardless of kind.
+    """
+    for kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD):
+        a_has = any(p.kind == kind and p.name not in shared_names for p in source_a)
+        b_has = any(p.kind == kind and p.name not in shared_names for p in source_b)
+        if a_has and b_has:
+            return False
+    return True
+
+
+def _insertion_category(spec: ParamSpec) -> tuple[int, int]:
+    """Sort key for ``insert_by_category``: ``(kind priority, default tier)``.
+
+    Default tier only distinguishes within ``POSITIONAL_ONLY``/
+    ``POSITIONAL_OR_KEYWORD`` (required before defaulted, matching
+    ``_validate_parameter_order``'s combined-span rule for those two kinds).
+    ``KEYWORD_ONLY``/``VAR_POSITIONAL``/``VAR_KEYWORD`` always sort at tier
+    0 — default status never affects their placement validity.
+    """
+    positional_kinds = {ParamSpec.POSITIONAL_ONLY, ParamSpec.POSITIONAL_OR_KEYWORD}
+    default_tier = 1 if spec.kind in positional_kinds and spec.default is not NO_VAL else 0
+    return (_KIND_PRIORITY[spec.kind], default_tier)
+
+
+def insert_by_category(
+    composed: list[ParamSpec], items: list[ParamSpec]
+) -> list[ParamSpec]:
+    """Batch-insert new params into an already-valid composed list.
+
+    Places each item from ``items`` at the position that keeps the result a
+    valid Python-style signature ordering, without the caller needing to
+    reason about where. A stable sort of ``composed + items`` by
+    ``_insertion_category`` does the placement in one pass: ties keep their
+    position from the concatenation, so within any category ``composed``'s
+    existing entries (which appear first) land before ``items``' new
+    entries, and ``items`` among themselves keep their relative batch order.
+
+    Always returns a fresh list of freshly-constructed, reindexed
+    ``ParamSpec`` objects — never the same list or object references as
+    either input, even when ``items`` is empty. The result is validated via
+    ``_validate_parameter_order`` before returning, so an ordering violation
+    that should have been resolved upstream (e.g. a duplicate name) surfaces
+    as ``SchemaError`` here rather than silently producing an invalid schema.
+    """
+    combined = sorted(composed + items, key=_insertion_category)
+    result = [
+        ParamSpec(
+            name=spec.name,
+            index=index,
+            kind=spec.kind,
+            type=spec.type,
+            default=spec.default,
+            description=spec.description,
+        )
+        for index, spec in enumerate(combined)
+    ]
+    _validate_parameter_order(result)
+    return result

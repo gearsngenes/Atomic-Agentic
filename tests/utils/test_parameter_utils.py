@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Annotated, Any, Optional, TypedDict
 
 import pytest
@@ -7,12 +8,19 @@ import pytest
 from atomic_agentic.exceptions import SchemaError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.utils.parameters import (
+    _insertion_category,
     _normalize_prompt_template,
     _try_parse_clean_field,
     _validate_parameter_order,
     extract_io,
+    insert_by_category,
     is_valid_parameter_order,
+    parameter_collisions,
+    parameter_overlap,
+    semantically_compatible,
+    semantically_identical,
     to_paramspec_list,
+    variadic_compatible,
 )
 from atomic_agentic.constants.core import NO_VAL
 
@@ -620,3 +628,285 @@ class TestNormalizePromptTemplate:
         normalized_twice, discovered_twice = _normalize_prompt_template(normalized_once)
         assert normalized_twice == normalized_once
         assert discovered_twice == discovered_once
+
+
+class TestSemanticallyCompatible:
+    def test_same_type_same_non_variadic_kind_is_compatible(self) -> None:
+        a = make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int")
+        b = make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int")
+        assert semantically_compatible(a, b) is True
+
+    def test_either_side_any_type_is_compatible_despite_type_mismatch(self) -> None:
+        a = make_param("x", 0, type_="int")
+        b = make_param("x", 0, type_="Any")
+        assert semantically_compatible(a, b) is True
+        assert semantically_compatible(b, a) is True
+
+    def test_mismatched_non_any_types_are_incompatible(self) -> None:
+        a = make_param("x", 0, type_="int")
+        b = make_param("x", 0, type_="str")
+        assert semantically_compatible(a, b) is False
+
+    def test_two_different_non_variadic_kinds_are_kind_compatible(self) -> None:
+        a = make_param("x", 0, ParamSpec.POSITIONAL_ONLY, type_="int")
+        b = make_param("x", 0, ParamSpec.KEYWORD_ONLY, type_="int")
+        assert semantically_compatible(a, b) is True
+
+    def test_same_variadic_kind_is_compatible(self) -> None:
+        a = make_param("args", 0, ParamSpec.VAR_POSITIONAL, type_="int")
+        b = make_param("args", 0, ParamSpec.VAR_POSITIONAL, type_="int")
+        assert semantically_compatible(a, b) is True
+
+    def test_different_variadic_kinds_are_incompatible(self) -> None:
+        a = make_param("x", 0, ParamSpec.VAR_POSITIONAL, type_="int")
+        b = make_param("x", 0, ParamSpec.VAR_KEYWORD, type_="int")
+        assert semantically_compatible(a, b) is False
+
+    def test_variadic_vs_non_variadic_is_incompatible(self) -> None:
+        a = make_param("x", 0, ParamSpec.VAR_POSITIONAL, type_="int")
+        b = make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int")
+        assert semantically_compatible(a, b) is False
+
+
+class TestSemanticallyIdentical:
+    def _base(self) -> ParamSpec:
+        return ParamSpec(
+            name="x",
+            index=0,
+            kind=ParamSpec.KEYWORD_ONLY,
+            type="int",
+            default=1,
+            description="the x value",
+        )
+
+    def test_fully_matching_specs_are_identical(self) -> None:
+        a = self._base()
+        b = self._base()
+        assert semantically_identical(a, b) is True
+
+    def test_identical_implies_compatible(self) -> None:
+        a = self._base()
+        b = self._base()
+        assert semantically_identical(a, b) is True
+        assert semantically_compatible(a, b) is True
+
+    def test_type_mismatch_breaks_identity(self) -> None:
+        a = self._base()
+        b = replace(self._base(), type="str")
+        assert semantically_identical(a, b) is False
+
+    def test_kind_mismatch_breaks_identity(self) -> None:
+        a = self._base()
+        b = replace(self._base(), kind=ParamSpec.POSITIONAL_OR_KEYWORD)
+        assert semantically_identical(a, b) is False
+
+    def test_default_mismatch_breaks_identity(self) -> None:
+        a = self._base()
+        b = replace(self._base(), default=2)
+        assert semantically_identical(a, b) is False
+
+    def test_description_mismatch_breaks_identity(self) -> None:
+        a = self._base()
+        b = replace(self._base(), description="a different description")
+        assert semantically_identical(a, b) is False
+
+    def test_name_mismatch_breaks_identity(self) -> None:
+        a = self._base()
+        b = replace(self._base(), name="y")
+        assert semantically_identical(a, b) is False
+
+
+class TestParameterOverlapAndCollisions:
+    def test_empty_lists_produce_no_overlap_or_collisions(self) -> None:
+        assert parameter_overlap([], []) == []
+        assert parameter_collisions([], []) == []
+
+    def test_disjoint_names_produce_no_overlap_or_collisions(self) -> None:
+        source_a = [make_param("x", 0, type_="int")]
+        source_b = [make_param("y", 0, type_="int")]
+        assert parameter_overlap(source_a, source_b) == []
+        assert parameter_collisions(source_a, source_b) == []
+
+    def test_compatible_shared_name_is_overlap_not_collision(self) -> None:
+        source_a = [make_param("x", 0, type_="int")]
+        source_b = [make_param("x", 0, type_="Any")]
+        assert parameter_overlap(source_a, source_b) == ["x"]
+        assert parameter_collisions(source_a, source_b) == []
+
+    def test_incompatible_shared_name_is_collision_not_overlap(self) -> None:
+        source_a = [make_param("x", 0, type_="int")]
+        source_b = [make_param("x", 0, type_="str")]
+        assert parameter_overlap(source_a, source_b) == []
+        assert parameter_collisions(source_a, source_b) == ["x"]
+
+    def test_mixed_overlap_and_collisions_partition_cleanly(self) -> None:
+        source_a = [
+            make_param("compatible", 0, type_="int"),
+            make_param("colliding", 1, type_="int"),
+            make_param("only_in_a", 2, type_="int"),
+        ]
+        source_b = [
+            make_param("compatible", 0, type_="Any"),
+            make_param("colliding", 1, type_="str"),
+            make_param("only_in_b", 2, type_="int"),
+        ]
+
+        overlap = parameter_overlap(source_a, source_b)
+        collisions = parameter_collisions(source_a, source_b)
+
+        assert overlap == ["compatible"]
+        assert collisions == ["colliding"]
+        assert set(overlap) & set(collisions) == set()
+        shared_names = {p.name for p in source_a} & {p.name for p in source_b}
+        assert set(overlap) | set(collisions) == shared_names
+
+    def test_results_follow_source_a_order(self) -> None:
+        source_a = [
+            make_param("second", 0, type_="int"),
+            make_param("first", 1, type_="int"),
+        ]
+        source_b = [
+            make_param("first", 0, type_="int"),
+            make_param("second", 1, type_="int"),
+        ]
+        assert parameter_overlap(source_a, source_b) == ["second", "first"]
+
+
+class TestVariadicCompatible:
+    def test_neither_side_has_variadics(self) -> None:
+        source_a = [make_param("x", 0)]
+        source_b = [make_param("y", 0)]
+        assert variadic_compatible(source_a, source_b, set()) is True
+
+    def test_only_one_side_has_a_variadic(self) -> None:
+        source_a = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
+        source_b = [make_param("y", 0)]
+        assert variadic_compatible(source_a, source_b, set()) is True
+
+    def test_same_kind_same_name_already_in_shared_names_is_safe(self) -> None:
+        source_a = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
+        source_b = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
+        assert variadic_compatible(source_a, source_b, {"args"}) is True
+
+    def test_same_kind_different_names_not_in_shared_names_conflicts(self) -> None:
+        source_a = [make_param("extra_args", 0, ParamSpec.VAR_POSITIONAL)]
+        source_b = [make_param("things", 0, ParamSpec.VAR_POSITIONAL)]
+        assert variadic_compatible(source_a, source_b, set()) is False
+
+    def test_same_kind_same_name_not_yet_in_shared_names_still_conflicts(self) -> None:
+        # This function trusts the shared_names set given to it -- it does not
+        # independently recognize a shared name as "already resolved" unless
+        # the caller included it in shared_names.
+        source_a = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
+        source_b = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
+        assert variadic_compatible(source_a, source_b, set()) is False
+
+    def test_different_variadic_kinds_do_not_conflict(self) -> None:
+        source_a = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
+        source_b = [make_param("extras", 0, ParamSpec.VAR_KEYWORD)]
+        assert variadic_compatible(source_a, source_b, set()) is True
+
+    def test_both_kinds_conflicting_independently_still_reports_conflict(self) -> None:
+        source_a = [
+            make_param("args_a", 0, ParamSpec.VAR_POSITIONAL),
+            make_param("extras_a", 1, ParamSpec.VAR_KEYWORD),
+        ]
+        source_b = [
+            make_param("args_b", 0, ParamSpec.VAR_POSITIONAL),
+            make_param("extras_b", 1, ParamSpec.VAR_KEYWORD),
+        ]
+        assert variadic_compatible(source_a, source_b, set()) is False
+
+
+class TestInsertionCategory:
+    def test_positional_only_without_default(self) -> None:
+        spec = make_param("x", 0, ParamSpec.POSITIONAL_ONLY)
+        assert _insertion_category(spec) == (0, 0)
+
+    def test_positional_only_with_default(self) -> None:
+        spec = make_param("x", 0, ParamSpec.POSITIONAL_ONLY, default=1)
+        assert _insertion_category(spec) == (0, 1)
+
+    def test_positional_or_keyword_without_default(self) -> None:
+        spec = make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD)
+        assert _insertion_category(spec) == (1, 0)
+
+    def test_positional_or_keyword_with_default(self) -> None:
+        spec = make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, default=1)
+        assert _insertion_category(spec) == (1, 1)
+
+    def test_var_positional(self) -> None:
+        spec = make_param("args", 0, ParamSpec.VAR_POSITIONAL)
+        assert _insertion_category(spec) == (2, 0)
+
+    def test_keyword_only_without_default_is_tier_zero(self) -> None:
+        spec = make_param("x", 0, ParamSpec.KEYWORD_ONLY)
+        assert _insertion_category(spec) == (3, 0)
+
+    def test_keyword_only_with_default_is_still_tier_zero(self) -> None:
+        spec = make_param("x", 0, ParamSpec.KEYWORD_ONLY, default=1)
+        assert _insertion_category(spec) == (3, 0)
+
+    def test_var_keyword(self) -> None:
+        spec = make_param("extras", 0, ParamSpec.VAR_KEYWORD)
+        assert _insertion_category(spec) == (4, 0)
+
+
+class TestInsertByCategory:
+    def test_empty_items_returns_fresh_equal_content_list(self) -> None:
+        composed = [make_param("a", 5, type_="int")]
+        result = insert_by_category(composed, [])
+
+        assert result is not composed
+        assert result[0] is not composed[0]
+        assert [(p.name, p.index, p.type) for p in result] == [("a", 0, "int")]
+
+    def test_simple_keyword_only_append(self) -> None:
+        composed = [make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD)]
+        items = [make_param("flag", 0, ParamSpec.KEYWORD_ONLY, default=False)]
+
+        result = insert_by_category(composed, items)
+
+        assert [p.name for p in result] == ["x", "flag"]
+        assert [p.index for p in result] == [0, 1]
+
+    def test_required_positional_or_keyword_graft_lands_before_defaulted_existing(self) -> None:
+        # composed ~ def pre(a, /, b=1) -- a positional-only required, b
+        # positional-or-keyword defaulted. Grafting a new required
+        # positional-or-keyword param must land before b, not after, or the
+        # result would violate the required-after-defaulted rule.
+        composed = [
+            make_param("a", 0, ParamSpec.POSITIONAL_ONLY, type_="int"),
+            make_param("b", 1, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int", default=1),
+        ]
+        items = [make_param("c", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int")]
+
+        result = insert_by_category(composed, items)
+
+        assert [p.name for p in result] == ["a", "c", "b"]
+        assert is_valid_parameter_order(result) is True
+
+    def test_batch_items_in_same_category_preserve_relative_order(self) -> None:
+        items = [
+            make_param("p1", 0, ParamSpec.KEYWORD_ONLY),
+            make_param("p2", 0, ParamSpec.KEYWORD_ONLY),
+        ]
+
+        result = insert_by_category([], items)
+
+        assert [p.name for p in result] == ["p1", "p2"]
+
+    def test_existing_entries_land_before_new_entries_in_same_category(self) -> None:
+        composed = [make_param("existing", 0, ParamSpec.KEYWORD_ONLY)]
+        items = [make_param("new", 0, ParamSpec.KEYWORD_ONLY)]
+
+        result = insert_by_category(composed, items)
+
+        assert [p.name for p in result] == ["existing", "new"]
+
+    def test_duplicate_name_raises_schema_error(self) -> None:
+        composed = [make_param("x", 0, ParamSpec.KEYWORD_ONLY)]
+        items = [make_param("x", 0, ParamSpec.KEYWORD_ONLY)]
+
+        with pytest.raises(SchemaError, match="Duplicate"):
+            insert_by_category(composed, items)
