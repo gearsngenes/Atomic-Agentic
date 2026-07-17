@@ -25,6 +25,14 @@ class ToolAgentRunState:
 
     Blackboard Architecture
     -----------------------
+    **inputs** : dict[str, Any]
+        The full, untouched ``inputs`` mapping from the base ``Agent``
+        invocation lifecycle — the same object passed to ``_invoke``/
+        ``_ainvoke``. Populated once by ``_initialize_run_state``/
+        ``_ainitialize_run_state`` at construction; available to
+        ``_prepare_next_batch`` via ``state.inputs`` without widening that
+        hook's own signature.
+
     **cache_blackboard** : list[BlackboardSlot]
         Snapshot of the persisted ``self._blackboard`` at invoke start when context is
         enabled. Previous invocation results are available here and can be referenced
@@ -90,6 +98,8 @@ class ToolAgentRunState:
         FAILED status. Disjoint with ``valid_cache_indices``. Referenced during
         generation to produce targeted LLM feedback.
     """
+    inputs: dict[str, Any]
+
     messages: list[dict[str, str]]
 
     cache_blackboard: list[BlackboardSlot]

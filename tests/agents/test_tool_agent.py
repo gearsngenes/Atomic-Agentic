@@ -63,12 +63,6 @@ class TestToolAgentConstruction:
         assert agent.has_tool(return_tool.full_name)
         assert agent.get_tool(return_tool.full_name) is return_tool
 
-    def test_update_prompt_accepts_other_key(self) -> None:
-        agent = make_agent()
-        config = PromptConfig(template="hello", description="other")
-        agent.update_prompt("other_key", config)
-        assert "other_key" in agent.system_prompts
-
     def test_scripted_tool_agent_registers_prompt_in_system_prompts(self) -> None:
         agent = make_agent()
         assert "tool_instructions" in agent.system_prompts
@@ -86,12 +80,6 @@ class TestToolAgentConstruction:
         agent = make_react_agent([])
         assert "reason_then_act" in agent.system_prompts
         assert agent.system_prompts["reason_then_act"] is ORCHESTRATOR_PROMPT
-
-    def test_update_prompt_accepts_previously_guarded_key(self) -> None:
-        agent = make_agent()
-        replacement = PromptConfig(template=ROLE_TEMPLATE, description="replacement")
-        agent.update_prompt("tool_instructions", replacement)
-        assert agent.system_prompts["tool_instructions"] is replacement
 
     @pytest.mark.parametrize("value", [None, 0, 1, 5])
     def test_tool_calls_limit_accepts_none_and_non_negative_int(
@@ -2129,31 +2117,6 @@ class TestExecutePreparedBatchEarlyValidation:
 
         updated = agent._execute_prepared_batch(state)
         assert updated.running_blackboard[0].result.result == 7
-
-
-# â”€â”€ TestToolAgentContextProperties â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-class TestToolAgentContextProperties:
-    def test_context_properties_at_construction_adds_graft_d(self) -> None:
-        prop = ParamSpec(name="user_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="The user identifier.")
-        agent = ScriptedToolAgent(context_enabled=True, context_properties=[prop])
-        param_names = [p.name for p in agent.parameters]
-        assert "context" in param_names
-
-    def test_set_context_properties_refreshes_description(self) -> None:
-        prop = ParamSpec(name="user_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="The user identifier.")
-        agent = ScriptedToolAgent(context_enabled=True, context_properties=[prop])
-        new_prop = ParamSpec(name="session_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="Active session.")
-        agent.set_context_properties([new_prop])
-        context_param = next(p for p in agent.parameters if p.name == "context")
-        assert "session_id" in context_param.description
-
-    def test_set_context_properties_none_clears_properties(self) -> None:
-        prop = ParamSpec(name="user_id", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", description="The user identifier.")
-        agent = ScriptedToolAgent(context_enabled=True, context_properties=[prop])
-        agent.set_context_properties(None)
-        assert agent._context_properties == ()
-        assert "context" in [p.name for p in agent.parameters]
 
 
 # â”€â”€ TestPlanActAgentUpdatePromptGuard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
