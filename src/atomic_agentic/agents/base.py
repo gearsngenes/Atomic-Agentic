@@ -83,8 +83,8 @@ class Agent(AtomicInvokable, ABC):
     - Post-only non-result parameters, grafted while preserving their
       original declared kind (no forced ``KEYWORD_ONLY`` coercion).
     - ``extra_parameters`` — a flat, subclass-computed source (e.g.
-      ``BasicAgent`` unions role-prompt placeholders with its own extra
-      properties before calling ``super().__init__()``).
+      ``BasicAgent`` passes its role-prompt placeholders as this agent's
+      sole ``extra_parameters`` source).
     - This (sub)class's reserved parameters (``get_reserved_parameters()``;
       ``run_id`` by default), grafted last.
 
@@ -102,15 +102,6 @@ class Agent(AtomicInvokable, ABC):
     ``True``:  ``get_conversation`` selects prior turns for each invocation.
     ``False``: turns are always ``[]``; ``run_id`` is ignored.
     Records are appended unconditionally regardless of this setting.
-
-    Scope-boundary note (v2.0.0a22 Phase 3 Pass 3)
-    ------------------------------------------------
-    As of this pass, concrete subclasses (``BasicAgent``, ``ToolAgent``, and
-    transitively ``PlanActAgent`` / ``ReActAgent``) are constructible but
-    their ``.invoke()`` / ``.async_invoke()`` raise ``TypeError``: their
-    ``_invoke`` / ``_ainvoke`` overrides still declare the retired
-    ``context`` parameter name against this class's ``inputs`` signature.
-    Resolved by the dedicated subclass-migration pass.
     """
 
     # ------------------------------------------------------------------ #

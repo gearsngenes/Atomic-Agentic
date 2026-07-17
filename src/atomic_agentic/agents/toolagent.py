@@ -1986,11 +1986,7 @@ class ToolAgent(Agent, ABC):
                 "ToolAgent.make_result: llm_model_data must be an LLMModelData instance."
             )
 
-        llm_token_usage = tuple(
-            r.llm_result.token_usage
-            for r in llm_records
-            if r.llm_result.token_usage is not None
-        )
+        llm_token_usage = tuple(r.llm_result.token_usage for r in llm_records)
 
         return self._make_result(
             result=result,

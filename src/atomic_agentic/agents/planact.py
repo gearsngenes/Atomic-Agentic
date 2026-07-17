@@ -55,7 +55,6 @@ from ..exceptions import ToolAgentError
 from ..models.agents import PlanActRunState
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord, LLMRecord
-from ..models.parameters import ParamSpec
 from ..utils.agents import extract_dependencies
 
 logger = logging.getLogger(__name__)
@@ -112,9 +111,8 @@ class PlanActAgent(ToolAgent):
         description: str,
         llm_engine: LLMEngine,
         filter_extraneous_inputs: Optional[bool] = None,
-        *,
         context_enabled: bool = False,
-        context_properties: list[str] | list[ParamSpec] | None = None,
+        *,
         tool_calls_limit: int | None = None,
         fail_fast: bool = True,
         generation_retries: int = 0,
@@ -131,7 +129,8 @@ class PlanActAgent(ToolAgent):
 
         ``"plan_first"`` is the key under which the built-in planning prompt is
         registered in ``self._system_prompts``. All other parameters are
-        forwarded verbatim to ``ToolAgent.__init__``.
+        forwarded verbatim to ``ToolAgent.__init__`` — no extra_parameters
+        keyword is passed at all (``ToolAgent.__init__`` accepts none).
         """
         super().__init__(
             name=name,
@@ -140,7 +139,6 @@ class PlanActAgent(ToolAgent):
             llm_engine=llm_engine,
             filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
-            context_properties=context_properties,
             tool_calls_limit=tool_calls_limit,
             fail_fast=fail_fast,
             generation_retries=generation_retries,
@@ -456,6 +454,7 @@ class PlanActAgent(ToolAgent):
         working_messages: list[dict[str, str]],
         cache_blackboard: list[BlackboardSlot],
         llm_records: list[LLMRecord],
+        inputs: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> PlanActRunState:
@@ -477,6 +476,7 @@ class PlanActAgent(ToolAgent):
         )
 
         return PlanActRunState(
+            inputs=inputs,
             messages=working_messages,
             cache_blackboard=cache_blackboard,
             running_blackboard=planned_slots,
@@ -552,11 +552,15 @@ class PlanActAgent(ToolAgent):
             engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in working_messages]})
             raw_output: str = engine_result.result
 
-            # PlanAct delta: the last working message (the current user turn) only.
-            # ReAct uses a 3-element delta (task + snapshot + step-request); PlanAct
-            # is simpler because the system prompt already carries planning context.
+            # PlanAct delta: the current user turn on the first attempt (1
+            # element); on a retry, the two messages injected since the prior
+            # attempt (assistant's bad output + feedback). ReAct uses the same
+            # first-vs-retry split via its own `delta` parameter.
+            record_messages = (
+                [working_messages[-1]] if not llm_records else list(working_messages[-2:])
+            )
             llm_records.append(LLMRecord(
-                messages=[working_messages[-1]],
+                messages=record_messages,
                 llm_result=engine_result,
                 system_prompt_name="plan_first",
             ))
@@ -626,8 +630,11 @@ class PlanActAgent(ToolAgent):
             engine_result = await self._llm_engine.async_invoke({"messages": [dict(m) for m in working_messages]})
             raw_output: str = engine_result.result
 
+            record_messages = (
+                [working_messages[-1]] if not llm_records else list(working_messages[-2:])
+            )
             llm_records.append(LLMRecord(
-                messages=[working_messages[-1]],
+                messages=record_messages,
                 llm_result=engine_result,
                 system_prompt_name="plan_first",
             ))
@@ -679,6 +686,7 @@ class PlanActAgent(ToolAgent):
         *,
         turns: list[AgentRecord],
         prompt: str,
+        inputs: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> PlanActRunState:
@@ -699,7 +707,8 @@ class PlanActAgent(ToolAgent):
         3. ``_generate_plan``: generate the plan via LLM, returning
            ``(planned_slots, llm_records)``.
         4. ``_build_planact_run_state``: compile batches and construct the
-           ``PlanActRunState`` with the generated slots and LLM records.
+           ``PlanActRunState`` with the generated slots, LLM records, and ``inputs``
+           (forwarded through, not interpreted here).
 
         Returns
         -------
@@ -733,6 +742,7 @@ class PlanActAgent(ToolAgent):
             working_messages=working_messages,
             cache_blackboard=cache_blackboard,
             llm_records=llm_records,
+            inputs=inputs,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )
@@ -742,6 +752,7 @@ class PlanActAgent(ToolAgent):
         *,
         turns: list[AgentRecord],
         prompt: str,
+        inputs: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> PlanActRunState:
@@ -769,6 +780,7 @@ class PlanActAgent(ToolAgent):
             working_messages=working_messages,
             cache_blackboard=cache_blackboard,
             llm_records=llm_records,
+            inputs=inputs,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )

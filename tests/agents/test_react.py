@@ -224,6 +224,7 @@ class TestReActAgent:
         state = agent._initialize_run_state(
             turns=[],
             prompt="react",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -285,6 +286,7 @@ class TestReActAgent:
         state = agent._initialize_run_state(
             turns=[],
             prompt="react",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -367,6 +369,7 @@ class TestReActAgent:
         state = agent._initialize_run_state(
             turns=[],
             prompt="react",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -398,6 +401,7 @@ class TestReActAgent:
         state = agent._initialize_run_state(
             turns=[],
             prompt="react",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -867,6 +871,7 @@ class TestCacheRefValidation:
         state = agent._initialize_run_state(
             turns=[],
             prompt="react",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -904,6 +909,7 @@ class TestCacheRefValidation:
         state = agent._initialize_run_state(
             turns=[],
             prompt="react",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )

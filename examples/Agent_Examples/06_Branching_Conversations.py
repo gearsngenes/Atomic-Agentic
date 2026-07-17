@@ -3,19 +3,19 @@
 Demonstrates conversation branching via the ``run_id`` parameter.
 
 The scenario uses grounded, verifiable facts so the agent's context isolation
-is unambiguous â€” it cannot invent the right answer if the fact was never in
+is unambiguous — it cannot invent the right answer if the fact was never in
 its chain, so missing context produces a clear, observable "I don't know."
 
 Conversation tree
 -----------------
 
-    T0 (root)  â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-        â”‚                                â”‚
-    T_A1  reveal dog name                â”‚
-        â”‚                                â”‚
+    T0 (root)  ──────────────────────────┐
+        │                                │
+    T_A1  reveal dog name                │
+        │                                │
     T_A2  "what do you know             T_B1  "what's my dog's
           about my dog?"                        name?" (fork from T0)
-          â†’ agent recalls Biscuit               â†’ agent: "you haven't
+          → agent recalls Biscuit               → agent: "you haven't
                                                   told me"
 
 Key concepts shown
@@ -32,7 +32,7 @@ use ``context_enabled=False``, or instantiate a separate agent.
 
 Post-invoke parameters are no longer declared via ``passthrough_inputs``.
 Any non-result, non-variadic post_invoke parameter (e.g. ``style`` below)
-is auto-grafted into the agent schema as KEYWORD_ONLY â€” callers pass it
+is auto-grafted into the agent schema as KEYWORD_ONLY — callers pass it
 as a regular input.
 """
 from __future__ import annotations
@@ -68,7 +68,7 @@ def package_reply(result: str, style: str = "friendly") -> dict:
     """Post-invoke: wrap the raw LLM response with lightweight metadata.
 
     ``style`` is auto-grafted from this function's signature into the agent
-    schema â€” no ``passthrough_inputs`` configuration needed.
+    schema — no ``passthrough_inputs`` configuration needed.
     """
     return {
         "reply":      result.strip(),
@@ -83,21 +83,21 @@ def package_reply(result: str, style: str = "friendly") -> dict:
 
 def print_chain(chain: list, label: str) -> None:
     """Pretty-print a conversation chain returned by get_conversation()."""
-    print(f"\n{'â”' * _W}")
+    print(f"\n{'━' * _W}")
     print(f"  {label}")
     print(f"  {len(chain)} turn(s) in chain")
-    print(f"{'â”' * _W}")
+    print(f"{'━' * _W}")
 
     for i, record in enumerate(chain):
         run_short  = record.final_result.run_id[:8]
         prev_short = (
             f"{record.prev.final_result.run_id[:8]}..."
-            if record.prev else "None  â† chain root"
+            if record.prev else "None  ← chain root"
         )
         payload = record.final_result.result
 
         print(f"\n  [Turn {i + 1}]  run: {run_short}...   parent: {prev_short}")
-        print(f"  style: {payload['style']}  Â·  {payload['char_count']} chars")
+        print(f"  style: {payload['style']}  ·  {payload['char_count']} chars")
 
         flat_msg = " ".join(record.user_prompt.split())
         msg_lines = textwrap.wrap(flat_msg, width=_W - 13)
@@ -129,7 +129,7 @@ def main() -> None:
             "You are a helpful assistant in a conversation with the user. "
             "You only know what has been said in this conversation. "
             "When asked about something that has not been mentioned, "
-            "say clearly that you don't have that information â€” "
+            "say clearly that you don't have that information — "
             "never guess or invent details."
         ),
         context_enabled=True,
@@ -142,11 +142,11 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # T0 â€” root: establish the user
+    # T0 — root: establish the user
     # ------------------------------------------------------------------ #
-    print(f"\n{'â•' * _W}")
-    print("  T0  Â·  Root  â€”  common starting point for all branches")
-    print(f"{'â•' * _W}")
+    print(f"\n{'═' * _W}")
+    print("  T0  ·  Root  —  common starting point for all branches")
+    print(f"{'═' * _W}")
 
     r0 = agent(
         message="Hi, I'm Sam. Nice to meet you.",
@@ -157,11 +157,11 @@ def main() -> None:
     print(f"  reply: {r0.result['reply']}")
 
     # ------------------------------------------------------------------ #
-    # Branch A â€” T_A1: reveal a fact the agent must remember
+    # Branch A — T_A1: reveal a fact the agent must remember
     # ------------------------------------------------------------------ #
-    print(f"\n{'â•' * _W}")
-    print("  T_A1  Â·  Branch A  â€”  revealing a fact")
-    print(f"{'â•' * _W}")
+    print(f"\n{'═' * _W}")
+    print("  T_A1  ·  Branch A  —  revealing a fact")
+    print(f"{'═' * _W}")
 
     r_a1 = agent(
         message="I have a golden retriever named Biscuit. She loves fetch.",
@@ -172,11 +172,11 @@ def main() -> None:
     print(f"  reply: {r_a1.result['reply']}")
 
     # ------------------------------------------------------------------ #
-    # Branch A â€” T_A2: test recall of the fact
+    # Branch A — T_A2: test recall of the fact
     # ------------------------------------------------------------------ #
-    print(f"\n{'â•' * _W}")
-    print("  T_A2  Â·  Branch A  â€”  recalling the fact  (agent should know)")
-    print(f"{'â•' * _W}")
+    print(f"\n{'═' * _W}")
+    print("  T_A2  ·  Branch A  —  recalling the fact  (agent should know)")
+    print(f"{'═' * _W}")
 
     r_a2 = agent(
         message="What do you know about my dog?",
@@ -187,15 +187,15 @@ def main() -> None:
     print(f"  reply: {r_a2.result['reply']}")
 
     # ------------------------------------------------------------------ #
-    # Branch B â€” T_B1: fork from T0, ask the same recall question
+    # Branch B — T_B1: fork from T0, ask the same recall question
     #
     # This branch's context is T0 only. T_A1 and T_A2 never happened here.
     # The agent cannot know Biscuit's name.
     # ------------------------------------------------------------------ #
-    print(f"\n{'â•' * _W}")
-    print("  T_B1  Â·  Branch B  â€”  forked from T0  (run_id=run_0)")
-    print("  â†³ T_A1 and T_A2 are invisible â€” agent has no dog info")
-    print(f"{'â•' * _W}")
+    print(f"\n{'═' * _W}")
+    print("  T_B1  ·  Branch B  —  forked from T0  (run_id=run_0)")
+    print("  ↳ T_A1 and T_A2 are invisible — agent has no dog info")
+    print(f"{'═' * _W}")
 
     r_b1 = agent(
         message="What's my dog's name?",
@@ -209,30 +209,30 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     # Reconstruct and display each branch chain
     # ------------------------------------------------------------------ #
-    print(f"\n\n{'â•' * _W}")
+    print(f"\n\n{'═' * _W}")
     print(f"  BRANCH CHAINS  ({len(agent.records)} records in flat history)")
-    print(f"{'â•' * _W}")
+    print(f"{'═' * _W}")
 
     print_chain(
         agent.get_conversation(run_id=run_a2),
-        "Branch A  Â·  root â†’ fact revealed â†’ fact recalled",
+        "Branch A  ·  root → fact revealed → fact recalled",
     )
     print_chain(
         agent.get_conversation(run_id=run_b1),
-        "Branch B  Â·  root â†’ same question, no prior fact  (fork at T0)",
+        "Branch B  ·  root → same question, no prior fact  (fork at T0)",
     )
 
     # ------------------------------------------------------------------ #
-    # Flat history â€” all records stored, regardless of branch
+    # Flat history — all records stored, regardless of branch
     # ------------------------------------------------------------------ #
-    print(f"\n{'â•' * _W}")
-    print(f"  Flat records  â€”  {len(agent.records)} records total")
-    print(f"{'â•' * _W}")
+    print(f"\n{'═' * _W}")
+    print(f"  Flat records  —  {len(agent.records)} records total")
+    print(f"{'═' * _W}")
     labels = {
         run_0:  "T0     root",
-        run_a1: "T_A1   branch A â€” fact revealed",
-        run_a2: "T_A2   branch A â€” fact recalled",
-        run_b1: "T_B1   branch B â€” parallel fork from T0",
+        run_a1: "T_A1   branch A — fact revealed",
+        run_a2: "T_A2   branch A — fact recalled",
+        run_b1: "T_B1   branch B — parallel fork from T0",
     }
     for i, record in enumerate(agent.records):
         rid    = record.final_result.run_id
@@ -241,7 +241,7 @@ def main() -> None:
             if record.prev else "None"
         )
         print(f"  [{i}]  {rid[:8]}...  parent: {parent:<18}  {labels.get(rid, '')}")
-    print(f"{'â•' * _W}\n")
+    print(f"{'═' * _W}\n")
 
 
 if __name__ == "__main__":

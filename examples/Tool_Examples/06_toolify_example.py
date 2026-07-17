@@ -24,7 +24,7 @@ def add_scale(a: int, b: int, scale: float = 1.0) -> float:
 def summarize(text: str, limit: int = 40) -> str:
     """Truncate text to `limit` chars with ellipsis."""
     s = str(text)
-    return s if len(s) <= limit else s[: max(0, limit - 1)] + "â€¦"
+    return s if len(s) <= limit else s[: max(0, limit - 1)] + "…"
 
 
 pre_wrapped_tool = Tool(
