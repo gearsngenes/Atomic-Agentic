@@ -1317,39 +1317,6 @@ class TestFinalReservedGraftOrdering:
 
 
 class TestUpdatePrompt:
-    def test_update_prompt_registers_new_key(self) -> None:
-        agent = _MinimalAgent(
-            name="a",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-        )
-        config = PromptConfig(template="New prompt.", description="custom")
-        agent.update_prompt("custom", config)
-
-        assert "custom" in agent.system_prompts
-        assert agent.system_prompts["custom"].template == "New prompt."
-
-    def test_update_prompt_rejects_empty_key(self) -> None:
-        agent = _MinimalAgent(
-            name="a",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-        )
-        with pytest.raises(AgentError, match="key"):
-            agent.update_prompt("  ", PromptConfig(template="x", description="d"))
-
-    def test_update_prompt_rejects_non_prompt_config(self) -> None:
-        agent = _MinimalAgent(
-            name="a",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-        )
-        with pytest.raises(AgentError, match="PromptConfig"):
-            agent.update_prompt("key", "not a config")  # type: ignore[arg-type]
-
     def test_system_prompts_property_returns_shallow_copy(self) -> None:
         agent = _MinimalAgent(
             name="a",

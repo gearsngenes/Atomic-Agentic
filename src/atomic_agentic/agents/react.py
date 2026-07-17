@@ -61,7 +61,6 @@ from ..exceptions import ToolAgentError
 from ..models.agents import ReActRunState, ReActStepMeta
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord, LLMRecord
-from ..models.agents.prompts import PromptConfig
 from ..models.parameters import ParamSpec
 from ..utils.agents import extract_dependencies
 
@@ -178,24 +177,6 @@ class ReActAgent(ToolAgent):
             records_window=records_window,
         )
         self._system_prompts["reason_then_act"] = ORCHESTRATOR_PROMPT
-
-    # ------------------------------------------------------------------ #
-    # Prompt update guard
-    # ------------------------------------------------------------------ #
-    def update_prompt(self, key: str, config: PromptConfig) -> None:
-        """Guard the built-in orchestrator instruction prompt.
-
-        Raises ``ToolAgentError`` when ``key`` is ``'reason_then_act'`` — that
-        prompt is operational machinery and must not be replaced post-construction.
-        All other keys are forwarded to the base implementation.
-        """
-        if key.strip() == "reason_then_act":
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: "
-                "'reason_then_act' is the built-in orchestrator instruction prompt "
-                "and cannot be replaced via update_prompt."
-            )
-        super().update_prompt(key, config)
 
     # ------------------------------------------------------------------ #
     # Property Overrides

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Mapping
 
@@ -6,18 +6,15 @@ import pytest
 import asyncio
 
 from atomic_agentic.agents.basic import BasicAgent
-from atomic_agentic.exceptions import AgentError, AgentInvocationError
-from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.exceptions import AgentError
 from atomic_agentic.llm import LLMEngine
-from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.results import LLMModelData, TokenUsage
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─────────────────────────────────────────────────────────────────────────────
 # Test engine
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─────────────────────────────────────────────────────────────────────────────
 class EchoLLMEngine(LLMEngine):
     """Deterministic echo engine that records all message batches received."""
 
@@ -83,9 +80,9 @@ def make_basic_agent(
     )
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─────────────────────────────────────────────────────────────────────────────
 # Tests
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─────────────────────────────────────────────────────────────────────────────
 class TestBasicAgentRolePrompt:
     def test_none_role_prompt_uses_default(self) -> None:
         agent = make_basic_agent(role_prompt=None)
@@ -108,170 +105,49 @@ class TestBasicAgentRolePrompt:
         with pytest.raises(TypeError, match="role_prompt"):
             make_basic_agent(role_prompt=123)  # type: ignore[arg-type]
 
-    def test_role_prompt_setter_updates_role_prompt(self) -> None:
+    def test_role_prompt_has_no_setter(self) -> None:
         agent = make_basic_agent(role_prompt="You are a poet.")
-        agent.role_prompt = "You are a chef."
-        assert agent.role_prompt == "You are a chef."
+        with pytest.raises(AttributeError):
+            agent.role_prompt = "You are a chef."  # type: ignore[misc]
 
-    def test_update_prompt_role_key_allowed(self) -> None:
+
+class TestBasicAgentRemovedAPISurfaces:
+    """Locks down the pass-4 removals: no mutation API remains anywhere."""
+
+    def test_no_update_prompt_method(self) -> None:
         agent = make_basic_agent()
-        config = PromptConfig(template="You are a {x}.", description="d")
-        agent.update_prompt("role", config)
-        assert agent.role_prompt == "You are a {x}."
+        assert not hasattr(agent, "update_prompt")
 
-    def test_update_prompt_non_role_key_raises(self) -> None:
+    def test_no_set_context_properties_method(self) -> None:
         agent = make_basic_agent()
-        config = PromptConfig(template="Supplemental.", description="extra")
-        with pytest.raises(AgentError, match="only a 'role' prompt"):
-            agent.update_prompt("extra", config)
+        assert not hasattr(agent, "set_context_properties")
 
-
-class TestBasicAgentRolePromptSetter:
-    def test_setter_str_normalizes_and_updates(self) -> None:
+    def test_no_set_extra_context_properties_method(self) -> None:
         agent = make_basic_agent()
-        agent.role_prompt = "  You are a {x}.  "
-        assert agent.role_prompt == "You are a {x}."
+        assert not hasattr(agent, "set_extra_context_properties")
 
-    def test_setter_none_resets_to_default(self) -> None:
-        agent = make_basic_agent(role_prompt="You are a poet.")
-        agent.role_prompt = None
-        assert agent.role_prompt == BasicAgent.DEFAULT_ROLE_PROMPT
-
-    def test_setter_prompt_config_stored_directly(self) -> None:
-        agent = make_basic_agent()
-        config = PromptConfig(template="You are a {y}.", description="d")
-        agent.role_prompt = config
-        assert agent.role_prompt == "You are a {y}."
+    def test_constructor_rejects_extra_context_properties_kwarg(self) -> None:
+        with pytest.raises(TypeError):
+            make_basic_agent(extra_context_properties=[])  # type: ignore[call-arg]
 
 
-class TestBasicAgentUpdatePromptRole:
-    def test_update_role_changes_context_description(self) -> None:
-        agent = make_basic_agent(role_prompt="You are a {persona}.")
-        new_config = PromptConfig(template="You are a {tone} assistant.", description="d")
-        agent.update_prompt("role", new_config)
-        context_param = next(p for p in agent.parameters if p.name == "context")
-        assert "tone" in context_param.description
-        assert "persona" not in context_param.description
+class TestBasicAgentSchemaComposition:
+    """Role-prompt placeholders are now a flat extra_parameters source."""
 
-    def test_update_role_to_static_clears_properties_from_description(self) -> None:
-        agent = make_basic_agent(role_prompt="You are a {persona}.")
-        static_config = PromptConfig(template="You are a generic assistant.", description="d")
-        agent.update_prompt("role", static_config)
-        context_param = next(p for p in agent.parameters if p.name == "context")
-        assert "persona" not in context_param.description
-        assert "Required" not in context_param.description
-
-    def test_update_role_overlap_with_extra_raises(self) -> None:
-        extra = [ParamSpec(name="shared", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                           type="str", default=NO_VAL)]
-        agent = make_basic_agent(extra_context_properties=extra)
-        conflict_config = PromptConfig(template="You are a {shared}.", description="d")
-        with pytest.raises(AgentError, match="overlaps"):
-            agent.update_prompt("role", conflict_config)
-
-    def test_update_prompt_invalid_config_type_raises(self) -> None:
-        agent = make_basic_agent()
-        with pytest.raises(AgentError, match="PromptConfig"):
-            agent.update_prompt("role", "not a config")  # type: ignore[arg-type]
-
-    def test_update_prompt_empty_key_raises(self) -> None:
-        agent = make_basic_agent()
-        config = PromptConfig(template="x", description="d")
-        with pytest.raises(AgentError):
-            agent.update_prompt("", config)
-
-
-class TestBasicAgentExtraContextProperties:
-    def test_extra_props_appear_in_context_description(self) -> None:
-        extra = [ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                           type="str", default=NO_VAL)]
-        agent = make_basic_agent(extra_context_properties=extra)
-        context_param = next(p for p in agent.parameters if p.name == "context")
-        assert "lang" in context_param.description
-
-    def test_extra_props_overlap_with_role_raises_at_construction(self) -> None:
-        role = PromptConfig(template="You are a {x}.", description="d")
-        extra = [ParamSpec(name="x", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                           type="str", default=NO_VAL)]
-        with pytest.raises(AgentError, match="overlaps"):
-            make_basic_agent(role_prompt=role, extra_context_properties=extra)
-
-    def test_extra_and_role_props_both_in_description(self) -> None:
-        role = PromptConfig(template="You are a {persona}.", description="d")
-        extra = [ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                           type="str", default=NO_VAL)]
-        agent = make_basic_agent(role_prompt=role, extra_context_properties=extra)
-        context_param = next(p for p in agent.parameters if p.name == "context")
-        assert "persona" in context_param.description
-        assert "lang" in context_param.description
-
-    def test_set_extra_replaces_and_refreshes_description(self) -> None:
-        extra_a = [ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                             type="str", default=NO_VAL)]
-        agent = make_basic_agent(extra_context_properties=extra_a)
-        extra_b = [ParamSpec(name="mode", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                             type="str", default=NO_VAL)]
-        agent.set_extra_context_properties(extra_b)
-        context_param = next(p for p in agent.parameters if p.name == "context")
-        assert "mode" in context_param.description
-        assert "lang" not in context_param.description
-
-    def test_set_extra_none_clears_extras(self) -> None:
-        extra = [ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                           type="str", default=NO_VAL)]
-        agent = make_basic_agent(extra_context_properties=extra)
-        agent.set_extra_context_properties(None)
-        assert agent._extra_context_properties == ()
-
-    def test_set_extra_overlap_with_role_raises(self) -> None:
-        role = PromptConfig(template="You are a {persona}.", description="d")
-        agent = make_basic_agent(role_prompt=role)
-        conflict = [ParamSpec(name="persona", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                              type="str", default=NO_VAL)]
-        with pytest.raises(AgentError, match="overlaps"):
-            agent.set_extra_context_properties(conflict)
-
-    def test_extra_required_prop_missing_at_invoke_raises(self) -> None:
-        extra = [ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                           type="str", default=NO_VAL)]
-        agent = make_basic_agent(extra_context_properties=extra)
-        with pytest.raises(AgentInvocationError):
-            agent.invoke({"prompt": "Hello.", "context": {}})
-
-    def test_to_dict_includes_extra_context_properties(self) -> None:
-        extra = [ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                           type="str", default=NO_VAL)]
-        agent = make_basic_agent(extra_context_properties=extra)
-        d = agent.to_dict()
-        assert "extra_context_properties" in d
-        assert isinstance(d["extra_context_properties"], list)
-        assert d["extra_context_properties"][0]["name"] == "lang"
-
-
-class TestBasicAgentContextKeys:
-    def test_role_prompt_placeholder_grafts_context_param_in_schema(self) -> None:
+    def test_role_prompt_placeholder_becomes_top_level_param(self) -> None:
         config = PromptConfig(template="You are a {persona} assistant.", description="d")
         agent = make_basic_agent(role_prompt=config)
 
         names = [p.name for p in agent.parameters]
-        assert "context" in names
-        assert "persona" not in names
+        assert names == ["prompt", "persona", "run_id"]
 
-    def test_context_param_is_keyword_only_in_schema(self) -> None:
-        config = PromptConfig(template="You are a {persona} assistant.", description="d")
-        agent = make_basic_agent(role_prompt=config)
-
-        context_param = next(p for p in agent.parameters if p.name == "context")
-        assert context_param.kind == "KEYWORD_ONLY"
-
-    def test_static_role_prompt_produces_no_context_keys(self) -> None:
+    def test_static_role_prompt_produces_no_extra_params(self) -> None:
         agent = make_basic_agent(role_prompt="You are a generic assistant.")
 
-        # Only expect: prompt, run_id (no context param with static role prompt)
         names = [p.name for p in agent.parameters]
         assert names == ["prompt", "run_id"]
 
-    def test_placeholder_default_described_in_context_param_description(self) -> None:
+    def test_placeholder_default_from_field_specs_is_preserved(self) -> None:
         config = PromptConfig(
             template="Speak as {persona}.",
             description="d",
@@ -279,9 +155,20 @@ class TestBasicAgentContextKeys:
         )
         agent = make_basic_agent(role_prompt=config)
 
-        context_param = next(p for p in agent.parameters if p.name == "context")
-        assert "persona" in context_param.description
-        assert "a helper" in context_param.description
+        persona_param = next(p for p in agent.parameters if p.name == "persona")
+        assert persona_param.default == "a helper"
+
+    def test_placeholder_name_colliding_with_pre_invoke_param_type_raises(self) -> None:
+        def custom_pre(*, x: str) -> str:
+            return x
+
+        config = PromptConfig(
+            template="Value: {x}.",
+            description="d",
+            field_specs={"x": {"type": "int"}},
+        )
+        with pytest.raises(AgentError):
+            make_basic_agent(role_prompt=config, pre_invoke=custom_pre)
 
 
 class TestBasicAgentInvoke:
@@ -301,9 +188,29 @@ class TestBasicAgentInvoke:
         config = PromptConfig(template="You are a {persona}.", description="d")
         agent = make_basic_agent(engine=engine, role_prompt=config)
 
-        agent.invoke({"prompt": "Speak.", "context": {"persona": "pirate"}})
+        agent.invoke({"prompt": "Speak.", "persona": "pirate"})
 
         assert engine.calls[0][0]["content"] == "You are a pirate."
+
+    def test_invoke_uses_placeholder_default_when_omitted(self) -> None:
+        engine = EchoLLMEngine()
+        config = PromptConfig(
+            template="Speak as {persona}.",
+            description="d",
+            field_specs={"persona": {"default": "a helper"}},
+        )
+        agent = make_basic_agent(engine=engine, role_prompt=config)
+
+        agent.invoke({"prompt": "Speak."})
+
+        assert engine.calls[0][0]["content"] == "Speak as a helper."
+
+    def test_invoke_missing_required_placeholder_raises(self) -> None:
+        config = PromptConfig(template="You are a {persona}.", description="d")
+        agent = make_basic_agent(role_prompt=config)
+
+        with pytest.raises(ValueError, match="persona"):
+            agent.invoke({"prompt": "Speak."})
 
     def test_invoke_result_is_echo_of_prompt(self) -> None:
         engine = EchoLLMEngine()
@@ -364,6 +271,15 @@ class TestBasicAgentAsyncInvoke:
 
         assert engine.calls[0][0]["content"] == "Async role."
 
+    def test_async_invoke_renders_placeholder_in_system_prompt(self) -> None:
+        engine = EchoLLMEngine()
+        config = PromptConfig(template="You are a {persona}.", description="d")
+        agent = make_basic_agent(engine=engine, role_prompt=config)
+
+        asyncio.run(agent.async_invoke({"prompt": "Speak.", "persona": "pirate"}))
+
+        assert engine.calls[0][0]["content"] == "You are a pirate."
+
     def test_async_invoke_llm_record_has_system_prompt_name_role(self) -> None:
         agent = make_basic_agent()
 
@@ -394,24 +310,7 @@ class TestBasicAgentSerialization:
         assert "role" in data["system_prompts"]
         assert data["system_prompts"]["role"]["template"] == "My role."
 
-    def test_to_dict_includes_extra_context_properties_empty_by_default(self) -> None:
+    def test_to_dict_omits_extra_context_properties_key(self) -> None:
         agent = make_basic_agent()
         data = agent.to_dict()
-        assert data["extra_context_properties"] == []
-
-
-class TestBasicAgentSetContextProperties:
-    def test_set_context_properties_raises(self) -> None:
-        agent = make_basic_agent()
-        with pytest.raises(AgentError):
-            agent.set_context_properties(None)
-
-    def test_set_context_properties_raises_on_list_input(self) -> None:
-        agent = make_basic_agent()
-        with pytest.raises(AgentError):
-            agent.set_context_properties([])
-
-    def test_set_context_properties_error_mentions_endpoints(self) -> None:
-        agent = make_basic_agent()
-        with pytest.raises(AgentError, match="set_extra_context_properties|update_prompt"):
-            agent.set_context_properties(["prop_a"])
+        assert "extra_context_properties" not in data

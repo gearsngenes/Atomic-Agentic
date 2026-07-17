@@ -449,14 +449,6 @@ class Agent(AtomicInvokable, ABC):
         """Shallow copy of the system prompt registry."""
         return dict(self._system_prompts)
 
-    def update_prompt(self, key: str, config: PromptConfig) -> None:
-        """Register or replace a system prompt by key."""
-        if not isinstance(key, str) or not key.strip():
-            raise AgentError("update_prompt: key must be a non-empty string.")
-        if not isinstance(config, PromptConfig):
-            raise AgentError("update_prompt: config must be a PromptConfig instance.")
-        self._system_prompts[key.strip()] = config
-
     # ------------------------------------------------------------------ #
     # Agent Helpers
     # ------------------------------------------------------------------ #

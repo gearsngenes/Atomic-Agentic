@@ -55,7 +55,6 @@ from ..exceptions import ToolAgentError
 from ..models.agents import PlanActRunState
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord, LLMRecord
-from ..models.agents.prompts import PromptConfig
 from ..models.parameters import ParamSpec
 from ..utils.agents import extract_dependencies
 
@@ -154,24 +153,6 @@ class PlanActAgent(ToolAgent):
             records_window=records_window,
         )
         self._system_prompts["plan_first"] = PLANNER_PROMPT
-
-    # ------------------------------------------------------------------ #
-    # Prompt update guard
-    # ------------------------------------------------------------------ #
-    def update_prompt(self, key: str, config: PromptConfig) -> None:
-        """Guard the built-in planning instruction prompt.
-
-        Raises ``ToolAgentError`` when ``key`` is ``'plan_first'`` — that prompt
-        is operational machinery and must not be replaced post-construction.
-        All other keys are forwarded to the base implementation.
-        """
-        if key.strip() == "plan_first":
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: "
-                "'plan_first' is the built-in planning instruction prompt and cannot "
-                "be replaced via update_prompt."
-            )
-        super().update_prompt(key, config)
 
     # ------------------------------------------------------------------ #
     # Initialization
