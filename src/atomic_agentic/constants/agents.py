@@ -6,22 +6,15 @@ from ..models.parameters import ParamSpec
 # Agent framework-reserved parameters
 # =============================================================================
 # RUN_ID_PARAM is the canonical ParamSpec grafted onto every Agent subclass
-# schema (Graft C in _compose_agent_parameters). It is defined here so that
-# _warn_reserved_name_collisions can compare caller-declared params against the
-# authoritative definition without re-constructing it inline.
+# schema via Agent.get_reserved_parameters(). It is defined here so that the
+# reserved-name reconciliation machinery in Agent.__init__ can compare
+# caller-declared params against the authoritative definition without
+# re-constructing it inline.
 
 RUN_ID_PARAM: ParamSpec = ParamSpec(
     name="run_id", index=0, kind=ParamSpec.KEYWORD_ONLY,
     type="str | None", default=None,
     description="Optional UUID hexstring used to point to a specific historical run of this agent. Do NOT provide natural-language instructions here; this is a reserved parameter to programatically select where in an agent's history to resume execution."
-)
-
-# CONTEXT_PARAM is the canonical Graft-D ParamSpec. Its description is always
-# overridden at schema-composition time via dataclasses.replace(); the empty
-# string here is a valid stand-in for a not-yet-specialized instance.
-CONTEXT_PARAM: ParamSpec = ParamSpec(
-    name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
-    type="dict", default={}, description="A canonical dictionary placeholder for additional information to be passed to the agent.{context_property_descriptions}",
 )
 
 # =============================================================================
@@ -122,7 +115,6 @@ RETURN_TOOL_FULL_NAME = (
 __all__ = [
     # Framework-reserved parameters
     "RUN_ID_PARAM",
-    "CONTEXT_PARAM",
     # LLM step fields
     "STEP_FIELD",
     "TOOL_FIELD",

@@ -126,10 +126,11 @@ class AgentRecord:
         no further templating or context lookup.
 
     inputs:
-        The context sub-mapping supplied for this invocation (the
-        framework-reserved ``context`` argument), retained for
-        provenance/observability only. Not consumed when reconstructing this
-        turn's rendered content.
+        The full filtered top-level inputs mapping for this invocation (post
+        ``filter_inputs``, pre pre/post-invoke slicing) — the same dict passed
+        to ``_invoke``/``_ainvoke``. Retained for provenance/observability only;
+        not consumed when reconstructing this turn's rendered content
+        (``render_turn`` uses ``user_prompt`` verbatim).
 
     generated_response:
         Raw post-engine response material for this invocation, prior to

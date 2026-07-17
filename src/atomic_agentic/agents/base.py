@@ -9,7 +9,6 @@ from typing import (
     Literal,
     Mapping,
     Optional,
-    Union,
 )
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -23,7 +22,6 @@ from ..exceptions import (
 )
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
-from ..constants.core import NO_VAL
 from ..llm.base import LLMEngine
 from ..models.results import AgentResult, LLMModelData
 from ..tools import toolify
@@ -33,8 +31,16 @@ from ..models.agents.prompts import PromptConfig
 logger = logging.getLogger(__name__)
 
 from .tools import identity_pre_tool, identity_post_tool
-from ..constants.agents import RUN_ID_PARAM, CONTEXT_PARAM
-from ..utils.agents import build_context_description, normalize_context_properties
+from ..constants.agents import RUN_ID_PARAM
+from ..utils.parameters import (
+    semantically_compatible,
+    semantically_identical,
+    parameter_overlap,
+    parameter_collisions,
+    variadic_compatible,
+    insert_by_category,
+    to_paramspec_list,
+)
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -45,39 +51,83 @@ class Agent(AtomicInvokable, ABC):
     Abstract base for schema-driven LLM agents.
 
     ``Agent`` owns the full invocation lifecycle shell — input filtering,
-    context extraction, turn selection, pre/post-invoke dispatch, record
-    management — but delegates the actual LLM work to the ``_invoke`` /
-    ``_ainvoke`` abstract methods that concrete subclasses implement.
+    turn selection, pre/post-invoke dispatch, record management — but
+    delegates the actual LLM work to the ``_invoke`` / ``_ainvoke`` abstract
+    methods that concrete subclasses implement.
 
-    Lifecycle (four-tier input model)
-    ----------------------------------
+    Lifecycle
+    ---------
     ``invoke(inputs)`` follows this sequence:
 
     1. ``filter_inputs`` collects declared keys and injects defaults.
-    2. Framework-reserved args (``run_id``) are popped.
-    3. ``context`` is popped from inputs; required context properties are validated.
-    4. Remaining inputs are sliced into ``pre_inputs`` and ``post_inputs``.
+    2. Reserved names (``run_id`` by default; see ``get_reserved_parameters``)
+       are read non-destructively — ``inputs`` itself is never mutated.
+    3. Remaining inputs are sliced into ``pre_inputs`` / ``post_inputs`` by
+       name membership against ``pre_invoke`` / ``post_invoke``'s own
+       declared parameters, excluding reserved names.
+    4. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
     5. Turns are selected from history if ``context_enabled`` is True.
-    6. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
-    7. ``_invoke(turns, prompt, context)`` performs LLM work.
-    8. ``post_invoke`` transforms the raw response to the final result.
-    9. A completed ``AgentRecord`` is always appended to ``_records``.
+    6. ``_invoke(turns, prompt, inputs)`` performs LLM work, receiving the
+       full filtered ``inputs`` dict untouched — not a slice, not popped of
+       anything.
+    7. ``post_invoke`` transforms the raw response into the final result.
+    8. A completed ``AgentRecord`` is always appended to ``_records``, with
+       ``inputs`` set to the exact same full dict passed to ``_invoke``.
 
     Schema composition
-    ------------------
-    The agent's parameter schema is composed at construction time from:
+    -------------------
+    The agent's parameter schema is composed at construction time from four
+    flat sources, reconciled in order:
 
     - All ``pre_invoke`` parameters.
-    - Post-only non-result non-variadic parameters, grafted as KEYWORD_ONLY.
-    - ``context: dict = {}`` (KEYWORD_ONLY), when ``context_properties`` is non-empty.
-    - ``run_id`` (KEYWORD_ONLY, default None).
+    - Post-only non-result parameters, grafted while preserving their
+      original declared kind (no forced ``KEYWORD_ONLY`` coercion).
+    - ``extra_parameters`` — a flat, subclass-computed source (e.g.
+      ``BasicAgent`` unions role-prompt placeholders with its own extra
+      properties before calling ``super().__init__()``).
+    - This (sub)class's reserved parameters (``get_reserved_parameters()``;
+      ``run_id`` by default), grafted last.
+
+    Name collisions between sources are resolved via
+    ``semantically_compatible`` / ``semantically_identical``
+    (``utils/parameters.py``): an incompatible collision raises
+    ``AgentError``; a compatible-but-not-identical overlap warns (the
+    earlier-reconciled source wins); an identical overlap is silent.
+    Grafting uses ``insert_by_category`` so every new parameter lands at the
+    position that preserves a valid Python-style signature ordering,
+    regardless of its declared kind.
 
     ``context_enabled``
     -------------------
     ``True``:  ``get_conversation`` selects prior turns for each invocation.
     ``False``: turns are always ``[]``; ``run_id`` is ignored.
     Records are appended unconditionally regardless of this setting.
+
+    Scope-boundary note (v2.0.0a22 Phase 3 Pass 3)
+    ------------------------------------------------
+    As of this pass, concrete subclasses (``BasicAgent``, ``ToolAgent``, and
+    transitively ``PlanActAgent`` / ``ReActAgent``) are constructible but
+    their ``.invoke()`` / ``.async_invoke()`` raise ``TypeError``: their
+    ``_invoke`` / ``_ainvoke`` overrides still declare the retired
+    ``context`` parameter name against this class's ``inputs`` signature.
+    Resolved by the dedicated subclass-migration pass.
     """
+
+    # ------------------------------------------------------------------ #
+    # Class-level configuration
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def get_reserved_parameters(cls) -> list[ParamSpec]:
+        """Return this Agent (sub)class's framework-reserved parameters.
+
+        Base ``Agent`` reserves only ``run_id``. A subclass with its own
+        fixed/reserved parameter overrides this as
+        ``return super().get_reserved_parameters() + [MY_RESERVED_PARAM]``,
+        so the same collision/overlap/graft machinery in ``__init__`` covers
+        its reserved name too, without base ``Agent`` needing advance
+        knowledge of it.
+        """
+        return [RUN_ID_PARAM]
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -94,7 +144,7 @@ class Agent(AtomicInvokable, ABC):
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
         post_invoke: Optional[AtomicInvokable | Callable] = None,
         post_result_key: Optional[str] = None,
-        context_properties: list[str] | list[ParamSpec] | None = None,
+        extra_parameters: list[str] | list[ParamSpec] | None = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         assistant_response_source: Literal["raw", "final"] = "raw",
@@ -132,48 +182,111 @@ class Agent(AtomicInvokable, ABC):
         if len(post_tool.parameters) == 0:
             raise AgentError("Agent.post_invoke must expect at least 1 argument")
 
-        # ── Post result key ──────────────────────────────────────────────────
-        _RESERVED = frozenset({"context", "run_id"})
-        _post_params = list(post_tool.parameters)
-        if post_result_key is None:
-            resolved_post_result_key = _post_params[0].name
-            if resolved_post_result_key in _RESERVED:
+        # 2. Reserved parameters for this (sub)class.
+        reserved_params = self.get_reserved_parameters()
+
+        # 3. Normalize extra_parameters; reject variadic entries.
+        extra_params = to_paramspec_list(extra_parameters)
+        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
+        for p in extra_params:
+            if p.kind in variadic_kinds:
                 raise AgentError(
-                    f"post_invoke's first parameter is named {resolved_post_result_key!r}, "
-                    "which is a framework-reserved name; supply an explicit post_result_key "
-                    "pointing to a non-reserved parameter."
+                    f"extra_parameters entry {p.name!r} must not be variadic; "
+                    f"got kind {p.kind!r}."
                 )
+
+        # 4-5. Reserved-name reconciliation — three independent passes, each
+        # popped of its own reserved-name entries once reconciled.
+        pre_params = self._reconcile_reserved_names(
+            list(pre_tool.parameters), reserved_params, "pre_invoke"
+        )
+        post_params_full = self._reconcile_reserved_names(
+            list(post_tool.parameters), reserved_params, "post_invoke"
+        )
+        extra_params = self._reconcile_reserved_names(
+            extra_params, reserved_params, "extra_parameters"
+        )
+
+        # 6. Resolve post_result_key against the reserved-popped post pool.
+        if post_result_key is None:
+            if not post_params_full:
+                raise AgentError("Agent.post_invoke must expect at least 1 argument")
+            resolved_post_result_key = post_params_full[0].name
         else:
             if not isinstance(post_result_key, str) or not post_result_key.strip():
                 raise AgentError("post_result_key must be None or a non-empty string.")
             resolved_post_result_key = post_result_key.strip()
-            if resolved_post_result_key in _RESERVED:
-                raise AgentError(
-                    f"post_result_key {resolved_post_result_key!r} is a framework-reserved "
-                    "name ('context' and 'run_id' cannot serve as the result routing key)."
-                )
-            if resolved_post_result_key not in {p.name for p in _post_params}:
+            if resolved_post_result_key not in {p.name for p in post_params_full}:
                 raise AgentError(
                     "post_result_key must name one of post_invoke's declared parameters; "
                     f"got {resolved_post_result_key!r}."
                 )
+        if resolved_post_result_key in {p.name for p in pre_params} or (
+            resolved_post_result_key in {p.name for p in extra_params}
+        ):
+            raise AgentError(
+                f"post_result_key {resolved_post_result_key!r} collides with a "
+                "pre_invoke or extra_parameters name; a name cannot mean both a "
+                "caller-supplied input and the internal result-routing slot."
+            )
 
-        # ── Schema composition ───────────────────────────────────────────────
-        context_property_params = normalize_context_properties(context_properties)
-        self._validate_pre_post_overlap_shapes(list(pre_tool.parameters), _post_params)
-        self._warn_reserved_name_collisions(list(pre_tool.parameters), _post_params)
-        agent_parameters = self._compose_agent_parameters(
-            pre_params=list(pre_tool.parameters),
-            post_params=_post_params,
-            result_key=resolved_post_result_key,
-            context_property_params=context_property_params,
-        )
+        # 7. Pre-vs-post reconciliation.
+        post_only = [p for p in post_params_full if p.name != resolved_post_result_key]
+        pre_post_collisions = parameter_collisions(pre_params, post_only)
+        if pre_post_collisions:
+            raise AgentError(
+                f"pre_invoke/post_invoke parameter collision(s): {pre_post_collisions!r} "
+                "(same name, incompatible type/kind)."
+            )
+        pre_post_overlap = parameter_overlap(pre_params, post_only)
+        if not variadic_compatible(pre_params, post_only, set(pre_post_overlap)):
+            raise AgentError(
+                "pre_invoke and post_invoke each declare an independent variadic "
+                "parameter of the same kind under different names; rename one."
+            )
+        pre_by_name = {p.name: p for p in pre_params}
+        post_by_name = {p.name: p for p in post_only}
+        for overlap_name in pre_post_overlap:
+            if not semantically_identical(pre_by_name[overlap_name], post_by_name[overlap_name]):
+                warnings.warn(
+                    f"Parameter {overlap_name!r} is declared by both pre_invoke and "
+                    "post_invoke and is compatible but not identical; pre_invoke's "
+                    "declaration wins.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+        post_only_remainder = [p for p in post_only if p.name not in pre_post_overlap]
+        combined = insert_by_category(pre_params, post_only_remainder)
+
+        # 8. Combined-vs-extra reconciliation.
+        combined_extra_collisions = parameter_collisions(combined, extra_params)
+        if combined_extra_collisions:
+            raise AgentError(
+                "pre_invoke/post_invoke schema vs. extra_parameters collision(s): "
+                f"{combined_extra_collisions!r} (same name, incompatible type/kind)."
+            )
+        combined_extra_overlap = parameter_overlap(combined, extra_params)
+        combined_by_name = {p.name: p for p in combined}
+        extra_by_name = {p.name: p for p in extra_params}
+        for overlap_name in combined_extra_overlap:
+            if not semantically_identical(combined_by_name[overlap_name], extra_by_name[overlap_name]):
+                warnings.warn(
+                    f"extra_parameters entry {overlap_name!r} is compatible with an "
+                    "existing pre_invoke/post_invoke parameter but not identical; "
+                    "the pre_invoke/post_invoke declaration wins.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+        extra_remainder = [p for p in extra_params if p.name not in combined_extra_overlap]
+        combined = insert_by_category(combined, extra_remainder)
+
+        # 9. Final reserved-parameter graft — produces the schema directly.
+        agent_parameters = insert_by_category(combined, reserved_params)
 
         # Store lifecycle components.
         self._pre_invoke = pre_tool
         self._post_invoke = post_tool
         self._post_result_key = resolved_post_result_key
-        self._context_properties: tuple[ParamSpec, ...] = tuple(context_property_params)
 
         # System prompt registry — subclasses populate after super().__init__.
         self._system_prompts: dict[str, PromptConfig] = {}
@@ -218,211 +331,48 @@ class Agent(AtomicInvokable, ABC):
     # Agent lifecycle configuration and validation
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _validate_pre_post_overlap_shapes(
-        pre_params: list[ParamSpec],
-        post_params: list[ParamSpec],
-    ) -> None:
-        """Validate that overlapping pre/post parameter names have compatible variadic shapes.
-
-        Both must be non-variadic, or both must be the same variadic kind.
-        A mismatch raises ``AgentError``.
-        """
-        pre_map = {p.name: p for p in pre_params}
-        post_map = {p.name: p for p in post_params}
-        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
-        for name in pre_map.keys() & post_map.keys():
-            pre = pre_map[name]
-            post = post_map[name]
-            pre_v = pre.kind in variadic_kinds
-            post_v = post.kind in variadic_kinds
-            if pre_v != post_v or (pre_v and pre.kind != post.kind):
-                raise AgentError(
-                    f"Overlapping pre/post parameter {name!r}: both must be non-variadic "
-                    f"or both must be the same variadic kind; "
-                    f"got {pre.kind!r} (pre_invoke) and {post.kind!r} (post_invoke)."
-                )
-
-    @staticmethod
-    def _warn_reserved_name_collisions(
-        pre_params: list[ParamSpec],
-        post_params: list[ParamSpec],
-    ) -> None:
-        """Warn or raise when a pre/post param name collides with a reserved framework arg.
-
-        ``run_id`` collisions:
-        - Semantically identical to ``RUN_ID_PARAM`` (kind, type, default, description): warn.
-        - Any mismatch: raise ``AgentError`` (true collision).
-
-        ``context`` collisions:
-        - Compatible (dict-typed and description shares CONTEXT_PARAM root): warn (redundant).
-        - Any mismatch (wrong type or description root differs): raise ``AgentError``.
-        """
-        reserved_agent_args = frozenset({"run_id", "context"})
-        all_params = (
-            [(p, "pre_invoke") for p in pre_params]
-            + [(p, "post_invoke") for p in post_params]
-        )
-        for param, source in all_params:
-            if param.name not in reserved_agent_args:
-                continue
-
-            if param.name == "run_id":
-                semantically_equal = (
-                    param.kind == RUN_ID_PARAM.kind
-                    and param.type == RUN_ID_PARAM.type
-                    and param.default == RUN_ID_PARAM.default
-                    and param.description == RUN_ID_PARAM.description
-                )
-                if semantically_equal:
-                    warnings.warn(
-                        f"'run_id' declared in {source} is redundant; "
-                        "the framework grafts it automatically.",
-                        UserWarning,
-                        stacklevel=4,
-                    )
-                else:
-                    raise AgentError(
-                        f"'run_id' declared in {source} conflicts with the "
-                        "framework-reserved 'run_id' parameter "
-                        "(kind, type, or default mismatch)."
-                    )
-
-            elif param.name == "context":
-                type_str = (param.type or "").lower()
-                ctx_type = CONTEXT_PARAM.type.lower()
-                type_compatible = (
-                    type_str in {ctx_type, "any"}
-                    or type_str.startswith(ctx_type)
-                    or param.type is NO_VAL
-                )
-                ctx_desc_prefix = CONTEXT_PARAM.description.split("{")[0]
-                desc_compatible = (param.description or "").startswith(ctx_desc_prefix)
-                if type_compatible and desc_compatible:
-                    warnings.warn(
-                        f"'context' declared in {source} is redundant; "
-                        "the framework grafts it automatically.",
-                        UserWarning,
-                        stacklevel=4,
-                    )
-                else:
-                    raise AgentError(
-                        f"'context' declared in {source} conflicts with the "
-                        "framework-reserved 'context' parameter "
-                        f"({'type' if not type_compatible else 'description'} mismatch)."
-                    )
-
-    @staticmethod
-    def _compose_agent_parameters(
-        *,
-        pre_params: list[ParamSpec],
-        post_params: list[ParamSpec],
-        result_key: str,
-        context_property_params: list[ParamSpec],
+    def _reconcile_reserved_names(
+        params: list[ParamSpec],
+        reserved_params: list[ParamSpec],
+        source_label: str,
     ) -> list[ParamSpec]:
-        """Compose the agent-facing parameter schema from the four-tier model.
+        """Warn or raise on reserved-name collisions, then pop reserved names.
 
-        Graft A: post-only non-result non-variadic params (as KEYWORD_ONLY).
-        Graft D: one ``context: dict = {}`` KEYWORD_ONLY param, only when
-                 ``context_property_params`` is non-empty.
-        Graft C: ``run_id`` (KEYWORD_ONLY, default=None).
-
-        All grafts are inserted before an existing ``**kwargs`` parameter.
-        Pre's ``ParamSpec`` wins on name overlaps with post params.
+        For each param whose name matches a ``reserved_params`` entry:
+        ``semantically_identical`` → warn (redundant declaration);
+        ``semantically_compatible`` (but not identical) → warn (distinct
+        message); otherwise → raise ``AgentError`` (true collision). Returns
+        ``params`` with every reserved-name entry removed — only the
+        warned/compatible ones can still be present, since true collisions
+        already raised.
         """
-        composed = list(pre_params)
-        pre_names = {p.name for p in pre_params}
-        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
-
-        def _insert_before_varkw(
-            lst: list[ParamSpec], items: list[ParamSpec]
-        ) -> list[ParamSpec]:
-            if not items:
-                return lst
-            idx = next(
-                (i for i, p in enumerate(lst) if p.kind == ParamSpec.VAR_KEYWORD),
-                None,
-            )
-            return lst[:idx] + items + lst[idx:] if idx is not None else lst + items
-
-        # Graft A: post-only non-result non-variadic params
-        grafts: list[ParamSpec] = []
-        for param in post_params:
-            if param.name == result_key or param.name in pre_names or param.kind in variadic_kinds:
+        reserved_by_name = {p.name: p for p in reserved_params}
+        for param in params:
+            reserved = reserved_by_name.get(param.name)
+            if reserved is None:
                 continue
-            grafts.append(
-                ParamSpec(
-                    name=param.name, index=0, kind=ParamSpec.KEYWORD_ONLY,
-                    type=param.type, default=param.default,
+            if semantically_identical(param, reserved):
+                warnings.warn(
+                    f"{param.name!r} declared in {source_label} is redundant; "
+                    "the framework grafts it automatically.",
+                    UserWarning,
+                    stacklevel=4,
                 )
-            )
-        composed = _insert_before_varkw(composed, grafts)
-
-        # Graft D: single context dict param when context_properties declared
-        if context_property_params:
-            existing_names = {p.name for p in composed}
-            if CONTEXT_PARAM.name not in existing_names:
-                desc = build_context_description(context_property_params)
-                prop_suffix = f" {desc}" if desc else ""
-                full_desc = CONTEXT_PARAM.description.replace(
-                    "{context_property_descriptions}", prop_suffix
+            elif semantically_compatible(param, reserved):
+                warnings.warn(
+                    f"{param.name!r} declared in {source_label} is compatible with "
+                    "the framework-reserved parameter of the same name but not "
+                    "identical; the framework's version will be used.",
+                    UserWarning,
+                    stacklevel=4,
                 )
-                context_graft = replace(CONTEXT_PARAM, description=full_desc)
-                composed = _insert_before_varkw(composed, [context_graft])
-
-        # Graft C: run_id — always the canonical framework version.
-        # Pop any collision (already warned/raised above) then reinsert.
-        composed = [p for p in composed if p.name != "run_id"]
-        composed = _insert_before_varkw(composed, [RUN_ID_PARAM])
-
-        return [
-            ParamSpec(name=p.name, index=i, kind=p.kind, type=p.type, default=p.default, description=p.description)
-            for i, p in enumerate(composed)
-        ]
-
-    # ------------------------------------------------------------------ #
-    # Schema helpers
-    # ------------------------------------------------------------------ #
-    def _update_context_param(self) -> None:
-        """Refresh the ``context`` param description in the agent schema.
-
-        Rebuilds the description from the current ``_context_properties`` and
-        replaces the matching entry in ``_parameters`` in-place. No-op if the
-        schema contains no ``context`` param (Graft D was never applied).
-
-        Only the ``description`` field is mutated; all structural fields
-        (name, type, default, kind, index) are preserved.
-        """
-        if not any(p.name == CONTEXT_PARAM.name for p in self._parameters):
-            return
-        desc = build_context_description(list(self._context_properties))
-        prop_suffix = f" {desc}" if desc else ""
-        full_desc = CONTEXT_PARAM.description.replace(
-            "{context_property_descriptions}", prop_suffix
-        )
-        self._parameters = [
-            replace(p, description=full_desc) if p.name == CONTEXT_PARAM.name else p
-            for p in self._parameters
-        ]
-
-    def _set_context_properties(self, params: list[ParamSpec]) -> None:
-        """Re-index, store, and refresh the context schema description."""
-        self._context_properties = tuple(
-            replace(p, index=i) for i, p in enumerate(params)
-        )
-        self._update_context_param()
-
-    def set_context_properties(
-        self,
-        properties: list[str] | list[ParamSpec] | None,
-    ) -> None:
-        """Replace context properties and refresh the schema description.
-
-        Normalizes ``properties`` via ``normalize_context_properties`` then
-        delegates storage and description refresh to ``_set_context_properties``.
-        Subclasses with multiple context sources (e.g. ``BasicAgent``) override
-        this method to raise — use their specific mutation endpoints instead.
-        """
-        self._set_context_properties(normalize_context_properties(properties))
+            else:
+                raise AgentError(
+                    f"{param.name!r} declared in {source_label} conflicts with the "
+                    "framework-reserved parameter of the same name "
+                    "(kind, type, or default mismatch)."
+                )
+        return [p for p in params if p.name not in reserved_by_name]
 
     # ------------------------------------------------------------------ #
     # Agent Properties
@@ -534,6 +484,8 @@ class Agent(AtomicInvokable, ABC):
         The assistant content is selected from either ``turn.generated_response``
         or ``turn.final_result.result`` according to ``assistant_response_source``.
         ``response_preview_limit`` is applied only to the rendered text.
+        ``turn.user_prompt`` is used verbatim as the user message content — it
+        is already a fully-resolved string, not a template.
         """
         if not isinstance(turn, AgentRecord):
             raise AgentInvocationError(
@@ -571,13 +523,16 @@ class Agent(AtomicInvokable, ABC):
         self,
         turns: list[AgentRecord],
         prompt: str,
-        context: dict,
+        inputs: dict,
     ) -> tuple[AgentRecord, dict]:
         """Sync core LLM call path.
 
         Receives the selected conversation turns, the current prompt string,
-        and the assembled context dict. Returns a 2-tuple of a draft
-        ``AgentRecord`` (``final_result=None``) and a metadata dict carrying
+        and the full filtered ``inputs`` dict — untouched, not a slice, not
+        popped of anything, so a subclass can still reach a reserved value
+        (e.g. ``run_id``) beyond what base ``Agent`` already threads through
+        for it. Returns a 2-tuple of a draft ``AgentRecord``
+        (``final_result=None``) and a metadata dict carrying
         ``"llm_records"`` and ``"llm_model_data"``.
         """
         ...
@@ -587,7 +542,7 @@ class Agent(AtomicInvokable, ABC):
         self,
         turns: list[AgentRecord],
         prompt: str,
-        context: dict,
+        inputs: dict,
     ) -> tuple[AgentRecord, dict]:
         """Async core LLM call path. Mirror of ``_invoke``."""
         ...
@@ -703,44 +658,32 @@ class Agent(AtomicInvokable, ABC):
     async def async_invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Async analog of ``invoke``.
 
-        Lifecycle steps mirror ``invoke`` with ``await`` at pre/post and ``_ainvoke``.
+        Lifecycle steps mirror ``invoke`` with ``await`` at pre/post and
+        ``_ainvoke``. No ``self._invoke_lock`` (unchanged from current
+        implementation, which does not lock async_invoke either).
         """
         logger.info(f"[Async {self.full_name} started]")
         started_at = datetime.now(timezone.utc)
 
-        # ① Filter inputs
+        # 1. Filter inputs.
         inputs = self.filter_inputs(inputs)
 
-        # ② Agent args
-        run_id = inputs.pop("run_id", None)
+        # 2. Reserved names + non-destructive run_id read.
+        reserved_names = {p.name for p in self.get_reserved_parameters()}
+        run_id = inputs.get("run_id")
 
-        # ③ Context extraction + required-property validation
-        context = dict(inputs.pop("context", {}))
-        for _cp in self._context_properties:
-            if _cp.default is NO_VAL and _cp.name not in context:
-                raise AgentInvocationError(
-                    f"Required context property {_cp.name!r} is missing from the "
-                    "caller-supplied 'context' dict."
-                )
-            elif _cp.default is not NO_VAL and _cp.name not in context:
-                context[_cp.name] = _cp.default
+        # 3. Slice pre/post inputs, excluding reserved names.
+        pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
+        pre_inputs = {k: v for k, v in inputs.items() if k in pre_names}
 
-        # ④ Pre-slice
-        pre_param_names = {p.name for p in self._pre_invoke.parameters}
-        pre_inputs = {k: v for k, v in inputs.items() if k in pre_param_names}
-        if "context" in pre_param_names:
-            pre_inputs["context"] = context
+        post_names = (
+            {p.name for p in self._post_invoke.parameters}
+            - {self._post_result_key}
+            - reserved_names
+        )
+        post_inputs = {k: v for k, v in inputs.items() if k in post_names}
 
-        # ⑤ Post-slice
-        post_param_names = {
-            p.name for p in self._post_invoke.parameters
-            if p.name != self._post_result_key
-        }
-        post_inputs = {k: v for k, v in inputs.items() if k in post_param_names}
-        if "context" in post_param_names:
-            post_inputs["context"] = context
-
-        # ⑥ Task prompt
+        # 4. Task prompt.
         try:
             logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs asynchronously")
             pre_result = await self._pre_invoke.async_invoke(pre_inputs)
@@ -757,23 +700,22 @@ class Agent(AtomicInvokable, ABC):
             )
         prompt = raw_prompt
 
-        # ⑦ History
+        # 5. History.
         logger.debug(f"Agent.{self.name} selecting turns")
         turns: list[AgentRecord] = []
-        if self._context_enabled:
-            if self._records_window != 0:
-                turns = self.get_conversation(run_id=run_id, turns=self._records_window)
+        if self._context_enabled and self._records_window != 0:
+            turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-        # ⑧ Core LLM work
+        # 6. Core LLM work — inputs passed through untouched.
         logger.debug(f"Agent.{self.name} performing async logic")
-        draft, metadata = await self._ainvoke(turns=turns, prompt=prompt, context=context)
+        draft, metadata = await self._ainvoke(turns=turns, prompt=prompt, inputs=inputs)
 
         if not isinstance(draft, AgentRecord):
             raise AgentInvocationError(
                 f"_ainvoke returned non-AgentRecord draft (type={type(draft)!r})"
             )
 
-        # ⑨ Output transformation
+        # 7. Output transformation.
         try:
             logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
             post_inputs[self._post_result_key] = draft.generated_response
@@ -786,7 +728,7 @@ class Agent(AtomicInvokable, ABC):
         final_response = post_result.result
         ended_at = datetime.now(timezone.utc)
 
-        # ⑩ Result
+        # 8. Result.
         agent_result = self.make_result(
             result=final_response,
             started_at=started_at,
@@ -794,11 +736,11 @@ class Agent(AtomicInvokable, ABC):
             **metadata,
         )
 
-        # ⑪ Record — always appended; set authoritative user_prompt + inputs
+        # 9. Record — always appended; inputs widens to the full filtered dict.
         record = replace(
             draft,
             user_prompt=prompt,
-            inputs=context,
+            inputs=inputs,
             final_result=agent_result,
             llm_records=metadata["llm_records"],
             prev=turns[-1] if turns else None,
@@ -811,57 +753,48 @@ class Agent(AtomicInvokable, ABC):
     def invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Invoke the agent with a single input mapping.
 
+        Runs under ``self._invoke_lock``.
+
         Steps
         -----
-        ① filter_inputs — collect declared keys; inject defaults.
-        ② Pop framework-reserved arg ``run_id``.
-        ③ Pop ``context``; validate required context properties.
-        ④ Slice ``pre_inputs`` from remaining; inject ``context`` if declared.
-        ⑤ Slice ``post_inputs`` from remaining; inject ``context`` if declared.
-        ⑥ pre_invoke → str (validated); used directly as prompt.
-        ⑦ Select conversation turns according to ``context_enabled``.
-        ⑧ _invoke(turns, prompt, context) → draft + metadata.
-        ⑨ post_invoke → final result.
-        ⑩ Construct AgentResult.
-        ⑪ Commit AgentRecord unconditionally (sets user_prompt + inputs on record).
+        1. ``filter_inputs`` — collect declared keys; inject defaults.
+        2. Read reserved names (``run_id`` by default) non-destructively via
+           ``inputs.get(...)`` — ``inputs`` is never mutated.
+        3. Slice ``pre_inputs`` / ``post_inputs`` from ``inputs`` by name
+           membership against ``pre_invoke`` / ``post_invoke``'s own
+           declared parameters, excluding reserved names.
+        4. ``pre_invoke`` → prompt string (validated).
+        5. Select conversation turns according to ``context_enabled``.
+        6. ``_invoke(turns, prompt, inputs)`` → draft + metadata; ``inputs``
+           is the full, untouched dict from step 1.
+        7. ``post_invoke`` → final result.
+        8. Construct ``AgentResult``.
+        9. Commit ``AgentRecord`` unconditionally — ``inputs`` on the record
+           is the same full dict passed to ``_invoke`` in step 6.
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
             started_at = datetime.now(timezone.utc)
 
-            # ① Filter inputs
+            # 1. Filter inputs.
             inputs = self.filter_inputs(inputs)
 
-            # ② Agent args
-            run_id = inputs.pop("run_id", None)
+            # 2. Reserved names + non-destructive run_id read.
+            reserved_names = {p.name for p in self.get_reserved_parameters()}
+            run_id = inputs.get("run_id")
 
-            # ③ Context extraction + required-property validation
-            context = dict(inputs.pop("context", {}))
-            for _cp in self._context_properties:
-                if _cp.default is NO_VAL and _cp.name not in context:
-                    raise AgentInvocationError(
-                        f"Required context property {_cp.name!r} is missing from the "
-                        "caller-supplied 'context' dict."
-                    )
-                elif _cp.default is not NO_VAL and _cp.name not in context:
-                    context[_cp.name] = _cp.default
+            # 3. Slice pre/post inputs, excluding reserved names.
+            pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
+            pre_inputs = {k: v for k, v in inputs.items() if k in pre_names}
 
-            # ④ Pre-slice
-            pre_param_names = {p.name for p in self._pre_invoke.parameters}
-            pre_inputs = {k: v for k, v in inputs.items() if k in pre_param_names}
-            if "context" in pre_param_names:
-                pre_inputs["context"] = context
+            post_names = (
+                {p.name for p in self._post_invoke.parameters}
+                - {self._post_result_key}
+                - reserved_names
+            )
+            post_inputs = {k: v for k, v in inputs.items() if k in post_names}
 
-            # ⑤ Post-slice
-            post_param_names = {
-                p.name for p in self._post_invoke.parameters
-                if p.name != self._post_result_key
-            }
-            post_inputs = {k: v for k, v in inputs.items() if k in post_param_names}
-            if "context" in post_param_names:
-                post_inputs["context"] = context
-
-            # ⑥ Task prompt
+            # 4. Task prompt.
             try:
                 logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
                 pre_result = self._pre_invoke.invoke(pre_inputs)
@@ -878,25 +811,22 @@ class Agent(AtomicInvokable, ABC):
                 )
             prompt = raw_prompt
 
-            # ⑦ History
+            # 5. History.
             logger.debug(f"Agent.{self.name} selecting turns")
             turns: list[AgentRecord] = []
-            if self._context_enabled:
-                if self._records_window != 0:
-                    turns = self.get_conversation(
-                        run_id=run_id, turns=self._records_window
-                    )
+            if self._context_enabled and self._records_window != 0:
+                turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-            # ⑧ Core LLM work
+            # 6. Core LLM work — inputs passed through untouched.
             logger.debug(f"Agent.{self.name} performing logic")
-            draft, metadata = self._invoke(turns=turns, prompt=prompt, context=context)
+            draft, metadata = self._invoke(turns=turns, prompt=prompt, inputs=inputs)
 
             if not isinstance(draft, AgentRecord):
                 raise AgentInvocationError(
                     f"_invoke returned non-AgentRecord draft (type={type(draft)!r})"
                 )
 
-            # ⑨ Output transformation
+            # 7. Output transformation.
             try:
                 logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
                 post_inputs[self._post_result_key] = draft.generated_response
@@ -909,7 +839,7 @@ class Agent(AtomicInvokable, ABC):
             final_response = post_result.result
             ended_at = datetime.now(timezone.utc)
 
-            # ⑩ Result
+            # 8. Result.
             agent_result = self.make_result(
                 result=final_response,
                 started_at=started_at,
@@ -917,11 +847,11 @@ class Agent(AtomicInvokable, ABC):
                 **metadata,
             )
 
-            # ⑪ Record — always appended; set authoritative user_prompt + inputs
+            # 9. Record — always appended; inputs widens to the full filtered dict.
             record = replace(
                 draft,
                 user_prompt=prompt,
-                inputs=context,
+                inputs=inputs,
                 final_result=agent_result,
                 llm_records=metadata["llm_records"],
                 prev=turns[-1] if turns else None,
