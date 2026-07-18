@@ -22,6 +22,7 @@ import pprint
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import BasicAgent
+from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.models.agents.prompts import PromptConfig
 
@@ -105,7 +106,7 @@ def main() -> None:
     # to show the auto-grafted, required `domain` parameter.
     print("\n=== Agent schema (shared across all three personas) ===\n")
     for param in agents[0][1].parameters:
-        default_str = "(required)" if param.default.__class__.__name__ == "_NO_VAL" else repr(param.default)
+        default_str = "(required)" if param.default is NO_VAL else repr(param.default)
         print(f"  {param.name:<20} {param.kind:<25} default={default_str}")
         if param.description:
             print(f"  {'':20} {param.description}")
