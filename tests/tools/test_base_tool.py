@@ -6,7 +6,7 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
-from atomic_agentic.core.Invokable import AtomicInvokable
+from atomic_agentic.core.Invokable import AtomicInvokable, StructuredInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.tools.base import Tool
@@ -268,6 +268,28 @@ class TestToolConstruction:
         assert data["return_type"] == "int"
         assert data["wraps_invokable"] is False
         assert "invokable_function" not in data
+
+
+class TestToolExtraDescription:
+    def test_plain_callable_backed_tool_has_no_extra_description(self) -> None:
+        tool = Tool(function=add, name="add", namespace="tests")
+
+        assert tool._extra_description() == ""
+        assert tool.description == tool._description
+
+    def test_invokable_backed_tool_surfaces_wrapped_extra_description(self) -> None:
+        inner = Tool(function=add, name="add", namespace="tests")
+        structured = StructuredInvokable(
+            component=inner,
+            output_schema=["result"],
+            name="structured_add",
+            description="Add two numbers.",
+        )
+
+        tool = Tool(function=structured, name="add_tool", namespace="tests")
+
+        assert tool._extra_description() == "Output schema: [result]"
+        assert tool.description == "Add two numbers.\nOutput schema: [result]"
 
 
 class TestToolInvokableBacking:

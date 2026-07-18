@@ -127,8 +127,6 @@ from ..constants.agents import (
 )
 
 from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
-from ..models.parameters import ParamSpec
-from ..models.agents.prompts import PromptConfig
 from ..models.results.agents import ToolAgentResult, ToolUsageRecord
 from ..models.results import LLMModelData
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
@@ -166,12 +164,12 @@ class ToolAgent(Agent, ABC):
 
     Template-Method Loop
     --------------------
-    The ``_invoke(turns, prompt, context)`` and ``_ainvoke(turns, prompt, context)``
+    The ``_invoke(turns, prompt, inputs)`` and ``_ainvoke(turns, prompt, inputs)``
     methods are FINAL; subclasses should not override them. They receive the selected
-    canonical turns, current prompt, and assembled context dict from the base
+    canonical turns, current prompt, and full inputs dict from the base
     ``Agent`` lifecycle, then run the ToolAgent template loop::
 
-    1. state = _initialize_run_state(turns=turns, prompt=prompt, context=context, ...)
+    1. state = _initialize_run_state(turns=turns, prompt=prompt, inputs=inputs, ...)
                                                               [subclass hook]
     2. while not state.is_done:
         state = _prepare_next_batch(state)              [subclass hook]
@@ -197,9 +195,9 @@ class ToolAgent(Agent, ABC):
     -------------------------
     Subclasses must implement two abstract methods:
 
-    **_initialize_run_state(turns, prompt, context, ...)** → ``RS`` (TypeVar[ToolAgentRunState])
+    **_initialize_run_state(turns, prompt, inputs, ...)** → ``RS`` (TypeVar[ToolAgentRunState])
         Initialize and return a run state for this invoke. Receives the raw turns,
-        prompt, and context from the base lifecycle. Must:
+        prompt, and inputs from the base lifecycle. Must:
         - Render the system prompt from instance state (tools, limit, constants)
         - Call ``build_messages(system, turns, prompt)`` to produce LLM messages
         - Snapshot cached blackboard entries if context is enabled
@@ -262,7 +260,6 @@ class ToolAgent(Agent, ABC):
         llm_engine: LLMEngine,
         filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = False,
-        context_properties: list[str] | list[ParamSpec] | None = None,
         *,
         fail_fast: bool = True,
         generation_retries: int = 0,
@@ -339,7 +336,6 @@ class ToolAgent(Agent, ABC):
             llm_engine=llm_engine,
             filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
-            context_properties=context_properties,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
@@ -1754,25 +1750,25 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     # Template Method (FINAL)
     # ------------------------------------------------------------------ #
-    def _invoke(self, turns: list[AgentRecord], prompt: str, context: dict) -> tuple[ToolAgentRecord, dict]:
+    def _invoke(self, turns: list[AgentRecord], prompt: str, inputs: dict) -> tuple[ToolAgentRecord, dict]:
         """
         FINAL sync ToolAgent template method.
 
-        Receives selected canonical turns, the current prompt, and the assembled
-        context dict from the base ``Agent.invoke(...)`` lifecycle, then runs the
+        Receives selected canonical turns, the current prompt, and the full
+        inputs dict from the base ``Agent.invoke(...)`` lifecycle, then runs the
         ToolAgent template loop. Returns a 2-tuple of a **draft** ``ToolAgentRecord``
         (``final_result`` is ``None``) and a metadata dict carrying ``llm_records``,
         ``llm_model_data``, and ``tool_usage``.
 
         System-prompt rendering and message construction are delegated entirely to
         ``_initialize_run_state``; this method receives and forwards ``turns``,
-        ``prompt``, and ``context`` without interpreting them. LLMRecord envelopes
+        ``prompt``, and ``inputs`` without interpreting them. LLMRecord envelopes
         are accumulated on ``state.llm_records`` across the loop and transferred to
         the metadata dict at return time. ``invoke`` later completes the draft via
         ``dataclasses.replace(draft, final_result=agent_result)``.
 
         Subclasses should not override this method. They should implement:
-        - ``_initialize_run_state(turns=..., prompt=..., context=..., ...)``
+        - ``_initialize_run_state(turns=..., prompt=..., inputs=..., ...)``
         - ``_prepare_next_batch(state)``
         """
         # Compute conversation-scoped cache index sets from the turns chain.
@@ -1782,6 +1778,7 @@ class ToolAgent(Agent, ABC):
         state = self._initialize_run_state(
             turns=turns,
             prompt=prompt,
+            inputs=inputs,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )
@@ -1835,7 +1832,7 @@ class ToolAgent(Agent, ABC):
         )
 
         draft = ToolAgentRecord(
-            user_prompt=PromptConfig(template=prompt, description=""),
+            user_prompt=prompt,
             generated_response=state.return_value,
             blackboard_start=blackboard_start,
             blackboard_end=blackboard_end,
@@ -1852,26 +1849,26 @@ class ToolAgent(Agent, ABC):
         self,
         turns: list[AgentRecord],
         prompt: str,
-        context: dict,
+        inputs: dict,
     ) -> tuple[ToolAgentRecord, dict]:
         """
         FINAL async ToolAgent template method.
 
-        Receives selected canonical turns, the current prompt, and the assembled
-        context dict from the base ``Agent.async_invoke(...)`` lifecycle, then runs
+        Receives selected canonical turns, the current prompt, and the full
+        inputs dict from the base ``Agent.async_invoke(...)`` lifecycle, then runs
         the ToolAgent template loop. Returns a 2-tuple mirroring the sync
         ``_invoke(...)`` contract — see its docstring for details on the
         draft-record and metadata dict contents.
 
         System-prompt rendering and message construction are delegated to
         ``_ainitialize_run_state``; this method forwards ``turns``, ``prompt``,
-        and ``context`` without interpreting them. Mirrors the sync ``_invoke(...)``
+        and ``inputs`` without interpreting them. Mirrors the sync ``_invoke(...)``
         loop but awaits the async batch executor for tool execution.
 
         Subclasses should not override this method. They should implement:
-        - ``_initialize_run_state(turns=..., prompt=..., context=..., ...)``
+        - ``_initialize_run_state(turns=..., prompt=..., inputs=..., ...)``
         - ``_prepare_next_batch(state)``
-        - ``_ainitialize_run_state(turns=..., prompt=..., context=..., ...)`` (async; base default: asyncio.to_thread wrap)
+        - ``_ainitialize_run_state(turns=..., prompt=..., inputs=..., ...)`` (async; base default: asyncio.to_thread wrap)
         - ``_aprepare_next_batch(state)`` (async; base default: asyncio.to_thread wrap)
         """
         # Compute conversation-scoped cache index sets from the turns chain.
@@ -1881,6 +1878,7 @@ class ToolAgent(Agent, ABC):
         state = await self._ainitialize_run_state(
             turns=turns,
             prompt=prompt,
+            inputs=inputs,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )
@@ -1936,7 +1934,7 @@ class ToolAgent(Agent, ABC):
         )
 
         draft = ToolAgentRecord(
-            user_prompt=PromptConfig(template=prompt, description=""),
+            user_prompt=prompt,
             generated_response=state.return_value,
             blackboard_start=blackboard_start,
             blackboard_end=blackboard_end,
@@ -1988,11 +1986,7 @@ class ToolAgent(Agent, ABC):
                 "ToolAgent.make_result: llm_model_data must be an LLMModelData instance."
             )
 
-        llm_token_usage = tuple(
-            r.llm_result.token_usage
-            for r in llm_records
-            if r.llm_result.token_usage is not None
-        )
+        llm_token_usage = tuple(r.llm_result.token_usage for r in llm_records)
 
         return self._make_result(
             result=result,
@@ -2374,16 +2368,23 @@ class ToolAgent(Agent, ABC):
         *,
         turns: list[AgentRecord],
         prompt: str,
+        inputs: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ToolAgentRunState:
         """
         Initialize and return a run state for this invocation.
 
-        Receives the selected canonical turns and rendered user prompt from the
-        base Agent lifecycle. Implementations are responsible for rendering the
-        system prompt, building the full message list via ``build_messages(...)``,
-        and initializing all run-state bookkeeping.
+        Receives the selected canonical turns, rendered user prompt, and full
+        inputs dict from the base Agent lifecycle. Implementations are
+        responsible for rendering the system prompt, building the full message
+        list via ``build_messages(...)``, and initializing all run-state
+        bookkeeping.
+
+        ``inputs`` is the same object ``_invoke``/``_ainvoke`` received, untouched.
+        Implementations should store it on the constructed run state's ``inputs``
+        field so ``_prepare_next_batch`` can read ``state.inputs`` later if it
+        ever needs to — ``_prepare_next_batch``'s own signature is not changing.
 
         Implementations should:
         - render the system prompt from instance state (tools, limit, constants)
@@ -2418,19 +2419,22 @@ class ToolAgent(Agent, ABC):
         *,
         turns: list[AgentRecord],
         prompt: str,
+        inputs: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ToolAgentRunState:
         """
         Async hook for run-state initialization.
 
-        Default offloads the sync hook to a worker thread. Subclasses override
-        when the hook contains blocking I/O (e.g. a planning LLM call).
+        Default offloads the sync hook to a worker thread, forwarding ``inputs``
+        through unchanged. Subclasses override when the hook contains blocking
+        I/O (e.g. a planning LLM call).
         """
         return await asyncio.to_thread(
             self._initialize_run_state,
             turns=turns,
             prompt=prompt,
+            inputs=inputs,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )

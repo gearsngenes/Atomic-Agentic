@@ -120,6 +120,21 @@ class TestBasicFlowConstruction:
         assert flow.filter_extraneous_inputs is True
 
 
+class TestBasicFlowExtraDescription:
+    def test_surfaces_component_extra_description(self) -> None:
+        component = make_structured_component()
+        flow = BasicFlow(component=component)
+
+        assert flow._extra_description() == "Output schema: [value]"
+        assert flow.description == "Structured scalar.\nOutput schema: [value]"
+
+    def test_empty_when_component_has_no_extra_description(self) -> None:
+        flow = BasicFlow(component=EchoWorkflow())
+
+        assert flow._extra_description() == ""
+        assert flow.description == flow._description
+
+
 class TestBasicFlowStructuredChild:
     def test_invoke_returns_basic_flow_result_with_child_payload(self) -> None:
         component = make_structured_component()

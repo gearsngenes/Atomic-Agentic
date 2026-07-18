@@ -197,6 +197,65 @@ class TestParallelFlowConstruction:
             make_three_branch_flow(output_indices=[5])
 
 
+def make_structured_branch(name: str, output_schema: list[str]) -> StructuredInvokable:
+    def return_value(value: Any) -> Any:
+        """Return the provided value."""
+        return value
+
+    tool = Tool(
+        function=return_value,
+        name=name,
+        namespace="tests",
+        description=f"Return the provided value ({name}).",
+    )
+    return StructuredInvokable(
+        component=tool,
+        output_schema=output_schema,
+        name=f"structured_{name}",
+        description=f"Structured {name}.",
+    )
+
+
+class TestParallelFlowExtraDescription:
+    def test_scalar_output_surfaces_selected_branch_extra_description(self) -> None:
+        structured = make_structured_branch("value_branch", ["value"])
+
+        flow = ParallelFlow(
+            name="parallel_flow",
+            namespace="tests",
+            description="Parallel test flow.",
+            branches=[structured, make_branch("b")],
+            output_type=ParallelFlow.SCALAR,
+            output_indices=[0],
+        )
+
+        assert flow._extra_description() == "Output schema: [value]"
+        assert flow.description == "Parallel test flow.\nOutput schema: [value]"
+
+    def test_dict_output_lists_keys_and_branch_return_types(self) -> None:
+        flow = make_three_branch_flow(
+            output_type=ParallelFlow.DICT,
+            output_names=["first", "second", "third"],
+        )
+
+        assert flow._extra_description() == (
+            "Returns a dict of 3 keys: first (dict[str, Any]), "
+            "second (dict[str, Any]), third (dict[str, Any])"
+        )
+
+    def test_list_output_states_branch_count_and_omits_branch_content(self) -> None:
+        structured = make_structured_branch("value_branch", ["value"])
+
+        flow = ParallelFlow(
+            name="parallel_flow",
+            namespace="tests",
+            description="Parallel test flow.",
+            branches=[structured, make_branch("b"), make_branch("c")],
+        )
+
+        assert flow._extra_description() == "Returns a list of 3 branch outputs."
+
+
 class TestParallelFlowSyncInvoke:
     def test_all_branches_invoked_with_same_broadcast_inputs(self) -> None:
         flow = make_three_branch_flow()

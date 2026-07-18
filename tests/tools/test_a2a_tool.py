@@ -38,6 +38,7 @@ def remote_metadata(
     description: str = "Remote echo invokable.",
     return_type: str = "dict[str, Any]",
     parameters: list[Mapping[str, Any]] | None = None,
+    extra_description: str = "",
 ) -> dict[str, Any]:
     return {
         "name": "echo",
@@ -53,6 +54,7 @@ def remote_metadata(
         "return_type": return_type,
         "filter_extraneous_inputs": True,
         "invokable_type": "EchoInvokable",
+        "extra_description": extra_description,
     }
 
 
@@ -236,6 +238,29 @@ class TestPyA2AtomicToolSignatureAndMetadata:
         snapshot["description"] = "mutated"
 
         assert tool.remote_metadata["description"] == "Remote echo invokable."
+
+class TestPyA2AtomicToolExtraDescription:
+    def test_extra_description_empty_by_default(self) -> None:
+        tool = make_tool()
+
+        assert tool._extra_description() == ""
+
+    def test_surfaces_remote_extra_description_verbatim(self) -> None:
+        client = FakePyA2AtomicClient(
+            metadata=remote_metadata(extra_description="Output schema: [result]")
+        )
+        tool = make_tool(client=client)
+
+        assert tool._extra_description() == "Output schema: [result]"
+
+    def test_extra_description_defaults_to_empty_when_key_missing_from_legacy_host(self) -> None:
+        legacy_metadata = remote_metadata()
+        del legacy_metadata["extra_description"]
+        client = FakePyA2AtomicClient(metadata=legacy_metadata)
+        tool = make_tool(client=client)
+
+        assert tool._extra_description() == ""
+
 
 class TestPyA2AtomicToolInvocation:
     def test_invoke_forwards_remote_name_and_kwargs_to_client(self) -> None:

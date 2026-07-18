@@ -15,8 +15,8 @@ You are the *Story Outliner*.
 Input: story_idea (one sentence).
 Output: **JSON only** with keys:
   working_title, premise,
-  characters [ {{name, motivation, conflict}} â€¦ ],
-  scenes     [ {{title, purpose}} â€¦ ]
+  characters [ {{name, motivation, conflict}} … ],
+  scenes     [ {{title, purpose}} … ]
 """.strip()
 
 WRITER_PROMPT = """
@@ -106,7 +106,7 @@ if __name__ == "__main__":
         f"Then for {loops} cycles, have the reviewer critique the draft and the writer apply the notes."
     )
 
-    print("\nâ‡¢ Planning + execution â€¦")
+    print("\n⇢ Planning + execution …")
     final_draft_md = orch.invoke({"prompt": task_prompt}).result
 
     print("\n========== FINAL DRAFT ==========\n")
@@ -116,4 +116,4 @@ if __name__ == "__main__":
     out_dir.mkdir(exist_ok=True)
     filepath = out_dir / "planact_story.md"
     filepath.write_text(final_draft_md, encoding="utf-8")
-    print(f"\nâœ“ Story saved to: {filepath.resolve()}")
+    print(f"\n✓ Story saved to: {filepath.resolve()}")

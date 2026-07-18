@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Mapping
 import warnings
@@ -8,24 +8,23 @@ import asyncio
 
 from atomic_agentic.tools import Tool
 from atomic_agentic.agents.base import Agent
-from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.constants.agents import RUN_ID_PARAM, CONTEXT_PARAM
+from atomic_agentic.constants.agents import RUN_ID_PARAM
 from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results import LLMModelData, TokenUsage
-from atomic_agentic.utils.agents import normalize_context_properties
+from atomic_agentic.utils.parameters import to_paramspec_list
 
 
 ROLE_PROMPT = "You are a deterministic test writer."
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─────────────────────────────────────────────────────────────────────────────
 # Minimal concrete Agent fixture (for abstract-API tests)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─────────────────────────────────────────────────────────────────────────────
 class _MinimalAgent(Agent):
     """Trivial concrete Agent used to test abstract Agent construction and API.
 
@@ -37,7 +36,7 @@ class _MinimalAgent(Agent):
         self,
         turns: list[AgentRecord],
         prompt: str,
-        context: dict,
+        inputs: dict,
     ) -> tuple[AgentRecord, dict]:
         engine_result = self._llm_engine.invoke({
             "messages": [
@@ -50,7 +49,7 @@ class _MinimalAgent(Agent):
             llm_result=engine_result,
         )
         draft = AgentRecord(
-            user_prompt=PromptConfig(template=prompt, description=""),
+            user_prompt=prompt,
             generated_response=engine_result.result,
         )
         return draft, {
@@ -62,7 +61,7 @@ class _MinimalAgent(Agent):
         self,
         turns: list[AgentRecord],
         prompt: str,
-        context: dict,
+        inputs: dict,
     ) -> tuple[AgentRecord, dict]:
         engine_result = await self._llm_engine.async_invoke({
             "messages": [
@@ -75,7 +74,7 @@ class _MinimalAgent(Agent):
             llm_result=engine_result,
         )
         draft = AgentRecord(
-            user_prompt=PromptConfig(template=prompt, description=""),
+            user_prompt=prompt,
             generated_response=engine_result.result,
         )
         return draft, {
@@ -84,9 +83,90 @@ class _MinimalAgent(Agent):
         }
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+class _EchoAgent(Agent):
+    """Concrete Agent fixture with a fixed system prompt and a real
+    single-LLM-call ``_invoke``/``_ainvoke`` path.
+
+    Used in place of ``BasicAgent`` for invoke-lifecycle tests in this file:
+    as of this pass, ``BasicAgent._invoke``/``_ainvoke`` still declare the
+    retired ``context`` parameter name against this class's renamed
+    ``inputs`` abstract signature (accepted, documented scope-boundary
+    breakage -- see the ``Agent`` class docstring) and would raise
+    ``TypeError`` at invoke time. This fixture mirrors ``BasicAgent``'s
+    message-construction shape (system + turns + prompt) with the correct
+    signature, keeping this file's invoke-behavior coverage independent of
+    ``BasicAgent``'s health.
+    """
+
+    def __init__(self, *, system_prompt: str = ROLE_PROMPT, **kwargs: Any) -> None:
+        self._echo_system_prompt = system_prompt
+        super().__init__(**kwargs)
+        self._system_prompts["system"] = PromptConfig(
+            template=system_prompt, description="Echo agent system prompt."
+        )
+
+    def _invoke(
+        self,
+        turns: list[AgentRecord],
+        prompt: str,
+        inputs: dict,
+    ) -> tuple[AgentRecord, dict]:
+        messages = self.build_messages(self._echo_system_prompt, turns, prompt)
+        engine_result = self._llm_engine.invoke({"messages": messages})
+        text = engine_result.result
+        if not isinstance(text, str):
+            raise AgentInvocationError(
+                f"LLM engine returned non-string result (type={type(text).__name__})."
+            )
+        llm_record = LLMRecord(messages=(messages[-1],), llm_result=engine_result)
+        draft = AgentRecord(user_prompt=prompt, generated_response=text)
+        return draft, {
+            "llm_records": (llm_record,),
+            "llm_model_data": engine_result.model_data,
+        }
+
+    async def _ainvoke(
+        self,
+        turns: list[AgentRecord],
+        prompt: str,
+        inputs: dict,
+    ) -> tuple[AgentRecord, dict]:
+        messages = self.build_messages(self._echo_system_prompt, turns, prompt)
+        engine_result = await self._llm_engine.async_invoke({"messages": messages})
+        text = engine_result.result
+        if not isinstance(text, str):
+            raise AgentInvocationError(
+                f"LLM engine returned non-string result (type={type(text).__name__})."
+            )
+        llm_record = LLMRecord(messages=(messages[-1],), llm_result=engine_result)
+        draft = AgentRecord(user_prompt=prompt, generated_response=text)
+        return draft, {
+            "llm_records": (llm_record,),
+            "llm_model_data": engine_result.model_data,
+        }
+
+
+class _ExtraReservedAgent(_MinimalAgent):
+    """Concrete Agent subclass declaring one additional reserved parameter.
+
+    Exercises the ``get_reserved_parameters`` override contract: a subclass
+    adds its own reserved name on top of the base ``[RUN_ID_PARAM]`` list.
+    """
+
+    EXTRA_RESERVED = ParamSpec(
+        name="trace_id", index=0, kind=ParamSpec.KEYWORD_ONLY,
+        type="str | None", default=None,
+        description="Subclass-reserved trace identifier.",
+    )
+
+    @classmethod
+    def get_reserved_parameters(cls) -> list[ParamSpec]:
+        return super().get_reserved_parameters() + [cls.EXTRA_RESERVED]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Test engine and helper functions
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─────────────────────────────────────────────────────────────────────────────
 class StatefulEchoLLMEngine(LLMEngine):
     """Concrete deterministic LLMEngine for Agent tests.
 
@@ -237,16 +317,16 @@ def make_agent(
     pre_invoke: Any = build_prompt,
     post_invoke: Any = package_response,
     post_result_key: str | None = None,
-    role_prompt: str = ROLE_PROMPT,
+    system_prompt: str = ROLE_PROMPT,
     response_preview_limit: int | None = None,
     assistant_response_source: str = "raw",
-) -> BasicAgent:
-    return BasicAgent(
+) -> _EchoAgent:
+    return _EchoAgent(
         name="writer_agent",
         namespace="tests",
         description="Deterministic writer test agent.",
         llm_engine=engine or StatefulEchoLLMEngine(),
-        role_prompt=role_prompt,
+        system_prompt=system_prompt,
         context_enabled=context_enabled,
         records_window=records_window,
         pre_invoke=pre_invoke,
@@ -257,9 +337,9 @@ def make_agent(
     )
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─────────────────────────────────────────────────────────────────────────────
 # Test classes
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─────────────────────────────────────────────────────────────────────────────
 class TestAgentPipeline:
     def test_pre_invoke_shapes_prompt_and_post_invoke_packages_result(self) -> None:
         engine = StatefulEchoLLMEngine()
@@ -295,12 +375,12 @@ class TestAgentPipeline:
 
     def test_default_identity_pre_and_post_invoke_path(self) -> None:
         engine = StatefulEchoLLMEngine()
-        agent = BasicAgent(
+        agent = _EchoAgent(
             name="identity_agent",
             namespace="tests",
             description="Identity agent.",
             llm_engine=engine,
-            role_prompt=ROLE_PROMPT,
+            system_prompt=ROLE_PROMPT,
             context_enabled=False,
         )
 
@@ -324,13 +404,18 @@ class TestAgentPipeline:
 
 
 class TestAgentSchemaComposition:
-    def test_post_only_non_result_param_is_auto_grafted_as_keyword_only(self) -> None:
+    def test_post_only_non_result_param_preserves_its_declared_kind(self) -> None:
+        # suffix is POSITIONAL_OR_KEYWORD in post_with_suffix's own signature --
+        # no forced KEYWORD_ONLY coercion (dropped this pass). Since suffix is
+        # required (no default) it sorts ahead of the defaulted "tone" within
+        # the POSITIONAL_OR_KEYWORD category (insert_by_category's required-
+        # before-defaulted ordering rule).
         agent = make_agent(post_invoke=post_with_suffix)
 
         assert [(param.name, param.kind, param.default) for param in agent.parameters] == [
             ("topic", "POSITIONAL_OR_KEYWORD", NO_VAL),
+            ("suffix", "POSITIONAL_OR_KEYWORD", NO_VAL),
             ("tone", "POSITIONAL_OR_KEYWORD", "neutral"),
-            ("suffix", "KEYWORD_ONLY", NO_VAL),
             ("run_id", "KEYWORD_ONLY", None),
         ]
 
@@ -339,7 +424,8 @@ class TestAgentSchemaComposition:
 
         suffix_param = next(param for param in agent.parameters if param.name == "suffix")
 
-        assert suffix_param.kind == "KEYWORD_ONLY"
+        # Declared kind preserved (POSITIONAL_OR_KEYWORD, not forced KEYWORD_ONLY).
+        assert suffix_param.kind == "POSITIONAL_OR_KEYWORD"
         assert suffix_param.default == "!"
 
     def test_overlapping_param_pre_wins_in_schema(self) -> None:
@@ -360,19 +446,34 @@ class TestAgentSchemaComposition:
             "tone": "neutral",
         }
 
-    def test_variadic_post_param_is_not_grafted_into_schema(self) -> None:
+    def test_variadic_post_only_param_is_grafted_preserving_its_kind(self) -> None:
+        # Dropped this pass: post-only VAR_POSITIONAL/VAR_KEYWORD params are no
+        # longer excluded from grafting -- insert_by_category places them in
+        # their own valid ordering slot (after POSITIONAL_OR_KEYWORD, before
+        # KEYWORD_ONLY) like any other kind.
         agent = make_agent(post_invoke=post_with_post_only_args)
 
         names = [p.name for p in agent.parameters]
+        assert names == ["topic", "tone", "extras", "run_id"]
+        extras_param = next(p for p in agent.parameters if p.name == "extras")
+        assert extras_param.kind == "VAR_POSITIONAL"
 
-        assert "extras" not in names
+    def test_overlapping_param_with_type_mismatch_raises_at_construction(self) -> None:
+        # "tone" overlaps pre_invoke's own "tone: str" param but is declared
+        # "int" here -- an incompatible collision, caught at construction by
+        # parameter_collisions (was previously undetected: pre/post overlap
+        # shapes were only checked for variadic-kind mismatches).
+        with pytest.raises(AgentError, match="collision"):
+            make_agent(post_invoke=post_with_type_mismatch)
 
-    def test_post_only_param_with_type_mismatch_still_routes_correctly(self) -> None:
-        agent = make_agent(post_invoke=post_with_type_mismatch)
+    def test_truly_post_only_param_with_any_type_routes_correctly(self) -> None:
+        # A post-only param that does NOT overlap any pre_invoke name is free
+        # to declare any type -- only overlapping names are cross-checked.
+        agent = make_agent(post_invoke=post_with_suffix)
 
-        result = agent.invoke({"topic": "pytest", "tone": "strict"})
+        result = agent.invoke({"topic": "pytest", "tone": "strict", "suffix": "!"})
 
-        assert result.result == "ECHO: Write about pytest in a strict tone.|tone=strict"
+        assert result.result == "ECHO: Write about pytest in a strict tone.!"
 
 
 class TestAgentPostInvokeRouting:
@@ -432,26 +533,18 @@ class TestAgentPostInvokeRouting:
 
         assert agent.post_result_key == "items"
 
-    def test_post_result_key_context_raises(self) -> None:
-        def post_with_context_key(context: dict) -> dict:
-            return context
-
-        with pytest.raises(AgentError, match="framework-reserved"):
-            make_agent(post_invoke=post_with_context_key, post_result_key="context")
-
     def test_post_result_key_run_id_raises(self) -> None:
-        def post_with_run_id_key(run_id: str, result: str) -> str:
-            return result
+        # "run_id" is never a legal post_result_key: it's not among
+        # post_invoke's own declared (reserved-popped) names.
+        with pytest.raises(AgentError, match="post_result_key"):
+            make_agent(post_result_key="run_id")
 
-        with pytest.raises(AgentError, match="framework-reserved"):
-            make_agent(post_invoke=post_with_run_id_key, post_result_key="run_id")
+    def test_post_result_key_colliding_with_pre_invoke_name_raises(self) -> None:
+        def post_with_topic_key(topic: str) -> str:
+            return topic
 
-    def test_auto_resolved_result_key_reserved_raises(self) -> None:
-        def post_context_first(context: dict) -> dict:
-            return context
-
-        with pytest.raises(AgentError, match="framework-reserved"):
-            make_agent(post_invoke=post_context_first)
+        with pytest.raises(AgentError, match="post_result_key"):
+            make_agent(post_invoke=post_with_topic_key, post_result_key="topic")
 
 
 class TestAgentContext:
@@ -581,8 +674,8 @@ class TestAgentContext:
         assert second_call_messages[-1]["content"] == "Write about second topic in a plain tone."
 
         assert len(agent.records) == 2
-        assert agent.records[0].user_prompt.template == "Write about first topic in a plain tone."
-        assert agent.records[1].user_prompt.template == "Write about second topic in a plain tone."
+        assert agent.records[0].user_prompt == "Write about first topic in a plain tone."
+        assert agent.records[1].user_prompt == "Write about second topic in a plain tone."
 
     def test_clear_memory_removes_stored_history(self) -> None:
         engine = StatefulEchoLLMEngine()
@@ -607,7 +700,7 @@ class TestAgentValidation:
     def test_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
         agent = make_agent(pre_invoke=bad_pre_invoke)
 
-        with pytest.raises(AgentInvocationError, match="pre_invoke returned non-string/non-PromptConfig"):
+        with pytest.raises(AgentInvocationError, match="pre_invoke returned a non-string result"):
             agent.invoke({"topic": "pytest"})
 
     def test_post_invoke_with_one_defaulted_parameter_is_allowed(self) -> None:
@@ -688,10 +781,9 @@ class TestAgentSerialization:
 
         data = agent.to_dict()
 
-        assert data["type"] == "BasicAgent"
+        assert data["type"] == "_EchoAgent"
         assert data["name"] == "writer_agent"
         assert data["description"] == "Deterministic writer test agent."
-        assert data["role_prompt"] == ROLE_PROMPT
         assert data["context_enabled"] is True
         assert data["records_window"] == 1
         assert data["records"] == [turn.to_dict() for turn in agent.records]
@@ -708,7 +800,7 @@ class TestAgentSerialization:
         data = agent.to_dict()
 
         assert "system_prompts" in data
-        assert "role" in data["system_prompts"]
+        assert "system" in data["system_prompts"]
 
     def test_to_dict_excludes_passthrough_inputs(self) -> None:
         agent = make_agent()
@@ -784,7 +876,7 @@ class TestAgentAsyncInvoke:
     def test_async_pre_invoke_returning_non_string_raises_at_invoke_time(self) -> None:
         agent = make_agent(pre_invoke=bad_pre_invoke)
 
-        with pytest.raises(AgentInvocationError, match="pre_invoke returned non-string/non-PromptConfig"):
+        with pytest.raises(AgentInvocationError, match="pre_invoke returned a non-string result"):
             asyncio.run(agent.async_invoke({"topic": "pytest"}))
 
     def test_async_engine_non_string_response_raises_agent_invocation_error(self) -> None:
@@ -873,220 +965,358 @@ class TestAgentMutableRuntimeProperties:
         }
 
 
-class TestAgentContextProperties:
-    """Tests for context_properties, Graft D schema, and collision checks."""
+class TestGetReservedParameters:
+    """Coverage for Agent.get_reserved_parameters() -- default and override."""
 
-    def test_normalize_context_properties_none_returns_empty_list(self) -> None:
-        result = normalize_context_properties(None)
-        assert result == []
+    def test_base_agent_default_is_run_id_only(self) -> None:
+        assert Agent.get_reserved_parameters.__func__(Agent) == [RUN_ID_PARAM]
 
-    def test_normalize_context_properties_str_list_produces_keyword_only_paramspecs(self) -> None:
-        result = normalize_context_properties(["alpha", "beta"])
+    def test_minimal_agent_default_is_run_id_only(self) -> None:
+        assert _MinimalAgent.get_reserved_parameters() == [RUN_ID_PARAM]
 
-        assert len(result) == 2
-        assert result[0].name == "alpha"
-        assert result[0].kind == ParamSpec.KEYWORD_ONLY
-        assert result[0].default is NO_VAL
-        assert result[1].name == "beta"
+    def test_subclass_override_extends_base_reserved_list(self) -> None:
+        reserved = _ExtraReservedAgent.get_reserved_parameters()
+        assert reserved == [RUN_ID_PARAM, _ExtraReservedAgent.EXTRA_RESERVED]
 
-    def test_normalize_context_properties_paramspec_list_coerced_to_keyword_only(self) -> None:
+    def test_subclass_reserved_param_is_grafted_into_schema(self) -> None:
+        agent = _ExtraReservedAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+        )
+        names = [p.name for p in agent.parameters]
+        assert "run_id" in names
+        assert "trace_id" in names
+
+
+class TestExtraParametersNormalization:
+    """Coverage for extra_parameters normalization via to_paramspec_list."""
+
+    def test_extra_parameters_none_produces_no_extra_schema_entries(self) -> None:
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+        )
+        # "prompt" comes from the default identity_pre_tool; no extra_parameters
+        # means nothing else is grafted beyond the reserved run_id.
+        assert [p.name for p in agent.parameters] == ["prompt", "run_id"]
+
+    def test_extra_parameters_str_list_preserves_declared_kind(self) -> None:
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            extra_parameters=["persona", "style"],
+        )
+        names = [p.name for p in agent.parameters]
+        assert "persona" in names
+        assert "style" in names
+        # to_paramspec_list default for a bare string list is POSITIONAL_OR_KEYWORD,
+        # not force-coerced to KEYWORD_ONLY (unlike the retired Graft-D behavior).
+        persona_param = next(p for p in agent.parameters if p.name == "persona")
+        assert persona_param.kind == "POSITIONAL_OR_KEYWORD"
+
+    def test_extra_parameters_paramspec_list_preserves_declared_kind(self) -> None:
         specs = [
-            ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
+            ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
         ]
-        result = normalize_context_properties(specs)
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            extra_parameters=specs,
+        )
+        lang_param = next(p for p in agent.parameters if p.name == "lang")
+        assert lang_param.kind == "KEYWORD_ONLY"
+        assert lang_param.default == "English"
 
-        assert result[0].kind == ParamSpec.KEYWORD_ONLY
-
-    def test_normalize_context_properties_rejects_variadic_paramspec(self) -> None:
+    def test_extra_parameters_rejects_variadic_paramspec(self) -> None:
         specs = [
             ParamSpec(name="items", index=0, kind=ParamSpec.VAR_POSITIONAL, type="Any", default=NO_VAL),
         ]
         with pytest.raises(AgentError, match="variadic"):
-            normalize_context_properties(specs)
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+                extra_parameters=specs,
+            )
 
-    def test_normalize_context_properties_rejects_duplicate_names(self) -> None:
-        with pytest.raises(AgentError, match="duplicate"):
-            normalize_context_properties(["x", "x"])
-
-    def test_normalize_context_properties_rejects_empty_string(self) -> None:
-        with pytest.raises(AgentError, match="non-empty"):
-            normalize_context_properties([""])
-
-    def test_normalize_context_properties_accepts_reserved_framework_names(self) -> None:
-        # "context" and "run_id" are reserved agent *parameters*, but context_properties
-        # are keys inside the context dict â€” a separate namespace, so no conflict.
-        result = normalize_context_properties(["context", "run_id"])
-        assert [p.name for p in result] == ["context", "run_id"]
-
-    def test_context_properties_grafts_single_context_dict_param(self) -> None:
-        agent = _MinimalAgent(
-            name="ctx_agent",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-            context_properties=["persona", "style"],
-        )
-
-        names = [p.name for p in agent.parameters]
-        kinds = {p.name: p.kind for p in agent.parameters}
-
-        assert "context" in names
-        assert kinds["context"] == "KEYWORD_ONLY"
-        assert "persona" not in names
-        assert "style" not in names
-
-    def test_context_dict_param_appears_before_run_id(self) -> None:
-        agent = _MinimalAgent(
-            name="ctx_agent",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-            context_properties=["persona"],
-        )
-        names = [p.name for p in agent.parameters]
-        assert names.index("context") < names.index("run_id")
-
-    def test_no_context_properties_does_not_graft_context_param(self) -> None:
+    def test_extra_parameters_values_reach_invoke_via_inputs(self) -> None:
         agent = _MinimalAgent(
             name="a",
             namespace="tests",
             description="d",
             llm_engine=StatefulEchoLLMEngine(),
-        )
-        names = [p.name for p in agent.parameters]
-        assert "context" not in names
-
-    def test_required_context_property_missing_raises_agent_invocation_error(self) -> None:
-        agent = _MinimalAgent(
-            name="ctx_agent",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-            context_properties=[
-                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default=NO_VAL),
+            extra_parameters=[
+                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
             ],
         )
-        with pytest.raises(AgentInvocationError, match="lang"):
-            agent.invoke({"prompt": "hello"})
-
-    def test_required_context_property_provided_does_not_raise(self) -> None:
-        agent = _MinimalAgent(
-            name="ctx_agent",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-            context_properties=[
-                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default=NO_VAL),
-            ],
-        )
-        result = agent.invoke({"prompt": "hello", "context": {"lang": "English"}})
+        # _MinimalAgent._invoke ignores inputs entirely, but invoke() must
+        # accept the extra top-level key without complaint (no more "context"
+        # dict wrapper -- extra_parameters values are flat top-level keys now).
+        result = agent.invoke({"prompt": "hi", "lang": "French"})
         assert result is not None
 
-    def test_context_stored_on_agent_record_after_invoke(self) -> None:
-        agent = _MinimalAgent(
-            name="ctx_agent",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-            context_properties=["lang"],
-        )
-        agent.invoke({"prompt": "hello", "context": {"lang": "English"}})
-        assert agent.records[0].context == {"lang": "English"}
 
-    def test_warn_reserved_name_collisions_run_id_semantic_match_warns(self) -> None:
-        matching = ParamSpec(
-            name="run_id", index=0, kind=ParamSpec.KEYWORD_ONLY,
-            type="str | None", default=None,
-            description=RUN_ID_PARAM.description,
-        )
+class TestReservedNameReconciliation:
+    """Per-source reserved-name reconciliation: identical / compatible / incompatible."""
+
+    def test_identical_reserved_param_in_extra_parameters_warns_and_is_popped(self) -> None:
+        # RUN_ID_PARAM itself, declared verbatim -- guaranteed field-for-field
+        # identical (name/type/kind/default/description all match).
         with pytest.warns(UserWarning, match="redundant"):
-            Agent._warn_reserved_name_collisions(
-                pre_params=[matching],
-                post_params=[],
+            agent = _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+                extra_parameters=[RUN_ID_PARAM],
+            )
+        # Only one run_id entry survives in the final schema (the framework's).
+        assert [p.name for p in agent.parameters].count("run_id") == 1
+
+    def test_pre_invoke_compatible_run_id_warns_distinct_message(self) -> None:
+        # type="Any" is compatible with RUN_ID_PARAM's "str | None" (either
+        # side being "Any" satisfies semantically_compatible); default/
+        # description differ, so it's compatible but not identical.
+        def pre_with_compatible_run_id(prompt: str, *, run_id: Any = "unset") -> str:
+            return prompt
+
+        with pytest.warns(UserWarning, match="not identical"):
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+                pre_invoke=pre_with_compatible_run_id,
             )
 
-    def test_warn_reserved_name_collisions_run_id_semantic_mismatch_raises(self) -> None:
-        clashing = ParamSpec(
-            name="run_id", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-            type="str", default=NO_VAL,
-        )
+    def test_pre_invoke_incompatible_run_id_raises(self) -> None:
+        def pre_with_bad_run_id(prompt: str, run_id: int) -> str:
+            return prompt
+
         with pytest.raises(AgentError, match="conflicts"):
-            Agent._warn_reserved_name_collisions(
-                pre_params=[clashing],
-                post_params=[],
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+                pre_invoke=pre_with_bad_run_id,
             )
 
-    def test_warn_reserved_name_collisions_context_no_description_raises(self) -> None:
-        # context: dict with no description does not share the CONTEXT_PARAM description
-        # root â†’ description mismatch â†’ raises, not warns.
-        ctx_no_desc = ParamSpec(
-            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
-            type="dict", default={},
-        )
-        with pytest.raises(AgentError, match="description mismatch"):
-            Agent._warn_reserved_name_collisions(pre_params=[ctx_no_desc], post_params=[])
+    def test_post_invoke_incompatible_run_id_raises_independently_of_clean_pre(self) -> None:
+        # A clean, warning-free pre_invoke must not mask an incompatible
+        # reserved-name collision detected independently in post_invoke --
+        # each of the three sources (pre/post/extra) is reconciled on its own.
+        def post_with_bad_run_id(result: str, run_id: int) -> str:
+            return result
 
-    def test_warn_reserved_name_collisions_context_matching_description_warns(self) -> None:
-        ctx_desc_prefix = CONTEXT_PARAM.description.split("{")[0]
-        matching = ParamSpec(
-            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
-            type="dict", default={},
-            description=ctx_desc_prefix + " Required: 'lang' (str)",
-        )
-        with pytest.warns(UserWarning, match="redundant"):
-            Agent._warn_reserved_name_collisions(pre_params=[matching], post_params=[])
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            with pytest.raises(AgentError, match="conflicts"):
+                _MinimalAgent(
+                    name="a",
+                    namespace="tests",
+                    description="d",
+                    llm_engine=StatefulEchoLLMEngine(),
+                    pre_invoke=build_prompt,
+                    post_invoke=post_with_bad_run_id,
+                )
 
-    def test_warn_reserved_name_collisions_context_incompatible_type_raises(self) -> None:
-        bad_type = ParamSpec(
-            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
-            type="str", default=NO_VAL,
-        )
-        with pytest.raises(AgentError, match="type mismatch"):
-            Agent._warn_reserved_name_collisions(pre_params=[bad_type], post_params=[])
+    def test_extra_parameters_incompatible_run_id_raises(self) -> None:
+        bad = ParamSpec(name="run_id", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int", default=NO_VAL)
+        with pytest.raises(AgentError, match="conflicts"):
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+                extra_parameters=[bad],
+            )
 
-    def test_validate_pre_post_overlap_shapes_mismatch_raises(self) -> None:
-        pre = [
-            ParamSpec(name="items", index=0, kind=ParamSpec.VAR_POSITIONAL, type="Any", default=NO_VAL),
-        ]
-        post = [
-            ParamSpec(name="items", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", default=NO_VAL),
-        ]
-        with pytest.raises(AgentError, match="items"):
-            Agent._validate_pre_post_overlap_shapes(pre, post)
 
-    def test_update_prompt_registers_new_key(self) -> None:
+class TestPostResultKeyResolution:
+    def test_default_resolves_to_first_reserved_popped_post_name(self) -> None:
+        agent = make_agent(post_invoke=post_with_custom_key)
+        assert agent.post_result_key == "raw"
+
+    def test_explicit_override_accepted(self) -> None:
+        agent = make_agent(post_invoke=post_with_custom_key, post_result_key="suffix")
+        assert agent.post_result_key == "suffix"
+
+    def test_unknown_name_raises(self) -> None:
+        with pytest.raises(AgentError, match="post_result_key"):
+            make_agent(post_invoke=post_with_custom_key, post_result_key="nope")
+
+    def test_collision_with_pre_invoke_name_raises(self) -> None:
+        with pytest.raises(AgentError, match="post_result_key"):
+            make_agent(
+                post_invoke=lambda topic: topic,
+                post_result_key="topic",
+            )
+
+    def test_collision_with_extra_parameters_name_raises(self) -> None:
+        def post_with_flag(result: str, flag: str = "x") -> str:
+            return result
+
+        with pytest.raises(AgentError, match="post_result_key"):
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+                post_invoke=post_with_flag,
+                post_result_key="flag",
+                extra_parameters=["flag"],
+            )
+
+
+class TestPreVsPostReconciliation:
+    def test_incompatible_overlap_raises(self) -> None:
+        def post_with_int_topic(result: str, topic: int) -> str:
+            return result
+
+        with pytest.raises(AgentError, match="collision"):
+            make_agent(post_invoke=post_with_int_topic)
+
+    def test_compatible_but_not_identical_overlap_warns(self) -> None:
+        def post_with_defaulted_topic(result: str, topic: str = "default-topic") -> str:
+            return result
+
+        with pytest.warns(UserWarning, match="not identical"):
+            make_agent(post_invoke=post_with_defaulted_topic)
+
+    def test_identical_overlap_is_silent(self) -> None:
+        def pre_identical(topic: str) -> str:
+            return topic
+
+        def post_identical(result: str, topic: str) -> str:
+            return result
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            make_agent(pre_invoke=pre_identical, post_invoke=post_identical)
+        assert not any("topic" in str(w.message) for w in caught)
+
+    def test_post_only_remainder_keeps_original_declared_kind(self) -> None:
+        # A post-only VAR_POSITIONAL remainder now grafts preserving its own
+        # kind (dropped: the old unconditional exclusion of variadic-kind
+        # post-only params).
+        def post_with_var_positional(result: str, *extras: Any) -> str:
+            return result
+
+        agent = make_agent(post_invoke=post_with_var_positional)
+        extras_param = next(p for p in agent.parameters if p.name == "extras")
+        assert extras_param.kind == "VAR_POSITIONAL"
+
+    def test_post_only_remainder_lands_via_insert_by_category(self) -> None:
+        agent = make_agent(post_invoke=post_with_suffix)
+        names = [p.name for p in agent.parameters]
+        # topic (pre, required) and suffix (post-only, required) both sort
+        # ahead of tone (pre, defaulted) within the POSITIONAL_OR_KEYWORD
+        # category -- insert_by_category enforces required-before-defaulted
+        # regardless of which source declared the parameter.
+        assert names == ["topic", "suffix", "tone", "run_id"]
+
+
+class TestCombinedVsExtraReconciliation:
+    def test_incompatible_overlap_raises(self) -> None:
+        with pytest.raises(AgentError, match="collision"):
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+                pre_invoke=build_prompt,
+                extra_parameters=[
+                    ParamSpec(name="topic", index=0, kind=ParamSpec.KEYWORD_ONLY, type="int", default=NO_VAL),
+                ],
+            )
+
+    def test_compatible_but_not_identical_overlap_warns_and_combined_wins(self) -> None:
+        with pytest.warns(UserWarning, match="not identical"):
+            agent = _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+                pre_invoke=build_prompt,
+                extra_parameters=[
+                    ParamSpec(name="topic", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="fallback"),
+                ],
+            )
+        topic_param = next(p for p in agent.parameters if p.name == "topic")
+        # combined (pre_invoke's) declaration wins: required, no default.
+        assert topic_param.default is NO_VAL
+        assert topic_param.kind == "POSITIONAL_OR_KEYWORD"
+
+    def test_identical_overlap_is_silent(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+                pre_invoke=build_prompt,
+                extra_parameters=[
+                    ParamSpec(name="topic", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
+                ],
+            )
+        assert not any("topic" in str(w.message) for w in caught)
+
+    def test_extra_remainder_grafted_via_insert_by_category(self) -> None:
         agent = _MinimalAgent(
             name="a",
             namespace="tests",
             description="d",
             llm_engine=StatefulEchoLLMEngine(),
+            pre_invoke=pre_with_two_fields,
+            extra_parameters=[
+                ParamSpec(name="flag", index=0, kind=ParamSpec.KEYWORD_ONLY, type="bool", default=False),
+            ],
         )
-        config = PromptConfig(template="New prompt.", description="custom")
-        agent.update_prompt("custom", config)
+        names = [p.name for p in agent.parameters]
+        assert names == ["subject", "style", "flag", "run_id"]
 
-        assert "custom" in agent.system_prompts
-        assert agent.system_prompts["custom"].template == "New prompt."
 
-    def test_update_prompt_rejects_empty_key(self) -> None:
+class TestFinalReservedGraftOrdering:
+    def test_reserved_graft_valid_ordering_with_positional_only_pre(self) -> None:
+        def pre_positional_only(subject: str, /) -> str:
+            return subject
+
+        agent = make_agent(pre_invoke=pre_positional_only)
+        names = [p.name for p in agent.parameters]
+        assert names == ["subject", "run_id"]
+        assert agent.parameters[0].kind == "POSITIONAL_ONLY"
+        assert agent.parameters[-1].kind == "KEYWORD_ONLY"
+
+    def test_reserved_graft_after_extra_keyword_only_params(self) -> None:
         agent = _MinimalAgent(
             name="a",
             namespace="tests",
             description="d",
             llm_engine=StatefulEchoLLMEngine(),
+            extra_parameters=[
+                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
+            ],
         )
-        with pytest.raises(AgentError, match="key"):
-            agent.update_prompt("  ", PromptConfig(template="x", description="d"))
+        names = [p.name for p in agent.parameters]
+        # "prompt" (default identity_pre_tool, KEYWORD_ONLY) and "lang" (extra,
+        # KEYWORD_ONLY) both sort at the same category tier; combined-vs-extra
+        # reconciliation appends extra's remainder after pre's, and the final
+        # reserved graft appends run_id last.
+        assert names == ["prompt", "lang", "run_id"]
 
-    def test_update_prompt_rejects_non_prompt_config(self) -> None:
-        agent = _MinimalAgent(
-            name="a",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-        )
-        with pytest.raises(AgentError, match="PromptConfig"):
-            agent.update_prompt("key", "not a config")  # type: ignore[arg-type]
 
+class TestUpdatePrompt:
     def test_system_prompts_property_returns_shallow_copy(self) -> None:
         agent = _MinimalAgent(
             name="a",
@@ -1099,6 +1329,8 @@ class TestAgentContextProperties:
 
         assert "mutated" not in agent.system_prompts
 
+
+class TestAgentRecordsAlwaysAppended:
     def test_context_disabled_records_always_appended(self) -> None:
         engine = StatefulEchoLLMEngine()
         agent = _MinimalAgent(
@@ -1133,80 +1365,6 @@ class TestAgentContextProperties:
         assert len(second_call) == 2  # just system + user from _MinimalAgent
 
 
-class TestAgentCollisionCheckerCompleteness:
-    """Tests for _warn_reserved_name_collisions evaluating every (param, source) pair."""
-
-    def test_pre_compatible_post_incompatible_context_raises(self) -> None:
-        # pre has context with matching description (compatible â†’ warns); post has context: str
-        # (type mismatch â†’ raises). Verifies post is evaluated independently even after pre warned.
-        ctx_desc_prefix = CONTEXT_PARAM.description.split("{")[0]
-        pre_ctx = ParamSpec(
-            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
-            type="dict", default={},
-            description=ctx_desc_prefix,
-        )
-        post_ctx_bad = ParamSpec(
-            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
-            type="str", default=NO_VAL,
-        )
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            with pytest.raises(AgentError, match="type mismatch"):
-                Agent._warn_reserved_name_collisions(
-                    pre_params=[pre_ctx],
-                    post_params=[post_ctx_bad],
-                )
-        # pre_invoke should have produced the redundant warning before post raised
-        assert any("redundant" in str(warning.message) for warning in w)
-
-    def test_both_compatible_context_warns_twice(self) -> None:
-        ctx_desc_prefix = CONTEXT_PARAM.description.split("{")[0]
-        pre_ctx = ParamSpec(
-            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
-            type="dict", default={},
-            description=ctx_desc_prefix,
-        )
-        post_ctx = ParamSpec(
-            name="context", index=0, kind=ParamSpec.KEYWORD_ONLY,
-            type="dict", default={},
-            description=ctx_desc_prefix + " extra detail",
-        )
-        with pytest.warns(UserWarning, match="redundant") as w:
-            Agent._warn_reserved_name_collisions(
-                pre_params=[pre_ctx],
-                post_params=[post_ctx],
-            )
-        assert len(w) == 2
-
-
-class TestAgentContextIsolation:
-    """Tests that context is always a fresh dict per invocation (not shared mutable default)."""
-
-    def test_omitted_context_does_not_share_state_across_invocations(self) -> None:
-        agent = _MinimalAgent(
-            name="ctx_agent",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-            context_properties=["lang"],
-        )
-        # First call omits context (required property â€” must be provided):
-        # so use an optional property instead
-        agent2 = _MinimalAgent(
-            name="ctx_agent2",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-            context_properties=[
-                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                          type="str", default="English"),
-            ],
-        )
-        agent2.invoke({"prompt": "hello"})
-        agent2.invoke({"prompt": "world"})
-        assert agent2.records[0].context is not agent2.records[1].context
-
-
 class TestAgentRenderTurnGuards:
     """Tests for render_turn defensive checks."""
 
@@ -1217,90 +1375,12 @@ class TestAgentRenderTurnGuards:
             assistant_response_source="final",
         )
         draft = AgentRecord(
-            user_prompt=PromptConfig(template="hello", description=""),
+            user_prompt="hello",
             generated_response="raw text",
             final_result=None,
         )
         with pytest.raises(AgentInvocationError, match="final_result is None"):
             agent.render_turn(draft)
-
-    def test_render_turn_replays_context_into_template(self) -> None:
-        engine = StatefulEchoLLMEngine()
-        agent = make_agent(engine=engine, context_enabled=True)
-
-        from atomic_agentic.models.agents.prompts import PromptConfig as PC
-        from dataclasses import replace as dc_replace
-        from atomic_agentic.models.results.agents import AgentResult
-        from datetime import datetime, timezone, timedelta
-        from atomic_agentic.models.results import LLMModelData, TokenUsage
-
-        # Craft a completed record with a template that has a placeholder
-        cfg = PC(template="Task for {user}: do something.", description="")
-        result = AgentResult(
-            result="done",
-            invoker_id="test-agent",
-            started_at=datetime.now(timezone.utc),
-            ended_at=datetime.now(timezone.utc) + timedelta(seconds=1),
-            llm_token_usage=(
-                TokenUsage(
-                    input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
-                ),
-            ),
-            llm_model_data=LLMModelData(provider="test"),
-        )
-        from atomic_agentic.models.agents.records import LLMRecord
-        from atomic_agentic.models.results import LLMResult
-        llm_result = LLMResult(
-            result="done",
-            invoker_id="engine-1",
-            started_at=datetime.now(timezone.utc),
-            ended_at=datetime.now(timezone.utc) + timedelta(seconds=1),
-            token_usage=TokenUsage(
-                input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
-            ),
-            model_data=LLMModelData(provider="test"),
-        )
-        record = AgentRecord(
-            user_prompt=cfg,
-            generated_response="raw",
-            context={"user": "Alice"},
-            final_result=result,
-            llm_records=(LLMRecord(
-                messages=({"role": "user", "content": "Task for Alice: do something."},),
-                llm_result=llm_result,
-            ),),
-        )
-        rendered = agent.render_turn(record)
-        assert rendered[0]["content"] == "Task for Alice: do something."
-
-
-class TestAgentAsyncContextProperties:
-    """Tests for context_properties through async_invoke."""
-
-    def test_async_required_context_property_missing_raises(self) -> None:
-        agent = _MinimalAgent(
-            name="ctx_agent",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-            context_properties=[
-                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY,
-                          type="str", default=NO_VAL),
-            ],
-        )
-        with pytest.raises(AgentInvocationError, match="lang"):
-            asyncio.run(agent.async_invoke({"prompt": "hello"}))
-
-    def test_async_context_stored_on_record(self) -> None:
-        agent = _MinimalAgent(
-            name="ctx_agent",
-            namespace="tests",
-            description="d",
-            llm_engine=StatefulEchoLLMEngine(),
-            context_properties=["lang"],
-        )
-        asyncio.run(agent.async_invoke({"prompt": "hello", "context": {"lang": "English"}}))
-        assert agent.records[0].context == {"lang": "English"}
 
 
 class TestAgentDescriptionOverrideRemoval:
@@ -1319,3 +1399,107 @@ class TestAgentDescriptionOverrideRemoval:
         agent = make_agent()
 
         assert agent.to_dict()["description"] == "Deterministic writer test agent."
+
+
+class TestInvocationLifecycle:
+    """Non-destructive run_id read, reserved-name exclusion from pre/post
+    slices, full inputs threading to _invoke, and AgentRecord.inputs widening."""
+
+    def test_run_id_read_does_not_mutate_caller_inputs_dict(self) -> None:
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+        )
+        caller_inputs = {"prompt": "hello", "run_id": None}
+        agent.invoke(caller_inputs)
+        # The caller's own dict object is untouched (filter_inputs works on
+        # a copy internally; this just confirms invoke never mutates in place).
+        assert caller_inputs == {"prompt": "hello", "run_id": None}
+
+    def test_invoke_receives_full_unsliced_inputs_in_invoke_arg(self) -> None:
+        captured: dict[str, Any] = {}
+
+        class CapturingAgent(_MinimalAgent):
+            def _invoke(self, turns, prompt, inputs):  # type: ignore[override]
+                captured.update(inputs)
+                return super()._invoke(turns, prompt, inputs)
+
+        agent = CapturingAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            extra_parameters=[
+                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
+            ],
+        )
+        agent.invoke({"prompt": "hi", "lang": "French"})
+
+        assert captured == {"prompt": "hi", "lang": "French", "run_id": None}
+
+    def test_reserved_name_excluded_from_pre_invoke_slice_even_if_declared_compatible(self) -> None:
+        """A tool declaring a compatible same-named reserved param (warned, not
+        raised, at construction) must not have the framework's reserved value
+        silently slotted into it -- the exclusion applies at every invoke()."""
+        seen: dict[str, Any] = {}
+
+        def pre_with_compatible_run_id(prompt: str, *, run_id: Any = "unset") -> str:
+            seen["run_id_seen_by_pre"] = run_id
+            return prompt
+
+        with pytest.warns(UserWarning):
+            agent = _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=StatefulEchoLLMEngine(),
+                pre_invoke=pre_with_compatible_run_id,
+            )
+        agent.invoke({"prompt": "hi"})
+        # pre_invoke's own declared default is used -- the framework's run_id
+        # value is never routed into it.
+        assert seen["run_id_seen_by_pre"] == "unset"
+
+    def test_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            extra_parameters=[
+                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
+            ],
+        )
+        agent.invoke({"prompt": "hi", "lang": "French"})
+
+        assert agent.records[0].inputs == {"prompt": "hi", "lang": "French", "run_id": None}
+
+    def test_async_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            extra_parameters=[
+                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
+            ],
+        )
+        asyncio.run(agent.async_invoke({"prompt": "hi", "lang": "French"}))
+
+        assert agent.records[0].inputs == {"prompt": "hi", "lang": "French", "run_id": None}
+
+    def test_inputs_isolated_across_invocations(self) -> None:
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+            extra_parameters=[
+                ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
+            ],
+        )
+        agent.invoke({"prompt": "hi"})
+        agent.invoke({"prompt": "yo"})
+        assert agent.records[0].inputs is not agent.records[1].inputs

@@ -5,7 +5,6 @@ from typing import Any, Dict
 
 from ..results.agents import AgentResult
 from ..results.llm import LLMResult
-from .prompts import PromptConfig
 
 __all__ = [
     "LLMRecord",
@@ -122,9 +121,16 @@ class AgentRecord:
     Fields
     ------
     user_prompt:
-        Pre-render ``PromptConfig`` produced by ``pre_invoke`` for this
-        invocation. Re-rendered with ``context`` when replaying turns in
-        ``render_turn``.
+        The fully-resolved prompt string produced by ``pre_invoke`` for this
+        invocation. Already rendered — ``render_turn`` uses it verbatim, with
+        no further templating or context lookup.
+
+    inputs:
+        The full filtered top-level inputs mapping for this invocation (post
+        ``filter_inputs``, pre pre/post-invoke slicing) — the same dict passed
+        to ``_invoke``/``_ainvoke``. Retained for provenance/observability only;
+        not consumed when reconstructing this turn's rendered content
+        (``render_turn`` uses ``user_prompt`` verbatim).
 
     generated_response:
         Raw post-engine response material for this invocation, prior to
@@ -146,20 +152,20 @@ class AgentRecord:
         to a completed (non-draft) record on any record committed to history.
     """
 
-    user_prompt: PromptConfig
+    user_prompt: str
     generated_response: Any
-    context: dict = field(default_factory=dict, hash=False, compare=False)
+    inputs: dict = field(default_factory=dict, hash=False, compare=False)
     final_result: AgentResult | None = None
     llm_records: tuple[LLMRecord, ...] = ()
     prev: AgentRecord | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.user_prompt, PromptConfig):
+        if not isinstance(self.user_prompt, str):
             raise TypeError(
-                f"AgentRecord.user_prompt must be a PromptConfig, "
+                f"AgentRecord.user_prompt must be a str, "
                 f"got {type(self.user_prompt).__name__}."
             )
-        object.__setattr__(self, "context", dict(self.context))
+        object.__setattr__(self, "inputs", dict(self.inputs))
 
         if not isinstance(self.llm_records, (tuple, list)) or isinstance(self.llm_records, (str, bytes)):
             raise TypeError(
@@ -190,8 +196,8 @@ class AgentRecord:
     def to_dict(self) -> Dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         return {
-            "user_prompt": self.user_prompt.to_dict(),
-            "context": self.context,
+            "user_prompt": self.user_prompt,
+            "inputs": self.inputs,
             "generated_response": self.generated_response,
             "final_result": self.final_result.to_dict() if self.final_result is not None else None,
             "llm_records": [r.to_dict() for r in self.llm_records],

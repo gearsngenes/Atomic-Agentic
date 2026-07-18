@@ -95,7 +95,7 @@ class OpenAIEngine(LLMEngine):
             namespace: str = "llm",
             description: str = "OpenAI LLM Engine",
             client: OpenAI | AsyncOpenAI | None = None,
-            temperature: float | None = 0.1,
+            temperature: float | None = None,
             max_output_tokens: int | None = None,
             reasoning: dict[str, str] | None = None,
             truncation: str | None = None,

@@ -61,8 +61,6 @@ from ..exceptions import ToolAgentError
 from ..models.agents import ReActRunState, ReActStepMeta
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord, LLMRecord
-from ..models.agents.prompts import PromptConfig
-from ..models.parameters import ParamSpec
 from ..utils.agents import extract_dependencies
 
 # --------------------------------------------------------------------------- #
@@ -135,9 +133,8 @@ class ReActAgent(ToolAgent):
         description: str,
         llm_engine: LLMEngine,
         filter_extraneous_inputs: Optional[bool] = None,
-        *,
         context_enabled: bool = False,
-        context_properties: list[str] | list[ParamSpec] | None = None,
+        *,
         tool_calls_limit: int = 25,
         fail_fast: bool = True,
         generation_retries: int = 0,
@@ -156,7 +153,9 @@ class ReActAgent(ToolAgent):
         >= 0 — ``None`` is not accepted because the running blackboard is
         pre-allocated to ``tool_calls_limit + 1`` slots at initialization.
         ``"reason_then_act"`` is the key under which the built-in orchestrator
-        prompt is registered in ``self._system_prompts``.
+        prompt is registered in ``self._system_prompts``. No extra_parameters
+        keyword is passed to ``super().__init__(...)`` at all (``ToolAgent.__init__``
+        accepts none).
         """
         super().__init__(
             name=name,
@@ -165,7 +164,6 @@ class ReActAgent(ToolAgent):
             llm_engine=llm_engine,
             filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
-            context_properties=context_properties,
             tool_calls_limit=tool_calls_limit,
             fail_fast=fail_fast,
             generation_retries=generation_retries,
@@ -178,24 +176,6 @@ class ReActAgent(ToolAgent):
             records_window=records_window,
         )
         self._system_prompts["reason_then_act"] = ORCHESTRATOR_PROMPT
-
-    # ------------------------------------------------------------------ #
-    # Prompt update guard
-    # ------------------------------------------------------------------ #
-    def update_prompt(self, key: str, config: PromptConfig) -> None:
-        """Guard the built-in orchestrator instruction prompt.
-
-        Raises ``ToolAgentError`` when ``key`` is ``'reason_then_act'`` — that
-        prompt is operational machinery and must not be replaced post-construction.
-        All other keys are forwarded to the base implementation.
-        """
-        if key.strip() == "reason_then_act":
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: "
-                "'reason_then_act' is the built-in orchestrator instruction prompt "
-                "and cannot be replaced via update_prompt."
-            )
-        super().update_prompt(key, config)
 
     # ------------------------------------------------------------------ #
     # Property Overrides
@@ -609,6 +589,7 @@ class ReActAgent(ToolAgent):
         *,
         turns: list[AgentRecord],
         prompt: str,
+        inputs: dict,
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> ReActRunState:
@@ -631,7 +612,8 @@ class ReActAgent(ToolAgent):
         4. Copy ``messages`` into a mutable working list.
         5. Pre-allocate a fixed-size ``running_blackboard`` of
            ``tool_calls_limit + 1`` slots.
-        6. Initialize ``step_meta`` and construct ``ReActRunState``.
+        6. Initialize ``step_meta`` and construct ``ReActRunState`` with ``inputs``
+           forwarded through (not interpreted here).
 
         Returns
         -------
@@ -663,6 +645,7 @@ class ReActAgent(ToolAgent):
         running_blackboard = [BlackboardSlot(step=i) for i in range(self._tool_calls_limit + 1)]
 
         return ReActRunState(
+            inputs=inputs,
             messages=working_messages,
             cache_blackboard=cache_blackboard,
             running_blackboard=running_blackboard,

@@ -5,6 +5,112 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a22] - 2026-07-17
+
+### Added
+
+- `AtomicInvokable._extra_description()` — new overridable hook (default
+  `""`) composed into the `description` getter after any parameter-description
+  bullets. Implemented across every local wrapper-shaped class (`Tool`,
+  `Command`, `BasicFlow`, `SequentialFlow`, `IterativeFlow`, `ParallelFlow`,
+  `RoutingFlow`) so each surfaces its wrapped component's extra description
+  content per its own "source of truth" for `return_type`.
+- `PyA2AtomicHost`/`PyA2AtomicTool` — new `extra_description` wire field so a
+  remote wrapper's real extra description content survives the A2A round trip.
+- `PromptConfig.field_specs: dict[str, dict[str, Any]] | None` — sparse
+  per-field `{description, type, default}` spec, replacing the old flat
+  `defaults` map. A field is required iff its entry omits `default`.
+- `Agent.get_reserved_parameters()` — new overridable classmethod for
+  subclasses to declare additional reserved parameter names beyond the base
+  `run_id`.
+- New `utils/parameters.py` primitives: `semantically_compatible`/
+  `semantically_identical`, `parameter_overlap`/`parameter_collisions`, a
+  variadic cross-source compatibility check, and `insert_by_category` (a
+  stable-sort-based parameter-graft helper superseding the old
+  keyword-only-before-`**kwargs` insertion).
+- `_normalize_prompt_template` / `_try_parse_clean_field` (`utils/parameters.py`)
+  — construction-time template scanner: malformed/non-identifier brace shapes
+  are brace-escaped into inert literal text instead of raising or silently
+  mis-parsing.
+
+### Changed
+
+- `Agent.__init__`'s `context_properties` constructor param renamed to
+  `extra_parameters` and normalized via `to_paramspec_list` (declared kinds
+  preserved, no forced `KEYWORD_ONLY` coercion). Reserved-name reconciliation
+  against `pre_invoke`/`post_invoke`/`extra_parameters` now runs through the
+  new `utils/parameters.py` primitives.
+- `Agent._invoke`/`_ainvoke` (and every concrete subclass's override):
+  `context: dict` renamed to `inputs: dict`, now receiving the full filtered
+  inputs dict rather than a context-only slice.
+- `AgentRecord.user_prompt`: `PromptConfig` reverted to plain `str` (already
+  fully rendered at invocation time — no more redundant re-render in
+  `render_turn`). `AgentRecord.context` renamed to `inputs`.
+- `ToolAgentRunState`/`PlanActRunState`/`ReActRunState` gain a required
+  `inputs: dict[str, Any]` field, threaded through each `_initialize_run_state`/
+  `_ainitialize_run_state` override.
+- `PromptConfig.render()` collapsed to a single resolve-or-collect-missing pass
+  (raises one `ValueError` naming every missing required field, not
+  fail-on-first).
+- `PromptConfig.to_dict()` emits `"parameters"` (full `ParamSpec.to_dict()` per
+  field) instead of the old `"defaults"` key.
+- `StructuredInvokable`'s `description` setter override removed — fully
+  inherits the base setter's unified `ValueError`-for-both-cases contract
+  (previously split `TypeError`/`ValueError`, uniquely among invokable types).
+- `PlanActAgent`/`ReActAgent.__init__`: `context_enabled` moved from a
+  keyword-only parameter to positional-or-keyword, matching
+  `Agent.__init__`/`ToolAgent.__init__`'s parameter ordering.
+
+### Fixed
+
+- `PlanActAgent._generate_plan`/`_agenerate_plan`: retry attempts now capture
+  both the model's failed output and the injected feedback message in the
+  `LLMRecord` delta (previously captured only the last message, silently
+  dropping the feedback message from the record on every retry).
+- `ToolAgent.make_result`: removed a dead defensive `is not None` filter over
+  `llm_records`' token usage — `LLMResult.token_usage` is a required,
+  non-`None`-validated field, so the guarded state could never occur.
+- `PyA2AtomicHost`'s metadata payload previously sent the *rendered*
+  description (parameter bullets already baked in); now sends the raw
+  description plus a separate `extra_description` field, preventing duplicated
+  bullet content after a remote round trip.
+- `examples/Agent_Examples/07_Prompt_Parameters.py`'s required-parameter
+  display used an incorrect sentinel check (`param.default.__class__.__name__
+  == "_NO_VAL"`, always `False`) and always showed a bogus default value for
+  the demo's required parameter — same defect class previously fixed in
+  `examples/Tool_Examples/04_MCPProxyTool.py` (a21), reintroduced in this
+  release's rewrite of the file; now uses the correct `param.default is
+  NO_VAL` identity check.
+- Six example files (`Agent_Examples/03_Schema_Test.py`,
+  `05_Passthrough_Test.py`, `06_Branching_Conversations.py`,
+  `PlanAct_Examples/01_plugins_test.py`, `03_agentic_story_builder.py`,
+  `Tool_Examples/06_toolify_example.py`) had pre-existing UTF-8 mojibake
+  corruption (multi-generation mis-decode/re-encode of em-dashes,
+  multiplication signs, box-drawing characters, smart quotes) repaired at the
+  byte level — no logic or behavior changes.
+
+### Removed
+
+- `Agent.update_prompt` (base) and its `BasicAgent`/`PlanActAgent`/
+  `ReActAgent` overrides — zero real callers anywhere in `src/`/`examples/`.
+- `BasicAgent`'s `extra_context_properties` constructor param, `role_prompt`
+  setter, `set_context_properties`, `set_extra_context_properties` — role-prompt
+  placeholders are now `BasicAgent`'s sole `extra_parameters` source;
+  `role_prompt` is read-only post-construction, matching every other
+  `AtomicInvokable`'s fixed-topology invariant.
+- `ToolAgent.__init__`'s `context_properties` param — no legitimate extra-
+  parameter source exists for `ToolAgent` today, so it was dropped rather than
+  renamed.
+- `Agent._validate_pre_post_overlap_shapes`, `_warn_reserved_name_collisions`,
+  `_compose_agent_parameters` (+ `_insert_before_varkw`),
+  `_update_context_param`, `_set_context_properties`, public
+  `set_context_properties`; module-level `CONTEXT_PARAM`,
+  `normalize_context_properties`, `build_context_description`. No `context:
+  dict` schema parameter exists anywhere in base `Agent` anymore.
+- `PromptConfig`'s `strict` construction-time toggle — traced dead on the only
+  call path that mattered (`Agent`'s own required-context-property check
+  already raises before `render()` is reached).
+
 ## [2.0.0a21] - 2026-07-12
 
 ### Added

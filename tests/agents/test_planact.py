@@ -100,6 +100,7 @@ class TestPlanActAgent:
         state = agent._initialize_run_state(
             turns=[],
             prompt="plan",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -264,6 +265,7 @@ class TestPlanActAgent:
         state = agent._initialize_run_state(
             turns=[],
             prompt="plan",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -290,6 +292,7 @@ class TestPlanActAgent:
         state = agent._initialize_run_state(
             turns=[],
             prompt="plan",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -316,6 +319,7 @@ class TestPlanActAgent:
         state = agent._initialize_run_state(
             turns=[],
             prompt="plan",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )
@@ -339,6 +343,7 @@ class TestPlanActAgent:
         state = agent._initialize_run_state(
             turns=[],
             prompt="plan",
+            inputs={},
             valid_cache_indices=frozenset(),
             failed_cache_indices=frozenset(),
         )

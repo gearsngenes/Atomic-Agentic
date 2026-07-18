@@ -198,6 +198,17 @@ class Tool(AtomicInvokable):
         """Best-effort qualified-name identity for the wrapped callable or invokable target."""
         return self._qualname
 
+    def _extra_description(self) -> str:
+        """Chain into the wrapped invokable's own extra description.
+
+        Invokable-backed tools surface `self._function`'s `_extra_description()`
+        verbatim. Plain callable-backed tools have no wrapped instance to
+        chain to, so this returns `""`.
+        """
+        if self.wraps_invokable:
+            return self._function._extra_description()
+        return ""
+
     # ------------------------------------------------------------------ #
     # Signature Building (Template Method)
     # ------------------------------------------------------------------ #

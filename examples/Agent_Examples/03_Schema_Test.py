@@ -66,7 +66,7 @@ def lesson_prompt_strict(
 strict_tool = Tool(
     function=lesson_prompt_strict,
     name="lesson_prompt_strict",
-    description="Strict schema: {grade_level, subject, topic, duration_min?, objectives[], constraints[]?, tone?} â†’ prompt",
+    description="Strict schema: {grade_level, subject, topic, duration_min?, objectives[], constraints[]?, tone?} → prompt",
 )
 
 
@@ -132,9 +132,9 @@ def main(use_permissive: bool = False) -> None:
         pre_invoke=(permissive_tool if use_permissive else strict_tool),
     )
 
-    # 3) Prepare inputs (MAPPING ONLY!). Match the Toolâ€™s schema.
+    # 3) Prepare inputs (MAPPING ONLY!). Match the Tool’s schema.
     inputs = {
-        "grade_level": "Middle School (6â€“8)",
+        "grade_level": "Middle School (6–8)",
         "subject": "Science",
         "topic": "Magnetic fields and flux",
         "duration_min": 50,

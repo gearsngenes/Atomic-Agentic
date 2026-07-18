@@ -260,6 +260,19 @@ class IterativeFlow(Workflow):
             raise ValueError("max_iterations must be > 0")
         self._max_iterations = value
 
+    def _extra_description(self) -> str:
+        """Chain the loop body's extra description with a fixed iteration-bound note.
+
+        The loop body is a `SequentialFlow`, whose own `_extra_description()`
+        already resolves to its return-index step - the step that actually
+        produces this flow's result payload each run - so this is a true 1:1
+        passthrough. The iteration-bound note is always present.
+        """
+        loop_extra = self._loop_body._extra_description()
+        parts = [loop_extra] if loop_extra else []
+        parts.append(f"Runs up to {self._max_iterations} iteration(s).")
+        return "\n".join(parts)
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #

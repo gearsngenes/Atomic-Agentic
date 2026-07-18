@@ -10,7 +10,7 @@ from atomic_agentic.llm import OpenAIEngine
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-llm = OpenAIEngine(model="gpt-5-mini")
+llm = OpenAIEngine(model="gpt-5-mini", temperature = None)
 
 def builder_prestep(task: str | None = None, revision_notes: str | None = None) -> str:
     if revision_notes:

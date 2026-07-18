@@ -279,13 +279,13 @@ class TestStructuredInvokablePolicyValidation:
     def test_description_rejects_non_string(self) -> None:
         wrapper = structured(output_schema=["a"])
 
-        with pytest.raises(TypeError, match="description"):
+        with pytest.raises(ValueError, match="description"):
             wrapper.description = 123  # type: ignore[assignment]
 
     def test_description_rejects_empty_string(self) -> None:
         wrapper = structured(output_schema=["a"])
 
-        with pytest.raises(ValueError, match="description cannot be empty"):
+        with pytest.raises(ValueError, match="description"):
             wrapper.description = "   "
 
     @pytest.mark.parametrize("mode", ["raise", "RAISE", "drop", "DROP", "fill", "FILL"])
@@ -753,6 +753,27 @@ class _DescribedInvokable(AtomicInvokable):
 
     def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
         return {}
+
+
+class _ExtraDescriptionComponent(AtomicInvokable):
+    """Concrete invokable with a non-empty _extra_description(), for testing SI's component-chaining."""
+
+    def invoke(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
+        return {}
+
+    def _extra_description(self) -> str:
+        return "inner extra"
+
+
+class TestStructuredInvokableChainsComponentExtraDescription:
+    def test_chains_into_wrapped_components_own_extra_description(self) -> None:
+        component = _ExtraDescriptionComponent(
+            name="inner", namespace="tests", description="Inner desc.",
+            parameters=[], return_type="Any",
+        )
+        wrapper = StructuredInvokable(component=component, output_schema=["result"])
+
+        assert wrapper.description == "Inner desc.\ninner extra\nOutput schema: [result]"
 
 
 class TestStructuredInvokableDescriptionGetter:
