@@ -12,6 +12,7 @@ __all__ = [
     "PlanActRunState",
     "ReActRunState",
     "ReActStepMeta",
+    "ReActKRunState",
 ]
 
 
@@ -247,5 +248,46 @@ class ReActRunState(ToolAgentRunState):
     3. Continue until the return tool executes.
     """
     next_step_index: int = 0
+    step_meta: list[ReActStepMeta] = field(default_factory=list)
+    retries_used: int = 0
+
+
+@dataclass(slots=True)
+class ReActKRunState(ToolAgentRunState):
+    """
+    ReActKAgent-specific run state extending ToolAgentRunState.
+
+    Tracks a generation cursor that advances by the size of a whole subplan
+    per round (not by 1), plus a FIFO queue of already-compiled batches
+    awaiting execution.
+
+    Fields
+    ------
+    next_step_index : int
+        Cursor for the next preallocated running_blackboard slot a new
+        subplan may claim. Starts at 0; advances by len(subplan) once per
+        generation round (in _apply_subplan_result), not once per step.
+
+    pending_batches : list[list[int]]
+        FIFO queue of concurrency-compiled batches (absolute
+        running_blackboard indices) awaiting preparation/execution.
+        Populated once per generation round by _apply_subplan_result;
+        drained by _prepare_next_batch popping the front entry, one batch
+        per call, with zero further LLM calls until the queue empties.
+
+    step_meta : list[ReActStepMeta]
+        Reused as-is from ReActAgent. Same fields, same semantics:
+        step_meta[i].observable is decremented once per generation round
+        (once per _apply_subplan_result call) rather than once per step, so
+        a round producing several concurrency batches only costs one tick
+        of everyone else's observability window regardless of how many
+        batches or steps landed in that round.
+
+    retries_used : int
+        Cumulative retry attempts across all subplan generations in this
+        run. Same role as ReActRunState.retries_used.
+    """
+    next_step_index: int = 0
+    pending_batches: list[list[int]] = field(default_factory=list)
     step_meta: list[ReActStepMeta] = field(default_factory=list)
     retries_used: int = 0

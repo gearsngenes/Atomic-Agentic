@@ -84,6 +84,22 @@ REQUIRED_REACT_FIELDS = REQUIRED_BASE_STEP_FIELDS | frozenset(
 )
 
 
+SUBPLAN_FIELDS = BASE_STEP_FIELDS | frozenset(
+    {
+        AWAIT_FIELD,
+        DURATION_FIELD,
+        DESCRIPTION_FIELD,
+    }
+)
+
+REQUIRED_SUBPLAN_FIELDS = REQUIRED_BASE_STEP_FIELDS | frozenset(
+    {
+        DURATION_FIELD,
+        DESCRIPTION_FIELD,
+    }
+)
+
+
 # =============================================================================
 # ToolAgent canonical return-tool identity
 # =============================================================================
@@ -130,6 +146,8 @@ __all__ = [
     "REQUIRED_PLAN_FIELDS",
     "REACT_FIELDS",
     "REQUIRED_REACT_FIELDS",
+    "SUBPLAN_FIELDS",
+    "REQUIRED_SUBPLAN_FIELDS",
     # Canonical return tool
     "RETURN_TOOL_NAME",
     "RETURN_TOOL_NAMESPACE",

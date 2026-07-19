@@ -13,6 +13,7 @@ import pytest
 from atomic_agentic.agents.toolagent import ToolAgent, extract_dependencies, return_tool
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
+from atomic_agentic.agents.reactk import ReActKAgent
 from atomic_agentic.models.agents.runstates import ToolAgentRunState
 from atomic_agentic.models.agents.records import AgentRecord, ToolAgentRecord
 from atomic_agentic.models.agents.records import LLMRecord
@@ -195,6 +196,63 @@ def make_react_agent(
     )
     register_math_tools(agent)  # type: ignore[arg-type]
     return agent
+
+
+def make_reactk_agent(
+    responses: list[str],
+    *,
+    context_enabled: bool = False,
+    steps_per_round: int = 1,
+    tool_calls_limit: int = 3,
+    peek_at_cache: bool = False,
+    response_preview_limit: int | None = None,
+    blackboard_preview_limit: int | None = None,
+    post_invoke: Any = None,
+    post_result_key: str | None = None,
+    fail_fast: bool = True,
+    generation_retries: int = 0,
+) -> ReActKAgent:
+    agent = ReActKAgent(
+        name="tests",
+        namespace="tests",
+        description="ReActK agent under test.",
+        llm_engine=ScriptedLLMEngine(responses),
+        context_enabled=context_enabled,
+        steps_per_round=steps_per_round,
+        tool_calls_limit=tool_calls_limit,
+        peek_at_cache=peek_at_cache,
+        response_preview_limit=response_preview_limit,
+        blackboard_preview_limit=blackboard_preview_limit,
+        post_invoke=post_invoke,
+        post_result_key=post_result_key,
+        fail_fast=fail_fast,
+        generation_retries=generation_retries,
+    )
+    register_math_tools(agent)  # type: ignore[arg-type]
+    return agent
+
+
+def subplan_step(
+    *,
+    tool: str,
+    args: Any,
+    duration: int = 0,
+    description: str = "Run the next tool call needed for the current test task.",
+    **extra: Any,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "tool": tool,
+        "args": args,
+        "duration": duration,
+        "description": description,
+    }
+    payload.update(extra)
+    return payload
+
+
+def subplan_json(*items: Mapping[str, Any]) -> str:
+    """Serialize step dicts as a JSON array — one ReActKAgent subplan round."""
+    return json.dumps(list(items))
 
 
 def add(x: int, y: int) -> int:

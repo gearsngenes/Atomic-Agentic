@@ -262,3 +262,144 @@ VALID OUTPUT:
 """,
     description="ReActAgent iterative step-orchestration prompt.",
 )
+
+
+SUBPLAN_PROMPT = PromptConfig(
+    template="""\
+# OBJECTIVE
+You are a strict ORCHESTRATOR in a batched ReAct-style loop.
+Infer the user's current task from the conversation messages.
+Using the cache, tools, constants, and running plan state, output the NEXT
+BEST subplan of tool calls needed to advance or finish that task.
+Your ONLY output is ONE JSON array of step objects (no prose, no markdown,
+no code fences) — even when you intend only one step.
+
+# STEPS PER ROUND
+This agent generates at most {STEPS_PER_ROUND} step(s) per round. The exact
+number requested this specific round (which may be lower, based on the
+remaining tool-call budget) is stated in the closing request below. Never
+exceed either bound.
+
+# TOOL CALL BUDGET (NON-RETURN ONLY)
+Max non-return tool calls for this run: {TOOL_CALLS_LIMIT}
+- The final return step does NOT count.
+- Keep each subplan minimal and relevant.
+
+# AVAILABLE TOOLS (USE IDS VERBATIM)
+{TOOLS}
+
+# AVAILABLE CONSTANTS
+Registered constants are exact runtime values available by symbolic name.
+Use a constant only when a tool argument should receive that exact registered value.
+Do NOT guess, approximate, or manually write constant values.
+
+{CONSTANTS}
+
+# RUNTIME STATE (READ-ONLY)
+You may see cached steps from prior invokes; reference cache results only as <<__cN__>>.
+You may see one fresh running-plan snapshot for this run. Use it to determine what has already been done.
+
+Each executed running step has:
+- step: run-local absolute index
+- description: one-sentence summary of what that step did and why it was needed
+- tool: executed tool id
+- args: unresolved args originally used
+- result_ref: placeholder for that result, e.g. <<__s0__>>
+- run_id: UUID of this step's result; pass as a plain quoted JSON string to a tool's
+  run_id arg to continue from this step's conversation — NOT a placeholder, do not wrap in <<...>>
+- observable_result: optional preview-limited raw result text
+
+Use descriptions to understand what each prior step was intended to accomplish for the current task.
+observable_result is for OBSERVATION ONLY. Use it only to decide the next tool calls or branch.
+If a new arg needs that step's value, use its result_ref placeholder.
+Do not assume results not shown as cache refs, result_ref, or observable_result.
+
+# OUTPUT FORMAT (STRICT)
+Emit exactly ONE JSON array. Each element MUST be a JSON object with EXACTLY
+AND ONLY these keys:
+- "step": <int>                        (run-local absolute index; see below)
+- "tool": "<Type>.<namespace>.<name>"  (use a tool id verbatim)
+- "args": {{ ... }}                    (MUST be a JSON object)
+- "duration": <int>                    (0 up to remaining future round budget)
+- "description": <str>                (one sentence describing this step)
+- (optional) "await": <int>            (MUST be an integer >= 0 if present)
+
+No other keys. No comments. No trailing text.
+
+Step index rule:
+- If RUNNING PLAN STEPS show steps 0..k, the first element of your array
+  is step k+1, and each subsequent element increments by 1.
+- If no running steps are shown, the first element is step 0.
+
+# PLACEHOLDERS (GREEDY REQUIRED)
+Use ONLY these placeholders for prior results and constants:
+- <<__sN__>> : executed OR newly-generated step N (absolute index, this run)
+- <<__cN__>> : CACHE step N
+- <<__k.NAME__>> : registered constant NAME
+
+Rules:
+1) Indices must be concrete non-negative integers, e.g. <<__s0__>>, never <<__sN__>>.
+2) In JSON output, every placeholder MUST be a quoted JSON string.
+3) No forward refs: a step may only reference an earlier absolute index
+   (already executed, or earlier in this same array).
+4) <<__cN__>> may only reference visible cache indices.
+5) Use placeholders GREEDILY to preserve symbolic dataflow.
+6) Never copy observable_result values into args.
+7) Never manually approximate registered constants; use <<__k.NAME__>>.
+8) Do NOT do inline computation inside args. Use tools.
+
+# IMPORTANT — NO MID-SUBPLAN RESULT STEERING
+None of the steps in one array have executed yet when you generate them —
+you are committing to all of them at once. A later step in this same array
+may depend on an earlier one's result only by placeholder (data dependency,
+resolved automatically at execution time). It must NOT need to see an
+earlier step's actual runtime value to decide which TOOL to call — that
+decision can only be made once the value is actually observable, i.e. in a
+LATER round. If your next choice of tool genuinely depends on seeing a
+prior step's concrete result, end this array before that step and let it be
+decided in the next round instead.
+
+# AWAIT (SCHEDULING BARRIER)
+"await" is OPTIONAL. If present on a non-return step, it MUST be an integer
+>= 0 referencing an earlier absolute step index, adding a sequencing barrier
+even if args do not reference that step. Runtime may run steps concurrently
+unless constrained by placeholder deps or await barriers.
+
+# DURATION
+"duration" controls how many future rounds may see this step's raw result as
+observable_result:
+- 0: hide raw result; pass by placeholder only
+- 1: show raw result for the next round
+- >1: keep raw result visible for a later branching/tool-choice decision
+Use duration 0 by default. The return tool MUST use duration 0.
+
+# DESCRIPTION
+"description" is required, one sentence, describing what this exact tool
+call does and why it is needed for the user's current task. Do NOT describe
+future steps, hidden reasoning, or guessed results.
+
+# RETURN (OPTIONAL, LAST ELEMENT ONLY)
+A return step is OPTIONAL in any given array — most rounds will not include
+one. If you include one:
+{{ "tool": "Tool.ToolAgents.return", "args": {{ "val": <literal-or-placeholder-or-null> }}, "duration": 0, "description": "<one sentence>" }}
+- It MUST be the LAST element of the array.
+- It MUST NOT include "await".
+- Return val may be: <<__sN__>>, <<__cN__>>, <<__k.NAME__>>, any JSON literal, or null.
+Only include a return step once the running plan (across all rounds so far)
+has fully completed the user's current task.
+
+# EXAMPLE
+CACHE:
+[{{"step":0,"tool":"Tool.Math.power","args":{{"a":2,"b":3}}}}]
+
+RUNNING PLAN STEPS 0-0 SO FAR:
+[{{"step":0,"description":"Multiply the cached power result by 5 for the current calculation.","tool":"Tool.Math.multiply","args":{{"a":"<<__c0__>>","b":5}},"result_ref":"<<__s0__>>","run_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}}]
+
+VALID OUTPUT (requesting up to 2 steps this round):
+[
+  {{"step":1,"tool":"Tool.Math.add","args":{{"a":"<<__s0__>>","b":2}},"duration":0,"description":"Add 2 to the previous multiplication result for the current calculation."}},
+  {{"step":2,"tool":"Tool.ToolAgents.return","args":{{"val":"<<__s1__>>"}},"duration":0,"description":"The running plan has completed the task; returning the final computed value."}}
+]
+""",
+    description="ReActKAgent per-round subplan-generation prompt (bare-bones placeholder; Pass 3 replaces wording).",
+)
