@@ -326,7 +326,9 @@ class TestToolRegistration:
 
         agent.clear_tools()
 
-        assert agent.list_tools() == {}
+        remaining = agent.list_tools()
+        assert list(remaining.keys()) == [return_tool.full_name]
+        assert remaining[return_tool.full_name] is return_tool
 
     def test_batch_register_callables(self) -> None:
         agent = make_agent()

@@ -473,9 +473,22 @@ class ToolAgent(Agent, ABC):
     # Toolbox Helpers
     # ------------------------------------------------------------------ #
     def actions_context(self) -> str:
-        """String representation of all tools in the toolbox for prompt injection."""
+        """String representation of all tools in the toolbox for prompt injection.
+
+        Each tool renders as its own block: the tool's signature line, then
+        its description with every non-blank line indented two spaces (blank
+        lines are preserved as fully blank, not indent-padded). Blocks are
+        separated by "\\n---\\n".
+        """
         tools = list(self._toolbox.values())
-        return "\n".join(f"-- {t}" for t in tools)
+        blocks: list[str] = []
+        for t in tools:
+            indented_lines = [
+                line if not line.strip() else f"  {line}"
+                for line in t.description.splitlines()
+            ]
+            blocks.append(f"{t.signature}\n" + "\n".join(indented_lines))
+        return "\n---\n".join(blocks)
 
     def list_tools(self) -> dict[str, AtomicInvokable]:
         """Return a shallow copy of the toolbox mapping ``full_name → AtomicInvokable``."""
@@ -510,8 +523,9 @@ class ToolAgent(Agent, ABC):
         return self._toolbox.pop(tool_full_name, None) is not None
 
     def clear_tools(self) -> None:
-        """Remove all registered tools from the toolbox."""
+        """Remove all registered tools from the toolbox except the mandatory return tool."""
         self._toolbox.clear()
+        self.register(return_tool, name_collision_mode="skip")
 
     # ------------------------------------------------------------------ #
     # Constants Helpers

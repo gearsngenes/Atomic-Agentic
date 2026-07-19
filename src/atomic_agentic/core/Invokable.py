@@ -507,10 +507,25 @@ class AtomicInvokable(ABC):
     # Unified repr/str
     # ---------------------------------------------------------------- #
     def __str__(self) -> str:
-        return f"<{self.signature} - {self.description}>"
+        """Constructor-style dump using the augmented `description` getter
+        (per-parameter bullets and any `_extra_description()` included) for
+        the most comprehensive human-readable detail. Unlike `to_dict()`,
+        which uses raw `_description` to avoid duplicating bullets in
+        persisted metadata, `__str__` favors completeness over compactness."""
+        return (
+            f"{type(self).__name__}("
+            f"name={self.name!r}, "
+            f"namespace={self.namespace!r}, "
+            f"parameters={self.parameters!r}, "
+            f"return_type={self.return_type!r}, "
+            f"description={self.description!r})"
+        )
 
     def __repr__(self) -> str:
-        return f"{self.signature}: {self.description}"
+        """Short, single-line, unambiguous form. `full_name` already leads
+        with the class name (`Type.namespace.name`), so no separate class
+        name prefix is added."""
+        return f"<{self.full_name} @{self.instance_id}>"
 
     # ---------------------------------------------------------------- #
     # callable contract
