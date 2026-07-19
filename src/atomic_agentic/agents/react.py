@@ -543,27 +543,9 @@ class ReActAgent(ToolAgent):
         slot.await_step = generated_slot.await_step
 
         # Cascade-fail: when fail_fast=False, propagate failures through arg dependencies.
-        # Use extract_dependencies(slot.args) for the same reason as PlanActAgent: only
-        # steps actually referenced in args need to resolve successfully.
         if not self._fail_fast:
             board = state.running_blackboard
-            failed_arg_deps = sorted(
-                d
-                for d in extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
-                if board[d].is_failed()
-            )
-            if failed_arg_deps:
-                dep_str = ", ".join(str(d) for d in failed_arg_deps)
-                if slot.tool == RETURN_TOOL_FULL_NAME:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: return step cannot execute; "
-                        f"dependency step(s) {dep_str} failed."
-                    )
-                slot.error = ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: step {prefix_len} skipped — "
-                    f"dependency step(s) {dep_str} failed."
-                )
-                slot.status = BlackboardSlot.FAILED
+            if self._check_cascade_failure(slot, board):
                 state.step_meta[prefix_len].description = description
                 state.next_step_index = prefix_len + 1
                 return state  # prepared_steps stays []; _invoke loop will skip execute and continue

@@ -785,66 +785,6 @@ class PlanActAgent(ToolAgent):
             failed_cache_indices=failed_cache_indices,
         )
 
-    def _compile_batches_from_deps(
-        self,
-        *,
-        planned_slots: list[BlackboardSlot],
-        return_idx: int,
-    ) -> list[list[int]]:
-        """
-        Compile concurrent batches from plan-local scheduling dependencies.
-
-        For non-return step i:
-          scheduling_deps[i] = step_dependencies + await_step if present
-          level[i] = 0 if scheduling_deps are empty else
-          1 + max(level[d] for d in scheduling_deps)
-
-        step_dependencies represent data dependencies extracted from <<__sN__>>
-        placeholders. await_step is an explicit scheduling barrier and is folded into
-        dependencies only locally while compiling execution batches.
-
-        Return step is always isolated as its own final batch [return_idx].
-        """
-        if not planned_slots:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: cannot compile empty plan.")
-
-        if (
-            return_idx != len(planned_slots) - 1
-            or planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME
-        ):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: return_idx mismatch during batch compilation."
-            )
-
-        levels: dict[int, int] = {}
-
-        # Non-return only.
-        for i in range(return_idx):
-            slot = planned_slots[i]
-
-            scheduling_deps: set[int] = set(slot.step_dependencies)
-            if slot.await_step is not NO_VAL:
-                scheduling_deps.add(slot.await_step)
-
-            if not scheduling_deps:
-                levels[i] = 0
-            else:
-                levels[i] = 1 + max(levels[d] for d in scheduling_deps)
-
-        buckets: dict[int, list[int]] = {}
-        for i in range(return_idx):
-            lvl = levels.get(i, 0)
-            buckets.setdefault(lvl, []).append(i)
-
-        batches: list[list[int]] = []
-        for lvl in sorted(buckets):
-            batch = sorted(buckets[lvl])
-            if batch:
-                batches.append(batch)
-
-        batches.append([return_idx])
-        return batches
-
     # ------------------------------------------------------------------ #
     # Prepare next batch
     # ------------------------------------------------------------------ #
@@ -963,28 +903,8 @@ class PlanActAgent(ToolAgent):
                 )
 
             # Cascade-fail: when fail_fast=False, propagate failures through arg dependencies.
-            # Use extract_dependencies(slot.args) rather than slot.step_dependencies because
-            # the return slot's step_dependencies is forced to include ALL prior steps for
-            # scheduling; only steps actually referenced in args need to resolve successfully.
-            if not self._fail_fast:
-                failed_arg_deps = sorted(
-                    d
-                    for d in extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
-                    if board[d].is_failed()
-                )
-                if failed_arg_deps:
-                    dep_str = ", ".join(str(d) for d in failed_arg_deps)
-                    if slot.tool == RETURN_TOOL_FULL_NAME:
-                        raise ToolAgentError(
-                            f"{type(self).__name__}.{self.name}: return step {i} cannot execute; "
-                            f"dependency step(s) {dep_str} failed."
-                        )
-                    slot.error = ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: step {i} skipped — "
-                        f"dependency step(s) {dep_str} failed."
-                    )
-                    slot.status = BlackboardSlot.FAILED
-                    continue
+            if not self._fail_fast and self._check_cascade_failure(slot, board):
+                continue
 
             # Resolve placeholders using base resolver (checks cache + executed step readiness).
             slot.resolved_args = self._resolve_placeholders(slot.args, state=state)

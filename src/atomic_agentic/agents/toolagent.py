@@ -1196,6 +1196,142 @@ class ToolAgent(Agent, ABC):
             return x
 
         return resolve(obj)
+
+    # ------------------------------------------------------------------ #
+    # Batch preparation helpers (prepare-time, shared by subclasses)
+    # ------------------------------------------------------------------ #
+    def _compile_batches_from_deps(
+        self,
+        *,
+        planned_slots: list[BlackboardSlot],
+        return_idx: int | None = None,
+    ) -> list[list[int]]:
+        """
+        Compile concurrent execution batches from scheduling dependencies.
+
+        For non-return step i: scheduling_deps[i] = step_dependencies plus
+        await_step if present; level[i] = 0 if scheduling_deps is empty,
+        else 1 + max(level[d] for d in scheduling_deps). Steps at the same
+        level share no dependency and may execute concurrently.
+
+        ``return_idx`` is optional so a partial step list with no
+        terminating return step (e.g. one round of a future adaptive-batch
+        subclass's generation) can be compiled the same way a full plan
+        can:
+
+        - Given: validates it points at a real return-tool slot at the
+          final position, raises on mismatch, and isolates it as its own
+          final batch.
+        - ``None``: every given slot participates in leveling; no isolated
+          final batch, no return-shaped validation at all.
+
+        This method does not itself guard against ``planned_slots`` being
+        empty — callers must ensure non-emptiness before calling.
+
+        Raises
+        ------
+        ToolAgentError
+            If ``return_idx`` is given but does not point at a real
+            return-tool slot at the final position.
+        """
+        if return_idx is not None and (
+            return_idx != len(planned_slots) - 1
+            or planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME
+        ):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: internal error: return_idx mismatch during batch compilation."
+            )
+
+        # Only indices in [0, level_span) participate in leveling; when return_idx
+        # is given, that final index is isolated below rather than leveled.
+        level_span = return_idx if return_idx is not None else len(planned_slots)
+
+        levels: dict[int, int] = {}
+        for i in range(level_span):
+            slot = planned_slots[i]
+
+            scheduling_deps: set[int] = set(slot.step_dependencies)
+            if slot.await_step is not NO_VAL:
+                scheduling_deps.add(slot.await_step)
+
+            if not scheduling_deps:
+                levels[i] = 0
+            else:
+                levels[i] = 1 + max(levels[d] for d in scheduling_deps)
+
+        buckets: dict[int, list[int]] = {}
+        for i in range(level_span):
+            lvl = levels.get(i, 0)
+            buckets.setdefault(lvl, []).append(i)
+
+        batches: list[list[int]] = []
+        for lvl in sorted(buckets):
+            batch = sorted(buckets[lvl])
+            if batch:
+                batches.append(batch)
+
+        if return_idx is not None:
+            batches.append([return_idx])
+
+        return batches
+
+    def _check_cascade_failure(
+        self,
+        slot: BlackboardSlot,
+        board: list[BlackboardSlot],
+    ) -> bool:
+        """
+        Check one slot's argument-dependencies for already-failed steps and
+        mark or raise accordingly.
+
+        Shared by ``PlanActAgent``, ``ReActAgent``, and future ``ToolAgent``
+        subclasses. Callers are responsible for only invoking this when
+        ``not self._fail_fast`` — this method does not check ``fail_fast``
+        itself.
+
+        Uses ``extract_dependencies(slot.args, ...)`` rather than
+        ``slot.step_dependencies`` because a return slot's
+        ``step_dependencies`` may be forced to include every prior step for
+        scheduling purposes; only steps actually referenced in ``args``
+        need to resolve successfully.
+
+        Returns
+        -------
+        bool
+            ``True`` if ``slot`` was marked ``FAILED`` due to a failed
+            dependency (caller should skip executing it). ``False`` if no
+            cascade failure was found.
+
+        Raises
+        ------
+        ToolAgentError
+            If ``slot`` is the return tool and depends on a failed step — a
+            return that cannot execute ends the run regardless of
+            ``fail_fast``.
+        """
+        failed_deps = sorted(
+            d
+            for d in extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
+            if board[d].is_failed()
+        )
+        if not failed_deps:
+            return False
+
+        dep_str = ", ".join(str(d) for d in failed_deps)
+
+        if slot.tool == RETURN_TOOL_FULL_NAME:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return step {slot.step} "
+                f"cannot execute; dependency step(s) {dep_str} failed."
+            )
+
+        slot.error = ToolAgentError(
+            f"{type(self).__name__}.{self.name}: step {slot.step} skipped — "
+            f"dependency step(s) {dep_str} failed."
+        )
+        slot.status = BlackboardSlot.FAILED
+        return True
+
     # ------------------------------------------------------------------ #
     # Execution (base-owned)
     # ------------------------------------------------------------------ #
