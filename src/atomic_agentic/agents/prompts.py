@@ -273,10 +273,25 @@ Each turn you will be shown a running plan of steps already committed and
 executed so far (possibly empty on the first turn). Those steps are fixed
 and cannot be changed or restated — your only job is to decide what comes
 NEXT.
-Output the NEXT K (or fewer) BEST steps needed to advance or finish that
-task — not a complete end-to-end plan, only what is ready to commit right now.
+Output the NEXT K (or fewer, but always at least one) BEST steps needed to
+advance or finish that task — not a complete end-to-end plan, only what is
+ready to commit right now.
 Your ONLY output is ONE JSON array of step objects (no prose, no markdown,
 no code fences), even when it contains only one element.
+
+# OUTPUT RULES
+1) Output MUST be valid JSON for an array, even when it contains exactly one
+   element — NEVER a bare object.
+2) First non-whitespace char MUST be '[' and last non-whitespace char MUST
+   be ']'.
+3) The array MUST contain AT LEAST ONE element — never emit an empty array.
+   If the task is already fully complete, that one element MUST be the
+   return step.
+4) Do NOT output headings, labels, explanations, code fences, or repeated
+   context.
+5) The array MUST NOT contain more elements than the count stated in the
+   closing request for this round. If more steps are logically needed,
+   defer the rest to a later round instead of exceeding it.
 
 # BUDGET
 Two limits bound every subplan you produce:
@@ -384,9 +399,12 @@ step's raw result for, in order to plan ahead — not how many steps:
   (e.g. to help pick the following tool).
 - >1: you expect to still need this raw result visible across that many
   upcoming rounds.
-Use 0 by default. Only raise it when you can already foresee, right now,
-that a specific upcoming round will need to inspect this exact raw value
-again. The return tool MUST use duration 0.
+Use duration 0 whenever the result only needs to be passed forward, printed,
+returned, or reused by placeholder — being referenced by a later step is NOT
+by itself a reason to raise duration. Only raise it when you must inspect
+this exact raw value again to decide which tool to call next; e.g. if a
+later round's tool choice depends on whether this result is even or odd,
+use duration 1. The return tool MUST use duration 0.
 
 # DESCRIPTION
 "description" is required, one sentence, describing what this exact tool
@@ -403,20 +421,25 @@ one. If you include one:
 Only include a return step once the task is fully complete, considering the
 entire running plan across all rounds so far — not just this array.
 
-# EXAMPLE 1 — independent steps, a chained step, and a genuine await
-Task: "Compute 2^3, add 4 and 5, multiply those two results together, print a
-completion notice once that's done, and return the final number."
+# EXAMPLE 1 — independent steps, a chained step, a registered constant, and
+# a genuine await
+Task: "Compute 2^3, add 4 and 5, multiply those two results together, scale
+that by the registered constant PI, print a completion notice once that's
+done, and return the final number."
 
 RUNNING PLAN STEPS SO FAR:
 No steps executed yet.
 
 VALID OUTPUT (steps 0-1 run concurrently; step 2 chains via placeholder
-alone; step 3 needs an explicit "await"):
+alone; step 3 uses the registered constant exactly as listed in AVAILABLE
+CONSTANTS — note the double underscore before the closing brackets; step 4
+needs an explicit "await"):
 [
   {{"step":0,"tool":"Tool.Math.power","args":{{"a":2,"b":3}},"duration":0,"description":"Compute 2 to the power of 3 as the first input the task needs."}},
   {{"step":1,"tool":"Tool.Math.add","args":{{"a":4,"b":5}},"duration":0,"description":"Add 4 and 5 as the second input the task needs."}},
   {{"step":2,"tool":"Tool.Math.multiply","args":{{"a":"<<__s0__>>","b":"<<__s1__>>"}},"duration":0,"description":"Multiply the two computed inputs together as requested."}},
-  {{"step":3,"tool":"Tool.Console.print","args":{{"value":"Calculation complete"}},"await":2,"duration":0,"description":"Print the completion notice the task asked for, after the multiplication finishes."}}
+  {{"step":3,"tool":"Tool.Math.multiply","args":{{"a":"<<__s2__>>","b":"<<__k.PI__>>"}},"duration":0,"description":"Scale the product by the registered constant PI as requested."}},
+  {{"step":4,"tool":"Tool.Console.print","args":{{"value":"Calculation complete"}},"await":3,"duration":0,"description":"Print the completion notice the task asked for, after the scaling finishes."}}
 ]
 
 # EXAMPLE 2 — completion in a later round
@@ -429,6 +452,18 @@ RUNNING PLAN STEPS 0-3 SO FAR:
 VALID OUTPUT (every requested action is done; return the final value):
 [
   {{"step":4,"tool":"Tool.ToolAgents.return","args":{{"val":"<<__s2__>>"}},"duration":0,"description":"The running plan has completed every part of the task; returning the multiplication result."}}
+]
+
+# EXAMPLE 3 — a single non-return step is still an array
+RUNNING PLAN STEPS 0-2 SO FAR:
+[{{"step":0,"description":"Compute 2 to the power of 3 as the first input the task needs.","tool":"Tool.Math.power","args":{{"a":2,"b":3}},"result_ref":"<<__s0__>>","run_id":"a1b2c3d4-e5..."}},
+ {{"step":1,"description":"Add 4 and 5 as the second input the task needs.","tool":"Tool.Math.add","args":{{"a":4,"b":5}},"result_ref":"<<__s1__>>","run_id":"b2c3d4e5-f6..."}},
+ {{"step":2,"description":"Multiply the two computed inputs together as requested.","tool":"Tool.Math.multiply","args":{{"a":"<<__s0__>>","b":"<<__s1__>>"}},"result_ref":"<<__s2__>>","run_id":"c3d4e5f6-a7..."}}]
+
+VALID OUTPUT (only one more non-return step is ready this round — still a
+one-element array, NEVER a bare object):
+[
+  {{"step":3,"tool":"Tool.Console.print","args":{{"value":"Calculation complete"}},"duration":0,"description":"Print the completion notice the task asked for, after the multiplication finishes."}}
 ]
 """,
     description="ReActKAgent per-round reactive-planning prompt.",

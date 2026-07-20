@@ -38,7 +38,7 @@ agent = ReActKAgent(
     llm_engine=llm_engine,
     context_enabled=False,
     steps_per_round=2,   # too small to fit compute+classify+branch in one round
-    tool_calls_limit=10,
+    tool_calls_limit=20,
 )
 
 agent.batch_register(MATH_TOOLS)
