@@ -52,8 +52,11 @@ if __name__ == "__main__":
     sequentially = choice == "y"
 
     if sequentially:
-        # steps_per_round is irrelevant here — the "await" chain forces one
-        # step per round regardless of K, so a single run is enough.
+        # steps_per_round=5 gives the model room to batch all five calls at
+        # once; strict ordering is no longer structurally guaranteed (no
+        # "await"), so this now tests whether the model, given only "call
+        # them SEQUENTIALLY" plus the CONCURRENCY rule, correctly emits five
+        # separate single-element subplans across five rounds instead.
         elapsed = run_once(sequentially=True, steps_per_round=5)
         print(f"\nSequential time taken: {elapsed:.2f} seconds")
     else:

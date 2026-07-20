@@ -49,17 +49,15 @@ agent.register(is_even, name="IsEven", description="Return True if n is even, el
 # ──────────────────────────  TASK  ─────────────────────────────
 task_template = """
 Given x = {x}:
-1. Compute y = 3 * x - 1.
-2. Determine whether y is prime, and independently whether y is even.
-3. Apply EXACTLY ONE of the following branches. Prime status takes priority
-   over even/odd:
-   - If y is prime: compute y ** 2.
-   - Else if y is even: compute y / 2.
-   - Else (y is odd): compute y + 7.
-   You cannot know which branch applies until you see the actual results of
-   the primality/evenness checks — do not guess ahead of that.
-4. Print the final computed value.
-5. Return the final computed value.
+1. Compute y = three times x minus one
+2. Check if y is prime or even.
+3. Based on what those checks show, do one of the following:
+    a. If it is prime, compute and return y**2
+    b. Else if y is even, compute and return y/2
+    c. Else if y is odd, compute and return y + 7
+4. Return the final computed result.
+
+DO NOT SKIP STEPS
 """
 
 # Seeds chosen so 3*x - 1 lands in each branch:
@@ -68,8 +66,8 @@ Given x = {x}:
 #   x=12 -> y=35 (composite, odd  -> branch C)
 runs = [
     (1, "prime (priority over even)"),
-    (3, "composite, even"),
-    (12, "composite, odd"),
+    # (3, "composite, even"),
+    # (12, "composite, odd"),
 ]
 
 from pprint import pprint
@@ -78,5 +76,7 @@ for x, expected_branch in runs:
     print(f"\n⇢ Running x={x} (expected branch: {expected_branch}) …")
     result = agent.invoke({"prompt": task_template.format(x=x)})
     print(f"=== RESULT for x={x} ===")
-    pprint(result)
+    pprint(f"FINAL RESULT: {result.result}")
+    print(f"=== BLACKBOARD for x={x} ===")
+    pprint(agent.blackboard)
     agent.clear_memory()

@@ -339,21 +339,30 @@ class ReActKAgent(ToolAgent):
             )
 
         working_messages.append({"role": "assistant", "content": running_text})
-        working_messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"Produce the NEXT subplan of UP TO {round_cap} step(s) for the current task, "
-                    "as a JSON array (even if it contains only one element). "
-                    "Include a return step only once the running plan has fully completed the "
-                    "task, and only as the LAST element of the array. "
-                    "Preserve symbolic dataflow with quoted placeholders; do not copy "
-                    "observable_result values into args; no step may need to see a sibling in "
-                    "this same array's actual result to choose its own tool. "
-                    f"For every step in this array, duration must be an int from 0 to {max_duration}."
-                ),
-            }
-        )
+
+        if round_cap == 0:
+            closing_text = (
+                "This round's remaining non-return tool-call budget is 0. "
+                f"The ONLY valid step you may output is the return tool "
+                f"({RETURN_TOOL_FULL_NAME!r}) — do not include any other step. "
+                "Output it as a one-element JSON array."
+            )
+        else:
+            closing_text = (
+                "Produce the NEXT subplan for the current task as a JSON array "
+                "(even if it contains only one element), following ALL of these:\n"
+                f"- At most {round_cap} step(s) this round — fewer is fine, never pad.\n"
+                "- Include a return step only once the running plan has fully "
+                "completed the task, and only as the LAST element.\n"
+                "- Preserve symbolic dataflow with quoted placeholders; never copy "
+                "observable_result values into args.\n"
+                "- No step may need to see a sibling in this same array's actual "
+                "result to choose its own tool.\n"
+                f"- Every step's duration must be an int from 0 to {max_duration}."
+            )
+
+        working_messages.append({"role": "user", "content":
+                                 })
 
         delta = [state.messages[-1], working_messages[-2], working_messages[-1]]
         return working_messages, delta
@@ -477,7 +486,6 @@ class ReActKAgent(ToolAgent):
         if return_positions:
             return_slot = items[-1][0]
             return_slot.step_dependencies = tuple(range(return_slot.step))
-            return_slot.await_step = NO_VAL
 
         return items
 
@@ -548,12 +556,6 @@ class ReActKAgent(ToolAgent):
                         f"subplan step {absolute} has invalid step dependencies "
                         f"{sorted(set(bad_step_deps))!r}; all deps must be earlier steps (< {absolute})."
                     )
-
-            if slot.await_step is not NO_VAL and slot.await_step >= absolute:
-                return (
-                    f"subplan step {absolute} has an invalid await_step {slot.await_step!r}; "
-                    f"await_step must reference an earlier step (< {absolute})."
-                )
 
             cache_refs = extract_dependencies(slot.args, placeholder_pattern=self.CACHE_REF_PATTERN)
 

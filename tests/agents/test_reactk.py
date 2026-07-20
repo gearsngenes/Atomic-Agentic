@@ -268,6 +268,23 @@ class TestReActKAgentValidation:
         assert feedback is not None
         assert "remaining tool-call budget" in feedback
 
+    def test_process_subplan_output_rejects_await_field(self) -> None:
+        agent = make_reactk_agent([], tool_calls_limit=5, steps_per_round=5)
+
+        parsed = [{
+            "tool": "Tool.tests.add",
+            "args": {"x": 1, "y": 2},
+            "await": 0,
+            "duration": 0,
+            "description": "add",
+        }]
+
+        result = agent._process_subplan_output(parsed=parsed, cursor=0, max_duration=5)
+
+        assert isinstance(result, str)
+        assert "unsupported keys" in result
+        assert "await" in result
+
 
 class TestReActKAgentApplySubplanResult:
     def test_batch_compile_and_filter_handles_cross_round_dependency(self) -> None:

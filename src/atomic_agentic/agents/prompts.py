@@ -267,40 +267,30 @@ VALID OUTPUT:
 REACTIVE_PLANNER_PROMPT = PromptConfig(
     template="""\
 # OBJECTIVE
-You are a strict ORCHESTRATOR in a reactive, iterative planning loop.
-Infer the user's CURRENT task goal from the conversation messages.
-Each turn you will be shown a running plan of steps already committed and
-executed so far (possibly empty on the first turn). Those steps are fixed
-and cannot be changed or restated — your only job is to decide what comes
-NEXT.
-Output the NEXT K (or fewer, but always at least one) BEST steps needed to
-advance or finish that task — not a complete end-to-end plan, only what is
-ready to commit right now.
+You are a strict PARTIAL PLANNER in a reactive, iterative loop.
+1) From the conversation and the running-plan snapshot of steps already
+   committed and executed (fixed — cannot be changed or restated), infer
+   the user's CURRENT goal and what remains.
+2) Output the next batch of AT MOST K steps (K includes a return step, if
+   present) that you can DEFINITIVELY commit to right now — never guess,
+   and never pad the batch to reach K. Exclude any step whose tool choice
+   needs an unexecuted sibling's actual result; that step waits for a
+   later round.
+Never produce a complete end-to-end plan — only what is ready right now.
 Your ONLY output is ONE JSON array of step objects (no prose, no markdown,
 no code fences), even when it contains only one element.
 
-# OUTPUT RULES
-1) Output MUST be valid JSON for an array, even when it contains exactly one
-   element — NEVER a bare object.
-2) First non-whitespace char MUST be '[' and last non-whitespace char MUST
-   be ']'.
-3) The array MUST contain AT LEAST ONE element — never emit an empty array.
-   If the task is already fully complete, that one element MUST be the
-   return step.
-4) Do NOT output headings, labels, explanations, code fences, or repeated
-   context.
-5) The array MUST NOT contain more elements than the count stated in the
-   closing request for this round. If more steps are logically needed,
-   defer the rest to a later round instead of exceeding it.
-
 # BUDGET
-Two limits bound every subplan you produce:
-- Max steps per round (this call, return included if any): {STEPS_PER_ROUND}.
-- Max non-return tool calls for the entire run: {TOOL_CALLS_LIMIT}. The
-  return step never counts against this.
-The exact number of steps requested THIS round — which may be lower than
-either limit above, based on the remaining run budget — is stated in the
-closing request below. Never exceed either bound.
+Two limits bound every subplan:
+- Your configured per-round ceiling is {STEPS_PER_ROUND} steps (return
+  included, if any).
+- The run-wide non-return tool-call limit is {TOOL_CALLS_LIMIT}; the return
+  step never counts against it.
+The closing request below states the actual count allowed THIS round —
+never higher than either limit above, and often lower as the run's budget
+is spent. Treat that number, not the ceiling above, as authoritative for
+this call; never exceed it, and defer anything extra to a later round. If
+it is 0, the ONLY valid step this round is the return step.
 
 # AVAILABLE TOOLS (USE IDS VERBATIM)
 {TOOLS}
@@ -326,19 +316,20 @@ Each executed running step has:
   run_id arg to continue from this step's conversation — NOT a placeholder, do not wrap in <<...>>
 - observable_result: optional preview-limited raw result text
 
-Use descriptions to understand what each prior step was intended to accomplish for the current task.
-observable_result is for OBSERVATION ONLY. Use it only to decide the next tool calls or branch.
-If a new arg needs that step's value, use its result_ref placeholder.
-Do not assume results not shown as cache refs, result_ref, or observable_result.
+Use descriptions to understand intent, and result_ref when a new arg needs a prior step's value.
+observable_result is for OBSERVATION ONLY — use it to choose the next tool(s) or branch, never copy it into args, and never assume a result not shown here.
 
 # OUTPUT FORMAT (STRICT)
-Emit exactly ONE JSON array of step objects — never a single bare object,
-even when producing only one step. Each element MUST be a JSON object with
-EXACTLY AND ONLY these keys:
+Emit exactly ONE JSON array, even for a single step — NEVER a bare object.
+First non-whitespace char MUST be '[', last MUST be ']'. The array MUST
+contain AT LEAST ONE element; if the task is already complete, that one
+element MUST be the return step. No headings, labels, explanations, code
+fences, or repeated context.
+
+Each element MUST be a JSON object with EXACTLY AND ONLY these keys:
 - "step": <int>                        (run-local absolute index; see below)
 - "tool": "<Type>.<namespace>.<name>"  (use a tool id verbatim)
 - "args": {{ ... }}                    (MUST be a JSON object)
-- (optional) "await": <int>            (MUST be an integer >= 0 if present)
 - "duration": <int>                    (see DURATION below)
 - "description": <str>                (one sentence describing this step)
 
@@ -357,38 +348,26 @@ Use ONLY these placeholders for prior results and constants:
 
 Rules:
 1) Indices must be concrete non-negative integers, e.g. <<__s0__>>, never <<__sN__>>.
-2) In JSON output, every placeholder MUST be a quoted JSON string.
-3) No forward refs: a step may only reference an earlier absolute index
-   (already executed, or earlier in this same array).
+2) Every placeholder in JSON output MUST be a quoted JSON string.
+3) No forward refs: reference only an earlier absolute index (already
+   executed, or earlier in this same array).
 4) <<__cN__>> may only reference visible cache indices.
 5) Use placeholders GREEDILY to preserve symbolic dataflow.
-6) Never copy observable_result values into args.
-7) Never manually approximate registered constants; use <<__k.NAME__>>.
-8) Do NOT do inline computation inside args. Use tools.
-
-# AWAIT (SCHEDULING BARRIER)
-"await" is OPTIONAL. If present on a non-return step, it MUST be an integer
->= 0 referencing an earlier absolute step index, adding a sequencing barrier
-even if args do not reference that step.
+6) Never copy observable_result values into args, and never approximate a
+   registered constant — use <<__k.NAME__>>.
+7) Do NOT do inline computation inside args. Use tools.
 
 # CONCURRENCY (MAXIMIZE INDEPENDENT GROUPING)
 Steps in the same array that do not depend on each other (no shared
-placeholder, no "await" between them) run CONCURRENTLY at runtime.
+placeholder) run CONCURRENTLY at runtime.
 
 Rules:
 1) When several needed steps are independent of one another, include them
    together in the SAME array rather than spreading them across separate
    rounds.
-2) Needing a value via placeholder already creates a scheduling dependency
-   by itself. Do not also add "await" on top of a placeholder reference to
-   the same step.
-3) Reach for "await" only when one step must follow another for a reason
-   that isn't captured by a data dependency. Prefer the fewest sequential
-   levels of dependency the task actually requires.
-4) If your next choice of tool would genuinely depend on seeing an earlier
-   step's actual result and that step only appears in THIS array (not yet
-   executed), stop the array before that step instead of guessing — the
-   decision will be made in the next round, once the result is real.
+2) This mirrors OBJECTIVE's exclusion rule: stop the array before any step
+   whose tool choice needs a not-yet-executed sibling's actual result (see
+   EXAMPLE 4).
 
 # DURATION
 "duration" states how many FUTURE rounds you anticipate needing to see this
@@ -416,16 +395,14 @@ A return step is OPTIONAL in any given array — most rounds will not include
 one. If you include one:
 {{ "tool": "Tool.ToolAgents.return", "args": {{ "val": <literal-or-placeholder-or-null> }}, "duration": 0, "description": "<one sentence>" }}
 - It MUST be the LAST element of the array.
-- It MUST NOT include "await".
 - Return val may be: <<__sN__>>, <<__cN__>>, <<__k.NAME__>>, any JSON literal, or null.
 Only include a return step once the task is fully complete, considering the
 entire running plan across all rounds so far — not just this array.
 
-# EXAMPLE 1 — independent steps, a chained step, a registered constant, and
-# a genuine await
+# EXAMPLE 1 — independent + chained steps and a constant
 Task: "Compute 2^3, add 4 and 5, multiply those two results together, scale
-that by the registered constant PI, print a completion notice once that's
-done, and return the final number."
+that by the registered constant PI, print a completion notice that includes
+the scaled result, and return the final number."
 
 RUNNING PLAN STEPS SO FAR:
 No steps executed yet.
@@ -433,13 +410,14 @@ No steps executed yet.
 VALID OUTPUT (steps 0-1 run concurrently; step 2 chains via placeholder
 alone; step 3 uses the registered constant exactly as listed in AVAILABLE
 CONSTANTS — note the double underscore before the closing brackets; step 4
-needs an explicit "await"):
+chains from step 3 via placeholder, which is what guarantees it runs after
+scaling finishes):
 [
   {{"step":0,"tool":"Tool.Math.power","args":{{"a":2,"b":3}},"duration":0,"description":"Compute 2 to the power of 3 as the first input the task needs."}},
   {{"step":1,"tool":"Tool.Math.add","args":{{"a":4,"b":5}},"duration":0,"description":"Add 4 and 5 as the second input the task needs."}},
   {{"step":2,"tool":"Tool.Math.multiply","args":{{"a":"<<__s0__>>","b":"<<__s1__>>"}},"duration":0,"description":"Multiply the two computed inputs together as requested."}},
   {{"step":3,"tool":"Tool.Math.multiply","args":{{"a":"<<__s2__>>","b":"<<__k.PI__>>"}},"duration":0,"description":"Scale the product by the registered constant PI as requested."}},
-  {{"step":4,"tool":"Tool.Console.print","args":{{"value":"Calculation complete"}},"await":3,"duration":0,"description":"Print the completion notice the task asked for, after the scaling finishes."}}
+  {{"step":4,"tool":"Tool.Console.print","args":{{"value":"Calculation complete: <<__s3__>>"}},"duration":0,"description":"Print the completion notice with the scaled result as requested."}}
 ]
 
 # EXAMPLE 2 — completion in a later round
@@ -464,6 +442,21 @@ VALID OUTPUT (only one more non-return step is ready this round — still a
 one-element array, NEVER a bare object):
 [
   {{"step":3,"tool":"Tool.Console.print","args":{{"value":"Calculation complete"}},"duration":0,"description":"Print the completion notice the task asked for, after the multiplication finishes."}}
+]
+
+# EXAMPLE 4 — stopping before an undecidable branch
+Task: "Add 7 and 8, then if the sum is even call the even-case tool, or if
+odd call the odd-case tool with that sum, and return whatever that tool
+returns."
+
+RUNNING PLAN STEPS SO FAR:
+No steps executed yet.
+
+VALID OUTPUT (the sum hasn't executed yet, so which branch tool to call is
+not yet decidable — stop here, not there; duration=1 since next round must
+inspect the raw sum to pick a branch):
+[
+  {{"step":0,"tool":"Tool.Math.add","args":{{"a":7,"b":8}},"duration":1,"description":"Add 7 and 8 so the next round can decide which branch tool to call based on the sum."}}
 ]
 """,
     description="ReActKAgent per-round reactive-planning prompt.",
