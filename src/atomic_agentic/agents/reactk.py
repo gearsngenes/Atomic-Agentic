@@ -326,7 +326,9 @@ class ReActKAgent(ToolAgent):
                 "observable_result fields are for OBSERVATION ONLY: use them only to choose "
                 "the next tool(s) or branch.\n"
                 "Do not copy observable_result values into new args.\n\n"
-                + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
+                + "\n".join(
+                    pprint.pformat(r, width=1 << 30, sort_dicts=False) for r in running_records
+                )
             )
         else:
             running_text = (
