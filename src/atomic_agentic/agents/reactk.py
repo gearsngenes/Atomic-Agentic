@@ -50,7 +50,7 @@ import pprint
 from typing import Any, Callable, Mapping, Optional
 
 from .toolagent import ToolAgent
-from .prompts import SUBPLAN_PROMPT
+from .prompts import REACTIVE_PLANNER_PROMPT
 from ..constants.agents import (
     STEP_FIELD,
     TOOL_FIELD,
@@ -145,10 +145,10 @@ class ReActKAgent(ToolAgent):
         integer >= 0 — ``None`` is not accepted because the running
         blackboard is pre-allocated to ``tool_calls_limit + 1`` slots at
         initialization, same requirement as ``ReActAgent``.
-        ``"react_subplan"`` is the key under which the built-in subplan
-        prompt is registered in ``self._system_prompts``. No
-        extra_parameters keyword is passed to ``super().__init__(...)`` at
-        all (``ToolAgent.__init__`` accepts none).
+        ``"reactive_planner"`` is the key under which the built-in
+        reactive-planning prompt is registered in ``self._system_prompts``.
+        No extra_parameters keyword is passed to ``super().__init__(...)``
+        at all (``ToolAgent.__init__`` accepts none).
         """
         super().__init__(
             name=name,
@@ -170,7 +170,7 @@ class ReActKAgent(ToolAgent):
         )
         self._steps_per_round: int = 1
         self.steps_per_round = steps_per_round
-        self._system_prompts["react_subplan"] = SUBPLAN_PROMPT
+        self._system_prompts["reactive_planner"] = REACTIVE_PLANNER_PROMPT
 
     # ------------------------------------------------------------------ #
     # Property Overrides
@@ -217,7 +217,7 @@ class ReActKAgent(ToolAgent):
         same as ``ReActAgent``, so no ``_ainitialize_run_state`` override is
         needed; the base default (``asyncio.to_thread`` wrap) suffices.
 
-        1. Render ``self._system_prompts["react_subplan"]`` with TOOLS/
+        1. Render ``self._system_prompts["reactive_planner"]`` with TOOLS/
            TOOL_CALLS_LIMIT/CONSTANTS (same three sources every ToolAgent
            subclass uses) plus STEPS_PER_ROUND from ``self.steps_per_round``.
         2. Build messages via ``build_messages``; raise if empty.
@@ -233,7 +233,7 @@ class ReActKAgent(ToolAgent):
             ToolAgent.CONSTANTS_FIELD: self.constants_context(),
             self.STEPS_PER_ROUND_FIELD: str(self.steps_per_round),
         }
-        system = self._system_prompts["react_subplan"].render(render_context)
+        system = self._system_prompts["reactive_planner"].render(render_context)
         messages = self.build_messages(system, turns, prompt)
         if not messages:
             raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
@@ -629,7 +629,7 @@ class ReActKAgent(ToolAgent):
             llm_records.append(LLMRecord(
                 messages=record_messages,
                 llm_result=engine_result,
-                system_prompt_name="react_subplan",
+                system_prompt_name="reactive_planner",
             ))
 
             # JSON extraction
@@ -738,7 +738,7 @@ class ReActKAgent(ToolAgent):
             llm_records.append(LLMRecord(
                 messages=record_messages,
                 llm_result=engine_result,
-                system_prompt_name="react_subplan",
+                system_prompt_name="reactive_planner",
             ))
 
             try:

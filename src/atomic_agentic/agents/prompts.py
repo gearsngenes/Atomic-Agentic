@@ -264,26 +264,28 @@ VALID OUTPUT:
 )
 
 
-SUBPLAN_PROMPT = PromptConfig(
+REACTIVE_PLANNER_PROMPT = PromptConfig(
     template="""\
 # OBJECTIVE
-You are a strict ORCHESTRATOR in a batched ReAct-style loop.
-Infer the user's current task from the conversation messages.
-Using the cache, tools, constants, and running plan state, output the NEXT
-BEST subplan of tool calls needed to advance or finish that task.
+You are a strict ORCHESTRATOR in a reactive, iterative planning loop.
+Infer the user's CURRENT task goal from the conversation messages.
+Each turn you will be shown a running plan of steps already committed and
+executed so far (possibly empty on the first turn). Those steps are fixed
+and cannot be changed or restated — your only job is to decide what comes
+NEXT.
+Output the NEXT K (or fewer) BEST steps needed to advance or finish that
+task — not a complete end-to-end plan, only what is ready to commit right now.
 Your ONLY output is ONE JSON array of step objects (no prose, no markdown,
-no code fences) — even when you intend only one step.
+no code fences), even when it contains only one element.
 
-# STEPS PER ROUND
-This agent generates at most {STEPS_PER_ROUND} step(s) per round. The exact
-number requested this specific round (which may be lower, based on the
-remaining tool-call budget) is stated in the closing request below. Never
-exceed either bound.
-
-# TOOL CALL BUDGET (NON-RETURN ONLY)
-Max non-return tool calls for this run: {TOOL_CALLS_LIMIT}
-- The final return step does NOT count.
-- Keep each subplan minimal and relevant.
+# BUDGET
+Two limits bound every subplan you produce:
+- Max steps per round (this call, return included if any): {STEPS_PER_ROUND}.
+- Max non-return tool calls for the entire run: {TOOL_CALLS_LIMIT}. The
+  return step never counts against this.
+The exact number of steps requested THIS round — which may be lower than
+either limit above, based on the remaining run budget — is stated in the
+closing request below. Never exceed either bound.
 
 # AVAILABLE TOOLS (USE IDS VERBATIM)
 {TOOLS}
@@ -315,14 +317,15 @@ If a new arg needs that step's value, use its result_ref placeholder.
 Do not assume results not shown as cache refs, result_ref, or observable_result.
 
 # OUTPUT FORMAT (STRICT)
-Emit exactly ONE JSON array. Each element MUST be a JSON object with EXACTLY
-AND ONLY these keys:
+Emit exactly ONE JSON array of step objects — never a single bare object,
+even when producing only one step. Each element MUST be a JSON object with
+EXACTLY AND ONLY these keys:
 - "step": <int>                        (run-local absolute index; see below)
 - "tool": "<Type>.<namespace>.<name>"  (use a tool id verbatim)
 - "args": {{ ... }}                    (MUST be a JSON object)
-- "duration": <int>                    (0 up to remaining future round budget)
-- "description": <str>                (one sentence describing this step)
 - (optional) "await": <int>            (MUST be an integer >= 0 if present)
+- "duration": <int>                    (see DURATION below)
+- "description": <str>                (one sentence describing this step)
 
 No other keys. No comments. No trailing text.
 
@@ -348,30 +351,42 @@ Rules:
 7) Never manually approximate registered constants; use <<__k.NAME__>>.
 8) Do NOT do inline computation inside args. Use tools.
 
-# IMPORTANT — NO MID-SUBPLAN RESULT STEERING
-None of the steps in one array have executed yet when you generate them —
-you are committing to all of them at once. A later step in this same array
-may depend on an earlier one's result only by placeholder (data dependency,
-resolved automatically at execution time). It must NOT need to see an
-earlier step's actual runtime value to decide which TOOL to call — that
-decision can only be made once the value is actually observable, i.e. in a
-LATER round. If your next choice of tool genuinely depends on seeing a
-prior step's concrete result, end this array before that step and let it be
-decided in the next round instead.
-
 # AWAIT (SCHEDULING BARRIER)
 "await" is OPTIONAL. If present on a non-return step, it MUST be an integer
 >= 0 referencing an earlier absolute step index, adding a sequencing barrier
-even if args do not reference that step. Runtime may run steps concurrently
-unless constrained by placeholder deps or await barriers.
+even if args do not reference that step.
+
+# CONCURRENCY (MAXIMIZE INDEPENDENT GROUPING)
+Steps in the same array that do not depend on each other (no shared
+placeholder, no "await" between them) run CONCURRENTLY at runtime.
+
+Rules:
+1) When several needed steps are independent of one another, include them
+   together in the SAME array rather than spreading them across separate
+   rounds.
+2) Needing a value via placeholder already creates a scheduling dependency
+   by itself. Do not also add "await" on top of a placeholder reference to
+   the same step.
+3) Reach for "await" only when one step must follow another for a reason
+   that isn't captured by a data dependency. Prefer the fewest sequential
+   levels of dependency the task actually requires.
+4) If your next choice of tool would genuinely depend on seeing an earlier
+   step's actual result and that step only appears in THIS array (not yet
+   executed), stop the array before that step instead of guessing — the
+   decision will be made in the next round, once the result is real.
 
 # DURATION
-"duration" controls how many future rounds may see this step's raw result as
-observable_result:
-- 0: hide raw result; pass by placeholder only
-- 1: show raw result for the next round
-- >1: keep raw result visible for a later branching/tool-choice decision
-Use duration 0 by default. The return tool MUST use duration 0.
+"duration" states how many FUTURE rounds you anticipate needing to see this
+step's raw result for, in order to plan ahead — not how many steps:
+- 0: you do not expect to need this raw result again; pass it forward by
+  placeholder only.
+- 1: you expect to want to see this raw result again on the very next round
+  (e.g. to help pick the following tool).
+- >1: you expect to still need this raw result visible across that many
+  upcoming rounds.
+Use 0 by default. Only raise it when you can already foresee, right now,
+that a specific upcoming round will need to inspect this exact raw value
+again. The return tool MUST use duration 0.
 
 # DESCRIPTION
 "description" is required, one sentence, describing what this exact tool
@@ -385,21 +400,36 @@ one. If you include one:
 - It MUST be the LAST element of the array.
 - It MUST NOT include "await".
 - Return val may be: <<__sN__>>, <<__cN__>>, <<__k.NAME__>>, any JSON literal, or null.
-Only include a return step once the running plan (across all rounds so far)
-has fully completed the user's current task.
+Only include a return step once the task is fully complete, considering the
+entire running plan across all rounds so far — not just this array.
 
-# EXAMPLE
-CACHE:
-[{{"step":0,"tool":"Tool.Math.power","args":{{"a":2,"b":3}}}}]
+# EXAMPLE 1 — independent steps, a chained step, and a genuine await
+Task: "Compute 2^3, add 4 and 5, multiply those two results together, print a
+completion notice once that's done, and return the final number."
 
-RUNNING PLAN STEPS 0-0 SO FAR:
-[{{"step":0,"description":"Multiply the cached power result by 5 for the current calculation.","tool":"Tool.Math.multiply","args":{{"a":"<<__c0__>>","b":5}},"result_ref":"<<__s0__>>","run_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}}]
+RUNNING PLAN STEPS SO FAR:
+No steps executed yet.
 
-VALID OUTPUT (requesting up to 2 steps this round):
+VALID OUTPUT (steps 0-1 run concurrently; step 2 chains via placeholder
+alone; step 3 needs an explicit "await"):
 [
-  {{"step":1,"tool":"Tool.Math.add","args":{{"a":"<<__s0__>>","b":2}},"duration":0,"description":"Add 2 to the previous multiplication result for the current calculation."}},
-  {{"step":2,"tool":"Tool.ToolAgents.return","args":{{"val":"<<__s1__>>"}},"duration":0,"description":"The running plan has completed the task; returning the final computed value."}}
+  {{"step":0,"tool":"Tool.Math.power","args":{{"a":2,"b":3}},"duration":0,"description":"Compute 2 to the power of 3 as the first input the task needs."}},
+  {{"step":1,"tool":"Tool.Math.add","args":{{"a":4,"b":5}},"duration":0,"description":"Add 4 and 5 as the second input the task needs."}},
+  {{"step":2,"tool":"Tool.Math.multiply","args":{{"a":"<<__s0__>>","b":"<<__s1__>>"}},"duration":0,"description":"Multiply the two computed inputs together as requested."}},
+  {{"step":3,"tool":"Tool.Console.print","args":{{"value":"Calculation complete"}},"await":2,"duration":0,"description":"Print the completion notice the task asked for, after the multiplication finishes."}}
+]
+
+# EXAMPLE 2 — completion in a later round
+RUNNING PLAN STEPS 0-3 SO FAR:
+[{{"step":0,"description":"Compute 2 to the power of 3 as the first input the task needs.","tool":"Tool.Math.power","args":{{"a":2,"b":3}},"result_ref":"<<__s0__>>","run_id":"a1b2c3d4-e5..."}},
+ {{"step":1,"description":"Add 4 and 5 as the second input the task needs.","tool":"Tool.Math.add","args":{{"a":4,"b":5}},"result_ref":"<<__s1__>>","run_id":"b2c3d4e5-f6..."}},
+ {{"step":2,"description":"Multiply the two computed inputs together as requested.","tool":"Tool.Math.multiply","args":{{"a":"<<__s0__>>","b":"<<__s1__>>"}},"result_ref":"<<__s2__>>","run_id":"c3d4e5f6-a7..."}},
+ {{"step":3,"description":"Print the completion notice the task asked for, after the multiplication finishes.","tool":"Tool.Console.print","args":{{"value":"Calculation complete"}},"result_ref":"<<__s3__>>","run_id":"d4e5f6a7-b8..."}}]
+
+VALID OUTPUT (every requested action is done; return the final value):
+[
+  {{"step":4,"tool":"Tool.ToolAgents.return","args":{{"val":"<<__s2__>>"}},"duration":0,"description":"The running plan has completed every part of the task; returning the multiplication result."}}
 ]
 """,
-    description="ReActKAgent per-round subplan-generation prompt (bare-bones placeholder; Pass 3 replaces wording).",
+    description="ReActKAgent per-round reactive-planning prompt.",
 )

@@ -84,7 +84,7 @@ class TestReActKAgentEndToEnd:
         assert len(engine.calls) == 2
 
         first_call_text = "\n".join(message["content"] for message in engine.calls[0])
-        assert "at most 1 step(s) per round" in first_call_text
+        assert "Max steps per round (this call, return included if any): 1" in first_call_text
         assert "UP TO 1 step(s)" in first_call_text
         assert "duration must be an int from 0 to 2" in first_call_text
 
