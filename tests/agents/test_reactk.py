@@ -84,9 +84,8 @@ class TestReActKAgentEndToEnd:
         assert len(engine.calls) == 2
 
         first_call_text = "\n".join(message["content"] for message in engine.calls[0])
-        assert "Max steps per round (this call, return included if any): 1" in first_call_text
-        assert "UP TO 1 step(s)" in first_call_text
-        assert "duration must be an int from 0 to 2" in first_call_text
+        assert "Steps allowed this round: 1" in first_call_text
+        assert "Duration ceiling this round: 2" in first_call_text
 
     def test_multi_step_subplan_batches_and_drains_in_one_round(self) -> None:
         agent = make_reactk_agent(
@@ -133,7 +132,13 @@ class TestReActKAgentEndToEnd:
                 )),
             ],
             steps_per_round=1,
-            tool_calls_limit=2,
+            # tool_calls_limit=3 (not 2): the two non-return steps below
+            # exhaust a limit of 2 exactly, which would now trigger the
+            # skip-on-exhaustion forced return before round 3 ever generates
+            # (see test_forced_return_on_budget_exhaustion_makes_no_extra_llm_call
+            # below). Budget headroom of 1 keeps this test exercising a
+            # genuinely LLM-generated 3rd round.
+            tool_calls_limit=3,
         )
 
         result = agent.invoke({"prompt": "run reactk"})
@@ -191,6 +196,27 @@ class TestReActKAgentEndToEnd:
         with pytest.raises(ToolAgentError, match="return tool must use 'duration' 0"):
             agent.invoke({"prompt": "run reactk"})
 
+    def test_forced_return_on_budget_exhaustion_makes_no_extra_llm_call(self) -> None:
+        # Only one scripted response: a single non-return step that exactly
+        # exhausts tool_calls_limit=1. The next round must force-commit
+        # return(None) with zero further LLM calls — if it instead tried to
+        # generate, ScriptedLLMEngine would raise on the exhausted script.
+        agent = make_reactk_agent(
+            [subplan_json(subplan_step(
+                tool="Tool.tests.add", args={"x": 2, "y": 3},
+                description="Add the two input numbers for the current calculation.",
+            ))],
+            steps_per_round=2,
+            tool_calls_limit=1,
+        )
+
+        result = agent.invoke({"prompt": "run reactk"})
+
+        assert result.result is None
+        engine = agent.llm_engine
+        assert isinstance(engine, ScriptedLLMEngine)
+        assert len(engine.calls) == 1
+
 
 class TestReActKAgentNormalization:
     def test_normalize_relocates_return_and_forces_full_dependency(self) -> None:
@@ -239,7 +265,10 @@ class TestReActKAgentNormalization:
 
 
 class TestReActKAgentValidation:
-    def test_validate_rejects_exceeding_steps_per_round(self) -> None:
+    def test_validate_rejects_exceeding_round_cap(self) -> None:
+        # round_cap now bounds TOTAL items this round (incl. an optional
+        # return); a generous `remaining` isolates this from the separate
+        # non-return-budget check below.
         agent = make_reactk_agent([], tool_calls_limit=5, steps_per_round=1)
 
         slot_a = _planned_slot(0, "Tool.tests.add", {"x": 1, "y": 2})
@@ -247,21 +276,23 @@ class TestReActKAgentValidation:
         items = [(slot_a, 0, "add"), (slot_b, 0, "multiply")]
 
         feedback = agent._validate_subplan_slots(
-            items=items, cursor=0, round_cap=5,
+            items=items, cursor=0, round_cap=1, remaining=5,
             cache_blackboard=[], valid_cache_indices=frozenset(), failed_cache_indices=frozenset(),
         )
 
         assert feedback is not None
-        assert "steps_per_round" in feedback
+        assert "round cap" in feedback
 
-    def test_validate_rejects_exceeding_round_cap_budget(self) -> None:
+    def test_validate_rejects_exceeding_remaining_budget(self) -> None:
+        # `remaining` bounds non-return steps specifically; a generous
+        # round_cap isolates this from the total-items check above.
         agent = make_reactk_agent([], tool_calls_limit=5, steps_per_round=5)
 
         slot_a = _planned_slot(0, "Tool.tests.add", {"x": 1, "y": 2})
         items = [(slot_a, 0, "add")]
 
         feedback = agent._validate_subplan_slots(
-            items=items, cursor=0, round_cap=0,
+            items=items, cursor=0, round_cap=5, remaining=0,
             cache_blackboard=[], valid_cache_indices=frozenset(), failed_cache_indices=frozenset(),
         )
 

@@ -58,6 +58,7 @@ from ..constants.agents import (
     DURATION_FIELD,
     DESCRIPTION_FIELD,
     RETURN_TOOL_FULL_NAME,
+    RETURN_VALUE_FIELD,
     BASE_STEP_FIELDS,
     SUBPLAN_FIELDS,
     REQUIRED_SUBPLAN_FIELDS,
@@ -106,6 +107,11 @@ class ReActKAgent(ToolAgent):
        - Once a generated subplan includes a return step, it is isolated
          into its own final batch by the shared batch compiler; once that
          batch drains, the base loop detects completion.
+       - If the non-return tool-call budget hits 0 before a return has been
+         produced, a synthetic ``return(None)`` step is force-committed with
+         zero LLM calls (see ``_prepare_next_batch``) — mirroring
+         ``PlanActAgent``'s own force-append convention — rather than asking
+         the model to remember to emit one.
 
     Parameters (construction)
     ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -285,6 +291,27 @@ class ReActKAgent(ToolAgent):
         with description/result_ref/run_id/observable_result), but the
         closing ask requests a subplan of up to ``round_cap`` steps instead
         of exactly one. Returns ``(working_messages, delta)``.
+
+        Callers guarantee ``round_cap >= 1``: generation (and therefore this
+        method) is skipped entirely whenever the non-return budget is 0 (see
+        ``_prepare_next_batch``), so there is no zero-budget closing-ask
+        branch here.
+
+        The closing ask is deliberately terse: full rule explanations
+        (placeholder discipline, the exclusion rule, duration semantics)
+        live once in ``REACTIVE_PLANNER_PROMPT`` and are not restated here —
+        this message carries only the numbers that change every round
+        (``cursor``, ``round_cap``, ``max_duration``) plus one combined
+        reminder line for the two highest-stakes correctness rules, kept
+        short but present to exploit models' recency bias toward the final
+        instruction seen before generating.
+
+        Both the running-plan snapshot and the closing ask also state
+        ``cursor`` explicitly as the required starting index for this
+        round's new steps, rather than leaving the model to compute it from
+        the snapshot's header range — live runs showed the model
+        inconsistently restarting numbering at 0 mid-run when left to
+        derive it itself (see ``.claude/proposals/reactk-prompt-refinement.md``).
         """
         working_messages: list[dict[str, str]] = [dict(m) for m in state.messages]
 
@@ -319,6 +346,8 @@ class ReActKAgent(ToolAgent):
         if running_records:
             running_text = (
                 f"RUNNING PLAN STEPS 0-{cursor - 1} SO FAR:\n"
+                f"Your next new step's absolute index MUST be {cursor}; each "
+                "further element in this array increments by 1 from there.\n"
                 "Steps may be EXECUTED (result available via result_ref) or FAILED "
                 "(error shown; do not reference result_ref for failed steps).\n"
                 "Use descriptions to understand what each step was intended to do.\n"
@@ -334,35 +363,26 @@ class ReActKAgent(ToolAgent):
             running_text = (
                 "RUNNING PLAN STEPS SO FAR:\n"
                 "No steps executed yet.\n"
+                "Your first new step's absolute index MUST be 0.\n"
                 "When steps execute, their results will be available by result_ref "
                 "placeholders like <<__s0__>>."
             )
 
         working_messages.append({"role": "assistant", "content": running_text})
 
-        if round_cap == 0:
-            closing_text = (
-                "This round's remaining non-return tool-call budget is 0. "
-                f"The ONLY valid step you may output is the return tool "
-                f"({RETURN_TOOL_FULL_NAME!r}) — do not include any other step. "
-                "Output it as a one-element JSON array."
-            )
-        else:
-            closing_text = (
-                "Produce the NEXT subplan for the current task as a JSON array "
-                "(even if it contains only one element), following ALL of these:\n"
-                f"- At most {round_cap} step(s) this round — fewer is fine, never pad.\n"
-                "- Include a return step only once the running plan has fully "
-                "completed the task, and only as the LAST element.\n"
-                "- Preserve symbolic dataflow with quoted placeholders; never copy "
-                "observable_result values into args.\n"
-                "- No step may need to see a sibling in this same array's actual "
-                "result to choose its own tool.\n"
-                f"- Every step's duration must be an int from 0 to {max_duration}."
-            )
+        closing_text = (
+            "NEXT SUBPLAN REQUEST\n"
+            f"- Start step indices at: {cursor}\n"
+            f"- Steps allowed this round: {round_cap} (fewer OK; never pad)\n"
+            f"- Duration ceiling this round: {max_duration}\n"
+            "- Return step: only if the task is now fully complete; must be "
+            "last if included\n"
+            "- Use placeholders only; stop before any step needing a "
+            "sibling's unexecuted result\n"
+            "Respond with ONE JSON array, even if it contains only one element."
+        )
 
-        working_messages.append({"role": "user", "content":
-                                 })
+        working_messages.append({"role": "user", "content": closing_text})
 
         delta = [state.messages[-1], working_messages[-2], working_messages[-1]]
         return working_messages, delta
@@ -495,6 +515,7 @@ class ReActKAgent(ToolAgent):
         items: list[tuple[BlackboardSlot, int, str]],
         cursor: int,
         round_cap: int,
+        remaining: int,
         cache_blackboard: list[BlackboardSlot],
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
@@ -503,28 +524,31 @@ class ReActKAgent(ToolAgent):
         Validate a normalized subplan's invariants not already guaranteed by
         ``_normalize_subplan_slots``.
 
-        Adapted from ``PlanActAgent._validate_planned_slots``, plus the two
-        new per-round budget checks: ``len(items) <= steps_per_round`` and
-        ``non_return_count <= round_cap`` (``round_cap`` already folds in
-        the remaining ``tool_calls_limit`` budget).
+        Adapted from ``PlanActAgent._validate_planned_slots``, plus two
+        per-round budget checks: ``len(items) <= round_cap`` (the
+        total-steps-this-round bound, including one optional return) and
+        ``non_return_count <= remaining`` (the true remaining non-return
+        tool-call budget — deliberately checked against ``remaining`` rather
+        than ``round_cap``, since ``round_cap`` overshoots ``remaining`` by up
+        to 1 to leave room for a return step).
         """
         if not items:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: internal error: normalized subplan is empty."
             )
 
-        if len(items) > self.steps_per_round:
+        if len(items) > round_cap:
             return (
-                f"subplan contains {len(items)} step(s), exceeding steps_per_round of "
-                f"{self.steps_per_round}."
+                f"subplan contains {len(items)} step(s), exceeding the round cap of "
+                f"{round_cap} step(s) for this round."
             )
 
         return_name = RETURN_TOOL_FULL_NAME
         non_return_count = sum(1 for slot, _duration, _description in items if slot.tool != return_name)
-        if non_return_count > round_cap:
+        if non_return_count > remaining:
             return (
                 f"subplan contains {non_return_count} non-return step(s), exceeding the "
-                f"remaining tool-call budget of {round_cap} for this round."
+                f"remaining tool-call budget of {remaining} for this round."
             )
 
         cache_len = len(cache_blackboard)
@@ -603,6 +627,7 @@ class ReActKAgent(ToolAgent):
         retries_used: int,
         max_duration: int,
         round_cap: int,
+        remaining: int,
         cache_blackboard: list[BlackboardSlot],
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
@@ -616,6 +641,8 @@ class ReActKAgent(ToolAgent):
         ``_process_subplan_output`` -> ``_normalize_subplan_slots`` ->
         ``_validate_subplan_slots``, injecting structured feedback and
         retrying against the shared ``retries_used`` budget on any failure.
+        ``remaining`` is forwarded unchanged to every ``_validate_subplan_slots``
+        call.
         """
         if not messages:
             raise ToolAgentError(
@@ -693,6 +720,7 @@ class ReActKAgent(ToolAgent):
                 items=normalized,
                 cursor=cursor,
                 round_cap=round_cap,
+                remaining=remaining,
                 cache_blackboard=cache_blackboard,
                 valid_cache_indices=valid_cache_indices,
                 failed_cache_indices=failed_cache_indices,
@@ -720,12 +748,14 @@ class ReActKAgent(ToolAgent):
         retries_used: int,
         max_duration: int,
         round_cap: int,
+        remaining: int,
         cache_blackboard: list[BlackboardSlot],
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
     ) -> tuple[list[tuple[BlackboardSlot, int, str]], list[LLMRecord], int]:
         """Async mirror of ``_generate_next_subplan``: uses ``async_invoke`` for
-        each LLM call. Retry logic, feedback injection, and return type identical."""
+        each LLM call. Retry logic, feedback injection, and return type identical.
+        ``remaining`` is forwarded unchanged to every ``_validate_subplan_slots`` call."""
         if not messages:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: messages must be non-empty."
@@ -798,6 +828,7 @@ class ReActKAgent(ToolAgent):
                 items=normalized,
                 cursor=cursor,
                 round_cap=round_cap,
+                remaining=remaining,
                 cache_blackboard=cache_blackboard,
                 valid_cache_indices=valid_cache_indices,
                 failed_cache_indices=failed_cache_indices,
@@ -971,18 +1002,25 @@ class ReActKAgent(ToolAgent):
 
     def _prepare_next_batch(self, state: ReActKRunState) -> ReActKRunState:
         """
-        Pop-or-generate: drain a pending batch if one exists, else generate
-        the next subplan.
+        Pop-or-generate: drain a pending batch if one exists, else either
+        force-commit a synthetic return (budget exhausted) or generate the
+        next subplan.
 
         1. Guard: ``prepared_steps`` must be empty.
         2. If ``pending_batches`` non-empty: delegate to
            ``_drain_pending_batch`` — zero LLM calls.
-        3. Else: compute ``max_duration``/``round_cap``, build messages via
-           ``_build_reactk_messages``, generate via
-           ``_generate_next_subplan``, commit via
-           ``_apply_subplan_result``. Returns with ``prepared_steps`` still
-           empty — the base loop's ``continue`` re-invokes this method next
-           iteration, which now takes the drain branch.
+        3. Else, compute ``remaining = tool_calls_limit - tool_calls_used``:
+           - If ``remaining == 0``: force-commit a synthetic
+             ``return(None)`` step at ``cursor`` via ``_apply_subplan_result``
+             — no ``round_cap``, no message building, no LLM call.
+           - Otherwise: compute ``max_duration``/``round_cap`` (now
+             ``min(steps_per_round, remaining + 1)``, leaving room for an
+             optional return), build messages via ``_build_reactk_messages``,
+             generate via ``_generate_next_subplan``, commit via
+             ``_apply_subplan_result``.
+           Either way, returns with ``prepared_steps`` still empty — the base
+           loop's ``continue`` re-invokes this method next iteration, which
+           now takes the drain branch.
         """
         if state.prepared_steps:
             raise ToolAgentError(
@@ -994,8 +1032,21 @@ class ReActKAgent(ToolAgent):
             return self._drain_pending_batch(state)
 
         cursor = state.next_step_index
+        remaining = self._tool_calls_limit - state.tool_calls_used
+
+        if remaining == 0:
+            forced_slot = BlackboardSlot(
+                step=cursor,
+                tool=RETURN_TOOL_FULL_NAME,
+                args={RETURN_VALUE_FIELD: None},
+                step_dependencies=tuple(range(cursor)),
+                status=BlackboardSlot.PLANNED,
+            )
+            description = "Non-return tool-call budget exhausted; forcing return(None)."
+            return self._apply_subplan_result(state, cursor, [(forced_slot, 0, description)], [])
+
         max_duration = max(0, self._tool_calls_limit - cursor)
-        round_cap = min(self.steps_per_round, self._tool_calls_limit - state.tool_calls_used)
+        round_cap = min(self.steps_per_round, remaining + 1)
 
         working_messages, delta = self._build_reactk_messages(
             state, cursor, max_duration=max_duration, round_cap=round_cap,
@@ -1008,6 +1059,7 @@ class ReActKAgent(ToolAgent):
             retries_used=state.retries_used,
             max_duration=max_duration,
             round_cap=round_cap,
+            remaining=remaining,
             cache_blackboard=state.cache_blackboard,
             valid_cache_indices=state.valid_cache_indices,
             failed_cache_indices=state.failed_cache_indices,
@@ -1021,8 +1073,10 @@ class ReActKAgent(ToolAgent):
         Async override — needed unlike ``PlanActAgent`` (never generates
         here) or ``ReActAgent`` (always generates here): this method's
         generation branch has a genuine LLM call, its drain branch does
-        not. Mirrors sync ``_prepare_next_batch`` exactly except the
-        generation branch awaits ``_agenerate_next_subplan``.
+        not. Mirrors sync ``_prepare_next_batch`` exactly (including the
+        force-commit-on-exhaustion branch, which has no I/O and therefore
+        needs no async variant) except the generation branch awaits
+        ``_agenerate_next_subplan``.
         """
         if state.prepared_steps:
             raise ToolAgentError(
@@ -1034,8 +1088,21 @@ class ReActKAgent(ToolAgent):
             return self._drain_pending_batch(state)
 
         cursor = state.next_step_index
+        remaining = self._tool_calls_limit - state.tool_calls_used
+
+        if remaining == 0:
+            forced_slot = BlackboardSlot(
+                step=cursor,
+                tool=RETURN_TOOL_FULL_NAME,
+                args={RETURN_VALUE_FIELD: None},
+                step_dependencies=tuple(range(cursor)),
+                status=BlackboardSlot.PLANNED,
+            )
+            description = "Non-return tool-call budget exhausted; forcing return(None)."
+            return self._apply_subplan_result(state, cursor, [(forced_slot, 0, description)], [])
+
         max_duration = max(0, self._tool_calls_limit - cursor)
-        round_cap = min(self.steps_per_round, self._tool_calls_limit - state.tool_calls_used)
+        round_cap = min(self.steps_per_round, remaining + 1)
 
         working_messages, delta = self._build_reactk_messages(
             state, cursor, max_duration=max_duration, round_cap=round_cap,
@@ -1048,6 +1115,7 @@ class ReActKAgent(ToolAgent):
             retries_used=state.retries_used,
             max_duration=max_duration,
             round_cap=round_cap,
+            remaining=remaining,
             cache_blackboard=state.cache_blackboard,
             valid_cache_indices=state.valid_cache_indices,
             failed_cache_indices=state.failed_cache_indices,

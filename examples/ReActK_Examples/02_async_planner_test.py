@@ -1,6 +1,7 @@
 import logging
 import time
 from dotenv import load_dotenv
+from pprint import pprint
 
 from atomic_agentic.agents import ReActKAgent
 from atomic_agentic.llm import OpenAIEngine
@@ -41,9 +42,10 @@ def run_once(*, sequentially: bool, steps_per_round: int) -> float:
         f"{'SEQUENTIALLY' if sequentially else 'CONCURRENTLY'}. Then return None.\n"
     )
     start = time.time()
-    async_tester.invoke({"prompt": prompt})
+    result = async_tester.invoke({"prompt": prompt})
     elapsed = time.time() - start
     async_tester.clear_memory()
+    pprint(result)
     return elapsed
 
 
@@ -68,8 +70,8 @@ if __name__ == "__main__":
         elapsed_k5 = run_once(sequentially=False, steps_per_round=5)
         print(f"\nConcurrent time taken (steps_per_round=5): {elapsed_k5:.2f} seconds")
 
-        elapsed_k2 = run_once(sequentially=False, steps_per_round=2)
-        print(f"Concurrent time taken (steps_per_round=2): {elapsed_k2:.2f} seconds")
+        elapsed_k2 = run_once(sequentially=False, steps_per_round=3)
+        print(f"Concurrent time taken (steps_per_round=3): {elapsed_k2:.2f} seconds")
 
         print(
             "\nSame independent task, same executor — the only difference is "
