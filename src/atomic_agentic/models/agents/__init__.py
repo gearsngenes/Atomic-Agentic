@@ -6,7 +6,6 @@ from .runstates import (
     PlanActRunState,
     ReActRunState,
     ReActStepMeta,
-    ReActKRunState,
 )
 
 __all__ = [
@@ -20,5 +19,4 @@ __all__ = [
     "PlanActRunState",
     "ReActRunState",
     "ReActStepMeta",
-    "ReActKRunState",
 ]
