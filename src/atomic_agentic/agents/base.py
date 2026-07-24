@@ -503,34 +503,31 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Abstract core LLM work
     # ------------------------------------------------------------------ #
-    @abstractmethod
     def _invoke(
         self,
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
     ) -> tuple[AgentRecord, dict]:
-        """Sync core LLM call path.
+        """Neutered (task-oriented-lifecycle migration, Pass 5).
 
-        Receives the selected conversation turns, the current prompt string,
-        and the full filtered ``inputs`` dict — untouched, not a slice, not
-        popped of anything, so a subclass can still reach a reserved value
-        (e.g. ``run_id``) beyond what base ``Agent`` already threads through
-        for it. Returns a 2-tuple of a draft ``AgentRecord``
-        (``final_result=None``) and a metadata dict carrying
-        ``"llm_records"`` and ``"llm_model_data"``.
+        No longer called by ``invoke()`` — see ``_initialize_task``/
+        ``_progress``. Kept, body ``pass``, until Pass 6 deletes it along
+        with the rest of the pre-migration dispatch. Subclass overrides
+        (``BasicAgent``/``ToolAgent``) are left untouched — dead code, not
+        reachable from anywhere, since nothing else calls this method
+        either (confirmed via grep).
         """
-        ...
+        pass
 
-    @abstractmethod
     async def _ainvoke(
         self,
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
     ) -> tuple[AgentRecord, dict]:
-        """Async core LLM call path. Mirror of ``_invoke``."""
-        ...
+        """Neutered (task-oriented-lifecycle migration, Pass 5). Async mirror of ``_invoke``."""
+        pass
 
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks (task-oriented-lifecycle migration, Pass 1)
@@ -773,7 +770,8 @@ class Agent(AtomicInvokable, ABC):
         """Async analog of ``invoke``.
 
         Lifecycle steps mirror ``invoke`` with ``await`` at pre/post and
-        ``_ainvoke``. No ``self._invoke_lock`` (unchanged from current
+        the ``_async_initialize_task``/``_async_progress`` task-lifecycle
+        hooks. No ``self._invoke_lock`` (unchanged from current
         implementation, which does not lock async_invoke either).
         """
         logger.info(f"[Async {self.full_name} started]")
@@ -820,19 +818,22 @@ class Agent(AtomicInvokable, ABC):
         if self._context_enabled and self._records_window != 0:
             turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-        # 6. Core LLM work — inputs passed through untouched.
+        # 6. Task lifecycle: initialize, progress until complete, build record.
         logger.debug(f"Agent.{self.name} performing async logic")
-        draft, metadata = await self._ainvoke(turns=turns, prompt=prompt, inputs=inputs)
+        task = await self._async_initialize_task(turns=turns, prompt=prompt, inputs=inputs)
+        while not task.complete:
+            task = await self._async_progress(task)
+        record = self._build_record_from_task(task, turns)
 
-        if not isinstance(draft, AgentRecord):
+        if not isinstance(record, AgentRecord):
             raise AgentInvocationError(
-                f"_ainvoke returned non-AgentRecord draft (type={type(draft)!r})"
+                f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
             )
 
         # 7. Output transformation.
         try:
             logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
-            post_inputs[self._post_result_key] = draft.generated_response
+            post_inputs[self._post_result_key] = record.generated_response
             post_result = await self._post_invoke.async_invoke(post_inputs)
         except ToolInvocationError:
             raise
@@ -843,22 +844,15 @@ class Agent(AtomicInvokable, ABC):
         ended_at = datetime.now(timezone.utc)
 
         # 8. Result.
-        agent_result = self.make_result(
+        agent_result = self.build_result_from_record(
+            record,
             result=final_response,
             started_at=started_at,
             ended_at=ended_at,
-            **metadata,
         )
 
-        # 9. Record — always appended; inputs widens to the full filtered dict.
-        record = replace(
-            draft,
-            user_prompt=prompt,
-            inputs=inputs,
-            final_result=agent_result,
-            llm_records=metadata["llm_records"],
-            prev=turns[-1] if turns else None,
-        )
+        # 9. Record — always appended.
+        record = replace(record, final_result=agent_result)
         self._records.append(record)
 
         logger.info(f"[Async {self.full_name} finished]")
@@ -879,12 +873,12 @@ class Agent(AtomicInvokable, ABC):
            declared parameters, excluding reserved names.
         4. ``pre_invoke`` → prompt string (validated).
         5. Select conversation turns according to ``context_enabled``.
-        6. ``_invoke(turns, prompt, inputs)`` → draft + metadata; ``inputs``
-           is the full, untouched dict from step 1.
+        6. ``_initialize_task(turns, prompt, inputs)`` → task; loop
+           ``task = self._progress(task)`` until ``task.complete``; then
+           ``_build_record_from_task(task, turns)`` → record.
         7. ``post_invoke`` → final result.
-        8. Construct ``AgentResult``.
-        9. Commit ``AgentRecord`` unconditionally — ``inputs`` on the record
-           is the same full dict passed to ``_invoke`` in step 6.
+        8. ``build_result_from_record(record, ...)`` → ``AgentResult``.
+        9. Commit the completed ``AgentRecord`` unconditionally.
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
@@ -931,19 +925,22 @@ class Agent(AtomicInvokable, ABC):
             if self._context_enabled and self._records_window != 0:
                 turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-            # 6. Core LLM work — inputs passed through untouched.
+            # 6. Task lifecycle: initialize, progress until complete, build record.
             logger.debug(f"Agent.{self.name} performing logic")
-            draft, metadata = self._invoke(turns=turns, prompt=prompt, inputs=inputs)
+            task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
+            while not task.complete:
+                task = self._progress(task)
+            record = self._build_record_from_task(task, turns)
 
-            if not isinstance(draft, AgentRecord):
+            if not isinstance(record, AgentRecord):
                 raise AgentInvocationError(
-                    f"_invoke returned non-AgentRecord draft (type={type(draft)!r})"
+                    f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
                 )
 
             # 7. Output transformation.
             try:
                 logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
-                post_inputs[self._post_result_key] = draft.generated_response
+                post_inputs[self._post_result_key] = record.generated_response
                 post_result = self._post_invoke.invoke(post_inputs)
             except ToolInvocationError:
                 raise
@@ -954,22 +951,15 @@ class Agent(AtomicInvokable, ABC):
             ended_at = datetime.now(timezone.utc)
 
             # 8. Result.
-            agent_result = self.make_result(
+            agent_result = self.build_result_from_record(
+                record,
                 result=final_response,
                 started_at=started_at,
                 ended_at=ended_at,
-                **metadata,
             )
 
-            # 9. Record — always appended; inputs widens to the full filtered dict.
-            record = replace(
-                draft,
-                user_prompt=prompt,
-                inputs=inputs,
-                final_result=agent_result,
-                llm_records=metadata["llm_records"],
-                prev=turns[-1] if turns else None,
-            )
+            # 9. Record — always appended.
+            record = replace(record, final_result=agent_result)
             self._records.append(record)
 
             logger.info(f"[{self.full_name} finished]")
