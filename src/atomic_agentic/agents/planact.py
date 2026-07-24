@@ -53,6 +53,7 @@ from ..constants.core import NO_VAL
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError
 from ..models.agents import PlanActRunState
+from ..models.agents.tasks import PlanActTask
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..utils.agents import extract_dependencies
@@ -786,9 +787,146 @@ class PlanActAgent(ToolAgent):
         )
 
     # ------------------------------------------------------------------ #
+    # Task-lifecycle hooks (task-oriented-lifecycle migration, Pass 4)
+    # ------------------------------------------------------------------ #
+    def _initialize_task(
+        self,
+        *,
+        turns: list[AgentRecord],
+        prompt: str,
+        inputs: dict,
+    ) -> PlanActTask:
+        """
+        One-shot plan generation and compilation into concurrent batches.
+
+        Near-verbatim port of ``_initialize_run_state``: same prompt
+        render, ``build_messages``, and (unchanged) ``_generate_plan``
+        call. Computes ``valid_cache_indices``/``failed_cache_indices``
+        internally via ``_compute_cache_index_sets`` — today's ``_invoke``
+        precomputes these before calling ``_initialize_run_state``; this
+        signature doesn't receive them. Delegates final construction to
+        ``_build_planact_task``.
+        """
+        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
+        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        render_context = {
+            ToolAgent.TOOLS_FIELD: self.actions_context(),
+            ToolAgent.LIMIT_FIELD: limit_text,
+            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
+        }
+        system = self._system_prompts["plan_first"].render(render_context)
+        messages = self.build_messages(system, turns, prompt)
+        working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
+        planned_slots, llm_records = self._generate_plan(
+            messages=working_messages,
+            cache_blackboard=cache_blackboard,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+        )
+        return self._build_planact_task(
+            turns=turns,
+            prompt=prompt,
+            inputs=inputs,
+            planned_slots=planned_slots,
+            working_messages=working_messages,
+            cache_blackboard=cache_blackboard,
+            llm_records=llm_records,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+        )
+
+    async def _async_initialize_task(
+        self,
+        *,
+        turns: list[AgentRecord],
+        prompt: str,
+        inputs: dict,
+    ) -> PlanActTask:
+        """
+        Async override: uses ``_agenerate_plan`` so the planning LLM call
+        goes through ``async_invoke`` rather than a worker thread — real
+        override, not the inherited ``asyncio.to_thread`` default, since
+        this hook performs real LLM I/O.
+        """
+        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
+        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        render_context = {
+            ToolAgent.TOOLS_FIELD: self.actions_context(),
+            ToolAgent.LIMIT_FIELD: limit_text,
+            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
+        }
+        system = self._system_prompts["plan_first"].render(render_context)
+        messages = self.build_messages(system, turns, prompt)
+        working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
+        planned_slots, llm_records = await self._agenerate_plan(
+            messages=working_messages,
+            cache_blackboard=cache_blackboard,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+        )
+        return self._build_planact_task(
+            turns=turns,
+            prompt=prompt,
+            inputs=inputs,
+            planned_slots=planned_slots,
+            working_messages=working_messages,
+            cache_blackboard=cache_blackboard,
+            llm_records=llm_records,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+        )
+
+    def _build_planact_task(
+        self,
+        *,
+        turns: list[AgentRecord],
+        prompt: str,
+        inputs: dict,
+        planned_slots: list[BlackboardSlot],
+        working_messages: list[dict[str, str]],
+        cache_blackboard: list[BlackboardSlot],
+        llm_records: list[LLMRecord],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> PlanActTask:
+        """Validate plan structure, compile batches, and construct PlanActTask."""
+        if not planned_slots:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: internal error: generated plan is empty."
+            )
+
+        return_idx = len(planned_slots) - 1
+        if planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: internal error: generated plan does not end with return tool."
+            )
+
+        batches = self._compile_batches_from_deps(
+            planned_slots=planned_slots,
+            return_idx=return_idx,
+        )
+
+        return PlanActTask(
+            turns=turns,
+            inputs=inputs,
+            user_prompt=prompt,
+            llm_records=list(llm_records),
+            messages=working_messages,
+            cache_blackboard=cache_blackboard,
+            running_blackboard=planned_slots,
+            executed_steps=set(),
+            prepared_steps=[],
+            tool_calls_used=0,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+            batches=batches,
+            batch_index=0,
+        )
+
+    # ------------------------------------------------------------------ #
     # Prepare next batch
     # ------------------------------------------------------------------ #
-    def _prepare_next_batch(self, state: PlanActRunState) -> PlanActRunState:
+    def _prepare_next_batch(self, task: PlanActTask) -> PlanActTask:
         """
         Prepare the next pre-compiled batch for execution.
 
@@ -798,8 +936,8 @@ class PlanActAgent(ToolAgent):
 
         Execution
         ~~~~~~~~~
-        1. **Validate state**: prepared_steps must be empty
-        2. **Read next batch**: Get batch indices from ``state.batches[state.batch_index]``
+        1. **Validate task**: prepared_steps must be empty
+        2. **Read next batch**: Get batch indices from ``task.batches[task.batch_index]``
         3. **Validate non-empty**: Batch must have at least one step
         4. **For each step in batch**:
            - Validate bounds: index must be within running_blackboard
@@ -809,12 +947,12 @@ class PlanActAgent(ToolAgent):
            - **Cascade check** (``fail_fast=False`` only): if any ``step_dependencies``
              entry is FAILED in the running blackboard, the return tool raises immediately;
              non-return steps are marked FAILED and skipped (not added to prepared_steps)
-           - Call ``_resolve_placeholders(slot.args, state=state)``
+           - Call ``_resolve_placeholders(slot.args, task=task)``
            - Store resolved args in ``slot.resolved_args``
            - Mark slot ``status="prepared"``
         5. **Set prepared_steps**: Indices of steps that passed the cascade check and were
            prepared; may be empty if all steps in the batch were cascade-failed
-        6. **Advance cursor**: Increment ``state.batch_index`` for next iteration
+        6. **Advance cursor**: Increment ``task.batch_index`` for next iteration
 
         Concurrency
         ~~~~~~~~~~~
@@ -823,13 +961,13 @@ class PlanActAgent(ToolAgent):
 
         Parameters
         ----------
-        state : PlanActRunState
-            Current run state with initialized batches and batch_index cursor
+        task : PlanActTask
+            Current task with initialized batches and batch_index cursor
 
         Returns
         -------
-        PlanActRunState
-            Updated state with prepared_steps populated, batch_index incremented
+        PlanActTask
+            Updated task with prepared_steps populated, batch_index incremented
 
         Raises
         ------
@@ -840,23 +978,23 @@ class PlanActAgent(ToolAgent):
             - Batch validation failure
             - Placeholder resolution failure
         """
-        if state.prepared_steps:
+        if task.prepared_steps:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
             )
 
-        if state.batch_index >= len(state.batches):
+        if task.batch_index >= len(task.batches):
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: no remaining batches to prepare (batch_index={state.batch_index})."
+                f"{type(self).__name__}.{self.name}: no remaining batches to prepare (batch_index={task.batch_index})."
             )
 
-        batch = state.batches[state.batch_index]
+        batch = task.batches[task.batch_index]
         if not batch:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: encountered empty batch at index {state.batch_index}."
+                f"{type(self).__name__}.{self.name}: internal error: encountered empty batch at index {task.batch_index}."
             )
 
-        board = state.running_blackboard
+        board = task.running_blackboard
         board_len = len(board)
 
         # Resolve args for all steps in the batch; resolver enforces readiness.
@@ -907,7 +1045,7 @@ class PlanActAgent(ToolAgent):
                 continue
 
             # Resolve placeholders using base resolver (checks cache + executed step readiness).
-            slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
+            slot.resolved_args = self._resolve_placeholders(slot.args, task=task)
 
             if slot.result is not NO_VAL:
                 raise ToolAgentError(
@@ -918,10 +1056,10 @@ class PlanActAgent(ToolAgent):
             slot.status = BlackboardSlot.PREPARED
             prepared_in_batch.append(i)
 
-        state.prepared_steps = sorted(prepared_in_batch)  # empty when all steps cascade-failed
-        state.batch_index += 1
+        task.prepared_steps = sorted(prepared_in_batch)  # empty when all steps cascade-failed
+        task.batch_index += 1
         logger.info(
-            f"{self.full_name}: Prepared batch {state.batch_index}/{len(state.batches)} "
-            f"with steps {state.prepared_steps}."
+            f"{self.full_name}: Prepared batch {task.batch_index}/{len(task.batches)} "
+            f"with steps {task.prepared_steps}."
         )
-        return state
+        return task

@@ -7,6 +7,12 @@ from .runstates import (
     ReActRunState,
     ReActStepMeta,
 )
+from .tasks import (
+    AgentTask,
+    ToolAgentTask,
+    PlanActTask,
+    ReActTask,
+)
 
 __all__ = [
     "PromptConfig",
@@ -19,4 +25,8 @@ __all__ = [
     "PlanActRunState",
     "ReActRunState",
     "ReActStepMeta",
+    "AgentTask",
+    "ToolAgentTask",
+    "PlanActTask",
+    "ReActTask",
 ]

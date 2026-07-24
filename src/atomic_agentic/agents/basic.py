@@ -8,6 +8,7 @@ from ..exceptions import AgentInvocationError
 from ..llm.base import LLMEngine
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..models.agents.prompts import PromptConfig
+from ..models.agents.tasks import AgentTask
 from ..utils.agents import normalize_role_prompt
 from .base import Agent
 
@@ -149,6 +150,61 @@ class BasicAgent(Agent):
             "llm_records": (llm_record,),
             "llm_model_data": engine_result.model_data,
         }
+
+    # ------------------------------------------------------------------ #
+    # Task-lifecycle hooks (task-oriented-lifecycle migration, Pass 2)
+    # ------------------------------------------------------------------ #
+    # No _initialize_task/_async_initialize_task override: Agent's concrete
+    # base implementation (Pass 1) already builds exactly the bare AgentTask
+    # BasicAgent needs.
+    def _progress(self, task: AgentTask) -> AgentTask:
+        """Advance (and complete) a single-turn BasicAgent invocation.
+
+        1:1 port of ``_invoke``, re-pointed at ``task``'s fields.
+        ``BasicAgent`` always finishes in exactly one ``_progress`` call.
+        """
+        system = self._system_prompts["role"].render(task.inputs)
+        messages = self.build_messages(system, task.turns, task.user_prompt)
+        engine_result = self._llm_engine.invoke({"messages": messages})
+        text = engine_result.result
+        if not isinstance(text, str):
+            raise AgentInvocationError(
+                f"LLM engine returned non-string result (type={type(text).__name__})."
+            )
+        llm_record = LLMRecord(
+            messages=(messages[-1],),
+            llm_result=engine_result,
+            system_prompt_name="role",
+        )
+        task.llm_records.append(llm_record)
+        task.generated_response = text
+        task.complete = True
+        return task
+
+    async def _async_progress(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``_progress``.
+
+        1:1 port of ``_ainvoke`` — awaits the engine's native async path
+        directly rather than relying on ``Agent``'s inherited
+        ``asyncio.to_thread``-wrapping default.
+        """
+        system = self._system_prompts["role"].render(task.inputs)
+        messages = self.build_messages(system, task.turns, task.user_prompt)
+        engine_result = await self._llm_engine.async_invoke({"messages": messages})
+        text = engine_result.result
+        if not isinstance(text, str):
+            raise AgentInvocationError(
+                f"LLM engine returned non-string result (type={type(text).__name__})."
+            )
+        llm_record = LLMRecord(
+            messages=(messages[-1],),
+            llm_result=engine_result,
+            system_prompt_name="role",
+        )
+        task.llm_records.append(llm_record)
+        task.generated_response = text
+        task.complete = True
+        return task
 
     # ------------------------------------------------------------------ #
     # Serialization

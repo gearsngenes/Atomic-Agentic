@@ -12,6 +12,7 @@ from typing import (
 )
 from dataclasses import replace
 from datetime import datetime, timezone
+import asyncio
 import logging
 import warnings
 
@@ -27,6 +28,7 @@ from ..models.results import AgentResult, LLMModelData
 from ..tools import toolify
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..models.agents.prompts import PromptConfig
+from ..models.agents.tasks import AgentTask
 
 logger = logging.getLogger(__name__)
 
@@ -531,6 +533,98 @@ class Agent(AtomicInvokable, ABC):
         ...
 
     # ------------------------------------------------------------------ #
+    # Task-lifecycle hooks (task-oriented-lifecycle migration, Pass 1)
+    # ------------------------------------------------------------------ #
+    # _initialize_task is concrete here: wrapping turns/prompt/inputs into a
+    # bare AgentTask is subclass-agnostic base-contract work, unlike
+    # _invoke/_ainvoke's genuinely divergent per-type logic. BasicAgent
+    # inherits this unchanged (Pass 2). ToolAgent re-declares it
+    # @abstractmethod (Pass 3) — mirroring today's _initialize_run_state
+    # precedent (toolagent.py) — since only PlanActAgent/ReActAgent know how
+    # to build their own richer ToolAgentTask subclass; the bare AgentTask
+    # this base method returns isn't sufficient for them. _progress stays
+    # @abstractmethod here — every subclass's advance-by-one-round logic
+    # genuinely differs, matching _invoke/_ainvoke. Every currently-concrete
+    # subclass (BasicAgent, PlanActAgent, ReActAgent) is transiently
+    # un-instantiable until it implements _progress (Pass 2 for BasicAgent,
+    # Pass 4 for PlanActAgent/ReActAgent via ToolAgent) — acceptable because
+    # nothing instantiates or calls them before Pass 6's live example runs,
+    # by which point Pass 2-4 will have already landed.
+    def _initialize_task(
+        self,
+        *,
+        turns: list[AgentRecord],
+        prompt: str,
+        inputs: dict,
+    ) -> AgentTask:
+        """Build and return this invocation's AgentTask.
+
+        Mirrors the intent of today's ``_initialize_run_state`` (currently
+        ``ToolAgent``-only), generalized to base ``Agent``. Receives the
+        selected conversation turns, the current prompt string, and the
+        full filtered ``inputs`` dict — untouched, matching ``_invoke``'s
+        contract for the same parameters. Concrete base implementation just
+        wraps the three into a bare ``AgentTask``; subclasses that need a
+        richer ``AgentTask`` subclass (with additional bookkeeping fields
+        populated) override this.
+        """
+        return AgentTask(turns=turns, inputs=inputs, user_prompt=prompt)
+
+    @abstractmethod
+    def _progress(self, task: AgentTask) -> AgentTask:
+        """Advance the task by exactly one round; may set ``task.complete``.
+
+        Once ``invoke()``/``async_invoke()`` are rewired (Pass 5), the base
+        lifecycle loop becomes
+        ``while not task.complete: task = self._progress(task)``.
+        Implementations must set ``task.generated_response`` and
+        ``task.complete = True`` on the round that finishes the
+        invocation.
+        """
+        ...
+
+    async def _async_initialize_task(
+        self,
+        *,
+        turns: list[AgentRecord],
+        prompt: str,
+        inputs: dict,
+    ) -> AgentTask:
+        """Async mirror of ``_initialize_task``; default offloads to a worker thread."""
+        return await asyncio.to_thread(
+            self._initialize_task, turns=turns, prompt=prompt, inputs=inputs
+        )
+
+    async def _async_progress(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``_progress``; default offloads to a worker thread."""
+        return await asyncio.to_thread(self._progress, task)
+
+    def _build_record_from_task(
+        self,
+        task: AgentTask,
+        turns: list[AgentRecord],
+    ) -> AgentRecord:
+        """Assemble a complete AgentRecord from a finished AgentTask.
+
+        Additive/unwired this pass — no caller exists yet (lands in
+        Pass 5). ``BasicAgent`` uses this base implementation as-is;
+        ``ToolAgent`` overrides it in a later pass to return a
+        ``ToolAgentRecord`` with blackboard bookkeeping folded in.
+        ``final_result`` is deliberately left at its dataclass default
+        (``None``) — it is not knowable until
+        ``build_result_from_record``/``make_result`` runs afterward; the
+        eventual caller attaches it via ``dataclasses.replace(...)``.
+        """
+        prev = turns[-1] if turns else None
+        return AgentRecord(
+            user_prompt=task.user_prompt,
+            generated_response=task.generated_response,
+            inputs=task.inputs,
+            llm_records=tuple(task.llm_records),
+            prev=prev,
+        )
+
+    # ------------------------------------------------------------------ #
     # Result construction
     # ------------------------------------------------------------------ #
     def make_result(
@@ -569,6 +663,43 @@ class Agent(AtomicInvokable, ABC):
             )
 
         llm_token_usage = tuple(r.llm_result.token_usage for r in llm_records)
+
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=AgentResult,
+            llm_token_usage=llm_token_usage,
+            llm_model_data=llm_model_data,
+        )
+
+    def build_result_from_record(
+        self,
+        record: AgentRecord,
+        *,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+    ) -> AgentResult:
+        """Construct this Agent's ``AgentResult`` envelope directly from a
+        completed ``AgentRecord``, wrapping the low-level ``_make_result``
+        primitive.
+
+        Additive/unwired this pass — no caller exists yet. Distinct from
+        ``make_result`` (untouched; still what the live ``invoke()`` path
+        calls until Pass 5 cuts over). Public, unlike the task-lifecycle
+        hooks above — this is the direct successor to today's public
+        ``make_result``, which external subclasses may legitimately
+        override.
+
+        ``result`` (the post-``post_invoke`` final caller-facing value) and
+        ``started_at``/``ended_at`` (the outer invocation's timing envelope)
+        are not derivable from the record, so both stay explicit parameters —
+        distinct from ``record.generated_response``, which is the
+        pre-``post_invoke`` raw value.
+        """
+        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
+        llm_model_data = record.llm_records[-1].llm_result.model_data
 
         return self._make_result(
             result=result,
