@@ -127,10 +127,11 @@ class AgentRecord:
 
     inputs:
         The full filtered top-level inputs mapping for this invocation (post
-        ``filter_inputs``, pre pre/post-invoke slicing) — the same dict passed
-        to ``_invoke``/``_ainvoke``. Retained for provenance/observability only;
-        not consumed when reconstructing this turn's rendered content
-        (``render_turn`` uses ``user_prompt`` verbatim).
+        ``filter_inputs``, pre pre/post-invoke slicing) — the same dict the
+        task's ``_initialize_task`` received. Retained for
+        provenance/observability only; not consumed when reconstructing this
+        turn's rendered content (``render_turn`` uses ``user_prompt``
+        verbatim).
 
     generated_response:
         Raw post-engine response material for this invocation, prior to
@@ -138,13 +139,15 @@ class AgentRecord:
 
     final_result:
         The completed ``AgentResult`` for this invocation. ``None`` during
-        the draft phase (between ``_invoke`` return and ``make_result``
-        completion); an ``AgentResult`` instance on all stored records.
+        the draft phase (between ``_build_record_from_task`` and
+        ``build_result_from_record`` completion); an ``AgentResult``
+        instance on all stored records.
 
     llm_records:
         Complete record of every LLM generation that contributed to this
-        invocation. Empty tuple during the draft phase; populated in the
-        completion ``replace`` step after ``make_result`` runs.
+        invocation. Empty tuple during the draft phase; populated by
+        ``_build_record_from_task`` from the task's accumulated
+        ``llm_records``.
 
     prev:
         The most recent ``AgentRecord`` that was used as context for this

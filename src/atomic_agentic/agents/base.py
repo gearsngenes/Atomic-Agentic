@@ -24,9 +24,9 @@ from ..exceptions import (
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
-from ..models.results import AgentResult, LLMModelData
+from ..models.results import AgentResult
 from ..tools import toolify
-from ..models.agents.records import AgentRecord, LLMRecord
+from ..models.agents.records import AgentRecord
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.tasks import AgentTask
 
@@ -54,8 +54,8 @@ class Agent(AtomicInvokable, ABC):
 
     ``Agent`` owns the full invocation lifecycle shell — input filtering,
     turn selection, pre/post-invoke dispatch, record management — but
-    delegates the actual LLM work to the ``_invoke`` / ``_ainvoke`` abstract
-    methods that concrete subclasses implement.
+    delegates the actual LLM work to the ``_initialize_task``/``_progress``
+    abstract-or-overridable hooks that concrete subclasses implement.
 
     Lifecycle
     ---------
@@ -69,12 +69,14 @@ class Agent(AtomicInvokable, ABC):
        declared parameters, excluding reserved names.
     4. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
     5. Turns are selected from history if ``context_enabled`` is True.
-    6. ``_invoke(turns, prompt, inputs)`` performs LLM work, receiving the
+    6. ``_initialize_task(turns, prompt, inputs)`` builds a task from the
        full filtered ``inputs`` dict untouched — not a slice, not popped of
-       anything.
+       anything; then ``_progress`` runs until ``task.complete``;
+       ``_build_record_from_task`` assembles the completed record.
     7. ``post_invoke`` transforms the raw response into the final result.
     8. A completed ``AgentRecord`` is always appended to ``_records``, with
-       ``inputs`` set to the exact same full dict passed to ``_invoke``.
+       ``inputs`` set to the exact same full dict passed to
+       ``_initialize_task``.
 
     Schema composition
     -------------------
@@ -372,7 +374,7 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     @property
     def post_result_key(self) -> str:
-        """Post-invoke parameter name that receives the raw ``_invoke`` result."""
+        """Post-invoke parameter name that receives the task's raw generated response."""
         return self._post_result_key
 
     @property
@@ -434,7 +436,7 @@ class Agent(AtomicInvokable, ABC):
 
     @property
     def post_invoke(self) -> AtomicInvokable:
-        """Invokable that converts the raw ``_invoke`` result into the final agent output."""
+        """Invokable that converts the task's raw generated response into the final agent output."""
         return self._post_invoke
 
     @property
@@ -501,52 +503,15 @@ class Agent(AtomicInvokable, ABC):
         ]
 
     # ------------------------------------------------------------------ #
-    # Abstract core LLM work
-    # ------------------------------------------------------------------ #
-    def _invoke(
-        self,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> tuple[AgentRecord, dict]:
-        """Neutered (task-oriented-lifecycle migration, Pass 5).
-
-        No longer called by ``invoke()`` — see ``_initialize_task``/
-        ``_progress``. Kept, body ``pass``, until Pass 6 deletes it along
-        with the rest of the pre-migration dispatch. Subclass overrides
-        (``BasicAgent``/``ToolAgent``) are left untouched — dead code, not
-        reachable from anywhere, since nothing else calls this method
-        either (confirmed via grep).
-        """
-        pass
-
-    async def _ainvoke(
-        self,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> tuple[AgentRecord, dict]:
-        """Neutered (task-oriented-lifecycle migration, Pass 5). Async mirror of ``_invoke``."""
-        pass
-
-    # ------------------------------------------------------------------ #
-    # Task-lifecycle hooks (task-oriented-lifecycle migration, Pass 1)
+    # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
     # _initialize_task is concrete here: wrapping turns/prompt/inputs into a
-    # bare AgentTask is subclass-agnostic base-contract work, unlike
-    # _invoke/_ainvoke's genuinely divergent per-type logic. BasicAgent
-    # inherits this unchanged (Pass 2). ToolAgent re-declares it
-    # @abstractmethod (Pass 3) — mirroring today's _initialize_run_state
-    # precedent (toolagent.py) — since only PlanActAgent/ReActAgent know how
-    # to build their own richer ToolAgentTask subclass; the bare AgentTask
-    # this base method returns isn't sufficient for them. _progress stays
-    # @abstractmethod here — every subclass's advance-by-one-round logic
-    # genuinely differs, matching _invoke/_ainvoke. Every currently-concrete
-    # subclass (BasicAgent, PlanActAgent, ReActAgent) is transiently
-    # un-instantiable until it implements _progress (Pass 2 for BasicAgent,
-    # Pass 4 for PlanActAgent/ReActAgent via ToolAgent) — acceptable because
-    # nothing instantiates or calls them before Pass 6's live example runs,
-    # by which point Pass 2-4 will have already landed.
+    # bare AgentTask is subclass-agnostic base-contract work. BasicAgent
+    # inherits this unchanged. ToolAgent re-declares it @abstractmethod,
+    # since only PlanActAgent/ReActAgent know how to build their own richer
+    # ToolAgentTask subclass; the bare AgentTask this base method returns
+    # isn't sufficient for them. _progress stays @abstractmethod here —
+    # every subclass's advance-by-one-round logic genuinely differs.
     def _initialize_task(
         self,
         *,
@@ -556,14 +521,11 @@ class Agent(AtomicInvokable, ABC):
     ) -> AgentTask:
         """Build and return this invocation's AgentTask.
 
-        Mirrors the intent of today's ``_initialize_run_state`` (currently
-        ``ToolAgent``-only), generalized to base ``Agent``. Receives the
-        selected conversation turns, the current prompt string, and the
-        full filtered ``inputs`` dict — untouched, matching ``_invoke``'s
-        contract for the same parameters. Concrete base implementation just
-        wraps the three into a bare ``AgentTask``; subclasses that need a
-        richer ``AgentTask`` subclass (with additional bookkeeping fields
-        populated) override this.
+        Receives the selected conversation turns, the current prompt
+        string, and the full filtered ``inputs`` dict — untouched. Concrete
+        base implementation just wraps the three into a bare ``AgentTask``;
+        subclasses that need a richer ``AgentTask`` subclass (with
+        additional bookkeeping fields populated) override this.
         """
         return AgentTask(turns=turns, inputs=inputs, user_prompt=prompt)
 
@@ -571,8 +533,7 @@ class Agent(AtomicInvokable, ABC):
     def _progress(self, task: AgentTask) -> AgentTask:
         """Advance the task by exactly one round; may set ``task.complete``.
 
-        Once ``invoke()``/``async_invoke()`` are rewired (Pass 5), the base
-        lifecycle loop becomes
+        The base lifecycle loop in ``invoke()``/``async_invoke()`` is
         ``while not task.complete: task = self._progress(task)``.
         Implementations must set ``task.generated_response`` and
         ``task.complete = True`` on the round that finishes the
@@ -603,14 +564,12 @@ class Agent(AtomicInvokable, ABC):
     ) -> AgentRecord:
         """Assemble a complete AgentRecord from a finished AgentTask.
 
-        Additive/unwired this pass — no caller exists yet (lands in
-        Pass 5). ``BasicAgent`` uses this base implementation as-is;
-        ``ToolAgent`` overrides it in a later pass to return a
-        ``ToolAgentRecord`` with blackboard bookkeeping folded in.
-        ``final_result`` is deliberately left at its dataclass default
-        (``None``) — it is not knowable until
-        ``build_result_from_record``/``make_result`` runs afterward; the
-        eventual caller attaches it via ``dataclasses.replace(...)``.
+        ``BasicAgent`` uses this base implementation as-is; ``ToolAgent``
+        overrides it to return a ``ToolAgentRecord`` with blackboard
+        bookkeeping folded in. ``final_result`` is deliberately left at its
+        dataclass default (``None``) — it is not knowable until
+        ``build_result_from_record`` runs afterward; the caller attaches it
+        via ``dataclasses.replace(...)``.
         """
         prev = turns[-1] if turns else None
         return AgentRecord(
@@ -624,52 +583,6 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Result construction
     # ------------------------------------------------------------------ #
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> AgentResult:
-        """Construct this Agent's ``AgentResult`` envelope.
-
-        ``result`` is the caller-facing post-processed payload. LLM accounting
-        is passed via ``result_kwargs`` from ``_invoke``'s metadata dict.
-        """
-        unexpected = set(result_kwargs) - {"llm_records", "llm_model_data"}
-        if unexpected:
-            raise AgentInvocationError(
-                f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
-            )
-
-        llm_records = result_kwargs.get("llm_records")
-        llm_model_data = result_kwargs.get("llm_model_data")
-
-        if (
-            not isinstance(llm_records, tuple)
-            or not llm_records
-            or not all(isinstance(r, LLMRecord) for r in llm_records)
-        ):
-            raise AgentInvocationError(
-                "Agent.make_result: llm_records must be a non-empty tuple of LLMRecord instances."
-            )
-
-        if not isinstance(llm_model_data, LLMModelData):
-            raise AgentInvocationError(
-                "Agent.make_result: llm_model_data must be an LLMModelData instance."
-            )
-
-        llm_token_usage = tuple(r.llm_result.token_usage for r in llm_records)
-
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=AgentResult,
-            llm_token_usage=llm_token_usage,
-            llm_model_data=llm_model_data,
-        )
-
     def build_result_from_record(
         self,
         record: AgentRecord,
@@ -682,12 +595,9 @@ class Agent(AtomicInvokable, ABC):
         completed ``AgentRecord``, wrapping the low-level ``_make_result``
         primitive.
 
-        Additive/unwired this pass — no caller exists yet. Distinct from
-        ``make_result`` (untouched; still what the live ``invoke()`` path
-        calls until Pass 5 cuts over). Public, unlike the task-lifecycle
-        hooks above — this is the direct successor to today's public
-        ``make_result``, which external subclasses may legitimately
-        override.
+        Public — external subclasses may legitimately override this to
+        choose a more specific result class or add subclass-specific result
+        fields.
 
         ``result`` (the post-``post_invoke`` final caller-facing value) and
         ``started_at``/``ended_at`` (the outer invocation's timing envelope)

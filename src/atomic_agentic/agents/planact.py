@@ -52,7 +52,6 @@ from ..core import AtomicInvokable
 from ..constants.core import NO_VAL
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError
-from ..models.agents import PlanActRunState
 from ..models.agents.tasks import PlanActTask
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord, LLMRecord
@@ -69,11 +68,11 @@ class PlanActAgent(ToolAgent):
 
     **Design**: PlanActAgent implements a **static planning** strategy:
 
-    1. **Initialization** (``_initialize_run_state``)
+    1. **Initialization** (``_initialize_task``)
        - LLM generates complete plan as a JSON array of steps (one-shot)
        - Each step: ``{"tool": "<name>", "args": {...}}``, optionally with "await"
        - Plan is normalized (return moved to end, added if missing)
-       - Compiled into topologically-sorted batches using dependency analysis
+       - Compiled into topologically-sorted batches via ``_build_planact_task``
        - Running blackboard allocated with slots for all planned steps
 
     2. **Compilation**
@@ -83,9 +82,11 @@ class PlanActAgent(ToolAgent):
          level execute together)
        - Return step is always isolated as the final batch
 
-    3. **Execution**
-       - ``_prepare_next_batch()`` reads next batch from ``state.batches[state.batch_index]``
+    3. **Execution** (``_progress``, base ``ToolAgent``)
+       - ``_prepare_next_batch()`` reads next batch from ``task.batches[task.batch_index]``
        - Resolves placeholders in parallel-executable steps
+       - ``_execute_prepared_batch()`` (base ``ToolAgent``) runs the batch concurrently;
+         sets ``task.complete`` when the return step executes
        - Increments batch_index; loop continues until all batches consumed
 
     Advantages
@@ -448,51 +449,6 @@ class PlanActAgent(ToolAgent):
 
         return normalized
 
-    def _build_planact_run_state(
-        self,
-        *,
-        planned_slots: list[BlackboardSlot],
-        working_messages: list[dict[str, str]],
-        cache_blackboard: list[BlackboardSlot],
-        llm_records: list[LLMRecord],
-        inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> PlanActRunState:
-        """Validate plan structure, compile batches, and construct PlanActRunState."""
-        if not planned_slots:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: generated plan is empty."
-            )
-
-        return_idx = len(planned_slots) - 1
-        if planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: generated plan does not end with return tool."
-            )
-
-        batches = self._compile_batches_from_deps(
-            planned_slots=planned_slots,
-            return_idx=return_idx,
-        )
-
-        return PlanActRunState(
-            inputs=inputs,
-            messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            running_blackboard=planned_slots,
-            executed_steps=set(),
-            prepared_steps=[],
-            tool_calls_used=0,
-            llm_records=list(llm_records),
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-            is_done=False,
-            return_value=NO_VAL,
-            batches=batches,
-            batch_index=0,
-        )
-
     def _generate_plan(
         self,
         *,
@@ -682,112 +638,8 @@ class PlanActAgent(ToolAgent):
 
             return result, llm_records
 
-    def _initialize_run_state(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> PlanActRunState:
-        """
-        One-shot plan generation and compilation into concurrent batches.
-
-        Renders the planning system prompt from instance state, builds the full
-        message list, then delegates plan generation/normalization/validation to
-        ``_generate_plan(...)`` and compiles the resulting planned slots into
-        topologically-sorted concurrent batches.
-
-        Execution Steps
-        ~~~~~~~~~~~~~~~
-        1. Render ``self._system_prompts["plan_first"]`` with TOOLS/LIMIT/CONSTANTS
-           assembled from instance state; call ``build_messages`` to produce messages.
-        2. ``_setup_plan_init``: validate messages; copy to working list; snapshot
-           cache blackboard.
-        3. ``_generate_plan``: generate the plan via LLM, returning
-           ``(planned_slots, llm_records)``.
-        4. ``_build_planact_run_state``: compile batches and construct the
-           ``PlanActRunState`` with the generated slots, LLM records, and ``inputs``
-           (forwarded through, not interpreted here).
-
-        Returns
-        -------
-        PlanActRunState
-            Initialized state ready for the base template-method loop.
-
-        Raises
-        ------
-        ToolAgentError
-            On any of: empty messages, empty or invalid plan, multiple return steps,
-            unknown tool references, out-of-range placeholder references, invalid plan
-            dependencies, or budget exceeded.
-        """
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        render_context = {
-            ToolAgent.TOOLS_FIELD: self.actions_context(),
-            ToolAgent.LIMIT_FIELD: limit_text,
-            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
-        }
-        system = self._system_prompts["plan_first"].render(render_context)
-        messages = self.build_messages(system, turns, prompt)
-        working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
-        planned_slots, llm_records = self._generate_plan(
-            messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-        return self._build_planact_run_state(
-            planned_slots=planned_slots,
-            working_messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            llm_records=llm_records,
-            inputs=inputs,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-
-    async def _ainitialize_run_state(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> PlanActRunState:
-        """
-        Async override: uses ``_agenerate_plan`` so the planning LLM call
-        goes through ``async_invoke`` rather than a worker thread.
-        """
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        render_context = {
-            ToolAgent.TOOLS_FIELD: self.actions_context(),
-            ToolAgent.LIMIT_FIELD: limit_text,
-            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
-        }
-        system = self._system_prompts["plan_first"].render(render_context)
-        messages = self.build_messages(system, turns, prompt)
-        working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
-        planned_slots, llm_records = await self._agenerate_plan(
-            messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-        return self._build_planact_run_state(
-            planned_slots=planned_slots,
-            working_messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            llm_records=llm_records,
-            inputs=inputs,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-
     # ------------------------------------------------------------------ #
-    # Task-lifecycle hooks (task-oriented-lifecycle migration, Pass 4)
+    # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
     def _initialize_task(
         self,
@@ -799,13 +651,11 @@ class PlanActAgent(ToolAgent):
         """
         One-shot plan generation and compilation into concurrent batches.
 
-        Near-verbatim port of ``_initialize_run_state``: same prompt
-        render, ``build_messages``, and (unchanged) ``_generate_plan``
-        call. Computes ``valid_cache_indices``/``failed_cache_indices``
-        internally via ``_compute_cache_index_sets`` — today's ``_invoke``
-        precomputes these before calling ``_initialize_run_state``; this
-        signature doesn't receive them. Delegates final construction to
-        ``_build_planact_task``.
+        Renders the planning system prompt, builds the message list, calls
+        ``_generate_plan``, and delegates final construction to
+        ``_build_planact_task``. Computes ``valid_cache_indices``/
+        ``failed_cache_indices`` internally via ``_compute_cache_index_sets``
+        — this hook's shared base signature doesn't receive them.
         """
         valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
         limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)

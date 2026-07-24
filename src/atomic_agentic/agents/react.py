@@ -58,8 +58,7 @@ from ..core import AtomicInvokable
 from ..constants.core import NO_VAL
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError
-from ..models.agents import ReActRunState, ReActStepMeta
-from ..models.agents.tasks import ReActTask
+from ..models.agents.tasks import ReActTask, ReActStepMeta
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..utils.agents import extract_dependencies
@@ -77,7 +76,7 @@ class ReActAgent(ToolAgent):
     duration remains active. Generated step descriptions preserve semantic intent
     across turns without exposing raw results.
 
-    1. **Initialization** (``_initialize_run_state``)
+    1. **Initialization** (``_initialize_task``)
        - Pre-allocates a fixed-size running blackboard: ``tool_calls_limit + 1`` slots
          to accommodate non-return tool calls plus one return call.
        - Requires ``tool_calls_limit`` to be a concrete integer.
@@ -97,16 +96,18 @@ class ReActAgent(ToolAgent):
        - Validates placeholder dependencies are prior-only.
        - Resolves placeholders into concrete tool args.
        - Stores the prepared slot in ``running_blackboard[step_index]``.
-       - Stores duration and description in ReAct run state.
+       - Stores duration and description in the ReAct task's ``step_meta``.
        - Sets ``prepared_steps = [step_index]``.
 
     3. **Execution**
-       - Base loop executes the single prepared step.
-       - Result is stored; loop returns to preparation for the next step.
+       - Base ``_progress`` (via ``_execute_prepared_batch``) executes the single
+         prepared step. Result is stored; loop returns to preparation for the next step.
 
     4. **Termination**
-       - When the return tool is emitted and executed, loop exits.
-       - Running blackboard is persisted if ``context_enabled=True``.
+       - When the return tool is emitted and executed, ``task.complete`` is set
+         and the ``_progress`` loop exits.
+       - Running blackboard is persisted by ``_build_record_from_task`` if
+         ``context_enabled=True``.
 
     Advantages
     ~~~~~~~~~~
@@ -487,8 +488,8 @@ class ReActAgent(ToolAgent):
         **Cascade path** (``fail_fast=False``): if any ``step_dependencies`` entry
         is FAILED in the running blackboard, the return tool raises immediately;
         non-return slots are marked FAILED and the method returns early with
-        ``prepared_steps`` left empty — the ``_invoke`` loop will skip execution
-        and continue to the next generation turn.
+        ``prepared_steps`` left empty — the ``_progress`` loop will skip
+        execution and continue to the next generation turn.
         """
         task.llm_records.extend(llm_records)
 
@@ -565,87 +566,7 @@ class ReActAgent(ToolAgent):
         return task
 
     # ------------------------------------------------------------------ #
-    # Tool-Agent Hooks
-    # ------------------------------------------------------------------ #
-    def _initialize_run_state(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> ReActRunState:
-        """
-        Initialize run state for a single ReAct invocation.
-
-        Renders the orchestrator system prompt from instance state, builds the
-        full message list, then pre-allocates the fixed-size running blackboard.
-        Unlike ``PlanActAgent``, ReAct performs no LLM call at initialization —
-        step planning is deferred to ``_prepare_next_batch``.
-
-        Steps
-        -----
-        1. Render ``self._system_prompts["reason_then_act"]`` with TOOLS/LIMIT/
-           CONSTANTS assembled from instance state; call ``build_messages``.
-        2. Validate ``messages`` is non-empty.
-        3. Snapshot the persisted blackboard as a copy (empty list when
-           ``context_enabled=False``); store ``valid_cache_indices`` and
-           ``failed_cache_indices`` on state.
-        4. Copy ``messages`` into a mutable working list.
-        5. Pre-allocate a fixed-size ``running_blackboard`` of
-           ``tool_calls_limit + 1`` slots.
-        6. Initialize ``step_meta`` and construct ``ReActRunState`` with ``inputs``
-           forwarded through (not interpreted here).
-
-        Returns
-        -------
-        ReActRunState
-
-        Raises
-        ------
-        ToolAgentError
-            If the built message list is empty.
-        """
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        render_context = {
-            ToolAgent.TOOLS_FIELD: self.actions_context(),
-            ToolAgent.LIMIT_FIELD: limit_text,
-            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
-        }
-        system = self._system_prompts["reason_then_act"].render(render_context)
-        messages = self.build_messages(system, turns, prompt)
-        if not messages:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
-
-        cache_blackboard = (
-            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
-        )
-
-        working_messages = [dict(m) for m in messages]
-
-        # Preallocate fixed-size run blackboard: non-return calls + 1 return call.
-        running_blackboard = [BlackboardSlot(step=i) for i in range(self._tool_calls_limit + 1)]
-
-        return ReActRunState(
-            inputs=inputs,
-            messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            running_blackboard=running_blackboard,
-            executed_steps=set(),
-            prepared_steps=[],
-            tool_calls_used=0,
-            llm_records=[],
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-            is_done=False,
-            return_value=NO_VAL,
-            next_step_index=0,
-            step_meta=[ReActStepMeta() for _ in running_blackboard],
-        )
-
-    # ------------------------------------------------------------------ #
-    # Task-lifecycle hooks (task-oriented-lifecycle migration, Pass 4)
+    # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
     def _initialize_task(
         self,
@@ -657,14 +578,11 @@ class ReActAgent(ToolAgent):
         """
         Initialize a ReActTask for a single ReAct invocation.
 
-        Near-verbatim port of ``_initialize_run_state``. Computes
-        ``valid_cache_indices``/``failed_cache_indices`` internally via
-        ``_compute_cache_index_sets`` (today precomputed by ``_invoke``).
-        No LLM call here — step planning is deferred to
-        ``_prepare_next_batch``. No async override needed: unlike
-        ``PlanActAgent``, there is no blocking I/O in this hook to bridge
-        natively (matches today's ``ReActAgent`` not overriding
-        ``_ainitialize_run_state`` either).
+        Renders the orchestrator system prompt, builds the message list,
+        then pre-allocates the fixed-size running blackboard. No LLM call
+        here — step planning is deferred to ``_prepare_next_batch``. No
+        async override needed: unlike ``PlanActAgent``, there is no
+        blocking I/O in this hook to bridge natively.
         """
         valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
         limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
@@ -725,7 +643,7 @@ class ReActAgent(ToolAgent):
 
         ``retries_used`` carries the shared per-run budget consumed by prior step
         generations. The returned int is the updated value; the caller writes it back
-        to ``state.retries_used``.
+        to ``task.retries_used``.
 
         LLMRecord messages convention:
         - First attempt: ``delta`` (task user + snapshot assistant + step-request user).
