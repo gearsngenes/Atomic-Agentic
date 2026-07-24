@@ -10,13 +10,13 @@ from conftest import (
     make_planact_agent,
     react_step_json,
     register_math_tools,
-    make_state,
+    make_task,
     executed_slot,
     prepared_slot,
     make_llm_result,
     make_llm_record,
     make_tool_result,
-    ScriptedRunState,
+    ScriptedTask,
     ScriptedToolAgent,
     ScriptedLLMEngine,
     BadRepr,
@@ -25,7 +25,7 @@ from conftest import (
 from atomic_agentic.agents.toolagent import ToolAgent, return_tool
 from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot
-from atomic_agentic.models.agents.runstates import ReActRunState, ReActStepMeta
+from atomic_agentic.models.agents.tasks import ReActTask, ReActStepMeta
 from atomic_agentic.exceptions import (
     ToolAgentError,
     ToolInvocationError,
@@ -221,15 +221,13 @@ class TestReActAgent:
             ],
             tool_calls_limit=1,
         )
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        updated = agent._prepare_next_batch(state)
+        updated = agent._prepare_next_batch(task)
 
         slot = updated.running_blackboard[0]
         assert updated.prepared_steps == [0]
@@ -283,15 +281,13 @@ class TestReActAgent:
             ],
             tool_calls_limit=1,
         )
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        updated = agent._prepare_next_batch(state)
+        updated = agent._prepare_next_batch(task)
 
         slot = updated.running_blackboard[0]
         assert updated.prepared_steps == [0]
@@ -366,15 +362,13 @@ class TestReActAgent:
             ],
             tool_calls_limit=2,
         )
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        updated = agent._prepare_next_batch(state)
+        updated = agent._prepare_next_batch(task)
 
         slot = updated.running_blackboard[0]
         assert updated.prepared_steps == [0]
@@ -398,18 +392,16 @@ class TestReActAgent:
             ],
             tool_calls_limit=2,
         )
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
-        state.next_step_index = 1
-        state.running_blackboard[0] = executed_slot(0, 5)
-        state.step_meta[0].description = "Add the two numbers for the current calculation."
+        task.next_step_index = 1
+        task.running_blackboard[0] = executed_slot(0, 5)
+        task.step_meta[0].description = "Add the two numbers for the current calculation."
 
-        updated = agent._prepare_next_batch(state)
+        updated = agent._prepare_next_batch(task)
 
         slot = updated.running_blackboard[1]
         assert slot.status == "prepared"
@@ -567,7 +559,10 @@ class TestReActGenerationRetry:
             generation_retries=1,
         )
         agent.invoke({"prompt": "run"})
-        assert len(agent.records[-1].llm_records) == 2
+        llm_records = agent.records[-1].llm_records
+        assert len(llm_records) == 2
+        assert len(llm_records[0].messages) == 3
+        assert len(llm_records[1].messages) == 2
 
     def test_spec_error_retry_succeeds_on_second_call(self) -> None:
         """generation_retries=1: unknown tool on first step attempt; valid step on second."""
@@ -590,7 +585,10 @@ class TestReActGenerationRetry:
         )
         register_math_tools(agent)  # type: ignore[arg-type]
         agent.invoke({"prompt": "run"})
-        assert len(agent.records[-1].llm_records) == 2
+        llm_records = agent.records[-1].llm_records
+        assert len(llm_records) == 2
+        assert len(llm_records[0].messages) == 3
+        assert len(llm_records[1].messages) == 2
 
     def test_budget_exhausted_raises_after_all_attempts(self) -> None:
         """generation_retries=1: both attempts return invalid JSON → ToolAgentError."""
@@ -868,12 +866,10 @@ class TestCacheRefValidation:
         assert result.result == 99
 
         # Build the snapshot for prefix_len=1 (after step 0 fails, before step 1 is generated).
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
         # Manually seed a FAILED slot at index 0 to simulate the post-failure state.
         failed_slot = BlackboardSlot(
@@ -883,10 +879,10 @@ class TestCacheRefValidation:
             error=RuntimeError("intentional failure"),
             status=BlackboardSlot.FAILED,
         )
-        state.running_blackboard[0] = failed_slot
-        state.step_meta[0] = ReActStepMeta(observable=0, description="Test fail step.")
+        task.running_blackboard[0] = failed_slot
+        task.step_meta[0] = ReActStepMeta(observable=0, description="Test fail step.")
 
-        working_messages, _ = agent._build_react_messages(state, prefix_len=1, max_duration=1)
+        working_messages, _ = agent._build_react_messages(task, prefix_len=1, max_duration=1)
         # working_messages[-2] is the assistant turn with the running-plan snapshot.
         snapshot_text = working_messages[-2]["content"]
 
@@ -906,19 +902,17 @@ class TestCacheRefValidation:
         assert result.result == 3
 
         # Build snapshot after step 0 executed — check no FAILED markers.
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
         # After invoke, the blackboard is persisted; index 0 is the executed add step.
         exec_slot = agent.blackboard[0]
-        state.running_blackboard[0] = exec_slot
-        state.step_meta[0] = ReActStepMeta(observable=0, description="Add two numbers.")
+        task.running_blackboard[0] = exec_slot
+        task.step_meta[0] = ReActStepMeta(observable=0, description="Add two numbers.")
 
-        working_messages, _ = agent._build_react_messages(state, prefix_len=1, max_duration=1)
+        working_messages, _ = agent._build_react_messages(task, prefix_len=1, max_duration=1)
         # working_messages[-2] is the assistant turn with the running-plan snapshot.
         snapshot_text = working_messages[-2]["content"]
 

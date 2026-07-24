@@ -13,7 +13,7 @@ import pytest
 from atomic_agentic.agents.toolagent import ToolAgent, extract_dependencies, return_tool
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
-from atomic_agentic.models.agents.runstates import ToolAgentRunState
+from atomic_agentic.models.agents.tasks import ToolAgentTask
 from atomic_agentic.models.agents.records import AgentRecord, ToolAgentRecord
 from atomic_agentic.models.agents.records import LLMRecord
 from atomic_agentic.models.results.agents import ToolAgentResult
@@ -273,7 +273,10 @@ def react_step_json(
 
 
 @dataclass(slots=True)
-class ScriptedRunState(ToolAgentRunState):
+class ScriptedTask(ToolAgentTask):
+    """Test-only ToolAgentTask subclass carrying the scripted fixture's
+    batch cursor state, mirroring how PlanActTask/ReActTask each carry
+    their own domain-specific fields on top of ToolAgentTask."""
     batches: list[list[dict[str, Any]]] = field(default_factory=list)
     batch_index: int = 0
     next_step_index: int = 0
@@ -320,15 +323,14 @@ class ScriptedToolAgent(ToolAgent):
     def set_script(self, script: list[list[dict[str, Any]]]) -> None:
         self.script = script
 
-    def _initialize_run_state(
+    def _initialize_task(
         self,
         *,
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> ScriptedRunState:
+    ) -> ScriptedTask:
+        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
         limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
         render_ctx = {
             ToolAgent.TOOLS_FIELD: self.actions_context(),
@@ -344,16 +346,18 @@ class ScriptedToolAgent(ToolAgent):
         engine_result = self.llm_engine.invoke({"messages": messages})
         llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
 
-        return ScriptedRunState(
+        return ScriptedTask(
+            turns=turns,
             inputs=inputs,
+            user_prompt=prompt,
             messages=[dict(message) for message in messages],
             cache_blackboard=[slot.copy() for slot in self._blackboard],
             running_blackboard=running_blackboard,
             executed_steps=set(),
             prepared_steps=[],
             tool_calls_used=0,
-            is_done=False,
-            return_value=NO_VAL,
+            complete=False,
+            generated_response=NO_VAL,
             llm_records=[llm_record],
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
@@ -362,19 +366,19 @@ class ScriptedToolAgent(ToolAgent):
             next_step_index=0,
         )
 
-    def _prepare_next_batch(self, state: ScriptedRunState) -> ScriptedRunState:
-        if state.batch_index >= len(state.batches):
+    def _prepare_next_batch(self, task: ScriptedTask) -> ScriptedTask:
+        if task.batch_index >= len(task.batches):
             raise ToolAgentError("No scripted batches remain.")
 
-        batch = state.batches[state.batch_index]
+        batch = task.batches[task.batch_index]
         if not batch:
-            raise ToolAgentError(f"ScriptedToolAgent: encountered empty batch at index {state.batch_index}.")
+            raise ToolAgentError(f"ScriptedToolAgent: encountered empty batch at index {task.batch_index}.")
 
         prepared_steps: list[int] = []
 
         for call in batch:
-            step = state.next_step_index
-            if step >= len(state.running_blackboard):
+            step = task.next_step_index
+            if step >= len(task.running_blackboard):
                 raise ToolAgentError("Scripted batch exceeded running blackboard size.")
 
             tool_name = call["tool"]
@@ -382,10 +386,10 @@ class ScriptedToolAgent(ToolAgent):
 
             self.get_tool(tool_name)
 
-            slot = state.running_blackboard[step]
+            slot = task.running_blackboard[step]
             slot.tool = tool_name
             slot.args = args
-            slot.resolved_args = self._resolve_placeholders(args, state=state)
+            slot.resolved_args = self._resolve_placeholders(args, task=task)
             slot.result = NO_VAL
             slot.error = NO_VAL
             slot.step_dependencies = tuple(
@@ -395,45 +399,50 @@ class ScriptedToolAgent(ToolAgent):
             slot.status = "prepared"
 
             prepared_steps.append(step)
-            state.next_step_index += 1
+            task.next_step_index += 1
 
-        state.prepared_steps = prepared_steps
-        state.batch_index += 1
-        return state
+        task.prepared_steps = prepared_steps
+        task.batch_index += 1
+        return task
 
 
 class BadInitializeToolAgent(ScriptedToolAgent):
-    def _initialize_run_state(
+    def _initialize_task(
         self,
         *,
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
     ) -> Any:
         return {"bad": "state"}
 
 
 class PendingPreparedToolAgent(ScriptedToolAgent):
-    def _initialize_run_state(
+    def _initialize_task(
         self,
         *,
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> ScriptedRunState:
-        state = super()._initialize_run_state(
-            turns=turns,
-            prompt=prompt,
-            inputs=inputs,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-        state.prepared_steps = [0]
-        return state
+    ) -> ScriptedTask:
+        task = super()._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
+        task.prepared_steps = [0]
+        return task
+
+
+class SkipFirstBatchToolAgent(ScriptedToolAgent):
+    """Batch index 0 always cascade-skips to empty (simulating every step
+    in that round having failed a dependency check) without executing or
+    raising; batch index 1+ delegates to the real scripted behavior. Tests
+    that ToolAgent._progress's cascade-skip guard tolerates a batch that
+    legitimately prepares to empty."""
+
+    def _prepare_next_batch(self, task: ScriptedTask) -> ScriptedTask:
+        if task.batch_index == 0:
+            task.batch_index += 1
+            return task
+        task.batch_index -= 1
+        return super()._prepare_next_batch(task)
 
 
 def make_agent(
@@ -487,24 +496,26 @@ def executed_slot(step: int, result: Any, *, tool: str = "Tool.tests.add") -> Bl
     return slot
 
 
-def make_state(
+def make_task(
     *,
     running: list[BlackboardSlot] | None = None,
     cache: list[BlackboardSlot] | None = None,
     prepared_steps: list[int] | None = None,
     tool_calls_used: int = 0,
     inputs: dict[str, Any] | None = None,
-) -> ScriptedRunState:
-    return ScriptedRunState(
+) -> ScriptedTask:
+    return ScriptedTask(
+        turns=[],
         inputs=inputs or {},
+        user_prompt="run",
         messages=[{"role": "user", "content": "run"}],
         cache_blackboard=cache or [],
         running_blackboard=running or [],
         executed_steps=set(),
         prepared_steps=prepared_steps or [],
         tool_calls_used=tool_calls_used,
-        is_done=False,
-        return_value=NO_VAL,
+        complete=False,
+        generated_response=NO_VAL,
         batches=[],
         batch_index=0,
         next_step_index=0,

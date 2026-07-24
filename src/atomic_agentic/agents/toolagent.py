@@ -1366,10 +1366,20 @@ class ToolAgent(Agent, ABC):
         2. Count non-return vs. return tool calls
         3. If tool_calls_limit set, check budget
         4. Execute concurrently via ``asyncio.gather(..., return_exceptions=True)``
-        5. If any gathered result is an exception, identify the first such step,
-        store the error on that slot, mark it failed, and raise
-        6. Otherwise, store each ``ToolResult`` envelope whole in ``slot.result``
-        and mark slots executed
+        5. Handle gathered failures, branching on ``fail_fast``:
+           - ``fail_fast=True`` (default): identify the first failed step,
+             store the error on that slot, mark it failed, and raise
+             immediately -- no further slots are stored this round.
+           - ``fail_fast=False``: mark **every** failed slot (error +
+             ``FAILED`` status), but only raise if the return tool itself
+             is among the failures (a failed return always ends the run
+             regardless of ``fail_fast``); otherwise fall through to step 6.
+        6. Store each successful ``ToolResult`` envelope whole in
+           ``slot.result`` and mark those slots executed (runs after step 5
+           in both branches -- reached unconditionally under
+           ``fail_fast=True`` only when there were no failures at all, and
+           always reached under ``fail_fast=False`` for the surviving
+           successes).
         7. If return tool executed: set ``task.generated_response`` and ``task.complete = True``
         8. Update ``task.executed_steps``, ``task.tool_calls_used``
         9. Clear ``prepared_steps`` (consumed)
@@ -1564,6 +1574,13 @@ class ToolAgent(Agent, ABC):
 
         This method intentionally preserves the current compact gather-based
         semantics rather than introducing stricter cancellation machinery.
+
+        Failure handling mirrors ``_execute_prepared_batch`` exactly: under
+        ``fail_fast=True`` (default), the first failed step is marked and
+        raised immediately; under ``fail_fast=False``, every failed slot is
+        marked but the round only raises if the return tool itself failed --
+        otherwise execution falls through and records the surviving
+        successes.
         """
         indices = list(task.prepared_steps)
         if not indices:
