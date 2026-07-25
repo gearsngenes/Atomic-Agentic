@@ -350,7 +350,7 @@ class ScriptedToolAgent(ToolAgent):
             turns=turns,
             inputs=inputs,
             user_prompt=prompt,
-            messages=[dict(message) for message in messages],
+            system_prompt_name="tool_instructions",
             cache_blackboard=[slot.copy() for slot in self._blackboard],
             running_blackboard=running_blackboard,
             executed_steps=set(),
@@ -365,6 +365,30 @@ class ScriptedToolAgent(ToolAgent):
             batch_index=0,
             next_step_index=0,
         )
+
+    def render_task(
+        self,
+        task: ScriptedTask,
+        *,
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Minimal render_task satisfying the abstract contract; this
+        fixture's LLM call happens in _initialize_task, decoupled from the
+        scripted _prepare_next_batch, so this is not exercised on the
+        scripted execution path -- present for abstract-class instantiation
+        and for any test that calls it directly."""
+        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        render_ctx = {
+            ToolAgent.TOOLS_FIELD: self.actions_context(),
+            ToolAgent.LIMIT_FIELD: limit_text,
+            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
+        }
+        system = self._render_system_message(task, render_ctx)
+        historic = self._render_historic_messages(task)
+        if not task.task_messages:
+            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+        task.task_messages.extend(additional_messages or [])
+        return system + historic + task.task_messages
 
     def _prepare_next_batch(self, task: ScriptedTask) -> ScriptedTask:
         if task.batch_index >= len(task.batches):
@@ -508,7 +532,7 @@ def make_task(
         turns=[],
         inputs=inputs or {},
         user_prompt="run",
-        messages=[{"role": "user", "content": "run"}],
+        system_prompt_name="tool_instructions",
         cache_blackboard=cache or [],
         running_blackboard=running or [],
         executed_steps=set(),

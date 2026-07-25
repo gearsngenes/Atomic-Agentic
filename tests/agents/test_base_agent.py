@@ -32,8 +32,24 @@ class _MinimalAgent(Agent):
     ``_progress`` performs a single engine call and completes the task;
     tests that never call invoke() don't need this to run. No
     ``_initialize_task`` override -- Agent's concrete base implementation
-    (bare AgentTask) is sufficient.
+    (bare AgentTask, ``system_prompt_name=None``) is sufficient.
     """
+
+    def render_task(
+        self,
+        task: AgentTask,
+        *,
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Minimal implementation satisfying the abstract contract -- not
+        exercised by ``_progress``/``_async_progress``, which build their
+        own inline message list."""
+        system = self._render_system_message(task, {})
+        historic = self._render_historic_messages(task)
+        if not task.task_messages:
+            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+        task.task_messages.extend(additional_messages or [])
+        return system + historic + task.task_messages
 
     def _progress(self, task: AgentTask) -> AgentTask:
         engine_result = self._llm_engine.invoke({
@@ -80,6 +96,22 @@ class _EchoAgent(Agent):
         self._system_prompts["system"] = PromptConfig(
             template=system_prompt, description="Echo agent system prompt."
         )
+
+    def render_task(
+        self,
+        task: AgentTask,
+        *,
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Minimal implementation satisfying the abstract contract -- not
+        exercised by ``_progress``/``_async_progress``, which call
+        ``build_messages`` directly with ``self._echo_system_prompt``."""
+        system = self._render_system_message(task, {})
+        historic = self._render_historic_messages(task)
+        if not task.task_messages:
+            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+        task.task_messages.extend(additional_messages or [])
+        return system + historic + task.task_messages
 
     def _progress(self, task: AgentTask) -> AgentTask:
         messages = self.build_messages(self._echo_system_prompt, task.turns, task.user_prompt)

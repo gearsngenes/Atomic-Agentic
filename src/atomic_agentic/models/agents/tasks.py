@@ -23,7 +23,7 @@ class AgentTask:
 
     Drives an invocation through ``_initialize_task``/``_progress``.
     ``BasicAgent`` uses this base class directly; it needs nothing beyond
-    these six fields.
+    these fields.
 
     Fields
     ------
@@ -40,6 +40,15 @@ class AgentTask:
         The fully-resolved prompt string produced by ``pre_invoke`` for this
         invocation (matches ``AgentRecord.user_prompt`` 1:1).
 
+    system_prompt_name : str | None
+        Identifies which entry in ``self._system_prompts`` governs the
+        current phase — read by ``render_task``/``_render_system_message``
+        to select and render the active system prompt. Required (no
+        default): every concrete subclass must decide it explicitly.
+        ``None`` is a legitimate value meaning "render no system message at
+        all," not a not-yet-set placeholder — though no concrete subclass
+        shipped today ever constructs a task with ``None``.
+
     llm_records : list[LLMRecord]
         Accumulator for every LLM generation made while producing this
         invocation's result. Read exactly once, at loop-close, to populate
@@ -54,14 +63,31 @@ class AgentTask:
         ``BasicAgent``, the executed return-tool value for ``ToolAgent`` and
         its subclasses. ``NO_VAL`` until ``_progress`` sets it on the round
         that completes the task.
+
+    historic_messages : list[dict[str, str]]
+        Rendered ``turns``, built lazily once per invoke by
+        ``Agent._render_historic_messages`` and reused for the rest of it.
+        Never rebuilt mid-invoke — turn-rendering is phase-invariant,
+        governed only by ``assistant_response_source``/
+        ``response_preview_limit``, both static per-agent config.
+
+    task_messages : list[dict[str, str]]
+        Phase-scoped LLM-facing content, lazily built by each subclass's
+        ``render_task`` when empty and grown by ``additional_messages``
+        across generation retries within one phase. Cleared by the owning
+        subclass at its own phase boundary (e.g. ``PlanActAgent`` once
+        planning finishes; ``ReActAgent`` after each step commits).
     """
     turns: list[AgentRecord]
     inputs: dict[str, Any]
     user_prompt: str
+    system_prompt_name: str | None
 
     llm_records: list[LLMRecord] = field(default_factory=list)
     complete: bool = False
     generated_response: Any = NO_VAL
+    historic_messages: list[dict[str, str]] = field(default_factory=list)
+    task_messages: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -71,11 +97,6 @@ class ToolAgentTask(AgentTask):
 
     Fields
     ------
-    messages : list[dict[str, str]]
-        Run-local LLM-facing messages used during this invocation. ReAct may
-        augment this list with current-run observations. Not the canonical
-        stored memory format; completed invocations are stored as turns.
-
     cache_blackboard : list[BlackboardSlot]
         Snapshot of the persisted ``self._blackboard`` at invoke start when
         context is enabled. Previous invocation results are available here
@@ -135,8 +156,6 @@ class ToolAgentTask(AgentTask):
         ``ReActTask``) so it's available uniformly to every subclass,
         including ``PlanActTask``.
     """
-    messages: list[dict[str, str]] = field(default_factory=list)
-
     cache_blackboard: list[BlackboardSlot] = field(default_factory=list)
     running_blackboard: list[BlackboardSlot] = field(default_factory=list)
 

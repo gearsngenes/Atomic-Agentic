@@ -197,13 +197,19 @@ class ToolAgent(Agent, ABC):
 
     **_initialize_task(*, turns, prompt, inputs)** → ``ToolAgentTask`` (or subclass)
         Build and return a task for this invocation. Must:
-        - Render the system prompt from instance state (tools, limit, constants)
-        - Call ``build_messages(system, turns, prompt)`` to produce messages
+        - Stamp ``system_prompt_name`` so ``render_task`` can render the
+          active system prompt on demand (never pre-rendered/cached as text)
         - Compute ``valid_cache_indices``/``failed_cache_indices`` via
           ``_compute_cache_index_sets(turns)``
         - Snapshot cached blackboard entries if context is enabled
         - Create an appropriate running blackboard
         - Initialize ``executed_steps``, ``prepared_steps``, and completion state
+
+    **render_task(task, *, additional_messages=None)** → ``list[dict[str, str]]``
+        Build the exact send-payload message list for one LLM call — see
+        ``Agent.render_task``. Every ``ToolAgent`` subclass fully
+        reimplements this (``ToolAgent`` itself declares no override;
+        ``PlanActAgent``/``ReActAgent`` each implement it directly).
 
     **_prepare_next_batch(task)** → ``ToolAgentTask`` (or subclass)
         Prepare exactly one executable batch per round:

@@ -526,8 +526,14 @@ class Agent(AtomicInvokable, ABC):
         base implementation just wraps the three into a bare ``AgentTask``;
         subclasses that need a richer ``AgentTask`` subclass (with
         additional bookkeeping fields populated) override this.
+
+        ``system_prompt_name`` is set to ``None`` here — this base hook has
+        no domain knowledge of which (if any) system prompt applies;
+        subclasses that need one override this and set it explicitly
+        (``BasicAgent`` calls ``super()._initialize_task(...)`` then stamps
+        ``"role"`` over this ``None``).
         """
-        return AgentTask(turns=turns, inputs=inputs, user_prompt=prompt)
+        return AgentTask(turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name=None)
 
     @abstractmethod
     def _progress(self, task: AgentTask) -> AgentTask:
@@ -540,6 +546,68 @@ class Agent(AtomicInvokable, ABC):
         invocation.
         """
         ...
+
+    @abstractmethod
+    def render_task(
+        self,
+        task: AgentTask,
+        *,
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Build the exact send-payload message list for one LLM call.
+
+        Every concrete subclass fully reimplements this rather than
+        composing via ``super()`` — each implementation calls
+        ``_render_system_message``/``_render_historic_messages`` explicitly
+        for the two pieces that render identically everywhere, then lazily
+        builds its own ``task.task_messages`` when empty (fully
+        subclass-specific content). ``additional_messages`` (``None``
+        treated as ``[]``) is appended onto ``task.task_messages`` and
+        **persists** there — generation retries within one phase accumulate
+        across multiple ``render_task`` calls rather than resetting each
+        time. Returns the rendered system message (if any) plus
+        ``task.historic_messages`` plus ``task.task_messages``.
+
+        Pure computation, no I/O — the same method serves both the sync and
+        async lifecycle paths; there is no ``_async_render_task``.
+        """
+        ...
+
+    def _render_system_message(
+        self,
+        task: AgentTask,
+        render_context: dict[str, Any],
+    ) -> list[dict[str, str]]:
+        """Render ``task``'s active system prompt, if any.
+
+        Returns ``[]`` when ``task.system_prompt_name`` is ``None``.
+        Otherwise renders ``self._system_prompts[task.system_prompt_name]``
+        against ``render_context`` and returns a single-element system
+        message list. An unregistered name raises ``KeyError`` naturally —
+        an internal-contract violation, not guarded against.
+        """
+        if task.system_prompt_name is None:
+            return []
+        rendered = self._system_prompts[task.system_prompt_name].render(render_context)
+        return [{"role": "system", "content": rendered}]
+
+    def _render_historic_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        """Lazily render ``task.turns`` into ``task.historic_messages``.
+
+        Built once per invoke and reused thereafter. If ``task.turns`` is
+        empty, ``task.historic_messages`` correctly stays empty — later
+        calls re-checking an empty ``turns`` are a harmless no-op, not an
+        ambiguous state.
+        """
+        if task.historic_messages:
+            return task.historic_messages
+        if not task.turns:
+            return task.historic_messages
+        rendered: list[dict[str, str]] = []
+        for turn in task.turns:
+            rendered.extend(self.render_turn(turn))
+        task.historic_messages = rendered
+        return task.historic_messages
 
     async def _async_initialize_task(
         self,

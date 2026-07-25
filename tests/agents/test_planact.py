@@ -444,7 +444,10 @@ class TestPlanActGenerationRetry:
         llm_records = agent.records[-1].llm_records
         assert len(llm_records) == 2
         assert len(llm_records[0].messages) == 1
-        assert len(llm_records[1].messages) == 2
+        # Self-contained convention: retry's messages = full task_messages so
+        # far (1 original decompose-instruction + 2 injected feedback), not
+        # just the 2 new ones.
+        assert len(llm_records[1].messages) == 3
 
     def test_spec_error_retry_succeeds_on_second_call(self) -> None:
         agent = make_planact_agent(
@@ -468,7 +471,10 @@ class TestPlanActGenerationRetry:
         llm_records = agent.records[-1].llm_records
         assert len(llm_records) == 2
         assert len(llm_records[0].messages) == 1
-        assert len(llm_records[1].messages) == 2
+        # Self-contained convention: retry's messages = full task_messages so
+        # far (1 original decompose-instruction + 2 injected feedback), not
+        # just the 2 new ones.
+        assert len(llm_records[1].messages) == 3
 
     def test_budget_exhausted_raises_after_all_attempts(self) -> None:
         agent = make_planact_agent(

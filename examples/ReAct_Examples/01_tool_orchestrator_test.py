@@ -30,12 +30,12 @@ orchestrator.batch_register(MATH_TOOLS)
 orchestrator.batch_register(CONSOLE_TOOLS)
 
 # 4) Register the pi constant
-orchestrator.register_constant("PI", math.pi, "Mathematical constant `PI`")
+orchestrator.register_constant("PI", math.pi, "Use ONLY THIS constant in place of a literal or float for any calculations that involve it.")
 
 # 4) Task (schema-first: mapping with 'prompt')
 task = """
 Complete the following problem:
-1. Compute the volume of a cylinder with a radius of 2 and a height of 10 [V(r, h) = pi * r^2 * h].
+1. Compute the volume of a CYLINDER with a radius of 2 and a height of 10.
 2. Then print the result in the format "The volume of the cylinder is: <result>".
 Return None.
 """
