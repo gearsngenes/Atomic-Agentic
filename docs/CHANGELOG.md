@@ -5,6 +5,58 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a23] - 2026-07-25
+
+### Added
+
+- Unified **task-oriented agent lifecycle**: a new `AgentTask` hierarchy
+  (`ToolAgentTask`/`PlanActTask`/`ReActTask`) plus `Agent._initialize_task`/
+  `_progress` hooks replace the old per-subclass `_invoke`/`_ainvoke` shell
+  and the `ToolAgentRunState`/`PlanActRunState`/`ReActRunState` family it
+  relied on. Every agent type — `BasicAgent`, `PlanActAgent`, `ReActAgent`
+  — now runs through one shared loop in `Agent.invoke()`/`async_invoke()`:
+  `while not task.complete: task = progress(task)`.
+- `Agent.render_task(task, ...) -> list[dict[str, str]]` — new per-subclass
+  hook that builds the exact message list sent to the LLM for a given
+  phase, replacing ad hoc inline message construction. `AgentTask` gains
+  `system_prompt_name`, `historic_messages`, and `task_messages` fields.
+- `ToolAgent._compile_batches_from_deps`/`_check_cascade_failure` — shared
+  batch-preparation and cascade-failure helpers, generalized from logic
+  that previously lived only in `PlanActAgent`.
+
+### Changed
+
+- `LLMRecord.messages` now stores a full, self-contained copy of every
+  message built for a given generation attempt (growing across retries),
+  rather than only the newest delta on top of prior calls.
+- `ReActAgent`'s per-round prompt content tightened for reliability on
+  cheaper models: the running-plan snapshot shown each round is now a
+  directive-free data block, and the final per-round instruction drops
+  rules already covered by the system prompt in favor of an explicit
+  reminder not to redo work already available via cache or existing
+  placeholders.
+- `PlanActAgent`'s task prompt is now visually separated (wrapped in a
+  `===== CURRENT TASK =====` banner) from the planning instruction that
+  follows it, instead of the two being glued into one unstructured block.
+
+### Fixed
+
+- `ToolAgent.clear_tools()` no longer removes the mandatory return tool.
+- A missing required field on the base agent task-construction path, found
+  during this release's test repair.
+
+### Removed
+
+- The old `ToolAgentRunState`/`PlanActRunState`/`ReActRunState` family and
+  the `_invoke`/`_ainvoke`/`make_result` lifecycle it backed, fully
+  superseded by the task-oriented lifecycle above.
+- `ReActKAgent`, a K-fixed-batch step-planning agent that was built out in
+  full and live-tested, then removed after testing showed it less reliable
+  than the existing `PlanActAgent`/`ReActAgent` strategies — reasoning that
+  informs later steps in a fixed batch isn't reliably persisted or
+  inferable across separate LLM calls the way it is within a single
+  planning call or a single-step reactive call.
+
 ## [2.0.0a22] - 2026-07-17
 
 ### Added
