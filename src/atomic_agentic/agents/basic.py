@@ -8,6 +8,7 @@ from ..exceptions import AgentInvocationError
 from ..llm.base import LLMEngine
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..models.agents.prompts import PromptConfig
+from ..models.agents.tasks import AgentTask
 from ..utils.agents import normalize_role_prompt
 from .base import Agent
 
@@ -85,22 +86,53 @@ class BasicAgent(Agent):
         return self._system_prompts["role"].template
 
     # ------------------------------------------------------------------ #
-    # Core LLM work
+    # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
-    def _invoke(
+    def _initialize_task(
         self,
+        *,
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
-    ) -> tuple[AgentRecord, dict]:
-        """Sync single-LLM-call implementation.
+    ) -> AgentTask:
+        """Build this invocation's task, stamping the role-prompt name.
 
-        Renders the role prompt from ``inputs``, builds the message list,
-        calls the engine, and returns a draft ``AgentRecord`` plus accounting
-        metadata.
+        ``Agent``'s concrete base implementation builds a bare ``AgentTask``
+        from ``turns``/``prompt``/``inputs``; this override adds only the
+        ``system_prompt_name`` stamp ``render_task`` needs.
         """
-        system = self._system_prompts["role"].render(inputs)
-        messages = self.build_messages(system, turns, prompt)
+        task = super()._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
+        task.system_prompt_name = "role"
+        return task
+
+    def render_task(
+        self,
+        task: AgentTask,
+        *,
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Render the role prompt, prior turns, and this invocation's prompt.
+
+        ``task.task_messages`` is a single message the first time it's
+        built (the raw ``user_prompt``, unwrapped) and never grows further
+        — ``BasicAgent`` has no retry loop, so ``additional_messages`` is
+        always empty in practice.
+        """
+        system = self._render_system_message(task, task.inputs)
+        historic = self._render_historic_messages(task)
+        if not task.task_messages:
+            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+        task.task_messages.extend(additional_messages or [])
+        return system + historic + task.task_messages
+
+    def _progress(self, task: AgentTask) -> AgentTask:
+        """Advance (and complete) a single-turn BasicAgent invocation.
+
+        ``BasicAgent`` always finishes in exactly one ``_progress`` call:
+        render the task, call the engine, validate the response, and mark
+        the task complete.
+        """
+        messages = self.render_task(task)
         engine_result = self._llm_engine.invoke({"messages": messages})
         text = engine_result.result
         if not isinstance(text, str):
@@ -108,28 +140,22 @@ class BasicAgent(Agent):
                 f"LLM engine returned non-string result (type={type(text).__name__})."
             )
         llm_record = LLMRecord(
-            messages=(messages[-1],),
+            messages=list(task.task_messages),
             llm_result=engine_result,
-            system_prompt_name="role",
+            system_prompt_name=task.system_prompt_name,
         )
-        draft = AgentRecord(
-            user_prompt=prompt,
-            generated_response=text,
-        )
-        return draft, {
-            "llm_records": (llm_record,),
-            "llm_model_data": engine_result.model_data,
-        }
+        task.llm_records.append(llm_record)
+        task.generated_response = text
+        task.complete = True
+        return task
 
-    async def _ainvoke(
-        self,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> tuple[AgentRecord, dict]:
-        """Async mirror of ``_invoke``."""
-        system = self._system_prompts["role"].render(inputs)
-        messages = self.build_messages(system, turns, prompt)
+    async def _async_progress(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``_progress``.
+
+        Awaits the engine's native async path directly rather than relying
+        on ``Agent``'s inherited ``asyncio.to_thread``-wrapping default.
+        """
+        messages = self.render_task(task)
         engine_result = await self._llm_engine.async_invoke({"messages": messages})
         text = engine_result.result
         if not isinstance(text, str):
@@ -137,18 +163,14 @@ class BasicAgent(Agent):
                 f"LLM engine returned non-string result (type={type(text).__name__})."
             )
         llm_record = LLMRecord(
-            messages=(messages[-1],),
+            messages=list(task.task_messages),
             llm_result=engine_result,
-            system_prompt_name="role",
+            system_prompt_name=task.system_prompt_name,
         )
-        draft = AgentRecord(
-            user_prompt=prompt,
-            generated_response=text,
-        )
-        return draft, {
-            "llm_records": (llm_record,),
-            "llm_model_data": engine_result.model_data,
-        }
+        task.llm_records.append(llm_record)
+        task.generated_response = text
+        task.complete = True
+        return task
 
     # ------------------------------------------------------------------ #
     # Serialization

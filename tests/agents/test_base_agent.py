@@ -14,6 +14,7 @@ from atomic_agentic.constants.agents import RUN_ID_PARAM
 from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
+from atomic_agentic.models.agents.tasks import AgentTask
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results import LLMModelData, TokenUsage
 from atomic_agentic.utils.parameters import to_paramspec_list
@@ -28,74 +29,65 @@ ROLE_PROMPT = "You are a deterministic test writer."
 class _MinimalAgent(Agent):
     """Trivial concrete Agent used to test abstract Agent construction and API.
 
-    ``_invoke`` performs a single engine call and produces the required
-    tuple; tests that never call invoke() don't need this to run.
+    ``_progress`` performs a single engine call and completes the task;
+    tests that never call invoke() don't need this to run. No
+    ``_initialize_task`` override -- Agent's concrete base implementation
+    (bare AgentTask, ``system_prompt_name=None``) is sufficient.
     """
 
-    def _invoke(
+    def render_task(
         self,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> tuple[AgentRecord, dict]:
+        task: AgentTask,
+        *,
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Minimal implementation satisfying the abstract contract -- not
+        exercised by ``_progress``/``_async_progress``, which build their
+        own inline message list."""
+        system = self._render_system_message(task, {})
+        historic = self._render_historic_messages(task)
+        if not task.task_messages:
+            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+        task.task_messages.extend(additional_messages or [])
+        return system + historic + task.task_messages
+
+    def _progress(self, task: AgentTask) -> AgentTask:
         engine_result = self._llm_engine.invoke({
             "messages": [
                 {"role": "system", "content": "minimal"},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": task.user_prompt},
             ]
         })
         llm_record = LLMRecord(
-            messages=({"role": "user", "content": prompt},),
+            messages=({"role": "user", "content": task.user_prompt},),
             llm_result=engine_result,
         )
-        draft = AgentRecord(
-            user_prompt=prompt,
-            generated_response=engine_result.result,
-        )
-        return draft, {
-            "llm_records": (llm_record,),
-            "llm_model_data": engine_result.model_data,
-        }
+        task.llm_records.append(llm_record)
+        task.generated_response = engine_result.result
+        task.complete = True
+        return task
 
-    async def _ainvoke(
-        self,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> tuple[AgentRecord, dict]:
+    async def _async_progress(self, task: AgentTask) -> AgentTask:
         engine_result = await self._llm_engine.async_invoke({
             "messages": [
                 {"role": "system", "content": "minimal"},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": task.user_prompt},
             ]
         })
         llm_record = LLMRecord(
-            messages=({"role": "user", "content": prompt},),
+            messages=({"role": "user", "content": task.user_prompt},),
             llm_result=engine_result,
         )
-        draft = AgentRecord(
-            user_prompt=prompt,
-            generated_response=engine_result.result,
-        )
-        return draft, {
-            "llm_records": (llm_record,),
-            "llm_model_data": engine_result.model_data,
-        }
+        task.llm_records.append(llm_record)
+        task.generated_response = engine_result.result
+        task.complete = True
+        return task
 
 
 class _EchoAgent(Agent):
     """Concrete Agent fixture with a fixed system prompt and a real
-    single-LLM-call ``_invoke``/``_ainvoke`` path.
-
-    Used in place of ``BasicAgent`` for invoke-lifecycle tests in this file:
-    as of this pass, ``BasicAgent._invoke``/``_ainvoke`` still declare the
-    retired ``context`` parameter name against this class's renamed
-    ``inputs`` abstract signature (accepted, documented scope-boundary
-    breakage -- see the ``Agent`` class docstring) and would raise
-    ``TypeError`` at invoke time. This fixture mirrors ``BasicAgent``'s
-    message-construction shape (system + turns + prompt) with the correct
-    signature, keeping this file's invoke-behavior coverage independent of
-    ``BasicAgent``'s health.
+    single-LLM-call ``_progress`` path. Used in place of ``BasicAgent`` for
+    invoke-lifecycle tests in this file for fixture independence.
     """
 
     def __init__(self, *, system_prompt: str = ROLE_PROMPT, **kwargs: Any) -> None:
@@ -105,13 +97,24 @@ class _EchoAgent(Agent):
             template=system_prompt, description="Echo agent system prompt."
         )
 
-    def _invoke(
+    def render_task(
         self,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> tuple[AgentRecord, dict]:
-        messages = self.build_messages(self._echo_system_prompt, turns, prompt)
+        task: AgentTask,
+        *,
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Minimal implementation satisfying the abstract contract -- not
+        exercised by ``_progress``/``_async_progress``, which call
+        ``build_messages`` directly with ``self._echo_system_prompt``."""
+        system = self._render_system_message(task, {})
+        historic = self._render_historic_messages(task)
+        if not task.task_messages:
+            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+        task.task_messages.extend(additional_messages or [])
+        return system + historic + task.task_messages
+
+    def _progress(self, task: AgentTask) -> AgentTask:
+        messages = self.build_messages(self._echo_system_prompt, task.turns, task.user_prompt)
         engine_result = self._llm_engine.invoke({"messages": messages})
         text = engine_result.result
         if not isinstance(text, str):
@@ -119,19 +122,13 @@ class _EchoAgent(Agent):
                 f"LLM engine returned non-string result (type={type(text).__name__})."
             )
         llm_record = LLMRecord(messages=(messages[-1],), llm_result=engine_result)
-        draft = AgentRecord(user_prompt=prompt, generated_response=text)
-        return draft, {
-            "llm_records": (llm_record,),
-            "llm_model_data": engine_result.model_data,
-        }
+        task.llm_records.append(llm_record)
+        task.generated_response = text
+        task.complete = True
+        return task
 
-    async def _ainvoke(
-        self,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> tuple[AgentRecord, dict]:
-        messages = self.build_messages(self._echo_system_prompt, turns, prompt)
+    async def _async_progress(self, task: AgentTask) -> AgentTask:
+        messages = self.build_messages(self._echo_system_prompt, task.turns, task.user_prompt)
         engine_result = await self._llm_engine.async_invoke({"messages": messages})
         text = engine_result.result
         if not isinstance(text, str):
@@ -139,11 +136,10 @@ class _EchoAgent(Agent):
                 f"LLM engine returned non-string result (type={type(text).__name__})."
             )
         llm_record = LLMRecord(messages=(messages[-1],), llm_result=engine_result)
-        draft = AgentRecord(user_prompt=prompt, generated_response=text)
-        return draft, {
-            "llm_records": (llm_record,),
-            "llm_model_data": engine_result.model_data,
-        }
+        task.llm_records.append(llm_record)
+        task.generated_response = text
+        task.complete = True
+        return task
 
 
 class _ExtraReservedAgent(_MinimalAgent):
@@ -1422,9 +1418,9 @@ class TestInvocationLifecycle:
         captured: dict[str, Any] = {}
 
         class CapturingAgent(_MinimalAgent):
-            def _invoke(self, turns, prompt, inputs):  # type: ignore[override]
+            def _initialize_task(self, *, turns, prompt, inputs):  # type: ignore[override]
                 captured.update(inputs)
-                return super()._invoke(turns, prompt, inputs)
+                return super()._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
 
         agent = CapturingAgent(
             name="a",

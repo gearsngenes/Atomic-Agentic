@@ -58,7 +58,7 @@ from ..core import AtomicInvokable
 from ..constants.core import NO_VAL
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError
-from ..models.agents import ReActRunState, ReActStepMeta
+from ..models.agents.tasks import ReActTask, ReActStepMeta
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..utils.agents import extract_dependencies
@@ -76,7 +76,7 @@ class ReActAgent(ToolAgent):
     duration remains active. Generated step descriptions preserve semantic intent
     across turns without exposing raw results.
 
-    1. **Initialization** (``_initialize_run_state``)
+    1. **Initialization** (``_initialize_task``)
        - Pre-allocates a fixed-size running blackboard: ``tool_calls_limit + 1`` slots
          to accommodate non-return tool calls plus one return call.
        - Requires ``tool_calls_limit`` to be a concrete integer.
@@ -96,16 +96,18 @@ class ReActAgent(ToolAgent):
        - Validates placeholder dependencies are prior-only.
        - Resolves placeholders into concrete tool args.
        - Stores the prepared slot in ``running_blackboard[step_index]``.
-       - Stores duration and description in ReAct run state.
+       - Stores duration and description in the ReAct task's ``step_meta``.
        - Sets ``prepared_steps = [step_index]``.
 
     3. **Execution**
-       - Base loop executes the single prepared step.
-       - Result is stored; loop returns to preparation for the next step.
+       - Base ``_progress`` (via ``_execute_prepared_batch``) executes the single
+         prepared step. Result is stored; loop returns to preparation for the next step.
 
     4. **Termination**
-       - When the return tool is emitted and executed, loop exits.
-       - Running blackboard is persisted if ``context_enabled=True``.
+       - When the return tool is emitted and executed, ``task.complete`` is set
+         and the ``_progress`` loop exits.
+       - Running blackboard is persisted by ``_build_record_from_task`` if
+         ``context_enabled=True``.
 
     Advantages
     ~~~~~~~~~~
@@ -195,23 +197,23 @@ class ReActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Private helpers
     # ------------------------------------------------------------------ #
-    def _validate_react_prepare_state(self, state: ReActRunState) -> None:
+    def _validate_react_prepare_state(self, task: ReActTask) -> None:
         """
         Validate cursor bounds, prior-step processing, and step_meta length.
         """
-        prefix_len = state.next_step_index
+        prefix_len = task.next_step_index
         if type(prefix_len) is not int or prefix_len < 0:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: next_step_index must be an "
                 f"int >= 0; got {prefix_len!r}."
             )
-        if prefix_len >= len(state.running_blackboard):
+        if prefix_len >= len(task.running_blackboard):
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: next_step_index exceeds run "
-                f"blackboard capacity ({prefix_len} >= {len(state.running_blackboard)})."
+                f"blackboard capacity ({prefix_len} >= {len(task.running_blackboard)})."
             )
         if prefix_len > 0:
-            prev = state.running_blackboard[prefix_len - 1]
+            prev = task.running_blackboard[prefix_len - 1]
             # With fail_fast=False a previous step may be FAILED rather than EXECUTED;
             # both count as "processed" and allow generation of the next step.
             prev_processed = prev.is_executed() or (not self._fail_fast and prev.is_failed())
@@ -221,99 +223,12 @@ class ReActAgent(ToolAgent):
                     f"not executed before the next prepare call "
                     f"(status={prev.status!r})."
                 )
-        if len(state.step_meta) != len(state.running_blackboard):
+        if len(task.step_meta) != len(task.running_blackboard):
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: step_meta length must match "
                 f"running_blackboard length "
-                f"({len(state.step_meta)} != {len(state.running_blackboard)})."
+                f"({len(task.step_meta)} != {len(task.running_blackboard)})."
             )
-
-    def _build_react_messages(
-        self,
-        state: ReActRunState,
-        prefix_len: int,
-        *,
-        max_duration: int,
-    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        """
-        Build the working message list and delta for one ReAct step generation.
-
-        ``max_duration`` is pre-computed by the caller and injected here so the
-        prompt and the validator in ``_generate_next_step`` share a single value.
-
-        EXECUTED steps are rendered with ``result_ref``, ``run_id``, and optionally
-        ``observable_result``. FAILED steps are rendered with ``status="FAILED"`` and
-        ``error``; they carry no ``result_ref`` (so the LLM cannot attempt to reference
-        a non-existent result).
-
-        Returns ``(working_messages, delta)``.
-        """
-        working_messages: list[dict[str, str]] = [dict(m) for m in state.messages]
-
-        running_records: list[dict[str, Any]] = []
-        for idx in range(prefix_len):
-            slot = state.running_blackboard[idx]
-
-            if slot.is_executed():
-                record: dict[str, Any] = {
-                    STEP_FIELD: slot.step,
-                    DESCRIPTION_FIELD: state.step_meta[idx].description,
-                    TOOL_FIELD: slot.tool,
-                    ARGS_FIELD: slot.args,
-                    "result_ref": f"<<__s{idx}__>>",
-                    "run_id": slot.result.run_id,
-                }
-                if state.step_meta[idx].observable > 0:
-                    record["observable_result"] = self._preview_blackboard_result(slot.result.result)
-                running_records.append(record)
-
-            elif slot.is_failed():
-                running_records.append({
-                    STEP_FIELD: slot.step,
-                    DESCRIPTION_FIELD: state.step_meta[idx].description,
-                    TOOL_FIELD: slot.tool,
-                    ARGS_FIELD: slot.args,
-                    "status": "FAILED",
-                    "error": str(slot.error),
-                })
-            # Empty/PLANNED slots are not yet part of the running plan; skip.
-
-        if running_records:
-            running_text = (
-                f"RUNNING PLAN STEPS 0-{prefix_len - 1} SO FAR:\n"
-                "Steps may be EXECUTED (result available via result_ref) or FAILED "
-                "(error shown; do not reference result_ref for failed steps).\n"
-                "Use descriptions to understand what each step was intended to do.\n"
-                "Use result_ref placeholders when a new arg needs a prior executed step's value.\n"
-                "observable_result fields are for OBSERVATION ONLY: use them only to choose "
-                "the next tool or branch.\n"
-                "Do not copy observable_result values into new args.\n\n"
-                + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
-            )
-        else:
-            running_text = (
-                "RUNNING PLAN STEPS SO FAR:\n"
-                "No steps executed yet.\n"
-                "When steps execute, their results will be available by result_ref "
-                "placeholders like <<__s0__>>."
-            )
-
-        working_messages.append({"role": "assistant", "content": running_text})
-        working_messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "Produce the NEXT BEST single tool call for the current task. "
-                    "Pick the return tool if the running plan has completed all needed work. "
-                    "Output exactly one JSON object with keys {step, tool, args, duration, description}. "
-                    "Preserve symbolic dataflow with quoted placeholders; do not copy observable_result values into args. "
-                    f"For this output step, duration must be an int from 0 to {max_duration}."
-                ),
-            }
-        )
-
-        delta = [state.messages[-1], working_messages[-2], working_messages[-1]]
-        return working_messages, delta
 
     def _process_next_step_output(
         self,
@@ -463,33 +378,38 @@ class ReActAgent(ToolAgent):
 
     def _apply_react_step_result(
         self,
-        state: ReActRunState,
+        task: ReActTask,
         prefix_len: int,
         generated_slot: BlackboardSlot,
         observe_duration: int,
         description: str,
-        llm_records: list[LLMRecord],
-        *,
-        max_duration: int,
-    ) -> ReActRunState:
+    ) -> ReActTask:
         """
-        Apply one validated ReAct step generation result to the run state.
+        Apply one validated ReAct step generation result to the task.
 
         Validates the returned tuple fields, decrements observable counters,
         fills the preallocated running-blackboard slot, then either cascade-fails
         the slot (``fail_fast=False`` only) or resolves placeholders and marks it
         prepared. Advances the cursor and writes ``step_meta``.
 
-        ``max_duration`` is pre-computed by ``_prepare_next_batch`` /
-        ``_aprepare_next_batch`` and passed in; this method does not recompute it.
+        ``max_duration`` is recomputed locally from ``prefix_len`` — cheap and
+        derivable, no longer threaded through as a parameter. ``llm_records``
+        is no longer a parameter either: ``_generate_next_step``/
+        ``_agenerate_next_step`` now append directly onto ``task.llm_records``
+        as each attempt happens.
 
         **Cascade path** (``fail_fast=False``): if any ``step_dependencies`` entry
         is FAILED in the running blackboard, the return tool raises immediately;
         non-return slots are marked FAILED and the method returns early with
-        ``prepared_steps`` left empty — the ``_invoke`` loop will skip execution
-        and continue to the next generation turn.
+        ``prepared_steps`` left empty — the ``_progress`` loop will skip
+        execution and continue to the next generation turn.
+
+        ``task.task_messages`` is cleared unconditionally before returning —
+        on both the cascade-fail early return and the normal path — since an
+        LLM call happened this round either way and the next round rebuilds
+        fresh.
         """
-        state.llm_records.extend(llm_records)
+        max_duration = max(0, self._tool_calls_limit - prefix_len)
 
         if type(observe_duration) is not int or observe_duration < 0 or observe_duration > max_duration:
             raise ToolAgentError(
@@ -518,12 +438,12 @@ class ReActAgent(ToolAgent):
             )
 
         # A successful generation turn consumed any raw results that were visible.
-        for meta in state.step_meta:
+        for meta in task.step_meta:
             if meta.observable > 0:
                 meta.observable -= 1
 
         # Fill the preallocated running-blackboard slot.
-        slot = state.running_blackboard[prefix_len]
+        slot = task.running_blackboard[prefix_len]
         if slot.step != prefix_len:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: running slot step mismatch at index {prefix_len}: "
@@ -543,86 +463,67 @@ class ReActAgent(ToolAgent):
         slot.await_step = generated_slot.await_step
 
         # Cascade-fail: when fail_fast=False, propagate failures through arg dependencies.
-        # Use extract_dependencies(slot.args) for the same reason as PlanActAgent: only
-        # steps actually referenced in args need to resolve successfully.
         if not self._fail_fast:
-            board = state.running_blackboard
-            failed_arg_deps = sorted(
-                d
-                for d in extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
-                if board[d].is_failed()
-            )
-            if failed_arg_deps:
-                dep_str = ", ".join(str(d) for d in failed_arg_deps)
-                if slot.tool == RETURN_TOOL_FULL_NAME:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: return step cannot execute; "
-                        f"dependency step(s) {dep_str} failed."
-                    )
-                slot.error = ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: step {prefix_len} skipped — "
-                    f"dependency step(s) {dep_str} failed."
-                )
-                slot.status = BlackboardSlot.FAILED
-                state.step_meta[prefix_len].description = description
-                state.next_step_index = prefix_len + 1
-                return state  # prepared_steps stays []; _invoke loop will skip execute and continue
+            board = task.running_blackboard
+            if self._check_cascade_failure(slot, board):
+                task.step_meta[prefix_len].description = description
+                task.next_step_index = prefix_len + 1
+                task.task_messages.clear()
+                return task  # prepared_steps stays []; _invoke loop will skip execute and continue
 
-        # Resolve placeholders after stamping the planned slot into the running state.
-        slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
+        # Resolve placeholders after stamping the planned slot into the running task.
+        slot.resolved_args = self._resolve_placeholders(slot.args, task=task)
         slot.status = BlackboardSlot.PREPARED
 
         # Write per-slot metadata.
-        state.step_meta[prefix_len].observable = observe_duration
-        state.step_meta[prefix_len].description = description
+        task.step_meta[prefix_len].observable = observe_duration
+        task.step_meta[prefix_len].description = description
 
-        state.prepared_steps = [prefix_len]
-        state.next_step_index = prefix_len + 1
+        task.prepared_steps = [prefix_len]
+        task.next_step_index = prefix_len + 1
 
-        return state
+        task.task_messages.clear()
+        return task
 
     # ------------------------------------------------------------------ #
-    # Tool-Agent Hooks
+    # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
-    def _initialize_run_state(
+    def render_task(
         self,
+        task: ReActTask,
         *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> ReActRunState:
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
         """
-        Initialize run state for a single ReAct invocation.
+        Render the orchestrator system prompt, prior turns, and the current
+        running-plan snapshot for one ReAct step generation.
 
-        Renders the orchestrator system prompt from instance state, builds the
-        full message list, then pre-allocates the fixed-size running blackboard.
-        Unlike ``PlanActAgent``, ReAct performs no LLM call at initialization —
-        step planning is deferred to ``_prepare_next_batch``.
+        Absorbs the running-plan-snapshot construction formerly done by
+        ``_build_react_messages`` (removed as a standalone method).
+        ``task.task_messages`` is a 3-message thread built lazily each
+        round — cleared by ``_apply_react_step_result`` once the round
+        commits, so it is empty again at the start of every new round:
 
-        Steps
-        -----
-        1. Render ``self._system_prompts["reason_then_act"]`` with TOOLS/LIMIT/
-           CONSTANTS assembled from instance state; call ``build_messages``.
-        2. Validate ``messages`` is non-empty.
-        3. Snapshot the persisted blackboard as a copy (empty list when
-           ``context_enabled=False``); store ``valid_cache_indices`` and
-           ``failed_cache_indices`` on state.
-        4. Copy ``messages`` into a mutable working list.
-        5. Pre-allocate a fixed-size ``running_blackboard`` of
-           ``tool_calls_limit + 1`` slots.
-        6. Initialize ``step_meta`` and construct ``ReActRunState`` with ``inputs``
-           forwarded through (not interpreted here).
+        1. user — the current task, wrapped in a ``===== CURRENT TASK
+           =====`` banner (custom delimiter, matching
+           ``PlanActAgent.render_task``; avoids colliding with real code in
+           task prompts or AA's own ``<<...>>`` placeholder syntax).
+        2. assistant — a thin, directive-free snapshot: a one-line header
+           plus the running-plan data. Reads as state, not instruction,
+           matching ``ToolAgent.render_turn``'s ``CACHED STEPS`` convention.
+        3. user — the per-round instruction. Deliberately omits any rule
+           already owned by ``ORCHESTRATOR_PROMPT``'s ``RUNTIME STATE``
+           section (descriptions, result_ref usage, observable_result
+           semantics, don't-copy-into-args); carries only what's new each
+           round: the produce-next-call/return directive, an unconditional
+           anti-duplication reminder, a FAILED-reference warning shown only
+           when this round's snapshot contains a FAILED entry, the
+           output-format directive, and the duration bound.
 
-        Returns
-        -------
-        ReActRunState
-
-        Raises
-        ------
-        ToolAgentError
-            If the built message list is empty.
+        EXECUTED steps are rendered with ``result_ref``, ``run_id``, and
+        optionally ``observable_result``. FAILED steps are rendered with
+        ``status="FAILED"`` and ``error``; they carry no ``result_ref`` (so
+        the LLM cannot attempt to reference a non-existent result).
         """
         limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
         render_context = {
@@ -630,133 +531,167 @@ class ReActAgent(ToolAgent):
             ToolAgent.LIMIT_FIELD: limit_text,
             ToolAgent.CONSTANTS_FIELD: self.constants_context(),
         }
-        system = self._system_prompts["reason_then_act"].render(render_context)
-        messages = self.build_messages(system, turns, prompt)
-        if not messages:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: messages must be non-empty.")
+        system = self._render_system_message(task, render_context)
+        historic = self._render_historic_messages(task)
+
+        if not task.task_messages:
+            prefix_len = task.next_step_index
+            max_duration = max(0, self._tool_calls_limit - prefix_len)
+
+            running_records: list[dict[str, Any]] = []
+            for idx in range(prefix_len):
+                slot = task.running_blackboard[idx]
+
+                if slot.is_executed():
+                    record: dict[str, Any] = {
+                        STEP_FIELD: slot.step,
+                        DESCRIPTION_FIELD: task.step_meta[idx].description,
+                        TOOL_FIELD: slot.tool,
+                        ARGS_FIELD: slot.args,
+                        "result_ref": f"<<__s{idx}__>>",
+                        "run_id": slot.result.run_id,
+                    }
+                    if task.step_meta[idx].observable > 0:
+                        record["observable_result"] = self._preview_blackboard_result(slot.result.result)
+                    running_records.append(record)
+
+                elif slot.is_failed():
+                    running_records.append({
+                        STEP_FIELD: slot.step,
+                        DESCRIPTION_FIELD: task.step_meta[idx].description,
+                        TOOL_FIELD: slot.tool,
+                        ARGS_FIELD: slot.args,
+                        "status": "FAILED",
+                        "error": str(slot.error),
+                    })
+                # Empty/PLANNED slots are not yet part of the running plan; skip.
+
+            if running_records:
+                snapshot_text = (
+                    f"STEPS 0-{prefix_len - 1} SO FAR:\n\n"
+                    + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
+                )
+            else:
+                snapshot_text = "STEPS SO FAR:\nNo steps executed yet."
+
+            task.task_messages = [
+                {
+                    "role": "user",
+                    "content": f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK =====",
+                },
+                {"role": "assistant", "content": snapshot_text},
+                {
+                    "role": "user",
+                    "content": (
+                        "Produce the NEXT BEST single tool call for the current task. "
+                        "Pick the return tool if the running plan above has completed all needed work. "
+                        "Do NOT repeat a tool call or redo work already available above or in cache — "
+                        "reuse its result_ref, cache, or constant placeholder instead of recomputing or re-deriving the value."
+                        + (
+                            " Some steps above are marked FAILED — they have no result_ref; do not reference one."
+                            if any(r.get("status") == "FAILED" for r in running_records)
+                            else ""
+                        )
+                        + " Output exactly one JSON object with keys {step, tool, args, duration, description}."
+                        + f" duration must be an int from 0 to {max_duration}."
+                    ),
+                },
+            ]
+
+        task.task_messages.extend(additional_messages or [])
+        return system + historic + task.task_messages
+
+    def _initialize_task(
+        self,
+        *,
+        turns: list[AgentRecord],
+        prompt: str,
+        inputs: dict,
+    ) -> ReActTask:
+        """
+        Initialize a ReActTask for a single ReAct invocation.
+
+        Pre-allocates the fixed-size running blackboard and stamps the
+        orchestrator system-prompt name. No LLM call here — step planning
+        is deferred to ``_prepare_next_batch``. No async override needed:
+        unlike ``PlanActAgent``, there is no blocking I/O in this hook to
+        bridge natively.
+        """
+        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
 
         cache_blackboard = (
             [slot.copy() for slot in self._blackboard] if self.context_enabled else []
         )
 
-        working_messages = [dict(m) for m in messages]
-
-        # Preallocate fixed-size run blackboard: non-return calls + 1 return call.
         running_blackboard = [BlackboardSlot(step=i) for i in range(self._tool_calls_limit + 1)]
 
-        return ReActRunState(
+        return ReActTask(
+            turns=turns,
             inputs=inputs,
-            messages=working_messages,
+            user_prompt=prompt,
+            system_prompt_name="reason_then_act",
             cache_blackboard=cache_blackboard,
             running_blackboard=running_blackboard,
             executed_steps=set(),
             prepared_steps=[],
             tool_calls_used=0,
-            llm_records=[],
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
-            is_done=False,
-            return_value=NO_VAL,
             next_step_index=0,
             step_meta=[ReActStepMeta() for _ in running_blackboard],
         )
 
-    def _generate_next_step(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        cache_blackboard: list[BlackboardSlot],
-        expected_step: int,
-        delta: list[dict[str, str]],
-        retries_used: int,
-        max_duration: int,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> tuple[BlackboardSlot, int, str, list[LLMRecord], int]:
+    def _generate_next_step(self, *, task: ReActTask) -> tuple[BlackboardSlot, int, str]:
         """
         Generate and validate one ReAct tool step, with a bounded retry loop.
 
-        Mirrors ``_generate_plan`` in structure. LLMRecord construction lives here;
-        ``_process_next_step_output`` receives the already-extracted ``parsed`` value.
-        The retry loop catches ``json.JSONDecodeError`` (JSON path) and string returns
-        from ``_process_next_step_output`` (spec-validation path), injecting structured
-        feedback into the working message thread on each failed attempt.
+        Mirrors ``_generate_plan`` in structure. ``_process_next_step_output``
+        receives the already-extracted ``parsed`` value. The retry loop
+        catches ``json.JSONDecodeError`` (JSON path) and string returns from
+        ``_process_next_step_output`` (spec-validation path), injecting
+        structured feedback as ``additional_messages`` for the next
+        ``render_task`` call on each failed attempt.
 
-        ``retries_used`` carries the shared per-run budget consumed by prior step
-        generations. The returned int is the updated value; the caller writes it back
-        to ``state.retries_used``.
-
-        LLMRecord messages convention:
-        - First attempt: ``delta`` (task user + snapshot assistant + step-request user).
-        - Retry attempt N: ``working_messages[-2:]`` (failed-output assistant + feedback user).
-
-        Observable counters are NOT decremented here — only when a step commits in
-        ``_apply_react_step_result``.
+        Observable counters are NOT decremented here — only when a step
+        commits in ``_apply_react_step_result``.
 
         Steps
         -----
-        1. Contract guards: messages empty, cache_blackboard not a list,
-           expected_step not a non-negative int → raise ToolAgentError.
-        2. Copy ``messages`` to ``working_messages``; ``max_duration`` is pre-computed
-           by the caller and passed in.
+        1. ``expected_step = task.next_step_index``; ``max_duration`` derived
+           from it.
+        2. ``additional_messages`` starts empty.
         3. Loop:
-           a. LLM call.
-           b. Construct LLMRecord (``delta`` on first attempt, ``working_messages[-2:]``
-              on retries); append to ``llm_records``.
-           c. JSON extraction — on ``json.JSONDecodeError``: check budget, inject
-              feedback, increment ``retries_used``, continue.
-           d. Spec validation via ``_process_next_step_output`` — on string return:
-              check budget, inject re-serialised step + feedback, increment, continue.
-           e. Success: return ``(slot, duration, description, llm_records, retries_used)``.
-
-        Parameters
-        ----------
-        messages : list[dict[str, str]]
-            Base LLM-facing messages. Copied locally; original unchanged.
-        cache_blackboard : list[BlackboardSlot]
-            Snapshot of persisted prior results for cache-ref validation.
-        expected_step : int
-            Authoritative plan-local step index.
-        delta : list[dict[str, str]]
-            Pre-computed new messages for the first attempt's LLMRecord.
-        retries_used : int
-            Shared budget counter on entry (retries consumed by prior steps).
+           a. ``messages = self.render_task(task, additional_messages=additional_messages)``.
+           b. LLM call.
+           c. Append an ``LLMRecord`` (``messages=list(task.task_messages)``)
+              directly onto ``task.llm_records``.
+           d. JSON extraction — on ``json.JSONDecodeError``: check
+              ``task.retries_used`` against ``self._generation_retries``,
+              raise if exhausted; else set ``additional_messages`` to the
+              feedback pair and increment ``task.retries_used``.
+           e. Spec validation via ``_process_next_step_output`` — on string
+              return: same budget check, re-serialised step + feedback as
+              ``additional_messages``, increment.
+           f. Success: return ``(slot, duration, description)``.
 
         Returns
         -------
-        tuple[BlackboardSlot, int, str, list[LLMRecord], int]
-            Validated slot, duration, description, all LLMRecords for this call
-            (one per attempt), and the updated ``retries_used``.
+        tuple[BlackboardSlot, int, str]
+            Validated slot, duration, and description.
         """
-        if not messages:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: messages must be non-empty."
-            )
-
-        if not isinstance(cache_blackboard, list):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: cache_blackboard must be a list."
-            )
-
-        if type(expected_step) is not int or expected_step < 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: expected_step must be an int >= 0; "
-                f"got {expected_step!r}."
-            )
-
-        working_messages: list[dict[str, str]] = list(messages)
-        llm_records: list[LLMRecord] = []
+        expected_step = task.next_step_index
+        max_duration = max(0, self._tool_calls_limit - expected_step)
+        additional_messages: list[dict[str, str]] = []
 
         while True:
-            engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in working_messages]})
+            messages = self.render_task(task, additional_messages=additional_messages)
+            engine_result = self._llm_engine.invoke({"messages": messages})
             raw_output: str = engine_result.result
 
-            # First attempt uses the pre-computed delta; retries use the two injected feedback messages.
-            record_messages = delta if not llm_records else list(working_messages[-2:])
-            llm_records.append(LLMRecord(
-                messages=record_messages,
+            task.llm_records.append(LLMRecord(
+                messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name="reason_then_act",
+                system_prompt_name=task.system_prompt_name,
             ))
 
             # JSON extraction
@@ -769,96 +704,70 @@ class ReActAgent(ToolAgent):
                     f"The response you produced was:\n\n{raw_output}\n\n"
                     "Produce a correctly formatted JSON object."
                 )
-                if retries_used >= self._generation_retries:
+                if task.retries_used >= self._generation_retries:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
+                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
                     )
-                working_messages.append({"role": "assistant", "content": raw_output})
-                working_messages.append({"role": "user", "content": feedback})
-                retries_used += 1
+                additional_messages = [
+                    {"role": "assistant", "content": raw_output},
+                    {"role": "user", "content": feedback},
+                ]
+                task.retries_used += 1
                 continue
 
             # Spec validation
             result = self._process_next_step_output(
                 parsed=parsed,
                 expected_step=expected_step,
-                cache_blackboard=cache_blackboard,
+                cache_blackboard=task.cache_blackboard,
                 max_duration=max_duration,
-                valid_cache_indices=valid_cache_indices,
-                failed_cache_indices=failed_cache_indices,
+                valid_cache_indices=task.valid_cache_indices,
+                failed_cache_indices=task.failed_cache_indices,
             )
             if isinstance(result, str):
                 feedback = result
-                if retries_used >= self._generation_retries:
+                if task.retries_used >= self._generation_retries:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
+                        f"after {task.retries_used + 1} attempt(s). Last error: {feedback}"
                     )
                 step_repr = json.dumps(parsed, indent=2)
-                working_messages.append({"role": "assistant", "content": step_repr})
-                working_messages.append({"role": "user", "content": (
-                    f"The step you produced contains an error:\n\n"
-                    f"{step_repr}\n\n"
-                    f"Error: {feedback}\n\n"
-                    "Reflect on this and produce a corrected step."
-                )})
-                retries_used += 1
+                additional_messages = [
+                    {"role": "assistant", "content": step_repr},
+                    {"role": "user", "content": (
+                        f"The step you produced contains an error:\n\n"
+                        f"{step_repr}\n\n"
+                        f"Error: {feedback}\n\n"
+                        "Reflect on this and produce a corrected step."
+                    )},
+                ]
+                task.retries_used += 1
                 continue
 
             slot, duration, description = result
-            return slot, duration, description, llm_records, retries_used
+            return slot, duration, description
 
-    async def _agenerate_next_step(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        cache_blackboard: list[BlackboardSlot],
-        expected_step: int,
-        delta: list[dict[str, str]],
-        retries_used: int,
-        max_duration: int,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> tuple[BlackboardSlot, int, str, list[LLMRecord], int]:
+    async def _agenerate_next_step(self, *, task: ReActTask) -> tuple[BlackboardSlot, int, str]:
         """
         Async mirror of ``_generate_next_step``: uses ``async_invoke`` for each LLM call.
 
         Full async loop — not delegated to ``asyncio.to_thread``. Retry logic,
-        feedback injection, LLMRecord accumulation, and return type are identical
-        to the sync version. The only difference is the LLM call:
-        ``await self._llm_engine.async_invoke(...)``.
+        feedback injection, and return type are identical to the sync version.
         """
-        if not messages:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: messages must be non-empty."
-            )
-
-        if not isinstance(cache_blackboard, list):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: cache_blackboard must be a list."
-            )
-
-        if type(expected_step) is not int or expected_step < 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: expected_step must be an int >= 0; "
-                f"got {expected_step!r}."
-            )
-
-        working_messages: list[dict[str, str]] = list(messages)
-        llm_records: list[LLMRecord] = []
+        expected_step = task.next_step_index
+        max_duration = max(0, self._tool_calls_limit - expected_step)
+        additional_messages: list[dict[str, str]] = []
 
         while True:
-            engine_result = await self._llm_engine.async_invoke(
-                {"messages": [dict(m) for m in working_messages]}
-            )
+            messages = self.render_task(task, additional_messages=additional_messages)
+            engine_result = await self._llm_engine.async_invoke({"messages": messages})
             raw_output: str = engine_result.result
 
-            record_messages = delta if not llm_records else list(working_messages[-2:])
-            llm_records.append(LLMRecord(
-                messages=record_messages,
+            task.llm_records.append(LLMRecord(
+                messages=list(task.task_messages),
                 llm_result=engine_result,
-                system_prompt_name="reason_then_act",
+                system_prompt_name=task.system_prompt_name,
             ))
 
             try:
@@ -870,84 +779,69 @@ class ReActAgent(ToolAgent):
                     f"The response you produced was:\n\n{raw_output}\n\n"
                     "Produce a correctly formatted JSON object."
                 )
-                if retries_used >= self._generation_retries:
+                if task.retries_used >= self._generation_retries:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
+                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
                     )
-                working_messages.append({"role": "assistant", "content": raw_output})
-                working_messages.append({"role": "user", "content": feedback})
-                retries_used += 1
+                additional_messages = [
+                    {"role": "assistant", "content": raw_output},
+                    {"role": "user", "content": feedback},
+                ]
+                task.retries_used += 1
                 continue
 
             result = self._process_next_step_output(
                 parsed=parsed,
                 expected_step=expected_step,
-                cache_blackboard=cache_blackboard,
+                cache_blackboard=task.cache_blackboard,
                 max_duration=max_duration,
-                valid_cache_indices=valid_cache_indices,
-                failed_cache_indices=failed_cache_indices,
+                valid_cache_indices=task.valid_cache_indices,
+                failed_cache_indices=task.failed_cache_indices,
             )
             if isinstance(result, str):
                 feedback = result
-                if retries_used >= self._generation_retries:
+                if task.retries_used >= self._generation_retries:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
+                        f"after {task.retries_used + 1} attempt(s). Last error: {feedback}"
                     )
                 step_repr = json.dumps(parsed, indent=2)
-                working_messages.append({"role": "assistant", "content": step_repr})
-                working_messages.append({"role": "user", "content": (
-                    f"The step you produced contains an error:\n\n"
-                    f"{step_repr}\n\n"
-                    f"Error: {feedback}\n\n"
-                    "Reflect on this and produce a corrected step."
-                )})
-                retries_used += 1
+                additional_messages = [
+                    {"role": "assistant", "content": step_repr},
+                    {"role": "user", "content": (
+                        f"The step you produced contains an error:\n\n"
+                        f"{step_repr}\n\n"
+                        f"Error: {feedback}\n\n"
+                        "Reflect on this and produce a corrected step."
+                    )},
+                ]
+                task.retries_used += 1
                 continue
 
             slot, duration, description = result
-            return slot, duration, description, llm_records, retries_used
+            return slot, duration, description
 
-    def _prepare_next_batch(self, state: ReActRunState) -> ReActRunState:
+    def _prepare_next_batch(self, task: ReActTask) -> ReActTask:
         """
         Prepare the next single-step batch via one LLM call.
 
-        ReAct generates exactly one step per turn. A temporary LLM message list is
-        assembled from the static base messages plus a running-plan snapshot; the LLM
-        returns a single planned step that is validated, placeholder-resolved, and
-        stamped into the preallocated running blackboard.
-
-        The temporary running-plan messages do not persist between turns; state.messages
-        remains the static base message list for this invoke.
+        ReAct generates exactly one step per turn; ``_generate_next_step``
+        handles rendering (via ``render_task``), the LLM call, JSON
+        extraction, spec validation, and generation retries.
 
         Execution
         ~~~~~~~~~
         1. **Guard**: ``prepared_steps`` must be empty.
-        2. **Snapshot messages**: compute ``max_duration`` and call
-           ``_build_react_messages`` to assemble the temporary message thread and
-           ``delta`` for the LLMRecord.
-        3. **Step generation**: call ``_generate_next_step``, which handles the LLM
-           call, JSON extraction, spec validation, and generation retries. Returns one
-           planned ``BlackboardSlot``, an observability duration, a step description,
-           LLMRecords for this call, and the updated ``retries_used`` budget.
+        2. **Validate state**: cursor bounds, prior-step processing.
+        3. **Step generation**: call ``_generate_next_step``, which returns
+           one planned ``BlackboardSlot``, an observability duration, and a
+           step description — ``task.llm_records``/``task.retries_used`` are
+           mutated directly inside it.
         4. **Commit**: delegate to ``_apply_react_step_result`` — decrement
-           observability counters on prior steps, stamp the slot into the running
-           blackboard, resolve placeholders, mark prepared, update ``step_meta``.
-        5. **Cursor**: ``next_step_index`` advances by 1; ``prepared_steps`` is
-           ``[prefix_len]``.
-
-        Parameters
-        ----------
-        state : ReActRunState
-            Current run state. ``prepared_steps`` must be empty; ``next_step_index``
-            identifies the preallocated slot to fill.
-
-        Returns
-        -------
-        ReActRunState
-            Updated state with one prepared step and an incremented
-            ``next_step_index``.
+           observability counters on prior steps, stamp the slot into the
+           running blackboard, resolve placeholders, mark prepared, update
+           ``step_meta``, clear ``task.task_messages``.
 
         Raises
         ------
@@ -955,63 +849,27 @@ class ReActAgent(ToolAgent):
             If ``prepared_steps`` is non-empty, the cursor is out of bounds, or
             the generation retry budget is exhausted.
         """
-        if state.prepared_steps:
+        if task.prepared_steps:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
             )
 
-        prefix_len = state.next_step_index
-        self._validate_react_prepare_state(state)
-        max_duration = max(0, self._tool_calls_limit - prefix_len)
-        working_messages, delta = self._build_react_messages(state, prefix_len, max_duration=max_duration)
+        prefix_len = task.next_step_index
+        self._validate_react_prepare_state(task)
+        generated_slot, observe_duration, description = self._generate_next_step(task=task)
+        return self._apply_react_step_result(task, prefix_len, generated_slot, observe_duration, description)
 
-        generated_slot, observe_duration, description, llm_records, new_retries_used = (
-            self._generate_next_step(
-                messages=working_messages,
-                cache_blackboard=state.cache_blackboard,
-                expected_step=prefix_len,
-                delta=delta,
-                retries_used=state.retries_used,
-                max_duration=max_duration,
-                valid_cache_indices=state.valid_cache_indices,
-                failed_cache_indices=state.failed_cache_indices,
-            )
-        )
-        state.retries_used = new_retries_used
-        return self._apply_react_step_result(
-            state, prefix_len, generated_slot, observe_duration, description, llm_records,
-            max_duration=max_duration,
-        )
-
-    async def _aprepare_next_batch(self, state: ReActRunState) -> ReActRunState:
+    async def _aprepare_next_batch(self, task: ReActTask) -> ReActTask:
         """
         Async override: uses ``_agenerate_next_step`` so the per-step LLM call
         goes through ``async_invoke`` rather than a worker thread.
         """
-        if state.prepared_steps:
+        if task.prepared_steps:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
             )
 
-        prefix_len = state.next_step_index
-        self._validate_react_prepare_state(state)
-        max_duration = max(0, self._tool_calls_limit - prefix_len)
-        working_messages, delta = self._build_react_messages(state, prefix_len, max_duration=max_duration)
-
-        generated_slot, observe_duration, description, llm_records, new_retries_used = (
-            await self._agenerate_next_step(
-                messages=working_messages,
-                cache_blackboard=state.cache_blackboard,
-                expected_step=prefix_len,
-                delta=delta,
-                retries_used=state.retries_used,
-                max_duration=max_duration,
-                valid_cache_indices=state.valid_cache_indices,
-                failed_cache_indices=state.failed_cache_indices,
-            )
-        )
-        state.retries_used = new_retries_used
-        return self._apply_react_step_result(
-            state, prefix_len, generated_slot, observe_duration, description, llm_records,
-            max_duration=max_duration,
-        )
+        prefix_len = task.next_step_index
+        self._validate_react_prepare_state(task)
+        generated_slot, observe_duration, description = await self._agenerate_next_step(task=task)
+        return self._apply_react_step_result(task, prefix_len, generated_slot, observe_duration, description)

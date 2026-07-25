@@ -12,7 +12,7 @@ load_dotenv()  # take environment variables from .env file (if exists)
 logging.basicConfig(level=logging.INFO)
 
 # 1) LLM engine (model/key via env)
-llm = OpenAIEngine(model="gpt-4o-mini")
+llm = OpenAIEngine(model="gpt-4o")
 
 # 2) ReAct-style Orchestrator (iterative tool-use)
 orchestrator = ReActAgent(
@@ -30,14 +30,17 @@ orchestrator.batch_register(MATH_TOOLS)
 orchestrator.batch_register(CONSOLE_TOOLS)
 
 # 4) Register the pi constant
-orchestrator.register_constant("PI", math.pi, "Mathematical constant `PI`")
+orchestrator.register_constant("PI", math.pi, "Use ONLY THIS constant in place of a literal or float for any calculations that involve it.")
 
 # 4) Task (schema-first: mapping with 'prompt')
 task = """
-Complete the following problem:
-1. Compute the volume of a cylinder with a radius of 2 and a height of 10 [V(r, h) = pi * r^2 * h].
-2. Then print the result in the format "The volume of the cylinder is: <result>".
-Return None.
+1) Compute the area of a circle with a radius of 5 [A(r) = pi * r^2].
+2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
+3) Compute the volume of a cylinder with radius of 2 and height of 10 [V(r, h) = pi * r^2 * h].
+
+Do NOT skip any steps, and do NOT attempt to combine them into a single calculation.
+
+Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN ORDER ABOVE.
 """
 
 final_result = orchestrator.invoke({"prompt": task})

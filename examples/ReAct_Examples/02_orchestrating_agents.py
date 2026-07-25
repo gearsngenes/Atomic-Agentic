@@ -57,8 +57,7 @@ reviewer = BasicAgent(
         "- Syntax or semantic errors in the code (high priority fixes)\n"
         "- Redundant or duplicate code that could be refactored into reusable chunks\n"
         "- Overly complex or irrelevant/unused code that isn't needed for the codebuilder's task\n\n"
-        "If none of these types of significant errors are present in a major way, "
-        "return a single 'Approved' flag."
+        "If the code appears clean enough and lacks these errors to a significant degree, reply ONLY with 'Approved'."
     ),
     context_enabled=True,
     pre_invoke=reviewer_prestep,
@@ -104,10 +103,10 @@ out_dir = Path("examples/output_markdowns")
 out_dir.mkdir(exist_ok=True)
 filepath = out_dir / "ReAct_Code.py"
 filepath.write_text(result, encoding="utf-8")
-print(f"\nâœ“ Final Draft code saved to: {filepath.resolve()}")
+print(f"\n>> Final Draft code saved to: {filepath.resolve()}")
 filepath = out_dir / "ReAct_Blackboard.txt"
 filepath.write_text(pformat(orchestrator.blackboard), encoding="utf-8")
-print(f"\nâœ“ Blackboard content saved to: {filepath.resolve()}")
+print(f"\n>> Blackboard content saved to: {filepath.resolve()}")
 filepath = out_dir / "ReAct_Record.json"
 filepath.write_text(serialized_record, encoding="utf-8")
-print(f"\nâœ“ Serialized record saved to: {filepath.resolve()}")
+print(f"\n>> Serialized record saved to: {filepath.resolve()}")

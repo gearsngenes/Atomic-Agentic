@@ -52,7 +52,7 @@ from ..core import AtomicInvokable
 from ..constants.core import NO_VAL
 from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError
-from ..models.agents import PlanActRunState
+from ..models.agents.tasks import PlanActTask
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..utils.agents import extract_dependencies
@@ -68,11 +68,11 @@ class PlanActAgent(ToolAgent):
 
     **Design**: PlanActAgent implements a **static planning** strategy:
 
-    1. **Initialization** (``_initialize_run_state``)
+    1. **Initialization** (``_initialize_task``)
        - LLM generates complete plan as a JSON array of steps (one-shot)
        - Each step: ``{"tool": "<name>", "args": {...}}``, optionally with "await"
        - Plan is normalized (return moved to end, added if missing)
-       - Compiled into topologically-sorted batches using dependency analysis
+       - Compiled into topologically-sorted batches via ``_finalize_planact_task``
        - Running blackboard allocated with slots for all planned steps
 
     2. **Compilation**
@@ -82,9 +82,11 @@ class PlanActAgent(ToolAgent):
          level execute together)
        - Return step is always isolated as the final batch
 
-    3. **Execution**
-       - ``_prepare_next_batch()`` reads next batch from ``state.batches[state.batch_index]``
+    3. **Execution** (``_progress``, base ``ToolAgent``)
+       - ``_prepare_next_batch()`` reads next batch from ``task.batches[task.batch_index]``
        - Resolves placeholders in parallel-executable steps
+       - ``_execute_prepared_batch()`` (base ``ToolAgent``) runs the batch concurrently;
+         sets ``task.complete`` when the return step executes
        - Increments batch_index; loop continues until all batches consumed
 
     Advantages
@@ -374,22 +376,6 @@ class PlanActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Private helpers
     # ------------------------------------------------------------------ #
-    def _setup_plan_init(
-        self,
-        *,
-        messages: list[dict[str, str]],
-    ) -> tuple[list[dict[str, str]], list[BlackboardSlot]]:
-        """Validate messages, copy to working list, snapshot cache blackboard."""
-        if not messages:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: messages must be non-empty."
-            )
-        working_messages = [dict(m) for m in messages]
-        cache_blackboard: list[BlackboardSlot] = (
-            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
-        )
-        return working_messages, cache_blackboard
-
     def _process_plan_output(
         self,
         *,
@@ -447,18 +433,282 @@ class PlanActAgent(ToolAgent):
 
         return normalized
 
-    def _build_planact_run_state(
+    # ------------------------------------------------------------------ #
+    # Task-lifecycle hooks
+    # ------------------------------------------------------------------ #
+    def render_task(
+        self,
+        task: PlanActTask,
+        *,
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """
+        Render the planning system prompt, prior turns, and this
+        invocation's decompose-into-plan request.
+
+        ``task.task_messages`` is a single message the first time it's
+        built — ``task.user_prompt`` wrapped in a ``===== CURRENT TASK
+        =====`` banner (a custom delimiter, not markdown fences, to avoid
+        colliding with real code in task prompts or AA's own ``<<...>>``
+        placeholder syntax) followed by the decompose-into-JSON
+        instruction; generation retries extend it via
+        ``additional_messages``.
+        """
+        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        render_context = {
+            ToolAgent.TOOLS_FIELD: self.actions_context(),
+            ToolAgent.LIMIT_FIELD: limit_text,
+            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
+        }
+        system = self._render_system_message(task, render_context)
+        historic = self._render_historic_messages(task)
+        if not task.task_messages:
+            task.task_messages = [{
+                "role": "user",
+                "content": (
+                    f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK =====\n\n"
+                    "Using the current task above and the prior chat history, construct "
+                    "a valid JSON array that decomposes it into tool-call steps."
+                ),
+            }]
+        task.task_messages.extend(additional_messages or [])
+        return system + historic + task.task_messages
+
+    def _generate_plan(self, *, task: PlanActTask) -> list[BlackboardSlot]:
+        """
+        Generate, parse, and validate a complete PlanAct running blackboard, with
+        optional retry on generation failures.
+
+        Lifecycle
+        ---------
+        1. ``additional_messages`` starts empty.
+        2. Loop:
+           a. Render this attempt's send payload via ``render_task``.
+           b. Call the LLM engine; capture ``engine_result``.
+           c. Append an ``LLMRecord`` (``messages=list(task.task_messages)``,
+              which ``render_task`` has already extended for this attempt)
+              to ``task.llm_records``.
+           d. Try JSON extraction (``_extract_from_json_string``). On
+              failure: check ``task.retries_used`` against
+              ``self._generation_retries``; if exhausted raise; else inject
+              JSON-error feedback as ``additional_messages`` for the next
+              attempt, increment ``task.retries_used``, continue.
+           e. Try spec validation (``_process_plan_output``). On failure:
+              same budget check/feedback-injection pattern as (d).
+           f. On success: return the validated planned slots.
+
+        Parameters
+        ----------
+        task : PlanActTask
+            Current task — supplies ``cache_blackboard``/
+            ``valid_cache_indices``/``failed_cache_indices`` for validation
+            and accumulates ``llm_records``/``retries_used`` directly.
+
+        Returns
+        -------
+        list[BlackboardSlot]
+            Fully normalized and validated planned slots (not yet assigned
+            onto ``task`` — the caller finalizes via
+            ``_finalize_planact_task``).
+
+        Raises
+        ------
+        ToolAgentError
+            If generation output cannot be parsed or validated after all
+            allowed attempts are exhausted.
+        """
+        additional_messages: list[dict[str, str]] = []
+
+        while True:
+            messages = self.render_task(task, additional_messages=additional_messages)
+            engine_result = self._llm_engine.invoke({"messages": messages})
+            raw_output: str = engine_result.result
+
+            task.llm_records.append(LLMRecord(
+                messages=list(task.task_messages),
+                llm_result=engine_result,
+                system_prompt_name=task.system_prompt_name,
+            ))
+
+            # JSON extraction
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                feedback = (
+                    f"Your output could not be parsed as valid JSON.\n\n"
+                    f"Decoder error: {exc}\n\n"
+                    f"The response you produced was:\n\n{raw_output}\n\n"
+                    "Produce a correctly formatted JSON array."
+                )
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error is JSONDecodeError: {exc}"
+                    )
+                additional_messages = [
+                    {"role": "assistant", "content": raw_output},
+                    {"role": "user", "content": feedback},
+                ]
+                task.retries_used += 1
+                continue
+
+            # Spec validation
+            result = self._process_plan_output(
+                parsed=parsed,
+                cache_blackboard=task.cache_blackboard,
+                valid_cache_indices=task.valid_cache_indices,
+                failed_cache_indices=task.failed_cache_indices,
+            )
+            if isinstance(result, str):
+                feedback = result
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error: {feedback}"
+                    )
+                plan_repr = json.dumps(parsed, indent=2)
+                additional_messages = [
+                    {"role": "assistant", "content": plan_repr},
+                    {"role": "user", "content": feedback},
+                ]
+                task.retries_used += 1
+                continue
+
+            return result
+
+    async def _agenerate_plan(self, *, task: PlanActTask) -> list[BlackboardSlot]:
+        """Async mirror of ``_generate_plan``: uses ``async_invoke`` for each LLM call.
+        Retry logic, feedback injection, and return type are identical."""
+        additional_messages: list[dict[str, str]] = []
+
+        while True:
+            messages = self.render_task(task, additional_messages=additional_messages)
+            engine_result = await self._llm_engine.async_invoke({"messages": messages})
+            raw_output: str = engine_result.result
+
+            task.llm_records.append(LLMRecord(
+                messages=list(task.task_messages),
+                llm_result=engine_result,
+                system_prompt_name=task.system_prompt_name,
+            ))
+
+            # JSON extraction
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                feedback = (
+                    f"Your output could not be parsed as valid JSON.\n\n"
+                    f"Decoder error: {exc}\n\n"
+                    f"The response you produced was:\n\n{raw_output}\n\n"
+                    "Produce a correctly formatted JSON array."
+                )
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error is JSONDecodeError: {exc}"
+                    )
+                additional_messages = [
+                    {"role": "assistant", "content": raw_output},
+                    {"role": "user", "content": feedback},
+                ]
+                task.retries_used += 1
+                continue
+
+            # Spec validation
+            result = self._process_plan_output(
+                parsed=parsed,
+                cache_blackboard=task.cache_blackboard,
+                valid_cache_indices=task.valid_cache_indices,
+                failed_cache_indices=task.failed_cache_indices,
+            )
+            if isinstance(result, str):
+                feedback = result
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error: {feedback}"
+                    )
+                plan_repr = json.dumps(parsed, indent=2)
+                additional_messages = [
+                    {"role": "assistant", "content": plan_repr},
+                    {"role": "user", "content": feedback},
+                ]
+                task.retries_used += 1
+                continue
+
+            return result
+
+    def _initialize_task(
         self,
         *,
-        planned_slots: list[BlackboardSlot],
-        working_messages: list[dict[str, str]],
-        cache_blackboard: list[BlackboardSlot],
-        llm_records: list[LLMRecord],
+        turns: list[AgentRecord],
+        prompt: str,
         inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> PlanActRunState:
-        """Validate plan structure, compile batches, and construct PlanActRunState."""
+    ) -> PlanActTask:
+        """
+        One-shot plan generation and compilation into concurrent batches.
+
+        Constructs the ``PlanActTask`` early — before generation runs —
+        since ``_generate_plan`` needs an existing task to call
+        ``render_task`` against. Computes ``valid_cache_indices``/
+        ``failed_cache_indices`` internally via ``_compute_cache_index_sets``
+        — this hook's shared base signature doesn't receive them.
+        """
+        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
+        cache_blackboard = (
+            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
+        )
+        task = PlanActTask(
+            turns=turns,
+            inputs=inputs,
+            user_prompt=prompt,
+            system_prompt_name="plan_first",
+            cache_blackboard=cache_blackboard,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+        )
+        planned_slots = self._generate_plan(task=task)
+        self._finalize_planact_task(task, planned_slots)
+        task.task_messages.clear()
+        return task
+
+    async def _async_initialize_task(
+        self,
+        *,
+        turns: list[AgentRecord],
+        prompt: str,
+        inputs: dict,
+    ) -> PlanActTask:
+        """
+        Async override: uses ``_agenerate_plan`` so the planning LLM call
+        goes through ``async_invoke`` rather than a worker thread — real
+        override, not the inherited ``asyncio.to_thread`` default, since
+        this hook performs real LLM I/O.
+        """
+        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
+        cache_blackboard = (
+            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
+        )
+        task = PlanActTask(
+            turns=turns,
+            inputs=inputs,
+            user_prompt=prompt,
+            system_prompt_name="plan_first",
+            cache_blackboard=cache_blackboard,
+            valid_cache_indices=valid_cache_indices,
+            failed_cache_indices=failed_cache_indices,
+        )
+        planned_slots = await self._agenerate_plan(task=task)
+        self._finalize_planact_task(task, planned_slots)
+        task.task_messages.clear()
+        return task
+
+    def _finalize_planact_task(
+        self,
+        task: PlanActTask,
+        planned_slots: list[BlackboardSlot],
+    ) -> None:
+        """Validate plan structure, compile batches, and assign onto ``task`` in place."""
         if not planned_slots:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: internal error: generated plan is empty."
@@ -475,380 +725,14 @@ class PlanActAgent(ToolAgent):
             return_idx=return_idx,
         )
 
-        return PlanActRunState(
-            inputs=inputs,
-            messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            running_blackboard=planned_slots,
-            executed_steps=set(),
-            prepared_steps=[],
-            tool_calls_used=0,
-            llm_records=list(llm_records),
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-            is_done=False,
-            return_value=NO_VAL,
-            batches=batches,
-            batch_index=0,
-        )
-
-    def _generate_plan(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        cache_blackboard: list[BlackboardSlot],
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> tuple[list[BlackboardSlot], list[LLMRecord]]:
-        """
-        Generate, parse, and validate a complete PlanAct running blackboard, with
-        optional retry on generation failures.
-
-        Lifecycle
-        ---------
-        1. Validate that ``messages`` is non-empty.
-        2. Initialize ``working_messages`` as a mutable copy of ``messages``; initialize
-           ``llm_records`` list and ``retries_used`` counter.
-        3. Loop:
-           a. Call the LLM engine with ``working_messages``; capture ``engine_result``.
-           b. Construct an ``LLMRecord`` from the last working message and
-              ``engine_result``; append to ``llm_records``.
-           c. Try JSON extraction (``_extract_from_json_string``). On failure: check
-              budget; if exhausted re-raise; else inject JSON-error feedback and
-              continue.
-           d. Try spec validation (``_process_plan_output``). On failure: check budget;
-              if exhausted re-raise; else inject spec-error feedback and continue.
-           e. On success: return ``(planned_slots, llm_records)``.
-
-        Parameters
-        ----------
-        messages : list[dict[str, str]]
-            LLM-facing messages already built by the base Agent message pipeline.
-        cache_blackboard : list[BlackboardSlot]
-            Snapshot of persisted blackboard entries available to this invoke.
-
-        Returns
-        -------
-        tuple[list[BlackboardSlot], list[LLMRecord]]
-            Fully normalized and validated planned slots, plus one ``LLMRecord`` per
-            generation attempt (including failed attempts).
-
-        Raises
-        ------
-        ToolAgentError
-            If generation output cannot be parsed or validated after all allowed
-            attempts are exhausted, or if ``messages`` is empty.
-        """
-        if not messages:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: messages must be non-empty."
-            )
-
-        working_messages: list[dict[str, str]] = list(messages)
-        llm_records: list[LLMRecord] = []
-        retries_used: int = 0
-
-        while True:
-            engine_result = self._llm_engine.invoke({"messages": [dict(m) for m in working_messages]})
-            raw_output: str = engine_result.result
-
-            # PlanAct delta: the current user turn on the first attempt (1
-            # element); on a retry, the two messages injected since the prior
-            # attempt (assistant's bad output + feedback). ReAct uses the same
-            # first-vs-retry split via its own `delta` parameter.
-            record_messages = (
-                [working_messages[-1]] if not llm_records else list(working_messages[-2:])
-            )
-            llm_records.append(LLMRecord(
-                messages=record_messages,
-                llm_result=engine_result,
-                system_prompt_name="plan_first",
-            ))
-
-            # JSON extraction
-            try:
-                parsed = self._extract_from_json_string(raw_output)
-            except json.JSONDecodeError as exc:
-                feedback = (
-                    f"Your output could not be parsed as valid JSON.\n\n"
-                    f"Decoder error: {exc}\n\n"
-                    f"The response you produced was:\n\n{raw_output}\n\n"
-                    "Produce a correctly formatted JSON array."
-                )
-                if retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {retries_used + 1} attempt(s). Last error is JSONDecodeError: {exc}"
-                    )
-                working_messages.append({"role": "assistant", "content": raw_output})
-                working_messages.append({"role": "user", "content": feedback})
-                retries_used += 1
-                continue
-
-            # Spec validation
-            result = self._process_plan_output(
-                parsed=parsed,
-                cache_blackboard=cache_blackboard,
-                valid_cache_indices=valid_cache_indices,
-                failed_cache_indices=failed_cache_indices,
-            )
-            if isinstance(result, str):
-                feedback = result
-                if retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
-                    )
-                plan_repr = json.dumps(parsed, indent=2)
-                working_messages.append({"role": "assistant", "content": plan_repr})
-                working_messages.append({"role": "user", "content": feedback})
-                retries_used += 1
-                continue
-
-            return result, llm_records
-
-    async def _agenerate_plan(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        cache_blackboard: list[BlackboardSlot],
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> tuple[list[BlackboardSlot], list[LLMRecord]]:
-        """Async mirror of ``_generate_plan``: uses ``async_invoke`` for each LLM call.
-        Retry logic, feedback injection, and return type are identical."""
-        if not messages:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: messages must be non-empty."
-            )
-
-        working_messages: list[dict[str, str]] = list(messages)
-        llm_records: list[LLMRecord] = []
-        retries_used: int = 0
-
-        while True:
-            engine_result = await self._llm_engine.async_invoke({"messages": [dict(m) for m in working_messages]})
-            raw_output: str = engine_result.result
-
-            record_messages = (
-                [working_messages[-1]] if not llm_records else list(working_messages[-2:])
-            )
-            llm_records.append(LLMRecord(
-                messages=record_messages,
-                llm_result=engine_result,
-                system_prompt_name="plan_first",
-            ))
-
-            # JSON extraction
-            try:
-                parsed = self._extract_from_json_string(raw_output)
-            except json.JSONDecodeError as exc:
-                feedback = (
-                    f"Your output could not be parsed as valid JSON.\n\n"
-                    f"Decoder error: {exc}\n\n"
-                    f"The response you produced was:\n\n{raw_output}\n\n"
-                    "Produce a correctly formatted JSON array."
-                )
-                if retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {retries_used + 1} attempt(s). Last error is JSONDecodeError: {exc}"
-                    )
-                working_messages.append({"role": "assistant", "content": raw_output})
-                working_messages.append({"role": "user", "content": feedback})
-                retries_used += 1
-                continue
-
-            # Spec validation
-            result = self._process_plan_output(
-                parsed=parsed,
-                cache_blackboard=cache_blackboard,
-                valid_cache_indices=valid_cache_indices,
-                failed_cache_indices=failed_cache_indices,
-            )
-            if isinstance(result, str):
-                feedback = result
-                if retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {retries_used + 1} attempt(s). Last error: {feedback}"
-                    )
-                plan_repr = json.dumps(parsed, indent=2)
-                working_messages.append({"role": "assistant", "content": plan_repr})
-                working_messages.append({"role": "user", "content": feedback})
-                retries_used += 1
-                continue
-
-            return result, llm_records
-
-    def _initialize_run_state(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> PlanActRunState:
-        """
-        One-shot plan generation and compilation into concurrent batches.
-
-        Renders the planning system prompt from instance state, builds the full
-        message list, then delegates plan generation/normalization/validation to
-        ``_generate_plan(...)`` and compiles the resulting planned slots into
-        topologically-sorted concurrent batches.
-
-        Execution Steps
-        ~~~~~~~~~~~~~~~
-        1. Render ``self._system_prompts["plan_first"]`` with TOOLS/LIMIT/CONSTANTS
-           assembled from instance state; call ``build_messages`` to produce messages.
-        2. ``_setup_plan_init``: validate messages; copy to working list; snapshot
-           cache blackboard.
-        3. ``_generate_plan``: generate the plan via LLM, returning
-           ``(planned_slots, llm_records)``.
-        4. ``_build_planact_run_state``: compile batches and construct the
-           ``PlanActRunState`` with the generated slots, LLM records, and ``inputs``
-           (forwarded through, not interpreted here).
-
-        Returns
-        -------
-        PlanActRunState
-            Initialized state ready for the base template-method loop.
-
-        Raises
-        ------
-        ToolAgentError
-            On any of: empty messages, empty or invalid plan, multiple return steps,
-            unknown tool references, out-of-range placeholder references, invalid plan
-            dependencies, or budget exceeded.
-        """
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        render_context = {
-            ToolAgent.TOOLS_FIELD: self.actions_context(),
-            ToolAgent.LIMIT_FIELD: limit_text,
-            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
-        }
-        system = self._system_prompts["plan_first"].render(render_context)
-        messages = self.build_messages(system, turns, prompt)
-        working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
-        planned_slots, llm_records = self._generate_plan(
-            messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-        return self._build_planact_run_state(
-            planned_slots=planned_slots,
-            working_messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            llm_records=llm_records,
-            inputs=inputs,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-
-    async def _ainitialize_run_state(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> PlanActRunState:
-        """
-        Async override: uses ``_agenerate_plan`` so the planning LLM call
-        goes through ``async_invoke`` rather than a worker thread.
-        """
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        render_context = {
-            ToolAgent.TOOLS_FIELD: self.actions_context(),
-            ToolAgent.LIMIT_FIELD: limit_text,
-            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
-        }
-        system = self._system_prompts["plan_first"].render(render_context)
-        messages = self.build_messages(system, turns, prompt)
-        working_messages, cache_blackboard = self._setup_plan_init(messages=messages)
-        planned_slots, llm_records = await self._agenerate_plan(
-            messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-        return self._build_planact_run_state(
-            planned_slots=planned_slots,
-            working_messages=working_messages,
-            cache_blackboard=cache_blackboard,
-            llm_records=llm_records,
-            inputs=inputs,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-
-    def _compile_batches_from_deps(
-        self,
-        *,
-        planned_slots: list[BlackboardSlot],
-        return_idx: int,
-    ) -> list[list[int]]:
-        """
-        Compile concurrent batches from plan-local scheduling dependencies.
-
-        For non-return step i:
-          scheduling_deps[i] = step_dependencies + await_step if present
-          level[i] = 0 if scheduling_deps are empty else
-          1 + max(level[d] for d in scheduling_deps)
-
-        step_dependencies represent data dependencies extracted from <<__sN__>>
-        placeholders. await_step is an explicit scheduling barrier and is folded into
-        dependencies only locally while compiling execution batches.
-
-        Return step is always isolated as its own final batch [return_idx].
-        """
-        if not planned_slots:
-            raise ToolAgentError(f"{type(self).__name__}.{self.name}: cannot compile empty plan.")
-
-        if (
-            return_idx != len(planned_slots) - 1
-            or planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME
-        ):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: return_idx mismatch during batch compilation."
-            )
-
-        levels: dict[int, int] = {}
-
-        # Non-return only.
-        for i in range(return_idx):
-            slot = planned_slots[i]
-
-            scheduling_deps: set[int] = set(slot.step_dependencies)
-            if slot.await_step is not NO_VAL:
-                scheduling_deps.add(slot.await_step)
-
-            if not scheduling_deps:
-                levels[i] = 0
-            else:
-                levels[i] = 1 + max(levels[d] for d in scheduling_deps)
-
-        buckets: dict[int, list[int]] = {}
-        for i in range(return_idx):
-            lvl = levels.get(i, 0)
-            buckets.setdefault(lvl, []).append(i)
-
-        batches: list[list[int]] = []
-        for lvl in sorted(buckets):
-            batch = sorted(buckets[lvl])
-            if batch:
-                batches.append(batch)
-
-        batches.append([return_idx])
-        return batches
+        task.running_blackboard = planned_slots
+        task.batches = batches
+        task.batch_index = 0
 
     # ------------------------------------------------------------------ #
     # Prepare next batch
     # ------------------------------------------------------------------ #
-    def _prepare_next_batch(self, state: PlanActRunState) -> PlanActRunState:
+    def _prepare_next_batch(self, task: PlanActTask) -> PlanActTask:
         """
         Prepare the next pre-compiled batch for execution.
 
@@ -858,8 +742,8 @@ class PlanActAgent(ToolAgent):
 
         Execution
         ~~~~~~~~~
-        1. **Validate state**: prepared_steps must be empty
-        2. **Read next batch**: Get batch indices from ``state.batches[state.batch_index]``
+        1. **Validate task**: prepared_steps must be empty
+        2. **Read next batch**: Get batch indices from ``task.batches[task.batch_index]``
         3. **Validate non-empty**: Batch must have at least one step
         4. **For each step in batch**:
            - Validate bounds: index must be within running_blackboard
@@ -869,12 +753,12 @@ class PlanActAgent(ToolAgent):
            - **Cascade check** (``fail_fast=False`` only): if any ``step_dependencies``
              entry is FAILED in the running blackboard, the return tool raises immediately;
              non-return steps are marked FAILED and skipped (not added to prepared_steps)
-           - Call ``_resolve_placeholders(slot.args, state=state)``
+           - Call ``_resolve_placeholders(slot.args, task=task)``
            - Store resolved args in ``slot.resolved_args``
            - Mark slot ``status="prepared"``
         5. **Set prepared_steps**: Indices of steps that passed the cascade check and were
            prepared; may be empty if all steps in the batch were cascade-failed
-        6. **Advance cursor**: Increment ``state.batch_index`` for next iteration
+        6. **Advance cursor**: Increment ``task.batch_index`` for next iteration
 
         Concurrency
         ~~~~~~~~~~~
@@ -883,13 +767,13 @@ class PlanActAgent(ToolAgent):
 
         Parameters
         ----------
-        state : PlanActRunState
-            Current run state with initialized batches and batch_index cursor
+        task : PlanActTask
+            Current task with initialized batches and batch_index cursor
 
         Returns
         -------
-        PlanActRunState
-            Updated state with prepared_steps populated, batch_index incremented
+        PlanActTask
+            Updated task with prepared_steps populated, batch_index incremented
 
         Raises
         ------
@@ -900,23 +784,23 @@ class PlanActAgent(ToolAgent):
             - Batch validation failure
             - Placeholder resolution failure
         """
-        if state.prepared_steps:
+        if task.prepared_steps:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
             )
 
-        if state.batch_index >= len(state.batches):
+        if task.batch_index >= len(task.batches):
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: no remaining batches to prepare (batch_index={state.batch_index})."
+                f"{type(self).__name__}.{self.name}: no remaining batches to prepare (batch_index={task.batch_index})."
             )
 
-        batch = state.batches[state.batch_index]
+        batch = task.batches[task.batch_index]
         if not batch:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: encountered empty batch at index {state.batch_index}."
+                f"{type(self).__name__}.{self.name}: internal error: encountered empty batch at index {task.batch_index}."
             )
 
-        board = state.running_blackboard
+        board = task.running_blackboard
         board_len = len(board)
 
         # Resolve args for all steps in the batch; resolver enforces readiness.
@@ -963,31 +847,11 @@ class PlanActAgent(ToolAgent):
                 )
 
             # Cascade-fail: when fail_fast=False, propagate failures through arg dependencies.
-            # Use extract_dependencies(slot.args) rather than slot.step_dependencies because
-            # the return slot's step_dependencies is forced to include ALL prior steps for
-            # scheduling; only steps actually referenced in args need to resolve successfully.
-            if not self._fail_fast:
-                failed_arg_deps = sorted(
-                    d
-                    for d in extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
-                    if board[d].is_failed()
-                )
-                if failed_arg_deps:
-                    dep_str = ", ".join(str(d) for d in failed_arg_deps)
-                    if slot.tool == RETURN_TOOL_FULL_NAME:
-                        raise ToolAgentError(
-                            f"{type(self).__name__}.{self.name}: return step {i} cannot execute; "
-                            f"dependency step(s) {dep_str} failed."
-                        )
-                    slot.error = ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: step {i} skipped — "
-                        f"dependency step(s) {dep_str} failed."
-                    )
-                    slot.status = BlackboardSlot.FAILED
-                    continue
+            if not self._fail_fast and self._check_cascade_failure(slot, board):
+                continue
 
             # Resolve placeholders using base resolver (checks cache + executed step readiness).
-            slot.resolved_args = self._resolve_placeholders(slot.args, state=state)
+            slot.resolved_args = self._resolve_placeholders(slot.args, task=task)
 
             if slot.result is not NO_VAL:
                 raise ToolAgentError(
@@ -998,10 +862,10 @@ class PlanActAgent(ToolAgent):
             slot.status = BlackboardSlot.PREPARED
             prepared_in_batch.append(i)
 
-        state.prepared_steps = sorted(prepared_in_batch)  # empty when all steps cascade-failed
-        state.batch_index += 1
+        task.prepared_steps = sorted(prepared_in_batch)  # empty when all steps cascade-failed
+        task.batch_index += 1
         logger.info(
-            f"{self.full_name}: Prepared batch {state.batch_index}/{len(state.batches)} "
-            f"with steps {state.prepared_steps}."
+            f"{self.full_name}: Prepared batch {task.batch_index}/{len(task.batches)} "
+            f"with steps {task.prepared_steps}."
         )
-        return state
+        return task

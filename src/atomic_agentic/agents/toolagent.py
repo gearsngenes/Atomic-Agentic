@@ -10,9 +10,9 @@ Core Concept
 Rather than executing a fixed sequence of operations, ToolAgents maintain an
 interactive execution loop:
 
-1. **LLM decides**: The LLM examines the current state and decides which tools to invoke
+1. **LLM decides**: The LLM examines the current task and decides which tools to invoke
 2. **Tools execute**: Selected tools run and produce results
-3. **Run state updates**: Results are stored in the invocation's running blackboard
+3. **Task updates**: Results are stored in the invocation's running blackboard
 4. **Loop continues**: The LLM observes results and decides next steps, or terminates
 5. **Memory persists**: If `context_enabled=True`, completed tool slots are merged into
    the persisted blackboard and the completed invocation is stored as a ToolAgentRecord
@@ -71,24 +71,24 @@ return a final value.
 
 Subclass Responsibilities
 -------------------------
-Subclasses must implement two abstract methods:
+Subclasses must implement two abstract hooks:
 
-**_initialize_run_state(messages)** → ``RS``
-  Initialize and snapshot the execution state for this invoke:
-  - Copy the incoming LLM-facing messages into run-local state
+**_initialize_task(*, turns, prompt, inputs)** → ``ToolAgentTask`` (or subclass)
+  Build and return a task for this invocation:
+  - Render the system prompt and build the LLM-facing message list
   - Snapshot prior cached results if context is enabled
   - Allocate running blackboard slots for current-run tool calls
 
-**_prepare_next_batch(state)** → ``RS``
+**_prepare_next_batch(task)** → ``ToolAgentTask`` (or subclass)
   Prepare the next executable batch:
-  - Decide which tools to invoke based on current state
+  - Decide which tools to invoke based on the current task
   - Validate tool names, dependencies, and placeholders
   - Resolve placeholders into concrete arguments
-  - Populate `state.prepared_steps`
+  - Populate `task.prepared_steps`
 
-The run state is extensible: ``RS`` is a TypeVar bound to ``ToolAgentRunState``,
-allowing subclasses to carry domain-specific fields such as batches, cursors, or
-planning metadata.
+The task is extensible: subclasses carry domain-specific fields (batches,
+cursors, planning metadata) on their own ``ToolAgentTask`` subclass
+(``PlanActTask``, ``ReActTask``).
 
 Concrete Subclasses
 -------------------
@@ -126,11 +126,10 @@ from ..constants.agents import (
     TOOL_FIELD,
 )
 
-from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from ..models.agents.records import AgentRecord, ToolAgentRecord
 from ..models.results.agents import ToolAgentResult, ToolUsageRecord
-from ..models.results import LLMModelData
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
-from ..models.agents.runstates import ToolAgentRunState
+from ..models.agents.tasks import ToolAgentTask
 from ..exceptions import (
     ToolAgentError,
     ToolInvocationError,
@@ -162,55 +161,63 @@ class ToolAgent(Agent, ABC):
     planning and batch preparation strategies. The architecture uses a blackboard slot
     system with sentinel-driven state and placeholder-based dependency management.
 
-    Template-Method Loop
-    --------------------
-    The ``_invoke(turns, prompt, inputs)`` and ``_ainvoke(turns, prompt, inputs)``
-    methods are FINAL; subclasses should not override them. They receive the selected
-    canonical turns, current prompt, and full inputs dict from the base
-    ``Agent`` lifecycle, then run the ToolAgent template loop::
+    Task-Oriented Lifecycle
+    ------------------------
+    ``Agent.invoke()``/``async_invoke()`` drive every ``ToolAgent`` through
+    the shared base lifecycle::
 
-    1. state = _initialize_run_state(turns=turns, prompt=prompt, inputs=inputs, ...)
-                                                              [subclass hook]
-    2. while not state.is_done:
-        state = _prepare_next_batch(state)              [subclass hook]
-        if prepared_steps is empty → continue           [cascade skip: entire batch was cascade-failed]
-        state = _execute_prepared_batch(state)          [base implementation]
-        [completion check: if return tool executed, is_done=True]
-       (each LLM generation made along the way is captured as an LLMRecord
-       and accumulated onto state.llm_records)
-    3. blackboard_start = len(self._blackboard)
-        state = update_blackboard(state)   [always; context_enabled only gates cache_blackboard]
-        blackboard_end = len(self._blackboard)
-    4. return a 2-tuple of a draft ToolAgentRecord (final_result=None) carrying
-       state.return_value, blackboard_start, and blackboard_end; and a metadata
-       dict with llm_records, llm_model_data, tool_usage, and exception_records.
+    1. task = _initialize_task(turns=turns, prompt=prompt, inputs=inputs)   [subclass hook]
+    2. while not task.complete:
+        task = _progress(task)                                              [ToolAgent, final]
+    3. record = _build_record_from_task(task, turns)                        [ToolAgent override]
+    4. post_invoke -> build_result_from_record(record, ...)                 [ToolAgent override]
 
-    The draft is complete except for ``final_result``, which is set after
-    ``make_result`` runs — ``invoke``/``async_invoke`` complete it via
-    ``dataclasses.replace(draft, final_result=agent_result)``. Future LLM-facing
-    messages are rendered from the stored ``ToolAgentRecord`` by
+    ``_progress`` (final; subclasses should not override) runs exactly one
+    prepare/execute round per call::
+
+        if task.prepared_steps: raise                # invariant: no re-prepare with a pending batch
+        task = _prepare_next_batch(task)              [subclass hook]
+        if not task.prepared_steps: return task       # cascade-skip: entire batch cascade-failed
+        task = _execute_prepared_batch(task)           [ToolAgent, final]
+
+    Each LLM generation made along the way is captured as an ``LLMRecord``
+    and accumulated onto ``task.llm_records``. ``_build_record_from_task``
+    persists the completed run's blackboard slots via ``update_blackboard``
+    — always, regardless of ``context_enabled`` (that flag only gates
+    ``cache_blackboard`` in ``_initialize_task``) — and captures the
+    resulting span as ``blackboard_start``/``blackboard_end`` on the
+    returned ``ToolAgentRecord``. ``build_result_from_record`` re-derives
+    ``tool_usage``/``exception_records`` from that persisted span. Future
+    LLM-facing messages are rendered from the stored ``ToolAgentRecord`` by
     ``render_turn(...)``.
 
     Subclass Responsibilities
     -------------------------
-    Subclasses must implement two abstract methods:
+    Subclasses must implement two abstract hooks:
 
-    **_initialize_run_state(turns, prompt, inputs, ...)** → ``RS`` (TypeVar[ToolAgentRunState])
-        Initialize and return a run state for this invoke. Receives the raw turns,
-        prompt, and inputs from the base lifecycle. Must:
-        - Render the system prompt from instance state (tools, limit, constants)
-        - Call ``build_messages(system, turns, prompt)`` to produce LLM messages
+    **_initialize_task(*, turns, prompt, inputs)** → ``ToolAgentTask`` (or subclass)
+        Build and return a task for this invocation. Must:
+        - Stamp ``system_prompt_name`` so ``render_task`` can render the
+          active system prompt on demand (never pre-rendered/cached as text)
+        - Compute ``valid_cache_indices``/``failed_cache_indices`` via
+          ``_compute_cache_index_sets(turns)``
         - Snapshot cached blackboard entries if context is enabled
         - Create an appropriate running blackboard
         - Initialize ``executed_steps``, ``prepared_steps``, and completion state
 
-    **_prepare_next_batch(state)** → ``RS``
-        Prepare exactly one executable batch per loop iteration:
-        - Generate next tool calls via LLM, precomputed plan, or another strategy
+    **render_task(task, *, additional_messages=None)** → ``list[dict[str, str]]``
+        Build the exact send-payload message list for one LLM call — see
+        ``Agent.render_task``. Every ``ToolAgent`` subclass fully
+        reimplements this (``ToolAgent`` itself declares no override;
+        ``PlanActAgent``/``ReActAgent`` each implement it directly).
+
+    **_prepare_next_batch(task)** → ``ToolAgentTask`` (or subclass)
+        Prepare exactly one executable batch per round:
+        - Generate next tool call(s) via LLM, precomputed plan, or another strategy
         - Validate tool names, placeholder dependencies, and budget
         - Resolve placeholders with ``self._resolve_placeholders(...)``
-        - Fill ``state.prepared_steps`` with indices ready to execute
-        - Return the updated state
+        - Fill ``task.prepared_steps`` with indices ready for execution
+        - Return the updated task
 
     Key Features
     ~~~~~~~~~~~~
@@ -223,7 +230,8 @@ class ToolAgent(Agent, ABC):
         Full-string placeholders preserve types; inline placeholders render via ``repr()``.
 
     **Return Semantics**: The canonical ``return_tool`` is registered automatically.
-        When return executes, ``state.return_value`` is set and the loop exits.
+        When return executes, ``task.generated_response`` is set and ``task.complete``
+        becomes ``True``, ending the ``_progress`` loop.
 
     **Budget Enforcement**: If ``tool_calls_limit`` is set, non-return tool calls are
         tracked and exceeding the limit raises.
@@ -232,11 +240,6 @@ class ToolAgent(Agent, ABC):
         ``self._blackboard`` (``blackboard_start``/``blackboard_end`` always set on
         the ``ToolAgentRecord``). If ``context_enabled=True``, those prior slots are
         also fed into the LLM as context on the next invocation.
-
-    Generic Type Parameter
-    ~~~~~~~~~~~~~~~~~~~~~~
-    ``RS`` is a TypeVar bound to ``ToolAgentRunState``. Subclasses provide a concrete
-    runtime-specific state class such as ``PlanActRunState`` or ``ReActRunState``.
     """
     TOOLS_FIELD = "TOOLS"
     LIMIT_FIELD = "TOOL_CALLS_LIMIT"
@@ -473,9 +476,22 @@ class ToolAgent(Agent, ABC):
     # Toolbox Helpers
     # ------------------------------------------------------------------ #
     def actions_context(self) -> str:
-        """String representation of all tools in the toolbox for prompt injection."""
+        """String representation of all tools in the toolbox for prompt injection.
+
+        Each tool renders as its own block: the tool's signature line, then
+        its description with every non-blank line indented two spaces (blank
+        lines are preserved as fully blank, not indent-padded). Blocks are
+        separated by "\\n---\\n".
+        """
         tools = list(self._toolbox.values())
-        return "\n".join(f"-- {t}" for t in tools)
+        blocks: list[str] = []
+        for t in tools:
+            indented_lines = [
+                line if not line.strip() else f"  {line}"
+                for line in t.description.splitlines()
+            ]
+            blocks.append(f"{t.signature}\n" + "\n".join(indented_lines))
+        return "\n---\n".join(blocks)
 
     def list_tools(self) -> dict[str, AtomicInvokable]:
         """Return a shallow copy of the toolbox mapping ``full_name → AtomicInvokable``."""
@@ -510,8 +526,9 @@ class ToolAgent(Agent, ABC):
         return self._toolbox.pop(tool_full_name, None) is not None
 
     def clear_tools(self) -> None:
-        """Remove all registered tools from the toolbox."""
+        """Remove all registered tools from the toolbox except the mandatory return tool."""
         self._toolbox.clear()
+        self.register(return_tool, name_collision_mode="skip")
 
     # ------------------------------------------------------------------ #
     # Constants Helpers
@@ -996,7 +1013,7 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     # Placeholder resolution helpers (prepare-time)
     # ------------------------------------------------------------------ #
-    def _resolve_placeholders(self, obj: Any, *, state: ToolAgentRunState) -> Any:
+    def _resolve_placeholders(self, obj: Any, *, task: ToolAgentTask) -> Any:
         """
         Resolve all placeholders in an object to their concrete values.
 
@@ -1040,8 +1057,8 @@ class ToolAgent(Agent, ABC):
         obj : Any
             Object to resolve. Can be nested lists, tuples, sets, dicts, strings,
             or scalar values.
-        state : ToolAgentRunState
-            Execution state containing cache_blackboard and running_blackboard.
+        task : ToolAgentTask
+            Execution task containing cache_blackboard and running_blackboard.
 
         Returns
         -------
@@ -1059,8 +1076,8 @@ class ToolAgent(Agent, ABC):
             If a referenced step/cache placeholder is out of bounds or unexecuted,
             or if a referenced constant is not registered.
         """
-        cache = state.cache_blackboard
-        running = state.running_blackboard
+        cache = task.cache_blackboard
+        running = task.running_blackboard
         constants_by_name: dict[str, ConstantSpec] = {
             spec.name: spec
             for spec in self._constants
@@ -1182,15 +1199,151 @@ class ToolAgent(Agent, ABC):
             return x
 
         return resolve(obj)
+
+    # ------------------------------------------------------------------ #
+    # Batch preparation helpers (prepare-time, shared by subclasses)
+    # ------------------------------------------------------------------ #
+    def _compile_batches_from_deps(
+        self,
+        *,
+        planned_slots: list[BlackboardSlot],
+        return_idx: int | None = None,
+    ) -> list[list[int]]:
+        """
+        Compile concurrent execution batches from scheduling dependencies.
+
+        For non-return step i: scheduling_deps[i] = step_dependencies plus
+        await_step if present; level[i] = 0 if scheduling_deps is empty,
+        else 1 + max(level[d] for d in scheduling_deps). Steps at the same
+        level share no dependency and may execute concurrently.
+
+        ``return_idx`` is optional so a partial step list with no
+        terminating return step (e.g. one round of a future adaptive-batch
+        subclass's generation) can be compiled the same way a full plan
+        can:
+
+        - Given: validates it points at a real return-tool slot at the
+          final position, raises on mismatch, and isolates it as its own
+          final batch.
+        - ``None``: every given slot participates in leveling; no isolated
+          final batch, no return-shaped validation at all.
+
+        This method does not itself guard against ``planned_slots`` being
+        empty — callers must ensure non-emptiness before calling.
+
+        Raises
+        ------
+        ToolAgentError
+            If ``return_idx`` is given but does not point at a real
+            return-tool slot at the final position.
+        """
+        if return_idx is not None and (
+            return_idx != len(planned_slots) - 1
+            or planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME
+        ):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: internal error: return_idx mismatch during batch compilation."
+            )
+
+        # Only indices in [0, level_span) participate in leveling; when return_idx
+        # is given, that final index is isolated below rather than leveled.
+        level_span = return_idx if return_idx is not None else len(planned_slots)
+
+        levels: dict[int, int] = {}
+        for i in range(level_span):
+            slot = planned_slots[i]
+
+            scheduling_deps: set[int] = set(slot.step_dependencies)
+            if slot.await_step is not NO_VAL:
+                scheduling_deps.add(slot.await_step)
+
+            if not scheduling_deps:
+                levels[i] = 0
+            else:
+                levels[i] = 1 + max(levels[d] for d in scheduling_deps)
+
+        buckets: dict[int, list[int]] = {}
+        for i in range(level_span):
+            lvl = levels.get(i, 0)
+            buckets.setdefault(lvl, []).append(i)
+
+        batches: list[list[int]] = []
+        for lvl in sorted(buckets):
+            batch = sorted(buckets[lvl])
+            if batch:
+                batches.append(batch)
+
+        if return_idx is not None:
+            batches.append([return_idx])
+
+        return batches
+
+    def _check_cascade_failure(
+        self,
+        slot: BlackboardSlot,
+        board: list[BlackboardSlot],
+    ) -> bool:
+        """
+        Check one slot's argument-dependencies for already-failed steps and
+        mark or raise accordingly.
+
+        Shared by ``PlanActAgent``, ``ReActAgent``, and future ``ToolAgent``
+        subclasses. Callers are responsible for only invoking this when
+        ``not self._fail_fast`` — this method does not check ``fail_fast``
+        itself.
+
+        Uses ``extract_dependencies(slot.args, ...)`` rather than
+        ``slot.step_dependencies`` because a return slot's
+        ``step_dependencies`` may be forced to include every prior step for
+        scheduling purposes; only steps actually referenced in ``args``
+        need to resolve successfully.
+
+        Returns
+        -------
+        bool
+            ``True`` if ``slot`` was marked ``FAILED`` due to a failed
+            dependency (caller should skip executing it). ``False`` if no
+            cascade failure was found.
+
+        Raises
+        ------
+        ToolAgentError
+            If ``slot`` is the return tool and depends on a failed step — a
+            return that cannot execute ends the run regardless of
+            ``fail_fast``.
+        """
+        failed_deps = sorted(
+            d
+            for d in extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
+            if board[d].is_failed()
+        )
+        if not failed_deps:
+            return False
+
+        dep_str = ", ".join(str(d) for d in failed_deps)
+
+        if slot.tool == RETURN_TOOL_FULL_NAME:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: return step {slot.step} "
+                f"cannot execute; dependency step(s) {dep_str} failed."
+            )
+
+        slot.error = ToolAgentError(
+            f"{type(self).__name__}.{self.name}: step {slot.step} skipped — "
+            f"dependency step(s) {dep_str} failed."
+        )
+        slot.status = BlackboardSlot.FAILED
+        return True
+
     # ------------------------------------------------------------------ #
     # Execution (base-owned)
     # ------------------------------------------------------------------ #
-    def _execute_prepared_batch(self, state: ToolAgentRunState) -> ToolAgentRunState:
+    def _execute_prepared_batch(self, task: ToolAgentTask) -> ToolAgentTask:
         """
         Execute all steps in the currently prepared batch concurrently.
 
         This is a core base-owned method (do not override). It executes all steps in
-        ``state.prepared_steps`` using the tool async-invoke path, records results in
+        ``task.prepared_steps`` using the tool async-invoke path, records results in
         the running blackboard, and handles termination if the return tool is executed.
 
         Batch Semantics
@@ -1219,24 +1372,34 @@ class ToolAgent(Agent, ABC):
         2. Count non-return vs. return tool calls
         3. If tool_calls_limit set, check budget
         4. Execute concurrently via ``asyncio.gather(..., return_exceptions=True)``
-        5. If any gathered result is an exception, identify the first such step,
-        store the error on that slot, mark it failed, and raise
-        6. Otherwise, store each ``ToolResult`` envelope whole in ``slot.result``
-        and mark slots executed
-        7. If return tool executed: set ``state.return_value`` and ``state.is_done = True``
-        8. Update ``state.executed_steps``, ``state.tool_calls_used``
+        5. Handle gathered failures, branching on ``fail_fast``:
+           - ``fail_fast=True`` (default): identify the first failed step,
+             store the error on that slot, mark it failed, and raise
+             immediately -- no further slots are stored this round.
+           - ``fail_fast=False``: mark **every** failed slot (error +
+             ``FAILED`` status), but only raise if the return tool itself
+             is among the failures (a failed return always ends the run
+             regardless of ``fail_fast``); otherwise fall through to step 6.
+        6. Store each successful ``ToolResult`` envelope whole in
+           ``slot.result`` and mark those slots executed (runs after step 5
+           in both branches -- reached unconditionally under
+           ``fail_fast=True`` only when there were no failures at all, and
+           always reached under ``fail_fast=False`` for the surviving
+           successes).
+        7. If return tool executed: set ``task.generated_response`` and ``task.complete = True``
+        8. Update ``task.executed_steps``, ``task.tool_calls_used``
         9. Clear ``prepared_steps`` (consumed)
 
         Parameters
         ----------
-        state : RS
-            Run state with prepared_steps populated. After execution, updated with
+        task : ToolAgentTask
+            Task with prepared_steps populated. After execution, updated with
             results and completion flags.
 
         Returns
         -------
-        RS
-            Updated state with results recorded and completion status set.
+        ToolAgentTask
+            Updated task with results recorded and completion status set.
 
         Raises
         ------
@@ -1246,20 +1409,20 @@ class ToolAgent(Agent, ABC):
 
         Side Effects
         ~~~~~~~~~~~~
-        - ``state.running_blackboard[idx].result`` is set to the whole
+        - ``task.running_blackboard[idx].result`` is set to the whole
           ``ToolResult`` envelope (an ``AtomicResult``) for executed steps —
           preserved for richer tracing. Consumers that need the caller-facing
-          value (placeholder resolution, previews, ``return_value``) read
+          value (placeholder resolution, previews, ``generated_response``) read
           ``result.result``; those sites are always reached only after the
           slot is confirmed executed
-        - ``state.running_blackboard[idx].error`` is set on failure
-        - ``state.running_blackboard[idx].status`` is updated to executed/failed
-        - ``state.executed_steps`` is updated with executed indices
-        - ``state.tool_calls_used`` incremented by non-return call count
-        - ``state.prepared_steps`` is cleared
-        - ``state.is_done`` and ``state.return_value`` set if return tool executed
+        - ``task.running_blackboard[idx].error`` is set on failure
+        - ``task.running_blackboard[idx].status`` is updated to executed/failed
+        - ``task.executed_steps`` is updated with executed indices
+        - ``task.tool_calls_used`` incremented by non-return call count
+        - ``task.prepared_steps`` is cleared
+        - ``task.complete`` and ``task.generated_response`` set if return tool executed
         """
-        indices = list(state.prepared_steps)
+        indices = list(task.prepared_steps)
         if not indices:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: no prepared steps to execute (prepared_steps is empty)."
@@ -1270,7 +1433,7 @@ class ToolAgent(Agent, ABC):
                 f"{type(self).__name__}.{self.name}: prepared_steps contains duplicates: {indices!r}."
             )
 
-        board = state.running_blackboard
+        board = task.running_blackboard
         board_len = len(board)
 
         non_return_planned = 0
@@ -1290,7 +1453,7 @@ class ToolAgent(Agent, ABC):
                     f"{type(self).__name__}.{self.name}: running slot step mismatch at index {idx}: slot.step={slot.step}."
                 )
 
-            if slot.is_executed() or idx in state.executed_steps:
+            if slot.is_executed() or idx in task.executed_steps:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: prepared step {idx} is already executed."
                 )
@@ -1317,10 +1480,10 @@ class ToolAgent(Agent, ABC):
 
         # Budget enforcement (non-return only).
         if self._tool_calls_limit is not None:
-            if state.tool_calls_used + non_return_planned > self._tool_calls_limit:
+            if task.tool_calls_used + non_return_planned > self._tool_calls_limit:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: tool_calls_limit exceeded "
-                    f"(limit={self._tool_calls_limit}, used={state.tool_calls_used}, planned={non_return_planned})."
+                    f"(limit={self._tool_calls_limit}, used={task.tool_calls_used}, planned={non_return_planned})."
                 )
 
         # Validate tool existence early — same pre-gather guard as async path.
@@ -1393,21 +1556,21 @@ class ToolAgent(Agent, ABC):
             board[idx].result = tool_result
             board[idx].error = NO_VAL
             board[idx].status = BlackboardSlot.EXECUTED
-            state.executed_steps.add(idx)
+            task.executed_steps.add(idx)
 
-        state.tool_calls_used += non_return_planned
-        state.prepared_steps = []
+        task.tool_calls_used += non_return_planned
+        task.prepared_steps = []
 
         if return_indices:
             ret_idx = return_indices[0]
             if board[ret_idx].is_executed():
-                state.return_value = board[ret_idx].result.result
-                state.is_done = True
+                task.generated_response = board[ret_idx].result.result
+                task.complete = True
             # else: return slot failed; already raised above in fail_fast=False path
 
-        return state
+        return task
 
-    async def _async_execute_prepared_batch(self, state: ToolAgentRunState) -> ToolAgentRunState:
+    async def _async_execute_prepared_batch(self, task: ToolAgentTask) -> ToolAgentTask:
         """
         Async analog of ``_execute_prepared_batch(...)``.
 
@@ -1417,8 +1580,15 @@ class ToolAgent(Agent, ABC):
 
         This method intentionally preserves the current compact gather-based
         semantics rather than introducing stricter cancellation machinery.
+
+        Failure handling mirrors ``_execute_prepared_batch`` exactly: under
+        ``fail_fast=True`` (default), the first failed step is marked and
+        raised immediately; under ``fail_fast=False``, every failed slot is
+        marked but the round only raises if the return tool itself failed --
+        otherwise execution falls through and records the surviving
+        successes.
         """
-        indices = list(state.prepared_steps)
+        indices = list(task.prepared_steps)
         if not indices:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: no prepared steps to execute "
@@ -1431,7 +1601,7 @@ class ToolAgent(Agent, ABC):
                 f"{indices!r}."
             )
 
-        board = state.running_blackboard
+        board = task.running_blackboard
         board_len = len(board)
 
         non_return_planned = 0
@@ -1452,7 +1622,7 @@ class ToolAgent(Agent, ABC):
                     f"slot.step={slot.step}."
                 )
 
-            if slot.is_executed() or idx in state.executed_steps:
+            if slot.is_executed() or idx in task.executed_steps:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: prepared step {idx} is already executed."
                 )
@@ -1484,10 +1654,10 @@ class ToolAgent(Agent, ABC):
             )
 
         if self._tool_calls_limit is not None:
-            if state.tool_calls_used + non_return_planned > self._tool_calls_limit:
+            if task.tool_calls_used + non_return_planned > self._tool_calls_limit:
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: tool_calls_limit exceeded "
-                    f"(limit={self._tool_calls_limit}, used={state.tool_calls_used}, "
+                    f"(limit={self._tool_calls_limit}, used={task.tool_calls_used}, "
                     f"planned={non_return_planned})."
                 )
 
@@ -1557,32 +1727,32 @@ class ToolAgent(Agent, ABC):
             board[idx].result = tool_result
             board[idx].error = NO_VAL
             board[idx].status = BlackboardSlot.EXECUTED
-            state.executed_steps.add(idx)
+            task.executed_steps.add(idx)
 
-        state.tool_calls_used += non_return_planned
-        state.prepared_steps = []
+        task.tool_calls_used += non_return_planned
+        task.prepared_steps = []
 
         if return_indices:
             ret_idx = return_indices[0]
             if board[ret_idx].is_executed():
-                state.return_value = board[ret_idx].result.result
-                state.is_done = True
+                task.generated_response = board[ret_idx].result.result
+                task.complete = True
             # else: return slot failed; already raised above in fail_fast=False path
 
-        return state
+        return task
 
     # ------------------------------------------------------------------ #
     # Finalization helpers
     # ------------------------------------------------------------------ #
-    def update_blackboard(self, state: ToolAgentRunState) -> ToolAgentRunState:
+    def update_blackboard(self, task: ToolAgentTask) -> ToolAgentTask:
         """
         Persist all non-empty run slots into the agent's persisted blackboard.
 
-        Called unconditionally at the end of ``_invoke()`` and ``_ainvoke()`` —
-        whether or not ``context_enabled`` is set. This mirrors how base ``Agent``
+        Called unconditionally by ``_build_record_from_task`` — whether or
+        not ``context_enabled`` is set. This mirrors how base ``Agent``
         always appends ``_records`` regardless of context settings. The
         ``context_enabled`` flag controls only whether ``cache_blackboard`` is
-        populated in ``_initialize_run_state`` (i.e. whether the LLM sees prior
+        populated in ``_initialize_task`` (i.e. whether the LLM sees prior
         steps as context).
 
         All non-empty slots (EXECUTED and FAILED) are persisted so that global
@@ -1619,22 +1789,22 @@ class ToolAgent(Agent, ABC):
 
         Parameters
         ----------
-        state : ToolAgentRunState
-            Run state with executed steps in running_blackboard and cache snapshot.
+        task : ToolAgentTask
+            Task with executed steps in running_blackboard and cache snapshot.
 
         Returns
         -------
-        ToolAgentRunState
-            Updated state after blackboard persistence.
+        ToolAgentTask
+            Updated task after blackboard persistence.
 
         Side Effects
         ~~~~~~~~~~~~
         - ``self._blackboard`` is replaced with merged cache + appended slots
         """
-        base_cache: list[BlackboardSlot] = [slot.copy() for slot in state.cache_blackboard]
+        base_cache: list[BlackboardSlot] = [slot.copy() for slot in task.cache_blackboard]
         base_len = len(base_cache)
 
-        running: list[BlackboardSlot] = list(state.running_blackboard)
+        running: list[BlackboardSlot] = list(task.running_blackboard)
 
         # 1) Trim empty/unplanned tail from running plan to avoid caching unused slots.
         last = len(running) - 1
@@ -1699,7 +1869,95 @@ class ToolAgent(Agent, ABC):
             combined = combined[: last2 + 1]
 
         self._blackboard = combined
-        return state
+        return task
+
+    def _build_record_from_task(
+        self,
+        task: ToolAgentTask,
+        turns: list[AgentRecord],
+    ) -> ToolAgentRecord:
+        """
+        Assemble a completed ToolAgentRecord from a finished ToolAgentTask.
+
+        Persists the run's blackboard slots via ``update_blackboard`` and
+        captures the half-open span those slots landed in — mirrors how
+        base ``Agent`` always appends ``_records`` regardless of
+        ``context_enabled`` (that flag only gates ``cache_blackboard`` in
+        ``_initialize_task``).
+        """
+        prev = turns[-1] if turns else None
+        blackboard_start = len(self._blackboard)
+        task = self.update_blackboard(task)
+        blackboard_end = len(self._blackboard)
+        return ToolAgentRecord(
+            user_prompt=task.user_prompt,
+            generated_response=task.generated_response,
+            inputs=task.inputs,
+            llm_records=tuple(task.llm_records),
+            prev=prev,
+            blackboard_start=blackboard_start,
+            blackboard_end=blackboard_end,
+        )
+
+    def build_result_from_record(
+        self,
+        record: ToolAgentRecord,
+        *,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+    ) -> ToolAgentResult:
+        """
+        Construct this ToolAgent's ToolAgentResult envelope directly from a
+        completed ToolAgentRecord.
+
+        Extends ``Agent.build_result_from_record``: re-derives
+        ``tool_usage``/``exception_records`` from the record's persisted
+        blackboard span (``record.blackboard_start:record.blackboard_end``)
+        rather than from task-local bookkeeping — ``update_blackboard``
+        preserves each slot's ``status``/``tool`` verbatim and rewrites
+        ``step`` to its final global index, so tallying over the persisted
+        span gives results identical to tallying over
+        ``task.running_blackboard`` directly.
+        """
+        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
+        llm_model_data = record.llm_records[-1].llm_result.model_data
+
+        span = self._blackboard[record.blackboard_start:record.blackboard_end]
+
+        # Collect failures only when fail_fast=False (fail_fast=True would have raised).
+        exception_records: tuple[tuple[int, Exception], ...] = ()
+        if not self._fail_fast:
+            exception_records = tuple(
+                (slot.step, slot.error)
+                for slot in span
+                if slot.status == BlackboardSlot.FAILED and isinstance(slot.error, Exception)
+            )
+
+        # Derive per-tool call counts from the persisted span.
+        _counts: dict[str, int] = {}
+        for slot in span:
+            if (
+                slot.is_executed()
+                and isinstance(slot.tool, str)
+                and slot.tool != RETURN_TOOL_FULL_NAME
+            ):
+                _counts[slot.tool] = _counts.get(slot.tool, 0) + 1
+        tool_usage = tuple(
+            ToolUsageRecord(tool_name=name, call_count=count)
+            for name, count in _counts.items()
+        )
+
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=ToolAgentResult,
+            llm_token_usage=llm_token_usage,
+            llm_model_data=llm_model_data,
+            tool_usage=tool_usage,
+            exception_records=exception_records,
+        )
 
     def _compute_cache_index_sets(
         self,
@@ -1746,258 +2004,6 @@ class ToolAgent(Agent, ABC):
                         f"slot {idx} has unexpected status {slot.status!r}; expected EXECUTED or FAILED."
                     )
         return frozenset(valid), frozenset(failed)
-
-    # ------------------------------------------------------------------ #
-    # Template Method (FINAL)
-    # ------------------------------------------------------------------ #
-    def _invoke(self, turns: list[AgentRecord], prompt: str, inputs: dict) -> tuple[ToolAgentRecord, dict]:
-        """
-        FINAL sync ToolAgent template method.
-
-        Receives selected canonical turns, the current prompt, and the full
-        inputs dict from the base ``Agent.invoke(...)`` lifecycle, then runs the
-        ToolAgent template loop. Returns a 2-tuple of a **draft** ``ToolAgentRecord``
-        (``final_result`` is ``None``) and a metadata dict carrying ``llm_records``,
-        ``llm_model_data``, and ``tool_usage``.
-
-        System-prompt rendering and message construction are delegated entirely to
-        ``_initialize_run_state``; this method receives and forwards ``turns``,
-        ``prompt``, and ``inputs`` without interpreting them. LLMRecord envelopes
-        are accumulated on ``state.llm_records`` across the loop and transferred to
-        the metadata dict at return time. ``invoke`` later completes the draft via
-        ``dataclasses.replace(draft, final_result=agent_result)``.
-
-        Subclasses should not override this method. They should implement:
-        - ``_initialize_run_state(turns=..., prompt=..., inputs=..., ...)``
-        - ``_prepare_next_batch(state)``
-        """
-        # Compute conversation-scoped cache index sets from the turns chain.
-        # Only executed/failed slots from records in this conversation are reachable.
-        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
-
-        state = self._initialize_run_state(
-            turns=turns,
-            prompt=prompt,
-            inputs=inputs,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-
-        while not state.is_done:
-            logger.debug(f"{type(self).__name__}.{self.name} has made {state.tool_calls_used} this run")
-            # Invariant: prepare must not be called with a pending prepared batch.
-            if state.prepared_steps:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: violation: prepared_steps is non-empty before prepare. "
-                    f"Execute must follow prepare before preparing again."
-                )
-
-            state = self._prepare_next_batch(state)
-
-            # Empty prepared_steps means all steps in this batch were cascade-failed;
-            # skip execution and loop to the next batch.
-            if not state.prepared_steps:
-                continue
-
-            state = self._execute_prepared_batch(state)
-
-        # Always persist run slots — mirrors how base Agent always appends records.
-        # context_enabled only controls cache_blackboard in _initialize_run_state.
-        blackboard_start = len(self._blackboard)
-        state = self.update_blackboard(state)
-        blackboard_end = len(self._blackboard)
-
-        # Collect failures only when fail_fast=False (fail_fast=True would have raised).
-        exception_records: tuple[tuple[int, Exception], ...] = ()
-        if not self._fail_fast:
-            exception_records = tuple(
-                (slot.step, slot.error)
-                for slot in self._blackboard[blackboard_start:blackboard_end]
-                if slot.status == BlackboardSlot.FAILED and isinstance(slot.error, Exception)
-            )
-
-        # Derive per-tool call counts from this invocation's running blackboard.
-        # Slots are iterated in execution order (first-call order preserved by dict).
-        _counts: dict[str, int] = {}
-        for _slot in state.running_blackboard:
-            if (
-                _slot.is_executed()
-                and isinstance(_slot.tool, str)
-                and _slot.tool != RETURN_TOOL_FULL_NAME
-            ):
-                _counts[_slot.tool] = _counts.get(_slot.tool, 0) + 1
-        tool_usage = tuple(
-            ToolUsageRecord(tool_name=name, call_count=count)
-            for name, count in _counts.items()
-        )
-
-        draft = ToolAgentRecord(
-            user_prompt=prompt,
-            generated_response=state.return_value,
-            blackboard_start=blackboard_start,
-            blackboard_end=blackboard_end,
-        )
-        metadata: dict = {
-            "llm_records": tuple(state.llm_records),
-            "llm_model_data": state.llm_records[-1].llm_result.model_data,
-            "tool_usage": tool_usage,
-            "exception_records": exception_records,
-        }
-        return draft, metadata
-
-    async def _ainvoke(
-        self,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> tuple[ToolAgentRecord, dict]:
-        """
-        FINAL async ToolAgent template method.
-
-        Receives selected canonical turns, the current prompt, and the full
-        inputs dict from the base ``Agent.async_invoke(...)`` lifecycle, then runs
-        the ToolAgent template loop. Returns a 2-tuple mirroring the sync
-        ``_invoke(...)`` contract — see its docstring for details on the
-        draft-record and metadata dict contents.
-
-        System-prompt rendering and message construction are delegated to
-        ``_ainitialize_run_state``; this method forwards ``turns``, ``prompt``,
-        and ``inputs`` without interpreting them. Mirrors the sync ``_invoke(...)``
-        loop but awaits the async batch executor for tool execution.
-
-        Subclasses should not override this method. They should implement:
-        - ``_initialize_run_state(turns=..., prompt=..., inputs=..., ...)``
-        - ``_prepare_next_batch(state)``
-        - ``_ainitialize_run_state(turns=..., prompt=..., inputs=..., ...)`` (async; base default: asyncio.to_thread wrap)
-        - ``_aprepare_next_batch(state)`` (async; base default: asyncio.to_thread wrap)
-        """
-        # Compute conversation-scoped cache index sets from the turns chain.
-        # Only executed/failed slots from records in this conversation are reachable.
-        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
-
-        state = await self._ainitialize_run_state(
-            turns=turns,
-            prompt=prompt,
-            inputs=inputs,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-
-        while not state.is_done:
-            logger.debug(
-                f"{type(self).__name__}.{self.name} has made {state.tool_calls_used} this run"
-            )
-
-            # Invariant: prepare must not be called with a pending prepared batch.
-            if state.prepared_steps:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: violation: prepared_steps is non-empty "
-                    "before prepare. Execute must follow prepare before preparing again."
-                )
-
-            state = await self._aprepare_next_batch(state)
-
-            # Empty prepared_steps means all steps in this batch were cascade-failed;
-            # skip execution and loop to the next batch.
-            if not state.prepared_steps:
-                continue
-
-            state = await self._async_execute_prepared_batch(state)
-
-        # Always persist run slots — mirrors how base Agent always appends records.
-        # context_enabled only controls cache_blackboard in _initialize_run_state.
-        blackboard_start = len(self._blackboard)
-        state = self.update_blackboard(state)
-        blackboard_end = len(self._blackboard)
-
-        # Collect failures only when fail_fast=False (fail_fast=True would have raised).
-        exception_records: tuple[tuple[int, Exception], ...] = ()
-        if not self._fail_fast:
-            exception_records = tuple(
-                (slot.step, slot.error)
-                for slot in self._blackboard[blackboard_start:blackboard_end]
-                if slot.status == BlackboardSlot.FAILED and isinstance(slot.error, Exception)
-            )
-
-        # Derive per-tool call counts from this invocation's running blackboard.
-        _counts: dict[str, int] = {}
-        for _slot in state.running_blackboard:
-            if (
-                _slot.is_executed()
-                and isinstance(_slot.tool, str)
-                and _slot.tool != RETURN_TOOL_FULL_NAME
-            ):
-                _counts[_slot.tool] = _counts.get(_slot.tool, 0) + 1
-        tool_usage = tuple(
-            ToolUsageRecord(tool_name=name, call_count=count)
-            for name, count in _counts.items()
-        )
-
-        draft = ToolAgentRecord(
-            user_prompt=prompt,
-            generated_response=state.return_value,
-            blackboard_start=blackboard_start,
-            blackboard_end=blackboard_end,
-        )
-        metadata: dict = {
-            "llm_records": tuple(state.llm_records),
-            "llm_model_data": state.llm_records[-1].llm_result.model_data,
-            "tool_usage": tool_usage,
-            "exception_records": exception_records,
-        }
-        return draft, metadata
-
-    def make_result(
-        self,
-        result: Any,
-        started_at: datetime,
-        ended_at: datetime,
-        **result_kwargs: Any,
-    ) -> ToolAgentResult:
-        """
-        Construct this ToolAgent's ``ToolAgentResult`` envelope.
-
-        Extends ``Agent.make_result`` with ``tool_usage`` and ``exception_records``
-        from the metadata dict returned by ``_invoke``. No derivation occurs here —
-        both fields are computed during the execution loop and passed through directly.
-        """
-        unexpected = set(result_kwargs) - {"llm_records", "llm_model_data", "tool_usage", "exception_records"}
-        if unexpected:
-            raise ToolAgentError(
-                f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
-            )
-
-        llm_records = result_kwargs.get("llm_records")
-        llm_model_data = result_kwargs.get("llm_model_data")
-        tool_usage = result_kwargs.get("tool_usage", ())
-        exception_records = result_kwargs.get("exception_records", ())
-
-        if (
-            not isinstance(llm_records, tuple)
-            or not llm_records
-            or not all(isinstance(r, LLMRecord) for r in llm_records)
-        ):
-            raise ToolAgentError(
-                "ToolAgent.make_result: llm_records must be a non-empty tuple of LLMRecord instances."
-            )
-
-        if not isinstance(llm_model_data, LLMModelData):
-            raise ToolAgentError(
-                "ToolAgent.make_result: llm_model_data must be an LLMModelData instance."
-            )
-
-        llm_token_usage = tuple(r.llm_result.token_usage for r in llm_records)
-
-        return self._make_result(
-            result=result,
-            started_at=started_at,
-            ended_at=ended_at,
-            result_cls=ToolAgentResult,
-            llm_token_usage=llm_token_usage,
-            llm_model_data=llm_model_data,
-            tool_usage=tool_usage,
-            exception_records=exception_records,
-        )
 
     def render_turn(self, turn: AgentRecord) -> list[dict[str, str]]:
         """Render one stored ToolAgentRecord into LLM-facing user/assistant messages.
@@ -2360,44 +2366,69 @@ class ToolAgent(Agent, ABC):
             ) from exc
 
     # ------------------------------------------------------------------ #
-    # Subclass Hooks
+    # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
     @abstractmethod
-    def _initialize_run_state(
+    def _initialize_task(
         self,
         *,
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> ToolAgentRunState:
+    ) -> ToolAgentTask:
         """
-        Initialize and return a run state for this invocation.
+        Re-declared abstract at this level: base ``Agent``'s concrete
+        implementation returns a bare ``AgentTask``, which isn't sufficient
+        here — only ``PlanActAgent``/``ReActAgent`` know how to build their
+        own richer ``ToolAgentTask``-family subclass.
 
-        Receives the selected canonical turns, rendered user prompt, and full
-        inputs dict from the base Agent lifecycle. Implementations are
-        responsible for rendering the system prompt, building the full message
-        list via ``build_messages(...)``, and initializing all run-state
-        bookkeeping.
-
-        ``inputs`` is the same object ``_invoke``/``_ainvoke`` received, untouched.
-        Implementations should store it on the constructed run state's ``inputs``
-        field so ``_prepare_next_batch`` can read ``state.inputs`` later if it
-        ever needs to — ``_prepare_next_batch``'s own signature is not changing.
-
-        Implementations should:
-        - render the system prompt from instance state (tools, limit, constants)
-        - call ``self.build_messages(system, turns, prompt)`` to produce messages
-        - snapshot persisted blackboard entries if context is enabled
-        - allocate an appropriate running blackboard for current-run tool calls
-        - initialize execution bookkeeping such as executed_steps, prepared_steps,
-          tool_calls_used, is_done, and return_value
+        Same three base parameters as ``Agent``'s own hook — no
+        ``valid_cache_indices``/``failed_cache_indices``; the real
+        implementation computes those internally via
+        ``_compute_cache_index_sets``.
         """
-        raise NotImplementedError
+        ...
 
+    def _progress(self, task: ToolAgentTask) -> ToolAgentTask:
+        """
+        Advance the task by one prepare/execute round.
+
+        Invariant check, prepare the next batch, cascade-skip an empty
+        batch (return early instead of raising — ``task.complete`` stays
+        ``False`` so the generic outer loop calls ``_progress`` again),
+        otherwise execute the batch.
+        """
+        logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
+        if task.prepared_steps:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: violation: prepared_steps is non-empty before prepare. "
+                f"Execute must follow prepare before preparing again."
+            )
+        task = self._prepare_next_batch(task)
+        if not task.prepared_steps:
+            return task
+        task = self._execute_prepared_batch(task)
+        return task
+
+    async def _async_progress(self, task: ToolAgentTask) -> ToolAgentTask:
+        """Async mirror of ``_progress``; awaits the async prepare/execute hooks."""
+        logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
+        if task.prepared_steps:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: violation: prepared_steps is non-empty "
+                "before prepare. Execute must follow prepare before preparing again."
+            )
+        task = await self._aprepare_next_batch(task)
+        if not task.prepared_steps:
+            return task
+        task = await self._async_execute_prepared_batch(task)
+        return task
+
+    # ------------------------------------------------------------------ #
+    # Subclass Hooks
+    # ------------------------------------------------------------------ #
     @abstractmethod
-    def _prepare_next_batch(self, state: ToolAgentRunState) -> ToolAgentRunState:
+    def _prepare_next_batch(self, task: ToolAgentTask) -> ToolAgentTask:
         """
         Prepare exactly one executable batch for the next loop iteration.
 
@@ -2405,51 +2436,26 @@ class ToolAgent(Agent, ABC):
         - decide which tool call(s) should execute next
         - validate tool names, step indices, dependencies, and placeholder legality
         - resolve placeholders with `_resolve_placeholders(...)`
-        - populate `state.prepared_steps` with the running blackboard indices ready
+        - populate `task.prepared_steps` with the running blackboard indices ready
         for execution
-        - return the updated state
+        - return the updated task
 
         The base ToolAgent loop will execute the prepared batch and handle return-tool
         completion.
         """
         raise NotImplementedError
 
-    async def _ainitialize_run_state(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> ToolAgentRunState:
-        """
-        Async hook for run-state initialization.
-
-        Default offloads the sync hook to a worker thread, forwarding ``inputs``
-        through unchanged. Subclasses override when the hook contains blocking
-        I/O (e.g. a planning LLM call).
-        """
-        return await asyncio.to_thread(
-            self._initialize_run_state,
-            turns=turns,
-            prompt=prompt,
-            inputs=inputs,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-
     async def _aprepare_next_batch(
         self,
-        state: ToolAgentRunState,
-    ) -> ToolAgentRunState:
+        task: ToolAgentTask,
+    ) -> ToolAgentTask:
         """
         Async hook for batch preparation.
 
         Default offloads the sync hook to a worker thread. Subclasses override
         when the hook contains blocking I/O (e.g. a per-step LLM call).
         """
-        return await asyncio.to_thread(self._prepare_next_batch, state)
+        return await asyncio.to_thread(self._prepare_next_batch, task)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a diagnostic snapshot of this ToolAgent.

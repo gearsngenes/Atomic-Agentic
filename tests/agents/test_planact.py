@@ -7,14 +7,13 @@ from typing import Any, Mapping
 
 from conftest import (
     ScriptedToolAgent,
-    ScriptedRunState,
     ScriptedLLMEngine,
     make_planact_agent,
     make_react_agent,
     register_math_tools,
     prepared_slot,
     executed_slot,
-    make_state,
+    make_task,
     make_llm_result,
     make_llm_record,
     make_tool_result,
@@ -25,7 +24,6 @@ from conftest import (
 from atomic_agentic.agents.toolagent import ToolAgent, return_tool
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
-from atomic_agentic.models.agents.runstates import ToolAgentRunState
 from atomic_agentic.models.agents.records import LLMRecord
 from atomic_agentic.models.results.agents import ToolAgentResult
 from atomic_agentic.exceptions import (
@@ -97,15 +95,13 @@ class TestPlanActAgent:
             ]
         )
 
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="plan",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        assert state.batches == [[0, 1], [2]]
+        assert task.batches == [[0, 1], [2]]
 
     def test_rejects_multiple_return_steps(self) -> None:
         agent = make_planact_agent(
@@ -249,7 +245,7 @@ class TestPlanActAgent:
 
         assert batches == [[0, 1], [2]]
 
-    def test_initialize_run_state_records_planned_slot_metadata(self) -> None:
+    def test_initialize_task_records_planned_slot_metadata(self) -> None:
         agent = make_planact_agent(
             [
                 f"""
@@ -262,21 +258,19 @@ class TestPlanActAgent:
             ]
         )
 
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="plan",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        assert state.running_blackboard[0].status == "planned"
-        assert state.running_blackboard[0].step_dependencies == ()
-        assert state.running_blackboard[1].status == "planned"
-        assert state.running_blackboard[1].step_dependencies == (0,)
-        assert state.running_blackboard[1].await_step == 0
-        assert state.running_blackboard[2].tool == return_tool.full_name
-        assert state.running_blackboard[2].step_dependencies == (0, 1)
+        assert task.running_blackboard[0].status == "planned"
+        assert task.running_blackboard[0].step_dependencies == ()
+        assert task.running_blackboard[1].status == "planned"
+        assert task.running_blackboard[1].step_dependencies == (0,)
+        assert task.running_blackboard[1].await_step == 0
+        assert task.running_blackboard[2].tool == return_tool.full_name
+        assert task.running_blackboard[2].step_dependencies == (0, 1)
 
     def test_prepare_next_batch_marks_slots_prepared(self) -> None:
         agent = make_planact_agent(
@@ -289,15 +283,13 @@ class TestPlanActAgent:
                 """
             ]
         )
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="plan",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        updated = agent._prepare_next_batch(state)
+        updated = agent._prepare_next_batch(task)
 
         assert updated.prepared_steps == [0]
         assert updated.running_blackboard[0].status == "prepared"
@@ -316,17 +308,15 @@ class TestPlanActAgent:
             ]
         )
 
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="plan",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        assert [slot.step for slot in state.running_blackboard] == [0, 1]
-        assert state.running_blackboard[0].tool == "Tool.tests.add"
-        assert state.running_blackboard[1].tool == return_tool.full_name
+        assert [slot.step for slot in task.running_blackboard] == [0, 1]
+        assert task.running_blackboard[0].tool == "Tool.tests.add"
+        assert task.running_blackboard[1].tool == return_tool.full_name
 
     def test_accepts_non_sequential_plan_step_and_normalizes(self) -> None:
         agent = make_planact_agent(
@@ -340,17 +330,15 @@ class TestPlanActAgent:
             ]
         )
 
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="plan",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        assert [slot.step for slot in state.running_blackboard] == [0, 1]
-        assert state.running_blackboard[0].tool == "Tool.tests.add"
-        assert state.running_blackboard[1].tool == return_tool.full_name
+        assert [slot.step for slot in task.running_blackboard] == [0, 1]
+        assert task.running_blackboard[0].tool == "Tool.tests.add"
+        assert task.running_blackboard[1].tool == return_tool.full_name
 
     def test_rejects_await_on_return_step(self) -> None:
         agent = make_planact_agent(
@@ -453,7 +441,13 @@ class TestPlanActGenerationRetry:
             generation_retries=1,
         )
         agent.invoke({"prompt": "run"})
-        assert len(agent.records[-1].llm_records) == 2
+        llm_records = agent.records[-1].llm_records
+        assert len(llm_records) == 2
+        assert len(llm_records[0].messages) == 1
+        # Self-contained convention: retry's messages = full task_messages so
+        # far (1 original decompose-instruction + 2 injected feedback), not
+        # just the 2 new ones.
+        assert len(llm_records[1].messages) == 3
 
     def test_spec_error_retry_succeeds_on_second_call(self) -> None:
         agent = make_planact_agent(
@@ -474,7 +468,13 @@ class TestPlanActGenerationRetry:
         )
         register_math_tools(agent)  # type: ignore[arg-type]
         agent.invoke({"prompt": "run"})
-        assert len(agent.records[-1].llm_records) == 2
+        llm_records = agent.records[-1].llm_records
+        assert len(llm_records) == 2
+        assert len(llm_records[0].messages) == 1
+        # Self-contained convention: retry's messages = full task_messages so
+        # far (1 original decompose-instruction + 2 injected feedback), not
+        # just the 2 new ones.
+        assert len(llm_records[1].messages) == 3
 
     def test_budget_exhausted_raises_after_all_attempts(self) -> None:
         agent = make_planact_agent(

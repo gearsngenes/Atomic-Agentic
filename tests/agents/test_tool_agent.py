@@ -3,6 +3,7 @@
 import pytest
 import asyncio
 import json
+import unittest.mock
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
@@ -12,15 +13,16 @@ from conftest import (
     EchoLLMEngine,
     ScriptedLLMEngine,
     BadRepr,
-    ScriptedRunState,
+    ScriptedTask,
     ScriptedToolAgent,
     BadInitializeToolAgent,
     PendingPreparedToolAgent,
+    SkipFirstBatchToolAgent,
     make_agent,
     register_math_tools,
     prepared_slot,
     executed_slot,
-    make_state,
+    make_task,
     make_llm_result,
     make_llm_record,
     make_tool_result,
@@ -38,7 +40,6 @@ from atomic_agentic.agents.toolagent import ToolAgent, extract_dependencies, ret
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.agents.react import ReActAgent
-from atomic_agentic.models.agents.runstates import ToolAgentRunState
 from atomic_agentic.models.agents.records import AgentRecord, ToolAgentRecord
 from atomic_agentic.models.agents.records import LLMRecord
 from atomic_agentic.models.results.agents import ToolAgentResult
@@ -326,7 +327,9 @@ class TestToolRegistration:
 
         agent.clear_tools()
 
-        assert agent.list_tools() == {}
+        remaining = agent.list_tools()
+        assert list(remaining.keys()) == [return_tool.full_name]
+        assert remaining[return_tool.full_name] is return_tool
 
     def test_batch_register_callables(self) -> None:
         agent = make_agent()
@@ -614,11 +617,11 @@ class TestConstantRegistration:
         agent = make_agent()
         value = {"items": [1, 2]}
         agent.register_constant("PAYLOAD", value)
-        state = make_state()
+        task = make_task()
 
         resolved = agent._resolve_placeholders(
             {"payload": "<<__k.PAYLOAD__>>"},
-            state=state,
+            task=task,
         )
 
         assert resolved == {"payload": value}
@@ -627,51 +630,51 @@ class TestConstantRegistration:
     def test_resolve_inline_constant_placeholder_renders_repr_with_inline_limit(self) -> None:
         agent = make_agent()
         agent.register_constant("LONG_TEXT", "abcdef", inline_limit=5)
-        state = make_state()
+        task = make_task()
 
         resolved = agent._resolve_placeholders(
             {"message": "Value is <<__k.LONG_TEXT__>>."},
-            state=state,
+            task=task,
         )
 
         assert resolved == {"message": "Value is 'abcd."}
 
     def test_resolve_unknown_constant_placeholder_raises(self) -> None:
         agent = make_agent()
-        state = make_state()
+        task = make_task()
 
         with pytest.raises(ToolAgentError, match="unknown constant reference"):
-            agent._resolve_placeholders("<<__k.MISSING__>>", state=state)
+            agent._resolve_placeholders("<<__k.MISSING__>>", task=task)
 
 
 class TestPlaceholderResolution:
     def test_full_step_placeholder_preserves_type(self) -> None:
         agent = make_agent()
-        state = make_state(running=[executed_slot(0, [1, 2, 3])])
+        task = make_task(running=[executed_slot(0, [1, 2, 3])])
 
-        assert agent._resolve_placeholders("<<__s0__>>", state=state) == [1, 2, 3]
+        assert agent._resolve_placeholders("<<__s0__>>", task=task) == [1, 2, 3]
 
     def test_full_cache_placeholder_preserves_type(self) -> None:
         agent = make_agent()
-        state = make_state(cache=[executed_slot(0, {"cached": 10})])
+        task = make_task(cache=[executed_slot(0, {"cached": 10})])
 
-        assert agent._resolve_placeholders("<<__c0__>>", state=state) == {"cached": 10}
+        assert agent._resolve_placeholders("<<__c0__>>", task=task) == {"cached": 10}
 
     def test_inline_step_placeholder_uses_repr(self) -> None:
         agent = make_agent()
-        state = make_state(running=[executed_slot(0, ["a", "b"])])
+        task = make_task(running=[executed_slot(0, ["a", "b"])])
 
-        assert agent._resolve_placeholders("result=<<__s0__>>", state=state) == "result=['a', 'b']"
+        assert agent._resolve_placeholders("result=<<__s0__>>", task=task) == "result=['a', 'b']"
 
     def test_inline_cache_placeholder_uses_repr(self) -> None:
         agent = make_agent()
-        state = make_state(cache=[executed_slot(0, {"cached": 10})])
+        task = make_task(cache=[executed_slot(0, {"cached": 10})])
 
-        assert agent._resolve_placeholders("cache=<<__c0__>>", state=state) == "cache={'cached': 10}"
+        assert agent._resolve_placeholders("cache=<<__c0__>>", task=task) == "cache={'cached': 10}"
 
     def test_nested_dict_list_tuple_set_resolution(self) -> None:
         agent = make_agent()
-        state = make_state(
+        task = make_task(
             cache=[executed_slot(0, "cached")],
             running=[
                 executed_slot(0, 5),
@@ -686,7 +689,7 @@ class TestPlaceholderResolution:
                 "c": ("<<__s0__>>",),
                 "d": {"<<__c0__>>"},
             },
-            state=state,
+            task=task,
         )
 
         assert resolved == {
@@ -698,57 +701,57 @@ class TestPlaceholderResolution:
 
     def test_placeholder_in_dict_key_resolves(self) -> None:
         agent = make_agent()
-        state = make_state(running=[executed_slot(0, "dynamic_key")])
+        task = make_task(running=[executed_slot(0, "dynamic_key")])
 
-        resolved = agent._resolve_placeholders({"<<__s0__>>": "value"}, state=state)
+        resolved = agent._resolve_placeholders({"<<__s0__>>": "value"}, task=task)
 
         assert resolved == {"dynamic_key": "value"}
 
     def test_multiple_placeholders_in_one_string(self) -> None:
         agent = make_agent()
-        state = make_state(
+        task = make_task(
             running=[
                 executed_slot(0, 1),
                 executed_slot(1, 2),
             ]
         )
 
-        assert agent._resolve_placeholders("<<__s0__>> + <<__s1__>>", state=state) == "1 + 2"
+        assert agent._resolve_placeholders("<<__s0__>> + <<__s1__>>", task=task) == "1 + 2"
 
     def test_out_of_range_step_placeholder_raises(self) -> None:
         agent = make_agent()
-        state = make_state(running=[])
+        task = make_task(running=[])
 
         with pytest.raises(ToolAgentError, match="Step reference 0 out of range"):
-            agent._resolve_placeholders("<<__s0__>>", state=state)
+            agent._resolve_placeholders("<<__s0__>>", task=task)
 
     def test_out_of_range_cache_placeholder_raises(self) -> None:
         agent = make_agent()
-        state = make_state(cache=[])
+        task = make_task(cache=[])
 
         with pytest.raises(ToolAgentError, match="Cache reference 0 out of range"):
-            agent._resolve_placeholders("<<__c0__>>", state=state)
+            agent._resolve_placeholders("<<__c0__>>", task=task)
 
     def test_unexecuted_step_placeholder_raises(self) -> None:
         agent = make_agent()
-        state = make_state(running=[BlackboardSlot(step=0)])
+        task = make_task(running=[BlackboardSlot(step=0)])
 
         with pytest.raises(ToolAgentError, match="Referenced step 0 is not executed"):
-            agent._resolve_placeholders("<<__s0__>>", state=state)
+            agent._resolve_placeholders("<<__s0__>>", task=task)
 
     def test_unexecuted_cache_placeholder_raises(self) -> None:
         agent = make_agent()
-        state = make_state(cache=[BlackboardSlot(step=0)])
+        task = make_task(cache=[BlackboardSlot(step=0)])
 
         with pytest.raises(ToolAgentError, match="Referenced cache 0 is not.*executed"):
-            agent._resolve_placeholders("<<__c0__>>", state=state)
+            agent._resolve_placeholders("<<__c0__>>", task=task)
 
     def test_non_string_scalar_is_returned_unchanged(self) -> None:
         agent = make_agent()
-        state = make_state()
+        task = make_task()
 
-        assert agent._resolve_placeholders(123, state=state) == 123
-        assert agent._resolve_placeholders(None, state=state) is None
+        assert agent._resolve_placeholders(123, task=task) == 123
+        assert agent._resolve_placeholders(None, task=task) is None
 
     def test_extract_dependencies_finds_nested_placeholders(self) -> None:
         obj = {"a": "<<__s0__>>", "b": ["prefix <<__s1__>>"], "<<__s2__>>": "key"}
@@ -763,9 +766,9 @@ class TestExecutePreparedBatch:
         keys = register_math_tools(agent)
 
         slot = prepared_slot(0, keys["add"], {"x": 2, "y": 3})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
-        updated = agent._execute_prepared_batch(state)
+        updated = agent._execute_prepared_batch(task)
 
         assert updated.running_blackboard[0].result.result == 5
         assert updated.running_blackboard[0].status == "executed"
@@ -778,7 +781,7 @@ class TestExecutePreparedBatch:
         agent = make_agent()
         keys = register_math_tools(agent)
 
-        state = make_state(
+        task = make_task(
             running=[
                 prepared_slot(0, keys["add"], {"x": 2, "y": 3}),
                 prepared_slot(1, keys["multiply"], {"x": 4, "y": 5}),
@@ -786,7 +789,7 @@ class TestExecutePreparedBatch:
             prepared_steps=[0, 1],
         )
 
-        updated = agent._execute_prepared_batch(state)
+        updated = agent._execute_prepared_batch(task)
 
         assert updated.running_blackboard[0].result.result == 5
         assert updated.running_blackboard[0].status == "executed"
@@ -797,98 +800,98 @@ class TestExecutePreparedBatch:
     def test_executes_return_tool_sets_done_and_return_value(self) -> None:
         agent = make_agent()
 
-        state = make_state(
+        task = make_task(
             running=[prepared_slot(0, return_tool.full_name, {"val": 123})],
             prepared_steps=[0],
         )
 
-        updated = agent._execute_prepared_batch(state)
+        updated = agent._execute_prepared_batch(task)
 
-        assert updated.is_done is True
-        assert updated.return_value == 123
+        assert updated.complete is True
+        assert updated.generated_response == 123
         assert updated.running_blackboard[0].status == "executed"
         assert updated.tool_calls_used == 0
 
     def test_return_tool_does_not_increment_tool_calls_used(self) -> None:
         agent = make_agent()
 
-        state = make_state(
+        task = make_task(
             running=[prepared_slot(0, return_tool.full_name, {"val": "done"})],
             prepared_steps=[0],
             tool_calls_used=3,
         )
 
-        updated = agent._execute_prepared_batch(state)
+        updated = agent._execute_prepared_batch(task)
 
         assert updated.tool_calls_used == 3
 
     def test_empty_prepared_steps_raises(self) -> None:
         agent = make_agent()
-        state = make_state(running=[])
+        task = make_task(running=[])
 
         with pytest.raises(ToolAgentError, match="no prepared steps"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
     def test_duplicate_prepared_steps_raises(self) -> None:
         agent = make_agent()
         keys = register_math_tools(agent)
-        state = make_state(
+        task = make_task(
             running=[prepared_slot(0, keys["add"], {"x": 1, "y": 2})],
             prepared_steps=[0, 0],
         )
 
         with pytest.raises(ToolAgentError, match="duplicates"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
     def test_out_of_range_prepared_step_raises(self) -> None:
         agent = make_agent()
-        state = make_state(running=[], prepared_steps=[0])
+        task = make_task(running=[], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="out of range"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
     def test_step_mismatch_raises(self) -> None:
         agent = make_agent()
         keys = register_math_tools(agent)
         slot = prepared_slot(99, keys["add"], {"x": 1, "y": 2})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="step mismatch"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
     def test_already_executed_step_raises(self) -> None:
         agent = make_agent()
-        state = make_state(running=[executed_slot(0, 3)], prepared_steps=[0])
+        task = make_task(running=[executed_slot(0, 3)], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="already executed"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
     def test_unprepared_slot_raises(self) -> None:
         agent = make_agent()
-        state = make_state(running=[BlackboardSlot(step=0)], prepared_steps=[0])
+        task = make_task(running=[BlackboardSlot(step=0)], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="not prepared"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
     def test_invalid_tool_name_raises(self) -> None:
         agent = make_agent()
         slot = prepared_slot(0, "", {})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="invalid tool name"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
     def test_unknown_tool_raises(self) -> None:
         agent = make_agent()
         slot = prepared_slot(0, "Tool.tests.missing", {})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="unknown tool"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
     def test_multiple_return_tools_in_same_batch_raises(self) -> None:
         agent = make_agent()
-        state = make_state(
+        task = make_task(
             running=[
                 prepared_slot(0, return_tool.full_name, {"val": 1}),
                 prepared_slot(1, return_tool.full_name, {"val": 2}),
@@ -897,41 +900,41 @@ class TestExecutePreparedBatch:
         )
 
         with pytest.raises(ToolAgentError, match="multiple return"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
     def test_tool_calls_limit_exceeded_raises(self) -> None:
         agent = make_agent(tool_calls_limit=0)
         keys = register_math_tools(agent)
-        state = make_state(
+        task = make_task(
             running=[prepared_slot(0, keys["add"], {"x": 1, "y": 2})],
             prepared_steps=[0],
         )
 
         with pytest.raises(ToolAgentError, match="tool_calls_limit exceeded"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
     def test_tool_failure_records_error_and_raises(self) -> None:
         agent = make_agent()
         keys = register_math_tools(agent)
         slot = prepared_slot(0, keys["fail_tool"], {})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
         with pytest.raises((ToolInvocationError, ToolAgentError)):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
-        assert state.running_blackboard[0].error is not NO_VAL
-        assert state.running_blackboard[0].status == "failed"
-        assert state.running_blackboard[0].is_failed() is True
+        assert task.running_blackboard[0].error is not NO_VAL
+        assert task.running_blackboard[0].status == "failed"
+        assert task.running_blackboard[0].is_failed() is True
 
     def test_prepared_steps_cleared_after_success(self) -> None:
         agent = make_agent()
         keys = register_math_tools(agent)
-        state = make_state(
+        task = make_task(
             running=[prepared_slot(0, keys["add"], {"x": 1, "y": 2})],
             prepared_steps=[0],
         )
 
-        updated = agent._execute_prepared_batch(state)
+        updated = agent._execute_prepared_batch(task)
 
         assert updated.prepared_steps == []
 
@@ -939,18 +942,18 @@ class TestExecutePreparedBatch:
         agent = make_agent(fail_fast=False)
         keys = register_math_tools(agent)
         slot = prepared_slot(0, keys["fail_tool"], {})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
-        agent._execute_prepared_batch(state)  # must not raise
+        agent._execute_prepared_batch(task)  # must not raise
 
-        assert state.running_blackboard[0].status == "failed"
-        assert state.running_blackboard[0].error is not NO_VAL
-        assert state.running_blackboard[0].is_failed() is True
+        assert task.running_blackboard[0].status == "failed"
+        assert task.running_blackboard[0].error is not NO_VAL
+        assert task.running_blackboard[0].is_failed() is True
 
     def test_fail_fast_false_mixed_batch_executes_successes_marks_failures(self) -> None:
         agent = make_agent(fail_fast=False)
         keys = register_math_tools(agent)
-        state = make_state(
+        task = make_task(
             running=[
                 prepared_slot(0, keys["add"], {"x": 1, "y": 2}),
                 prepared_slot(1, keys["fail_tool"], {}),
@@ -958,17 +961,17 @@ class TestExecutePreparedBatch:
             prepared_steps=[0, 1],
         )
 
-        agent._execute_prepared_batch(state)  # must not raise
+        agent._execute_prepared_batch(task)  # must not raise
 
-        assert state.running_blackboard[0].status == "executed"
-        assert state.running_blackboard[0].result.result == 3
-        assert state.running_blackboard[1].status == "failed"
-        assert state.running_blackboard[1].error is not NO_VAL
+        assert task.running_blackboard[0].status == "executed"
+        assert task.running_blackboard[0].result.result == 3
+        assert task.running_blackboard[1].status == "failed"
+        assert task.running_blackboard[1].error is not NO_VAL
 
     def test_fail_fast_false_executed_steps_excludes_failed_slots(self) -> None:
         agent = make_agent(fail_fast=False)
         keys = register_math_tools(agent)
-        state = make_state(
+        task = make_task(
             running=[
                 prepared_slot(0, keys["add"], {"x": 1, "y": 2}),
                 prepared_slot(1, keys["fail_tool"], {}),
@@ -976,7 +979,7 @@ class TestExecutePreparedBatch:
             prepared_steps=[0, 1],
         )
 
-        updated = agent._execute_prepared_batch(state)
+        updated = agent._execute_prepared_batch(task)
 
         assert 0 in updated.executed_steps
         assert 1 not in updated.executed_steps
@@ -984,12 +987,12 @@ class TestExecutePreparedBatch:
     def test_fail_fast_false_prepared_steps_cleared_after_partial_failure(self) -> None:
         agent = make_agent(fail_fast=False)
         keys = register_math_tools(agent)
-        state = make_state(
+        task = make_task(
             running=[prepared_slot(0, keys["fail_tool"], {})],
             prepared_steps=[0],
         )
 
-        updated = agent._execute_prepared_batch(state)
+        updated = agent._execute_prepared_batch(task)
 
         assert updated.prepared_steps == []
 
@@ -1002,9 +1005,9 @@ class TestAsyncExecutePreparedBatch:
         keys = register_math_tools(agent)
 
         slot = prepared_slot(0, keys["add"], {"x": 2, "y": 3})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
-        updated = asyncio.run(agent._async_execute_prepared_batch(state))
+        updated = asyncio.run(agent._async_execute_prepared_batch(task))
 
         assert updated.running_blackboard[0].result.result == 5
         assert updated.running_blackboard[0].status == "executed"
@@ -1015,76 +1018,76 @@ class TestAsyncExecutePreparedBatch:
     def test_executes_return_tool_sets_done_and_return_value(self) -> None:
         agent = make_agent()
 
-        state = make_state(
+        task = make_task(
             running=[prepared_slot(0, return_tool.full_name, {"val": 123})],
             prepared_steps=[0],
         )
 
-        updated = asyncio.run(agent._async_execute_prepared_batch(state))
+        updated = asyncio.run(agent._async_execute_prepared_batch(task))
 
-        assert updated.is_done is True
-        assert updated.return_value == 123
+        assert updated.complete is True
+        assert updated.generated_response == 123
         assert updated.tool_calls_used == 0
 
     def test_empty_prepared_steps_raises(self) -> None:
         agent = make_agent()
-        state = make_state(running=[])
+        task = make_task(running=[])
 
         with pytest.raises(ToolAgentError, match="no prepared steps"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
     def test_duplicate_prepared_steps_raises(self) -> None:
         agent = make_agent()
         keys = register_math_tools(agent)
-        state = make_state(
+        task = make_task(
             running=[prepared_slot(0, keys["add"], {"x": 1, "y": 2})],
             prepared_steps=[0, 0],
         )
 
         with pytest.raises(ToolAgentError, match="duplicates"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
     def test_out_of_range_prepared_step_raises(self) -> None:
         agent = make_agent()
-        state = make_state(running=[], prepared_steps=[0])
+        task = make_task(running=[], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="out of range"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
     def test_step_mismatch_raises(self) -> None:
         agent = make_agent()
         keys = register_math_tools(agent)
         slot = prepared_slot(99, keys["add"], {"x": 1, "y": 2})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="step mismatch"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
     def test_already_executed_step_raises(self) -> None:
         agent = make_agent()
-        state = make_state(running=[executed_slot(0, 3)], prepared_steps=[0])
+        task = make_task(running=[executed_slot(0, 3)], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="already executed"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
     def test_unprepared_slot_raises(self) -> None:
         agent = make_agent()
-        state = make_state(running=[BlackboardSlot(step=0)], prepared_steps=[0])
+        task = make_task(running=[BlackboardSlot(step=0)], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="not prepared"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
     def test_invalid_tool_name_raises(self) -> None:
         agent = make_agent()
         slot = prepared_slot(0, "", {})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="invalid tool name"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
     def test_multiple_return_tools_in_same_batch_raises(self) -> None:
         agent = make_agent()
-        state = make_state(
+        task = make_task(
             running=[
                 prepared_slot(0, return_tool.full_name, {"val": 1}),
                 prepared_slot(1, return_tool.full_name, {"val": 2}),
@@ -1093,18 +1096,18 @@ class TestAsyncExecutePreparedBatch:
         )
 
         with pytest.raises(ToolAgentError, match="multiple return"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
     def test_tool_calls_limit_exceeded_raises(self) -> None:
         agent = make_agent(tool_calls_limit=0)
         keys = register_math_tools(agent)
-        state = make_state(
+        task = make_task(
             running=[prepared_slot(0, keys["add"], {"x": 1, "y": 2})],
             prepared_steps=[0],
         )
 
         with pytest.raises(ToolAgentError, match="tool_calls_limit exceeded"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
     def test_non_invocation_exception_is_wrapped_as_tool_agent_error(self) -> None:
         agent = make_agent()
@@ -1112,30 +1115,30 @@ class TestAsyncExecutePreparedBatch:
         # Missing required "y" raises a raw TypeError out of Tool.async_invoke,
         # before it can be wrapped as a ToolInvocationError.
         slot = prepared_slot(0, keys["add"], {"x": 1})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
         with pytest.raises(ToolAgentError, match="tool call failed at step 0"):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
-        assert isinstance(state.running_blackboard[0].error, ToolAgentError)
-        assert state.running_blackboard[0].status == "failed"
+        assert isinstance(task.running_blackboard[0].error, ToolAgentError)
+        assert task.running_blackboard[0].status == "failed"
 
     def test_fail_fast_false_marks_all_failures_without_raising(self) -> None:
         agent = make_agent(fail_fast=False)
         keys = register_math_tools(agent)
         slot = prepared_slot(0, keys["fail_tool"], {})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
-        asyncio.run(agent._async_execute_prepared_batch(state))  # must not raise
+        asyncio.run(agent._async_execute_prepared_batch(task))  # must not raise
 
-        assert state.running_blackboard[0].status == "failed"
-        assert state.running_blackboard[0].error is not NO_VAL
-        assert state.running_blackboard[0].is_failed() is True
+        assert task.running_blackboard[0].status == "failed"
+        assert task.running_blackboard[0].error is not NO_VAL
+        assert task.running_blackboard[0].is_failed() is True
 
     def test_fail_fast_false_mixed_batch_executes_successes_marks_failures(self) -> None:
         agent = make_agent(fail_fast=False)
         keys = register_math_tools(agent)
-        state = make_state(
+        task = make_task(
             running=[
                 prepared_slot(0, keys["add"], {"x": 1, "y": 2}),
                 prepared_slot(1, keys["fail_tool"], {}),
@@ -1143,17 +1146,17 @@ class TestAsyncExecutePreparedBatch:
             prepared_steps=[0, 1],
         )
 
-        asyncio.run(agent._async_execute_prepared_batch(state))  # must not raise
+        asyncio.run(agent._async_execute_prepared_batch(task))  # must not raise
 
-        assert state.running_blackboard[0].status == "executed"
-        assert state.running_blackboard[0].result.result == 3
-        assert state.running_blackboard[1].status == "failed"
-        assert state.running_blackboard[1].error is not NO_VAL
+        assert task.running_blackboard[0].status == "executed"
+        assert task.running_blackboard[0].result.result == 3
+        assert task.running_blackboard[1].status == "failed"
+        assert task.running_blackboard[1].error is not NO_VAL
 
     def test_fail_fast_false_executed_steps_excludes_failed_slots(self) -> None:
         agent = make_agent(fail_fast=False)
         keys = register_math_tools(agent)
-        state = make_state(
+        task = make_task(
             running=[
                 prepared_slot(0, keys["add"], {"x": 1, "y": 2}),
                 prepared_slot(1, keys["fail_tool"], {}),
@@ -1161,7 +1164,7 @@ class TestAsyncExecutePreparedBatch:
             prepared_steps=[0, 1],
         )
 
-        updated = asyncio.run(agent._async_execute_prepared_batch(state))
+        updated = asyncio.run(agent._async_execute_prepared_batch(task))
 
         assert 0 in updated.executed_steps
         assert 1 not in updated.executed_steps
@@ -1815,14 +1818,14 @@ class TestToolAgentAsyncBaseLoop:
         agent = make_agent()
         keys = register_math_tools(agent)
         slot = prepared_slot(0, keys["fail_tool"], {})
-        state = make_state(running=[slot], prepared_steps=[0])
+        task = make_task(running=[slot], prepared_steps=[0])
 
         with pytest.raises((ToolInvocationError, ToolAgentError)):
-            asyncio.run(agent._async_execute_prepared_batch(state))
+            asyncio.run(agent._async_execute_prepared_batch(task))
 
-        assert state.running_blackboard[0].error is not NO_VAL
-        assert state.running_blackboard[0].status == "failed"
-        assert state.running_blackboard[0].is_failed() is True
+        assert task.running_blackboard[0].error is not NO_VAL
+        assert task.running_blackboard[0].status == "failed"
+        assert task.running_blackboard[0].is_failed() is True
 
     def test_async_prepare_empty_batch_raises(self) -> None:
         agent = make_agent()
@@ -1966,11 +1969,11 @@ class TestAsyncHookDispatch:
 
     def test_toolagent_base_has_concrete_async_hooks(self) -> None:
         agent = make_agent()
-        assert callable(getattr(agent, "_ainitialize_run_state", None))
+        assert callable(getattr(agent, "_async_initialize_task", None))
         assert callable(getattr(agent, "_aprepare_next_batch", None))
 
-    def test_planact_overrides_ainitialize_run_state(self) -> None:
-        # PlanActAgent._ainitialize_run_state must be its own override, not the base default.
+    def test_planact_overrides_async_initialize_task(self) -> None:
+        # PlanActAgent._async_initialize_task must be its own override, not the base default.
         agent = make_planact_agent(
             [
                 json.dumps([
@@ -1979,7 +1982,7 @@ class TestAsyncHookDispatch:
                 ])
             ]
         )
-        assert type(agent)._ainitialize_run_state is not ToolAgent._ainitialize_run_state
+        assert type(agent)._async_initialize_task is not ToolAgent._async_initialize_task
 
     def test_react_overrides_aprepare_next_batch(self) -> None:
         # ReActAgent._aprepare_next_batch must be its own override, not the base default.
@@ -2011,7 +2014,7 @@ class TestAsyncHookDispatch:
         assert result.result == 5
 
     def test_planact_async_invoke_uses_agenerate_plan(self) -> None:
-        # Full async_invoke via PlanActAgent exercises _ainitialize_run_state â†’ _agenerate_plan.
+        # Full async_invoke via PlanActAgent exercises _async_initialize_task â†’ _agenerate_plan.
         agent = make_planact_agent(
             [
                 json.dumps([
@@ -2049,8 +2052,42 @@ class TestAsyncHookDispatch:
 
         assert result.result == 10
 
+    def test_default_async_initialize_task_offloads_to_thread(self) -> None:
+        # ScriptedToolAgent overrides neither _async_initialize_task nor
+        # _async_progress, so the default asyncio.to_thread wrap on Agent
+        # must actually run _initialize_task through a worker thread.
+        agent = make_agent()
+        register_math_tools(agent)
+        agent.set_script([[{"tool": return_tool.full_name, "args": {"val": 1}}]])
 
-# â”€â”€ TestCascadeFailedPropagation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        with unittest.mock.patch(
+            "atomic_agentic.agents.base.asyncio.to_thread",
+            wraps=asyncio.to_thread,
+        ) as mock_to_thread:
+            asyncio.run(agent.async_invoke({"prompt": "run"}))
+
+        assert any(
+            call.args and call.args[0] == agent._initialize_task
+            for call in mock_to_thread.call_args_list
+        )
+
+
+class TestProgressCascadeSkipEmptyBatch:
+    def test_progress_returns_incomplete_task_without_raising_on_empty_batch(self) -> None:
+        agent = SkipFirstBatchToolAgent()
+        register_math_tools(agent)
+        agent.set_script([[{"tool": return_tool.full_name, "args": {"val": 1}}]])
+
+        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+
+        task = agent._progress(task)  # round over batch_index 0 (cascade-skipped)
+        assert task.complete is False
+        assert task.prepared_steps == []
+
+        task = agent._progress(task)  # round over batch_index 1 (the real batch)
+        assert task.complete is True
+        assert task.generated_response == 1
+
 
 class TestToolAgentToDictFastFail:
     """Tests that to_dict() includes the fail_fast and generation_retries keys."""
@@ -2088,7 +2125,7 @@ class TestExecutePreparedBatchEarlyValidation:
         agent = make_agent()
         keys = register_math_tools(agent)
 
-        state = make_state(
+        task = make_task(
             running=[
                 prepared_slot(0, keys["add"], {"x": 1, "y": 2}),
                 prepared_slot(1, "Tool.tests.no_such_tool", {}),
@@ -2097,24 +2134,24 @@ class TestExecutePreparedBatchEarlyValidation:
         )
 
         with pytest.raises(ToolAgentError, match="no_such_tool"):
-            agent._execute_prepared_batch(state)
+            agent._execute_prepared_batch(task)
 
         # Neither slot should have executed â€” early exit before the gather.
-        assert state.running_blackboard[0].is_empty() or state.running_blackboard[0].is_prepared()
-        assert state.running_blackboard[1].is_empty() or state.running_blackboard[1].is_prepared()
+        assert task.running_blackboard[0].is_empty() or task.running_blackboard[0].is_prepared()
+        assert task.running_blackboard[1].is_empty() or task.running_blackboard[1].is_prepared()
 
     def test_known_tools_proceed_normally(self) -> None:
         """Batch with all valid tools executes without raising."""
         agent = make_agent()
         keys = register_math_tools(agent)
 
-        state = make_state(
+        task = make_task(
             running=[
                 prepared_slot(0, keys["add"], {"x": 3, "y": 4}),
             ],
             prepared_steps=[0],
         )
 
-        updated = agent._execute_prepared_batch(state)
+        updated = agent._execute_prepared_batch(task)
         assert updated.running_blackboard[0].result.result == 7
 

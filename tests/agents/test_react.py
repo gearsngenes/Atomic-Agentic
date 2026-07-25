@@ -10,13 +10,13 @@ from conftest import (
     make_planact_agent,
     react_step_json,
     register_math_tools,
-    make_state,
+    make_task,
     executed_slot,
     prepared_slot,
     make_llm_result,
     make_llm_record,
     make_tool_result,
-    ScriptedRunState,
+    ScriptedTask,
     ScriptedToolAgent,
     ScriptedLLMEngine,
     BadRepr,
@@ -25,7 +25,7 @@ from conftest import (
 from atomic_agentic.agents.toolagent import ToolAgent, return_tool
 from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot
-from atomic_agentic.models.agents.runstates import ReActRunState, ReActStepMeta
+from atomic_agentic.models.agents.tasks import ReActTask, ReActStepMeta
 from atomic_agentic.exceptions import (
     ToolAgentError,
     ToolInvocationError,
@@ -221,15 +221,13 @@ class TestReActAgent:
             ],
             tool_calls_limit=1,
         )
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        updated = agent._prepare_next_batch(state)
+        updated = agent._prepare_next_batch(task)
 
         slot = updated.running_blackboard[0]
         assert updated.prepared_steps == [0]
@@ -283,15 +281,13 @@ class TestReActAgent:
             ],
             tool_calls_limit=1,
         )
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        updated = agent._prepare_next_batch(state)
+        updated = agent._prepare_next_batch(task)
 
         slot = updated.running_blackboard[0]
         assert updated.prepared_steps == [0]
@@ -366,15 +362,13 @@ class TestReActAgent:
             ],
             tool_calls_limit=2,
         )
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
 
-        updated = agent._prepare_next_batch(state)
+        updated = agent._prepare_next_batch(task)
 
         slot = updated.running_blackboard[0]
         assert updated.prepared_steps == [0]
@@ -398,18 +392,16 @@ class TestReActAgent:
             ],
             tool_calls_limit=2,
         )
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
-        state.next_step_index = 1
-        state.running_blackboard[0] = executed_slot(0, 5)
-        state.step_meta[0].description = "Add the two numbers for the current calculation."
+        task.next_step_index = 1
+        task.running_blackboard[0] = executed_slot(0, 5)
+        task.step_meta[0].description = "Add the two numbers for the current calculation."
 
-        updated = agent._prepare_next_batch(state)
+        updated = agent._prepare_next_batch(task)
 
         slot = updated.running_blackboard[1]
         assert slot.status == "prepared"
@@ -567,7 +559,13 @@ class TestReActGenerationRetry:
             generation_retries=1,
         )
         agent.invoke({"prompt": "run"})
-        assert len(agent.records[-1].llm_records) == 2
+        llm_records = agent.records[-1].llm_records
+        assert len(llm_records) == 2
+        assert len(llm_records[0].messages) == 3
+        # Self-contained convention: retry's messages = full task_messages so
+        # far (3-element first-attempt thread + 2 injected feedback), not
+        # just the 2 new ones.
+        assert len(llm_records[1].messages) == 5
 
     def test_spec_error_retry_succeeds_on_second_call(self) -> None:
         """generation_retries=1: unknown tool on first step attempt; valid step on second."""
@@ -590,7 +588,13 @@ class TestReActGenerationRetry:
         )
         register_math_tools(agent)  # type: ignore[arg-type]
         agent.invoke({"prompt": "run"})
-        assert len(agent.records[-1].llm_records) == 2
+        llm_records = agent.records[-1].llm_records
+        assert len(llm_records) == 2
+        assert len(llm_records[0].messages) == 3
+        # Self-contained convention: retry's messages = full task_messages so
+        # far (3-element first-attempt thread + 2 injected feedback), not
+        # just the 2 new ones.
+        assert len(llm_records[1].messages) == 5
 
     def test_budget_exhausted_raises_after_all_attempts(self) -> None:
         """generation_retries=1: both attempts return invalid JSON → ToolAgentError."""
@@ -710,9 +714,14 @@ class TestReActGenerationRetry:
 # ── TestExecutePreparedBatchEarlyValidation ───────────────────────────────────
 
 class TestMaxDurationSingleSource:
-    """B3/B-7: max_duration is computed once in _prepare_next_batch and flows to both
-    _build_react_messages, _generate_next_step, and _apply_react_step_result; none
-    re-derive it independently."""
+    """B3/B-7 (superseded by render-task-logic): max_duration is now cheaply
+    re-derived independently at each site that needs it (render_task,
+    _generate_next_step, _apply_react_step_result) from
+    max(0, self._tool_calls_limit - prefix_len) rather than computed once
+    and threaded through as a parameter. The invariant under test is no
+    longer "single computation, threaded through" but "every independent
+    derivation agrees," which the boundary-condition tests below verify
+    end-to-end."""
 
     def test_max_duration_limits_step_at_budget_boundary(self) -> None:
         """A step with duration == remaining budget is accepted."""
@@ -743,13 +752,16 @@ class TestMaxDurationSingleSource:
         result = agent.invoke({"prompt": "run"})
         assert result.result == 3
 
-    def test_apply_react_step_result_accepts_max_duration_param(self) -> None:
-        """_apply_react_step_result takes max_duration as a kwarg; no independent recomputation."""
+    def test_apply_react_step_result_no_longer_takes_max_duration_param(self) -> None:
+        """Locks down the render-task-logic redesign: max_duration is
+        recomputed internally from prefix_len rather than accepted as a
+        parameter -- also confirms llm_records was dropped (now mutated
+        directly by _generate_next_step)."""
         import inspect
         sig = inspect.signature(ReActAgent._apply_react_step_result)
         params = sig.parameters
-        assert "max_duration" in params
-        assert params["max_duration"].kind == inspect.Parameter.KEYWORD_ONLY
+        assert "max_duration" not in params
+        assert "llm_records" not in params
 
     def test_max_duration_flows_from_prepare_to_apply(self) -> None:
         """observe_duration == max_duration at budget boundary is accepted end-to-end."""
@@ -868,12 +880,10 @@ class TestCacheRefValidation:
         assert result.result == 99
 
         # Build the snapshot for prefix_len=1 (after step 0 fails, before step 1 is generated).
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
         # Manually seed a FAILED slot at index 0 to simulate the post-failure state.
         failed_slot = BlackboardSlot(
@@ -883,12 +893,18 @@ class TestCacheRefValidation:
             error=RuntimeError("intentional failure"),
             status=BlackboardSlot.FAILED,
         )
-        state.running_blackboard[0] = failed_slot
-        state.step_meta[0] = ReActStepMeta(observable=0, description="Test fail step.")
+        task.running_blackboard[0] = failed_slot
+        task.step_meta[0] = ReActStepMeta(observable=0, description="Test fail step.")
+        # render_task derives prefix_len from next_step_index internally
+        # (no longer a separate parameter) -- advance the cursor to match
+        # the "after step 0, before step 1" snapshot this test wants.
+        task.next_step_index = 1
 
-        working_messages, _ = agent._build_react_messages(state, prefix_len=1, max_duration=1)
-        # working_messages[-2] is the assistant turn with the running-plan snapshot.
-        snapshot_text = working_messages[-2]["content"]
+        messages = agent.render_task(task)
+        # messages[-2] is the assistant turn with the running-plan snapshot
+        # (task_messages occupies the tail of the returned list: goal,
+        # snapshot, request).
+        snapshot_text = messages[-2]["content"]
 
         assert "FAILED" in snapshot_text
         assert "intentional failure" in snapshot_text
@@ -906,21 +922,25 @@ class TestCacheRefValidation:
         assert result.result == 3
 
         # Build snapshot after step 0 executed — check no FAILED markers.
-        state = agent._initialize_run_state(
+        task = agent._initialize_task(
             turns=[],
             prompt="react",
             inputs={},
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
         )
         # After invoke, the blackboard is persisted; index 0 is the executed add step.
         exec_slot = agent.blackboard[0]
-        state.running_blackboard[0] = exec_slot
-        state.step_meta[0] = ReActStepMeta(observable=0, description="Add two numbers.")
+        task.running_blackboard[0] = exec_slot
+        task.step_meta[0] = ReActStepMeta(observable=0, description="Add two numbers.")
+        # render_task derives prefix_len from next_step_index internally
+        # (no longer a separate parameter) -- advance the cursor to match
+        # the "after step 0, before step 1" snapshot this test wants.
+        task.next_step_index = 1
 
-        working_messages, _ = agent._build_react_messages(state, prefix_len=1, max_duration=1)
-        # working_messages[-2] is the assistant turn with the running-plan snapshot.
-        snapshot_text = working_messages[-2]["content"]
+        messages = agent.render_task(task)
+        # messages[-2] is the assistant turn with the running-plan snapshot
+        # (task_messages occupies the tail of the returned list: goal,
+        # snapshot, request).
+        snapshot_text = messages[-2]["content"]
 
         assert "result_ref" in snapshot_text
         # No slot-level "status" key should appear (only FAILED slots get that field).

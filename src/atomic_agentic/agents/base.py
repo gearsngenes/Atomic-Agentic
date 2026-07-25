@@ -12,6 +12,7 @@ from typing import (
 )
 from dataclasses import replace
 from datetime import datetime, timezone
+import asyncio
 import logging
 import warnings
 
@@ -23,10 +24,11 @@ from ..exceptions import (
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
-from ..models.results import AgentResult, LLMModelData
+from ..models.results import AgentResult
 from ..tools import toolify
-from ..models.agents.records import AgentRecord, LLMRecord
+from ..models.agents.records import AgentRecord
 from ..models.agents.prompts import PromptConfig
+from ..models.agents.tasks import AgentTask
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +54,8 @@ class Agent(AtomicInvokable, ABC):
 
     ``Agent`` owns the full invocation lifecycle shell — input filtering,
     turn selection, pre/post-invoke dispatch, record management — but
-    delegates the actual LLM work to the ``_invoke`` / ``_ainvoke`` abstract
-    methods that concrete subclasses implement.
+    delegates the actual LLM work to the ``_initialize_task``/``_progress``
+    abstract-or-overridable hooks that concrete subclasses implement.
 
     Lifecycle
     ---------
@@ -67,12 +69,14 @@ class Agent(AtomicInvokable, ABC):
        declared parameters, excluding reserved names.
     4. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
     5. Turns are selected from history if ``context_enabled`` is True.
-    6. ``_invoke(turns, prompt, inputs)`` performs LLM work, receiving the
+    6. ``_initialize_task(turns, prompt, inputs)`` builds a task from the
        full filtered ``inputs`` dict untouched — not a slice, not popped of
-       anything.
+       anything; then ``_progress`` runs until ``task.complete``;
+       ``_build_record_from_task`` assembles the completed record.
     7. ``post_invoke`` transforms the raw response into the final result.
     8. A completed ``AgentRecord`` is always appended to ``_records``, with
-       ``inputs`` set to the exact same full dict passed to ``_invoke``.
+       ``inputs`` set to the exact same full dict passed to
+       ``_initialize_task``.
 
     Schema composition
     -------------------
@@ -370,7 +374,7 @@ class Agent(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     @property
     def post_result_key(self) -> str:
-        """Post-invoke parameter name that receives the raw ``_invoke`` result."""
+        """Post-invoke parameter name that receives the task's raw generated response."""
         return self._post_result_key
 
     @property
@@ -432,7 +436,7 @@ class Agent(AtomicInvokable, ABC):
 
     @property
     def post_invoke(self) -> AtomicInvokable:
-        """Invokable that converts the raw ``_invoke`` result into the final agent output."""
+        """Invokable that converts the task's raw generated response into the final agent output."""
         return self._post_invoke
 
     @property
@@ -499,76 +503,178 @@ class Agent(AtomicInvokable, ABC):
         ]
 
     # ------------------------------------------------------------------ #
-    # Abstract core LLM work
+    # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
-    @abstractmethod
-    def _invoke(
+    # _initialize_task is concrete here: wrapping turns/prompt/inputs into a
+    # bare AgentTask is subclass-agnostic base-contract work. BasicAgent
+    # inherits this unchanged. ToolAgent re-declares it @abstractmethod,
+    # since only PlanActAgent/ReActAgent know how to build their own richer
+    # ToolAgentTask subclass; the bare AgentTask this base method returns
+    # isn't sufficient for them. _progress stays @abstractmethod here —
+    # every subclass's advance-by-one-round logic genuinely differs.
+    def _initialize_task(
         self,
+        *,
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
-    ) -> tuple[AgentRecord, dict]:
-        """Sync core LLM call path.
+    ) -> AgentTask:
+        """Build and return this invocation's AgentTask.
 
-        Receives the selected conversation turns, the current prompt string,
-        and the full filtered ``inputs`` dict — untouched, not a slice, not
-        popped of anything, so a subclass can still reach a reserved value
-        (e.g. ``run_id``) beyond what base ``Agent`` already threads through
-        for it. Returns a 2-tuple of a draft ``AgentRecord``
-        (``final_result=None``) and a metadata dict carrying
-        ``"llm_records"`` and ``"llm_model_data"``.
+        Receives the selected conversation turns, the current prompt
+        string, and the full filtered ``inputs`` dict — untouched. Concrete
+        base implementation just wraps the three into a bare ``AgentTask``;
+        subclasses that need a richer ``AgentTask`` subclass (with
+        additional bookkeeping fields populated) override this.
+
+        ``system_prompt_name`` is set to ``None`` here — this base hook has
+        no domain knowledge of which (if any) system prompt applies;
+        subclasses that need one override this and set it explicitly
+        (``BasicAgent`` calls ``super()._initialize_task(...)`` then stamps
+        ``"role"`` over this ``None``).
+        """
+        return AgentTask(turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name=None)
+
+    @abstractmethod
+    def _progress(self, task: AgentTask) -> AgentTask:
+        """Advance the task by exactly one round; may set ``task.complete``.
+
+        The base lifecycle loop in ``invoke()``/``async_invoke()`` is
+        ``while not task.complete: task = self._progress(task)``.
+        Implementations must set ``task.generated_response`` and
+        ``task.complete = True`` on the round that finishes the
+        invocation.
         """
         ...
 
     @abstractmethod
-    async def _ainvoke(
+    def render_task(
         self,
+        task: AgentTask,
+        *,
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Build the exact send-payload message list for one LLM call.
+
+        Every concrete subclass fully reimplements this rather than
+        composing via ``super()`` — each implementation calls
+        ``_render_system_message``/``_render_historic_messages`` explicitly
+        for the two pieces that render identically everywhere, then lazily
+        builds its own ``task.task_messages`` when empty (fully
+        subclass-specific content). ``additional_messages`` (``None``
+        treated as ``[]``) is appended onto ``task.task_messages`` and
+        **persists** there — generation retries within one phase accumulate
+        across multiple ``render_task`` calls rather than resetting each
+        time. Returns the rendered system message (if any) plus
+        ``task.historic_messages`` plus ``task.task_messages``.
+
+        Pure computation, no I/O — the same method serves both the sync and
+        async lifecycle paths; there is no ``_async_render_task``.
+        """
+        ...
+
+    def _render_system_message(
+        self,
+        task: AgentTask,
+        render_context: dict[str, Any],
+    ) -> list[dict[str, str]]:
+        """Render ``task``'s active system prompt, if any.
+
+        Returns ``[]`` when ``task.system_prompt_name`` is ``None``.
+        Otherwise renders ``self._system_prompts[task.system_prompt_name]``
+        against ``render_context`` and returns a single-element system
+        message list. An unregistered name raises ``KeyError`` naturally —
+        an internal-contract violation, not guarded against.
+        """
+        if task.system_prompt_name is None:
+            return []
+        rendered = self._system_prompts[task.system_prompt_name].render(render_context)
+        return [{"role": "system", "content": rendered}]
+
+    def _render_historic_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        """Lazily render ``task.turns`` into ``task.historic_messages``.
+
+        Built once per invoke and reused thereafter. If ``task.turns`` is
+        empty, ``task.historic_messages`` correctly stays empty — later
+        calls re-checking an empty ``turns`` are a harmless no-op, not an
+        ambiguous state.
+        """
+        if task.historic_messages:
+            return task.historic_messages
+        if not task.turns:
+            return task.historic_messages
+        rendered: list[dict[str, str]] = []
+        for turn in task.turns:
+            rendered.extend(self.render_turn(turn))
+        task.historic_messages = rendered
+        return task.historic_messages
+
+    async def _async_initialize_task(
+        self,
+        *,
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
-    ) -> tuple[AgentRecord, dict]:
-        """Async core LLM call path. Mirror of ``_invoke``."""
-        ...
+    ) -> AgentTask:
+        """Async mirror of ``_initialize_task``; default offloads to a worker thread."""
+        return await asyncio.to_thread(
+            self._initialize_task, turns=turns, prompt=prompt, inputs=inputs
+        )
+
+    async def _async_progress(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``_progress``; default offloads to a worker thread."""
+        return await asyncio.to_thread(self._progress, task)
+
+    def _build_record_from_task(
+        self,
+        task: AgentTask,
+        turns: list[AgentRecord],
+    ) -> AgentRecord:
+        """Assemble a complete AgentRecord from a finished AgentTask.
+
+        ``BasicAgent`` uses this base implementation as-is; ``ToolAgent``
+        overrides it to return a ``ToolAgentRecord`` with blackboard
+        bookkeeping folded in. ``final_result`` is deliberately left at its
+        dataclass default (``None``) — it is not knowable until
+        ``build_result_from_record`` runs afterward; the caller attaches it
+        via ``dataclasses.replace(...)``.
+        """
+        prev = turns[-1] if turns else None
+        return AgentRecord(
+            user_prompt=task.user_prompt,
+            generated_response=task.generated_response,
+            inputs=task.inputs,
+            llm_records=tuple(task.llm_records),
+            prev=prev,
+        )
 
     # ------------------------------------------------------------------ #
     # Result construction
     # ------------------------------------------------------------------ #
-    def make_result(
+    def build_result_from_record(
         self,
+        record: AgentRecord,
+        *,
         result: Any,
         started_at: datetime,
         ended_at: datetime,
-        **result_kwargs: Any,
     ) -> AgentResult:
-        """Construct this Agent's ``AgentResult`` envelope.
+        """Construct this Agent's ``AgentResult`` envelope directly from a
+        completed ``AgentRecord``, wrapping the low-level ``_make_result``
+        primitive.
 
-        ``result`` is the caller-facing post-processed payload. LLM accounting
-        is passed via ``result_kwargs`` from ``_invoke``'s metadata dict.
+        Public — external subclasses may legitimately override this to
+        choose a more specific result class or add subclass-specific result
+        fields.
+
+        ``result`` (the post-``post_invoke`` final caller-facing value) and
+        ``started_at``/``ended_at`` (the outer invocation's timing envelope)
+        are not derivable from the record, so both stay explicit parameters —
+        distinct from ``record.generated_response``, which is the
+        pre-``post_invoke`` raw value.
         """
-        unexpected = set(result_kwargs) - {"llm_records", "llm_model_data"}
-        if unexpected:
-            raise AgentInvocationError(
-                f"make_result: unexpected result kwarg(s): {sorted(unexpected)!r}."
-            )
-
-        llm_records = result_kwargs.get("llm_records")
-        llm_model_data = result_kwargs.get("llm_model_data")
-
-        if (
-            not isinstance(llm_records, tuple)
-            or not llm_records
-            or not all(isinstance(r, LLMRecord) for r in llm_records)
-        ):
-            raise AgentInvocationError(
-                "Agent.make_result: llm_records must be a non-empty tuple of LLMRecord instances."
-            )
-
-        if not isinstance(llm_model_data, LLMModelData):
-            raise AgentInvocationError(
-                "Agent.make_result: llm_model_data must be an LLMModelData instance."
-            )
-
-        llm_token_usage = tuple(r.llm_result.token_usage for r in llm_records)
+        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
+        llm_model_data = record.llm_records[-1].llm_result.model_data
 
         return self._make_result(
             result=result,
@@ -642,7 +748,8 @@ class Agent(AtomicInvokable, ABC):
         """Async analog of ``invoke``.
 
         Lifecycle steps mirror ``invoke`` with ``await`` at pre/post and
-        ``_ainvoke``. No ``self._invoke_lock`` (unchanged from current
+        the ``_async_initialize_task``/``_async_progress`` task-lifecycle
+        hooks. No ``self._invoke_lock`` (unchanged from current
         implementation, which does not lock async_invoke either).
         """
         logger.info(f"[Async {self.full_name} started]")
@@ -689,19 +796,22 @@ class Agent(AtomicInvokable, ABC):
         if self._context_enabled and self._records_window != 0:
             turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-        # 6. Core LLM work — inputs passed through untouched.
+        # 6. Task lifecycle: initialize, progress until complete, build record.
         logger.debug(f"Agent.{self.name} performing async logic")
-        draft, metadata = await self._ainvoke(turns=turns, prompt=prompt, inputs=inputs)
+        task = await self._async_initialize_task(turns=turns, prompt=prompt, inputs=inputs)
+        while not task.complete:
+            task = await self._async_progress(task)
+        record = self._build_record_from_task(task, turns)
 
-        if not isinstance(draft, AgentRecord):
+        if not isinstance(record, AgentRecord):
             raise AgentInvocationError(
-                f"_ainvoke returned non-AgentRecord draft (type={type(draft)!r})"
+                f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
             )
 
         # 7. Output transformation.
         try:
             logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
-            post_inputs[self._post_result_key] = draft.generated_response
+            post_inputs[self._post_result_key] = record.generated_response
             post_result = await self._post_invoke.async_invoke(post_inputs)
         except ToolInvocationError:
             raise
@@ -712,22 +822,15 @@ class Agent(AtomicInvokable, ABC):
         ended_at = datetime.now(timezone.utc)
 
         # 8. Result.
-        agent_result = self.make_result(
+        agent_result = self.build_result_from_record(
+            record,
             result=final_response,
             started_at=started_at,
             ended_at=ended_at,
-            **metadata,
         )
 
-        # 9. Record — always appended; inputs widens to the full filtered dict.
-        record = replace(
-            draft,
-            user_prompt=prompt,
-            inputs=inputs,
-            final_result=agent_result,
-            llm_records=metadata["llm_records"],
-            prev=turns[-1] if turns else None,
-        )
+        # 9. Record — always appended.
+        record = replace(record, final_result=agent_result)
         self._records.append(record)
 
         logger.info(f"[Async {self.full_name} finished]")
@@ -748,12 +851,12 @@ class Agent(AtomicInvokable, ABC):
            declared parameters, excluding reserved names.
         4. ``pre_invoke`` → prompt string (validated).
         5. Select conversation turns according to ``context_enabled``.
-        6. ``_invoke(turns, prompt, inputs)`` → draft + metadata; ``inputs``
-           is the full, untouched dict from step 1.
+        6. ``_initialize_task(turns, prompt, inputs)`` → task; loop
+           ``task = self._progress(task)`` until ``task.complete``; then
+           ``_build_record_from_task(task, turns)`` → record.
         7. ``post_invoke`` → final result.
-        8. Construct ``AgentResult``.
-        9. Commit ``AgentRecord`` unconditionally — ``inputs`` on the record
-           is the same full dict passed to ``_invoke`` in step 6.
+        8. ``build_result_from_record(record, ...)`` → ``AgentResult``.
+        9. Commit the completed ``AgentRecord`` unconditionally.
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
@@ -800,19 +903,22 @@ class Agent(AtomicInvokable, ABC):
             if self._context_enabled and self._records_window != 0:
                 turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-            # 6. Core LLM work — inputs passed through untouched.
+            # 6. Task lifecycle: initialize, progress until complete, build record.
             logger.debug(f"Agent.{self.name} performing logic")
-            draft, metadata = self._invoke(turns=turns, prompt=prompt, inputs=inputs)
+            task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
+            while not task.complete:
+                task = self._progress(task)
+            record = self._build_record_from_task(task, turns)
 
-            if not isinstance(draft, AgentRecord):
+            if not isinstance(record, AgentRecord):
                 raise AgentInvocationError(
-                    f"_invoke returned non-AgentRecord draft (type={type(draft)!r})"
+                    f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
                 )
 
             # 7. Output transformation.
             try:
                 logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
-                post_inputs[self._post_result_key] = draft.generated_response
+                post_inputs[self._post_result_key] = record.generated_response
                 post_result = self._post_invoke.invoke(post_inputs)
             except ToolInvocationError:
                 raise
@@ -823,22 +929,15 @@ class Agent(AtomicInvokable, ABC):
             ended_at = datetime.now(timezone.utc)
 
             # 8. Result.
-            agent_result = self.make_result(
+            agent_result = self.build_result_from_record(
+                record,
                 result=final_response,
                 started_at=started_at,
                 ended_at=ended_at,
-                **metadata,
             )
 
-            # 9. Record — always appended; inputs widens to the full filtered dict.
-            record = replace(
-                draft,
-                user_prompt=prompt,
-                inputs=inputs,
-                final_result=agent_result,
-                llm_records=metadata["llm_records"],
-                prev=turns[-1] if turns else None,
-            )
+            # 9. Record — always appended.
+            record = replace(record, final_result=agent_result)
             self._records.append(record)
 
             logger.info(f"[{self.full_name} finished]")
