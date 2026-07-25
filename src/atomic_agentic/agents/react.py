@@ -500,10 +500,25 @@ class ReActAgent(ToolAgent):
 
         Absorbs the running-plan-snapshot construction formerly done by
         ``_build_react_messages`` (removed as a standalone method).
-        ``task.task_messages`` is a 3-message thread (current-task goal,
-        running-plan snapshot, next-step request) built lazily each round —
-        cleared by ``_apply_react_step_result`` once the round commits, so
-        it is empty again at the start of every new round.
+        ``task.task_messages`` is a 3-message thread built lazily each
+        round — cleared by ``_apply_react_step_result`` once the round
+        commits, so it is empty again at the start of every new round:
+
+        1. user — the current task, wrapped in a ``===== CURRENT TASK
+           =====`` banner (custom delimiter, matching
+           ``PlanActAgent.render_task``; avoids colliding with real code in
+           task prompts or AA's own ``<<...>>`` placeholder syntax).
+        2. assistant — a thin, directive-free snapshot: a one-line header
+           plus the running-plan data. Reads as state, not instruction,
+           matching ``ToolAgent.render_turn``'s ``CACHED STEPS`` convention.
+        3. user — the per-round instruction. Deliberately omits any rule
+           already owned by ``ORCHESTRATOR_PROMPT``'s ``RUNTIME STATE``
+           section (descriptions, result_ref usage, observable_result
+           semantics, don't-copy-into-args); carries only what's new each
+           round: the produce-next-call/return directive, an unconditional
+           anti-duplication reminder, a FAILED-reference warning shown only
+           when this round's snapshot contains a FAILED entry, the
+           output-format directive, and the duration bound.
 
         EXECUTED steps are rendered with ``result_ref``, ``run_id``, and
         optionally ``observable_result``. FAILED steps are rendered with
@@ -552,36 +567,33 @@ class ReActAgent(ToolAgent):
                 # Empty/PLANNED slots are not yet part of the running plan; skip.
 
             if running_records:
-                running_text = (
-                    f"RUNNING PLAN STEPS 0-{prefix_len - 1} SO FAR:\n"
-                    "Steps may be EXECUTED (result available via result_ref) or FAILED "
-                    "(error shown; do not reference result_ref for failed steps).\n"
-                    "Use descriptions to understand what each step was intended to do.\n"
-                    "Use result_ref placeholders when a new arg needs a prior executed step's value.\n"
-                    "observable_result fields are for OBSERVATION ONLY: use them only to choose "
-                    "the next tool or branch.\n"
-                    "Do not copy observable_result values into new args.\n\n"
+                snapshot_text = (
+                    f"STEPS 0-{prefix_len - 1} SO FAR:\n\n"
                     + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
                 )
             else:
-                running_text = (
-                    "RUNNING PLAN STEPS SO FAR:\n"
-                    "No steps executed yet.\n"
-                    "When steps execute, their results will be available by result_ref "
-                    "placeholders like <<__s0__>>."
-                )
+                snapshot_text = "STEPS SO FAR:\nNo steps executed yet."
 
             task.task_messages = [
-                {"role": "user", "content": f"CURRENT TASK:\n{task.user_prompt}"},
-                {"role": "assistant", "content": running_text},
+                {
+                    "role": "user",
+                    "content": f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK =====",
+                },
+                {"role": "assistant", "content": snapshot_text},
                 {
                     "role": "user",
                     "content": (
                         "Produce the NEXT BEST single tool call for the current task. "
-                        "Pick the return tool if the running plan has completed all needed work. "
-                        "Output exactly one JSON object with keys {step, tool, args, duration, description}. "
-                        "Preserve symbolic dataflow with quoted placeholders; do not copy observable_result values into args. "
-                        f"For this output step, duration must be an int from 0 to {max_duration}."
+                        "Pick the return tool if the running plan above has completed all needed work. "
+                        "Do NOT repeat a tool call or redo work already available above or in cache — "
+                        "reuse its result_ref, cache, or constant placeholder instead of recomputing or re-deriving the value."
+                        + (
+                            " Some steps above are marked FAILED — they have no result_ref; do not reference one."
+                            if any(r.get("status") == "FAILED" for r in running_records)
+                            else ""
+                        )
+                        + " Output exactly one JSON object with keys {step, tool, args, duration, description}."
+                        + f" duration must be an int from 0 to {max_duration}."
                     ),
                 },
             ]

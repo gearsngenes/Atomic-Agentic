@@ -447,8 +447,12 @@ class PlanActAgent(ToolAgent):
         invocation's decompose-into-plan request.
 
         ``task.task_messages`` is a single message the first time it's
-        built (the prompt wrapped in a decompose-into-JSON instruction);
-        generation retries extend it via ``additional_messages``.
+        built — ``task.user_prompt`` wrapped in a ``===== CURRENT TASK
+        =====`` banner (a custom delimiter, not markdown fences, to avoid
+        colliding with real code in task prompts or AA's own ``<<...>>``
+        placeholder syntax) followed by the decompose-into-JSON
+        instruction; generation retries extend it via
+        ``additional_messages``.
         """
         limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
         render_context = {
@@ -462,8 +466,8 @@ class PlanActAgent(ToolAgent):
             task.task_messages = [{
                 "role": "user",
                 "content": (
-                    f"CURRENT TASK:\n{task.user_prompt}\n\n"
-                    "Using the above chat history and current task, construct "
+                    f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK =====\n\n"
+                    "Using the current task above and the prior chat history, construct "
                     "a valid JSON array that decomposes it into tool-call steps."
                 ),
             }]
