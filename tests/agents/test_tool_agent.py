@@ -1780,6 +1780,12 @@ class TestParsingHelpers:
 
         assert value == [1, 2, 3]
 
+    def test_extract_from_json_string_rejects_non_string_input(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(TypeError, match="LLM returned non-string output"):
+            agent._extract_from_json_string(123)  # type: ignore[arg-type]
+
 
 class TestToolAgentAsyncBaseLoop:
     def test_async_scripted_invoke_runs_tools_placeholders_and_return(self) -> None:

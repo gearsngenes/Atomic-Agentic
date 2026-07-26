@@ -142,7 +142,7 @@ from ..llm.base import LLMEngine
 from ..tools import toolify
 from ..mcp import MCPClientHub
 from ..a2a import PyA2AtomicClient
-from ..utils.agents import extract_dependencies
+from ..utils.agents import extract_dependencies, extract_json_object
 from ..utils.core import run_coro_sync
 from .tools import return_tool
 
@@ -2099,75 +2099,22 @@ class ToolAgent(Agent, ABC):
         """
         Extract the largest decodable JSON array/object from a possibly noisy string.
 
-        This helper is intentionally shape-neutral:
-        - It does not require the decoded value to be a list.
-        - It does not require the decoded value to be a dict.
-        - It does not validate PlanAct/ReAct-specific fields.
-
-        It preserves the current permissive parsing style used by the older
-        `_str_to_steps(...)` and `_str_to_dict(...)` helpers:
-        - Strip a single common markdown fence wrapper if present.
-        - Scan for candidate JSON array/object starts.
-        - Decode with `json.JSONDecoder().raw_decode(...)`.
-        - Return the candidate with the largest decoded span.
-
-        Parameters
-        ----------
-        raw_text : str
-            Raw LLM output that may contain a JSON array/object surrounded by
-            prose, markdown fences, or other text.
-
-        Returns
-        -------
-        Any
-            The decoded Python value for the largest valid JSON array/object found.
+        Thin delegating wrapper — see ``utils.agents.extract_json_object``
+        for the full contract (parsing logic lives there now, shared with
+        any other caller that needs to pull structured output out of
+        free-form LLM text).
 
         Raises
         ------
-        ToolAgentError
+        TypeError
             If ``raw_text`` is not a string (engine contract violation).
+            Changed from ``ToolAgentError`` when the parsing logic was
+            promoted to ``extract_json_object`` — a ``ToolAgent``-specific
+            exception type no longer fit a shared utility.
         json.JSONDecodeError
             If ``raw_text`` is empty or contains no decodable JSON array/object.
         """
-        if not isinstance(raw_text, str):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: LLM returned non-string output."
-            )
-        if not raw_text.strip():
-            raise json.JSONDecodeError("LLM returned empty output", "", 0)
-
-        text = raw_text.strip()
-
-        # Strip a single fenced block wrapper if present.
-        # Examples:
-        # ```json
-        # [...]
-        # ```
-        text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", text)
-        text = re.sub(r"\s*```\s*$", "", text).strip()
-
-        decoder = json.JSONDecoder()
-
-        best_val: Any = NO_VAL
-        best_span_len: int = -1
-
-        # Candidate starts: JSON arrays or objects.
-        # This intentionally mirrors the existing PlanAct/ReAct parser needs.
-        for match in re.finditer(r"[\[{]", text):
-            start = match.start()
-            try:
-                val, end_rel = decoder.raw_decode(text[start:])
-            except json.JSONDecodeError:
-                continue
-
-            if end_rel > best_span_len:
-                best_span_len = end_rel
-                best_val = val
-
-        if best_val is NO_VAL:
-            raise json.JSONDecodeError("no valid JSON array or object found in LLM output", text, 0)
-
-        return best_val
+        return extract_json_object(raw_text, source_label=f"{type(self).__name__}.{self.name}")
 
     # ------------------------------------------------------------------ #
     # Dictionary Validation & Conversion Helpers

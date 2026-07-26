@@ -6,6 +6,7 @@ from typing import Any
 from ...constants.core import NO_VAL
 from .blackboard_models import BlackboardSlot
 from .records import AgentRecord, LLMRecord
+from .thought_models import AgentThought
 
 __all__ = [
     "AgentTask",
@@ -13,6 +14,7 @@ __all__ = [
     "PlanActTask",
     "ReActTask",
     "ReActStepMeta",
+    "ThinkingTask",
 ]
 
 
@@ -280,3 +282,38 @@ class ReActTask(ToolAgentTask):
     """
     next_step_index: int = 0
     step_meta: list[ReActStepMeta] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ThinkingTask(AgentTask):
+    """
+    ThinkingAgent-flavored task.
+
+    No ``phase`` field: ``AgentTask.system_prompt_name`` doubles as the
+    phase discriminator. The name ``"role"`` is reserved for the reply
+    phase across the whole family; any other value means a thinking round
+    is still active. This is why the field is required (no default) on the
+    base ``AgentTask`` — every concrete subclass must decide it explicitly,
+    and here that decision *is* the phase.
+
+    Fields
+    ------
+    retries_used : int
+        Cumulative generation-retry attempts across all thinking rounds in
+        this run. Mirrors ``ToolAgentTask.retries_used``.
+
+    rounds_used : int
+        Cumulative successful thinking rounds completed. Checked by
+        subclass ``_think`` implementations against
+        ``self._max_thinking_rounds`` to force the transition to the reply
+        phase regardless of any self-declared continuation signal.
+
+    thoughts : list[AgentThought]
+        Task-local accumulator, mirrors ``ToolAgentTask.running_blackboard``
+        — merged into the agent-level persisted ``self._thoughts`` only at
+        ``_build_record_from_task`` time, never appended to the agent-level
+        list mid-run.
+    """
+    retries_used: int = 0
+    rounds_used: int = 0
+    thoughts: list[AgentThought] = field(default_factory=list)

@@ -10,6 +10,7 @@ __all__ = [
     "LLMRecord",
     "AgentRecord",
     "ToolAgentRecord",
+    "ThinkingAgentRecord",
 ]
 
 
@@ -228,4 +229,28 @@ class ToolAgentRecord(AgentRecord):
             **super(ToolAgentRecord, self).to_dict(),
             "blackboard_start": self.blackboard_start,
             "blackboard_end": self.blackboard_end,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ThinkingAgentRecord(AgentRecord):
+    """
+    Canonical memory record for one completed ThinkingAgent invocation.
+
+    In addition to the base AgentRecord lifecycle artifacts, a
+    ThinkingAgentRecord stores the half-open span of persisted thoughts
+    produced by the invocation. ``ThinkingAgent`` renders that span into
+    future LLM-facing context (gated by ``render_thoughts_in_history``)
+    when building messages.
+    """
+
+    thoughts_start: int | None = None
+    thoughts_end: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation."""
+        return {
+            **super(ThinkingAgentRecord, self).to_dict(),
+            "thoughts_start": self.thoughts_start,
+            "thoughts_end": self.thoughts_end,
         }

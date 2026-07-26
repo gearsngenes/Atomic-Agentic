@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
+from ..constants.core import NO_VAL
 from ..models.agents.prompts import PromptConfig
 
 __all__ = [
     "extract_dependencies",
+    "extract_json_object",
     "normalize_role_prompt",
 ]
 
@@ -28,6 +31,84 @@ def normalize_role_prompt(
     raise TypeError(
         f"role_prompt must be str, PromptConfig, or None; got {type(value).__name__}."
     )
+
+
+def extract_json_object(raw_text: str, *, source_label: str) -> Any:
+    """
+    Extract the largest decodable JSON array/object from a possibly noisy string.
+
+    Promoted from ``ToolAgent._extract_from_json_string`` — shared by any
+    caller that needs to pull structured output out of free-form LLM text,
+    not just ``ToolAgent`` and its subclasses. Behavior is unchanged from
+    the original method except that the non-string-input case now raises a
+    plain ``TypeError`` (an internal-contract violation, not a
+    ``ToolAgent``-specific concern) instead of ``ToolAgentError``.
+
+    This helper is intentionally shape-neutral:
+    - It does not require the decoded value to be a list.
+    - It does not require the decoded value to be a dict.
+    - It does not validate any particular schema's fields.
+
+    Parsing steps
+    -------------
+    1. Strip a single common markdown fence wrapper if present.
+    2. Scan for candidate JSON array/object starts.
+    3. Decode with ``json.JSONDecoder().raw_decode(...)``.
+    4. Return the candidate with the largest decoded span.
+
+    Parameters
+    ----------
+    raw_text : str
+        Raw LLM output that may contain a JSON array/object surrounded by
+        prose, markdown fences, or other text.
+    source_label : str
+        Identifies the caller in error messages (e.g.
+        ``f"{type(self).__name__}.{self.name}"``).
+
+    Returns
+    -------
+    Any
+        The decoded Python value for the largest valid JSON array/object found.
+
+    Raises
+    ------
+    TypeError
+        If ``raw_text`` is not a string.
+    json.JSONDecodeError
+        If ``raw_text`` is empty or contains no decodable JSON array/object.
+    """
+    if not isinstance(raw_text, str):
+        raise TypeError(f"{source_label}: LLM returned non-string output.")
+    if not raw_text.strip():
+        raise json.JSONDecodeError("LLM returned empty output", "", 0)
+
+    text = raw_text.strip()
+
+    # Strip a single fenced block wrapper if present.
+    text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", text)
+    text = re.sub(r"\s*```\s*$", "", text).strip()
+
+    decoder = json.JSONDecoder()
+
+    best_val: Any = NO_VAL
+    best_span_len: int = -1
+
+    # Candidate starts: JSON arrays or objects.
+    for match in re.finditer(r"[\[{]", text):
+        start = match.start()
+        try:
+            val, end_rel = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+
+        if end_rel > best_span_len:
+            best_span_len = end_rel
+            best_val = val
+
+    if best_val is NO_VAL:
+        raise json.JSONDecodeError("no valid JSON array or object found in LLM output", text, 0)
+
+    return best_val
 
 
 def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:

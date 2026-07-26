@@ -6,7 +6,12 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from atomic_agentic.models.agents.records import (
+    AgentRecord,
+    LLMRecord,
+    ThinkingAgentRecord,
+    ToolAgentRecord,
+)
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results import AtomicResult, LLMModelData, LLMResult, TokenUsage
@@ -437,6 +442,54 @@ class TestToolAgentRecord:
         record = ToolAgentRecord(user_prompt="run", generated_response="raw")
         with pytest.raises(FrozenInstanceError):
             record.blackboard_start = 1  # type: ignore[misc]
+
+
+class TestThinkingAgentRecord:
+    def test_is_an_agent_record(self) -> None:
+        record = ThinkingAgentRecord(
+            user_prompt="write a poem",
+            generated_response="a poem",
+            thoughts_start=2,
+            thoughts_end=5,
+        )
+        assert isinstance(record, AgentRecord)
+        assert record.thoughts_start == 2
+        assert record.thoughts_end == 5
+
+    def test_to_dict_includes_thoughts_span_fields(self) -> None:
+        record = ThinkingAgentRecord(
+            user_prompt="write a poem",
+            generated_response="a poem",
+            thoughts_start=2,
+            thoughts_end=5,
+        )
+        assert record.to_dict() == {
+            "user_prompt": "write a poem",
+            "inputs": {},
+            "generated_response": "a poem",
+            "final_result": None,
+            "llm_records": [],
+            "prev_run_id": None,
+            "thoughts_start": 2,
+            "thoughts_end": 5,
+        }
+
+    def test_thoughts_span_defaults_to_none(self) -> None:
+        record = ThinkingAgentRecord(
+            user_prompt="write a poem",
+            generated_response="a poem",
+        )
+        assert record.thoughts_start is None
+        assert record.thoughts_end is None
+
+    def test_inherits_agent_record_validation(self) -> None:
+        with pytest.raises(TypeError, match="user_prompt"):
+            ThinkingAgentRecord(user_prompt=123, generated_response="raw")  # type: ignore[arg-type]
+
+    def test_is_frozen(self) -> None:
+        record = ThinkingAgentRecord(user_prompt="run", generated_response="raw")
+        with pytest.raises(FrozenInstanceError):
+            record.thoughts_start = 1  # type: ignore[misc]
 
 
 class TestBlackboardSlot:

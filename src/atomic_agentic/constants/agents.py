@@ -85,6 +85,42 @@ REQUIRED_REACT_FIELDS = REQUIRED_BASE_STEP_FIELDS | frozenset(
 
 
 # =============================================================================
+# ThinkingAgent LLM-output JSON fields
+# =============================================================================
+# Used by:
+# - agents/thinking.py: shared reply-phase thought-snapshot rendering
+# - agents/selfask.py, agents/planask.py (Pass 2/3): per-round JSON schemas
+#
+# THOUGHT_FIELDS is SelfAskAgent's fused per-round call schema (all four
+# keys required every round). PLANNED_QUESTION_FIELDS is PlanAskAgent's
+# upfront batch-item schema (no keep_thinking -- completion there is
+# structural, not self-declared).
+
+
+OBSERVATION_FIELD = "observation"
+QUESTION_FIELD = "question"
+ANSWER_FIELD = "answer"
+KEEP_THINKING_FIELD = "keep_thinking"
+
+
+THOUGHT_FIELDS = frozenset(
+    {
+        OBSERVATION_FIELD,
+        QUESTION_FIELD,
+        ANSWER_FIELD,
+        KEEP_THINKING_FIELD,
+    }
+)
+
+PLANNED_QUESTION_FIELDS = frozenset(
+    {
+        OBSERVATION_FIELD,
+        QUESTION_FIELD,
+    }
+)
+
+
+# =============================================================================
 # ToolAgent canonical return-tool identity
 # =============================================================================
 # Used by:
@@ -130,6 +166,13 @@ __all__ = [
     "REQUIRED_PLAN_FIELDS",
     "REACT_FIELDS",
     "REQUIRED_REACT_FIELDS",
+    # ThinkingAgent LLM-output fields
+    "OBSERVATION_FIELD",
+    "QUESTION_FIELD",
+    "ANSWER_FIELD",
+    "KEEP_THINKING_FIELD",
+    "THOUGHT_FIELDS",
+    "PLANNED_QUESTION_FIELDS",
     # Canonical return tool
     "RETURN_TOOL_NAME",
     "RETURN_TOOL_NAMESPACE",

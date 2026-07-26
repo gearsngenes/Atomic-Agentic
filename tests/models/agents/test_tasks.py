@@ -8,7 +8,9 @@ from atomic_agentic.models.agents.tasks import (
     PlanActTask,
     ReActTask,
     ReActStepMeta,
+    ThinkingTask,
 )
+from atomic_agentic.models.agents.thought_models import AgentThought
 from atomic_agentic.constants.core import NO_VAL
 
 
@@ -153,3 +155,41 @@ class TestReActTask:
         )
 
         assert task.step_meta == [meta]
+
+
+class TestThinkingTask:
+    def test_inherits_agent_task_fields(self) -> None:
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+
+        assert isinstance(task, AgentTask)
+
+    def test_added_field_defaults(self) -> None:
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+
+        assert task.retries_used == 0
+        assert task.rounds_used == 0
+        assert task.thoughts == []
+
+    def test_no_phase_field(self) -> None:
+        # ThinkingTask deliberately has no phase field -- system_prompt_name
+        # (base AgentTask) doubles as the phase discriminator: "role" means
+        # the reply phase, anything else means a thinking round is active.
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+
+        assert not hasattr(task, "phase")
+
+    def test_thoughts_holds_agent_thought_instances(self) -> None:
+        thought = AgentThought(observation="obs", question="q", answer="a")
+        task = ThinkingTask(
+            turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking", thoughts=[thought]
+        )
+
+        assert task.thoughts == [thought]
+
+    def test_default_factories_are_independent_per_instance(self) -> None:
+        first = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+        second = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+
+        first.thoughts.append(AgentThought(observation=None, question="q", answer="a"))
+
+        assert second.thoughts == []
