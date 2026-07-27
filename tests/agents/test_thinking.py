@@ -182,19 +182,61 @@ class TestRolePromptWrapping:
         assert "wizard" in system_message
 
 
-class TestAdditionalInstructions:
-    def test_stored_resolved_but_not_applied_to_role_prompt(self) -> None:
+class TestRoleDescription:
+    def test_explicit_role_description_wins(self) -> None:
         agent = make_stub_agent(
-            role_prompt="Be concise.",
-            additional_instructions="Always answer in French.",
+            role_prompt=PromptConfig(template="You are a {persona}.", description="A wise wizard."),
+            role_description="Explicit override.",
         )
-        assert agent._additional_instructions_config is not None
-        assert agent._additional_instructions_config.template == "Always answer in French."
-        assert "French" not in agent._system_prompts["role"].template
+        assert agent.role_description == "Explicit override."
 
-    def test_none_additional_instructions_stored_as_none(self) -> None:
+    def test_falls_back_to_role_prompt_config_description(self) -> None:
+        agent = make_stub_agent(
+            role_prompt=PromptConfig(template="You are a {persona}.", description="A wise wizard."),
+        )
+        assert agent.role_description == "A wise wizard."
+
+    def test_falls_back_to_agent_description_when_role_prompt_is_plain_string(self) -> None:
+        # A plain-string role_prompt normalizes to the generic "Role prompt"
+        # label, not something meaningfully caller-authored -- but it is
+        # non-empty, so it still wins over self._description per the
+        # documented fallback order (b) before (c).
+        agent = make_stub_agent(role_prompt="Be concise.")
+        assert agent.role_description == "Role prompt"
+
+    def test_setter_validates_non_string(self) -> None:
         agent = make_stub_agent()
-        assert agent._additional_instructions_config is None
+        with pytest.raises(TypeError, match="role_description"):
+            agent.role_description = 123  # type: ignore[assignment]
+
+    def test_setter_validates_non_empty(self) -> None:
+        agent = make_stub_agent()
+        with pytest.raises(ValueError, match="role_description"):
+            agent.role_description = "   "
+
+    def test_setter_is_mutable_after_construction(self) -> None:
+        agent = make_stub_agent()
+        agent.role_description = "Updated background."
+        assert agent.role_description == "Updated background."
+
+    def test_constructor_rejects_non_string(self) -> None:
+        with pytest.raises(TypeError, match="role_description"):
+            make_stub_agent(role_description=123)  # type: ignore[arg-type]
+
+    def test_constructor_rejects_empty_string(self) -> None:
+        with pytest.raises(ValueError, match="role_description"):
+            make_stub_agent(role_description="   ")
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"role_prompt": PromptConfig(template="{role_description} is neat.", description="d")},
+            {"extra_thinking_params": ["role_description"]},
+        ],
+    )
+    def test_reserved_name_collision_raises(self, kwargs: dict[str, Any]) -> None:
+        with pytest.raises(AgentError, match="role_description"):
+            make_stub_agent(**kwargs)
 
 
 class TestExtraThinkingParams:
@@ -381,10 +423,25 @@ class TestRenderTurnGating:
         record = agent.records[-1]
 
         messages = agent.render_turn(record)
+        content = messages[1]["content"]
 
         assert len(messages) == 2
-        assert "RESPONSE:" in messages[1]["content"]
-        assert "insight one" in messages[1]["content"]
+        assert "RESPONSE:" in content
+        assert "insight one" in content
+
+    def test_thoughts_appear_before_response_and_are_not_index_labeled(self) -> None:
+        agent = make_stub_agent(
+            engine=ScriptedLLMEngine(["insight one", "STOP", "final response"]),
+            render_thoughts_in_history=True,
+        )
+        agent.invoke({"prompt": "write a haiku"})
+        record = agent.records[-1]
+
+        content = agent.render_turn(record)[1]["content"]
+
+        assert content.index("THOUGHTS:") < content.index("RESPONSE:")
+        assert "THOUGHTS [" not in content
+        assert "THOUGHTS 0" not in content
 
     def test_render_turn_rejects_wrong_record_type(self) -> None:
         agent = make_stub_agent()

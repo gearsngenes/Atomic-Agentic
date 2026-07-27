@@ -121,6 +121,20 @@ PLANNED_QUESTION_FIELDS = frozenset(
 
 
 # =============================================================================
+# ThinkingAgent reserved prompt-template field
+# =============================================================================
+# Distinct category from the JSON-output fields above: this is a PromptConfig
+# TEMPLATE placeholder name, not an LLM-output JSON key. A subclass's
+# thinking-phase prompt (SelfAskAgent's "thinking"; PlanAskAgent's
+# "ask_questions"/"answer_question") may reference {role_description}
+# literally; ThinkingAgent.__init__ raises if any other parameter source
+# (pre_invoke, post_invoke, role_prompt, extra_thinking_params) also declares
+# a parameter with this name.
+
+ROLE_DESCRIPTION_FIELD = "role_description"
+
+
+# =============================================================================
 # ToolAgent canonical return-tool identity
 # =============================================================================
 # Used by:
@@ -173,6 +187,8 @@ __all__ = [
     "KEEP_THINKING_FIELD",
     "THOUGHT_FIELDS",
     "PLANNED_QUESTION_FIELDS",
+    # ThinkingAgent reserved prompt-template field
+    "ROLE_DESCRIPTION_FIELD",
     # Canonical return tool
     "RETURN_TOOL_NAME",
     "RETURN_TOOL_NAMESPACE",

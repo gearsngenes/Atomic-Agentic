@@ -7,7 +7,12 @@ from typing import Any, Callable, Literal, Optional
 import pprint
 import warnings
 
-from ..constants.agents import ANSWER_FIELD, OBSERVATION_FIELD, QUESTION_FIELD
+from ..constants.agents import (
+    ANSWER_FIELD,
+    OBSERVATION_FIELD,
+    QUESTION_FIELD,
+    ROLE_DESCRIPTION_FIELD,
+)
 from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
 from ..models.agents.prompts import PromptConfig
@@ -62,7 +67,7 @@ class ThinkingAgent(Agent, ABC):
         description: str,
         llm_engine: LLMEngine,
         role_prompt: str | PromptConfig | None = None,
-        additional_instructions: str | PromptConfig | None = None,
+        role_description: str | None = None,
         filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = False,
         *,
@@ -92,10 +97,15 @@ class ThinkingAgent(Agent, ABC):
             construction time inside a fixed fence plus a framework-authored
             note that thoughts precede the response in conversation — see
             class-level ``_RESPONSE_INSTRUCTIONS_PREFIX``/``_SUFFIX``.
-        additional_instructions : str | PromptConfig | None
-            Answer-quality-only guidance. Stored resolved but unfenced;
-            **not** applied here. Subclasses fence-and-append it onto
-            whichever of their own prompts authors the answer.
+        role_description : str | None
+            A narrow, mutable pointer to what the role prompt is going for
+            -- available to a subclass's thinking-phase prompts via the
+            reserved ``{role_description}`` template field, without ever
+            injecting the role prompt's full text. Resolved via fallback if
+            not given: the resolved role prompt's own ``description``, else
+            this agent's own ``description``. Freely settable afterward via
+            the ``role_description`` property (a behavioral/tuning knob, not
+            identity/shape).
         render_thoughts_in_history : bool
             Frozen at construction. Governs whether ``render_turn`` splices
             this agent's past thoughts into replayed history for later
@@ -116,6 +126,11 @@ class ThinkingAgent(Agent, ABC):
             raise TypeError("generation_retries must be a non-negative int.")
         if type(render_thoughts_in_history) is not bool:
             raise TypeError("render_thoughts_in_history must be a bool.")
+        if role_description is not None:
+            if not isinstance(role_description, str):
+                raise TypeError("role_description must be a str.")
+            if not role_description.strip():
+                raise ValueError("role_description must be a non-empty string.")
 
         # Wrap the caller's role prompt in the fixed RESPONSE INSTRUCTIONS
         # fence via plain concatenation (not .format()/re-templating) so an
@@ -130,25 +145,6 @@ class ThinkingAgent(Agent, ABC):
         )
         role_config = PromptConfig(template=wrapped_template, description="Response role prompt")
         role_params = list(role_config.parameters)
-
-        # additional_instructions is resolved but not fenced/applied to
-        # anything yet -- subclasses consume self._additional_instructions_config
-        # against their own answer-authoring prompt.
-        additional_instructions_config: PromptConfig | None
-        if additional_instructions is None:
-            additional_instructions_config = None
-        elif isinstance(additional_instructions, str):
-            additional_instructions_config = PromptConfig(
-                template=additional_instructions.strip(),
-                description="Additional answer-quality instructions",
-            )
-        elif isinstance(additional_instructions, PromptConfig):
-            additional_instructions_config = additional_instructions
-        else:
-            raise TypeError(
-                "additional_instructions must be str, PromptConfig, or None; "
-                f"got {type(additional_instructions).__name__}."
-            )
 
         # Reconcile role-prompt placeholders against extra_thinking_params
         # before handing the union to Agent.__init__ -- a true collision
@@ -196,12 +192,53 @@ class ThinkingAgent(Agent, ABC):
             assistant_response_source=assistant_response_source,
         )
 
+        # One-time reserved-name check, now that pre_invoke/post_invoke/
+        # combined_extra/run_id have all been merged into self.parameters --
+        # catches a collision from any source in one pass, since by this
+        # point everything is already unioned into one list.
+        if any(p.name == ROLE_DESCRIPTION_FIELD for p in self.parameters):
+            raise AgentError(
+                "role_description is a framework-reserved name; no pre_invoke, "
+                "post_invoke, role_prompt, or extra_thinking_params parameter "
+                "may be named 'role_description'."
+            )
+
         self._system_prompts["role"] = role_config
         self._max_thinking_rounds: int = max_thinking_rounds
         self._render_thoughts_in_history: bool = render_thoughts_in_history
         self._generation_retries: int = generation_retries
-        self._additional_instructions_config: PromptConfig | None = additional_instructions_config
+        self._role_description: str = (
+            role_description
+            or base_config.description.strip()
+            or self._description
+        )
+        if not self._role_description:
+            raise AgentError(
+                "ThinkingAgent could not resolve a non-empty role_description "
+                "from any source (explicit arg, role prompt description, or "
+                "agent description)."
+            )
         self._thoughts: list[AgentThought] = []
+
+    @property
+    def role_description(self) -> str:
+        """
+        Narrow, mutable pointer to what the role prompt is going for --
+        available to a subclass's thinking-phase prompts via the reserved
+        ``{role_description}`` template field, without ever injecting the
+        role prompt's full text. A subclass renders it by merging
+        ``role_description=self.role_description`` directly into its own
+        ``.render(inputs)`` call wherever a thinking-phase prompt needs it.
+        """
+        return self._role_description
+
+    @role_description.setter
+    def role_description(self, value: str) -> None:
+        if not isinstance(value, str):
+            raise TypeError("role_description must be a str.")
+        if not value.strip():
+            raise ValueError("role_description must be a non-empty string.")
+        self._role_description = value
 
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
@@ -430,7 +467,10 @@ class ThinkingAgent(Agent, ABC):
         splices a thought-trail block into the single assistant message's
         content (never a separate message, to respect strict
         user/assistant alternation), scoped to this record's own
-        ``thoughts_start``/``thoughts_end`` span.
+        ``thoughts_start``/``thoughts_end`` span. Thoughts are listed first,
+        with the final response appended last -- reading order matches the
+        order they actually happened in. Thought indices are not labeled;
+        nothing downstream needs to address a thought by position.
         """
         if not isinstance(turn, ThinkingAgentRecord):
             raise AgentInvocationError(
@@ -457,8 +497,8 @@ class ThinkingAgent(Agent, ABC):
         ]
         dump = pprint.pformat(records, indent=2, width=160, sort_dicts=False)
         assistant_content = (
-            f"RESPONSE:\n{assistant_response}\n\n"
-            f"THOUGHTS {list(range(start, end))}:\n\n{dump}"
+            f"THOUGHTS:\n\n{dump}\n\n"
+            f"RESPONSE:\n{assistant_response}"
         )
         return [messages[0], {"role": "assistant", "content": assistant_content}]
 
