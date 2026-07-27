@@ -31,6 +31,15 @@ class ToolRegistrationError(ToolAgentError):
     """Raised when registering tools fails due to collisions or bad inputs."""
 
 
+class ThinkingAgentError(RuntimeError):
+    """Base exception for ThinkingAgent-related errors.
+
+    Sibling to AgentError, not a subclass of it -- mirrors ToolAgentError's
+    own convention (a domain error type superseding a bare RuntimeError;
+    callers doing `except RuntimeError` upstream still catch these).
+    """
+
+
 class WorkflowError(Exception):
     """Base class for workflow-related errors."""
 
@@ -119,6 +128,7 @@ __all__ = [
     "AgentInvocationError",
     "ToolAgentError",
     "ToolRegistrationError",
+    "ThinkingAgentError",
     "WorkflowError",
     "ValidationError",
     "SchemaError",

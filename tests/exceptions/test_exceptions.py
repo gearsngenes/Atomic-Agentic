@@ -10,6 +10,7 @@ from atomic_agentic.exceptions import (
     PackagingError,
     RemoteInvocationError,
     SchemaError,
+    ThinkingAgentError,
     ToolAgentError,
     ToolDefinitionError,
     ToolError,
@@ -73,6 +74,20 @@ class TestToolAgentErrors:
     def test_tool_registration_error_can_be_caught_as_tool_agent_error(self) -> None:
         with pytest.raises(ToolAgentError):
             raise ToolRegistrationError("registration failed")
+
+
+class TestThinkingAgentErrors:
+    def test_thinking_agent_error_is_runtime_error(self) -> None:
+        assert issubclass(ThinkingAgentError, RuntimeError)
+
+    def test_thinking_agent_error_is_not_agent_error(self) -> None:
+        # Sibling to AgentError, not a subclass -- mirrors ToolAgentError's
+        # own convention.
+        assert not issubclass(ThinkingAgentError, AgentError)
+
+    def test_thinking_agent_error_can_be_raised_and_caught(self) -> None:
+        with pytest.raises(ThinkingAgentError):
+            raise ThinkingAgentError("thinking failed")
 
 
 class TestWorkflowErrors:

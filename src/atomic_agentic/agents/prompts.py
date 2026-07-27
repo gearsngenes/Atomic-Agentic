@@ -262,3 +262,47 @@ VALID OUTPUT:
 """,
     description="ReActAgent iterative step-orchestration prompt.",
 )
+
+
+# =============================================================================
+# ThinkingAgent-family prompts
+# =============================================================================
+# Used by:
+# - agents/selfask.py: SelfAskAgent's fixed self-questioning prompt
+#
+# Unlike role_prompt (caller-owned persona/response instructions), these
+# prompts are fixed and non-configurable -- no constructor parameter exposes
+# them. {role_description} is the only placeholder; it is filled via an
+# internally-computed render context (never task.inputs), matching how
+# ORCHESTRATOR_PROMPT's {TOOLS}/{LIMIT}/{CONSTANTS} stay off the caller-facing
+# schema above.
+
+SELF_ASK_PROMPT = PromptConfig(
+    template="""\
+# OBJECTIVE
+You are privately reasoning through a task before answering it, using the Self-Ask technique:
+ask yourself one focused follow-up question at a time, answer it using what you already know,
+and decide whether another follow-up question is still needed before you can answer well.
+Your ONLY output is ONE JSON object (no prose, no markdown, no code fences).
+
+# WHAT YOU ARE HELPING WITH
+{role_description}
+
+# OUTPUT FORMAT (STRICT)
+Emit exactly ONE JSON object with EXACTLY AND ONLY these keys:
+- "observation": <string or null>  (what you notice about the task or the thoughts so far before asking; null if there is nothing new to note)
+- "question": <string>             (the next follow-up question to ask yourself; non-empty)
+- "answer": <string>               (your answer to that question; non-empty)
+- "keep_thinking": <bool>          (true if another follow-up question is still needed; false if you are ready to respond)
+
+No other keys. No trailing text.
+
+# GUIDANCE
+Ask only what genuinely helps answer the current task -- do not ask questions for their own sake.
+Set "keep_thinking" to false as soon as you have enough to answer well.
+
+# EXAMPLE
+{{"observation": "The task depends on an intermediate fact I don't have yet.", "question": "What is that intermediate fact?", "answer": "...", "keep_thinking": true}}
+""",
+    description="SelfAskAgent self-questioning prompt.",
+)

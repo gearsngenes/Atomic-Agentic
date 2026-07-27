@@ -126,10 +126,11 @@ PLANNED_QUESTION_FIELDS = frozenset(
 # Distinct category from the JSON-output fields above: this is a PromptConfig
 # TEMPLATE placeholder name, not an LLM-output JSON key. A subclass's
 # thinking-phase prompt (SelfAskAgent's "thinking"; PlanAskAgent's
-# "ask_questions"/"answer_question") may reference {role_description}
-# literally; ThinkingAgent.__init__ raises if any other parameter source
-# (pre_invoke, post_invoke, role_prompt, extra_thinking_params) also declares
-# a parameter with this name.
+# "ask_questions"/"answer_question") may reference {role_description} in its
+# own internally-rendered context; ThinkingAgent.__init__ raises if any other
+# parameter source (pre_invoke, post_invoke, role_prompt -- the only
+# extra_parameters sources that exist) also declares a parameter with this
+# name.
 
 ROLE_DESCRIPTION_FIELD = "role_description"
 

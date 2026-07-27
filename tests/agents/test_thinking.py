@@ -14,7 +14,6 @@ from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.agents.records import AgentRecord, ThinkingAgentRecord
 from atomic_agentic.models.agents.tasks import ThinkingTask
 from atomic_agentic.models.agents.thought_models import AgentThought
-from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results import ThinkingAgentResult
 
 
@@ -227,42 +226,58 @@ class TestRoleDescription:
         with pytest.raises(ValueError, match="role_description"):
             make_stub_agent(role_description="   ")
 
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            {"role_prompt": PromptConfig(template="{role_description} is neat.", description="d")},
-            {"extra_thinking_params": ["role_description"]},
-        ],
-    )
-    def test_reserved_name_collision_raises(self, kwargs: dict[str, Any]) -> None:
+    def test_reserved_name_collision_raises(self) -> None:
         with pytest.raises(AgentError, match="role_description"):
-            make_stub_agent(**kwargs)
-
-
-class TestExtraThinkingParams:
-    def test_extra_thinking_params_reach_the_schema(self) -> None:
-        agent = make_stub_agent(extra_thinking_params=["topic"])
-        assert "topic" in {p.name for p in agent.parameters}
-
-    def test_extra_thinking_params_collision_with_role_prompt_raises(self) -> None:
-        # Role-prompt-discovered placeholders are always KEYWORD_ONLY/"Any",
-        # so an incompatible collision requires a mismatched variadic kind
-        # on the extra_thinking_params side sharing the same name.
-        with pytest.raises(AgentError, match="topic"):
             make_stub_agent(
-                role_prompt=PromptConfig(template="Discuss {topic}.", description="d"),
-                extra_thinking_params=[
-                    ParamSpec(name="topic", index=0, kind=ParamSpec.VAR_KEYWORD, type="Any"),
-                ],
+                role_prompt=PromptConfig(template="{role_description} is neat.", description="d")
             )
 
-    def test_extra_thinking_params_compatible_overlap_role_prompt_wins(self) -> None:
+
+class TestGetThoughts:
+    def test_no_records_returns_empty_list(self) -> None:
+        agent = make_stub_agent()
+        assert agent.get_thoughts() == []
+
+    def test_none_resolves_to_latest_record(self) -> None:
+        agent = make_stub_agent(engine=ScriptedLLMEngine(["insight one", "STOP", "final response"]))
+        agent.invoke({"prompt": "write a haiku"})
+
+        thoughts = agent.get_thoughts()
+
+        assert len(thoughts) == 1
+        assert thoughts[0].answer == "insight one"
+
+    def test_explicit_run_id_resolves_correct_record(self) -> None:
+        agent = make_stub_agent(engine=ScriptedLLMEngine(["insight one", "STOP", "final response"]))
+        result = agent.invoke({"prompt": "write a haiku"})
+
+        thoughts = agent.get_thoughts(result.run_id)
+
+        assert len(thoughts) == 1
+        assert thoughts[0].answer == "insight one"
+
+    def test_unresolvable_run_id_raises(self) -> None:
+        # A run_id must fail to resolve against a non-empty history to
+        # exercise the raise path -- get_thoughts mirrors get_conversation's
+        # own early `if not self._records: return []` guard, which fires
+        # before run_id resolution and would otherwise mask this case.
+        agent = make_stub_agent(engine=ScriptedLLMEngine(["insight one", "STOP", "final response"]))
+        agent.invoke({"prompt": "write a haiku"})
+
+        with pytest.raises(AgentInvocationError, match="no record with run_id"):
+            agent.get_thoughts("not-a-real-run-id")
+
+    def test_returned_slice_matches_thoughts_span(self) -> None:
         agent = make_stub_agent(
-            role_prompt=PromptConfig(template="Discuss {topic}.", description="d"),
-            extra_thinking_params=["topic"],
+            engine=ScriptedLLMEngine(["first", "second", "STOP", "final response"]),
+            max_thinking_rounds=5,
         )
-        topic_params = [p for p in agent.parameters if p.name == "topic"]
-        assert len(topic_params) == 1
+        result = agent.invoke({"prompt": "write a haiku"})
+
+        thoughts = agent.get_thoughts()
+
+        assert thoughts == agent._thoughts[result.thoughts_start:result.thoughts_end]
+        assert [t.answer for t in thoughts] == ["first", "second"]
 
 
 class TestProgressAndRenderTaskDispatch:

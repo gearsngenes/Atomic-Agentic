@@ -5,7 +5,6 @@ from datetime import datetime
 from typing import Any, Callable, Literal, Optional
 
 import pprint
-import warnings
 
 from ..constants.agents import (
     ANSWER_FIELD,
@@ -19,15 +18,8 @@ from ..models.agents.prompts import PromptConfig
 from ..models.agents.records import AgentRecord, LLMRecord, ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
 from ..models.agents.thought_models import AgentThought
-from ..models.parameters import ParamSpec
 from ..models.results.agents import ThinkingAgentResult
 from ..utils.agents import normalize_role_prompt
-from ..utils.parameters import (
-    parameter_collisions,
-    parameter_overlap,
-    semantically_identical,
-    to_paramspec_list,
-)
 from .base import Agent
 
 
@@ -74,7 +66,6 @@ class ThinkingAgent(Agent, ABC):
         max_thinking_rounds: int,
         render_thoughts_in_history: bool = False,
         generation_retries: int = 0,
-        extra_thinking_params: list[str] | list[ParamSpec] | None = None,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
         post_result_key: Optional[str] = None,
@@ -115,10 +106,18 @@ class ThinkingAgent(Agent, ABC):
             Number of additional LLM generation attempts subclasses may
             make when thinking-phase output fails validation. Same
             convention as ``ToolAgent.generation_retries``.
-        extra_thinking_params : list[str] | list[ParamSpec] | None
-            Placeholders discovered from a subclass's own prompts (beyond
-            ``role_prompt``), unioned into the single ``extra_parameters``
-            reconciliation pipeline base ``Agent.__init__`` already runs.
+
+        Notes
+        -----
+        No ``extra_thinking_params``-style constructor knob exists.
+        ``role_prompt``'s own discovered placeholders are the *only*
+        ``extra_parameters`` source, mirroring ``ToolAgent`` (which has no
+        legitimate source and drops the param outright, a22). A subclass's
+        own thinking-phase prompt(s) (e.g. ``SelfAskAgent``'s ``"thinking"``)
+        are rendered with an internally-computed render context (which may
+        include ``{role_description}``), never through the caller-facing
+        ``extra_parameters``/``inputs`` pipeline -- any such prompt must not
+        declare placeholders that need a caller-supplied value.
         """
         if type(max_thinking_rounds) is not int or max_thinking_rounds <= 0:
             raise TypeError("max_thinking_rounds must be a positive int.")
@@ -144,37 +143,6 @@ class ThinkingAgent(Agent, ABC):
             + self._RESPONSE_INSTRUCTIONS_SUFFIX
         )
         role_config = PromptConfig(template=wrapped_template, description="Response role prompt")
-        role_params = list(role_config.parameters)
-
-        # Reconcile role-prompt placeholders against extra_thinking_params
-        # before handing the union to Agent.__init__ -- a true collision
-        # (same name, incompatible type/kind) raises; a compatible-but-not-
-        # identical overlap keeps the role_prompt's declaration (mirrors
-        # Agent.__init__'s own pre_invoke-vs-post_invoke reconciliation
-        # convention, `base.py:228-273`). Without this step, a name shared
-        # by both sources would reach Agent.__init__ as two separate
-        # extra_parameters entries instead of being reconciled to one.
-        extra_params: list[ParamSpec] = to_paramspec_list(extra_thinking_params)
-        role_extra_collisions = parameter_collisions(role_params, extra_params)
-        if role_extra_collisions:
-            raise AgentError(
-                "role_prompt vs. extra_thinking_params parameter collision(s): "
-                f"{role_extra_collisions!r} (same name, incompatible type/kind)."
-            )
-        role_extra_overlap = parameter_overlap(role_params, extra_params)
-        role_by_name = {p.name: p for p in role_params}
-        extra_by_name = {p.name: p for p in extra_params}
-        for overlap_name in role_extra_overlap:
-            if not semantically_identical(role_by_name[overlap_name], extra_by_name[overlap_name]):
-                warnings.warn(
-                    f"extra_thinking_params entry {overlap_name!r} is compatible "
-                    "with a role_prompt placeholder but not identical; the "
-                    "role_prompt declaration wins.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-        extra_params = [p for p in extra_params if p.name not in role_extra_overlap]
-        combined_extra: list[ParamSpec] = role_params + extra_params
 
         super().__init__(
             name=name,
@@ -186,21 +154,21 @@ class ThinkingAgent(Agent, ABC):
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
             post_result_key=post_result_key,
-            extra_parameters=combined_extra,
+            extra_parameters=list(role_config.parameters),
             records_window=records_window,
             response_preview_limit=response_preview_limit,
             assistant_response_source=assistant_response_source,
         )
 
         # One-time reserved-name check, now that pre_invoke/post_invoke/
-        # combined_extra/run_id have all been merged into self.parameters --
+        # role_prompt/run_id have all been merged into self.parameters --
         # catches a collision from any source in one pass, since by this
         # point everything is already unioned into one list.
         if any(p.name == ROLE_DESCRIPTION_FIELD for p in self.parameters):
             raise AgentError(
                 "role_description is a framework-reserved name; no pre_invoke, "
-                "post_invoke, role_prompt, or extra_thinking_params parameter "
-                "may be named 'role_description'."
+                "post_invoke, or role_prompt parameter may be named "
+                "'role_description'."
             )
 
         self._system_prompts["role"] = role_config
@@ -239,6 +207,35 @@ class ThinkingAgent(Agent, ABC):
         if not value.strip():
             raise ValueError("role_description must be a non-empty string.")
         self._role_description = value
+
+    # ------------------------------------------------------------------ #
+    # Thought inspection
+    # ------------------------------------------------------------------ #
+    def get_thoughts(self, run_id: str | None = None) -> list[AgentThought]:
+        """
+        Return the thoughts produced during one specific completed run.
+
+        Mirrors ``Agent.get_conversation``'s ``run_id`` resolution: ``None``
+        resolves to the most recently committed record; an unresolvable
+        ``run_id`` raises ``AgentInvocationError``. Returns a plain slice of
+        the persisted ``self._thoughts`` list, scoped to that record's own
+        ``thoughts_start``/``thoughts_end`` span -- never a copy of the full
+        persisted list.
+        """
+        if not self._records:
+            return []
+        if run_id is None:
+            record = self._records[-1]
+        else:
+            record = next(
+                (r for r in self._records if r.final_result.run_id == run_id),
+                None,
+            )
+            if record is None:
+                raise AgentInvocationError(
+                    f"get_thoughts: no record with run_id {run_id!r} found in agent history."
+                )
+        return self._thoughts[record.thoughts_start:record.thoughts_end]
 
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
