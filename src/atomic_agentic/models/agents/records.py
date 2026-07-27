@@ -240,8 +240,8 @@ class ThinkingAgentRecord(AgentRecord):
     In addition to the base AgentRecord lifecycle artifacts, a
     ThinkingAgentRecord stores the half-open span of persisted thoughts
     produced by the invocation. ``ThinkingAgent`` renders that span into
-    future LLM-facing context (gated by ``render_thoughts_in_history``)
-    when building messages.
+    future LLM-facing context (gated by ``thoughts_window``) when building
+    messages.
     """
 
     thoughts_start: int | None = None

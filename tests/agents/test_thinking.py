@@ -136,15 +136,48 @@ class TestConstructionValidation:
         with pytest.raises(TypeError, match="max_thinking_rounds"):
             make_stub_agent(max_thinking_rounds=value)  # type: ignore[arg-type]
 
+    def test_max_thinking_rounds_accepts_none(self) -> None:
+        agent = make_stub_agent(max_thinking_rounds=None)
+        assert agent._max_thinking_rounds is None
+
     @pytest.mark.parametrize("value", [-1, "1", 1.5, True])
     def test_generation_retries_rejects_invalid(self, value: Any) -> None:
         with pytest.raises(TypeError, match="generation_retries"):
             make_stub_agent(generation_retries=value)  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize("value", [1, "True", 0])
-    def test_render_thoughts_in_history_rejects_non_bool(self, value: Any) -> None:
-        with pytest.raises(TypeError, match="render_thoughts_in_history"):
-            make_stub_agent(render_thoughts_in_history=value)  # type: ignore[arg-type]
+    @pytest.mark.parametrize("value", ["0", 1.5, True])
+    def test_thoughts_window_rejects_wrong_type(self, value: Any) -> None:
+        with pytest.raises(TypeError, match="thoughts_window"):
+            make_stub_agent(thoughts_window=value)  # type: ignore[arg-type]
+
+    def test_thoughts_window_rejects_negative(self) -> None:
+        with pytest.raises(ValueError, match="thoughts_window"):
+            make_stub_agent(thoughts_window=-1)
+
+    def test_thoughts_window_accepts_none_and_zero(self) -> None:
+        assert make_stub_agent(thoughts_window=None).thoughts_window is None
+        assert make_stub_agent(thoughts_window=0).thoughts_window == 0
+
+    def test_thoughts_window_defaults_to_zero(self) -> None:
+        assert make_stub_agent().thoughts_window == 0
+
+    def test_thoughts_window_is_mutable_after_construction(self) -> None:
+        agent = make_stub_agent()
+        agent.thoughts_window = 5
+        assert agent.thoughts_window == 5
+        agent.thoughts_window = None
+        assert agent.thoughts_window is None
+
+    @pytest.mark.parametrize("value", ["0", 1.5, True])
+    def test_thoughts_window_setter_rejects_wrong_type(self, value: Any) -> None:
+        agent = make_stub_agent()
+        with pytest.raises(TypeError, match="thoughts_window"):
+            agent.thoughts_window = value  # type: ignore[assignment]
+
+    def test_thoughts_window_setter_rejects_negative(self) -> None:
+        agent = make_stub_agent()
+        with pytest.raises(ValueError, match="thoughts_window"):
+            agent.thoughts_window = -1
 
 
 class TestRolePromptWrapping:
@@ -419,20 +452,20 @@ class TestFullInvokeLifecycle:
 
 
 class TestRenderTurnGating:
-    def test_render_thoughts_in_history_false_matches_base_render_turn(self) -> None:
+    def test_thoughts_window_zero_matches_base_render_turn(self) -> None:
         agent = make_stub_agent(
             engine=ScriptedLLMEngine(["insight one", "STOP", "final response"]),
-            render_thoughts_in_history=False,
+            thoughts_window=0,
         )
         agent.invoke({"prompt": "write a haiku"})
         record = agent.records[-1]
 
         assert agent.render_turn(record) == super(ThinkingAgent, agent).render_turn(record)
 
-    def test_render_thoughts_in_history_true_splices_thought_trail(self) -> None:
+    def test_thoughts_window_none_splices_thought_trail(self) -> None:
         agent = make_stub_agent(
             engine=ScriptedLLMEngine(["insight one", "STOP", "final response"]),
-            render_thoughts_in_history=True,
+            thoughts_window=None,
         )
         agent.invoke({"prompt": "write a haiku"})
         record = agent.records[-1]
@@ -447,7 +480,7 @@ class TestRenderTurnGating:
     def test_thoughts_appear_before_response_and_are_not_index_labeled(self) -> None:
         agent = make_stub_agent(
             engine=ScriptedLLMEngine(["insight one", "STOP", "final response"]),
-            render_thoughts_in_history=True,
+            thoughts_window=None,
         )
         agent.invoke({"prompt": "write a haiku"})
         record = agent.records[-1]
@@ -463,3 +496,78 @@ class TestRenderTurnGating:
 
         with pytest.raises(AgentInvocationError, match="ThinkingAgentRecord"):
             agent.render_turn(AgentRecord(user_prompt="x", generated_response="y"))
+
+
+class TestRenderHistoricMessagesWindowing:
+    """Positional windowing lives in _render_historic_messages, not
+    render_turn (which stays position-blind, see its own docstring) --
+    these tests exercise the override directly against a hand-built list of
+    turns so the trailing-window math is checked in isolation."""
+
+    def _invoke_and_collect_records(
+        self, agent: StubThinkingAgent, n: int
+    ) -> list[AgentRecord]:
+        for i in range(n):
+            agent.invoke({"prompt": f"task {i}"})
+        return list(agent.records)
+
+    @staticmethod
+    def _assistant_contents(messages: list[dict[str, str]]) -> list[str]:
+        return [messages[i]["content"] for i in range(1, len(messages), 2)]
+
+    def test_zero_window_renders_no_thoughts_for_any_turn(self) -> None:
+        agent = make_stub_agent(
+            engine=ScriptedLLMEngine(["insight", "STOP", "reply"] * 3),
+            thoughts_window=0,
+        )
+        turns = self._invoke_and_collect_records(agent, 3)
+        task = ThinkingTask(turns=turns, inputs={}, user_prompt="x", system_prompt_name="role")
+
+        messages = agent._render_historic_messages(task)
+
+        assert all("THOUGHTS:" not in c for c in self._assistant_contents(messages))
+
+    def test_none_window_renders_thoughts_for_every_turn(self) -> None:
+        agent = make_stub_agent(
+            engine=ScriptedLLMEngine(["insight", "STOP", "reply"] * 3),
+            thoughts_window=None,
+        )
+        turns = self._invoke_and_collect_records(agent, 3)
+        task = ThinkingTask(turns=turns, inputs={}, user_prompt="x", system_prompt_name="role")
+
+        messages = agent._render_historic_messages(task)
+
+        assert all("THOUGHTS:" in c for c in self._assistant_contents(messages))
+
+    def test_positive_window_renders_only_trailing_k_turns(self) -> None:
+        agent = make_stub_agent(
+            engine=ScriptedLLMEngine(["insight", "STOP", "reply"] * 3),
+            thoughts_window=1,
+        )
+        turns = self._invoke_and_collect_records(agent, 3)
+        task = ThinkingTask(turns=turns, inputs={}, user_prompt="x", system_prompt_name="role")
+
+        messages = agent._render_historic_messages(task)
+        contents = self._assistant_contents(messages)
+
+        assert "THOUGHTS:" not in contents[0]
+        assert "THOUGHTS:" not in contents[1]
+        assert "THOUGHTS:" in contents[2]
+
+    def test_window_caps_at_available_turns_without_error(self) -> None:
+        agent = make_stub_agent(
+            engine=ScriptedLLMEngine(["insight", "STOP", "reply"] * 2),
+            thoughts_window=10,
+        )
+        turns = self._invoke_and_collect_records(agent, 2)
+        task = ThinkingTask(turns=turns, inputs={}, user_prompt="x", system_prompt_name="role")
+
+        messages = agent._render_historic_messages(task)
+
+        assert all("THOUGHTS:" in c for c in self._assistant_contents(messages))
+
+    def test_empty_turns_returns_empty_without_error(self) -> None:
+        agent = make_stub_agent(thoughts_window=None)
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="x", system_prompt_name="role")
+
+        assert agent._render_historic_messages(task) == []

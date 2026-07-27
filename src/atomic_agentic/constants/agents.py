@@ -116,6 +116,7 @@ PLANNED_QUESTION_FIELDS = frozenset(
     {
         OBSERVATION_FIELD,
         QUESTION_FIELD,
+        ANSWER_FIELD,
     }
 )
 

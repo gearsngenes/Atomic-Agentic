@@ -1,19 +1,19 @@
 """
-SelfAskAgent: Adaptive Self-Questioning ThinkingAgent
+PlanAskAgent: Batch Self-Questioning ThinkingAgent
 
-This module provides ``SelfAskAgent``, a concrete ``ThinkingAgent`` subclass
-implementing the Self-Ask pattern: one self-asked follow-up question per
-round, fused (observe + ask + answer + continue-signal) into a single JSON
-LLM call. Thinking continues until the model self-declares it's done
-(``keep_thinking=false``) or ``max_thinking_rounds`` is hit -- a hard safety
-valve that forces a reply using whatever thoughts exist, never a raise.
+This module provides ``PlanAskAgent``, a concrete ``ThinkingAgent`` subclass
+implementing the batch, ask-all-upfront strategy: one fused JSON LLM call
+produces the entire list of already-answered thoughts at once -- no per-item
+continuation signal, since batch completion is structural (decided in one
+shot, never iterative). Range-validated for length, then the shared base
+``ThinkingAgent._reply`` produces the outward response.
 
 Contrast
 --------
 For the shared thinking/reply lifecycle, thought persistence, and
 ``role_description`` mechanics, see ``agents/thinking.py`` (``ThinkingAgent``).
-For the batch, ask-all-upfront strategy see ``agents/planask.py``
-(``PlanAskAgent``, a later pass).
+For the adaptive, one-question-at-a-time strategy see ``agents/selfask.py``
+(``SelfAskAgent``).
 """
 
 from __future__ import annotations
@@ -22,13 +22,12 @@ import json
 from typing import Any, Callable, Literal, Mapping, Optional
 
 from .thinking import ThinkingAgent
-from .prompts import SELF_ASK_PROMPT
+from .prompts import PLAN_ASK_PROMPT
 from ..constants.agents import (
     ANSWER_FIELD,
-    KEEP_THINKING_FIELD,
     OBSERVATION_FIELD,
+    PLANNED_QUESTION_FIELDS,
     QUESTION_FIELD,
-    THOUGHT_FIELDS,
 )
 from ..exceptions import ThinkingAgentError
 from ..llm.base import LLMEngine
@@ -39,25 +38,26 @@ from ..models.agents.thought_models import AgentThought
 from ..utils.agents import extract_json_object
 
 
-class SelfAskAgent(ThinkingAgent):
+class PlanAskAgent(ThinkingAgent):
     """
-    Adaptive ``ThinkingAgent``: one self-asked follow-up question per round,
-    fused into a single JSON LLM call producing
-    ``{observation, question, answer, keep_thinking}``. Thinking continues
-    until the model sets ``keep_thinking=false`` or ``max_thinking_rounds``
-    is reached (safety valve -- replies with whatever thoughts exist so far,
-    never a raise). Malformed output retries up to ``generation_retries``
-    times with feedback injection; exhausting the budget raises
-    ``ThinkingAgentError``.
+    Batch ``ThinkingAgent``: one fused JSON LLM call produces the entire
+    self-ask thought list at once -- ``{observation, question, answer}`` per
+    item, no ``keep_thinking`` (batch completion is structural, not
+    self-declared). List length must be ``>= 1``; upper-bounded by
+    ``max_thinking_rounds`` only when it is not ``None`` (``None`` permits an
+    unbounded batch, mirroring ``ToolAgent.tool_calls_limit``'s own
+    ``None``-means-unlimited precedent). Malformed output retries up to
+    ``generation_retries`` times with feedback injection; exhausting the
+    budget raises ``ThinkingAgentError``.
 
     Exactly two system prompts exist for any instance: ``"role"`` (built by
-    the base class from the caller's ``role_prompt``, reply phase only) and
-    ``"self_ask"`` (this class's own fixed, non-configurable prompt,
-    thinking phase only). No constructor parameter exposes the self-ask
-    prompt for customization -- it is identical across every instance.
+    the base class, reply phase only) and ``"plan_ask"`` (this class's own
+    fixed, non-configurable prompt, thinking phase only, used exactly once
+    per run). No constructor parameter exposes the plan-ask prompt for
+    customization -- it is identical across every instance.
     """
 
-    SELF_ASK_PROMPT_NAME = "self_ask"
+    PLAN_ASK_PROMPT_NAME = "plan_ask"
 
     def __init__(
         self,
@@ -70,7 +70,7 @@ class SelfAskAgent(ThinkingAgent):
         filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = False,
         *,
-        max_thinking_rounds: int,
+        max_thinking_rounds: int | None,
         thoughts_window: int | None = 0,
         generation_retries: int = 0,
         pre_invoke: Optional[Callable | Any] = None,
@@ -81,17 +81,11 @@ class SelfAskAgent(ThinkingAgent):
         assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
         """
-        Pure passthrough to ``ThinkingAgent.__init__`` -- no new parameters
-        except the ``max_thinking_rounds`` guard below. Registers the fixed
-        ``self_ask`` system prompt after construction.
+        Pure passthrough to ``ThinkingAgent.__init__`` -- no new parameters,
+        no guard on ``max_thinking_rounds`` (``None`` is permitted here: no
+        upper bound on the produced batch list, unlike ``SelfAskAgent``).
+        Registers the fixed ``plan_ask`` system prompt after construction.
         """
-        if max_thinking_rounds is None:
-            raise TypeError(
-                f"{type(self).__name__} requires a concrete positive int "
-                "max_thinking_rounds -- it is the only backstop guaranteeing "
-                "the self-ask loop terminates. None (unlimited) is not "
-                "permitted."
-            )
         super().__init__(
             name=name,
             namespace=namespace,
@@ -111,7 +105,7 @@ class SelfAskAgent(ThinkingAgent):
             response_preview_limit=response_preview_limit,
             assistant_response_source=assistant_response_source,
         )
-        self._system_prompts[self.SELF_ASK_PROMPT_NAME] = SELF_ASK_PROMPT
+        self._system_prompts[self.PLAN_ASK_PROMPT_NAME] = PLAN_ASK_PROMPT
 
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
@@ -124,20 +118,21 @@ class SelfAskAgent(ThinkingAgent):
         inputs: dict,
     ) -> ThinkingTask:
         """
-        Bare seed -- no LLM call. Every invocation performs at least one
-        self-ask round before a reply is possible.
+        Bare seed -- no LLM call. The one batch call happens in ``_think``
+        on the first ``_progress()`` call.
         """
         return ThinkingTask(
             turns=turns,
             inputs=inputs,
             user_prompt=prompt,
-            system_prompt_name=self.SELF_ASK_PROMPT_NAME,
+            system_prompt_name=self.PLAN_ASK_PROMPT_NAME,
         )
 
     def _think(self, task: ThinkingTask) -> ThinkingTask:
         """
-        One fused self-ask round, with a bounded JSON-decode/spec-validate
-        retry loop mirroring ``ReActAgent._generate_next_step``'s shape.
+        The one fused batch round this task will ever run, with a bounded
+        JSON-decode/spec-validate retry loop mirroring
+        ``SelfAskAgent._think``'s two-stage shape.
         """
         additional_messages: list[dict[str, str]] = []
 
@@ -160,7 +155,7 @@ class SelfAskAgent(ThinkingAgent):
                     f"Your output could not be parsed as valid JSON.\n\n"
                     f"Decoder error: {exc}\n\n"
                     f"The response you produced was:\n\n{raw_output}\n\n"
-                    "Produce a correctly formatted JSON object."
+                    "Produce a correctly formatted JSON array."
                 )
                 if task.retries_used >= self._generation_retries:
                     raise ThinkingAgentError(
@@ -175,7 +170,7 @@ class SelfAskAgent(ThinkingAgent):
                 continue
 
             # Spec validation
-            result = self._validate_self_ask_round(parsed)
+            result = self._validate_planned_thoughts(parsed)
             if isinstance(result, str):
                 feedback = result
                 if task.retries_used >= self._generation_retries:
@@ -183,29 +178,28 @@ class SelfAskAgent(ThinkingAgent):
                         f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
                         f"after {task.retries_used + 1} attempt(s). Last error: {feedback}"
                     )
-                round_repr = json.dumps(parsed, indent=2)
+                batch_repr = json.dumps(parsed, indent=2)
                 additional_messages = [
-                    {"role": "assistant", "content": round_repr},
+                    {"role": "assistant", "content": batch_repr},
                     {"role": "user", "content": (
-                        f"The self-ask round you produced contains an error:\n\n"
-                        f"{round_repr}\n\n"
+                        f"The batch you produced contains an error:\n\n"
+                        f"{batch_repr}\n\n"
                         f"Error: {feedback}\n\n"
-                        "Reflect on this and produce a corrected round."
+                        "Reflect on this and produce a corrected batch."
                     )},
                 ]
                 task.retries_used += 1
                 continue
 
-            thought, keep_thinking = result
+            thoughts = result
             break
 
-        task.thoughts.append(thought)
-        task.rounds_used += 1
-        # Clear now -- the next round's render_task (or the reply phase's)
-        # must rebuild fresh, reflecting the just-appended thought.
+        task.thoughts.extend(thoughts)
+        # Count of thoughts actually produced, not "+= 1" -- this phase
+        # never runs a second time this task.
+        task.rounds_used = len(thoughts)
         task.task_messages = []
-        if not keep_thinking or task.rounds_used >= self._max_thinking_rounds:
-            task.system_prompt_name = "role"
+        task.system_prompt_name = "role"
         return task
 
     async def _async_think(self, task: ThinkingTask) -> ThinkingTask:
@@ -231,7 +225,7 @@ class SelfAskAgent(ThinkingAgent):
                     f"Your output could not be parsed as valid JSON.\n\n"
                     f"Decoder error: {exc}\n\n"
                     f"The response you produced was:\n\n{raw_output}\n\n"
-                    "Produce a correctly formatted JSON object."
+                    "Produce a correctly formatted JSON array."
                 )
                 if task.retries_used >= self._generation_retries:
                     raise ThinkingAgentError(
@@ -245,7 +239,7 @@ class SelfAskAgent(ThinkingAgent):
                 task.retries_used += 1
                 continue
 
-            result = self._validate_self_ask_round(parsed)
+            result = self._validate_planned_thoughts(parsed)
             if isinstance(result, str):
                 feedback = result
                 if task.retries_used >= self._generation_retries:
@@ -253,27 +247,26 @@ class SelfAskAgent(ThinkingAgent):
                         f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
                         f"after {task.retries_used + 1} attempt(s). Last error: {feedback}"
                     )
-                round_repr = json.dumps(parsed, indent=2)
+                batch_repr = json.dumps(parsed, indent=2)
                 additional_messages = [
-                    {"role": "assistant", "content": round_repr},
+                    {"role": "assistant", "content": batch_repr},
                     {"role": "user", "content": (
-                        f"The self-ask round you produced contains an error:\n\n"
-                        f"{round_repr}\n\n"
+                        f"The batch you produced contains an error:\n\n"
+                        f"{batch_repr}\n\n"
                         f"Error: {feedback}\n\n"
-                        "Reflect on this and produce a corrected round."
+                        "Reflect on this and produce a corrected batch."
                     )},
                 ]
                 task.retries_used += 1
                 continue
 
-            thought, keep_thinking = result
+            thoughts = result
             break
 
-        task.thoughts.append(thought)
-        task.rounds_used += 1
+        task.thoughts.extend(thoughts)
+        task.rounds_used = len(thoughts)
         task.task_messages = []
-        if not keep_thinking or task.rounds_used >= self._max_thinking_rounds:
-            task.system_prompt_name = "role"
+        task.system_prompt_name = "role"
         return task
 
     def _render_thinking_messages(
@@ -283,12 +276,18 @@ class SelfAskAgent(ThinkingAgent):
         additional_messages: list[dict[str, str]] | None = None,
     ) -> list[dict[str, str]]:
         """
-        Render the self-ask system prompt (with ``role_description`` filled
-        via an internally-computed render context, never ``task.inputs``)
-        plus a fresh 3-message task thread: current-task banner, the
-        thoughts-so-far snapshot, and a fixed per-round instruction.
+        Render the plan-ask system prompt (with ``role_description`` and
+        ``thought_count_range`` filled via an internally-computed render
+        context, never ``task.inputs``) plus a fresh 2-message task thread:
+        current-task banner and a fixed batch-output instruction. No
+        thoughts-so-far snapshot -- ``task.thoughts`` is always empty going
+        into this single round.
         """
-        system = self._render_system_message(task, {"role_description": self.role_description})
+        render_context = {
+            "role_description": self.role_description,
+            "thought_count_range": self._render_thought_count_range(),
+        }
+        system = self._render_system_message(task, render_context)
         historic = self._render_historic_messages(task)
 
         if not task.task_messages:
@@ -299,61 +298,87 @@ class SelfAskAgent(ThinkingAgent):
                         f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK ====="
                     ),
                 },
-                {"role": "assistant", "content": self._render_thoughts_snapshot(task)},
                 {
                     "role": "user",
                     "content": (
-                        "Produce the next self-ask round: one JSON object with keys "
-                        "{observation, question, answer, keep_thinking}."
+                        "Produce the full set of self-ask thoughts needed to answer this "
+                        f"task well: a JSON array of {self._render_thought_count_range()} "
+                        "objects, each {observation, question, answer}."
                     ),
                 },
             ]
         task.task_messages.extend(additional_messages or [])
         return system + historic + task.task_messages
 
+    def _render_thought_count_range(self) -> str:
+        """
+        Phrase the batch's length constraint for both the system prompt's
+        ``{thought_count_range}`` placeholder and the fixed per-call
+        instruction. Mirrors ``ReActAgent``'s own ``"unlimited" if X is None
+        else str(X)`` idiom, generalized to a full phrase since this is
+        prose, not a bare number substitution.
+        """
+        if self._max_thinking_rounds is None:
+            return "as many as needed (no upper limit, minimum 1)"
+        return f"between 1 and {self._max_thinking_rounds}"
+
     # ------------------------------------------------------------------ #
     # Private validation
     # ------------------------------------------------------------------ #
-    def _validate_self_ask_round(self, parsed: Any) -> tuple[AgentThought, bool] | str:
+    def _validate_planned_thoughts(self, parsed: Any) -> list[AgentThought] | str:
         """
-        Validate one parsed self-ask round.
+        Validate one parsed batch of planned thoughts.
 
-        Returns ``(AgentThought, keep_thinking)`` on success, or a plain
-        feedback string on failure (no class/name prefix, matching
-        ``ReActAgent``'s validator convention).
+        Returns ``list[AgentThought]`` on success, or a plain feedback
+        string on the first failure (no class/name prefix, matching
+        ``SelfAskAgent._validate_self_ask_round``'s convention).
         """
-        if not isinstance(parsed, Mapping):
-            return f"self-ask round output must be a JSON object; got {type(parsed).__name__!r}."
+        if not isinstance(parsed, list):
+            return f"batch output must be a JSON array; got {type(parsed).__name__!r}."
 
-        raw = dict(parsed)
+        if len(parsed) < 1:
+            return "at least one thought is required in the batch."
 
-        extra = set(raw) - THOUGHT_FIELDS
-        if extra:
-            return f"self-ask round contains unsupported keys: {sorted(extra)!r}."
+        if self._max_thinking_rounds is not None and len(parsed) > self._max_thinking_rounds:
+            return (
+                f"batch contains {len(parsed)} thoughts, exceeding the max of "
+                f"{self._max_thinking_rounds}."
+            )
 
-        missing = THOUGHT_FIELDS - set(raw)
-        if missing:
-            return f"self-ask round missing required keys: {sorted(missing)!r}."
+        thoughts: list[AgentThought] = []
+        for i, item in enumerate(parsed):
+            if not isinstance(item, Mapping):
+                return f"item at index {i} must be a JSON object; got {type(item).__name__!r}."
 
-        observation = raw[OBSERVATION_FIELD]
-        if observation is not None and not isinstance(observation, str):
-            return f"{OBSERVATION_FIELD!r} must be a string or null; got {type(observation).__name__!r}."
+            raw = dict(item)
 
-        question = raw[QUESTION_FIELD]
-        if not isinstance(question, str) or not question.strip():
-            return f"{QUESTION_FIELD!r} must be a non-empty string."
+            extra = set(raw) - PLANNED_QUESTION_FIELDS
+            if extra:
+                return f"item at index {i} contains unsupported keys: {sorted(extra)!r}."
 
-        answer = raw[ANSWER_FIELD]
-        if not isinstance(answer, str) or not answer.strip():
-            return f"{ANSWER_FIELD!r} must be a non-empty string."
+            missing = PLANNED_QUESTION_FIELDS - set(raw)
+            if missing:
+                return f"item at index {i} missing required keys: {sorted(missing)!r}."
 
-        keep_thinking = raw[KEEP_THINKING_FIELD]
-        if type(keep_thinking) is not bool:
-            return f"{KEEP_THINKING_FIELD!r} must be a bool; got {type(keep_thinking).__name__!r}."
+            observation = raw[OBSERVATION_FIELD]
+            if observation is not None and not isinstance(observation, str):
+                return (
+                    f"item at index {i}: {OBSERVATION_FIELD!r} must be a string or null; "
+                    f"got {type(observation).__name__!r}."
+                )
 
-        thought = AgentThought(
-            observation=observation,
-            question=question.strip(),
-            answer=answer.strip(),
-        )
-        return thought, keep_thinking
+            question = raw[QUESTION_FIELD]
+            if not isinstance(question, str) or not question.strip():
+                return f"item at index {i}: {QUESTION_FIELD!r} must be a non-empty string."
+
+            answer = raw[ANSWER_FIELD]
+            if not isinstance(answer, str) or not answer.strip():
+                return f"item at index {i}: {ANSWER_FIELD!r} must be a non-empty string."
+
+            thoughts.append(AgentThought(
+                observation=observation,
+                question=question.strip(),
+                answer=answer.strip(),
+            ))
+
+        return thoughts

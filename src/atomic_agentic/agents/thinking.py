@@ -63,8 +63,8 @@ class ThinkingAgent(Agent, ABC):
         filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = False,
         *,
-        max_thinking_rounds: int,
-        render_thoughts_in_history: bool = False,
+        max_thinking_rounds: int | None,
+        thoughts_window: int | None = 0,
         generation_retries: int = 0,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
@@ -76,13 +76,18 @@ class ThinkingAgent(Agent, ABC):
         """
         Parameters
         ----------
-        max_thinking_rounds : int
+        max_thinking_rounds : int | None
             Hard cap on the number of thinking rounds this agent will run
             before forcing the transition to the reply phase. Required, no
-            default — every concrete subclass enforces it differently
-            (``SelfAskAgent``: a live safety backstop overriding any
-            self-declared continuation signal; ``PlanAskAgent``: a
-            validated upper bound on the upfront-planned question count).
+            default. ``None`` is accepted at this base level, but every
+            concrete subclass enforces it differently: ``SelfAskAgent``
+            rejects ``None`` outright (its own constructor guard) since it
+            is the only backstop guaranteeing its live, iterative
+            self-ask loop terminates; ``PlanAskAgent`` permits ``None`` as
+            "no upper bound on the upfront-planned question count," since
+            its batch call is inherently finite regardless of any cap
+            (mirrors ``ToolAgent.tool_calls_limit``'s own
+            ``None``-means-unlimited precedent).
         role_prompt : str | PromptConfig | None
             The caller's persona/response instructions. Wrapped at
             construction time inside a fixed fence plus a framework-authored
@@ -97,11 +102,16 @@ class ThinkingAgent(Agent, ABC):
             this agent's own ``description``. Freely settable afterward via
             the ``role_description`` property (a behavioral/tuning knob, not
             identity/shape).
-        render_thoughts_in_history : bool
-            Frozen at construction. Governs whether ``render_turn`` splices
-            this agent's past thoughts into replayed history for later
-            invocations — never required for the current run's own
-            function, purely a memory/replay concern.
+        thoughts_window : int | None
+            Mutable (unlike most shape-adjacent knobs here). Governs how
+            many of the *trailing* replayed records get their thoughts
+            spliced into history by ``_render_historic_messages`` — ``0``
+            (default) means none, ``None`` means every replayed record,
+            a positive int ``k`` means only the last ``k`` records. Never
+            required for the current run's own function, purely a
+            memory/replay concern. Its effective cap is implicitly bounded
+            by ``records_window`` for free, since ``task.turns`` is already
+            ``records_window``-limited by the time replay rendering runs.
         generation_retries : int
             Number of additional LLM generation attempts subclasses may
             make when thinking-phase output fails validation. Same
@@ -119,12 +129,17 @@ class ThinkingAgent(Agent, ABC):
         ``extra_parameters``/``inputs`` pipeline -- any such prompt must not
         declare placeholders that need a caller-supplied value.
         """
-        if type(max_thinking_rounds) is not int or max_thinking_rounds <= 0:
-            raise TypeError("max_thinking_rounds must be a positive int.")
+        if max_thinking_rounds is not None and (
+            type(max_thinking_rounds) is not int or max_thinking_rounds <= 0
+        ):
+            raise TypeError("max_thinking_rounds must be None or a positive int.")
         if type(generation_retries) is not int or generation_retries < 0:
             raise TypeError("generation_retries must be a non-negative int.")
-        if type(render_thoughts_in_history) is not bool:
-            raise TypeError("render_thoughts_in_history must be a bool.")
+        if thoughts_window is not None:
+            if type(thoughts_window) is not int:
+                raise TypeError("thoughts_window must be None or an int.")
+            if thoughts_window < 0:
+                raise ValueError("thoughts_window must be None or a non-negative int.")
         if role_description is not None:
             if not isinstance(role_description, str):
                 raise TypeError("role_description must be a str.")
@@ -172,8 +187,8 @@ class ThinkingAgent(Agent, ABC):
             )
 
         self._system_prompts["role"] = role_config
-        self._max_thinking_rounds: int = max_thinking_rounds
-        self._render_thoughts_in_history: bool = render_thoughts_in_history
+        self._max_thinking_rounds: int | None = max_thinking_rounds
+        self._thoughts_window: int | None = thoughts_window
         self._generation_retries: int = generation_retries
         self._role_description: str = (
             role_description
@@ -207,6 +222,28 @@ class ThinkingAgent(Agent, ABC):
         if not value.strip():
             raise ValueError("role_description must be a non-empty string.")
         self._role_description = value
+
+    @property
+    def thoughts_window(self) -> int | None:
+        """
+        Trailing-record window governing how many past records' thoughts get
+        spliced into replay by ``_render_historic_messages``. ``0`` (default)
+        means none; ``None`` means every replayed record; a positive int
+        ``k`` means only the last ``k`` records. Effective cap is bounded by
+        ``records_window`` for free -- ``task.turns`` is already
+        ``records_window``-limited by the time windowing runs, so this value
+        never needs reconciling against ``self._records_window`` directly.
+        """
+        return self._thoughts_window
+
+    @thoughts_window.setter
+    def thoughts_window(self, value: int | None) -> None:
+        if value is not None:
+            if type(value) is not int:
+                raise TypeError("thoughts_window must be None or an int.")
+            if value < 0:
+                raise ValueError("thoughts_window must be None or a non-negative int.")
+        self._thoughts_window = value
 
     # ------------------------------------------------------------------ #
     # Thought inspection
@@ -459,15 +496,22 @@ class ThinkingAgent(Agent, ABC):
         """
         Render one stored ``ThinkingAgentRecord`` into LLM-facing messages.
 
-        Gated by ``render_thoughts_in_history`` -- when ``False`` (default)
-        this is identical to base ``Agent.render_turn``. When ``True``,
-        splices a thought-trail block into the single assistant message's
-        content (never a separate message, to respect strict
-        user/assistant alternation), scoped to this record's own
-        ``thoughts_start``/``thoughts_end`` span. Thoughts are listed first,
-        with the final response appended last -- reading order matches the
-        order they actually happened in. Thought indices are not labeled;
-        nothing downstream needs to address a thought by position.
+        Gated by ``thoughts_window`` -- when it's ``0`` this is identical to
+        base ``Agent.render_turn``. Otherwise splices a thought-trail block
+        into the single assistant message's content (never a separate
+        message, to respect strict user/assistant alternation), scoped to
+        this record's own ``thoughts_start``/``thoughts_end`` span. Thoughts
+        are listed first, with the final response appended last -- reading
+        order matches the order they actually happened in. Thought indices
+        are not labeled; nothing downstream needs to address a thought by
+        position.
+
+        Position-blind and standalone-callable by design (exercised directly
+        by callers wanting to preview one record in isolation) -- it has no
+        way to know whether this particular record falls inside or outside
+        a trailing window. That positional decision lives entirely in
+        ``_render_historic_messages`` below, the only place with visibility
+        into a turn's position among all turns being replayed this call.
         """
         if not isinstance(turn, ThinkingAgentRecord):
             raise AgentInvocationError(
@@ -475,7 +519,7 @@ class ThinkingAgent(Agent, ABC):
             )
 
         messages = super().render_turn(turn)
-        if not self._render_thoughts_in_history:
+        if self._thoughts_window == 0:
             return messages
 
         start = turn.thoughts_start
@@ -498,6 +542,37 @@ class ThinkingAgent(Agent, ABC):
             f"RESPONSE:\n{assistant_response}"
         )
         return [messages[0], {"role": "assistant", "content": assistant_content}]
+
+    def _render_historic_messages(self, task: ThinkingTask) -> list[dict[str, str]]:
+        """
+        Override base ``Agent``'s version to apply ``thoughts_window``
+        positionally -- only the trailing window of replayed turns gets
+        thoughts spliced in; earlier turns render plain. ``render_turn``
+        itself stays position-blind (see its docstring above); this is the
+        one place with visibility into where a turn sits among all turns
+        being replayed this call.
+
+        ``records_window``'s own cap falls out for free here: ``task.turns``
+        is already ``records_window``-limited by the time this runs, so
+        ``window`` never exceeds however many turns were actually selected.
+        """
+        if task.historic_messages:
+            return task.historic_messages
+        if not task.turns:
+            return task.historic_messages
+
+        n = len(task.turns)
+        window = n if self._thoughts_window is None else min(self._thoughts_window, n)
+        cutoff = n - window
+
+        rendered: list[dict[str, str]] = []
+        for i, turn in enumerate(task.turns):
+            if i >= cutoff:
+                rendered.extend(self.render_turn(turn))
+            else:
+                rendered.extend(Agent.render_turn(self, turn))
+        task.historic_messages = rendered
+        return task.historic_messages
 
     # ------------------------------------------------------------------ #
     # Result construction

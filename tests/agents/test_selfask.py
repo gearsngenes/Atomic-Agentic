@@ -61,14 +61,21 @@ class TestConstruction:
 
     def test_no_new_constructor_parameters_beyond_thinking_agent(self) -> None:
         # role_prompt, role_description, max_thinking_rounds, generation_retries,
-        # render_thoughts_in_history all come straight from ThinkingAgent.
+        # thoughts_window all come straight from ThinkingAgent.
         agent = make_agent(
             [round_json(), "reply"],
             role_prompt="Be a helpful assistant.",
             role_description="Answering trivia questions.",
-            render_thoughts_in_history=True,
+            thoughts_window=None,
         )
         assert agent.role_description == "Answering trivia questions."
+
+    def test_max_thinking_rounds_none_raises(self) -> None:
+        # Unlike PlanAskAgent, SelfAskAgent's max_thinking_rounds is the
+        # only backstop guaranteeing its live, iterative loop terminates --
+        # None (unlimited) must never be permitted here.
+        with pytest.raises(TypeError, match="max_thinking_rounds"):
+            make_agent([round_json(), "reply"], max_thinking_rounds=None)  # type: ignore[arg-type]
 
 
 class TestSelfAskRoundValidation:

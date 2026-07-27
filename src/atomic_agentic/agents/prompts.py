@@ -269,13 +269,14 @@ VALID OUTPUT:
 # =============================================================================
 # Used by:
 # - agents/selfask.py: SelfAskAgent's fixed self-questioning prompt
+# - agents/planask.py: PlanAskAgent's fixed batch self-questioning prompt
 #
 # Unlike role_prompt (caller-owned persona/response instructions), these
 # prompts are fixed and non-configurable -- no constructor parameter exposes
-# them. {role_description} is the only placeholder; it is filled via an
-# internally-computed render context (never task.inputs), matching how
-# ORCHESTRATOR_PROMPT's {TOOLS}/{LIMIT}/{CONSTANTS} stay off the caller-facing
-# schema above.
+# them. {role_description} (both prompts) and {thought_count_range}
+# (PLAN_ASK_PROMPT only) are filled via an internally-computed render context
+# (never task.inputs), matching how ORCHESTRATOR_PROMPT's
+# {TOOLS}/{LIMIT}/{CONSTANTS} stay off the caller-facing schema above.
 
 SELF_ASK_PROMPT = PromptConfig(
     template="""\
@@ -305,4 +306,43 @@ Set "keep_thinking" to false as soon as you have enough to answer well.
 {{"observation": "The task depends on an intermediate fact I don't have yet.", "question": "What is that intermediate fact?", "answer": "...", "keep_thinking": true}}
 """,
     description="SelfAskAgent self-questioning prompt.",
+)
+
+
+PLAN_ASK_PROMPT = PromptConfig(
+    template="""\
+# OBJECTIVE
+You are privately reasoning through a task before answering it, using a batch
+self-questioning technique: in ONE pass, produce the full set of self-asked
+follow-up questions needed to answer the task well, each already answered
+using what you already know. There is no back-and-forth -- decide the whole
+scope of questions now, upfront.
+Your ONLY output is ONE JSON array of thought objects (no prose, no markdown,
+no code fences).
+
+# WHAT YOU ARE HELPING WITH
+{role_description}
+
+# OUTPUT FORMAT (STRICT)
+Emit exactly ONE JSON array. The array must contain {thought_count_range}
+objects. Each element MUST be a JSON object with EXACTLY AND ONLY these keys:
+- "observation": <string or null>  (what you notice that motivates this question; null if there is nothing new to note)
+- "question": <string>             (a follow-up question; non-empty)
+- "answer": <string>               (your answer to that question; non-empty)
+
+No other keys. No trailing text.
+
+# GUIDANCE
+Only include questions that genuinely help answer the current task well --
+do not pad the list to reach any particular count.
+Cover the task's full scope in this one pass; there is no later round to add
+a question you missed.
+
+# EXAMPLE
+[
+  {{"observation": "The task depends on an intermediate fact I don't have yet.", "question": "What is that intermediate fact?", "answer": "..."}},
+  {{"observation": null, "question": "...", "answer": "..."}}
+]
+""",
+    description="PlanAskAgent batch self-questioning prompt.",
 )
