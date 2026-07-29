@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .atomic import AtomicResult
@@ -70,10 +70,20 @@ class AgentResult(AtomicResult):
     llm_model_data:
         Model identity associated with the LLM activity that produced this
         Agent result. Sourced from the last LLMRecord's engine model_data.
+
+    thoughts_start, thoughts_end:
+        Mirrors ``AgentRecord``'s own fields -- carried through by
+        ``Agent2.build_result_from_record``. ``kw_only=True`` so these two
+        optional trailing fields don't force every subclass's own
+        non-default fields (e.g. ``ToolAgentResult.tool_usage``) to also
+        gain a default -- keyword-only fields are excluded from
+        dataclasses' positional default-ordering check entirely.
     """
 
     llm_token_usage: tuple[TokenUsage, ...]
     llm_model_data: LLMModelData
+    thoughts_start: int | None = field(default=None, kw_only=True)
+    thoughts_end: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         normalized = self._normalize_llm_token_usage(self.llm_token_usage)
@@ -111,6 +121,8 @@ class AgentResult(AtomicResult):
             {
                 "llm_token_usage": [u.to_dict() for u in self.llm_token_usage],
                 "llm_model_data": self.llm_model_data.to_dict(),
+                "thoughts_start": self.thoughts_start,
+                "thoughts_end": self.thoughts_end,
             }
         )
         return data

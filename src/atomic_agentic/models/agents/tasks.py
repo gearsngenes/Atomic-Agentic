@@ -7,6 +7,7 @@ from ...constants.core import NO_VAL
 from .blackboard_models import BlackboardSlot
 from .records import AgentRecord, LLMRecord
 from .thought_models import AgentThought
+from .thought_models2 import AgentThought2
 
 __all__ = [
     "AgentTask",
@@ -79,6 +80,22 @@ class AgentTask:
         across generation retries within one phase. Cleared by the owning
         subclass at its own phase boundary (e.g. ``PlanActAgent`` once
         planning finishes; ``ReActAgent`` after each step commits).
+
+    thoughts : list[list[AgentThought2]]
+        ``Agent2`` thinking-round accumulator, one inner list per
+        completed round. Round count is always ``len(self.thoughts)`` --
+        no separate counter field exists, so it can never drift from what
+        was actually recorded. Empty for agents that never call
+        ``Agent2.think`` or that have thinking disabled.
+
+    keep_thinking : bool
+        Whether another thinking round may run. Seeded at
+        ``Agent2._initialize_task`` as ``self._thinking_rounds != 0``.
+        Flipped to ``False`` by ``Agent2.think`` when the
+        ``|STOP_THINKING|`` sentinel is seen or the round cap is reached.
+        Defaults to ``True`` here as a neutral placeholder -- real callers
+        always overwrite it at initialization time, so the default is
+        never observed.
     """
     turns: list[AgentRecord]
     inputs: dict[str, Any]
@@ -90,6 +107,8 @@ class AgentTask:
     generated_response: Any = NO_VAL
     historic_messages: list[dict[str, str]] = field(default_factory=list)
     task_messages: list[dict[str, str]] = field(default_factory=list)
+    thoughts: list[list[AgentThought2]] = field(default_factory=list)
+    keep_thinking: bool = True
 
 
 @dataclass(slots=True)

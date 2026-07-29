@@ -137,6 +137,126 @@ ROLE_DESCRIPTION_FIELD = "role_description"
 
 
 # =============================================================================
+# Agent2 thinking-phase constants
+# =============================================================================
+# Used by:
+# - agents/base2.py: Agent2.think/_render_think_messages/_render_user_instructions_block
+# - agents/prompts.py: THINKING_PROMPT/TOOL_THINKING_PROMPT (assembled at import time)
+# - utils/agents.py: parse_thoughts
+#
+# Distinct from the ThinkingAgent LLM-output JSON fields above: these back
+# the new line-based, category-tagged thinking format used by Agent2, not
+# the old fused-JSON-call format. Both coexist until Pass 7 cutover retires
+# the old family and its fields.
+
+STOP_THINKING_SENTINEL = "|STOP_THINKING|"
+
+THOUGHT_CATEGORIES: tuple[str, ...] = (
+    "QUESTION",
+    "CLARIFICATION",
+    "OBSERVATION",
+    "REASONING",
+    "PLANNING",
+    "ASSUMPTION",
+    "OTHER",
+)
+
+# PromptConfig field names on Agent2._THINK_PROMPT's template. Not
+# collision-guarded against caller parameters -- the render context these
+# are drawn from is a purpose-built dict, never task.inputs.
+THINKING_CONTENT_FIELD = "user_thinking_instructions"
+THOUGHTS_PER_ROUND_FIELD = "thoughts_per_round"
+
+# Hand-typed prose, deliberately NOT built by interpolating
+# THOUGHT_CATEGORIES at runtime or import time -- category names/wording
+# here and THOUGHT_CATEGORIES above must be kept in sync by hand if a
+# category is ever added, renamed, or reworded. Not scaled dynamically
+# until there's a real reason to.
+#
+# {user_thinking_instructions} is bare -- no header/markers of its own in
+# this template. Agent2._render_user_instructions_block wraps it (or
+# renders nothing) at render time, so the whole section is invisible when
+# the caller supplied no thinking_instructions, rather than leaving an
+# empty header. {thoughts_per_round} is the other reserved field.
+THINKING_BASE_TEMPLATE = """\
+# OBJECTIVE
+You are a thinker who analyzes a task and produces a list of organized
+thoughts, given a view of the running/active task and any thoughts already
+produced.
+
+# THINKING OUTPUT FORMAT
+Return your thoughts as a block of lines, one thought per line, in this
+exact form:
+
+<CATEGORY>: <content>
+<CATEGORY>: <content>
+...
+
+# THOUGHT CATEGORIES
+Each thought's category must be exactly one of the following:
+
+QUESTION: An ambiguity or uncertainty about the task that needs to be
+resolved before proceeding.
+CLARIFICATION: An answer to a question you or a prior thought raised, or an
+enhancement/refinement to the instructions or actions needed for the task.
+OBSERVATION: An emergent truth about the current state of the task --
+something you notice, not something you decide or ask.
+REASONING: Justification or explanation for why something needs to happen,
+or why a particular choice is being made.
+ASSUMPTION: A belief taken as true without confirmation, used only to let
+thinking move forward. Use sparingly -- only when genuinely necessary.
+PLANNING: A suggestion or direction indicating what should happen next.
+OTHER: Any thought that does not fit cleanly into the categories above.
+
+# GUIDANCE
+Think sparingly. Do not produce a thought for something that is already
+obvious or self-explanatory from the task or your prior thoughts -- only
+think when it genuinely helps advance or clarify the task.
+
+# STOP CONDITION
+You may optionally include the literal token |STOP_THINKING| on its own
+line at the end of your response. Including it signals that no further
+thoughts are needed after this one; omitting it signals that more thinking
+may follow.
+
+# THOUGHT LIMIT
+Produce at least 1 and at most {thoughts_per_round} thought(s) each time you
+are asked to think.
+
+{user_thinking_instructions}"""
+
+# Wraps a resolved (non-empty) thinking_instructions render into its own
+# labeled section -- see THINKING_BASE_TEMPLATE's note above. Concatenated
+# around the resolved text, not part of any PromptConfig template.
+THINKING_ADDITIONAL_INSTRUCTIONS_HEADER = """\
+# ADDITIONAL INSTRUCTIONS
+Below are additional instructions provided by the user directly for \
+tailored thinking instructions, WHILE ABIDING by the rules above.
+===Additional Instructions Start===
+"""
+THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n"
+
+# Sketch only -- not yet wired to any class (ToolAgent2 doesn't exist yet).
+# Concatenated onto THINKING_BASE_TEMPLATE to form a tool-aware "think"
+# prompt for that family, per prompts.py's TOOL_THINKING_PROMPT.
+THINKING_TOOL_RESOURCES_BLOCK = """
+# ADDITIONAL RESOURCES
+You have access to the following tools, constants, and usage limits while
+thinking about this task. Reference them in your thoughts as needed, but do
+not attempt to invoke tools during thinking -- execution happens in a
+separate phase.
+
+Available tools:
+{TOOLS}
+
+Available constants:
+{CONSTANTS}
+
+Tool call budget (non-return calls): {TOOL_CALLS_LIMIT}
+"""
+
+
+# =============================================================================
 # ToolAgent canonical return-tool identity
 # =============================================================================
 # Used by:
@@ -191,6 +311,15 @@ __all__ = [
     "PLANNED_QUESTION_FIELDS",
     # ThinkingAgent reserved prompt-template field
     "ROLE_DESCRIPTION_FIELD",
+    # Agent2 thinking-phase constants
+    "STOP_THINKING_SENTINEL",
+    "THOUGHT_CATEGORIES",
+    "THINKING_CONTENT_FIELD",
+    "THOUGHTS_PER_ROUND_FIELD",
+    "THINKING_BASE_TEMPLATE",
+    "THINKING_ADDITIONAL_INSTRUCTIONS_HEADER",
+    "THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER",
+    "THINKING_TOOL_RESOURCES_BLOCK",
     # Canonical return tool
     "RETURN_TOOL_NAME",
     "RETURN_TOOL_NAMESPACE",

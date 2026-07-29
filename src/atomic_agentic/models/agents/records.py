@@ -154,6 +154,12 @@ class AgentRecord:
         The most recent ``AgentRecord`` that was used as context for this
         invocation, or ``None`` if no prior context was used. Always points
         to a completed (non-draft) record on any record committed to history.
+
+    thoughts_start, thoughts_end:
+        Half-open span into the owning ``Agent2``'s ``self._thoughts`` (a
+        list of thinking rounds, not individual thoughts) produced by this
+        invocation. ``None`` for records built by an agent that never
+        thinks, or by any pre-``Agent2`` caller of this base dataclass.
     """
 
     user_prompt: str
@@ -162,6 +168,8 @@ class AgentRecord:
     final_result: AgentResult | None = None
     llm_records: tuple[LLMRecord, ...] = ()
     prev: AgentRecord | None = None
+    thoughts_start: int | None = None
+    thoughts_end: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.user_prompt, str):
@@ -206,6 +214,8 @@ class AgentRecord:
             "final_result": self.final_result.to_dict() if self.final_result is not None else None,
             "llm_records": [r.to_dict() for r in self.llm_records],
             "prev_run_id": self.prev.final_result.run_id if self.prev is not None else None,
+            "thoughts_start": self.thoughts_start,
+            "thoughts_end": self.thoughts_end,
         }
 
 

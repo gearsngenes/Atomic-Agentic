@@ -7,6 +7,7 @@
 # These prompts live beside the ToolAgent protocol constants because they define
 # the LLM-facing side of the same parser/runtime contract.
 
+from ..constants.agents import THINKING_BASE_TEMPLATE, THINKING_TOOL_RESOURCES_BLOCK
 from ..models.agents.prompts import PromptConfig
 
 PLANNER_PROMPT = PromptConfig(
@@ -345,4 +346,31 @@ a question you missed.
 ]
 """,
     description="PlanAskAgent batch self-questioning prompt.",
+)
+
+
+# =============================================================================
+# Agent2 thinking-phase prompts
+# =============================================================================
+# Used by:
+# - agents/base2.py: Agent2._THINK_PROMPT (class attribute, base value)
+#
+# Assembled once at import time from constants/agents.py's hand-typed
+# fragments -- no per-instance/runtime composition, no method. A subclass
+# whose thinking phase needs more context (e.g. a future ToolAgent2 seeing
+# tools/constants/cache) points its own _THINK_PROMPT class attribute at a
+# different PromptConfig defined here (TOOL_THINKING_PROMPT is a first
+# sketch, not yet wired to any class -- ToolAgent2 doesn't exist yet).
+
+THINKING_PROMPT = PromptConfig(
+    template=THINKING_BASE_TEMPLATE,
+    description="Base Agent2 thinking-phase prompt.",
+)
+
+TOOL_THINKING_PROMPT = PromptConfig(
+    template=THINKING_BASE_TEMPLATE + THINKING_TOOL_RESOURCES_BLOCK,
+    description=(
+        "ToolAgent2-family thinking-phase prompt (adds tool/constant/limit "
+        "awareness) -- sketch only, not yet wired to any class."
+    ),
 )

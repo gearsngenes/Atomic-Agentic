@@ -4,13 +4,17 @@ import json
 import re
 from typing import Any
 
+from ..constants.agents import THOUGHT_CATEGORIES
 from ..constants.core import NO_VAL
 from ..models.agents.prompts import PromptConfig
+from ..models.agents.thought_models2 import AgentThought2
 
 __all__ = [
     "extract_dependencies",
     "extract_json_object",
     "normalize_role_prompt",
+    "normalize_thinking_instructions",
+    "parse_thoughts",
 ]
 
 
@@ -173,3 +177,64 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
 
     walk(obj)
     return deps
+
+
+def normalize_thinking_instructions(value: str | PromptConfig | None) -> PromptConfig:
+    """
+    Coerce an ``Agent2`` ``thinking_instructions`` value to a ``PromptConfig``.
+
+    Structurally mirrors ``normalize_role_prompt`` but is kept as its own
+    function rather than a shared/generalized one: reusing
+    ``normalize_role_prompt`` directly would surface its hardcoded
+    ``"role_prompt must be..."`` message for a ``thinking_instructions``
+    caller, which would be actively misleading. Unlike a role prompt, a
+    ``None``/empty ``thinking_instructions`` defaults to an empty template
+    (no persona filler needed -- the base ``"think"`` prompt stands alone).
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return PromptConfig(template="", description="No thinking instructions")
+    if isinstance(value, str):
+        return PromptConfig(template=value.strip(), description="Thinking instructions")
+    if isinstance(value, PromptConfig):
+        return value
+    raise TypeError(
+        f"thinking_instructions must be str, PromptConfig, or None; got {type(value).__name__}."
+    )
+
+
+_THOUGHT_MARKER_PATTERN = re.compile(
+    r"^\s*(" + "|".join(THOUGHT_CATEGORIES) + r")\s*:\s*",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def parse_thoughts(text: str) -> list[AgentThought2]:
+    """
+    Parse one thinking round's raw text into a list of ``AgentThought2``.
+
+    Line-based, lax format: each category marker (``CATEGORY:``, any casing,
+    anchored at a line start) begins a new thought; its content runs until
+    the next marker or the end of ``text``. If no marker is found anywhere,
+    the entire (stripped) text becomes a single ``OTHER``-category thought
+    -- unless it's empty/whitespace-only, in which case no thought is
+    produced at all (an empty prefix isn't unparseable content, it's simply
+    no content).
+
+    Does not know about ``|STOP_THINKING|`` -- callers (``Agent2.think``)
+    strip that before calling this function, keeping parsing pure and
+    independently testable.
+    """
+    matches = list(_THOUGHT_MARKER_PATTERN.finditer(text))
+
+    if not matches:
+        stripped = text.strip()
+        return [AgentThought2(category="OTHER", content=stripped)] if stripped else []
+
+    thoughts: list[AgentThought2] = []
+    for index, match in enumerate(matches):
+        category = match.group(1).upper()
+        content_start = match.end()
+        content_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        content = text[content_start:content_end].strip()
+        thoughts.append(AgentThought2(category=category, content=content))
+    return thoughts
