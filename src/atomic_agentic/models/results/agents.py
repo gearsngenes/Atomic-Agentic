@@ -69,7 +69,16 @@ class AgentResult(AtomicResult):
 
     llm_model_data:
         Model identity associated with the LLM activity that produced this
-        Agent result. Sourced from the last LLMRecord's engine model_data.
+        Agent result. Sourcing differs by producer: the pre-``Agent2``
+        ``Agent`` family (``agents/base.py``) sources it from the last
+        committed ``LLMRecord``'s engine ``model_data``
+        (``record.llm_records[-1].llm_result.model_data``); ``Agent2``
+        (``agents/base2.py``) sources it directly from
+        ``self._llm_engine._get_model_data()`` instead, since an
+        ``Agent2`` record's ``llm_records`` can legitimately be empty
+        (e.g. ``thinking_rounds=0`` and an ``execute`` phase that makes no
+        LLM call of its own) and model identity doesn't depend on any call
+        having happened.
 
     thoughts_start, thoughts_end:
         Mirrors ``AgentRecord``'s own fields -- carried through by

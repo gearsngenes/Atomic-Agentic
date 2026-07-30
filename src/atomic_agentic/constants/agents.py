@@ -205,7 +205,8 @@ REASONING: Justification or explanation for why something needs to happen,
 or why a particular choice is being made.
 ASSUMPTION: A belief taken as true without confirmation, used only to let
 thinking move forward. Use sparingly -- only when genuinely necessary.
-PLANNING: A suggestion or direction indicating what should happen next.
+PLANNING: A thought that helps with determing what to do next, a recommended
+action, or a way to break the task into smaller pieces.
 OTHER: Any thought that does not fit cleanly into the categories above.
 
 # GUIDANCE

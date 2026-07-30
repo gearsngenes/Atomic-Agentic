@@ -45,12 +45,18 @@ class AgentTask:
 
     system_prompt_name : str | None
         Identifies which entry in ``self._system_prompts`` governs the
-        current phase — read by ``render_task``/``_render_system_message``
-        to select and render the active system prompt. Required (no
-        default): every concrete subclass must decide it explicitly.
-        ``None`` is a legitimate value meaning "render no system message at
-        all," not a not-yet-set placeholder — though no concrete subclass
-        shipped today ever constructs a task with ``None``.
+        current phase — read by ``_render_system_prompt``/
+        ``_render_task_messages`` to select and render the active system
+        prompt (``render_task`` and the base ``_render_system_message``
+        only pass it through; neither reads it directly). Required (no
+        default): every concrete subclass must decide it explicitly. Base
+        ``Agent2._initialize_task`` seeds it to ``"think"`` — the only
+        phase base ``Agent2`` itself renders — and a subclass with
+        additional phases transitions it during its own lifecycle hooks.
+        ``None`` remains structurally valid (nothing forbids a future
+        override from using it to mean "no system message"), but no
+        shipped code path — old family or ``Agent2`` — ever actually
+        constructs a task with it.
 
     llm_records : list[LLMRecord]
         Accumulator for every LLM generation made while producing this
@@ -84,10 +90,13 @@ class AgentTask:
 
     task_messages : list[dict[str, str]]
         Phase-scoped LLM-facing content, lazily built by each subclass's
-        ``render_task`` when empty and grown by ``additional_messages``
-        across generation retries within one phase. Cleared by the owning
-        subclass at its own phase boundary (e.g. ``PlanActAgent`` once
-        planning finishes; ``ReActAgent`` after each step commits).
+        ``_render_task_messages`` when empty and grown by
+        ``additional_messages`` across generation retries within one phase
+        (``render_task`` itself is the fixed, shared pipeline that calls
+        ``_render_task_messages`` — it is never overridden per subclass).
+        Cleared by the owning subclass at its own phase boundary (e.g.
+        ``PlanActAgent`` once planning finishes; ``ReActAgent`` after each
+        step commits).
 
     thoughts : list[list[AgentThought2]]
         ``Agent2`` thinking-round accumulator, one inner list per

@@ -101,9 +101,9 @@ class Agent2(AtomicInvokable, ABC):
     - All ``pre_invoke`` parameters.
     - Post-only non-result parameters, grafted while preserving their
       original declared kind (no forced ``KEYWORD_ONLY`` coercion).
-    - ``extra_parameters`` — a flat, subclass-computed source (e.g.
-      ``BasicAgent`` passes its role-prompt placeholders as this agent's
-      sole ``extra_parameters`` source).
+    - ``extra_parameters`` — a flat, subclass-computed source, populated by
+      whatever concrete ``Agent2`` subclass constructs it (no such
+      subclass has been built yet).
     - This (sub)class's reserved parameters (``get_reserved_parameters()``;
       ``run_id`` by default), grafted last.
 
@@ -841,7 +841,11 @@ class Agent2(AtomicInvokable, ABC):
         truncates to ``thoughts_per_round``, records one new round, and
         advances ``keep_thinking``. No retries — an empty raw LLM response is
         a hard failure, and the lax category-marker format degrades to a
-        single ``OTHER`` thought rather than needing correction.
+        single ``OTHER`` thought when unmarked text is present. A round whose
+        parsed thoughts end up empty regardless (e.g. a bare or
+        whitespace-only ``|STOP_THINKING|`` sentinel with nothing preceding
+        it) is also a hard failure — never silently recorded as a no-op
+        round.
         """
         if not task.keep_thinking:
             return task
@@ -860,6 +864,12 @@ class Agent2(AtomicInvokable, ABC):
         stop_seen = STOP_THINKING_SENTINEL in raw
         prefix = raw.split(STOP_THINKING_SENTINEL, 1)[0] if stop_seen else raw
         parsed = parse_thoughts(prefix)[: self._thoughts_per_round]
+        if not parsed:
+            raise AgentInvocationError(
+                f"{self.full_name}: thinking round produced no parsable "
+                "thoughts (stop sentinel or empty content with no thought "
+                "text)."
+            )
         task.thoughts.append(parsed)
 
         task.llm_records.append(LLMRecord(
@@ -897,6 +907,12 @@ class Agent2(AtomicInvokable, ABC):
         stop_seen = STOP_THINKING_SENTINEL in raw
         prefix = raw.split(STOP_THINKING_SENTINEL, 1)[0] if stop_seen else raw
         parsed = parse_thoughts(prefix)[: self._thoughts_per_round]
+        if not parsed:
+            raise AgentInvocationError(
+                f"{self.full_name}: thinking round produced no parsable "
+                "thoughts (stop sentinel or empty content with no thought "
+                "text)."
+            )
         task.thoughts.append(parsed)
 
         task.llm_records.append(LLMRecord(
@@ -916,13 +932,16 @@ class Agent2(AtomicInvokable, ABC):
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
     # _initialize_task is concrete here: wrapping turns/prompt/inputs into a
-    # bare AgentTask is subclass-agnostic base-contract work. BasicAgent
-    # inherits this unchanged. ToolAgent re-declares it @abstractmethod,
-    # since only PlanActAgent/ReActAgent know how to build their own richer
-    # ToolAgentTask subclass; the bare AgentTask this base method returns
-    # isn't sufficient for them. think/prepare/execute stay @abstractmethod
-    # (prepare/execute) or concrete-but-family-agnostic (think) here —
-    # every subclass's advance-by-one-round logic genuinely differs.
+    # bare AgentTask is subclass-agnostic base-contract work. A future
+    # Agent2 subclass needing richer per-task bookkeeping would override
+    # this and return its own AgentTask subclass instead -- no such
+    # subclass has been designed yet (the pre-Agent2 ToolAgent family
+    # layers ToolAgentTask/PlanActTask/ReActTask on top of the shared
+    # AgentTask this way, but that's a different class hierarchy, not a
+    # precedent Agent2 subclasses are bound to follow). think/prepare/
+    # execute stay @abstractmethod (prepare/execute) or
+    # concrete-but-family-agnostic (think) here — every subclass's
+    # advance-by-one-round logic genuinely differs.
     def _initialize_task(
         self,
         *,
@@ -938,19 +957,20 @@ class Agent2(AtomicInvokable, ABC):
         subclasses that need a richer ``AgentTask`` subclass (with
         additional bookkeeping fields populated) override this.
 
-        ``system_prompt_name`` is set to ``None`` here — this base hook has
-        no domain knowledge of which (if any) system prompt applies;
-        subclasses that need one override this and set it explicitly
-        (``BasicAgent`` calls ``super()._initialize_task(...)`` then stamps
-        ``"role"`` over this ``None``).
+        ``system_prompt_name`` is seeded to ``"think"`` here — the only
+        phase base ``Agent2`` itself has any concept of (its own
+        ``_render_system_message`` only knows how to render "think"). A
+        subclass with additional phases (e.g. ``BasicAgent2``'s ``"role"``)
+        transitions it away from "think" during its own ``prepare()``/
+        ``execute()``, once thinking is actually done — never here, since
+        this hook runs before any thinking round has had a chance to run.
 
         ``task.keep_thinking`` is seeded here from ``self._thinking_rounds``
         (``!= 0``) — a subclass whose own ``_initialize_task`` builds a
-        richer task type from scratch (mirroring today's ``ToolAgent``
-        re-declaring this abstract) must remember to seed it the same way;
-        not handled automatically for those subclasses.
+        richer task type from scratch must remember to seed it the same
+        way; not handled automatically for those subclasses.
         """
-        task = AgentTask(turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name=None)
+        task = AgentTask(turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="think")
         task.keep_thinking = self._thinking_rounds != 0
         return task
 
@@ -998,12 +1018,13 @@ class Agent2(AtomicInvokable, ABC):
     def _build_record_from_task(self, task: AgentTask) -> AgentRecord:
         """Assemble a complete AgentRecord from a finished AgentTask.
 
-        ``BasicAgent`` uses this base implementation as-is; ``ToolAgent``
-        overrides it to return a ``ToolAgentRecord`` with blackboard
-        bookkeeping folded in. ``final_result`` is deliberately left at its
-        dataclass default (``None``) — it is not knowable until
-        ``build_result_from_record`` runs afterward; the caller attaches it
-        via ``dataclasses.replace(...)``.
+        The not-yet-built next concrete ``Agent2`` subclass may use this
+        base implementation as-is, or override it to return a richer
+        ``AgentRecord`` subclass with its own bookkeeping folded in — no
+        such subclass has been designed yet. ``final_result`` is
+        deliberately left at its dataclass default (``None``) — it is not
+        knowable until ``build_result_from_record`` runs afterward; the
+        caller attaches it via ``dataclasses.replace(...)``.
 
         Persists ``task.thoughts`` (this run's rounds) into the agent-level
         ``self._thoughts`` here — the only point in the lifecycle where a
