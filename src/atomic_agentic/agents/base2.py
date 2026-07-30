@@ -78,16 +78,20 @@ class Agent2(AtomicInvokable, ABC):
        name membership against ``pre_invoke`` / ``post_invoke``'s own
        declared parameters, excluding reserved names.
     4. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
-    5. Turns are selected from history if ``context_enabled`` is True.
+    5. Turns are selected from history if ``context_enabled`` is True and
+       ``records_window != 0`` — ``records_window=0`` forces ``turns=[]``
+       even when ``context_enabled`` is True, since ``get_conversation``
+       itself always raises on ``turns=0``.
     6. ``_initialize_task(turns, prompt, inputs)`` builds a task from the
        full filtered ``inputs`` dict untouched — not a slice, not popped of
        anything; then, every round, unconditionally: ``think(task)``,
-       ``prepare(task)``, ``execute(task)`` — until ``task.complete``;
-       ``_build_record_from_task`` assembles the completed record.
-    7. ``post_invoke`` transforms the raw response into the final result.
-    8. A completed ``AgentRecord`` is always appended to ``_records``, with
+       ``prepare(task)``, ``execute(task)`` — until ``task.complete``.
+    7. ``post_invoke`` transforms ``task.generated_response`` into
+       ``task.final_response``.
+    8. ``_commit_emit`` assembles the completed ``AgentRecord`` (with
        ``inputs`` set to the exact same full dict passed to
-       ``_initialize_task``.
+       ``_initialize_task``) and the final ``AgentResult`` together, and
+       appends the record to ``_records`` unconditionally.
 
     Schema composition
     -------------------
@@ -991,11 +995,7 @@ class Agent2(AtomicInvokable, ABC):
         """Async mirror of ``execute``, same rationale as ``async_prepare``."""
         ...
 
-    def _build_record_from_task(
-        self,
-        task: AgentTask,
-        turns: list[AgentRecord],
-    ) -> AgentRecord:
+    def _build_record_from_task(self, task: AgentTask) -> AgentRecord:
         """Assemble a complete AgentRecord from a finished AgentTask.
 
         ``BasicAgent`` uses this base implementation as-is; ``ToolAgent``
@@ -1009,8 +1009,11 @@ class Agent2(AtomicInvokable, ABC):
         ``self._thoughts`` here — the only point in the lifecycle where a
         run's thoughts move from task-local to agent-level, mirroring how
         ``llm_records`` is read exactly once at this same point.
+
+        Uses ``task.turns`` (not a separate parameter) — it's the same list
+        ``_initialize_task`` was given; no caller ever has a different one.
         """
-        prev = turns[-1] if turns else None
+        prev = task.turns[-1] if task.turns else None
         thoughts_start = len(self._thoughts)
         self._thoughts.extend(task.thoughts)
         thoughts_end = len(self._thoughts)
@@ -1048,9 +1051,16 @@ class Agent2(AtomicInvokable, ABC):
         are not derivable from the record, so both stay explicit parameters —
         distinct from ``record.generated_response``, which is the
         pre-``post_invoke`` raw value.
+
+        ``llm_model_data`` comes from ``self._llm_engine._get_model_data()``
+        directly (engine configuration, not a provider response) rather than
+        ``record.llm_records[-1]`` — the record's own ``llm_records`` can
+        legitimately be empty (e.g. ``thinking_rounds=0`` and an ``execute``
+        phase that makes no LLM call of its own), and model identity doesn't
+        depend on any call having happened.
         """
         llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
-        llm_model_data = record.llm_records[-1].llm_result.model_data
+        llm_model_data = self._llm_engine._get_model_data()
 
         return self._make_result(
             result=result,
@@ -1062,6 +1072,52 @@ class Agent2(AtomicInvokable, ABC):
             thoughts_start=record.thoughts_start,
             thoughts_end=record.thoughts_end,
         )
+
+    def _commit_emit(
+        self,
+        task: AgentTask,
+        started_at: datetime,
+        ended_at: datetime,
+    ) -> AgentResult:
+        """Assemble, commit, and return this invocation's final ``AgentResult``.
+
+        Shared tail for both ``invoke``/``async_invoke``, called once
+        ``task.final_response`` has already been stamped by ``post_invoke``.
+        Pure computation, no I/O — one method serves both lifecycle paths.
+        Takes ``task`` alone — ``task.turns`` already holds the same list
+        ``_initialize_task`` was given, so no separate ``turns`` parameter
+        is threaded through.
+
+        1. ``record = self._build_record_from_task(task)``, validated as an
+           ``AgentRecord``. Must happen before step 2 below —
+           ``thoughts_start``/``thoughts_end`` (and the ``llm_token_usage``/
+           ``llm_model_data`` derived from ``record.llm_records``) only
+           exist once this has run, since it's the one place ``task.thoughts``
+           merges into agent-level ``self._thoughts`` and the before/after
+           offsets get computed. There is no task-only shortcut to them.
+        2. ``result = self.build_result_from_record(record,
+           result=task.final_response, started_at=started_at,
+           ended_at=ended_at)``.
+        3. ``record = replace(record, final_result=result)``.
+        4. ``self._records.append(record)`` — committed unconditionally.
+        5. Return ``result``.
+        """
+        record = self._build_record_from_task(task)
+        if not isinstance(record, AgentRecord):
+            raise AgentInvocationError(
+                f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
+            )
+
+        result = self.build_result_from_record(
+            record,
+            result=task.final_response,
+            started_at=started_at,
+            ended_at=ended_at,
+        )
+
+        record = replace(record, final_result=result)
+        self._records.append(record)
+        return result
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -1204,44 +1260,29 @@ class Agent2(AtomicInvokable, ABC):
             turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
         # 6. Task lifecycle: initialize, think -> prepare -> execute until
-        # complete, build record.
+        # complete.
         logger.debug(f"Agent.{self.name} performing async logic")
         task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
         while not task.complete:
             task = await self.async_think(task)
             task = await self.async_prepare(task)
             task = await self.async_execute(task)
-        record = self._build_record_from_task(task, turns)
-
-        if not isinstance(record, AgentRecord):
-            raise AgentInvocationError(
-                f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
-            )
 
         # 7. Output transformation.
         try:
             logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
-            post_inputs[self._post_result_key] = record.generated_response
+            post_inputs[self._post_result_key] = task.generated_response
             post_result = await self._post_invoke.async_invoke(post_inputs)
         except ToolInvocationError:
             raise
         except Exception as e:  # pragma: no cover
             raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
+        task.final_response = post_result.result
 
-        final_response = post_result.result
         ended_at = datetime.now(timezone.utc)
 
-        # 8. Result.
-        agent_result = self.build_result_from_record(
-            record,
-            result=final_response,
-            started_at=started_at,
-            ended_at=ended_at,
-        )
-
-        # 9. Record — always appended.
-        record = replace(record, final_result=agent_result)
-        self._records.append(record)
+        # 8-9. Record + result construction, committed to history.
+        agent_result = self._commit_emit(task, started_at, ended_at)
 
         logger.info(f"[Async {self.full_name} finished]")
         return agent_result
@@ -1263,11 +1304,12 @@ class Agent2(AtomicInvokable, ABC):
         5. Select conversation turns according to ``context_enabled``.
         6. ``_initialize_task(turns, prompt, inputs)`` → task; loop
            ``task = think(task); task = prepare(task); task = execute(task)``
-           until ``task.complete``; then ``_build_record_from_task(task, turns)``
-           → record.
-        7. ``post_invoke`` → final result.
-        8. ``build_result_from_record(record, ...)`` → ``AgentResult``.
-        9. Commit the completed ``AgentRecord`` unconditionally.
+           until ``task.complete``.
+        7. ``post_invoke`` transforms ``task.generated_response`` into
+           ``task.final_response``.
+        8-9. ``_commit_emit(task, started_at, ended_at)`` builds the
+           completed record and ``AgentResult`` together, commits the
+           record unconditionally, and returns the result.
         """
         with self._invoke_lock:
             logger.info(f"[{self.full_name} started]")
@@ -1315,44 +1357,29 @@ class Agent2(AtomicInvokable, ABC):
                 turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
             # 6. Task lifecycle: initialize, think -> prepare -> execute
-            # until complete, build record.
+            # until complete.
             logger.debug(f"Agent.{self.name} performing logic")
             task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
             while not task.complete:
                 task = self.think(task)
                 task = self.prepare(task)
                 task = self.execute(task)
-            record = self._build_record_from_task(task, turns)
-
-            if not isinstance(record, AgentRecord):
-                raise AgentInvocationError(
-                    f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
-                )
 
             # 7. Output transformation.
             try:
                 logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
-                post_inputs[self._post_result_key] = record.generated_response
+                post_inputs[self._post_result_key] = task.generated_response
                 post_result = self._post_invoke.invoke(post_inputs)
             except ToolInvocationError:
                 raise
             except Exception as e:  # pragma: no cover
                 raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
+            task.final_response = post_result.result
 
-            final_response = post_result.result
             ended_at = datetime.now(timezone.utc)
 
-            # 8. Result.
-            agent_result = self.build_result_from_record(
-                record,
-                result=final_response,
-                started_at=started_at,
-                ended_at=ended_at,
-            )
-
-            # 9. Record — always appended.
-            record = replace(record, final_result=agent_result)
-            self._records.append(record)
+            # 8-9. Record + result construction, committed to history.
+            agent_result = self._commit_emit(task, started_at, ended_at)
 
             logger.info(f"[{self.full_name} finished]")
             return agent_result
@@ -1377,5 +1404,12 @@ class Agent2(AtomicInvokable, ABC):
             "response_preview_limit": self.response_preview_limit,
             "assistant_response_source": self.assistant_response_source,
             "records": [turn.to_dict() for turn in self._records],
+            "thinking_rounds": self.thinking_rounds,
+            "thoughts_per_round": self.thoughts_per_round,
+            "thoughts_window": self.thoughts_window,
+            "thoughts": [
+                [thought.to_dict() for thought in round_]
+                for round_ in self._thoughts
+            ],
         })
         return d

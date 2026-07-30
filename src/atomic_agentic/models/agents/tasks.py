@@ -24,9 +24,9 @@ class AgentTask:
     """
     Base run-task contract for one Agent invocation.
 
-    Drives an invocation through ``_initialize_task``/``_progress``.
-    ``BasicAgent`` uses this base class directly; it needs nothing beyond
-    these fields.
+    Drives an invocation through ``_initialize_task``/``think``/``prepare``/
+    ``execute``. ``BasicAgent2`` uses this base class directly; it needs
+    nothing beyond these fields.
 
     Fields
     ------
@@ -59,17 +59,25 @@ class AgentTask:
 
     complete : bool
         Loop termination flag. The base lifecycle loop is
-        ``while not task.complete: task = progress(task)``.
+        ``while not task.complete: task = think(task); task = prepare(task);
+        task = execute(task)``.
 
     generated_response : Any
         The record's produced-response equivalent — raw LLM text for
         ``BasicAgent``, the executed return-tool value for ``ToolAgent`` and
-        its subclasses. ``NO_VAL`` until ``_progress`` sets it on the round
-        that completes the task.
+        its subclasses. ``NO_VAL`` until ``execute``/``async_execute`` sets
+        it on the round that completes the task.
+
+    final_response : Any
+        ``post_invoke``'s transformation of ``generated_response`` — the
+        value that becomes ``AgentResult.result``. ``NO_VAL`` until
+        ``Agent2.invoke``/``async_invoke`` sets it, after the task loop
+        finishes and ``post_invoke`` has run, right before
+        ``_commit_emit`` builds the final record/result pair.
 
     historic_messages : list[dict[str, str]]
         Rendered ``turns``, built lazily once per invoke by
-        ``Agent._render_historic_messages`` and reused for the rest of it.
+        ``Agent2._render_history_messages`` and reused for the rest of it.
         Never rebuilt mid-invoke — turn-rendering is phase-invariant,
         governed only by ``assistant_response_source``/
         ``response_preview_limit``, both static per-agent config.
@@ -93,9 +101,13 @@ class AgentTask:
         ``Agent2._initialize_task`` as ``self._thinking_rounds != 0``.
         Flipped to ``False`` by ``Agent2.think`` when the
         ``|STOP_THINKING|`` sentinel is seen or the round cap is reached.
-        Defaults to ``True`` here as a neutral placeholder -- real callers
-        always overwrite it at initialization time, so the default is
-        never observed.
+        Defaults to ``True`` here as a neutral placeholder -- ``Agent2``
+        always overwrites it at initialization time, so the default is
+        never observed there. The old (pre-``Agent2``) family sharing this
+        base field -- ``ThinkingTask``/``ToolAgentTask``/``PlanActTask``/
+        ``ReActTask`` -- never reads or writes it at all; it simply sits at
+        this default forever for those tasks, unobserved only because
+        nothing looks at it, not because it's overwritten.
     """
     turns: list[AgentRecord]
     inputs: dict[str, Any]
@@ -105,6 +117,7 @@ class AgentTask:
     llm_records: list[LLMRecord] = field(default_factory=list)
     complete: bool = False
     generated_response: Any = NO_VAL
+    final_response: Any = NO_VAL
     historic_messages: list[dict[str, str]] = field(default_factory=list)
     task_messages: list[dict[str, str]] = field(default_factory=list)
     thoughts: list[list[AgentThought2]] = field(default_factory=list)
