@@ -12,7 +12,6 @@ from typing import (
 )
 from dataclasses import replace
 from datetime import datetime, timezone
-import asyncio
 import logging
 import warnings
 
@@ -64,8 +63,9 @@ class Agent2(AtomicInvokable, ABC):
 
     ``Agent`` owns the full invocation lifecycle shell — input filtering,
     turn selection, pre/post-invoke dispatch, record management — but
-    delegates the actual LLM work to the ``_initialize_task``/``_progress``
-    abstract-or-overridable hooks that concrete subclasses implement.
+    delegates the actual LLM work to the ``_initialize_task``/``think``/
+    ``prepare``/``execute`` abstract-or-overridable hooks that concrete
+    subclasses implement.
 
     Lifecycle
     ---------
@@ -81,7 +81,8 @@ class Agent2(AtomicInvokable, ABC):
     5. Turns are selected from history if ``context_enabled`` is True.
     6. ``_initialize_task(turns, prompt, inputs)`` builds a task from the
        full filtered ``inputs`` dict untouched — not a slice, not popped of
-       anything; then ``_progress`` runs until ``task.complete``;
+       anything; then, every round, unconditionally: ``think(task)``,
+       ``prepare(task)``, ``execute(task)`` — until ``task.complete``;
        ``_build_record_from_task`` assembles the completed record.
     7. ``post_invoke`` transforms the raw response into the final result.
     8. A completed ``AgentRecord`` is always appended to ``_records``, with
@@ -122,13 +123,13 @@ class Agent2(AtomicInvokable, ABC):
     # needs unbounded thinking permitted (e.g. a future ReActAgent2, whose
     # action phase doesn't depend on thinking finishing and already has
     # its own hard stop via tool_calls_limit) overrides this via plain
-    # class-body reassignment -- never inside __init__, so it is already
+    # class-body reassignment — never inside __init__, so it is already
     # correct via MRO attribute lookup before Agent2.__init__ ever runs,
     # avoiding a super().__init__() ordering hazard.
     _permits_unbounded_thinking: bool = False
 
     # Framework-fixed "think" system prompt, assembled once at prompts.py's
-    # import time -- not per-instance, no compose method. A subclass whose
+    # import time — not per-instance, no compose method. A subclass whose
     # thinking phase needs more context overrides this via plain
     # class-body reassignment (e.g. a future ToolAgent2 pointing at
     # prompts.TOOL_THINKING_PROMPT instead), mirroring
@@ -537,7 +538,7 @@ class Agent2(AtomicInvokable, ABC):
     @property
     def thoughts_window(self) -> int | None:
         """Trailing-record window governing how many past records' thoughts
-        get spliced into replay by ``_render_historic_messages``. ``0``
+        get spliced into replay by ``_render_history_messages``. ``0``
         means none, ``None`` means every replayed record, a positive int
         ``k`` means only the last ``k`` records."""
         return self._thoughts_window
@@ -579,25 +580,133 @@ class Agent2(AtomicInvokable, ABC):
         return dict(self._system_prompts)
 
     # ------------------------------------------------------------------ #
-    # Agent Helpers
+    # Render pipeline
     # ------------------------------------------------------------------ #
-    def build_messages(
+    def render_task(
         self,
-        system_prompt: str,
-        turns: List[AgentRecord],
-        prompt: str,
-    ) -> List[Dict[str, str]]:
-        """Render provider-facing message dicts from canonical turn inputs.
+        task: AgentTask,
+        *,
+        additional_messages: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Build the exact send-payload message list for one LLM call.
 
-        Each supplied turn is rendered through ``render_turn``. The current
-        prompt is appended as the final user message.
+        Fixed, unconditional pipeline shared by every phase and every
+        family: system message, then historic turns, then this phase's
+        own task messages. Family/phase-specific behavior lives entirely
+        in ``_render_system_message``/``_render_task_messages`` — this
+        method never branches on ``task.system_prompt_name`` itself.
+
+        ``_render_history_messages`` is computed first, ahead of the
+        system message, so its lazy build-once cache
+        (``task.historic_messages``) is already populated by the time
+        either of the other two steps run — neither currently reads it,
+        but nothing downstream has to worry about ordering if a future
+        override ever does. Computation order is independent of the final
+        concatenation order below, which is fixed by message-list shape
+        (system first, then history, then task messages), not by which
+        step ran first.
+
+        ``additional_messages`` (``None`` treated as ``[]``) is appended
+        directly onto whatever ``_render_task_messages`` returns — which
+        is ``task.task_messages`` itself, so the extension persists there
+        too, across generation retries within one phase.
+
+        Pure computation, no I/O — the same method serves both the sync
+        and async lifecycle paths; there is no ``_async_render_task``.
         """
-        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-        if turns:
-            for turn in turns:
-                messages.extend(self.render_turn(turn))
-        messages.append({"role": "user", "content": prompt})
-        return messages
+        history = self._render_history_messages(task)
+        system = self._render_system_message(task)
+        task_messages = self._render_task_messages(task)
+        task_messages.extend(additional_messages or [])
+        return system + history + task_messages
+
+    def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
+        """Render ``task``'s active system message.
+
+        Concrete, but meant to be overridden wholesale — base ``Agent2``
+        only knows how to render the "think" phase, unconditionally (no
+        internal dispatch on ``task.system_prompt_name`` here). A subclass
+        with its own named system prompt(s) overrides this method, checks
+        its own name(s) first, and falls back to
+        ``super()._render_system_message(task)`` when the active name is
+        "think".
+
+        Builds the "think"/"user-think" two-stage splice: ``"user-think"``
+        (the caller's own ``thinking_instructions``, possibly empty)
+        renders against the full ``task.inputs``; its resolved text is
+        wrapped in a labeled section only when non-empty, so the whole
+        "additional instructions" block is invisible in the rendered
+        prompt when the caller supplied none.
+        """
+        user_text = self._system_prompts["user-think"].render(task.inputs)
+        think_context = {
+            THINKING_CONTENT_FIELD: (
+                THINKING_ADDITIONAL_INSTRUCTIONS_HEADER
+                + user_text
+                + THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER
+                if user_text
+                else ""
+            ),
+            THOUGHTS_PER_ROUND_FIELD: self._thoughts_per_round,
+        }
+        rendered = self._render_system_prompt(task, think_context)
+        return [{"role": "system", "content": rendered}]
+
+    def _render_system_prompt(
+        self,
+        task: AgentTask,
+        render_context: dict[str, Any],
+    ) -> str:
+        """Render ``task``'s active system prompt template against a context.
+
+        Low-level primitive: looks up
+        ``self._system_prompts[task.system_prompt_name]`` and renders it
+        against ``render_context``, returning the raw string only — no
+        message-list wrapping (that's the caller's job). An unregistered
+        or unset name raises ``KeyError`` naturally; not guarded against,
+        since every real call path sets a valid name before rendering.
+
+        Also an override point: a family whose active template needs extra
+        context beyond what its caller already assembled (e.g. a future
+        ``ToolAgent2``'s think prompt needing
+        ``TOOLS``/``CONSTANTS``/``TOOL_CALLS_LIMIT``) overrides this
+        method, augments ``render_context``, and calls
+        ``super()._render_system_prompt(task, augmented_context)``.
+        """
+        return self._system_prompts[task.system_prompt_name].render(render_context)
+
+    def _render_history_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        """Lazily render ``task.turns`` into ``task.historic_messages``.
+
+        Built once per invoke and reused thereafter. If ``task.turns`` is
+        empty, ``task.historic_messages`` correctly stays empty — later
+        calls re-checking an empty ``turns`` are a harmless no-op, not an
+        ambiguous state.
+
+        Applies ``thoughts_window`` positionally — only the trailing
+        window of replayed turns gets ``include_thoughts=True``; earlier
+        turns render plain. ``render_turn`` itself stays position-blind
+        (see its docstring); this is the one place with visibility into
+        where a turn sits among all turns being replayed this call.
+        ``records_window``'s own cap falls out for free here:
+        ``task.turns`` is already ``records_window``-limited by the time
+        this runs, so ``window`` never exceeds however many turns were
+        actually selected.
+        """
+        if task.historic_messages:
+            return task.historic_messages
+        if not task.turns:
+            return task.historic_messages
+
+        n = len(task.turns)
+        window = n if self._thoughts_window is None else min(self._thoughts_window, n)
+        cutoff = n - window
+
+        rendered: list[dict[str, str]] = []
+        for i, turn in enumerate(task.turns):
+            rendered.extend(self.render_turn(turn, include_thoughts=i >= cutoff))
+        task.historic_messages = rendered
+        return task.historic_messages
 
     def render_turn(
         self,
@@ -619,7 +728,7 @@ class Agent2(AtomicInvokable, ABC):
         own ``thoughts_start``/``thoughts_end`` span. Position-blind by
         design — this method has no way to know whether ``turn`` falls
         inside a trailing window; that decision lives entirely in
-        ``_render_historic_messages``, the only place with visibility into a
+        ``_render_history_messages``, the only place with visibility into a
         turn's position among all turns being replayed for one call.
         """
         if not isinstance(turn, AgentRecord):
@@ -661,23 +770,45 @@ class Agent2(AtomicInvokable, ABC):
         assistant_content = f"THOUGHTS:\n\n{snapshot}\n\nRESPONSE:\n{response_text}"
         return [messages[0], {"role": "assistant", "content": assistant_content}]
 
-    # ------------------------------------------------------------------ #
-    # Thinking
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _render_user_instructions_block(text: str) -> str:
-        """Wrap resolved ``thinking_instructions`` text in its own labeled
-        section, or return ``""`` unchanged if there's nothing to show.
+    @abstractmethod
+    def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        """Family-specific task-message construction, every phase included.
 
-        Keeps the whole "additional instructions" section invisible in the
-        rendered ``"think"`` prompt when the caller supplied none, rather
-        than leaving an empty header — the header/markers live here, at
-        render time, not in ``THINKING_BASE_TEMPLATE`` itself, since a
-        static template can't know in advance whether this will be empty.
+        Replaces the old abstract ``_render_action_messages`` — that
+        method never saw the "think" phase at all (the old ``render_task``
+        filtered it out externally); this one owns the full
+        ``task.system_prompt_name`` branching itself, "think" included, so
+        every concrete family is responsible for both cases.
+
+        Every implementation must follow this contract:
+
+        1. If ``task.task_messages`` is already non-empty, this phase's
+           messages are already built for this round — return it as-is
+           (``render_task`` extends it with ``additional_messages`` next).
+        2. Otherwise, branch on ``task.system_prompt_name``:
+           - ``"think"``: build ``task.task_messages`` from scratch with
+             the shared CURRENT TASK banner / thoughts-so-far snapshot
+             (via ``self._render_task_thoughts(task)``) / continue-thinking
+             instruction shape.
+           - anything else: build this family's own phase-specific content
+             from scratch.
+        3. Return ``task.task_messages`` — the same list object now stored
+           on the task, not a copy.
+
+        No body exists yet — every current caller of ``render_task`` in
+        this pass only ever produces ``"think"``-phase tasks; concrete
+        family bodies land with ``BasicAgent2``/``ToolAgent2``.
         """
-        if not text:
-            return ""
-        return THINKING_ADDITIONAL_INSTRUCTIONS_HEADER + text + THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER
+        ...
+
+    def _render_task_thoughts(self, task: AgentTask) -> str:
+        """Format ``task.thoughts`` (this run's thoughts so far) as text.
+
+        Shared, concrete primitive — callable from any family's own
+        ``_render_task_messages`` implementation, in either branch, not
+        just the "think" case.
+        """
+        return f"# CURRENT THOUGHTS\n{self._format_thoughts(task.thoughts)}"
 
     @staticmethod
     def _format_thoughts(rounds: List[List[AgentThought2]]) -> str:
@@ -693,51 +824,9 @@ class Agent2(AtomicInvokable, ABC):
         lines = [f"[{t.category}] {t.content}" for round_thoughts in rounds for t in round_thoughts]
         return "\n".join(lines) if lines else "No thoughts yet."
 
-    def _render_think_messages(
-        self,
-        task: AgentTask,
-        *,
-        additional_messages: list[dict[str, str]] | None = None,
-    ) -> list[dict[str, str]]:
-        """Shared/concrete rendering for the thinking phase.
-
-        Every family reuses this unchanged: the ``"think"``/``"user-think"``
-        two-stage splice for the system message, the ordinary historic
-        messages, and a fixed current-task/thoughts-so-far/continue-thinking
-        task-message shape (built lazily, once per round — ``think()`` resets
-        ``task.task_messages`` before each round so this always rebuilds).
-        """
-        user_text = self._system_prompts["user-think"].render(task.inputs)
-        think_context = {
-            THINKING_CONTENT_FIELD: self._render_user_instructions_block(user_text),
-            THOUGHTS_PER_ROUND_FIELD: self._thoughts_per_round,
-        }
-        system = self._render_system_message(task, think_context)
-        historic = self._render_historic_messages(task)
-
-        if not task.task_messages:
-            task.task_messages = [
-                {
-                    "role": "user",
-                    "content": (
-                        f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK ====="
-                    ),
-                },
-                {
-                    "role": "assistant",
-                    "content": f"THOUGHTS SO FAR:\n\n{self._format_thoughts(task.thoughts)}",
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Given the current task and your thoughts so far, continue thinking. "
-                        "Produce your next thought(s), or include |STOP_THINKING| if you are done."
-                    ),
-                },
-            ]
-        task.task_messages.extend(additional_messages or [])
-        return system + historic + task.task_messages
-
+    # ------------------------------------------------------------------ #
+    # Thinking
+    # ------------------------------------------------------------------ #
     def think(self, task: AgentTask) -> AgentTask:
         """Advance ``task`` by exactly one thinking round.
 
@@ -746,8 +835,8 @@ class Agent2(AtomicInvokable, ABC):
         Otherwise renders, calls the engine, parses the (possibly
         ``|STOP_THINKING|``-truncated) output into categorized thoughts,
         truncates to ``thoughts_per_round``, records one new round, and
-        advances ``keep_thinking``. No retries — an empty raw response is a
-        hard failure, and the lax category-marker format degrades to a
+        advances ``keep_thinking``. No retries — an empty raw LLM response is
+        a hard failure, and the lax category-marker format degrades to a
         single ``OTHER`` thought rather than needing correction.
         """
         if not task.keep_thinking:
@@ -827,7 +916,8 @@ class Agent2(AtomicInvokable, ABC):
     # inherits this unchanged. ToolAgent re-declares it @abstractmethod,
     # since only PlanActAgent/ReActAgent know how to build their own richer
     # ToolAgentTask subclass; the bare AgentTask this base method returns
-    # isn't sufficient for them. _progress stays @abstractmethod here —
+    # isn't sufficient for them. think/prepare/execute stay @abstractmethod
+    # (prepare/execute) or concrete-but-family-agnostic (think) here —
     # every subclass's advance-by-one-round logic genuinely differs.
     def _initialize_task(
         self,
@@ -861,132 +951,45 @@ class Agent2(AtomicInvokable, ABC):
         return task
 
     @abstractmethod
-    def _progress(self, task: AgentTask) -> AgentTask:
-        """Advance the task by exactly one round; may set ``task.complete``.
+    def prepare(self, task: AgentTask) -> AgentTask:
+        """Advance ``task``'s preparation phase by one round.
 
-        The base lifecycle loop in ``invoke()``/``async_invoke()`` is
-        ``while not task.complete: task = self._progress(task)``.
-        Implementations must set ``task.generated_response`` and
-        ``task.complete = True`` on the round that finishes the
-        invocation.
+        Hard-abstract, no base default — every concrete family implements
+        this. What "preparation" means varies materially by family (e.g. a
+        no-op for a single-turn reply agent vs. an LLM-driven planning step
+        for a tool-calling agent); base ``Agent2`` has no generic behavior
+        to offer here. Exact per-family bodies are out of scope for this
+        pass.
         """
         ...
-
-    def render_task(
-        self,
-        task: AgentTask,
-        *,
-        additional_messages: list[dict[str, str]] | None = None,
-    ) -> list[dict[str, str]]:
-        """Build the exact send-payload message list for one LLM call.
-
-        No longer ``@abstractmethod`` — concrete dispatcher on
-        ``task.system_prompt_name``: ``"think"`` delegates to the shared
-        ``_render_think_messages`` (identical for every family); anything
-        else delegates to the new abstract ``_render_action_messages``,
-        which is where each concrete subclass's own non-thinking content
-        (a reply, a plan, a step) still fully reimplements rather than
-        composing via ``super()`` — same posture ``render_task`` itself
-        used to have, just relocated one level down.
-
-        ``additional_messages`` (``None`` treated as ``[]``) is appended
-        onto ``task.task_messages`` and **persists** there — generation
-        retries within one phase accumulate across multiple ``render_task``
-        calls rather than resetting each time.
-
-        Pure computation, no I/O — the same method serves both the sync and
-        async lifecycle paths; there is no ``_async_render_task``.
-        """
-        if task.system_prompt_name == "think":
-            return self._render_think_messages(task, additional_messages=additional_messages)
-        return self._render_action_messages(task, additional_messages=additional_messages)
 
     @abstractmethod
-    def _render_action_messages(
-        self,
-        task: AgentTask,
-        *,
-        additional_messages: list[dict[str, str]] | None = None,
-    ) -> list[dict[str, str]]:
-        """Family-specific, non-thinking action-phase message construction.
+    async def async_prepare(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``prepare``.
 
-        Replaces what used to be ``render_task`` itself for this purpose —
-        each concrete subclass (``BasicAgent2``'s reply, a future
-        ``PlanActAgent2``'s plan messages, a future ``ReActAgent2``'s step
-        messages) fully reimplements this, calling
-        ``_render_system_message``/``_render_historic_messages`` explicitly
-        for the two pieces that render identically everywhere, then lazily
-        building its own ``task.task_messages`` when empty. No bodies exist
-        yet — every current caller of ``render_task`` in this pass only
-        ever produces ``"think"``-phase tasks.
+        Hard-abstract, no soft default. Mirrors ``think``/``async_think``'s
+        precedent: a family's preparation phase is expected to perform
+        genuine async I/O of its own (an LLM call, a tool's own
+        ``async_invoke``) often enough that a soft default would just mask a
+        missing real implementation.
         """
         ...
 
-    def _render_system_message(
-        self,
-        task: AgentTask,
-        render_context: dict[str, Any],
-    ) -> list[dict[str, str]]:
-        """Render ``task``'s active system prompt, if any.
+    @abstractmethod
+    def execute(self, task: AgentTask) -> AgentTask:
+        """Advance ``task``'s execution phase by one round.
 
-        Returns ``[]`` when ``task.system_prompt_name`` is ``None``.
-        Otherwise renders ``self._system_prompts[task.system_prompt_name]``
-        against ``render_context`` and returns a single-element system
-        message list. An unregistered name raises ``KeyError`` naturally —
-        an internal-contract violation, not guarded against.
+        Hard-abstract, no base default. Implementations set
+        ``task.generated_response`` and ``task.complete = True`` on the
+        round that finishes the invocation, per family-specific rules.
+        Exact per-family bodies are out of scope for this pass.
         """
-        if task.system_prompt_name is None:
-            return []
-        rendered = self._system_prompts[task.system_prompt_name].render(render_context)
-        return [{"role": "system", "content": rendered}]
+        ...
 
-    def _render_historic_messages(self, task: AgentTask) -> list[dict[str, str]]:
-        """Lazily render ``task.turns`` into ``task.historic_messages``.
-
-        Built once per invoke and reused thereafter. If ``task.turns`` is
-        empty, ``task.historic_messages`` correctly stays empty — later
-        calls re-checking an empty ``turns`` are a harmless no-op, not an
-        ambiguous state.
-
-        Applies ``thoughts_window`` positionally — only the trailing window
-        of replayed turns gets ``include_thoughts=True``; earlier turns
-        render plain. ``render_turn`` itself stays position-blind (see its
-        docstring); this is the one place with visibility into where a turn
-        sits among all turns being replayed this call. ``records_window``'s
-        own cap falls out for free here: ``task.turns`` is already
-        ``records_window``-limited by the time this runs, so ``window``
-        never exceeds however many turns were actually selected.
-        """
-        if task.historic_messages:
-            return task.historic_messages
-        if not task.turns:
-            return task.historic_messages
-
-        n = len(task.turns)
-        window = n if self._thoughts_window is None else min(self._thoughts_window, n)
-        cutoff = n - window
-
-        rendered: list[dict[str, str]] = []
-        for i, turn in enumerate(task.turns):
-            rendered.extend(self.render_turn(turn, include_thoughts=i >= cutoff))
-        task.historic_messages = rendered
-        return task.historic_messages
-
-    async def _async_initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> AgentTask:
-        """Async mirror of ``_initialize_task``; default offloads to a worker thread."""
-        return await asyncio.to_thread(
-            self._initialize_task, turns=turns, prompt=prompt, inputs=inputs
-        )
-
-    async def _async_progress(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``_progress``; default offloads to a worker thread."""
-        return await asyncio.to_thread(self._progress, task)
+    @abstractmethod
+    async def async_execute(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``execute``, same rationale as ``async_prepare``."""
+        ...
 
     def _build_record_from_task(
         self,
@@ -1066,6 +1069,7 @@ class Agent2(AtomicInvokable, ABC):
     def clear_memory(self) -> None:
         """Clear the stored turn history."""
         self._records.clear()
+        self._thoughts.clear()
 
     def get_conversation(
         self,
@@ -1147,10 +1151,13 @@ class Agent2(AtomicInvokable, ABC):
     async def async_invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Async analog of ``invoke``.
 
-        Lifecycle steps mirror ``invoke`` with ``await`` at pre/post and
-        the ``_async_initialize_task``/``_async_progress`` task-lifecycle
-        hooks. No ``self._invoke_lock`` (unchanged from current
-        implementation, which does not lock async_invoke either).
+        Lifecycle steps mirror ``invoke`` with ``await`` at pre/post and the
+        ``async_think``/``async_prepare``/``async_execute`` task-lifecycle
+        hooks. Task construction itself (``_initialize_task``) is plain
+        object construction with no I/O, so it's called directly here, not
+        threaded through an async wrapper. No ``self._invoke_lock``
+        (unchanged from current implementation, which does not lock
+        async_invoke either).
         """
         logger.info(f"[Async {self.full_name} started]")
         started_at = datetime.now(timezone.utc)
@@ -1196,11 +1203,14 @@ class Agent2(AtomicInvokable, ABC):
         if self._context_enabled and self._records_window != 0:
             turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-        # 6. Task lifecycle: initialize, progress until complete, build record.
+        # 6. Task lifecycle: initialize, think -> prepare -> execute until
+        # complete, build record.
         logger.debug(f"Agent.{self.name} performing async logic")
-        task = await self._async_initialize_task(turns=turns, prompt=prompt, inputs=inputs)
+        task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
         while not task.complete:
-            task = await self._async_progress(task)
+            task = await self.async_think(task)
+            task = await self.async_prepare(task)
+            task = await self.async_execute(task)
         record = self._build_record_from_task(task, turns)
 
         if not isinstance(record, AgentRecord):
@@ -1252,8 +1262,9 @@ class Agent2(AtomicInvokable, ABC):
         4. ``pre_invoke`` → prompt string (validated).
         5. Select conversation turns according to ``context_enabled``.
         6. ``_initialize_task(turns, prompt, inputs)`` → task; loop
-           ``task = self._progress(task)`` until ``task.complete``; then
-           ``_build_record_from_task(task, turns)`` → record.
+           ``task = think(task); task = prepare(task); task = execute(task)``
+           until ``task.complete``; then ``_build_record_from_task(task, turns)``
+           → record.
         7. ``post_invoke`` → final result.
         8. ``build_result_from_record(record, ...)`` → ``AgentResult``.
         9. Commit the completed ``AgentRecord`` unconditionally.
@@ -1303,11 +1314,14 @@ class Agent2(AtomicInvokable, ABC):
             if self._context_enabled and self._records_window != 0:
                 turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-            # 6. Task lifecycle: initialize, progress until complete, build record.
+            # 6. Task lifecycle: initialize, think -> prepare -> execute
+            # until complete, build record.
             logger.debug(f"Agent.{self.name} performing logic")
             task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
             while not task.complete:
-                task = self._progress(task)
+                task = self.think(task)
+                task = self.prepare(task)
+                task = self.execute(task)
             record = self._build_record_from_task(task, turns)
 
             if not isinstance(record, AgentRecord):

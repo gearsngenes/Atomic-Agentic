@@ -140,7 +140,7 @@ ROLE_DESCRIPTION_FIELD = "role_description"
 # Agent2 thinking-phase constants
 # =============================================================================
 # Used by:
-# - agents/base2.py: Agent2.think/_render_think_messages/_render_user_instructions_block
+# - agents/base2.py: Agent2.think/_render_system_message/_render_task_messages
 # - agents/prompts.py: THINKING_PROMPT/TOOL_THINKING_PROMPT (assembled at import time)
 # - utils/agents.py: parse_thoughts
 #
@@ -174,7 +174,7 @@ THOUGHTS_PER_ROUND_FIELD = "thoughts_per_round"
 # until there's a real reason to.
 #
 # {user_thinking_instructions} is bare -- no header/markers of its own in
-# this template. Agent2._render_user_instructions_block wraps it (or
+# this template. Agent2._render_system_message wraps it inline (or
 # renders nothing) at render time, so the whole section is invisible when
 # the caller supplied no thinking_instructions, rather than leaving an
 # empty header. {thoughts_per_round} is the other reserved field.
