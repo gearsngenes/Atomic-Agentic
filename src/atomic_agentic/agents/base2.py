@@ -1282,9 +1282,14 @@ class Agent2(AtomicInvokable, ABC):
         ``async_think``/``async_prepare``/``async_execute`` task-lifecycle
         hooks. Task construction itself (``_initialize_task``) is plain
         object construction with no I/O, so it's called directly here, not
-        threaded through an async wrapper. No ``self._invoke_lock``
-        (unchanged from current implementation, which does not lock
-        async_invoke either).
+        threaded through an async wrapper. Same lock scope as ``invoke``:
+        only ``_commit_emit`` runs under ``self._invoke_lock`` (a
+        ``threading.RLock`` — safe to hold briefly here since
+        ``_commit_emit`` performs no I/O and never awaits), letting
+        concurrent ``async_invoke`` calls against the same instance
+        genuinely overlap everywhere else. See ``invoke``'s own docstring
+        for the full reasoning and the accepted `run_id=None` branching
+        consequence.
         """
         logger.info(f"[Async {self.full_name} started]")
         started_at = datetime.now(timezone.utc)
@@ -1353,7 +1358,8 @@ class Agent2(AtomicInvokable, ABC):
         ended_at = datetime.now(timezone.utc)
 
         # 8-9. Record + result construction, committed to history.
-        agent_result = self._commit_emit(task, started_at, ended_at)
+        with self._invoke_lock:
+            agent_result = self._commit_emit(task, started_at, ended_at)
 
         logger.info(f"[Async {self.full_name} finished]")
         return agent_result
@@ -1361,7 +1367,21 @@ class Agent2(AtomicInvokable, ABC):
     def invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Invoke the agent with a single input mapping.
 
-        Runs under ``self._invoke_lock``.
+        Only the final commit runs under ``self._invoke_lock`` — everything
+        before it (pre_invoke, turn selection, the full task lifecycle,
+        post_invoke) is unlocked. This is safe because the only shared,
+        mutable state any of that touches (``self._records``, and for
+        ``ToolAgent2`` subclasses ``self._blackboard``) is only ever
+        *mutated* inside ``_commit_emit``, and reads elsewhere are
+        stale-safe by construction (append-only, immutable-once-persisted).
+        Narrowing the lock this way is what makes true concurrent execution
+        of the actual work possible for both sync and async callers, sharing
+        one instance — see ``async_invoke`` below and
+        ``.claude/brainstorms/toolagent2-lifecycle.md`` §4 for the full
+        reasoning. A deliberate, accepted consequence: concurrent calls
+        using the default ``run_id=None`` may branch the conversation if
+        they race, since nothing serializes the read-tail-then-commit span
+        as a whole anymore.
 
         Steps
         -----
@@ -1378,82 +1398,83 @@ class Agent2(AtomicInvokable, ABC):
            until ``task.complete``.
         7. ``post_invoke`` transforms ``task.generated_response`` into
            ``task.final_response``.
-        8-9. ``_commit_emit(task, started_at, ended_at)`` builds the
-           completed record and ``AgentResult`` together, commits the
-           record unconditionally, and returns the result.
+        8-9. Under ``self._invoke_lock``: ``_commit_emit(task, started_at,
+           ended_at)`` builds the completed record and ``AgentResult``
+           together, commits the record unconditionally, and returns the
+           result.
         """
-        with self._invoke_lock:
-            logger.info(f"[{self.full_name} started]")
-            started_at = datetime.now(timezone.utc)
+        logger.info(f"[{self.full_name} started]")
+        started_at = datetime.now(timezone.utc)
 
-            # 1. Filter inputs.
-            inputs = self.filter_inputs(inputs)
+        # 1. Filter inputs.
+        inputs = self.filter_inputs(inputs)
 
-            # 2. Reserved names + non-destructive run_id read.
-            reserved_names = {p.name for p in self.get_reserved_parameters()}
-            run_id = inputs.get("run_id")
+        # 2. Reserved names + non-destructive run_id read.
+        reserved_names = {p.name for p in self.get_reserved_parameters()}
+        run_id = inputs.get("run_id")
 
-            # 3. Slice pre/post inputs, excluding reserved names.
-            pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
-            pre_inputs = {k: v for k, v in inputs.items() if k in pre_names}
+        # 3. Slice pre/post inputs, excluding reserved names.
+        pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
+        pre_inputs = {k: v for k, v in inputs.items() if k in pre_names}
 
-            post_names = (
-                {p.name for p in self._post_invoke.parameters}
-                - {self._post_result_key}
-                - reserved_names
+        post_names = (
+            {p.name for p in self._post_invoke.parameters}
+            - {self._post_result_key}
+            - reserved_names
+        )
+        post_inputs = {k: v for k, v in inputs.items() if k in post_names}
+
+        # 4. Task prompt.
+        try:
+            logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
+            pre_result = self._pre_invoke.invoke(pre_inputs)
+            raw_prompt = pre_result.result
+        except ToolInvocationError:
+            raise
+        except Exception as e:  # pragma: no cover
+            raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
+
+        if not isinstance(raw_prompt, str):
+            raise AgentInvocationError(
+                f"pre_invoke returned a non-string result "
+                f"(type={type(raw_prompt)!r}); a prompt string is required"
             )
-            post_inputs = {k: v for k, v in inputs.items() if k in post_names}
+        prompt = raw_prompt
 
-            # 4. Task prompt.
-            try:
-                logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
-                pre_result = self._pre_invoke.invoke(pre_inputs)
-                raw_prompt = pre_result.result
-            except ToolInvocationError:
-                raise
-            except Exception as e:  # pragma: no cover
-                raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
+        # 5. History.
+        logger.debug(f"Agent.{self.name} selecting turns")
+        turns: list[AgentRecord] = []
+        if self._context_enabled and self._records_window != 0:
+            turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-            if not isinstance(raw_prompt, str):
-                raise AgentInvocationError(
-                    f"pre_invoke returned a non-string result "
-                    f"(type={type(raw_prompt)!r}); a prompt string is required"
-                )
-            prompt = raw_prompt
+        # 6. Task lifecycle: initialize, think -> prepare -> execute
+        # until complete.
+        logger.debug(f"Agent.{self.name} performing logic")
+        task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
+        while not task.complete:
+            task = self.think(task)
+            task = self.prepare(task)
+            task = self.execute(task)
 
-            # 5. History.
-            logger.debug(f"Agent.{self.name} selecting turns")
-            turns: list[AgentRecord] = []
-            if self._context_enabled and self._records_window != 0:
-                turns = self.get_conversation(run_id=run_id, turns=self._records_window)
+        # 7. Output transformation.
+        try:
+            logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
+            post_inputs[self._post_result_key] = task.generated_response
+            post_result = self._post_invoke.invoke(post_inputs)
+        except ToolInvocationError:
+            raise
+        except Exception as e:  # pragma: no cover
+            raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
+        task.final_response = post_result.result
 
-            # 6. Task lifecycle: initialize, think -> prepare -> execute
-            # until complete.
-            logger.debug(f"Agent.{self.name} performing logic")
-            task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
-            while not task.complete:
-                task = self.think(task)
-                task = self.prepare(task)
-                task = self.execute(task)
+        ended_at = datetime.now(timezone.utc)
 
-            # 7. Output transformation.
-            try:
-                logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
-                post_inputs[self._post_result_key] = task.generated_response
-                post_result = self._post_invoke.invoke(post_inputs)
-            except ToolInvocationError:
-                raise
-            except Exception as e:  # pragma: no cover
-                raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
-            task.final_response = post_result.result
-
-            ended_at = datetime.now(timezone.utc)
-
-            # 8-9. Record + result construction, committed to history.
+        # 8-9. Record + result construction, committed to history.
+        with self._invoke_lock:
             agent_result = self._commit_emit(task, started_at, ended_at)
 
-            logger.info(f"[{self.full_name} finished]")
-            return agent_result
+        logger.info(f"[{self.full_name} finished]")
+        return agent_result
 
     # ------------------------------------------------------------------ #
     # Serialization

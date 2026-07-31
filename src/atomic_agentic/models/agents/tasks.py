@@ -140,24 +140,26 @@ class ToolAgentTask(AgentTask):
 
     Fields
     ------
-    cache_blackboard : list[BlackboardSlot]
-        Snapshot of the persisted ``self._blackboard`` at invoke start when
-        context is enabled. Previous invocation results are available here
-        and can be referenced via ``<<__cN__>>`` placeholders.
-
     running_blackboard : list[BlackboardSlot]
         Plan-local slots (0-based indices) created during this invoke.
         Populated by ``_initialize_task()``, planned by
         ``_prepare_next_batch()``, and executed by
-        ``_execute_prepared_batch()``. If ``context_enabled=True``, executed
-        slots are persisted and merged into ``self._blackboard`` by
-        ``_build_record_from_task``.
+        ``execute()``. Executed slots are always persisted
+        and merged into ``self._blackboard`` by ``_build_record_from_task``,
+        regardless of ``context_enabled`` — that flag only gates whether
+        ``valid_cache_indices``/``failed_cache_indices`` (and therefore
+        ``<<__cN__>>`` visibility) are non-empty, never whether history is
+        retained.
 
     Placeholder Semantics & Resolvability
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     **Cached Placeholder** (``<<__cN__>>``)
-        Resolvable iff ``0 <= N < len(cache_blackboard)`` AND
-        ``cache_blackboard[N].is_executed() == True``.
+        Resolvable iff ``0 <= N < len(self._blackboard)`` AND
+        ``self._blackboard[N].is_executed() == True`` — resolved directly
+        against the live, persisted blackboard (no per-task snapshot field;
+        removed once persistence became unconditional). Whether the LLM is
+        ever *told* index N exists is a separate question, governed by
+        ``valid_cache_indices``/``failed_cache_indices`` below.
 
     **Step Placeholder** (``<<__sN__>>``)
         Resolvable iff ``0 <= N < len(running_blackboard)`` AND
@@ -168,7 +170,7 @@ class ToolAgentTask(AgentTask):
 
     prepared_steps : list[int]
         Running plan indices ready for execution in the next batch. Must be
-        set by ``_prepare_next_batch()`` and consumed by ``_progress``.
+        set by ``_prepare_next_batch()`` and consumed by ``execute()``.
 
     tool_calls_used : int
         Count of non-return tool calls executed so far.
@@ -181,14 +183,18 @@ class ToolAgentTask(AgentTask):
         generations occur.
 
     valid_cache_indices : frozenset[int]
-        Cache-blackboard indices reachable in this conversation — entries
-        that are EXECUTED and belong to a record in the current ``turns``
-        chain. Computed once in ``_initialize_task`` from ``turns`` via
-        ``_compute_cache_index_sets``; empty when ``context_enabled=False``.
+        Blackboard indices reachable in this conversation — entries that are
+        EXECUTED and belong to a record in the current ``turns`` chain.
+        Computed once in ``_initialize_task`` from ``turns`` via
+        ``_compute_cache_index_sets``; empty when ``context_enabled=False``
+        (``turns`` itself is forced to ``[]`` in that case). This is the
+        actual LLM-facing visibility gate for ``<<__cN__>>`` references —
+        distinct from resolvability above, which only checks that an index
+        is in-bounds and executed.
 
     failed_cache_indices : frozenset[int]
-        Cache-blackboard indices that belong to this conversation but whose
-        slots have FAILED status. Disjoint with ``valid_cache_indices``.
+        Blackboard indices that belong to this conversation but whose slots
+        have FAILED status. Disjoint with ``valid_cache_indices``.
         Referenced during generation to produce targeted LLM feedback.
 
     retries_used : int
@@ -199,7 +205,6 @@ class ToolAgentTask(AgentTask):
         ``ReActTask``) so it's available uniformly to every subclass,
         including ``PlanActTask``.
     """
-    cache_blackboard: list[BlackboardSlot] = field(default_factory=list)
     running_blackboard: list[BlackboardSlot] = field(default_factory=list)
 
     executed_steps: set[int] = field(default_factory=set)
