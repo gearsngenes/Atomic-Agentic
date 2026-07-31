@@ -371,6 +371,41 @@ TOOL_THINKING_PROMPT = PromptConfig(
     template=THINKING_BASE_TEMPLATE + THINKING_TOOL_RESOURCES_BLOCK,
     description=(
         "ToolAgent2-family thinking-phase prompt (adds tool/constant/limit "
-        "awareness) -- sketch only, not yet wired to any class."
+        "awareness) -- shared default; PlanActAgent2/ReActAgent2 each "
+        "override _THINK_PROMPT further with their own variant below."
+    ),
+)
+
+PLANACT_THINKING_PROMPT = PromptConfig(
+    template=THINKING_BASE_TEMPLATE + THINKING_TOOL_RESOURCES_BLOCK + """
+# PLANNING GUIDANCE
+You are thinking ahead of a one-shot plan: once thinking ends, the full
+sequence of tool calls needed to complete the task is generated in a single
+pass, with no opportunity to revise it mid-execution. Use your thoughts to
+work out the end-to-end sequence of steps needed, their dependencies, and
+what each one requires -- not just the immediate next action.
+""",
+    description=(
+        "PlanActAgent2 thinking-phase prompt -- adds end-to-end planning "
+        "guidance on top of TOOL_THINKING_PROMPT's tool/constant/limit "
+        "awareness. First-pass prose, expected to be refined once "
+        "PlanActAgent2 is live-tested."
+    ),
+)
+
+REACT_THINKING_PROMPT = PromptConfig(
+    template=THINKING_BASE_TEMPLATE + THINKING_TOOL_RESOURCES_BLOCK + """
+# ACTING GUIDANCE
+You are thinking alongside a step-by-step actor: thoughts and tool calls
+interleave, one action at a time, with each new thought informing only the
+single next best action -- not a full plan. Use your thoughts to reason
+about what the single best next step is, given what has already happened,
+rather than trying to plan the whole task at once.
+""",
+    description=(
+        "ReActAgent2 thinking-phase prompt -- adds next-best-action "
+        "guidance on top of TOOL_THINKING_PROMPT's tool/constant/limit "
+        "awareness. First-pass prose, expected to be refined once "
+        "ReActAgent2 is live-tested."
     ),
 )

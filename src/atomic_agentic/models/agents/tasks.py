@@ -310,6 +310,20 @@ class ReActTask(ToolAgentTask):
     failed attempt; checked against ``self._generation_retries`` before
     permitting a retry.
 
+    newest_thoughts : list[AgentThought2]
+        The most recently produced thinking round, if any thoughts were
+        actually generated for the step about to be decided this round.
+        Stamped by ``ReActAgent2.think``/``async_think`` whenever a new
+        round is detected, independent of what ``task.keep_thinking``
+        becomes as a side effect of that same call — this is what lets the
+        exact round thinking concludes still render as "current" for that
+        round's step, rather than being swallowed into "previous." Cleared
+        to ``[]`` by ``_apply_react_step_result`` once consumed, so it
+        always reflects "produced this round, not yet shown" — permanently
+        empty once thinking has concluded. Shared base ``ReActTask`` is used
+        by both old (pre-``Agent2``) ``ReActAgent`` and new ``ReActAgent2``;
+        this field is ``ReActAgent2``-only, unused by the old family.
+
     Workflow
     ~~~~~~~~
     Each ``_progress`` round:
@@ -328,6 +342,7 @@ class ReActTask(ToolAgentTask):
     """
     next_step_index: int = 0
     step_meta: list[ReActStepMeta] = field(default_factory=list)
+    newest_thoughts: list[AgentThought2] = field(default_factory=list)
 
 
 @dataclass(slots=True)
