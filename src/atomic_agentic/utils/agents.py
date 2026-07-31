@@ -203,7 +203,7 @@ def normalize_thinking_instructions(value: str | PromptConfig | None) -> PromptC
 
 
 _THOUGHT_MARKER_PATTERN = re.compile(
-    r"^\s*(" + "|".join(THOUGHT_CATEGORIES) + r")\s*:\s*",
+    r"^\s*\[(" + "|".join(THOUGHT_CATEGORIES) + r")\]\s*",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -212,13 +212,19 @@ def parse_thoughts(text: str) -> list[AgentThought2]:
     """
     Parse one thinking round's raw text into a list of ``AgentThought2``.
 
-    Line-based, lax format: each category marker (``CATEGORY:``, any casing,
-    anchored at a line start) begins a new thought; its content runs until
-    the next marker or the end of ``text``. If no marker is found anywhere,
-    the entire (stripped) text becomes a single ``OTHER``-category thought
-    -- unless it's empty/whitespace-only, in which case no thought is
-    produced at all (an empty prefix isn't unparseable content, it's simply
-    no content).
+    Line-based, lax format: each category marker (``[CATEGORY]``, any
+    casing, no colon, anchored at a line start) begins a new thought; its
+    content runs until the next marker or the end of ``text``. Bracketed,
+    colon-free, to match ``_format_thoughts``'s own rendering of prior
+    thoughts exactly -- what's shown back to the model round after round as
+    its own history is what it's asked to keep producing, closing the loop
+    a bare colon-terminated form (``CATEGORY:``) previously left open (a
+    model imitating its own bracketed history would drift away from a
+    colon-based instructed format and fail to parse). If no marker is found
+    anywhere, the entire (stripped) text becomes a single ``OTHER``-category
+    thought -- unless it's empty/whitespace-only, in which case no thought
+    is produced at all (an empty prefix isn't unparseable content, it's
+    simply no content).
 
     Does not know about ``|STOP_THINKING|`` -- callers (``Agent2.think``)
     strip that before calling this function, keeping parsing pure and

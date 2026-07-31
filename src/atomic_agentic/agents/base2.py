@@ -790,20 +790,58 @@ class Agent2(AtomicInvokable, ABC):
            messages are already built for this round — return it as-is
            (``render_task`` extends it with ``additional_messages`` next).
         2. Otherwise, branch on ``task.system_prompt_name``:
-           - ``"think"``: build ``task.task_messages`` from scratch with
-             the shared CURRENT TASK banner / thoughts-so-far snapshot
-             (via ``self._render_task_thoughts(task)``) / continue-thinking
-             instruction shape.
+           - ``"think"``: delegate to ``self._render_thinking_task_messages(task)``
+             — generic across every family (task + thoughts-so-far +
+             continue-thinking instruction has no family-specific
+             dependency), so this branch should never be reimplemented
+             per subclass.
            - anything else: build this family's own phase-specific content
-             from scratch.
+             from scratch, reusing ``self._render_task_banner(task)`` for
+             the same visual anchor the think phase uses.
         3. Return ``task.task_messages`` — the same list object now stored
            on the task, not a copy.
-
-        No body exists yet — every current caller of ``render_task`` in
-        this pass only ever produces ``"think"``-phase tasks; concrete
-        family bodies land with ``BasicAgent2``/``ToolAgent2``.
         """
         ...
+
+    def _render_thinking_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        """Build one round's "think"-phase task messages.
+
+        Concrete and shared — every ``Agent2`` subclass's own
+        ``_render_task_messages`` delegates here for the "think" branch
+        rather than reimplementing it, since this phase's content (the
+        active task plus thoughts-so-far plus a continue-thinking
+        instruction) has no family-specific dependency (no blackboard,
+        tools, or other per-family state). Collapses to a single
+        banner-wrapped message on the first round (no thoughts yet); once
+        ``task.thoughts`` is non-empty, splits into the banner / a
+        self-labeled thoughts snapshot (via ``self._render_task_thoughts``)
+        / a continue-thinking instruction, mirroring the old
+        ``ThinkingAgent``/``ReActAgent`` running-snapshot convention.
+        """
+        banner = self._render_task_banner(task)
+        if not task.thoughts:
+            return [{
+                "role": "user",
+                "content": (
+                    f"{banner}\n\n"
+                    f"Think about this task, and produce the next 1 - {self.thoughts_per_round} "
+                    "thoughts to better understand and scope this task, following the "
+                    "OUTPUT FORMAT in your instructions. If more thoughts WILL be needed, "
+                    "then OMIT the |STOP_THINKING| token."
+                ),
+            }]
+        return [
+            {"role": "user", "content": banner},
+            {"role": "assistant", "content": self._render_task_thoughts(task)},
+            {
+                "role": "user",
+                "content": (
+                    f"Produce the next 1 - {self.thoughts_per_round} thoughts to better "
+                    "understand this task. EXACTLY follow the THINKING OUTPUT FORMAT. If"
+                    "more thoughts will be needed, then OMIT the |STOP_THINKING| token."
+                ),
+            },
+        ]
 
     def _render_task_thoughts(self, task: AgentTask) -> str:
         """Format ``task.thoughts`` (this run's thoughts so far) as text.
@@ -813,6 +851,18 @@ class Agent2(AtomicInvokable, ABC):
         just the "think" case.
         """
         return f"# CURRENT THOUGHTS\n{self._format_thoughts(task.thoughts)}"
+
+    @staticmethod
+    def _render_task_banner(task: AgentTask) -> str:
+        """Format ``task.user_prompt`` as a bannered block.
+
+        The shared visual anchor used across every phase's task messages
+        (both the "think" branch above and each family's own non-think
+        branches), so the active task stays legible regardless of what
+        else surrounds it in the rendered message list — e.g. thought-laden
+        history turns ahead of it via ``include_thoughts``/``thoughts_window``.
+        """
+        return f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK ====="
 
     @staticmethod
     def _format_thoughts(rounds: List[List[AgentThought2]]) -> str:

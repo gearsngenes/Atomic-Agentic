@@ -174,61 +174,41 @@ class BasicAgent2(Agent2):
     def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         """Build this phase's task messages, "think" and "role" alike.
 
-        Mirrors the old ``ThinkingAgent``/``ReActAgent`` message
-        convention: a ``CURRENT TASK`` banner, a self-labeled thoughts
-        snapshot as an assistant turn, and a fixed instruction — used
-        whenever ``task.thoughts`` is non-empty. When there's nothing to
-        show, collapses to a single banner-wrapped message instead. The
-        banner is always present, in every branch — a deliberate departure
-        from old ``BasicAgent``'s bare, unwrapped reply message, so the
-        active task stays visually anchored regardless of what else sits in
-        the rendered message list (e.g. thought-laden history turns ahead
-        of it via ``include_thoughts``/``thoughts_window``).
+        Delegates the "think" branch to ``Agent2``'s shared
+        ``_render_thinking_task_messages`` entirely — nothing
+        ``BasicAgent2``-specific about it. Owns only the "role" branch:
+        mirrors the old ``ThinkingAgent``/``ReActAgent`` message
+        convention (banner / self-labeled thoughts snapshot as an
+        assistant turn / fixed instruction) whenever ``task.thoughts`` is
+        non-empty, collapsing to a single banner-wrapped message
+        otherwise. The banner (via ``self._render_task_banner``) is always
+        present, in every branch — a deliberate departure from old
+        ``BasicAgent``'s bare, unwrapped reply message, so the active task
+        stays visually anchored regardless of what else sits in the
+        rendered message list.
         """
         if task.task_messages:
             return task.task_messages
 
-        banner = f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK ====="
-
         if task.system_prompt_name == "think":
-            if not task.thoughts:
-                task.task_messages = [{
+            task.task_messages = self._render_thinking_task_messages(task)
+            return task.task_messages
+
+        banner = self._render_task_banner(task)
+        if not task.thoughts:
+            task.task_messages = [{"role": "user", "content": banner}]
+        else:
+            task.task_messages = [
+                {"role": "user", "content": banner},
+                {"role": "assistant", "content": self._render_task_thoughts(task)},
+                {
                     "role": "user",
                     "content": (
-                        f"{banner}\n\n"
-                        "Begin thinking about this task, following the "
-                        "OUTPUT FORMAT and STOP CONDITION rules in your "
-                        "instructions."
+                        "Given the current task and the thoughts above, "
+                        "respond to the current task."
                     ),
-                }]
-            else:
-                task.task_messages = [
-                    {"role": "user", "content": banner},
-                    {"role": "assistant", "content": self._render_task_thoughts(task)},
-                    {
-                        "role": "user",
-                        "content": (
-                            "Continue thinking about this task, following "
-                            "the OUTPUT FORMAT and STOP CONDITION rules in "
-                            "your instructions."
-                        ),
-                    },
-                ]
-        else:
-            if not task.thoughts:
-                task.task_messages = [{"role": "user", "content": banner}]
-            else:
-                task.task_messages = [
-                    {"role": "user", "content": banner},
-                    {"role": "assistant", "content": self._render_task_thoughts(task)},
-                    {
-                        "role": "user",
-                        "content": (
-                            "Given the current task and the thoughts above, "
-                            "respond to the current task."
-                        ),
-                    },
-                ]
+                },
+            ]
 
         return task.task_messages
 
