@@ -573,7 +573,10 @@ class ReActAgent2(ToolAgent2):
         if previous_thoughts:
             thoughts_parts.append(f"PREVIOUS THOUGHTS:\n{self._format_thoughts(previous_thoughts)}")
         if current_thoughts:
-            thoughts_parts.append(f"CURRENT THOUGHTS:\n{self._format_thoughts([current_thoughts])}")
+            thoughts_parts.append(
+                f"CURRENT THOUGHTS:\n"
+                f"{self._format_thoughts([current_thoughts], start_round=len(task.thoughts) - 1)}"
+            )
         thoughts_text = "\n\n".join(thoughts_parts)
 
         assistant_content = f"{thoughts_text}\n\n{snapshot_text}" if thoughts_text else snapshot_text

@@ -39,6 +39,7 @@ from ..constants.agents import (
     STOP_THINKING_SENTINEL,
     THINKING_CONTENT_FIELD,
     THOUGHTS_PER_ROUND_FIELD,
+    MAX_THINKING_ROUNDS_FIELD,
     THINKING_ADDITIONAL_INSTRUCTIONS_HEADER,
     THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER,
 )
@@ -641,8 +642,27 @@ class Agent2(AtomicInvokable, ABC):
         wrapped in a labeled section only when non-empty, so the whole
         "additional instructions" block is invisible in the rendered
         prompt when the caller supplied none.
+
+        Also resolves ``MAX_THINKING_ROUNDS_FIELD`` to a full sentence
+        (bounded vs. unbounded phrasing) from ``self._thinking_rounds``,
+        rather than a bare number — same pre-resolve-outside-the-template
+        pattern as ``THINKING_CONTENT_FIELD`` above. Gives the model an
+        explicit round budget alongside the per-round ``## Round N``
+        headers ``_format_thoughts`` now renders, so it can pace itself
+        instead of scattering a single decision (e.g. PLANNING) across
+        rounds it didn't know were limited.
         """
         user_text = self._system_prompts["user-think"].render(task.inputs)
+        round_limit_text = (
+            f"You may think across an unbounded number of rounds — use "
+            f"{STOP_THINKING_SENTINEL} once no further thinking is needed."
+            if self._thinking_rounds is None
+            else (
+                f"You may think across AT MOST {self._thinking_rounds} round(s) "
+                "total for this task. Round headers in your prior thoughts (if "
+                "any) show how many you have already used."
+            )
+        )
         think_context = {
             THINKING_CONTENT_FIELD: (
                 THINKING_ADDITIONAL_INSTRUCTIONS_HEADER
@@ -652,6 +672,7 @@ class Agent2(AtomicInvokable, ABC):
                 else ""
             ),
             THOUGHTS_PER_ROUND_FIELD: self._thoughts_per_round,
+            MAX_THINKING_ROUNDS_FIELD: round_limit_text,
         }
         rendered = self._render_system_prompt(task, think_context)
         return [{"role": "system", "content": rendered}]
@@ -770,7 +791,7 @@ class Agent2(AtomicInvokable, ABC):
         if start is None or end is None or start == end:
             return messages
 
-        snapshot = self._format_thoughts(self._thoughts[start:end])
+        snapshot = self._format_thoughts(self._thoughts[start:end], start_round=start)
         assistant_content = f"THOUGHTS:\n\n{snapshot}\n\nRESPONSE:\n{response_text}"
         return [messages[0], {"role": "assistant", "content": assistant_content}]
 
@@ -865,18 +886,30 @@ class Agent2(AtomicInvokable, ABC):
         return f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK ====="
 
     @staticmethod
-    def _format_thoughts(rounds: List[List[AgentThought2]]) -> str:
-        """Plain-text thought-trail formatter.
+    def _format_thoughts(rounds: List[List[AgentThought2]], *, start_round: int = 0) -> str:
+        """Plain-text thought-trail formatter, grouped under ``## Round N``
+        headers so round boundaries are visible to the model, not just to
+        the human-facing dump files.
 
         Deliberately not ``pprint.pformat`` — verified that it wraps long
         string values across multiple lines via adjacent string-literal
         splitting and doesn't escape embedded newlines, both of which break
-        visual structure for free-text ``content``. Flat, one thought per
-        line, no index labeling — nothing downstream needs to address a
-        thought by position.
+        visual structure for free-text ``content``.
+
+        ``start_round`` labels ``rounds[0]`` — callers passing a slice or
+        single-round list (e.g. ``render_turn``'s ``self._thoughts[start:end]``,
+        or ``ReActAgent2``'s previous/current split) must pass the true round
+        index that slice begins at, so headers stay accurate rather than
+        resetting to 0 for every non-prefix slice.
         """
-        lines = [f"[{t.category}] {t.content}" for round_thoughts in rounds for t in round_thoughts]
-        return "\n".join(lines) if lines else "No thoughts yet."
+        if not rounds:
+            return "No thoughts yet."
+        blocks = [
+            f"## Round {start_round + i}\n"
+            + "\n".join(f"[{t.category}] {t.content}" for t in round_thoughts)
+            for i, round_thoughts in enumerate(rounds)
+        ]
+        return "\n\n".join(blocks)
 
     # ------------------------------------------------------------------ #
     # Thinking

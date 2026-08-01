@@ -453,9 +453,16 @@ class PlanActAgent2(ToolAgent2):
         """Build this phase's task messages, "think" and "plan_first" alike.
 
         Delegates the "think" branch to ``Agent2``'s shared
-        ``_render_thinking_task_messages`` entirely. Owns only the
-        "plan_first" branch: a single banner-wrapped decompose-into-JSON
-        request, unchanged content from v1's own ``render_task``.
+        ``_render_thinking_task_messages`` entirely. Owns the "plan_first"
+        branch: a banner-wrapped decompose-into-JSON request, preceded by a
+        ``PRIOR THINKING`` splice of ``task.thoughts`` when thinking
+        actually ran this task. Without this splice, thinking's conclusions
+        would be computed and then discarded — the one-shot plan-generation
+        call renders from a hard-cleared ``task_messages`` and has no other
+        path back to them (unlike ``ReActAgent2``, which re-surfaces
+        ``task.thoughts`` into every action-decision round). When
+        ``task.thoughts`` is empty (thinking disabled), collapses back to
+        v1's original single-message form.
         """
         if task.task_messages:
             return task.task_messages
@@ -464,14 +471,33 @@ class PlanActAgent2(ToolAgent2):
             task.task_messages = self._render_thinking_task_messages(task)
             return task.task_messages
 
-        task.task_messages = [{
-            "role": "user",
-            "content": (
-                f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK =====\n\n"
-                "Using the current task above and the prior chat history, construct "
-                "a valid JSON array that decomposes it into tool-call steps."
-            ),
-        }]
+        banner = self._render_task_banner(task)
+        instruction = (
+            "Using the current task above, your prior thinking, and the prior "
+            "chat history, construct a valid JSON array that decomposes it "
+            "into tool-call steps."
+            if task.thoughts
+            else (
+                "Using the current task above and the prior chat history, "
+                "construct a valid JSON array that decomposes it into "
+                "tool-call steps."
+            )
+        )
+
+        if task.thoughts:
+            task.task_messages = [
+                {"role": "user", "content": banner},
+                {
+                    "role": "assistant",
+                    "content": f"PRIOR THINKING:\n\n{self._format_thoughts(task.thoughts)}",
+                },
+                {"role": "user", "content": instruction},
+            ]
+        else:
+            task.task_messages = [{
+                "role": "user",
+                "content": f"{banner}\n\n{instruction}",
+            }]
         return task.task_messages
 
     # ------------------------------------------------------------------ #

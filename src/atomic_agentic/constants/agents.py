@@ -167,6 +167,12 @@ THOUGHT_CATEGORIES: tuple[str, ...] = (
 THINKING_CONTENT_FIELD = "user_thinking_instructions"
 THOUGHTS_PER_ROUND_FIELD = "thoughts_per_round"
 
+# Resolved to a full sentence by the caller (Agent2._render_system_message),
+# not a bare number -- mirrors THINKING_CONTENT_FIELD's own pattern of
+# pre-resolving varying phrasing (bounded vs. unbounded) outside the
+# template rather than branching inside it.
+MAX_THINKING_ROUNDS_FIELD = "max_thinking_rounds"
+
 # Hand-typed prose, deliberately NOT built by interpolating
 # THOUGHT_CATEGORIES at runtime or import time -- category names/wording
 # here and THOUGHT_CATEGORIES above must be kept in sync by hand if a
@@ -218,6 +224,14 @@ Think sparingly. Do not produce a thought for something that is already
 obvious or self-explanatory from the task or your prior thoughts -- only
 think when it genuinely helps advance or clarify the task.
 
+QUESTION, CLARIFICATION, OBSERVATION, REASONING, and ASSUMPTION thoughts may
+each occur multiple times within a single round -- they represent distinct,
+independent considerations. PLANNING is different: it represents a
+converged decision, not an open consideration. Produce AT MOST ONE PLANNING
+thought per round, synthesizing everything you have reasoned through so
+far -- typically as the last thought in that round, once you are ready to
+commit rather than continue exploring.
+
 # STOP CONDITION
 After you produce your thoughts, if you determine no further thinking
 is needed, then you MUST signal this by using the literal token
@@ -227,6 +241,9 @@ Do NOT include this token if you are not done thinking.
 # THOUGHT LIMIT
 The block of thoughts you produce per round for a given task must contain
 between (AT LEAST) 1 and {thoughts_per_round} (AT MOST) thoughts.
+
+# ROUND LIMIT
+{max_thinking_rounds}
 
 {user_thinking_instructions}"""
 
@@ -321,6 +338,7 @@ __all__ = [
     "THOUGHT_CATEGORIES",
     "THINKING_CONTENT_FIELD",
     "THOUGHTS_PER_ROUND_FIELD",
+    "MAX_THINKING_ROUNDS_FIELD",
     "THINKING_BASE_TEMPLATE",
     "THINKING_ADDITIONAL_INSTRUCTIONS_HEADER",
     "THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER",
