@@ -23,9 +23,9 @@ class AgentTask:
     """
     Base run-task contract for one Agent invocation.
 
-    Drives an invocation through ``_initialize_task``/``_progress``.
-    ``BasicAgent`` uses this base class directly; it needs nothing beyond
-    these fields.
+    Drives an invocation through ``_initialize_task`` then
+    ``think``/``prepare``/``act`` each round. ``BasicAgent`` uses this base
+    class directly; it needs nothing beyond these fields.
 
     Fields
     ------
@@ -58,13 +58,14 @@ class AgentTask:
 
     complete : bool
         Loop termination flag. The base lifecycle loop is
-        ``while not task.complete: task = progress(task)``.
+        ``while not task.complete: task = think(task); task = prepare(task);
+        task = act(task)``.
 
     generated_response : Any
         The record's produced-response equivalent — raw LLM text for
         ``BasicAgent``, the executed return-tool value for ``ToolAgent`` and
-        its subclasses. ``NO_VAL`` until ``_progress`` sets it on the round
-        that completes the task.
+        its subclasses. ``NO_VAL`` until ``act`` sets it on the round that
+        completes the task.
 
     historic_messages : list[dict[str, str]]
         Rendered ``turns``, built lazily once per invoke by
@@ -99,24 +100,20 @@ class ToolAgentTask(AgentTask):
 
     Fields
     ------
-    cache_blackboard : list[BlackboardSlot]
-        Snapshot of the persisted ``self._blackboard`` at invoke start when
-        context is enabled. Previous invocation results are available here
-        and can be referenced via ``<<__cN__>>`` placeholders.
-
     running_blackboard : list[BlackboardSlot]
         Plan-local slots (0-based indices) created during this invoke.
-        Populated by ``_initialize_task()``, planned by
-        ``_prepare_next_batch()``, and executed by
-        ``_execute_prepared_batch()``. If ``context_enabled=True``, executed
-        slots are persisted and merged into ``self._blackboard`` by
+        Populated by ``_initialize_task()``, planned by ``prepare()``, and
+        executed by ``act()``. If ``context_enabled=True``, executed slots
+        are persisted and merged into ``self._blackboard`` by
         ``_build_record_from_task``.
 
     Placeholder Semantics & Resolvability
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     **Cached Placeholder** (``<<__cN__>>``)
-        Resolvable iff ``0 <= N < len(cache_blackboard)`` AND
-        ``cache_blackboard[N].is_executed() == True``.
+        Resolvable iff ``0 <= N < len(self._blackboard)`` AND
+        ``self._blackboard[N].is_executed() == True`` — resolved directly
+        against the owning ``ToolAgent``'s live, always-persisted
+        blackboard, not a task-local snapshot.
 
     **Step Placeholder** (``<<__sN__>>``)
         Resolvable iff ``0 <= N < len(running_blackboard)`` AND
@@ -127,7 +124,7 @@ class ToolAgentTask(AgentTask):
 
     prepared_steps : list[int]
         Running plan indices ready for execution in the next batch. Must be
-        set by ``_prepare_next_batch()`` and consumed by ``_progress``.
+        set by ``prepare()`` and consumed by ``act()``.
 
     tool_calls_used : int
         Count of non-return tool calls executed so far.
@@ -158,7 +155,6 @@ class ToolAgentTask(AgentTask):
         ``ReActTask``) so it's available uniformly to every subclass,
         including ``PlanActTask``.
     """
-    cache_blackboard: list[BlackboardSlot] = field(default_factory=list)
     running_blackboard: list[BlackboardSlot] = field(default_factory=list)
 
     executed_steps: set[int] = field(default_factory=set)
@@ -179,10 +175,20 @@ class PlanActTask(ToolAgentTask):
 
     Fields
     ------
+    generated_plan : Any
+        Holds the validated (but not yet compiled) plan — the
+        ``list[BlackboardSlot]`` ``think()``/``async_think()`` produce —
+        until ``prepare()``'s first call compiles it into
+        ``running_blackboard``/``batches``/``batch_index``. Unlike
+        ``ReActTask.generated_step``, never reset back to ``NO_VAL``: it's
+        this hook's own one-time-generation marker (``think()`` no-ops once
+        it's set), not a per-round handoff.
+
     batches : list[list[int]]
         Pre-compiled topologically-sorted batches. Each batch is a list of
-        plan-local indices that can execute concurrently. Created during
-        ``_initialize_task()`` via ``_compile_batches_from_deps()``.
+        plan-local indices that can execute concurrently. Compiled from
+        ``generated_plan`` during ``prepare()``'s first call via
+        ``_compile_batches_from_deps()``.
 
         Example: ``[[0, 1], [2, 3], [4]]`` means:
         - Batch 0: steps 0 and 1 execute together
@@ -196,19 +202,23 @@ class PlanActTask(ToolAgentTask):
 
     Workflow
     ~~~~~~~~
-    1. ``_initialize_task()`` creates batches and sets ``batch_index=0``.
-    2. Each ``_progress`` round:
-       - ``_prepare_next_batch()`` reads ``batches[batch_index]``, resolves
-         placeholders for that batch.
-       - ``_execute_prepared_batch()`` runs the batch concurrently.
+    1. ``think()`` generates and validates the whole plan, once, storing it
+       on ``generated_plan``; every later round's ``think()`` is a no-op.
+    2. ``prepare()``'s first call (``batches`` still empty) compiles
+       ``generated_plan`` into batches and sets ``batch_index=0``.
+    3. Each round after that:
+       - ``prepare()`` reads ``batches[batch_index]``, resolves placeholders
+         for that batch.
+       - ``act()`` runs the batch concurrently.
        - ``batch_index`` incremented for the next round.
-    3. When ``batch_index >= len(batches)``, ``_prepare_next_batch()`` raises
-       — in practice this is never reached, since the final batch always
+    4. When ``batch_index >= len(batches)``, ``prepare()`` raises — in
+       practice this is never reached, since the final batch always
        contains the return step, which sets ``task.complete = True`` and
-       ends the ``_progress`` loop first.
+       ends the loop first.
     """
     batches: list[list[int]] = field(default_factory=list)
     batch_index: int = 0
+    generated_plan: Any = NO_VAL
 
 
 @dataclass(slots=True)
@@ -256,8 +266,18 @@ class ReActTask(ToolAgentTask):
     step_meta : list[ReActStepMeta]
         Per-slot metadata for each slot in ``running_blackboard``. Always the
         same length as ``running_blackboard``. Both fields are written by
-        ``_prepare_next_batch``/``_aprepare_next_batch`` at the index of the
-        slot being prepared.
+        ``prepare``/``async_prepare`` at the index of the slot being
+        prepared.
+
+    generated_step : Any
+        Holds the ``(BlackboardSlot, int, str)`` tuple ``think()``/
+        ``async_think()`` produces each round (the freshly-generated,
+        not-yet-applied step, duration, and description), until
+        ``prepare()`` unpacks it and resets this back to ``NO_VAL``.
+        Needed because ``think()`` and ``prepare()`` are independent
+        top-level calls from the base loop — there's no local Python scope
+        to pass the decision through directly the way a single fused
+        method could.
 
     ``retries_used`` is declared on ``ToolAgentTask`` (see that class) — its
     behavior originates here: incremented by ``_generate_next_step`` on each
@@ -266,22 +286,27 @@ class ReActTask(ToolAgentTask):
 
     Workflow
     ~~~~~~~~
-    Each ``_progress`` round:
+    Each ``think``/``prepare``/``act`` round:
 
-    1. ``_prepare_next_batch`` (a single step):
+    1. ``think()`` (a single step):
+       - Validate cursor/step_meta bookkeeping (``_validate_react_prepare_state``).
        - Build a fresh temporary copy of the static base messages.
        - Append a running-plan snapshot and a step-request message.
-       - Request the next step from the LLM.
-       - Validate ``idx == next_step_index``; fill ``running_blackboard[idx]``;
-         write ``step_meta[idx]``; set ``prepared_steps=[idx]``; increment
-         ``next_step_index``.
-    2. ``_execute_prepared_batch`` (base ``ToolAgent``, shared):
+       - Request the next step from the LLM; validate it end-to-end.
+       - Stash the validated step onto ``task.generated_step``.
+    2. ``prepare()``:
+       - Unpack ``task.generated_step``, reset it to ``NO_VAL``.
+       - Cascade-check dependencies; resolve placeholders.
+       - Fill ``running_blackboard[idx]``; write ``step_meta[idx]``; set
+         ``prepared_steps=[idx]``; increment ``next_step_index``.
+    3. ``act()`` (base ``ToolAgent``, final):
        - Run the prepared single-step batch; store the result in
          ``running_blackboard[idx]``.
-    3. Continue until the return tool executes, setting ``task.complete``.
+    4. Continue until the return tool executes, setting ``task.complete``.
     """
     next_step_index: int = 0
     step_meta: list[ReActStepMeta] = field(default_factory=list)
+    generated_step: Any = NO_VAL
 
 
 @dataclass(slots=True)

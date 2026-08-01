@@ -54,8 +54,9 @@ class Agent(AtomicInvokable, ABC):
 
     ``Agent`` owns the full invocation lifecycle shell — input filtering,
     turn selection, pre/post-invoke dispatch, record management — but
-    delegates the actual LLM work to the ``_initialize_task``/``_progress``
-    abstract-or-overridable hooks that concrete subclasses implement.
+    delegates the actual LLM work to the ``_initialize_task``/``think``/
+    ``prepare``/``act`` abstract-or-overridable hooks that concrete
+    subclasses implement.
 
     Lifecycle
     ---------
@@ -71,12 +72,13 @@ class Agent(AtomicInvokable, ABC):
     5. Turns are selected from history if ``context_enabled`` is True.
     6. ``_initialize_task(turns, prompt, inputs)`` builds a task from the
        full filtered ``inputs`` dict untouched — not a slice, not popped of
-       anything; then ``_progress`` runs until ``task.complete``;
-       ``_build_record_from_task`` assembles the completed record.
+       anything; then, every round, unconditionally: ``task = think(task);
+       task = prepare(task); task = act(task)`` — until ``task.complete``.
     7. ``post_invoke`` transforms the raw response into the final result.
-    8. A completed ``AgentRecord`` is always appended to ``_records``, with
+    8. ``_commit_emit`` assembles the completed ``AgentRecord`` (with
        ``inputs`` set to the exact same full dict passed to
-       ``_initialize_task``.
+       ``_initialize_task``) and the final ``AgentResult`` together, and
+       appends the record to ``_records`` unconditionally.
 
     Schema composition
     -------------------
@@ -510,8 +512,8 @@ class Agent(AtomicInvokable, ABC):
     # inherits this unchanged. ToolAgent re-declares it @abstractmethod,
     # since only PlanActAgent/ReActAgent know how to build their own richer
     # ToolAgentTask subclass; the bare AgentTask this base method returns
-    # isn't sufficient for them. _progress stays @abstractmethod here —
-    # every subclass's advance-by-one-round logic genuinely differs.
+    # isn't sufficient for them. act stays @abstractmethod here — every
+    # subclass's advance-by-one-round execution logic genuinely differs.
     def _initialize_task(
         self,
         *,
@@ -535,19 +537,54 @@ class Agent(AtomicInvokable, ABC):
         """
         return AgentTask(turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name=None)
 
+    def think(self, task: AgentTask) -> AgentTask:
+        """Advance ``task``'s reasoning phase by one round.
+
+        Concrete no-op passthrough — base ``Agent`` has no shared reasoning
+        behavior. A family whose phase genuinely reasons before acting
+        overrides it; every other family inherits this unchanged.
+        """
+        return task
+
+    async def async_think(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``think``; default offloads to a worker thread."""
+        return await asyncio.to_thread(self.think, task)
+
+    def prepare(self, task: AgentTask) -> AgentTask:
+        """Advance ``task``'s preparation phase by one round.
+
+        Concrete no-op passthrough, same rationale as ``think``.
+        """
+        return task
+
+    async def async_prepare(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``prepare``; default offloads to a worker thread."""
+        return await asyncio.to_thread(self.prepare, task)
+
     @abstractmethod
-    def _progress(self, task: AgentTask) -> AgentTask:
-        """Advance the task by exactly one round; may set ``task.complete``.
+    def act(self, task: AgentTask) -> AgentTask:
+        """Advance ``task``'s execution phase by one round; may set
+        ``task.complete``.
 
         The base lifecycle loop in ``invoke()``/``async_invoke()`` is
-        ``while not task.complete: task = self._progress(task)``.
-        Implementations must set ``task.generated_response`` and
-        ``task.complete = True`` on the round that finishes the
-        invocation.
+        ``task = think(task); task = prepare(task); task = act(task)``,
+        repeated until ``task.complete``. Implementations must set
+        ``task.generated_response`` and ``task.complete = True`` on the
+        round that finishes the invocation. Hard-abstract — every concrete
+        family performs genuine work here.
         """
         ...
 
     @abstractmethod
+    async def async_act(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``act``.
+
+        Hard-abstract, no thread-offload default — every family that
+        reaches this hook performs real work of its own, same rationale as
+        ``act`` itself.
+        """
+        ...
+
     def render_task(
         self,
         task: AgentTask,
@@ -556,39 +593,45 @@ class Agent(AtomicInvokable, ABC):
     ) -> list[dict[str, str]]:
         """Build the exact send-payload message list for one LLM call.
 
-        Every concrete subclass fully reimplements this rather than
-        composing via ``super()`` — each implementation calls
-        ``_render_system_message``/``_render_historic_messages`` explicitly
-        for the two pieces that render identically everywhere, then lazily
-        builds its own ``task.task_messages`` when empty (fully
-        subclass-specific content). ``additional_messages`` (``None``
-        treated as ``[]``) is appended onto ``task.task_messages`` and
-        **persists** there — generation retries within one phase accumulate
-        across multiple ``render_task`` calls rather than resetting each
-        time. Returns the rendered system message (if any) plus
-        ``task.historic_messages`` plus ``task.task_messages``.
+        Concrete, class-independent pipeline shared by every phase and
+        every family: system message, then historic turns, then this
+        phase's own task messages. Family/phase-specific behavior lives
+        entirely in ``_render_task_messages`` (and, for a family with a
+        richer system-prompt context, in what it passes to
+        ``_render_system_message``) — this method never branches on
+        ``task.system_prompt_name`` itself.
+
+        ``additional_messages`` (``None`` treated as ``[]``) is appended
+        directly onto whatever ``_render_task_messages`` returns — which is
+        ``task.task_messages`` itself, so the extension persists there too,
+        across generation retries within one phase.
 
         Pure computation, no I/O — the same method serves both the sync and
         async lifecycle paths; there is no ``_async_render_task``.
         """
-        ...
+        system = self._render_system_message(task)
+        history = self._render_historic_messages(task)
+        task_messages = self._render_task_messages(task)
+        task_messages.extend(additional_messages or [])
+        return system + history + task_messages
 
-    def _render_system_message(
-        self,
-        task: AgentTask,
-        render_context: dict[str, Any],
-    ) -> list[dict[str, str]]:
+    def _render_system_message(self, task: AgentTask) -> list[dict[str, str]]:
         """Render ``task``'s active system prompt, if any.
 
         Returns ``[]`` when ``task.system_prompt_name`` is ``None``.
         Otherwise renders ``self._system_prompts[task.system_prompt_name]``
-        against ``render_context`` and returns a single-element system
-        message list. An unregistered name raises ``KeyError`` naturally —
-        an internal-contract violation, not guarded against.
+        against ``task.inputs`` and returns a single-element system message
+        list. An unregistered name raises ``KeyError`` naturally — an
+        internal-contract violation, not guarded against.
+
+        A family whose active template needs a richer context than
+        ``task.inputs`` alone (e.g. tool/constants data) overrides this
+        method wholesale, builds its own context, and renders directly —
+        there is no parameterized "extra context" hook here by design.
         """
         if task.system_prompt_name is None:
             return []
-        rendered = self._system_prompts[task.system_prompt_name].render(render_context)
+        rendered = self._system_prompts[task.system_prompt_name].render(task.inputs)
         return [{"role": "system", "content": rendered}]
 
     def _render_historic_messages(self, task: AgentTask) -> list[dict[str, str]]:
@@ -609,6 +652,25 @@ class Agent(AtomicInvokable, ABC):
         task.historic_messages = rendered
         return task.historic_messages
 
+    @abstractmethod
+    def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        """Build this round's phase-specific task messages.
+
+        Every implementation must follow this contract:
+
+        1. If ``task.task_messages`` is already non-empty, this phase's
+           messages are already built for this round — return it as-is
+           (``render_task`` extends it with ``additional_messages`` next).
+        2. Otherwise, build this phase's content from scratch and store it
+           onto ``task.task_messages``.
+        3. Return ``task.task_messages`` — the same list object now stored
+           on the task, not a copy.
+
+        Hard-abstract, no shared content — base ``Agent`` has no phase of
+        its own to render generically.
+        """
+        ...
+
     async def _async_initialize_task(
         self,
         *,
@@ -620,10 +682,6 @@ class Agent(AtomicInvokable, ABC):
         return await asyncio.to_thread(
             self._initialize_task, turns=turns, prompt=prompt, inputs=inputs
         )
-
-    async def _async_progress(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``_progress``; default offloads to a worker thread."""
-        return await asyncio.to_thread(self._progress, task)
 
     def _build_record_from_task(
         self,
@@ -684,6 +742,46 @@ class Agent(AtomicInvokable, ABC):
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
         )
+
+    def _commit_emit(
+        self,
+        task: AgentTask,
+        turns: list[AgentRecord],
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+    ) -> AgentResult:
+        """Assemble, commit, and return this invocation's final ``AgentResult``.
+
+        Shared tail for both ``invoke``/``async_invoke``, called once the
+        task-lifecycle loop has completed and ``post_invoke`` has produced
+        ``result``. Pure computation, no I/O — one method serves both
+        lifecycle paths.
+
+        1. ``record = self._build_record_from_task(task, turns)``, validated
+           as an ``AgentRecord``.
+        2. ``agent_result = self.build_result_from_record(record,
+           result=result, started_at=started_at, ended_at=ended_at)``.
+        3. ``record = replace(record, final_result=agent_result)``.
+        4. ``self._records.append(record)`` — committed unconditionally.
+        5. Return ``agent_result``.
+        """
+        record = self._build_record_from_task(task, turns)
+        if not isinstance(record, AgentRecord):
+            raise AgentInvocationError(
+                f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
+            )
+
+        agent_result = self.build_result_from_record(
+            record,
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+        )
+
+        record = replace(record, final_result=agent_result)
+        self._records.append(record)
+        return agent_result
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -748,9 +846,15 @@ class Agent(AtomicInvokable, ABC):
         """Async analog of ``invoke``.
 
         Lifecycle steps mirror ``invoke`` with ``await`` at pre/post and
-        the ``_async_initialize_task``/``_async_progress`` task-lifecycle
-        hooks. No ``self._invoke_lock`` (unchanged from current
-        implementation, which does not lock async_invoke either).
+        the ``_async_initialize_task``/``async_think``/``async_prepare``/
+        ``async_act`` task-lifecycle hooks. Same lock scope as ``invoke``:
+        only ``_commit_emit`` runs under ``self._invoke_lock`` (a
+        ``threading.RLock`` — safe to hold briefly here since
+        ``_commit_emit`` performs no I/O and never awaits), letting
+        concurrent ``async_invoke`` calls against the same instance
+        genuinely overlap everywhere else. See ``invoke``'s own docstring
+        for the full reasoning and the accepted ``run_id=None`` branching
+        consequence.
         """
         logger.info(f"[Async {self.full_name} started]")
         started_at = datetime.now(timezone.utc)
@@ -796,22 +900,18 @@ class Agent(AtomicInvokable, ABC):
         if self._context_enabled and self._records_window != 0:
             turns = self.get_conversation(run_id=run_id, turns=self._records_window)
 
-        # 6. Task lifecycle: initialize, progress until complete, build record.
+        # 6. Task lifecycle: initialize, think -> prepare -> act until complete.
         logger.debug(f"Agent.{self.name} performing async logic")
         task = await self._async_initialize_task(turns=turns, prompt=prompt, inputs=inputs)
         while not task.complete:
-            task = await self._async_progress(task)
-        record = self._build_record_from_task(task, turns)
-
-        if not isinstance(record, AgentRecord):
-            raise AgentInvocationError(
-                f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
-            )
+            task = await self.async_think(task)
+            task = await self.async_prepare(task)
+            task = await self.async_act(task)
 
         # 7. Output transformation.
         try:
             logger.debug(f"Agent.{self.name}.post_invoke postprocessing result asynchronously")
-            post_inputs[self._post_result_key] = record.generated_response
+            post_inputs[self._post_result_key] = task.generated_response
             post_result = await self._post_invoke.async_invoke(post_inputs)
         except ToolInvocationError:
             raise
@@ -821,17 +921,9 @@ class Agent(AtomicInvokable, ABC):
         final_response = post_result.result
         ended_at = datetime.now(timezone.utc)
 
-        # 8. Result.
-        agent_result = self.build_result_from_record(
-            record,
-            result=final_response,
-            started_at=started_at,
-            ended_at=ended_at,
-        )
-
-        # 9. Record — always appended.
-        record = replace(record, final_result=agent_result)
-        self._records.append(record)
+        # 8-9. Record + result construction, committed to history.
+        with self._invoke_lock:
+            agent_result = self._commit_emit(task, turns, final_response, started_at, ended_at)
 
         logger.info(f"[Async {self.full_name} finished]")
         return agent_result
@@ -839,7 +931,17 @@ class Agent(AtomicInvokable, ABC):
     def invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Invoke the agent with a single input mapping.
 
-        Runs under ``self._invoke_lock``.
+        Only the final commit runs under ``self._invoke_lock`` — everything
+        before it (pre_invoke, turn selection, the full task lifecycle,
+        post_invoke) is unlocked. The only shared, mutable state any of that
+        touches (``self._records``) is only ever *mutated* inside
+        ``_commit_emit``; reads elsewhere are stale-safe by construction
+        (append-only, immutable-once-persisted). Narrowing the lock this way
+        lets true concurrent execution of the actual work happen for both
+        sync and async callers sharing one instance. A deliberate, accepted
+        consequence: concurrent calls using the default ``run_id=None`` may
+        branch the conversation if they race, since nothing serializes the
+        read-tail-then-commit span as a whole anymore.
 
         Steps
         -----
@@ -852,96 +954,85 @@ class Agent(AtomicInvokable, ABC):
         4. ``pre_invoke`` → prompt string (validated).
         5. Select conversation turns according to ``context_enabled``.
         6. ``_initialize_task(turns, prompt, inputs)`` → task; loop
-           ``task = self._progress(task)`` until ``task.complete``; then
-           ``_build_record_from_task(task, turns)`` → record.
-        7. ``post_invoke`` → final result.
-        8. ``build_result_from_record(record, ...)`` → ``AgentResult``.
-        9. Commit the completed ``AgentRecord`` unconditionally.
+           ``task = think(task); task = prepare(task); task = act(task)``
+           until ``task.complete``.
+        7. ``post_invoke`` transforms ``task.generated_response`` into the
+           final result.
+        8-9. Under ``self._invoke_lock``: ``_commit_emit(task, turns,
+           result, started_at, ended_at)`` builds the completed record and
+           ``AgentResult`` together, and commits the record unconditionally.
         """
+        logger.info(f"[{self.full_name} started]")
+        started_at = datetime.now(timezone.utc)
+
+        # 1. Filter inputs.
+        inputs = self.filter_inputs(inputs)
+
+        # 2. Reserved names + non-destructive run_id read.
+        reserved_names = {p.name for p in self.get_reserved_parameters()}
+        run_id = inputs.get("run_id")
+
+        # 3. Slice pre/post inputs, excluding reserved names.
+        pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
+        pre_inputs = {k: v for k, v in inputs.items() if k in pre_names}
+
+        post_names = (
+            {p.name for p in self._post_invoke.parameters}
+            - {self._post_result_key}
+            - reserved_names
+        )
+        post_inputs = {k: v for k, v in inputs.items() if k in post_names}
+
+        # 4. Task prompt.
+        try:
+            logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
+            pre_result = self._pre_invoke.invoke(pre_inputs)
+            raw_prompt = pre_result.result
+        except ToolInvocationError:
+            raise
+        except Exception as e:  # pragma: no cover
+            raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
+
+        if not isinstance(raw_prompt, str):
+            raise AgentInvocationError(
+                f"pre_invoke returned a non-string result "
+                f"(type={type(raw_prompt)!r}); a prompt string is required"
+            )
+        prompt = raw_prompt
+
+        # 5. History.
+        logger.debug(f"Agent.{self.name} selecting turns")
+        turns: list[AgentRecord] = []
+        if self._context_enabled and self._records_window != 0:
+            turns = self.get_conversation(run_id=run_id, turns=self._records_window)
+
+        # 6. Task lifecycle: initialize, think -> prepare -> act until complete.
+        logger.debug(f"Agent.{self.name} performing logic")
+        task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
+        while not task.complete:
+            task = self.think(task)
+            task = self.prepare(task)
+            task = self.act(task)
+
+        # 7. Output transformation.
+        try:
+            logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
+            post_inputs[self._post_result_key] = task.generated_response
+            post_result = self._post_invoke.invoke(post_inputs)
+        except ToolInvocationError:
+            raise
+        except Exception as e:  # pragma: no cover
+            raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
+
+        final_response = post_result.result
+        ended_at = datetime.now(timezone.utc)
+
+        # 8-9. Record + result construction, committed to history.
         with self._invoke_lock:
-            logger.info(f"[{self.full_name} started]")
-            started_at = datetime.now(timezone.utc)
+            agent_result = self._commit_emit(task, turns, final_response, started_at, ended_at)
 
-            # 1. Filter inputs.
-            inputs = self.filter_inputs(inputs)
-
-            # 2. Reserved names + non-destructive run_id read.
-            reserved_names = {p.name for p in self.get_reserved_parameters()}
-            run_id = inputs.get("run_id")
-
-            # 3. Slice pre/post inputs, excluding reserved names.
-            pre_names = {p.name for p in self._pre_invoke.parameters} - reserved_names
-            pre_inputs = {k: v for k, v in inputs.items() if k in pre_names}
-
-            post_names = (
-                {p.name for p in self._post_invoke.parameters}
-                - {self._post_result_key}
-                - reserved_names
-            )
-            post_inputs = {k: v for k, v in inputs.items() if k in post_names}
-
-            # 4. Task prompt.
-            try:
-                logger.debug(f"Agent.{self.name}.pre_invoke preprocessing inputs")
-                pre_result = self._pre_invoke.invoke(pre_inputs)
-                raw_prompt = pre_result.result
-            except ToolInvocationError:
-                raise
-            except Exception as e:  # pragma: no cover
-                raise AgentInvocationError(f"pre_invoke Tool failed: {e}") from e
-
-            if not isinstance(raw_prompt, str):
-                raise AgentInvocationError(
-                    f"pre_invoke returned a non-string result "
-                    f"(type={type(raw_prompt)!r}); a prompt string is required"
-                )
-            prompt = raw_prompt
-
-            # 5. History.
-            logger.debug(f"Agent.{self.name} selecting turns")
-            turns: list[AgentRecord] = []
-            if self._context_enabled and self._records_window != 0:
-                turns = self.get_conversation(run_id=run_id, turns=self._records_window)
-
-            # 6. Task lifecycle: initialize, progress until complete, build record.
-            logger.debug(f"Agent.{self.name} performing logic")
-            task = self._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
-            while not task.complete:
-                task = self._progress(task)
-            record = self._build_record_from_task(task, turns)
-
-            if not isinstance(record, AgentRecord):
-                raise AgentInvocationError(
-                    f"_build_record_from_task returned non-AgentRecord (type={type(record)!r})"
-                )
-
-            # 7. Output transformation.
-            try:
-                logger.debug(f"Agent.{self.name}.post_invoke postprocessing result")
-                post_inputs[self._post_result_key] = record.generated_response
-                post_result = self._post_invoke.invoke(post_inputs)
-            except ToolInvocationError:
-                raise
-            except Exception as e:  # pragma: no cover
-                raise AgentInvocationError(f"post_invoke Tool failed: {e}") from e
-
-            final_response = post_result.result
-            ended_at = datetime.now(timezone.utc)
-
-            # 8. Result.
-            agent_result = self.build_result_from_record(
-                record,
-                result=final_response,
-                started_at=started_at,
-                ended_at=ended_at,
-            )
-
-            # 9. Record — always appended.
-            record = replace(record, final_result=agent_result)
-            self._records.append(record)
-
-            logger.info(f"[{self.full_name} finished]")
-            return agent_result
+        logger.info(f"[{self.full_name} finished]")
+        return agent_result
 
     # ------------------------------------------------------------------ #
     # Serialization

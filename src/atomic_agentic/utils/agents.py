@@ -4,8 +4,11 @@ import json
 import re
 from typing import Any
 
+
 from ..constants.core import NO_VAL
 from ..models.agents.prompts import PromptConfig
+from ..models.agents.thought_models import AgentThought
+from ..constants.agents import THOUGHT_MARKER_PATTERN
 
 __all__ = [
     "extract_dependencies",
@@ -173,3 +176,40 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
 
     walk(obj)
     return deps
+
+def parse_thoughts(text: str) -> list[AgentThought]:
+    """
+    Parse one thinking round's raw text into a list of ``AgentThought2``.
+
+    Line-based, lax format: each category marker (``[CATEGORY]``, any
+    casing, no colon, anchored at a line start) begins a new thought; its
+    content runs until the next marker or the end of ``text``. Bracketed,
+    colon-free, to match ``_format_thoughts``'s own rendering of prior
+    thoughts exactly -- what's shown back to the model round after round as
+    its own history is what it's asked to keep producing, closing the loop
+    a bare colon-terminated form (``CATEGORY:``) previously left open (a
+    model imitating its own bracketed history would drift away from a
+    colon-based instructed format and fail to parse). If no marker is found
+    anywhere, the entire (stripped) text becomes a single ``OTHER``-category
+    thought -- unless it's empty/whitespace-only, in which case no thought
+    is produced at all (an empty prefix isn't unparseable content, it's
+    simply no content).
+
+    Does not know about ``|STOP_THINKING|`` -- callers (``Agent2.think``)
+    strip that before calling this function, keeping parsing pure and
+    independently testable.
+    """
+    matches = list(THOUGHT_MARKER_PATTERN.finditer(text))
+
+    if not matches:
+        stripped = text.strip()
+        return [AgentThought(category="OTHER", content=stripped)] if stripped else []
+
+    thoughts: list[AgentThought] = []
+    for index, match in enumerate(matches):
+        category = match.group(1).upper()
+        content_start = match.end()
+        content_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        content = text[content_start:content_end].strip()
+        thoughts.append(AgentThought(category=category, content=content))
+    return thoughts

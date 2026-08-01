@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+import re
+from ..constants.agents import THOUGHT_CATEGORIES
 from ..models.parameters import ParamSpec
 
 # =============================================================================
@@ -162,6 +163,23 @@ RETURN_TOOL_FULL_NAME = (
 # =============================================================================
 # Keep this explicit so adding local helper names or imports cannot accidentally
 # widen the module's public surface.
+
+THOUGHT_CATEGORIES: tuple[str, ...] = (
+    "QUESTION",
+    "CLARIFICATION",
+    "OBSERVATION",
+    "REASONING",
+    "PLANNING",
+    "ASSUMPTION",
+    "OTHER",
+)
+
+THOUGHT_MARKER_PATTERN = re.compile(
+    r"^\s*\[(" + "|".join(THOUGHT_CATEGORIES) + r")\]\s*",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+STOP_THINKING_SENTINEL = "|STOP_THINKING|"
 
 
 __all__ = [

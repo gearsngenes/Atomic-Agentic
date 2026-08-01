@@ -7,6 +7,7 @@
 # These prompts live beside the ToolAgent protocol constants because they define
 # the LLM-facing side of the same parser/runtime contract.
 
+from ..constants.agents import THINKING_BASE_TEMPLATE, THINKING_TOOL_RESOURCES_BLOCK
 from ..models.agents.prompts import PromptConfig
 
 PLANNER_PROMPT = PromptConfig(
@@ -279,70 +280,97 @@ VALID OUTPUT:
 # {TOOLS}/{LIMIT}/{CONSTANTS} stay off the caller-facing schema above.
 
 SELF_ASK_PROMPT = PromptConfig(
-    template="""\
+    template="""
 # OBJECTIVE
-You are privately reasoning through a task before answering it, using the Self-Ask technique:
-ask yourself one focused follow-up question at a time, answer it using what you already know,
-and decide whether another follow-up question is still needed before you can answer well.
-Your ONLY output is ONE JSON object (no prose, no markdown, no code fences).
+You are a thinker who analyzes a view of a running/active task and 
+produces a list of organized thoughts. This task view can contain a
+description of the task itself, prior thoughts or messages,
+instructions, and/or thoughts you have given for the current task..
 
-# WHAT YOU ARE HELPING WITH
-{role_description}
+# THINKING OUTPUT FORMAT
+Return your thoughts as a block of lines, one thought per line, in this
+EXACT format:
 
-# OUTPUT FORMAT (STRICT)
-Emit exactly ONE JSON object with EXACTLY AND ONLY these keys:
-- "observation": <string or null>  (what you notice about the task or the thoughts so far before asking; null if there is nothing new to note)
-- "question": <string>             (the next follow-up question to ask yourself; non-empty)
-- "answer": <string>               (your answer to that question; non-empty)
-- "keep_thinking": <bool>          (true if another follow-up question is still needed; false if you are ready to respond)
+[CATEGORY] content
+[CATEGORY] content
+...
 
-No other keys. No trailing text.
+The category MUST be contained in `[` and `]`.
+
+# THOUGHT CATEGORIES
+Each thought's category must be exactly one of the following:
+
+- QUESTION: An ambiguity or uncertainty about the task that needs to be
+  resolved before proceeding. A question can potentially be answered by
+  a follow-up thought of any of the below categories.
+- CLARIFICATION: An answer to a question you or a prior thought raised, or an
+  enhancement/refinement to the instructions or actions needed for the task.
+- OBSERVATION: An emergent truth about the current state of the task --
+  something you notice, not something you decide or ask.
+- REASONING: Justification or explanation for why something needs to happen,
+  or why a particular choice is being made.
+- ASSUMPTION: A belief taken as true without confirmation, used only to let
+  thinking move forward. Use sparingly -- only when genuinely necessary.
+- PLANNING: A thought that helps with determining what to do next, a recommended
+  action, or a way to break the task into smaller pieces.
+- OTHER: Any thought that does not fit cleanly into the categories above.
 
 # GUIDANCE
-Ask only what genuinely helps answer the current task -- do not ask questions for their own sake.
-Set "keep_thinking" to false as soon as you have enough to answer well.
+Think sparingly. Do not produce a thought for something that is already
+obvious or self-explanatory from the task or your prior thoughts -- only
+think when it genuinely helps advance or clarify the task.
 
-# EXAMPLE
-{{"observation": "The task depends on an intermediate fact I don't have yet.", "question": "What is that intermediate fact?", "answer": "...", "keep_thinking": true}}
-""",
-    description="SelfAskAgent self-questioning prompt.",
+QUESTION, CLARIFICATION, OBSERVATION, REASONING, and ASSUMPTION thoughts may
+each occur multiple times within a single round -- they represent distinct,
+independent considerations. PLANNING is different: it represents a
+converged decision, not an open consideration. Produce AT MOST ONE PLANNING
+thought per round, synthesizing everything you have reasoned through so
+far -- typically as the last thought in that round, once you are ready to
+commit rather than continue exploring.
+
+# STOP CONDITION
+After you produce your thoughts, if you determine no further thinking
+is needed, then you MUST signal this by using the literal token
+|STOP_THINKING|. Place this signal on its own line after your last thought.
+Do NOT include this token if you are not done thinking.
+
+# THOUGHT LIMIT
+The block of thoughts you produce per round for a given task must contain
+between (AT LEAST) 1 and {thoughts_per_round} (AT MOST) thoughts.
+
+# ROUND LIMIT
+{max_thinking_rounds}
+
+{user_thinking_instructions}""",
+    description="Self-Ask Agent's thinking-phase prompt.",
 )
 
+# Wraps a resolved (non-empty) thinking_instructions render into its own
+# labeled section -- see THINKING_BASE_TEMPLATE's note above. Concatenated
+# around the resolved text, not part of any PromptConfig template.
+THINKING_ADDITIONAL_INSTRUCTIONS_HEADER = """\
+# ADDITIONAL INSTRUCTIONS
+Below are additional instructions provided by the user directly for \
+tailored thinking instructions, WHILE ABIDING by the rules above.
+===Additional Instructions Start===
+"""
+THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n"
 
-PLAN_ASK_PROMPT = PromptConfig(
-    template="""\
-# OBJECTIVE
-You are privately reasoning through a task before answering it, using a batch
-self-questioning technique: in ONE pass, produce the full set of self-asked
-follow-up questions needed to answer the task well, each already answered
-using what you already know. There is no back-and-forth -- decide the whole
-scope of questions now, upfront.
-Your ONLY output is ONE JSON array of thought objects (no prose, no markdown,
-no code fences).
+# Sketch only -- not yet wired to any class (ToolAgent2 doesn't exist yet).
+# Concatenated onto THINKING_BASE_TEMPLATE to form a tool-aware "think"
+# prompt for that family, per prompts.py's TOOL_THINKING_PROMPT.
+THINKING_TOOL_RESOURCES_BLOCK = """
+# ADDITIONAL RESOURCES
+You have access to the following tools, constants, and usage limits while
+thinking about this task. Reference them in your thoughts as needed, but do
+not attempt to invoke tools during thinking -- execution happens in a
+separate phase.
 
-# WHAT YOU ARE HELPING WITH
-{role_description}
+Available tools:
+{TOOLS}
 
-# OUTPUT FORMAT (STRICT)
-Emit exactly ONE JSON array. The array must contain {thought_count_range}
-objects. Each element MUST be a JSON object with EXACTLY AND ONLY these keys:
-- "observation": <string or null>  (what you notice that motivates this question; null if there is nothing new to note)
-- "question": <string>             (a follow-up question; non-empty)
-- "answer": <string>               (your answer to that question; non-empty)
+Available constants:
+{CONSTANTS}
 
-No other keys. No trailing text.
-
-# GUIDANCE
-Only include questions that genuinely help answer the current task well --
-do not pad the list to reach any particular count.
-Cover the task's full scope in this one pass; there is no later round to add
-a question you missed.
-
-# EXAMPLE
-[
-  {{"observation": "The task depends on an intermediate fact I don't have yet.", "question": "What is that intermediate fact?", "answer": "..."}},
-  {{"observation": null, "question": "...", "answer": "..."}}
-]
-""",
-    description="PlanAskAgent batch self-questioning prompt.",
-)
+Tool call budget (non-return calls): {TOOL_CALLS_LIMIT}
+"""

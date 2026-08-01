@@ -140,8 +140,8 @@ class BlackboardSlot:
     result : AtomicResult | NO_VAL
         Full result envelope (``ToolResult``, an ``AtomicResult`` subclass)
         produced by a successful tool invocation — preserved whole for richer
-        tracing (timing, run identity, invoker). Set by
-        ``_execute_prepared_batch()``. Consumers that need the caller-facing
+        tracing (timing, run identity, invoker). Set by ``act()``.
+        Consumers that need the caller-facing
         value (placeholder resolution, previews, ``return_value``) read
         ``result.result`` directly; every such site is already gated by an
         ``is_executed()`` check, so the envelope is guaranteed present there.

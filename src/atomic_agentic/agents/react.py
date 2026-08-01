@@ -24,9 +24,10 @@ keeping recency-relevant results accessible.
 
 Execution
 ---------
-The base ``ToolAgent`` template-method loop calls ``_prepare_next_batch`` once
-per iteration to generate, validate, and stamp a single step; the loop executes
-it and repeats until the return tool is emitted.
+Each round, ``think()`` generates and validates exactly one step via the
+LLM; ``prepare()`` cascade-checks, resolves placeholders, and stamps it
+into the running blackboard; ``act()`` (base ``ToolAgent``, final) executes
+it. Repeats until the return tool is emitted.
 
 Contrast
 --------
@@ -80,32 +81,30 @@ class ReActAgent(ToolAgent):
        - Pre-allocates a fixed-size running blackboard: ``tool_calls_limit + 1`` slots
          to accommodate non-return tool calls plus one return call.
        - Requires ``tool_calls_limit`` to be a concrete integer.
-       - Snapshots cached blackboard entries only when ``context_enabled=True``.
        - Initializes ReAct-specific per-step metadata:
          observability counters and generated step descriptions.
 
-    2. **Preparation** (``_prepare_next_batch`` – single step per turn)
+    2. **Decision** (``think()`` — one step per round)
        - Builds a fresh temporary message list from static base messages.
        - Appends a compact running-plan snapshot containing executed steps,
          descriptions, unresolved args, result_ref placeholders, and any currently
          observable_result values.
-       - Asks the LLM for the next single step.
-       - Step generation returns a planned slot, observability duration, and
-         one-sentence description.
-       - Validates step index matches the expected cursor position.
-       - Validates placeholder dependencies are prior-only.
-       - Resolves placeholders into concrete tool args.
+       - Asks the LLM for the next single step; validates it end-to-end.
+       - Stashes the validated ``(slot, duration, description)`` onto
+         ``task.generated_step`` for ``prepare()`` to apply next round.
+
+    3. **Preparation** (``prepare()``)
+       - Cascade-checks dependencies; resolves placeholders into concrete tool args.
        - Stores the prepared slot in ``running_blackboard[step_index]``.
        - Stores duration and description in the ReAct task's ``step_meta``.
        - Sets ``prepared_steps = [step_index]``.
 
-    3. **Execution**
-       - Base ``_progress`` (via ``_execute_prepared_batch``) executes the single
-         prepared step. Result is stored; loop returns to preparation for the next step.
+    4. **Execution** (``act()``, base ``ToolAgent``, final)
+       - Executes the single prepared step. Result is stored; the loop
+         returns to ``think()`` for the next step.
 
-    4. **Termination**
-       - When the return tool is emitted and executed, ``task.complete`` is set
-         and the ``_progress`` loop exits.
+    5. **Termination**
+       - When the return tool is emitted and executed, ``task.complete`` is set.
        - Running blackboard is persisted by ``_build_record_from_task`` if
          ``context_enabled=True``.
 
@@ -248,6 +247,15 @@ class ReActAgent(ToolAgent):
         a plain feedback string (no class/name prefix); engine-contract violations
         raise ``ToolAgentError``.
 
+        Budget enforcement (step 9 below) is a real boundary check, not a
+        dead guard: unlike ``PlanActAgent`` (whose budget is validated once
+        against the *entire* plan before anything executes), ``ReActAgent``
+        generates one step at a time, so this is the only point that can
+        catch "the model didn't terminate by the last available slot"
+        before that step is ever prepared/executed. Nothing else in the
+        lifecycle enforces it — dropping it (as an earlier pass briefly
+        did) lets an over-budget non-return tool call actually run.
+
         Steps
         -----
         1. Reject non-Mapping parsed values.
@@ -258,11 +266,14 @@ class ReActAgent(ToolAgent):
         6. Extract, type-check, strip, and non-empty-check ``description``.
         7. Convert to ``BlackboardSlot`` via ``_tool_step_dict_to_slot``.
         8. Verify tool is registered; unknown tool → feedback string.
-        9. Require return-tool duration == 0.
-        10. Validate cache refs — three categories: out-of-range, failed-in-conv
+        9. Budget enforcement: if this is the last available slot
+           (``expected_step == self._tool_calls_limit``), the tool must be
+           the return tool.
+        10. Require return-tool duration == 0.
+        11. Validate cache refs — three categories: out-of-range, failed-in-conv
             (with tool+error detail), out-of-conv.
-        11. Validate step dependencies are prior-only.
-        12. Return ``(slot, duration, description)``.
+        12. Validate step dependencies are prior-only.
+        13. Return ``(slot, duration, description)``.
         """
         # 1. Structural check — LLM must return a JSON object, not an array or scalar.
         if not isinstance(parsed, Mapping):
@@ -322,11 +333,18 @@ class ReActAgent(ToolAgent):
         if not self.has_tool(slot.tool):
             return f"next step references unknown tool {slot.tool!r}."
 
-        # 9. Return-tool must use duration 0.
+        # 9. Budget enforcement: the final available slot must be the return step.
+        if expected_step == self._tool_calls_limit and slot.tool != RETURN_TOOL_FULL_NAME:
+            return (
+                f"step {expected_step} is the last available slot under "
+                f"tool_calls_limit={self._tool_calls_limit}; it must be the return tool."
+            )
+
+        # 10. Return-tool must use duration 0.
         if slot.tool == RETURN_TOOL_FULL_NAME and duration != 0:
             return f"return tool must use {DURATION_FIELD!r} 0; got {duration!r}."
 
-        # 10. Cache reference validation — three categories.
+        # 11. Cache reference validation — three categories.
         cache_len = len(cache_blackboard)
         cache_refs = extract_dependencies(slot.args, placeholder_pattern=self.CACHE_REF_PATTERN)
 
@@ -363,7 +381,7 @@ class ReActAgent(ToolAgent):
                 f"{sorted(set(out_of_conv))!r}."
             )
 
-        # 11. Step dependency validation.
+        # 12. Step dependency validation.
         bad_step_deps = [
             dep for dep in slot.step_dependencies
             if dep < 0 or dep >= expected_step
@@ -376,66 +394,38 @@ class ReActAgent(ToolAgent):
 
         return slot, duration, description
 
-    def _apply_react_step_result(
-        self,
-        task: ReActTask,
-        prefix_len: int,
-        generated_slot: BlackboardSlot,
-        observe_duration: int,
-        description: str,
-    ) -> ReActTask:
+    def prepare(self, task: ReActTask) -> ReActTask:
         """
-        Apply one validated ReAct step generation result to the task.
+        Apply this round's already-generated step: cascade-check, resolve
+        placeholders, stamp into the running blackboard, advance the
+        cursor.
 
-        Validates the returned tuple fields, decrements observable counters,
-        fills the preallocated running-blackboard slot, then either cascade-fails
-        the slot (``fail_fast=False`` only) or resolves placeholders and marks it
-        prepared. Advances the cursor and writes ``step_meta``.
+        Unpacks ``task.generated_step`` (set by ``think()``/
+        ``async_think()``) and resets it to ``NO_VAL``. Duration range,
+        return-duration-zero, description shape, and ``PLANNED`` status are
+        already guaranteed by ``_process_next_step_output``'s own success
+        path (not re-checked — dead code, same cleanup ``PlanActAgent``
+        applied to ``_finalize_planact_task``). The running-blackboard slot
+        mismatch/already-filled checks are also dropped:
+        ``running_blackboard`` is fixed-size and index-aligned from
+        allocation (``step=i`` at position ``i``, never reordered), and
+        ``next_step_index`` is written only here, always ``+1``, so slot
+        ``prefix_len`` is targeted exactly once across the whole run.
 
-        ``max_duration`` is recomputed locally from ``prefix_len`` — cheap and
-        derivable, no longer threaded through as a parameter. ``llm_records``
-        is no longer a parameter either: ``_generate_next_step``/
-        ``_agenerate_next_step`` now append directly onto ``task.llm_records``
-        as each attempt happens.
+        **Cascade path** (``fail_fast=False``): if any ``step_dependencies``
+        entry is FAILED in the running blackboard, the return tool raises
+        immediately; non-return slots are marked FAILED and this method
+        returns early with ``prepared_steps`` left empty — ``act()`` will
+        no-op this round.
 
-        **Cascade path** (``fail_fast=False``): if any ``step_dependencies`` entry
-        is FAILED in the running blackboard, the return tool raises immediately;
-        non-return slots are marked FAILED and the method returns early with
-        ``prepared_steps`` left empty — the ``_progress`` loop will skip
-        execution and continue to the next generation turn.
-
-        ``task.task_messages`` is cleared unconditionally before returning —
-        on both the cascade-fail early return and the normal path — since an
-        LLM call happened this round either way and the next round rebuilds
-        fresh.
+        ``task.task_messages`` is cleared unconditionally before
+        returning — on both the cascade-fail early return and the normal
+        path — since an LLM call happened this round either way and the
+        next round rebuilds fresh.
         """
-        max_duration = max(0, self._tool_calls_limit - prefix_len)
-
-        if type(observe_duration) is not int or observe_duration < 0 or observe_duration > max_duration:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: observe_duration must be an int in "
-                f"[0, {max_duration}]; got {observe_duration!r}."
-            )
-
-        if generated_slot.tool == RETURN_TOOL_FULL_NAME and observe_duration != 0:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: return tool must use duration 0; "
-                f"got {observe_duration!r}."
-            )
-
-        if type(description) is not str:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: description must be a string; "
-                f"got {type(description).__name__!r}."
-            )
-
-        description = description.strip()
-
-        if not generated_slot.is_planned():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: generated slot must be planned; "
-                f"got status={generated_slot.status!r}."
-            )
+        prefix_len = task.next_step_index
+        generated_slot, observe_duration, description = task.generated_step
+        task.generated_step = NO_VAL
 
         # A successful generation turn consumed any raw results that were visible.
         for meta in task.step_meta:
@@ -444,17 +434,6 @@ class ReActAgent(ToolAgent):
 
         # Fill the preallocated running-blackboard slot.
         slot = task.running_blackboard[prefix_len]
-        if slot.step != prefix_len:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: running slot step mismatch at index {prefix_len}: "
-                f"slot.step={slot.step}."
-            )
-
-        if not slot.is_empty():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: attempted to prepare into non-empty slot {prefix_len}."
-            )
-
         slot.tool = generated_slot.tool
         slot.args = generated_slot.args
         slot.result = NO_VAL
@@ -469,7 +448,7 @@ class ReActAgent(ToolAgent):
                 task.step_meta[prefix_len].description = description
                 task.next_step_index = prefix_len + 1
                 task.task_messages.clear()
-                return task  # prepared_steps stays []; _invoke loop will skip execute and continue
+                return task  # prepared_steps stays []; act() will no-op this round
 
         # Resolve placeholders after stamping the planned slot into the running task.
         slot.resolved_args = self._resolve_placeholders(slot.args, task=task)
@@ -485,29 +464,25 @@ class ReActAgent(ToolAgent):
         task.task_messages.clear()
         return task
 
+    async def async_prepare(self, task: ReActTask) -> ReActTask:
+        """Async mirror of ``prepare``. Direct passthrough — ``prepare``
+        has no I/O of its own to justify a thread offload."""
+        return self.prepare(task)
+
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
-    def render_task(
-        self,
-        task: ReActTask,
-        *,
-        additional_messages: list[dict[str, str]] | None = None,
-    ) -> list[dict[str, str]]:
+    def _render_task_messages(self, task: ReActTask) -> list[dict[str, str]]:
         """
-        Render the orchestrator system prompt, prior turns, and the current
-        running-plan snapshot for one ReAct step generation.
+        Build this round's 3-message thread: banner / running-plan
+        snapshot / next-call instruction.
 
-        Absorbs the running-plan-snapshot construction formerly done by
-        ``_build_react_messages`` (removed as a standalone method).
-        ``task.task_messages`` is a 3-message thread built lazily each
-        round — cleared by ``_apply_react_step_result`` once the round
-        commits, so it is empty again at the start of every new round:
+        Build-once contract: returns ``task.task_messages`` as-is if
+        already non-empty (cleared by ``prepare()`` at the end of the
+        prior round, so this branch is fresh at the start of every new
+        round):
 
-        1. user — the current task, wrapped in a ``===== CURRENT TASK
-           =====`` banner (custom delimiter, matching
-           ``PlanActAgent.render_task``; avoids colliding with real code in
-           task prompts or AA's own ``<<...>>`` placeholder syntax).
+        1. user — ``self._render_task_banner(task)`` directly.
         2. assistant — a thin, directive-free snapshot: a one-line header
            plus the running-plan data. Reads as state, not instruction,
            matching ``ToolAgent.render_turn``'s ``CACHED STEPS`` convention.
@@ -525,81 +500,70 @@ class ReActAgent(ToolAgent):
         ``status="FAILED"`` and ``error``; they carry no ``result_ref`` (so
         the LLM cannot attempt to reference a non-existent result).
         """
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        render_context = {
-            ToolAgent.TOOLS_FIELD: self.actions_context(),
-            ToolAgent.LIMIT_FIELD: limit_text,
-            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
-        }
-        system = self._render_system_message(task, render_context)
-        historic = self._render_historic_messages(task)
+        if task.task_messages:
+            return task.task_messages
 
-        if not task.task_messages:
-            prefix_len = task.next_step_index
-            max_duration = max(0, self._tool_calls_limit - prefix_len)
+        prefix_len = task.next_step_index
+        max_duration = max(0, self._tool_calls_limit - prefix_len)
 
-            running_records: list[dict[str, Any]] = []
-            for idx in range(prefix_len):
-                slot = task.running_blackboard[idx]
+        running_records: list[dict[str, Any]] = []
+        for idx in range(prefix_len):
+            slot = task.running_blackboard[idx]
 
-                if slot.is_executed():
-                    record: dict[str, Any] = {
-                        STEP_FIELD: slot.step,
-                        DESCRIPTION_FIELD: task.step_meta[idx].description,
-                        TOOL_FIELD: slot.tool,
-                        ARGS_FIELD: slot.args,
-                        "result_ref": f"<<__s{idx}__>>",
-                        "run_id": slot.result.run_id,
-                    }
-                    if task.step_meta[idx].observable > 0:
-                        record["observable_result"] = self._preview_blackboard_result(slot.result.result)
-                    running_records.append(record)
+            if slot.is_executed():
+                record: dict[str, Any] = {
+                    STEP_FIELD: slot.step,
+                    DESCRIPTION_FIELD: task.step_meta[idx].description,
+                    TOOL_FIELD: slot.tool,
+                    ARGS_FIELD: slot.args,
+                    "result_ref": f"<<__s{idx}__>>",
+                    "run_id": slot.result.run_id,
+                }
+                if task.step_meta[idx].observable > 0:
+                    record["observable_result"] = self._preview_blackboard_result(slot.result.result)
+                running_records.append(record)
 
-                elif slot.is_failed():
-                    running_records.append({
-                        STEP_FIELD: slot.step,
-                        DESCRIPTION_FIELD: task.step_meta[idx].description,
-                        TOOL_FIELD: slot.tool,
-                        ARGS_FIELD: slot.args,
-                        "status": "FAILED",
-                        "error": str(slot.error),
-                    })
-                # Empty/PLANNED slots are not yet part of the running plan; skip.
+            elif slot.is_failed():
+                running_records.append({
+                    STEP_FIELD: slot.step,
+                    DESCRIPTION_FIELD: task.step_meta[idx].description,
+                    TOOL_FIELD: slot.tool,
+                    ARGS_FIELD: slot.args,
+                    "status": "FAILED",
+                    "error": str(slot.error),
+                })
+            # Empty/PLANNED slots are not yet part of the running plan; skip.
 
-            if running_records:
-                snapshot_text = (
-                    f"STEPS 0-{prefix_len - 1} SO FAR:\n\n"
-                    + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
-                )
-            else:
-                snapshot_text = "STEPS SO FAR:\nNo steps executed yet."
+        if running_records:
+            snapshot_text = (
+                f"STEPS 0-{prefix_len - 1} SO FAR:\n\n"
+                + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
+            )
+        else:
+            snapshot_text = "STEPS SO FAR:\nNo steps executed yet."
 
-            task.task_messages = [
-                {
-                    "role": "user",
-                    "content": f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK =====",
-                },
-                {"role": "assistant", "content": snapshot_text},
-                {
-                    "role": "user",
-                    "content": (
-                        "Produce the NEXT BEST single tool call for the current task. "
-                        "Pick the return tool if the running plan above has completed all needed work. "
-                        "Do NOT repeat a tool call or redo work already available above or in cache — "
-                        "reuse its result_ref, cache, or constant placeholder instead of recomputing or re-deriving the value."
-                        + (
-                            " Some steps above are marked FAILED — they have no result_ref; do not reference one."
-                            if any(r.get("status") == "FAILED" for r in running_records)
-                            else ""
-                        )
-                        + " Output exactly one JSON object with keys {step, tool, args, duration, description}."
-                        + f" duration must be an int from 0 to {max_duration}."
-                    ),
-                },
-            ]
+        task.task_messages = [
+            self._render_task_banner(task),
+            {"role": "assistant", "content": snapshot_text},
+            {
+                "role": "user",
+                "content": (
+                    "Produce the NEXT BEST single tool call for the current task. "
+                    "Pick the return tool if the running plan above has completed all needed work. "
+                    "Do NOT repeat a tool call or redo work already available above or in cache — "
+                    "reuse its result_ref, cache, or constant placeholder instead of recomputing or re-deriving the value."
+                    + (
+                        " Some steps above are marked FAILED — they have no result_ref; do not reference one."
+                        if any(r.get("status") == "FAILED" for r in running_records)
+                        else ""
+                    )
+                    + " Output exactly one JSON object with keys {step, tool, args, duration, description}."
+                    + f" duration must be an int from 0 to {max_duration}."
+                ),
+            },
+        ]
 
-        task.task_messages.extend(additional_messages or [])
-        return system + historic + task.task_messages
+        return task.task_messages
 
     def _initialize_task(
         self,
@@ -613,15 +577,11 @@ class ReActAgent(ToolAgent):
 
         Pre-allocates the fixed-size running blackboard and stamps the
         orchestrator system-prompt name. No LLM call here — step planning
-        is deferred to ``_prepare_next_batch``. No async override needed:
-        unlike ``PlanActAgent``, there is no blocking I/O in this hook to
-        bridge natively.
+        is deferred to ``think()``. No async override needed: unlike
+        ``PlanActAgent``, there is no blocking I/O in this hook to bridge
+        natively.
         """
         valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
-
-        cache_blackboard = (
-            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
-        )
 
         running_blackboard = [BlackboardSlot(step=i) for i in range(self._tool_calls_limit + 1)]
 
@@ -630,7 +590,6 @@ class ReActAgent(ToolAgent):
             inputs=inputs,
             user_prompt=prompt,
             system_prompt_name="reason_then_act",
-            cache_blackboard=cache_blackboard,
             running_blackboard=running_blackboard,
             executed_steps=set(),
             prepared_steps=[],
@@ -653,7 +612,7 @@ class ReActAgent(ToolAgent):
         ``render_task`` call on each failed attempt.
 
         Observable counters are NOT decremented here — only when a step
-        commits in ``_apply_react_step_result``.
+        commits in ``prepare()``.
 
         Steps
         -----
@@ -720,7 +679,7 @@ class ReActAgent(ToolAgent):
             result = self._process_next_step_output(
                 parsed=parsed,
                 expected_step=expected_step,
-                cache_blackboard=task.cache_blackboard,
+                cache_blackboard=self._blackboard,
                 max_duration=max_duration,
                 valid_cache_indices=task.valid_cache_indices,
                 failed_cache_indices=task.failed_cache_indices,
@@ -794,7 +753,7 @@ class ReActAgent(ToolAgent):
             result = self._process_next_step_output(
                 parsed=parsed,
                 expected_step=expected_step,
-                cache_blackboard=task.cache_blackboard,
+                cache_blackboard=self._blackboard,
                 max_duration=max_duration,
                 valid_cache_indices=task.valid_cache_indices,
                 failed_cache_indices=task.failed_cache_indices,
@@ -822,54 +781,31 @@ class ReActAgent(ToolAgent):
             slot, duration, description = result
             return slot, duration, description
 
-    def _prepare_next_batch(self, task: ReActTask) -> ReActTask:
+    def think(self, task: ReActTask) -> ReActTask:
         """
-        Prepare the next single-step batch via one LLM call.
+        Generate this round's next step via the LLM, without applying it.
 
-        ReAct generates exactly one step per turn; ``_generate_next_step``
-        handles rendering (via ``render_task``), the LLM call, JSON
-        extraction, spec validation, and generation retries.
+        ``_validate_react_prepare_state`` runs first — a precondition on
+        the cursor/step_meta bookkeeping before deciding what to request,
+        not part of this pass's dead-guard drops. No
+        ``if task.prepared_steps: raise`` re-entry guard here — dead by the
+        same construction as base ``ToolAgent.act()``'s dropped guard (1c):
+        ``act()`` always leaves ``task.prepared_steps`` empty by the time
+        the next round's ``think()`` runs.
 
-        Execution
-        ~~~~~~~~~
-        1. **Guard**: ``prepared_steps`` must be empty.
-        2. **Validate state**: cursor bounds, prior-step processing.
-        3. **Step generation**: call ``_generate_next_step``, which returns
-           one planned ``BlackboardSlot``, an observability duration, and a
-           step description — ``task.llm_records``/``task.retries_used`` are
-           mutated directly inside it.
-        4. **Commit**: delegate to ``_apply_react_step_result`` — decrement
-           observability counters on prior steps, stamp the slot into the
-           running blackboard, resolve placeholders, mark prepared, update
-           ``step_meta``, clear ``task.task_messages``.
-
-        Raises
-        ------
-        ToolAgentError
-            If ``prepared_steps`` is non-empty, the cursor is out of bounds, or
-            the generation retry budget is exhausted.
+        The generated ``(slot, duration, description)`` is stashed on
+        ``task.generated_step`` for ``prepare()`` to consume next; applying
+        it (resolve placeholders, cascade-check, stamp into
+        ``running_blackboard``) is deliberately not done here.
         """
-        if task.prepared_steps:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
-            )
-
-        prefix_len = task.next_step_index
         self._validate_react_prepare_state(task)
-        generated_slot, observe_duration, description = self._generate_next_step(task=task)
-        return self._apply_react_step_result(task, prefix_len, generated_slot, observe_duration, description)
+        task.generated_step = self._generate_next_step(task=task)
+        return task
 
-    async def _aprepare_next_batch(self, task: ReActTask) -> ReActTask:
-        """
-        Async override: uses ``_agenerate_next_step`` so the per-step LLM call
-        goes through ``async_invoke`` rather than a worker thread.
-        """
-        if task.prepared_steps:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
-            )
-
-        prefix_len = task.next_step_index
+    async def async_think(self, task: ReActTask) -> ReActTask:
+        """Async mirror of ``think``: uses ``_agenerate_next_step`` so the
+        per-step LLM call goes through ``async_invoke`` rather than a
+        worker thread."""
         self._validate_react_prepare_state(task)
-        generated_slot, observe_duration, description = await self._agenerate_next_step(task=task)
-        return self._apply_react_step_result(task, prefix_len, generated_slot, observe_duration, description)
+        task.generated_step = await self._agenerate_next_step(task=task)
+        return task

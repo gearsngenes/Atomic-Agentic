@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Literal, Mapping, Optional
 
-from .thinking import ThinkingAgent
 from .prompts import SELF_ASK_PROMPT
 from ..constants.agents import (
     ANSWER_FIELD,

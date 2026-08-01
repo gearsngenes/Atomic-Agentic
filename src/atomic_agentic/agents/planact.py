@@ -23,9 +23,12 @@ level execute together.
 
 Execution
 ---------
-The base ``ToolAgent`` template-method loop calls ``_prepare_next_batch`` once
-per batch to resolve placeholders and mark steps prepared; the loop executes
-each prepared batch concurrently and then advances the cursor.
+Plan generation and validation happen once, in ``think()``, gated on
+``task.generated_plan``. Compilation into concurrent batches happens once,
+on ``prepare()``'s first call, gated on ``task.batches``. Every round after
+that, ``prepare()`` resolves placeholders for the next compiled batch and
+marks its steps prepared; ``act()`` (base ``ToolAgent``, final) executes
+the batch concurrently and advances the cursor.
 
 Contrast
 --------
@@ -68,24 +71,24 @@ class PlanActAgent(ToolAgent):
 
     **Design**: PlanActAgent implements a **static planning** strategy:
 
-    1. **Initialization** (``_initialize_task``)
+    1. **Planning** (``think()``, once — no-op on later rounds)
        - LLM generates complete plan as a JSON array of steps (one-shot)
        - Each step: ``{"tool": "<name>", "args": {...}}``, optionally with "await"
-       - Plan is normalized (return moved to end, added if missing)
-       - Compiled into topologically-sorted batches via ``_finalize_planact_task``
-       - Running blackboard allocated with slots for all planned steps
+       - Plan is normalized (return moved to end, added if missing) and validated
+       - Validated plan stored on ``task.generated_plan``
 
-    2. **Compilation**
+    2. **Compilation** (``prepare()``, first call only)
        - Each step's args are scanned for ``<<__sN__>>`` placeholders to extract
          plan-local dependencies
        - Topological sort produces concurrent batches (steps with identical dependency
          level execute together)
        - Return step is always isolated as the final batch
+       - ``running_blackboard``/``batches``/``batch_index`` assigned onto the task
 
-    3. **Execution** (``_progress``, base ``ToolAgent``)
-       - ``_prepare_next_batch()`` reads next batch from ``task.batches[task.batch_index]``
+    3. **Execution** (``prepare()``/``act()``, every round)
+       - ``prepare()`` reads next batch from ``task.batches[task.batch_index]``
        - Resolves placeholders in parallel-executable steps
-       - ``_execute_prepared_batch()`` (base ``ToolAgent``) runs the batch concurrently;
+       - ``act()`` (base ``ToolAgent``, final) runs the batch concurrently;
          sets ``task.complete`` when the return step executes
        - Increments batch_index; loop continues until all batches consumed
 
@@ -436,43 +439,31 @@ class PlanActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
-    def render_task(
-        self,
-        task: PlanActTask,
-        *,
-        additional_messages: list[dict[str, str]] | None = None,
-    ) -> list[dict[str, str]]:
+    def _render_task_messages(self, task: PlanActTask) -> list[dict[str, str]]:
         """
-        Render the planning system prompt, prior turns, and this
-        invocation's decompose-into-plan request.
+        Build this invocation's single decompose-into-plan request.
 
-        ``task.task_messages`` is a single message the first time it's
-        built — ``task.user_prompt`` wrapped in a ``===== CURRENT TASK
-        =====`` banner (a custom delimiter, not markdown fences, to avoid
-        colliding with real code in task prompts or AA's own ``<<...>>``
-        placeholder syntax) followed by the decompose-into-JSON
-        instruction; generation retries extend it via
-        ``additional_messages``.
+        Build-once contract: returns ``task.task_messages`` as-is if
+        already non-empty. Otherwise combines
+        ``self._render_task_banner(task)``'s content with the decompose
+        instruction into one user message — the exact text today's
+        ``render_task`` produced, now composed through the shared base
+        ``Agent.render_task`` pipeline (1a) instead of a full
+        reimplementation.
         """
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        render_context = {
-            ToolAgent.TOOLS_FIELD: self.actions_context(),
-            ToolAgent.LIMIT_FIELD: limit_text,
-            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
-        }
-        system = self._render_system_message(task, render_context)
-        historic = self._render_historic_messages(task)
-        if not task.task_messages:
-            task.task_messages = [{
-                "role": "user",
-                "content": (
-                    f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK =====\n\n"
-                    "Using the current task above and the prior chat history, construct "
-                    "a valid JSON array that decomposes it into tool-call steps."
-                ),
-            }]
-        task.task_messages.extend(additional_messages or [])
-        return system + historic + task.task_messages
+        if task.task_messages:
+            return task.task_messages
+
+        banner = self._render_task_banner(task)
+        task.task_messages = [{
+            "role": "user",
+            "content": (
+                f"{banner['content']}\n\n"
+                "Using the current task above and the prior chat history, construct "
+                "a valid JSON array that decomposes it into tool-call steps."
+            ),
+        }]
+        return task.task_messages
 
     def _generate_plan(self, *, task: PlanActTask) -> list[BlackboardSlot]:
         """
@@ -500,16 +491,17 @@ class PlanActAgent(ToolAgent):
         Parameters
         ----------
         task : PlanActTask
-            Current task — supplies ``cache_blackboard``/
-            ``valid_cache_indices``/``failed_cache_indices`` for validation
-            and accumulates ``llm_records``/``retries_used`` directly.
+            Current task — supplies ``valid_cache_indices``/
+            ``failed_cache_indices`` for validation (cache references are
+            validated against ``self._blackboard`` directly) and
+            accumulates ``llm_records``/``retries_used`` directly.
 
         Returns
         -------
         list[BlackboardSlot]
             Fully normalized and validated planned slots (not yet assigned
-            onto ``task`` — the caller finalizes via
-            ``_finalize_planact_task``).
+            onto ``task`` — the caller (``think()``/``async_think()``)
+            compiles batches and assigns them).
 
         Raises
         ------
@@ -555,7 +547,7 @@ class PlanActAgent(ToolAgent):
             # Spec validation
             result = self._process_plan_output(
                 parsed=parsed,
-                cache_blackboard=task.cache_blackboard,
+                cache_blackboard=self._blackboard,
                 valid_cache_indices=task.valid_cache_indices,
                 failed_cache_indices=task.failed_cache_indices,
             )
@@ -617,7 +609,7 @@ class PlanActAgent(ToolAgent):
             # Spec validation
             result = self._process_plan_output(
                 parsed=parsed,
-                cache_blackboard=task.cache_blackboard,
+                cache_blackboard=self._blackboard,
                 valid_cache_indices=task.valid_cache_indices,
                 failed_cache_indices=task.failed_cache_indices,
             )
@@ -646,106 +638,79 @@ class PlanActAgent(ToolAgent):
         inputs: dict,
     ) -> PlanActTask:
         """
-        One-shot plan generation and compilation into concurrent batches.
+        Build a bare ``PlanActTask``. No LLM call here — plan generation
+        moved to ``think()``, gated on ``task.batches`` being empty, so it
+        never re-runs once the plan exists.
 
-        Constructs the ``PlanActTask`` early — before generation runs —
-        since ``_generate_plan`` needs an existing task to call
-        ``render_task`` against. Computes ``valid_cache_indices``/
-        ``failed_cache_indices`` internally via ``_compute_cache_index_sets``
-        — this hook's shared base signature doesn't receive them.
+        Computes ``valid_cache_indices``/``failed_cache_indices`` via
+        ``_compute_cache_index_sets(turns)`` — this hook's shared base
+        signature doesn't receive them. ``running_blackboard``/``batches``/
+        ``batch_index`` stay at their dataclass defaults (``[]``, ``[]``,
+        ``0``) until ``think()`` populates them.
         """
         valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
-        cache_blackboard = (
-            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
-        )
-        task = PlanActTask(
+        return PlanActTask(
             turns=turns,
             inputs=inputs,
             user_prompt=prompt,
             system_prompt_name="plan_first",
-            cache_blackboard=cache_blackboard,
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )
-        planned_slots = self._generate_plan(task=task)
-        self._finalize_planact_task(task, planned_slots)
+
+    def think(self, task: PlanActTask) -> PlanActTask:
+        """
+        Generate and validate the whole plan, once.
+
+        No-op once ``task.generated_plan`` is set — a one-shot planner has
+        nothing further to decide after its single generation call.
+        ``_generate_plan`` already retries internally on parse/validation
+        failure, so a validated plan is guaranteed by the time this
+        returns. Compilation into batches is deliberately not done here —
+        that's deterministic bookkeeping, ``prepare()``'s job (its first
+        call compiles from ``task.generated_plan``).
+        """
+        if task.generated_plan is not NO_VAL:
+            return task
+
+        task.generated_plan = self._generate_plan(task=task)
         task.task_messages.clear()
         return task
 
-    async def _async_initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> PlanActTask:
-        """
-        Async override: uses ``_agenerate_plan`` so the planning LLM call
-        goes through ``async_invoke`` rather than a worker thread — real
-        override, not the inherited ``asyncio.to_thread`` default, since
-        this hook performs real LLM I/O.
-        """
-        valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
-        cache_blackboard = (
-            [slot.copy() for slot in self._blackboard] if self.context_enabled else []
-        )
-        task = PlanActTask(
-            turns=turns,
-            inputs=inputs,
-            user_prompt=prompt,
-            system_prompt_name="plan_first",
-            cache_blackboard=cache_blackboard,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
-        )
-        planned_slots = await self._agenerate_plan(task=task)
-        self._finalize_planact_task(task, planned_slots)
+    async def async_think(self, task: PlanActTask) -> PlanActTask:
+        """Async mirror of ``think``: uses ``_agenerate_plan`` so the
+        planning LLM call goes through ``async_invoke`` rather than a
+        worker thread."""
+        if task.generated_plan is not NO_VAL:
+            return task
+
+        task.generated_plan = await self._agenerate_plan(task=task)
         task.task_messages.clear()
         return task
-
-    def _finalize_planact_task(
-        self,
-        task: PlanActTask,
-        planned_slots: list[BlackboardSlot],
-    ) -> None:
-        """Validate plan structure, compile batches, and assign onto ``task`` in place."""
-        if not planned_slots:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: generated plan is empty."
-            )
-
-        return_idx = len(planned_slots) - 1
-        if planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: generated plan does not end with return tool."
-            )
-
-        batches = self._compile_batches_from_deps(
-            planned_slots=planned_slots,
-            return_idx=return_idx,
-        )
-
-        task.running_blackboard = planned_slots
-        task.batches = batches
-        task.batch_index = 0
 
     # ------------------------------------------------------------------ #
     # Prepare next batch
     # ------------------------------------------------------------------ #
-    def _prepare_next_batch(self, task: PlanActTask) -> PlanActTask:
+    def prepare(self, task: PlanActTask) -> PlanActTask:
         """
         Prepare the next pre-compiled batch for execution.
 
-        PlanActAgent uses pre-compiled batches created during initialization. This method
-        reads the next batch indices, resolves placeholders, marks those slots prepared,
-        and populates the prepared_steps list.
+        Compiles the validated plan into topologically-sorted batches on
+        first entry (``task.batches`` empty), reading ``task.generated_plan``
+        (set by ``think()``). Every later round's call skips straight to
+        batch resolution below — compilation is a one-time job, not
+        repeated per round. This method then reads the next batch indices,
+        resolves placeholders, marks those slots prepared, and populates
+        the prepared_steps list.
 
         Execution
         ~~~~~~~~~
-        1. **Validate task**: prepared_steps must be empty
-        2. **Read next batch**: Get batch indices from ``task.batches[task.batch_index]``
-        3. **Validate non-empty**: Batch must have at least one step
-        4. **For each step in batch**:
+        0. **Compile on first entry**: if ``task.batches`` is empty, compile
+           ``task.generated_plan`` via ``_compile_batches_from_deps`` and
+           assign ``running_blackboard``/``batches``/``batch_index=0``
+        1. **Read next batch**: Get batch indices from ``task.batches[task.batch_index]``
+        2. **Validate non-empty**: Batch must have at least one step
+        3. **For each step in batch**:
            - Validate bounds: index must be within running_blackboard
            - Validate not already executed or prepared
            - Validate slot is currently planned
@@ -756,14 +721,19 @@ class PlanActAgent(ToolAgent):
            - Call ``_resolve_placeholders(slot.args, task=task)``
            - Store resolved args in ``slot.resolved_args``
            - Mark slot ``status="prepared"``
-        5. **Set prepared_steps**: Indices of steps that passed the cascade check and were
+        4. **Set prepared_steps**: Indices of steps that passed the cascade check and were
            prepared; may be empty if all steps in the batch were cascade-failed
-        6. **Advance cursor**: Increment ``task.batch_index`` for next iteration
+        5. **Advance cursor**: Increment ``task.batch_index`` for next iteration
 
         Concurrency
         ~~~~~~~~~~~
         All steps in the batch can execute concurrently since the topological sort
         guarantee ensures no step in a batch depends on another step in the same batch.
+
+        Note: no ``if task.prepared_steps: raise`` re-entry guard here —
+        dead by the same construction as base ``ToolAgent.act()``'s dropped
+        guard (1c): ``act()`` always leaves ``task.prepared_steps`` empty
+        by the time the next round's ``prepare()`` runs.
 
         Parameters
         ----------
@@ -779,15 +749,18 @@ class PlanActAgent(ToolAgent):
         ------
         ToolAgentError
             On any of:
-            - prepared_steps not empty
             - batch_index out of bounds
             - Batch validation failure
             - Placeholder resolution failure
         """
-        if task.prepared_steps:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: cannot prepare next batch while prepared_steps is non-empty."
+        if not task.batches:
+            planned_slots = task.generated_plan
+            task.running_blackboard = planned_slots
+            task.batches = self._compile_batches_from_deps(
+                planned_slots=planned_slots,
+                return_idx=len(planned_slots) - 1,
             )
+            task.batch_index = 0
 
         if task.batch_index >= len(task.batches):
             raise ToolAgentError(
@@ -816,12 +789,6 @@ class PlanActAgent(ToolAgent):
                 )
 
             slot = board[i]
-
-            # Invariant: slot.step is plan-local index.
-            if slot.step != i:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: running slot step mismatch at index {i}: slot.step={slot.step}."
-                )
 
             if slot.is_executed():
                 raise ToolAgentError(
@@ -869,3 +836,8 @@ class PlanActAgent(ToolAgent):
             f"with steps {task.prepared_steps}."
         )
         return task
+
+    async def async_prepare(self, task: PlanActTask) -> PlanActTask:
+        """Async mirror of ``prepare``. Direct passthrough — ``prepare``
+        has no I/O of its own to justify a thread offload."""
+        return self.prepare(task)
