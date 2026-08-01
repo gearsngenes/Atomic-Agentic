@@ -14,10 +14,11 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
 
 # --- the role_prompt is a PromptConfig with its OWN two caller-facing
 #     placeholders, {max_word_count}/{writing_rules} -- these are real,
-#     required extra_parameters on the agent's schema (role_prompt's own
-#     discovered placeholders are the sole legitimate extra_parameters
-#     source on ThinkingAgent), supplied at invoke() time like any other
-#     input, distinct from role_description below. writing_rules is
+#     required extra_parameters on the agent's schema (role_prompt's and
+#     thinking_instructions' own discovered placeholders are SelfAskAgent's
+#     two extra_parameters sources, reconciled against each other at
+#     construction), supplied at invoke() time like any other input,
+#     distinct from thinking_instructions below. writing_rules is
 #     deliberately genre-agnostic craft guidance, not genre-specific --
 #     genre lives in the task prompt itself, alongside a starting premise ---
 STORY_WRITER_ROLE_PROMPT = PromptConfig(
@@ -40,24 +41,32 @@ nothing decorative, nothing wasted.
     },
 )
 
-# --- role_description is separate from role_prompt: a narrow, non-parameter
-#     pointer visible only to the self-ask thinking phase's internal render
-#     context. It deliberately does NOT repeat the literal word count or
-#     writing_rules text -- the self-ask rounds reason about the twist in
-#     the abstract; only the reply phase (which renders the fully-resolved
-#     role_prompt) ever sees the literal 1000/writing_rules values ---
+# --- thinking_instructions is separate from role_prompt: extra guidance
+#     visible only to the self-ask thinking phase's own prompt, spliced into
+#     its reserved slot. It deliberately does NOT repeat the literal word
+#     count or writing_rules text -- the self-ask rounds reason about the
+#     twist in the abstract; only the reply phase (which renders the
+#     fully-resolved role_prompt) ever sees the literal 1000/writing_rules
+#     values ---
 story_agent = SelfAskAgent(
     name="Twist_Story_Writer",
     namespace="examples",
     llm_engine=llm,
     role_prompt=STORY_WRITER_ROLE_PROMPT,
-    role_description=(
-        "Planning and writing a tightly word-budgeted short story built around "
-        "a twist ending that recontextualizes the whole narrative."
+    thinking_instructions=(
+        "You are planning a tightly word-budgeted short story built around a "
+        "twist ending that recontextualizes the whole narrative. Each round, "
+        "work through several angles at once rather than one thought at a "
+        "time -- e.g. an OBSERVATION about what the premise implies, a "
+        "QUESTION about what the twist could be, an ASSUMPTION you need to "
+        "commit to, and an INSTRUCTION about what must be planted earlier "
+        "for it to land -- as separate thoughts in the same round. Focus "
+        "your thoughts on what the twist should be and what needs to be set "
+        "up beforehand for it to land."
     ),
     description="A short-fiction writer that scopes a twist ending via self-questioning before drafting.",
     max_thinking_rounds=8,
-    generation_retries=2,
+    thoughts_per_round=4,
 )
 
 # --- the task itself declares genre + a small seed premise -- an open-ended
@@ -84,8 +93,9 @@ result = story_agent.invoke({
 
 print(f"TASK: {task}\n")
 print("SELF-ASK THOUGHTS (scoping the twist before writing):")
-for i, thought in enumerate(story_agent.get_thoughts(result.run_id)):
-    print(f"  [{i}] Q: {thought.question}")
-    print(f"      A: {thought.answer}")
+for round_index, round_thoughts in enumerate(story_agent.get_thoughts(result.run_id)):
+    print(f"  Round {round_index}:")
+    for thought in round_thoughts:
+        print(f"    [{thought.category}] {thought.content}")
 
-print(f"\nFINAL STORY:\n{result.result}")
+print(f"\n~~~ FINAL STORY ~~~\n{result.result}")

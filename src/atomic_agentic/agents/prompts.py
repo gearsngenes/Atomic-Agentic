@@ -7,7 +7,6 @@
 # These prompts live beside the ToolAgent protocol constants because they define
 # the LLM-facing side of the same parser/runtime contract.
 
-from ..constants.agents import THINKING_BASE_TEMPLATE, THINKING_TOOL_RESOURCES_BLOCK
 from ..models.agents.prompts import PromptConfig
 
 PLANNER_PROMPT = PromptConfig(
@@ -266,17 +265,16 @@ VALID OUTPUT:
 
 
 # =============================================================================
-# ThinkingAgent-family prompts
+# SelfAskAgent prompt
 # =============================================================================
 # Used by:
 # - agents/selfask.py: SelfAskAgent's fixed self-questioning prompt
-# - agents/planask.py: PlanAskAgent's fixed batch self-questioning prompt
 #
-# Unlike role_prompt (caller-owned persona/response instructions), these
-# prompts are fixed and non-configurable -- no constructor parameter exposes
-# them. {role_description} (both prompts) and {thought_count_range}
-# (PLAN_ASK_PROMPT only) are filled via an internally-computed render context
-# (never task.inputs), matching how ORCHESTRATOR_PROMPT's
+# Unlike role_prompt (caller-owned persona/response instructions), this
+# prompt is fixed and non-configurable -- no constructor parameter exposes
+# it. {thoughts_per_round}, {max_thinking_rounds}, and
+# {user_thinking_instructions} are filled via an internally-computed render
+# context (never task.inputs), matching how ORCHESTRATOR_PROMPT's
 # {TOOLS}/{LIMIT}/{CONSTANTS} stay off the caller-facing schema above.
 
 SELF_ASK_PROMPT = PromptConfig(
@@ -298,21 +296,26 @@ EXACT format:
 The category MUST be contained in `[` and `]`.
 
 # THOUGHT CATEGORIES
-Each thought's category must be exactly one of the following:
+Each thought's category must be exactly one of the following, listed in the
+order thinking typically progresses (not a hard rule -- a later round can
+still raise a fresh question after an earlier instruction if something new
+comes up):
 
-- QUESTION: An ambiguity or uncertainty about the task that needs to be
-  resolved before proceeding. A question can potentially be answered by
-  a follow-up thought of any of the below categories.
-- CLARIFICATION: An answer to a question you or a prior thought raised, or an
-  enhancement/refinement to the instructions or actions needed for the task.
 - OBSERVATION: An emergent truth about the current state of the task --
   something you notice, not something you decide or ask.
-- REASONING: Justification or explanation for why something needs to happen,
+- QUESTION: An ambiguity or uncertainty about the task that needs to be
+  resolved before proceeding.
+- CLARIFICATION: Restating or rewording part of the task in clearer terms --
+  a comprehension aid, not new information.
+- ASSUMPTION: A reference for something not explicitly stated but needed to
+  proceed with certainty, taken as true without confirmation. Use sparingly
+  -- only when genuinely necessary.
+- REASON: Justification or explanation for why something needs to happen,
   or why a particular choice is being made.
-- ASSUMPTION: A belief taken as true without confirmation, used only to let
-  thinking move forward. Use sparingly -- only when genuinely necessary.
-- PLANNING: A thought that helps with determining what to do next, a recommended
-  action, or a way to break the task into smaller pieces.
+- INSTRUCTION: A directed action that modifies the task -- an implied step
+  made explicit, or an addition to what's being asked. Aimed at whoever
+  answers the task once thinking concludes, not at the thinking process
+  itself.
 - OTHER: Any thought that does not fit cleanly into the categories above.
 
 # GUIDANCE
@@ -320,13 +323,8 @@ Think sparingly. Do not produce a thought for something that is already
 obvious or self-explanatory from the task or your prior thoughts -- only
 think when it genuinely helps advance or clarify the task.
 
-QUESTION, CLARIFICATION, OBSERVATION, REASONING, and ASSUMPTION thoughts may
-each occur multiple times within a single round -- they represent distinct,
-independent considerations. PLANNING is different: it represents a
-converged decision, not an open consideration. Produce AT MOST ONE PLANNING
-thought per round, synthesizing everything you have reasoned through so
-far -- typically as the last thought in that round, once you are ready to
-commit rather than continue exploring.
+Any category may occur multiple times within a single round -- each
+represents a distinct, independent consideration.
 
 # STOP CONDITION
 After you produce your thoughts, if you determine no further thinking
@@ -346,8 +344,9 @@ between (AT LEAST) 1 and {thoughts_per_round} (AT MOST) thoughts.
 )
 
 # Wraps a resolved (non-empty) thinking_instructions render into its own
-# labeled section -- see THINKING_BASE_TEMPLATE's note above. Concatenated
-# around the resolved text, not part of any PromptConfig template.
+# labeled section around SELF_ASK_PROMPT's {user_thinking_instructions}
+# slot. Concatenated around the resolved text, not part of any PromptConfig
+# template.
 THINKING_ADDITIONAL_INSTRUCTIONS_HEADER = """\
 # ADDITIONAL INSTRUCTIONS
 Below are additional instructions provided by the user directly for \
@@ -355,22 +354,3 @@ tailored thinking instructions, WHILE ABIDING by the rules above.
 ===Additional Instructions Start===
 """
 THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n"
-
-# Sketch only -- not yet wired to any class (ToolAgent2 doesn't exist yet).
-# Concatenated onto THINKING_BASE_TEMPLATE to form a tool-aware "think"
-# prompt for that family, per prompts.py's TOOL_THINKING_PROMPT.
-THINKING_TOOL_RESOURCES_BLOCK = """
-# ADDITIONAL RESOURCES
-You have access to the following tools, constants, and usage limits while
-thinking about this task. Reference them in your thoughts as needed, but do
-not attempt to invoke tools during thinking -- execution happens in a
-separate phase.
-
-Available tools:
-{TOOLS}
-
-Available constants:
-{CONSTANTS}
-
-Tool call budget (non-return calls): {TOOL_CALLS_LIMIT}
-"""

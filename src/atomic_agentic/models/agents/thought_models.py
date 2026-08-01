@@ -9,32 +9,33 @@ __all__ = ["AgentThought"]
 @dataclass(slots=True)
 class AgentThought:
     """
-    One self-questioning thinking step produced by a ``ThinkingAgent``.
+    One categorized thought produced during a ``SelfAskAgent`` thinking
+    round.
 
-    Always constructed already-answered, in one validated round — unlike
-    ``BlackboardSlot`` there is no in-progress/planned status to represent,
-    since retries happen before a thought is ever appended (never after).
+    Parsed from free-flowing ``[CATEGORY] content`` marked text
+    (``parse_thoughts``, ``utils/agents.py``) rather than a structured JSON
+    schema — a round's raw output degrades to a single ``OTHER``-category
+    thought when no marker is present, so parsing itself never fails; only
+    genuinely empty output does.
 
     Fields
     ------
-    observation : str | None
-        Optional context that prompted the question. ``None`` when the
-        producing subclass's schema doesn't distinguish an observation from
-        the question itself.
-    question : str
-        The self-asked question this thought answers.
-    answer : str
-        The answer produced for ``question``.
+    category : str
+        One of ``constants.agents.THOUGHT_CATEGORIES`` (uppercased at parse
+        time). Not validated against that set here — ``parse_thoughts``'s
+        own regex only ever matches a category listed there, so an
+        out-of-set value can't reach this constructor through the normal
+        path.
+    content : str
+        The thought's text, stripped of surrounding whitespace.
     """
 
-    observation: str | None
-    question: str
-    answer: str
+    category: str
+    content: str
 
     def to_dict(self) -> dict[str, Any]:
         """Return a serializable representation of this thought."""
         return {
-            "observation": self.observation,
-            "question": self.question,
-            "answer": self.answer,
+            "category": self.category,
+            "content": self.content,
         }

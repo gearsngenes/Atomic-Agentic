@@ -11,17 +11,25 @@ llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-4o-mini")
 # llm = MistralEngine(api_key= os.getenv("MISTRAL_API_KEY"), model = "mistral-small-latest")
 # llm = LlamaCppEngine(repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx = 512, verbose = False, n_threads=16)
 
-# --- define our SelfAskAgent: thinks through multi-hop questions one
-#     self-asked follow-up at a time before answering ---
+# --- define our SelfAskAgent: thinks through multi-hop questions, surfacing
+#     several distinct considerations per round (thoughts_per_round=3) rather
+#     than one thought at a time ---
 trivia_agent = SelfAskAgent(
     name="Trivia_Thinker",
     namespace="examples",
     llm_engine=llm,
     role_prompt="You are a careful trivia assistant. Answer concisely, in one or two sentences.",
-    role_description="Answering multi-hop trivia questions that require intermediate facts.",
+    thinking_instructions=(
+        "You answer multi-hop questions -- they depend on intermediate facts "
+        "you don't yet have. Each round, surface every distinct piece you "
+        "can at once: what the question is really asking, what intermediate "
+        "fact you still need, and any assumption you're relying on -- as "
+        "separate thoughts in the same round, not spread one at a time "
+        "across rounds."
+    ),
     description="A trivia assistant that reasons through multi-hop questions via self-questioning.",
     max_thinking_rounds=5,
-    generation_retries=2,
+    thoughts_per_round=3,
 )
 
 # --- ask a multi-hop question: answering it well requires an intermediate
@@ -31,8 +39,9 @@ result = trivia_agent.invoke({"prompt": question})
 
 print(f"QUESTION: {question}\n")
 print("SELF-ASK THOUGHTS:")
-for i, thought in enumerate(trivia_agent.get_thoughts(result.run_id)):
-    print(f"  [{i}] Q: {thought.question}")
-    print(f"      A: {thought.answer}")
+for round_index, round_thoughts in enumerate(trivia_agent.get_thoughts(result.run_id)):
+    print(f"  Round {round_index}:")
+    for thought in round_thoughts:
+        print(f"    [{thought.category}] {thought.content}")
 
 print(f"\nFINAL ANSWER: {result.result}")

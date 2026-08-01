@@ -1,6 +1,5 @@
 from __future__ import annotations
 import re
-from ..constants.agents import THOUGHT_CATEGORIES
 from ..models.parameters import ParamSpec
 
 # =============================================================================
@@ -86,58 +85,6 @@ REQUIRED_REACT_FIELDS = REQUIRED_BASE_STEP_FIELDS | frozenset(
 
 
 # =============================================================================
-# ThinkingAgent LLM-output JSON fields
-# =============================================================================
-# Used by:
-# - agents/thinking.py: shared reply-phase thought-snapshot rendering
-# - agents/selfask.py, agents/planask.py (Pass 2/3): per-round JSON schemas
-#
-# THOUGHT_FIELDS is SelfAskAgent's fused per-round call schema (all four
-# keys required every round). PLANNED_QUESTION_FIELDS is PlanAskAgent's
-# upfront batch-item schema (no keep_thinking -- completion there is
-# structural, not self-declared).
-
-
-OBSERVATION_FIELD = "observation"
-QUESTION_FIELD = "question"
-ANSWER_FIELD = "answer"
-KEEP_THINKING_FIELD = "keep_thinking"
-
-
-THOUGHT_FIELDS = frozenset(
-    {
-        OBSERVATION_FIELD,
-        QUESTION_FIELD,
-        ANSWER_FIELD,
-        KEEP_THINKING_FIELD,
-    }
-)
-
-PLANNED_QUESTION_FIELDS = frozenset(
-    {
-        OBSERVATION_FIELD,
-        QUESTION_FIELD,
-        ANSWER_FIELD,
-    }
-)
-
-
-# =============================================================================
-# ThinkingAgent reserved prompt-template field
-# =============================================================================
-# Distinct category from the JSON-output fields above: this is a PromptConfig
-# TEMPLATE placeholder name, not an LLM-output JSON key. A subclass's
-# thinking-phase prompt (SelfAskAgent's "thinking"; PlanAskAgent's
-# "ask_questions"/"answer_question") may reference {role_description} in its
-# own internally-rendered context; ThinkingAgent.__init__ raises if any other
-# parameter source (pre_invoke, post_invoke, role_prompt -- the only
-# extra_parameters sources that exist) also declares a parameter with this
-# name.
-
-ROLE_DESCRIPTION_FIELD = "role_description"
-
-
-# =============================================================================
 # ToolAgent canonical return-tool identity
 # =============================================================================
 # Used by:
@@ -165,12 +112,12 @@ RETURN_TOOL_FULL_NAME = (
 # widen the module's public surface.
 
 THOUGHT_CATEGORIES: tuple[str, ...] = (
+    "OBSERVATION",
     "QUESTION",
     "CLARIFICATION",
-    "OBSERVATION",
-    "REASONING",
-    "PLANNING",
     "ASSUMPTION",
+    "REASON",
+    "INSTRUCTION",
     "OTHER",
 )
 
@@ -200,15 +147,6 @@ __all__ = [
     "REQUIRED_PLAN_FIELDS",
     "REACT_FIELDS",
     "REQUIRED_REACT_FIELDS",
-    # ThinkingAgent LLM-output fields
-    "OBSERVATION_FIELD",
-    "QUESTION_FIELD",
-    "ANSWER_FIELD",
-    "KEEP_THINKING_FIELD",
-    "THOUGHT_FIELDS",
-    "PLANNED_QUESTION_FIELDS",
-    # ThinkingAgent reserved prompt-template field
-    "ROLE_DESCRIPTION_FIELD",
     # Canonical return tool
     "RETURN_TOOL_NAME",
     "RETURN_TOOL_NAMESPACE",

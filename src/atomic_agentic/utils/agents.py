@@ -14,6 +14,7 @@ __all__ = [
     "extract_dependencies",
     "extract_json_object",
     "normalize_role_prompt",
+    "normalize_thinking_instructions",
 ]
 
 
@@ -33,6 +34,32 @@ def normalize_role_prompt(
         return value
     raise TypeError(
         f"role_prompt must be str, PromptConfig, or None; got {type(value).__name__}."
+    )
+
+
+def normalize_thinking_instructions(
+    value: str | PromptConfig | None,
+) -> PromptConfig:
+    """Coerce a thinking-instructions value to a ``PromptConfig``.
+
+    Mirrors ``normalize_role_prompt`` exactly, but with an empty template
+    as the default rather than a persona sentence — ``None``/blank means
+    "no additional thinking instructions," and the caller's own
+    header/footer-wrapping logic (``SelfAskAgent._render_system_message``)
+    already treats an empty rendered result as invisible, so an empty
+    template here is sufficient, not a special case.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return PromptConfig(
+            template="",
+            description="No additional thinking instructions.",
+        )
+    if isinstance(value, str):
+        return PromptConfig(template=value.strip(), description="Thinking instructions")
+    if isinstance(value, PromptConfig):
+        return value
+    raise TypeError(
+        f"thinking_instructions must be str, PromptConfig, or None; got {type(value).__name__}."
     )
 
 

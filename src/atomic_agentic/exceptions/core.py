@@ -32,7 +32,7 @@ class ToolRegistrationError(ToolAgentError):
 
 
 class ThinkingAgentError(RuntimeError):
-    """Base exception for ThinkingAgent-related errors.
+    """Base exception for SelfAskAgent thinking-phase errors.
 
     Sibling to AgentError, not a subclass of it -- mirrors ToolAgentError's
     own convention (a domain error type superseding a bare RuntimeError;

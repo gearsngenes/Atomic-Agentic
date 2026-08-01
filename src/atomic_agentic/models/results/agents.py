@@ -206,7 +206,8 @@ class ToolAgentResult(AgentResult):
 @dataclass(frozen=True, slots=True)
 class ThinkingAgentResult(AgentResult):
     """
-    Successful ThinkingAgent invocation result.
+    Successful thinking-capable agent invocation result (currently only
+    ``SelfAskAgent``).
 
     Extends ``AgentResult`` with the half-open index span into the agent's
     persisted thoughts list produced by this invocation. Indices only, not

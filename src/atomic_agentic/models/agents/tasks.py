@@ -312,33 +312,30 @@ class ReActTask(ToolAgentTask):
 @dataclass(slots=True)
 class ThinkingTask(AgentTask):
     """
-    ThinkingAgent-flavored task.
+    SelfAskAgent-flavored task.
 
     No ``phase`` field: ``AgentTask.system_prompt_name`` doubles as the
     phase discriminator. The name ``"role"`` is reserved for the reply
-    phase across the whole family; any other value means a thinking round
-    is still active. This is why the field is required (no default) on the
-    base ``AgentTask`` — every concrete subclass must decide it explicitly,
-    and here that decision *is* the phase.
+    phase; any other value (``SelfAskAgent.SELF_ASK_PROMPT_NAME``) means a
+    thinking round is still active. This is why the field is required (no
+    default) on the base ``AgentTask`` — every concrete subclass must
+    decide it explicitly, and here that decision *is* the phase.
+
+    No retry-budget field: the free-flowing category-marker parser
+    (``parse_thoughts``) degrades unmarked text to a single ``OTHER``
+    thought rather than failing, so a thinking round either produces at
+    least one thought or ``think()`` raises outright — there is no
+    malformed-output case to retry.
 
     Fields
     ------
-    retries_used : int
-        Cumulative generation-retry attempts across all thinking rounds in
-        this run. Mirrors ``ToolAgentTask.retries_used``.
-
-    rounds_used : int
-        Cumulative successful thinking rounds completed. Checked by
-        subclass ``_think`` implementations against
-        ``self._max_thinking_rounds`` to force the transition to the reply
-        phase regardless of any self-declared continuation signal.
-
-    thoughts : list[AgentThought]
-        Task-local accumulator, mirrors ``ToolAgentTask.running_blackboard``
-        — merged into the agent-level persisted ``self._thoughts`` only at
+    thoughts : list[list[AgentThought]]
+        Task-local accumulator, one inner list per completed round (a round
+        may produce more than one thought, up to ``thoughts_per_round``).
+        Mirrors ``ToolAgentTask.running_blackboard`` — merged into the
+        agent-level persisted ``self._thoughts`` only at
         ``_build_record_from_task`` time, never appended to the agent-level
-        list mid-run.
+        list mid-run. Its own length doubles as the completed-round count —
+        no separate counter field is kept.
     """
-    retries_used: int = 0
-    rounds_used: int = 0
-    thoughts: list[AgentThought] = field(default_factory=list)
+    thoughts: list[list[AgentThought]] = field(default_factory=list)
