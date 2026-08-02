@@ -38,7 +38,6 @@ blackboard management, and tool registry see ``agents/toolagent.py``
 """
 
 from __future__ import annotations
-import json
 from typing import Any, Callable, Literal, Mapping, Optional
 import pprint
 
@@ -61,7 +60,7 @@ from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError
 from ..models.agents.tasks import ReActTask, ReActStepMeta
 from ..models.agents import BlackboardSlot
-from ..models.agents.records import AgentRecord, LLMRecord
+from ..models.agents.records import AgentRecord
 from ..utils.agents import extract_dependencies
 
 # --------------------------------------------------------------------------- #
@@ -244,10 +243,11 @@ class ReActAgent(ToolAgent):
         """
         Validate one parsed ReAct step and return the slot, duration, and description.
 
-        Receives the already-extracted ``parsed`` value. LLMRecord construction has
-        moved to ``_generate_next_step``. All LLM-facing validation failures return
-        a plain feedback string (no class/name prefix); engine-contract violations
-        raise ``ToolAgentError``.
+        Receives the already-extracted ``parsed`` value. LLMRecord construction
+        lives in ``ToolAgent._run_generation_retry_loop`` (the shared caller,
+        via ``_generate_next_step``'s ``validate`` binding). All LLM-facing
+        validation failures return a plain feedback string (no class/name
+        prefix); engine-contract violations raise ``ToolAgentError``.
 
         Budget enforcement (step 9 below) is a real boundary check, not a
         dead guard: unlike ``PlanActAgent`` (whose budget is validated once
@@ -604,36 +604,11 @@ class ReActAgent(ToolAgent):
 
     def _generate_next_step(self, *, task: ReActTask) -> tuple[BlackboardSlot, int, str]:
         """
-        Generate and validate one ReAct tool step, with a bounded retry loop.
-
-        Mirrors ``_generate_plan`` in structure. ``_process_next_step_output``
-        receives the already-extracted ``parsed`` value. The retry loop
-        catches ``json.JSONDecodeError`` (JSON path) and string returns from
-        ``_process_next_step_output`` (spec-validation path), injecting
-        structured feedback as ``additional_messages`` for the next
-        ``render_task`` call on each failed attempt.
+        Generate and validate one ReAct tool step, via the shared
+        ``ToolAgent._run_generation_retry_loop``.
 
         Observable counters are NOT decremented here — only when a step
         commits in ``prepare()``.
-
-        Steps
-        -----
-        1. ``expected_step = task.next_step_index``; ``max_duration`` derived
-           from it.
-        2. ``additional_messages`` starts empty.
-        3. Loop:
-           a. ``messages = self.render_task(task, additional_messages=additional_messages)``.
-           b. LLM call.
-           c. Append an ``LLMRecord`` (``messages=list(task.task_messages)``)
-              directly onto ``task.llm_records``.
-           d. JSON extraction — on ``json.JSONDecodeError``: check
-              ``task.retries_used`` against ``self._generation_retries``,
-              raise if exhausted; else set ``additional_messages`` to the
-              feedback pair and increment ``task.retries_used``.
-           e. Spec validation via ``_process_next_step_output`` — on string
-              return: same budget check, re-serialised step + feedback as
-              ``additional_messages``, increment.
-           f. Success: return ``(slot, duration, description)``.
 
         Returns
         -------
@@ -642,146 +617,54 @@ class ReActAgent(ToolAgent):
         """
         expected_step = task.next_step_index
         max_duration = max(0, self._tool_calls_limit - expected_step)
-        additional_messages: list[dict[str, str]] = []
-
-        while True:
-            messages = self.render_task(task, additional_messages=additional_messages)
-            engine_result = self._llm_engine.invoke({"messages": messages})
-            raw_output: str = engine_result.result
-
-            task.llm_records.append(LLMRecord(
-                messages=list(task.task_messages),
-                llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
-            ))
-
-            # JSON extraction
-            try:
-                parsed = self._extract_from_json_string(raw_output)
-            except json.JSONDecodeError as exc:
-                feedback = (
-                    f"Your output could not be parsed as valid JSON.\n\n"
-                    f"Decoder error: {exc}\n\n"
-                    f"The response you produced was:\n\n{raw_output}\n\n"
-                    "Produce a correctly formatted JSON object."
-                )
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": raw_output},
-                    {"role": "user", "content": feedback},
-                ]
-                task.retries_used += 1
-                continue
-
-            # Spec validation
-            result = self._process_next_step_output(
+        return self._run_generation_retry_loop(
+            task=task,
+            validate=lambda parsed: self._process_next_step_output(
                 parsed=parsed,
                 expected_step=expected_step,
                 cache_blackboard=self._blackboard,
                 max_duration=max_duration,
                 valid_cache_indices=task.valid_cache_indices,
                 failed_cache_indices=task.failed_cache_indices,
-            )
-            if isinstance(result, str):
-                feedback = result
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error: {feedback}"
-                    )
-                step_repr = json.dumps(parsed, indent=2)
-                additional_messages = [
-                    {"role": "assistant", "content": step_repr},
-                    {"role": "user", "content": (
-                        f"The step you produced contains an error:\n\n"
-                        f"{step_repr}\n\n"
-                        f"Error: {feedback}\n\n"
-                        "Reflect on this and produce a corrected step."
-                    )},
-                ]
-                task.retries_used += 1
-                continue
-
-            slot, duration, description = result
-            return slot, duration, description
+            ),
+            json_error_template=(
+                "Your output could not be parsed as valid JSON.\n\n"
+                "Decoder error: {exc}\n\n"
+                "Produce a correctly formatted JSON object."
+            ),
+            spec_error_template=(
+                "The step you produced contains an error.\n\n"
+                "Error: {feedback}\n\n"
+                "Reflect on this and produce a corrected step."
+            ),
+        )
 
     async def _agenerate_next_step(self, *, task: ReActTask) -> tuple[BlackboardSlot, int, str]:
-        """
-        Async mirror of ``_generate_next_step``: uses ``async_invoke`` for each LLM call.
-
-        Full async loop — not delegated to ``asyncio.to_thread``. Retry logic,
-        feedback injection, and return type are identical to the sync version.
-        """
+        """Async mirror of ``_generate_next_step``, via
+        ``ToolAgent._arun_generation_retry_loop``."""
         expected_step = task.next_step_index
         max_duration = max(0, self._tool_calls_limit - expected_step)
-        additional_messages: list[dict[str, str]] = []
-
-        while True:
-            messages = self.render_task(task, additional_messages=additional_messages)
-            engine_result = await self._llm_engine.async_invoke({"messages": messages})
-            raw_output: str = engine_result.result
-
-            task.llm_records.append(LLMRecord(
-                messages=list(task.task_messages),
-                llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
-            ))
-
-            try:
-                parsed = self._extract_from_json_string(raw_output)
-            except json.JSONDecodeError as exc:
-                feedback = (
-                    f"Your output could not be parsed as valid JSON.\n\n"
-                    f"Decoder error: {exc}\n\n"
-                    f"The response you produced was:\n\n{raw_output}\n\n"
-                    "Produce a correctly formatted JSON object."
-                )
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": raw_output},
-                    {"role": "user", "content": feedback},
-                ]
-                task.retries_used += 1
-                continue
-
-            result = self._process_next_step_output(
+        return await self._arun_generation_retry_loop(
+            task=task,
+            validate=lambda parsed: self._process_next_step_output(
                 parsed=parsed,
                 expected_step=expected_step,
                 cache_blackboard=self._blackboard,
                 max_duration=max_duration,
                 valid_cache_indices=task.valid_cache_indices,
                 failed_cache_indices=task.failed_cache_indices,
-            )
-            if isinstance(result, str):
-                feedback = result
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error: {feedback}"
-                    )
-                step_repr = json.dumps(parsed, indent=2)
-                additional_messages = [
-                    {"role": "assistant", "content": step_repr},
-                    {"role": "user", "content": (
-                        f"The step you produced contains an error:\n\n"
-                        f"{step_repr}\n\n"
-                        f"Error: {feedback}\n\n"
-                        "Reflect on this and produce a corrected step."
-                    )},
-                ]
-                task.retries_used += 1
-                continue
-
-            slot, duration, description = result
-            return slot, duration, description
+            ),
+            json_error_template=(
+                "Your output could not be parsed as valid JSON.\n\n"
+                "Decoder error: {exc}\n\n"
+                "Produce a correctly formatted JSON object."
+            ),
+            spec_error_template=(
+                "The step you produced contains an error.\n\n"
+                "Error: {feedback}\n\n"
+                "Reflect on this and produce a corrected step."
+            ),
+        )
 
     def think(self, task: ReActTask) -> ReActTask:
         """

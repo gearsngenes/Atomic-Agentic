@@ -137,7 +137,7 @@ from ..constants.agents import (
     TOOL_FIELD,
 )
 
-from ..models.agents.records import AgentRecord, ToolAgentRecord
+from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
 from ..models.results.agents import ToolAgentResult, ToolUsageRecord
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from ..models.agents.tasks import ToolAgentTask
@@ -1352,6 +1352,168 @@ class ToolAgent(Agent, ABC):
         )
         slot.status = BlackboardSlot.FAILED
         return True
+
+    # ------------------------------------------------------------------ #
+    # Shared generation-retry loop (PlanActAgent/ReActAgent think() bodies)
+    # ------------------------------------------------------------------ #
+    def _run_generation_retry_loop(
+        self,
+        *,
+        task: ToolAgentTask,
+        validate: Callable[[Any], Any],
+        json_error_template: str,
+        spec_error_template: str,
+    ) -> Any:
+        """
+        Shared retry loop for one-shot/per-step LLM generation: render, call
+        the engine, record the attempt, decode JSON, validate, and retry
+        with injected feedback on either failure category until success or
+        the retry budget (``self._generation_retries``, tracked via
+        ``task.retries_used``) is exhausted.
+
+        Parameters
+        ----------
+        task : ToolAgentTask
+            Supplies rendering context and accumulates ``llm_records``/
+            ``retries_used`` directly.
+        validate : Callable[[Any], Any]
+            The family-specific spec validator (``_process_plan_output`` or
+            ``_process_next_step_output``), called with only the ``parsed``
+            JSON value -- every other keyword argument is bound by the
+            caller's own closure. Returns the validated result on success,
+            or a plain feedback string on spec-validation failure.
+        json_error_template : str
+            ``.format(exc=...)`` -- the user-facing retry message when
+            ``_extract_from_json_string`` raises ``json.JSONDecodeError``.
+            Never receives ``raw_output`` -- that already goes into the
+            assistant-turn message alongside it; embedding it a second time
+            in the user text would just repeat what the model can already
+            see one turn up.
+        spec_error_template : str
+            ``.format(feedback=...)`` -- the user-facing retry message when
+            ``validate`` returns a feedback string. Never receives the
+            re-serialized ``parsed`` value, for the same reason.
+
+        Steps
+        -----
+        1. ``additional_messages`` starts empty.
+        2. Loop:
+           a. Render this attempt's send payload via ``render_task``.
+           b. Call the LLM engine; capture ``engine_result``.
+           c. Append an ``LLMRecord`` (``messages=list(task.task_messages)``)
+              to ``task.llm_records``.
+           d. Try JSON extraction. On ``json.JSONDecodeError``: budget-check
+              (raise if exhausted); else inject assistant/user feedback,
+              increment ``task.retries_used``, continue.
+           e. Call ``validate(parsed)``. On a string return (spec-validation
+              feedback): budget-check (raise if exhausted); else inject
+              assistant/user feedback, increment ``task.retries_used``,
+              continue.
+           f. On success: return the validated result.
+
+        Raises
+        ------
+        ToolAgentError
+            If either failure category's retry budget is exhausted.
+        """
+        additional_messages: list[dict[str, str]] = []
+
+        while True:
+            messages = self.render_task(task, additional_messages=additional_messages)
+            engine_result = self._llm_engine.invoke({"messages": messages})
+            raw_output: str = engine_result.result
+
+            task.llm_records.append(LLMRecord(
+                messages=list(task.task_messages),
+                llm_result=engine_result,
+                system_prompt_name=task.system_prompt_name,
+            ))
+
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
+                    )
+                additional_messages = [
+                    {"role": "assistant", "content": raw_output},
+                    {"role": "user", "content": json_error_template.format(exc=exc)},
+                ]
+                task.retries_used += 1
+                continue
+
+            result = validate(parsed)
+            if isinstance(result, str):
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error: {result}"
+                    )
+                additional_messages = [
+                    {"role": "assistant", "content": json.dumps(parsed, indent=2)},
+                    {"role": "user", "content": spec_error_template.format(feedback=result)},
+                ]
+                task.retries_used += 1
+                continue
+
+            return result
+
+    async def _arun_generation_retry_loop(
+        self,
+        *,
+        task: ToolAgentTask,
+        validate: Callable[[Any], Any],
+        json_error_template: str,
+        spec_error_template: str,
+    ) -> Any:
+        """Async mirror of ``_run_generation_retry_loop``: uses
+        ``async_invoke`` for the engine call; identical retry logic,
+        feedback injection, and parameters otherwise."""
+        additional_messages: list[dict[str, str]] = []
+
+        while True:
+            messages = self.render_task(task, additional_messages=additional_messages)
+            engine_result = await self._llm_engine.async_invoke({"messages": messages})
+            raw_output: str = engine_result.result
+
+            task.llm_records.append(LLMRecord(
+                messages=list(task.task_messages),
+                llm_result=engine_result,
+                system_prompt_name=task.system_prompt_name,
+            ))
+
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
+                    )
+                additional_messages = [
+                    {"role": "assistant", "content": raw_output},
+                    {"role": "user", "content": json_error_template.format(exc=exc)},
+                ]
+                task.retries_used += 1
+                continue
+
+            result = validate(parsed)
+            if isinstance(result, str):
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error: {result}"
+                    )
+                additional_messages = [
+                    {"role": "assistant", "content": json.dumps(parsed, indent=2)},
+                    {"role": "user", "content": spec_error_template.format(feedback=result)},
+                ]
+                task.retries_used += 1
+                continue
+
+            return result
 
     # ------------------------------------------------------------------ #
     # Finalization helpers

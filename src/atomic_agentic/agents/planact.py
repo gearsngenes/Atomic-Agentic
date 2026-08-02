@@ -38,7 +38,6 @@ For the shared iteration loop, blackboard management, and tool registry see
 """
 
 from __future__ import annotations
-import json
 from typing import Any, Callable, Literal, Mapping, Optional
 
 import logging
@@ -57,7 +56,7 @@ from ..llm.base import LLMEngine
 from ..exceptions import ToolAgentError
 from ..models.agents.tasks import PlanActTask
 from ..models.agents import BlackboardSlot
-from ..models.agents.records import AgentRecord, LLMRecord
+from ..models.agents.records import AgentRecord
 from ..utils.agents import extract_dependencies
 
 logger = logging.getLogger(__name__)
@@ -469,34 +468,8 @@ class PlanActAgent(ToolAgent):
 
     def _generate_plan(self, *, task: PlanActTask) -> list[BlackboardSlot]:
         """
-        Generate, parse, and validate a complete PlanAct running blackboard, with
-        optional retry on generation failures.
-
-        Lifecycle
-        ---------
-        1. ``additional_messages`` starts empty.
-        2. Loop:
-           a. Render this attempt's send payload via ``render_task``.
-           b. Call the LLM engine; capture ``engine_result``.
-           c. Append an ``LLMRecord`` (``messages=list(task.task_messages)``,
-              which ``render_task`` has already extended for this attempt)
-              to ``task.llm_records``.
-           d. Try JSON extraction (``_extract_from_json_string``). On
-              failure: check ``task.retries_used`` against
-              ``self._generation_retries``; if exhausted raise; else inject
-              JSON-error feedback as ``additional_messages`` for the next
-              attempt, increment ``task.retries_used``, continue.
-           e. Try spec validation (``_process_plan_output``). On failure:
-              same budget check/feedback-injection pattern as (d).
-           f. On success: return the validated planned slots.
-
-        Parameters
-        ----------
-        task : PlanActTask
-            Current task — supplies ``valid_cache_indices``/
-            ``failed_cache_indices`` for validation (cache references are
-            validated against ``self._blackboard`` directly) and
-            accumulates ``llm_records``/``retries_used`` directly.
+        Generate, parse, and validate a complete PlanAct running blackboard,
+        via the shared ``ToolAgent._run_generation_retry_loop``.
 
         Returns
         -------
@@ -504,133 +477,41 @@ class PlanActAgent(ToolAgent):
             Fully normalized and validated planned slots (not yet assigned
             onto ``task`` — the caller (``think()``/``async_think()``)
             compiles batches and assigns them).
-
-        Raises
-        ------
-        ToolAgentError
-            If generation output cannot be parsed or validated after all
-            allowed attempts are exhausted.
         """
-        additional_messages: list[dict[str, str]] = []
-
-        while True:
-            messages = self.render_task(task, additional_messages=additional_messages)
-            engine_result = self._llm_engine.invoke({"messages": messages})
-            raw_output: str = engine_result.result
-
-            task.llm_records.append(LLMRecord(
-                messages=list(task.task_messages),
-                llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
-            ))
-
-            # JSON extraction
-            try:
-                parsed = self._extract_from_json_string(raw_output)
-            except json.JSONDecodeError as exc:
-                feedback = (
-                    f"Your output could not be parsed as valid JSON.\n\n"
-                    f"Decoder error: {exc}\n\n"
-                    f"The response you produced was:\n\n{raw_output}\n\n"
-                    "Produce a correctly formatted JSON array."
-                )
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error is JSONDecodeError: {exc}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": raw_output},
-                    {"role": "user", "content": feedback},
-                ]
-                task.retries_used += 1
-                continue
-
-            # Spec validation
-            result = self._process_plan_output(
+        return self._run_generation_retry_loop(
+            task=task,
+            validate=lambda parsed: self._process_plan_output(
                 parsed=parsed,
                 cache_blackboard=self._blackboard,
                 valid_cache_indices=task.valid_cache_indices,
                 failed_cache_indices=task.failed_cache_indices,
-            )
-            if isinstance(result, str):
-                feedback = result
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error: {feedback}"
-                    )
-                plan_repr = json.dumps(parsed, indent=2)
-                additional_messages = [
-                    {"role": "assistant", "content": plan_repr},
-                    {"role": "user", "content": feedback},
-                ]
-                task.retries_used += 1
-                continue
-
-            return result
+            ),
+            json_error_template=(
+                "Your output could not be parsed as valid JSON.\n\n"
+                "Decoder error: {exc}\n\n"
+                "Produce a correctly formatted JSON array."
+            ),
+            spec_error_template="{feedback}",
+        )
 
     async def _agenerate_plan(self, *, task: PlanActTask) -> list[BlackboardSlot]:
-        """Async mirror of ``_generate_plan``: uses ``async_invoke`` for each LLM call.
-        Retry logic, feedback injection, and return type are identical."""
-        additional_messages: list[dict[str, str]] = []
-
-        while True:
-            messages = self.render_task(task, additional_messages=additional_messages)
-            engine_result = await self._llm_engine.async_invoke({"messages": messages})
-            raw_output: str = engine_result.result
-
-            task.llm_records.append(LLMRecord(
-                messages=list(task.task_messages),
-                llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
-            ))
-
-            # JSON extraction
-            try:
-                parsed = self._extract_from_json_string(raw_output)
-            except json.JSONDecodeError as exc:
-                feedback = (
-                    f"Your output could not be parsed as valid JSON.\n\n"
-                    f"Decoder error: {exc}\n\n"
-                    f"The response you produced was:\n\n{raw_output}\n\n"
-                    "Produce a correctly formatted JSON array."
-                )
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error is JSONDecodeError: {exc}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": raw_output},
-                    {"role": "user", "content": feedback},
-                ]
-                task.retries_used += 1
-                continue
-
-            # Spec validation
-            result = self._process_plan_output(
+        """Async mirror of ``_generate_plan``, via
+        ``ToolAgent._arun_generation_retry_loop``."""
+        return await self._arun_generation_retry_loop(
+            task=task,
+            validate=lambda parsed: self._process_plan_output(
                 parsed=parsed,
                 cache_blackboard=self._blackboard,
                 valid_cache_indices=task.valid_cache_indices,
                 failed_cache_indices=task.failed_cache_indices,
-            )
-            if isinstance(result, str):
-                feedback = result
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error: {feedback}"
-                    )
-                plan_repr = json.dumps(parsed, indent=2)
-                additional_messages = [
-                    {"role": "assistant", "content": plan_repr},
-                    {"role": "user", "content": feedback},
-                ]
-                task.retries_used += 1
-                continue
-
-            return result
+            ),
+            json_error_template=(
+                "Your output could not be parsed as valid JSON.\n\n"
+                "Decoder error: {exc}\n\n"
+                "Produce a correctly formatted JSON array."
+            ),
+            spec_error_template="{feedback}",
+        )
 
     def _initialize_task(
         self,
