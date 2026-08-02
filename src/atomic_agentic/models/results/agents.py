@@ -215,8 +215,9 @@ class ThinkingAgentResult(AgentResult):
     ``thoughts_start``/``thoughts_end`` exactly (no ``__post_init__``
     override needed here, matching that precedent: plain ``int | None``
     fields, no cross-field validation). A caller needing the actual
-    ``AgentThought`` content reads
-    ``agent._thoughts[thoughts_start:thoughts_end]`` directly.
+    ``AgentThought`` content either calls ``SelfAskAgent.get_thoughts(run_id)``
+    directly, or slices the agent's own public ``thoughts`` property
+    (``agent.thoughts[thoughts_start:thoughts_end]``).
 
     Fields
     ------

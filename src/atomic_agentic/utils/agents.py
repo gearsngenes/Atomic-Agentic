@@ -206,7 +206,7 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
 
 def parse_thoughts(text: str) -> list[AgentThought]:
     """
-    Parse one thinking round's raw text into a list of ``AgentThought2``.
+    Parse one thinking round's raw text into a list of ``AgentThought``.
 
     Line-based, lax format: each category marker (``[CATEGORY]``, any
     casing, no colon, anchored at a line start) begins a new thought; its
@@ -222,7 +222,7 @@ def parse_thoughts(text: str) -> list[AgentThought]:
     is produced at all (an empty prefix isn't unparseable content, it's
     simply no content).
 
-    Does not know about ``|STOP_THINKING|`` -- callers (``Agent2.think``)
+    Does not know about ``|STOP_THINKING|`` -- callers (``SelfAskAgent.think``)
     strip that before calling this function, keeping parsing pure and
     independently testable.
     """

@@ -207,6 +207,16 @@ class SelfAskAgent(BasicAgent):
                 )
         return list(self._thoughts[record.thoughts_start:record.thoughts_end])
 
+    @property
+    def thoughts(self) -> list[list[AgentThought]]:
+        """Shallow copy of the full persisted thought-round history, across
+        every invocation. Pairs with ``ThinkingAgentResult``/
+        ``ThinkingAgentRecord``'s own ``thoughts_start``/``thoughts_end``
+        span indices (``agent.thoughts[thoughts_start:thoughts_end]``),
+        mirroring ``ToolAgent.blackboard``'s equivalent relationship with
+        ``ToolAgentRecord.blackboard_start``/``blackboard_end``."""
+        return list(self._thoughts)
+
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
@@ -383,49 +393,35 @@ class SelfAskAgent(BasicAgent):
     def _render_task_messages(self, task: ThinkingTask) -> list[dict[str, str]]:
         """Build this phase's task messages, self_ask and role alike.
 
-        Build-once contract as with every other family. self_ask: banner +
-        thoughts-so-far snapshot (only when ``task.thoughts`` is
-        non-empty) + fixed per-round instruction. role: banner + thoughts
-        snapshot (if any) + reply instruction -- rendered regardless of
-        *why* thinking concluded (sentinel or round budget), same content
-        either way.
+        Build-once contract as with every other family. Both phases share
+        the exact same shape -- banner alone when ``task.thoughts`` is
+        empty, banner + thoughts-so-far snapshot + a phase-specific
+        instruction once it isn't (rendered regardless of *why* thinking
+        concluded, sentinel or round budget) -- so it's built as one
+        gated sequence of appends rather than two parallel branches.
         """
         if task.task_messages:
             return task.task_messages
 
-        banner = self._render_task_banner_text(task)
+        messages = [{"role": "user", "content": self._render_task_banner_text(task)}]
 
-        if task.system_prompt_name == self.SELF_ASK_PROMPT_NAME:
-            if not task.thoughts:
-                task.task_messages = [{"role": "user", "content": banner}]
+        if task.thoughts:
+            messages.append(
+                {"role": "assistant", "content": self._format_thoughts(task.thoughts)}
+            )
+            if task.system_prompt_name == self.SELF_ASK_PROMPT_NAME:
+                instruction = (
+                    "Produce the next round of thoughts, one per line in "
+                    "[CATEGORY] content format."
+                )
             else:
-                task.task_messages = [
-                    {"role": "user", "content": banner},
-                    {"role": "assistant", "content": self._format_thoughts(task.thoughts)},
-                    {
-                        "role": "user",
-                        "content": (
-                            "Produce the next round of thoughts, one per line in "
-                            "[CATEGORY] content format."
-                        ),
-                    },
-                ]
-            return task.task_messages
+                instruction = (
+                    "Given the current task and the thoughts above, respond "
+                    "to the current task."
+                )
+            messages.append({"role": "user", "content": instruction})
 
-        if not task.thoughts:
-            task.task_messages = [{"role": "user", "content": banner}]
-        else:
-            task.task_messages = [
-                {"role": "user", "content": banner},
-                {"role": "assistant", "content": self._format_thoughts(task.thoughts)},
-                {
-                    "role": "user",
-                    "content": (
-                        "Given the current task and the thoughts above, respond "
-                        "to the current task."
-                    ),
-                },
-            ]
+        task.task_messages = messages
         return task.task_messages
 
     def _render_task_banner_text(self, task: ThinkingTask) -> str:
@@ -497,7 +493,11 @@ class SelfAskAgent(BasicAgent):
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict:
-        """Return a diagnostic snapshot including persisted thoughts."""
+        """Return a diagnostic snapshot including this agent's own
+        construction knobs and persisted thoughts."""
         d = super().to_dict()
+        d["max_thinking_rounds"] = self._max_thinking_rounds
+        d["thoughts_per_round"] = self._thoughts_per_round
+        d["thinking_instructions"] = self._thinking_instructions_config.template
         d["thoughts"] = [[t.to_dict() for t in round_] for round_ in self._thoughts]
         return d

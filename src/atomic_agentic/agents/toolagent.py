@@ -122,6 +122,7 @@ import json
 from typing import (
     Any,
     Callable,
+    Literal,
     Mapping,
     Optional,
 )
@@ -293,6 +294,7 @@ class ToolAgent(Agent, ABC):
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
+        assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
         """
         Parameters
@@ -351,6 +353,10 @@ class ToolAgent(Agent, ABC):
         records_window : int | None
             Maximum number of prior ``AgentRecord`` turns rendered into LLM
             context. ``None`` means all records are rendered.
+        assistant_response_source : "raw" | "final"
+            Whether rendered assistant history uses the raw generated
+            response or the final post-``post_invoke`` result. Defaults to
+            ``"raw"``.
         """
         super().__init__(
             name=name,
@@ -364,6 +370,7 @@ class ToolAgent(Agent, ABC):
             post_result_key=post_result_key,
             records_window=records_window,
             response_preview_limit=response_preview_limit,
+            assistant_response_source=assistant_response_source,
         )
 
         self._toolbox: dict[str, AtomicInvokable] = {}
@@ -2043,33 +2050,27 @@ class ToolAgent(Agent, ABC):
             "content": f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK =====",
         }
 
-    def act(self, task: ToolAgentTask) -> ToolAgentTask:
+    def _apply_batch_results(
+        self,
+        task: ToolAgentTask,
+        indices: list[int],
+        board: list[BlackboardSlot],
+        raw_results: list[Any],
+    ) -> ToolAgentTask:
         """
-        Execute the currently prepared batch concurrently, or no-op if
-        ``prepare`` produced nothing to run this round.
-
-        Concrete and final — no ``ToolAgent`` subclass overrides this.
-        Trusts ``prepare``'s (and, for tool existence/budget, ``think``'s)
-        contract completely: every index in ``task.prepared_steps`` is
-        assumed in-bounds, unique, not yet executed, marked ``PREPARED``,
-        naming a registered tool, and within ``tool_calls_limit`` — none of
-        that is re-validated here. A cascade-skipped round (``prepare``
-        left ``task.prepared_steps`` empty) is not an error: this method
-        just returns ``task`` unchanged and the outer loop tries again next
-        round.
+        Shared post-gather bookkeeping for ``act``/``async_act``: partition
+        ``raw_results`` (paired positionally with ``indices``) into
+        failures/successes, apply ``fail_fast`` handling, mutate slots, and
+        check for run completion. Both callers differ only in *how*
+        ``raw_results`` was gathered (``run_coro_sync``-wrapped vs. awaited
+        directly) — everything after that point is identical, so it lives
+        here once instead of twice.
 
         Failure handling: ``fail_fast=True`` (default) marks and raises on
-        the first failed step; ``fail_fast=False`` marks every failed
-        slot but only raises if the return tool itself failed, otherwise
-        falling through to record the surviving successes.
+        the first failed step; ``fail_fast=False`` marks every failed slot
+        but only raises if the return tool itself failed, otherwise falling
+        through to record the surviving successes.
         """
-        logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
-        if not task.prepared_steps:
-            return task
-
-        indices = list(task.prepared_steps)
-        board = task.running_blackboard
-
         non_return_planned = 0
         return_indices: list[int] = []
         for idx in indices:
@@ -2078,20 +2079,7 @@ class ToolAgent(Agent, ABC):
             else:
                 non_return_planned += 1
 
-        async def run_batch() -> list[tuple[int, Any]]:
-            coros: list[Any] = []
-            for idx in indices:
-                slot = board[idx]
-                tool = self.get_tool(slot.tool)
-                logger.debug(
-                    f"{type(self).__name__}.{self.name}:\nTool: {slot.tool}\nArgs: {slot.args}\n\n"
-                )
-                coros.append(tool.async_invoke(slot.resolved_args))
-            raw_results = await asyncio.gather(*coros, return_exceptions=True)
-            return list(zip(indices, raw_results))
-
-        pairs = run_coro_sync(run_batch())
-
+        pairs = list(zip(indices, raw_results))
         failures = [(idx, raw) for idx, raw in pairs if isinstance(raw, BaseException)]
         successes = [(idx, raw) for idx, raw in pairs if not isinstance(raw, BaseException)]
 
@@ -2144,10 +2132,25 @@ class ToolAgent(Agent, ABC):
 
         return task
 
-    async def async_act(self, task: ToolAgentTask) -> ToolAgentTask:
-        """Async mirror of ``act``; same trust/trim contract, awaits each
-        tool's ``async_invoke`` directly rather than wrapping in
-        ``run_coro_sync``."""
+    def act(self, task: ToolAgentTask) -> ToolAgentTask:
+        """
+        Execute the currently prepared batch concurrently, or no-op if
+        ``prepare`` produced nothing to run this round.
+
+        Concrete and final — no ``ToolAgent`` subclass overrides this.
+        Trusts ``prepare``'s (and, for tool existence/budget, ``think``'s)
+        contract completely: every index in ``task.prepared_steps`` is
+        assumed in-bounds, unique, not yet executed, marked ``PREPARED``,
+        naming a registered tool, and within ``tool_calls_limit`` — none of
+        that is re-validated here. A cascade-skipped round (``prepare``
+        left ``task.prepared_steps`` empty) is not an error: this method
+        just returns ``task`` unchanged and the outer loop tries again next
+        round.
+
+        Gathers results via a ``run_coro_sync``-wrapped coroutine (this
+        method itself is sync); ``_apply_batch_results`` does everything
+        after that, shared verbatim with ``async_act``.
+        """
         logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
         if not task.prepared_steps:
             return task
@@ -2155,13 +2158,31 @@ class ToolAgent(Agent, ABC):
         indices = list(task.prepared_steps)
         board = task.running_blackboard
 
-        non_return_planned = 0
-        return_indices: list[int] = []
-        for idx in indices:
-            if board[idx].tool == RETURN_TOOL_FULL_NAME:
-                return_indices.append(idx)
-            else:
-                non_return_planned += 1
+        async def run_batch() -> list[Any]:
+            coros: list[Any] = []
+            for idx in indices:
+                slot = board[idx]
+                tool = self.get_tool(slot.tool)
+                logger.debug(
+                    f"{type(self).__name__}.{self.name}:\nTool: {slot.tool}\nArgs: {slot.args}\n\n"
+                )
+                coros.append(tool.async_invoke(slot.resolved_args))
+            return await asyncio.gather(*coros, return_exceptions=True)
+
+        raw_results = run_coro_sync(run_batch())
+        return self._apply_batch_results(task, indices, board, raw_results)
+
+    async def async_act(self, task: ToolAgentTask) -> ToolAgentTask:
+        """Async mirror of ``act``; same trust/trim contract, awaits each
+        tool's ``async_invoke`` directly rather than wrapping in
+        ``run_coro_sync``. ``_apply_batch_results`` does everything past the
+        gather step, shared verbatim with ``act``."""
+        logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
+        if not task.prepared_steps:
+            return task
+
+        indices = list(task.prepared_steps)
+        board = task.running_blackboard
 
         coros: list[Any] = []
         for idx in indices:
@@ -2173,62 +2194,7 @@ class ToolAgent(Agent, ABC):
             coros.append(tool.async_invoke(slot.resolved_args))
 
         raw_results = await asyncio.gather(*coros, return_exceptions=True)
-
-        failures = [
-            (idx, raw) for idx, raw in zip(indices, raw_results) if isinstance(raw, BaseException)
-        ]
-        successes = [
-            (idx, raw) for idx, raw in zip(indices, raw_results) if not isinstance(raw, BaseException)
-        ]
-
-        if failures:
-            if self._fail_fast:
-                idx, raw_error = failures[0]
-                if isinstance(raw_error, ToolInvocationError):
-                    board[idx].error = raw_error
-                    board[idx].status = BlackboardSlot.FAILED
-                    raise raw_error
-                wrapped = ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
-                    f"for {board[idx].tool!r}: {raw_error}"
-                )
-                board[idx].error = wrapped
-                board[idx].status = BlackboardSlot.FAILED
-                raise wrapped from raw_error
-            else:
-                for idx, raw_error in failures:
-                    if isinstance(raw_error, ToolInvocationError):
-                        board[idx].error = raw_error
-                    else:
-                        board[idx].error = ToolAgentError(
-                            f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
-                            f"for {board[idx].tool!r}: {raw_error}"
-                        )
-                    board[idx].status = BlackboardSlot.FAILED
-
-                for idx, raw_error in failures:
-                    if board[idx].tool == RETURN_TOOL_FULL_NAME:
-                        err = board[idx].error
-                        if isinstance(raw_error, ToolInvocationError):
-                            raise err
-                        raise err from raw_error
-
-        for idx, tool_result in successes:
-            board[idx].result = tool_result
-            board[idx].error = NO_VAL
-            board[idx].status = BlackboardSlot.EXECUTED
-            task.executed_steps.add(idx)
-
-        task.tool_calls_used += non_return_planned
-        task.prepared_steps = []
-
-        if return_indices:
-            ret_idx = return_indices[0]
-            if board[ret_idx].is_executed():
-                task.generated_response = board[ret_idx].result.result
-                task.complete = True
-
-        return task
+        return self._apply_batch_results(task, indices, board, raw_results)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a diagnostic snapshot of this ToolAgent.

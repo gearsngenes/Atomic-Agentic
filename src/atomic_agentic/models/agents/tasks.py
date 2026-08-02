@@ -148,12 +148,13 @@ class ToolAgentTask(AgentTask):
         Referenced during generation to produce targeted LLM feedback.
 
     retries_used : int
-        Cumulative retry attempts consumed across all step generations in
-        this run. ``PlanActAgent``'s retry budget is a local counter inside
-        ``_generate_plan``, not stored on the task; only ``ReActAgent``
-        actually uses this field. Declared here (rather than on
-        ``ReActTask``) so it's available uniformly to every subclass,
-        including ``PlanActTask``.
+        Cumulative retry attempts consumed across all generation attempts in
+        this run. Both ``PlanActAgent`` (``_generate_plan``/
+        ``_agenerate_plan``) and ``ReActAgent`` (``_generate_next_step``/
+        ``_agenerate_next_step``) read and increment this field directly on
+        the task — neither keeps a separate local counter. Declared here
+        (rather than on ``ReActTask``) so it's available uniformly to every
+        subclass, including ``PlanActTask``.
     """
     running_blackboard: list[BlackboardSlot] = field(default_factory=list)
 
