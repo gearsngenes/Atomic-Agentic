@@ -5,6 +5,49 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a24] - 2026-08-02
+
+### Added
+
+- `SelfAskAgent` rebuilt from scratch as a direct `BasicAgent` subclass:
+  adaptive, free-flowing self-questioning (`[CATEGORY] content` lines, no
+  JSON) that produces one or more categorized thoughts per round
+  (`OBSERVATION`/`QUESTION`/`CLARIFICATION`/`ASSUMPTION`/`REASON`/
+  `INSTRUCTION`/`OTHER`) until it signals it's done or hits
+  `max_thinking_rounds`. `thoughts_per_round` caps how many thoughts survive
+  each round — set it to `1` to force a task through multiple rounds
+  structurally rather than by instruction alone. `thinking_instructions`
+  accepts its own parameterized `PromptConfig`, reconciled against
+  `role_prompt`'s own parameters at construction time. A public `thoughts`
+  property exposes the full per-round thought history.
+- Three new example scripts under `examples/Thinking_Examples/` (easy,
+  medium, and a structurally-sequential hard puzzle demonstrating the
+  multi-round guarantee).
+
+### Changed
+
+- Every agent (`BasicAgent`, `ToolAgent`, `PlanActAgent`, `ReActAgent`,
+  `SelfAskAgent`) now runs a unified three-hook lifecycle — `think`/
+  `prepare`/`act` (+ async mirrors) — in place of the single `_progress`/
+  `_async_progress` hook introduced in a23. `Agent.render_task()` is now a
+  concrete, shared method on the base class; subclasses implement only a
+  small `_render_task_messages` hook instead of rebuilding the whole render
+  pipeline.
+- `PlanActAgent`/`ReActAgent`'s generation-retry loops (render → call LLM →
+  decode → validate → retry-with-feedback) now share one implementation.
+  Retry feedback messages no longer duplicate the raw model output or a
+  failed step's text a second time in the same turn.
+- `tools/prebuilt.py`'s `safe_eval` now uses `ast.literal_eval` instead of a
+  stripped-down `eval`, so it only ever accepts literal Python values
+  (strings, numbers, containers, booleans, `None`) instead of arbitrary
+  expression syntax.
+
+### Removed
+
+- The `ThinkingAgent`/`PlanAskAgent` classes and the JSON-based batch
+  self-questioning approach they implemented — fully superseded by the
+  single `SelfAskAgent` above.
+
 ## [2.0.0a23] - 2026-07-25
 
 ### Added
