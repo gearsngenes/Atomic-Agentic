@@ -105,32 +105,24 @@ class BasicAgent(Agent):
         task.system_prompt_name = "role"
         return task
 
-    def render_task(
-        self,
-        task: AgentTask,
-        *,
-        additional_messages: list[dict[str, str]] | None = None,
-    ) -> list[dict[str, str]]:
-        """Render the role prompt, prior turns, and this invocation's prompt.
+    def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        """Build this invocation's single task message.
 
         ``task.task_messages`` is a single message the first time it's
         built (the raw ``user_prompt``, unwrapped) and never grows further
-        — ``BasicAgent`` has no retry loop, so ``additional_messages`` is
-        always empty in practice.
+        — ``BasicAgent`` has no retry loop, so this branch never re-triggers
+        within one invocation once set.
         """
-        system = self._render_system_message(task, task.inputs)
-        historic = self._render_historic_messages(task)
         if not task.task_messages:
             task.task_messages = [{"role": "user", "content": task.user_prompt}]
-        task.task_messages.extend(additional_messages or [])
-        return system + historic + task.task_messages
+        return task.task_messages
 
-    def _progress(self, task: AgentTask) -> AgentTask:
+    def act(self, task: AgentTask) -> AgentTask:
         """Advance (and complete) a single-turn BasicAgent invocation.
 
-        ``BasicAgent`` always finishes in exactly one ``_progress`` call:
-        render the task, call the engine, validate the response, and mark
-        the task complete.
+        ``BasicAgent`` always finishes in exactly one ``act`` call: render
+        the task, call the engine, validate the response, and mark the
+        task complete.
         """
         messages = self.render_task(task)
         engine_result = self._llm_engine.invoke({"messages": messages})
@@ -149,8 +141,8 @@ class BasicAgent(Agent):
         task.complete = True
         return task
 
-    async def _async_progress(self, task: AgentTask) -> AgentTask:
-        """Async mirror of ``_progress``.
+    async def async_act(self, task: AgentTask) -> AgentTask:
+        """Async mirror of ``act``.
 
         Awaits the engine's native async path directly rather than relying
         on ``Agent``'s inherited ``asyncio.to_thread``-wrapping default.

@@ -3,35 +3,24 @@ from __future__ import annotations
 import pytest
 import json
 import asyncio
-from typing import Any, Mapping
 
 from conftest import (
-    ScriptedToolAgent,
     ScriptedLLMEngine,
     make_planact_agent,
     make_react_agent,
     register_math_tools,
-    prepared_slot,
-    executed_slot,
-    make_task,
-    make_llm_result,
-    make_llm_record,
-    make_tool_result,
-    BadRepr,
     react_step_json,
 )
 
-from atomic_agentic.agents.toolagent import ToolAgent, return_tool
+from atomic_agentic.agents.toolagent import return_tool
 from atomic_agentic.agents.planact import PlanActAgent
-from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
-from atomic_agentic.models.agents.records import LLMRecord
-from atomic_agentic.models.results.agents import ToolAgentResult
+from atomic_agentic.models.agents.blackboard_models import BlackboardSlot
 from atomic_agentic.exceptions import (
     ToolAgentError,
     ToolInvocationError,
 )
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
+
 
 class TestPlanActAgent:
     def test_invokes_planned_tools_and_returns_value(self) -> None:
@@ -95,11 +84,9 @@ class TestPlanActAgent:
             ]
         )
 
-        task = agent._initialize_task(
-            turns=[],
-            prompt="plan",
-            inputs={},
-        )
+        task = agent._initialize_task(turns=[], prompt="plan", inputs={})
+        task = agent.think(task)
+        task = agent.prepare(task)
 
         assert task.batches == [[0, 1], [2]]
 
@@ -245,7 +232,10 @@ class TestPlanActAgent:
 
         assert batches == [[0, 1], [2]]
 
-    def test_initialize_task_records_planned_slot_metadata(self) -> None:
+    def test_think_generates_planned_slot_metadata(self) -> None:
+        # think() generates + validates the whole plan onto
+        # task.generated_plan; running_blackboard/batches don't exist yet --
+        # those are prepare()'s job (compiled on its first call).
         agent = make_planact_agent(
             [
                 f"""
@@ -258,21 +248,19 @@ class TestPlanActAgent:
             ]
         )
 
-        task = agent._initialize_task(
-            turns=[],
-            prompt="plan",
-            inputs={},
-        )
+        task = agent._initialize_task(turns=[], prompt="plan", inputs={})
+        task = agent.think(task)
+        plan = task.generated_plan
 
-        assert task.running_blackboard[0].status == "planned"
-        assert task.running_blackboard[0].step_dependencies == ()
-        assert task.running_blackboard[1].status == "planned"
-        assert task.running_blackboard[1].step_dependencies == (0,)
-        assert task.running_blackboard[1].await_step == 0
-        assert task.running_blackboard[2].tool == return_tool.full_name
-        assert task.running_blackboard[2].step_dependencies == (0, 1)
+        assert plan[0].status == "planned"
+        assert plan[0].step_dependencies == ()
+        assert plan[1].status == "planned"
+        assert plan[1].step_dependencies == (0,)
+        assert plan[1].await_step == 0
+        assert plan[2].tool == return_tool.full_name
+        assert plan[2].step_dependencies == (0, 1)
 
-    def test_prepare_next_batch_marks_slots_prepared(self) -> None:
+    def test_prepare_marks_batch_zero_prepared(self) -> None:
         agent = make_planact_agent(
             [
                 f"""
@@ -283,13 +271,10 @@ class TestPlanActAgent:
                 """
             ]
         )
-        task = agent._initialize_task(
-            turns=[],
-            prompt="plan",
-            inputs={},
-        )
+        task = agent._initialize_task(turns=[], prompt="plan", inputs={})
+        task = agent.think(task)
 
-        updated = agent._prepare_next_batch(task)
+        updated = agent.prepare(task)
 
         assert updated.prepared_steps == [0]
         assert updated.running_blackboard[0].status == "prepared"
@@ -308,15 +293,13 @@ class TestPlanActAgent:
             ]
         )
 
-        task = agent._initialize_task(
-            turns=[],
-            prompt="plan",
-            inputs={},
-        )
+        task = agent._initialize_task(turns=[], prompt="plan", inputs={})
+        task = agent.think(task)
+        plan = task.generated_plan
 
-        assert [slot.step for slot in task.running_blackboard] == [0, 1]
-        assert task.running_blackboard[0].tool == "Tool.tests.add"
-        assert task.running_blackboard[1].tool == return_tool.full_name
+        assert [slot.step for slot in plan] == [0, 1]
+        assert plan[0].tool == "Tool.tests.add"
+        assert plan[1].tool == return_tool.full_name
 
     def test_accepts_non_sequential_plan_step_and_normalizes(self) -> None:
         agent = make_planact_agent(
@@ -330,15 +313,13 @@ class TestPlanActAgent:
             ]
         )
 
-        task = agent._initialize_task(
-            turns=[],
-            prompt="plan",
-            inputs={},
-        )
+        task = agent._initialize_task(turns=[], prompt="plan", inputs={})
+        task = agent.think(task)
+        plan = task.generated_plan
 
-        assert [slot.step for slot in task.running_blackboard] == [0, 1]
-        assert task.running_blackboard[0].tool == "Tool.tests.add"
-        assert task.running_blackboard[1].tool == return_tool.full_name
+        assert [slot.step for slot in plan] == [0, 1]
+        assert plan[0].tool == "Tool.tests.add"
+        assert plan[1].tool == return_tool.full_name
 
     def test_rejects_await_on_return_step(self) -> None:
         agent = make_planact_agent(
@@ -382,6 +363,126 @@ class TestPlanActAgent:
 
         for rec in agent.records[-1].llm_records:
             assert rec.system_prompt_name == "plan_first"
+
+
+class TestPlanActThinkPrepareHandoff:
+    """New 1f coverage: think() generates+validates the plan once (no-op on
+    later calls), storing it on task.generated_plan; prepare()'s first call
+    compiles it into batches (task.batches), later calls just resolve/
+    advance the cursor -- compilation itself never repeats."""
+
+    def test_think_populates_generated_plan_and_is_no_op_after(self) -> None:
+        agent = make_planact_agent(
+            [f'[{{"tool": "{return_tool.full_name}", "args": {{"val": 1}}}}]']
+        )
+        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        assert task.generated_plan is NO_VAL
+
+        task = agent.think(task)
+        first_plan = task.generated_plan
+        assert first_plan is not NO_VAL
+
+        task = agent.think(task)  # second call: no-op, same object
+        assert task.generated_plan is first_plan
+
+    def test_prepare_compiles_batches_only_on_first_call(self) -> None:
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+                ])
+            ]
+        )
+        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        task = agent.think(task)
+        assert task.batches == []
+
+        task = agent.prepare(task)
+        first_batches = task.batches
+        assert first_batches
+
+        task = agent.act(task)
+        task = agent.prepare(task)  # second batch -- compile not repeated
+        assert task.batches is first_batches
+
+
+class TestPlanActBlackboardInvariants:
+    """New 1f coverage: across a multi-batch run, running_blackboard[i].step
+    == i holds for every persisted slot and no slot is written twice --
+    under both fail_fast settings."""
+
+    def test_step_matches_index_and_no_double_write_fail_fast_true(self) -> None:
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
+                    {"tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 3}},
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                ])
+            ]
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 9
+        board = agent.blackboard
+        assert len(board) == 3
+        for i, slot in enumerate(board):
+            assert slot.step == i
+            assert slot.status == BlackboardSlot.EXECUTED
+
+    def test_step_matches_index_and_no_double_write_fail_fast_false(self) -> None:
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.fail_tool", "args": {}},
+                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                ])
+            ],
+            fail_fast=False,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 3
+        board = agent.blackboard
+        assert len(board) == 3
+        for i, slot in enumerate(board):
+            assert slot.step == i
+        assert board[0].status == BlackboardSlot.FAILED
+        assert board[1].status == BlackboardSlot.EXECUTED
+        assert board[2].status == BlackboardSlot.EXECUTED
+
+    def test_double_prepare_without_act_is_unreachable_via_the_loop_and_breaks_by_hand(self) -> None:
+        """Demonstrates why the base loop's fixed think -> prepare -> act
+        ordering is what actually prevents double-prepare-without-act, not
+        a guard inside prepare() itself (the old re-entry check was dropped
+        in 1c as dead -- the base loop's external sequencing makes this call
+        shape unreachable through normal invoke()/async_invoke() execution).
+        A hand-rolled re-entry doesn't silently corrupt state -- it breaks
+        loudly, because the second batch's return step depends on the first
+        batch's results, which were never actually executed (act() never
+        ran in between): _resolve_placeholders raises "not executed"."""
+        agent = make_planact_agent(
+            [
+                json.dumps([
+                    {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
+                    {"tool": "Tool.tests.multiply", "args": {"x": 3, "y": 4}},
+                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                ])
+            ]
+        )
+        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        task = agent.think(task)
+
+        task = agent.prepare(task)  # batch 0 prepared: steps [0, 1]
+        first_batch_prepared = list(task.prepared_steps)
+        assert first_batch_prepared == [0, 1]
+
+        with pytest.raises(ToolAgentError, match="not executed"):
+            agent.prepare(task)  # hand-rolled re-entry, no intervening act()
 
 
 # ── TestPlanActGenerationRetry ─────────────────────────────────────────────────
@@ -598,7 +699,7 @@ class TestCascadeFailedPropagation:
             agent.invoke({"prompt": "return cascade raise"})
 
     def test_chain_cascade_return_raises(self) -> None:
-        """Cascade chain: step 0 fails → step 1 cascade FAILED → return depends on step 1 → raises."""
+        """Cascade chain: step 0 fails -> step 1 cascade FAILED -> return depends on step 1 -> raises."""
         agent = make_planact_agent(
             [
                 json.dumps([
@@ -651,7 +752,7 @@ class TestCascadeFailedPropagation:
             agent.invoke({"prompt": "fail_fast=True raises"})
 
 
-# ── TestReActCascadeFailedPropagation ─────────────────────────────────────────
+# ── TestFailedCacheRefValidation ───────────────────────────────────────────────
 
 class TestFailedCacheRefValidation:
     """
@@ -683,7 +784,7 @@ class TestFailedCacheRefValidation:
         # First invoke succeeds (fail_fast=False, return is independent of failed step).
         result1 = agent.invoke({"prompt": "first run"})
         assert result1.result == 1
-        # Second invoke: plan references a FAILED cache slot → raises at validation.
+        # Second invoke: plan references a FAILED cache slot -> raises at validation.
         with pytest.raises(ToolAgentError, match="failed in this conversation"):
             agent.invoke({"prompt": "second run"})
 
@@ -696,7 +797,7 @@ class TestFailedCacheRefValidation:
         """
         # First invoke produces step 0 in the blackboard (global index 0).
         # Second invoke's return step mistakenly references <<__s1__>> (index 1 in
-        # a 1-step plan — out of range; only <<__s0__>> is valid).
+        # a 1-step plan -- out of range; only <<__s0__>> is valid).
         agent = make_planact_agent(
             [
                 # First invoke: one real step + return.
@@ -737,8 +838,6 @@ class TestFailedCacheRefValidation:
             agent.invoke({"prompt": "second run"})
 
 
-# ── TestToolAgentToDictFastFail ───────────────────────────────────────────────
-
 class TestAwaitFieldKeyInErrors:
     """B-5: _validate_tool_step_dict uses the LLM-facing 'await' key, not internal 'await_step'."""
 
@@ -757,7 +856,3 @@ class TestAwaitFieldKeyInErrors:
         assert isinstance(result, str)
         assert "'await'" in result
         assert "'await_step'" not in result
-
-
-# ── TestMaxDurationSingleSource ──────────────────────────────────────────────
-

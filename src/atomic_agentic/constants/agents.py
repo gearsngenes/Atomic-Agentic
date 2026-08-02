@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import re
 from ..models.parameters import ParamSpec
 
 # =============================================================================
@@ -110,6 +110,36 @@ RETURN_TOOL_FULL_NAME = (
 # =============================================================================
 # Keep this explicit so adding local helper names or imports cannot accidentally
 # widen the module's public surface.
+
+THOUGHT_CATEGORIES: tuple[str, ...] = (
+    "OBSERVATION",
+    "QUESTION",
+    "CLARIFICATION",
+    "ASSUMPTION",
+    "REASON",
+    "INSTRUCTION",
+    "OTHER",
+)
+
+THOUGHT_MARKER_PATTERN = re.compile(
+    r"^\s*\[(" + "|".join(THOUGHT_CATEGORIES) + r")\]\s*",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+STOP_THINKING_SENTINEL = "|STOP_THINKING|"
+
+# Wraps a resolved (non-empty) thinking_instructions render into its own
+# labeled section around SELF_ASK_PROMPT's {user_thinking_instructions}
+# slot (agents/prompts.py). Concatenated around the resolved text, not part
+# of any PromptConfig template -- plain literal wrapper text, not a prompt
+# itself.
+THINKING_ADDITIONAL_INSTRUCTIONS_HEADER = """\
+# ADDITIONAL INSTRUCTIONS
+Below are additional instructions provided by the user directly for \
+tailored thinking instructions, WHILE ABIDING by the rules above.
+===Additional Instructions Start===
+"""
+THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n"
 
 
 __all__ = [

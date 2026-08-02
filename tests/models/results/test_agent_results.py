@@ -8,6 +8,7 @@ import pytest
 
 from atomic_agentic.models.results.agents import (
     AgentResult,
+    ThinkingAgentResult,
     ToolAgentResult,
     ToolUsageRecord,
 )
@@ -275,3 +276,47 @@ class TestToolAgentResult:
         result = self._make_result(exception_records=[(0, err)])
         with pytest.raises(FrozenInstanceError):
             result.exception_records = ()  # type: ignore[misc]
+
+
+# ── TestThinkingAgentResult ───────────────────────────────────────────────────
+
+class TestThinkingAgentResult:
+    def _make_result(self, *, thoughts_start=None, thoughts_end=None) -> ThinkingAgentResult:
+        started_at = datetime.now(timezone.utc)
+        return ThinkingAgentResult(
+            result="done",
+            invoker_id="agent-1",
+            started_at=started_at,
+            ended_at=started_at + timedelta(seconds=1),
+            llm_token_usage=(make_token_usage(),),
+            llm_model_data=make_model_data(),
+            thoughts_start=thoughts_start,
+            thoughts_end=thoughts_end,
+        )
+
+    def test_is_agent_result(self) -> None:
+        result = self._make_result()
+        assert isinstance(result, AgentResult)
+
+    def test_thoughts_span_defaults_to_none(self) -> None:
+        result = self._make_result()
+        assert result.thoughts_start is None
+        assert result.thoughts_end is None
+
+    def test_thoughts_span_stores_indices(self) -> None:
+        result = self._make_result(thoughts_start=2, thoughts_end=5)
+        assert result.thoughts_start == 2
+        assert result.thoughts_end == 5
+
+    def test_to_dict_includes_thoughts_span(self) -> None:
+        result = self._make_result(thoughts_start=2, thoughts_end=5)
+        d = result.to_dict()
+        assert d["thoughts_start"] == 2
+        assert d["thoughts_end"] == 5
+        assert "llm_token_usage" in d
+        assert "thoughts" not in d
+
+    def test_is_frozen(self) -> None:
+        result = self._make_result()
+        with pytest.raises(FrozenInstanceError):
+            result.thoughts_start = 1  # type: ignore[misc]

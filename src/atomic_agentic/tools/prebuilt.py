@@ -23,6 +23,7 @@ Design
 from __future__ import annotations
 
 from typing import Any, List, Optional, Sequence
+import ast
 import json
 import logging
 import math
@@ -128,8 +129,9 @@ def split_string(s: str, sep: Optional[str] = None) -> List[str]:
     return s.split(sep)
 
 def safe_eval(s: str) -> Any:
-    # Evaluate simple Python literal expressions with no builtins.
-    return eval(s, {"__builtins__": None}, {})
+    # Parse a literal Python value (str/num/tuple/list/dict/set/bool/None) --
+    # no names, calls, or operators, unlike eval() with __builtins__ stripped.
+    return ast.literal_eval(s)
 
 def extract_json_string(s: str) -> Optional[str]:
     """Try to extract a JSON object/array substring from text.

@@ -1,11 +1,8 @@
-﻿from __future__ import annotations
-
-import pytest
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
-import asyncio
 import json
 
 import pytest
@@ -77,6 +74,7 @@ class EchoLLMEngine(LLMEngine):
 
     def _on_detach(self, meta: Mapping[str, Any]) -> None:
         return None
+
 
 class ScriptedLLMEngine(LLMEngine):
     """Deterministic LLMEngine that returns one scripted text response per call."""
@@ -276,14 +274,30 @@ def react_step_json(
 class ScriptedTask(ToolAgentTask):
     """Test-only ToolAgentTask subclass carrying the scripted fixture's
     batch cursor state, mirroring how PlanActTask/ReActTask each carry
-    their own domain-specific fields on top of ToolAgentTask."""
+    their own domain-specific fields on top of ToolAgentTask. No
+    cache_blackboard field -- that field does not exist on ToolAgentTask;
+    cache state lives on the owning agent's self._blackboard, never on the
+    task."""
     batches: list[list[dict[str, Any]]] = field(default_factory=list)
     batch_index: int = 0
     next_step_index: int = 0
 
 
 class ScriptedToolAgent(ToolAgent):
-    """Deterministic ToolAgent subclass for testing the base ToolAgent loop."""
+    """Deterministic ToolAgent subclass for testing the base ToolAgent
+    think/prepare/act loop.
+
+    Implements every ToolAgent-abstract hook (_initialize_task, think/
+    async_think, prepare/async_prepare); never overrides act/async_act --
+    those are concrete and final on ToolAgent itself.
+
+    think/async_think are no-ops: this fixture's whole script is known
+    upfront (mirrors ToolAgent.think's own documented "may no-op once
+    there's nothing further to decide" case for an already-compiled plan),
+    so there is no per-round decision to make -- the old fixture's engine
+    call in _initialize_task served no behavioral purpose once think() is
+    the hook responsible for real generation, and is dropped entirely.
+    """
 
     def __init__(
         self,
@@ -331,34 +345,21 @@ class ScriptedToolAgent(ToolAgent):
         inputs: dict,
     ) -> ScriptedTask:
         valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        render_ctx = {
-            ToolAgent.TOOLS_FIELD: self.actions_context(),
-            ToolAgent.LIMIT_FIELD: limit_text,
-            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
-        }
-        system = self._system_prompts["tool_instructions"].render(render_ctx)
-        messages = self.build_messages(system, turns, prompt)
-
         total_steps = sum(len(batch) for batch in self.script)
         running_blackboard = [BlackboardSlot(step=index) for index in range(total_steps)]
-
-        engine_result = self.llm_engine.invoke({"messages": messages})
-        llm_record = LLMRecord(messages=[messages[-1]], llm_result=engine_result)
 
         return ScriptedTask(
             turns=turns,
             inputs=inputs,
             user_prompt=prompt,
             system_prompt_name="tool_instructions",
-            cache_blackboard=[slot.copy() for slot in self._blackboard],
             running_blackboard=running_blackboard,
             executed_steps=set(),
             prepared_steps=[],
             tool_calls_used=0,
             complete=False,
             generated_response=NO_VAL,
-            llm_records=[llm_record],
+            llm_records=[],
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
             batches=[[dict(call) for call in batch] for batch in self.script],
@@ -366,31 +367,36 @@ class ScriptedToolAgent(ToolAgent):
             next_step_index=0,
         )
 
-    def render_task(
-        self,
-        task: ScriptedTask,
-        *,
-        additional_messages: list[dict[str, str]] | None = None,
-    ) -> list[dict[str, str]]:
-        """Minimal render_task satisfying the abstract contract; this
-        fixture's LLM call happens in _initialize_task, decoupled from the
-        scripted _prepare_next_batch, so this is not exercised on the
-        scripted execution path -- present for abstract-class instantiation
-        and for any test that calls it directly."""
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
-        render_ctx = {
-            ToolAgent.TOOLS_FIELD: self.actions_context(),
-            ToolAgent.LIMIT_FIELD: limit_text,
-            ToolAgent.CONSTANTS_FIELD: self.constants_context(),
-        }
-        system = self._render_system_message(task, render_ctx)
-        historic = self._render_historic_messages(task)
+    def think(self, task: ScriptedTask) -> ScriptedTask:
+        # The scripted batches are fixed upfront and never depend on this
+        # call's result -- but every real ToolAgent family guarantees at
+        # least one LLMRecord by the time build_result_from_record runs
+        # (inherited unchanged here), so a nominal one-time engine call is
+        # made on first entry only, mirroring PlanActAgent's own
+        # generate-once-then-no-op shape.
+        if not task.llm_records:
+            messages = [{"role": "user", "content": task.user_prompt}]
+            engine_result = self._llm_engine.invoke({"messages": messages})
+            task.llm_records.append(LLMRecord(messages=tuple(messages), llm_result=engine_result))
+        return task
+
+    async def async_think(self, task: ScriptedTask) -> ScriptedTask:
+        if not task.llm_records:
+            messages = [{"role": "user", "content": task.user_prompt}]
+            engine_result = await self._llm_engine.async_invoke({"messages": messages})
+            task.llm_records.append(LLMRecord(messages=tuple(messages), llm_result=engine_result))
+        return task
+
+    def _render_task_messages(self, task: ScriptedTask) -> list[dict[str, str]]:
+        """Minimal implementation satisfying the abstract contract; not
+        exercised on the scripted execution path since this fixture makes
+        no real per-round LLM call -- present for abstract-class
+        instantiation and for any test that calls render_task directly."""
         if not task.task_messages:
             task.task_messages = [{"role": "user", "content": task.user_prompt}]
-        task.task_messages.extend(additional_messages or [])
-        return system + historic + task.task_messages
+        return task.task_messages
 
-    def _prepare_next_batch(self, task: ScriptedTask) -> ScriptedTask:
+    def prepare(self, task: ScriptedTask) -> ScriptedTask:
         if task.batch_index >= len(task.batches):
             raise ToolAgentError("No scripted batches remain.")
 
@@ -429,6 +435,11 @@ class ScriptedToolAgent(ToolAgent):
         task.batch_index += 1
         return task
 
+    async def async_prepare(self, task: ScriptedTask) -> ScriptedTask:
+        # No real I/O in this fixture -- direct passthrough, not a thread
+        # offload. ToolAgent supplies no default; each family decides.
+        return self.prepare(task)
+
 
 class BadInitializeToolAgent(ScriptedToolAgent):
     def _initialize_task(
@@ -441,32 +452,19 @@ class BadInitializeToolAgent(ScriptedToolAgent):
         return {"bad": "state"}
 
 
-class PendingPreparedToolAgent(ScriptedToolAgent):
-    def _initialize_task(
-        self,
-        *,
-        turns: list[AgentRecord],
-        prompt: str,
-        inputs: dict,
-    ) -> ScriptedTask:
-        task = super()._initialize_task(turns=turns, prompt=prompt, inputs=inputs)
-        task.prepared_steps = [0]
-        return task
-
-
 class SkipFirstBatchToolAgent(ScriptedToolAgent):
     """Batch index 0 always cascade-skips to empty (simulating every step
     in that round having failed a dependency check) without executing or
     raising; batch index 1+ delegates to the real scripted behavior. Tests
-    that ToolAgent._progress's cascade-skip guard tolerates a batch that
-    legitimately prepares to empty."""
+    that ToolAgent.act tolerates a prepare() call that legitimately
+    produces an empty task.prepared_steps."""
 
-    def _prepare_next_batch(self, task: ScriptedTask) -> ScriptedTask:
+    def prepare(self, task: ScriptedTask) -> ScriptedTask:
         if task.batch_index == 0:
             task.batch_index += 1
             return task
         task.batch_index -= 1
-        return super()._prepare_next_batch(task)
+        return super().prepare(task)
 
 
 def make_agent(
@@ -523,17 +521,18 @@ def executed_slot(step: int, result: Any, *, tool: str = "Tool.tests.add") -> Bl
 def make_task(
     *,
     running: list[BlackboardSlot] | None = None,
-    cache: list[BlackboardSlot] | None = None,
     prepared_steps: list[int] | None = None,
     tool_calls_used: int = 0,
     inputs: dict[str, Any] | None = None,
 ) -> ScriptedTask:
+    """No cache/cache_blackboard parameter -- tests needing agent-level
+    cache state must set agent._blackboard directly before exercising
+    cache-placeholder resolution, not pass it through the task."""
     return ScriptedTask(
         turns=[],
         inputs=inputs or {},
         user_prompt="run",
         system_prompt_name="tool_instructions",
-        cache_blackboard=cache or [],
         running_blackboard=running or [],
         executed_steps=set(),
         prepared_steps=prepared_steps or [],
@@ -544,4 +543,3 @@ def make_task(
         batch_index=0,
         next_step_index=0,
     )
-

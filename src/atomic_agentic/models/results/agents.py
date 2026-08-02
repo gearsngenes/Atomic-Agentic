@@ -11,6 +11,7 @@ __all__ = [
     "ToolUsageRecord",
     "AgentResult",
     "ToolAgentResult",
+    "ThinkingAgentResult",
 ]
 
 
@@ -199,4 +200,41 @@ class ToolAgentResult(AgentResult):
             {"blackboard_index": idx, "error": str(e)}
             for idx, e in self.exception_records
         ]
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class ThinkingAgentResult(AgentResult):
+    """
+    Successful thinking-capable agent invocation result (currently only
+    ``SelfAskAgent``).
+
+    Extends ``AgentResult`` with the half-open index span into the agent's
+    persisted thoughts list produced by this invocation. Indices only, not
+    the thought content itself -- mirrors ``ThinkingAgentRecord``'s own
+    ``thoughts_start``/``thoughts_end`` exactly (no ``__post_init__``
+    override needed here, matching that precedent: plain ``int | None``
+    fields, no cross-field validation). A caller needing the actual
+    ``AgentThought`` content either calls ``SelfAskAgent.get_thoughts(run_id)``
+    directly, or slices the agent's own public ``thoughts`` property
+    (``agent.thoughts[thoughts_start:thoughts_end]``).
+
+    Fields
+    ------
+    thoughts_start:
+        Start index (inclusive) of this invocation's thoughts in the
+        agent's persisted ``self._thoughts`` list.
+    thoughts_end:
+        End index (exclusive) of this invocation's thoughts in the agent's
+        persisted ``self._thoughts`` list.
+    """
+
+    thoughts_start: int | None = None
+    thoughts_end: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation."""
+        data = AgentResult.to_dict(self)
+        data["thoughts_start"] = self.thoughts_start
+        data["thoughts_end"] = self.thoughts_end
         return data

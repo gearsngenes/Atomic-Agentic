@@ -262,3 +262,83 @@ VALID OUTPUT:
 """,
     description="ReActAgent iterative step-orchestration prompt.",
 )
+
+
+# =============================================================================
+# SelfAskAgent prompt
+# =============================================================================
+# Used by:
+# - agents/selfask.py: SelfAskAgent's fixed self-questioning prompt
+#
+# Unlike role_prompt (caller-owned persona/response instructions), this
+# prompt is fixed and non-configurable -- no constructor parameter exposes
+# it. {thoughts_per_round}, {max_thinking_rounds}, and
+# {user_thinking_instructions} are filled via an internally-computed render
+# context (never task.inputs), matching how ORCHESTRATOR_PROMPT's
+# {TOOLS}/{LIMIT}/{CONSTANTS} stay off the caller-facing schema above.
+
+SELF_ASK_PROMPT = PromptConfig(
+    template="""
+# OBJECTIVE
+You are a thinker who analyzes a view of a running/active task and 
+produces a list of organized thoughts. This task view can contain a
+description of the task itself, prior thoughts or messages,
+instructions, and/or thoughts you have given for the current task..
+
+# THINKING OUTPUT FORMAT
+Return your thoughts as a block of lines, one thought per line, in this
+EXACT format:
+
+[CATEGORY] content
+[CATEGORY] content
+...
+
+The category MUST be contained in `[` and `]`.
+
+# THOUGHT CATEGORIES
+Each thought's category must be exactly one of the following, listed in the
+order thinking typically progresses (not a hard rule -- a later round can
+still raise a fresh question after an earlier instruction if something new
+comes up):
+
+- OBSERVATION: An emergent truth about the current state of the task --
+  something you notice, not something you decide or ask.
+- QUESTION: An ambiguity or uncertainty about the task that needs to be
+  resolved before proceeding.
+- CLARIFICATION: Restating or rewording part of the task in clearer terms --
+  a comprehension aid, not new information.
+- ASSUMPTION: A reference for something not explicitly stated but needed to
+  proceed with certainty, taken as true without confirmation. Use sparingly
+  -- only when genuinely necessary.
+- REASON: Justification or explanation for why something needs to happen,
+  or why a particular choice is being made.
+- INSTRUCTION: A directed action that modifies the task -- an implied step
+  made explicit, or an addition to what's being asked. Aimed at whoever
+  answers the task once thinking concludes, not at the thinking process
+  itself.
+- OTHER: Any thought that does not fit cleanly into the categories above.
+
+# GUIDANCE
+Think sparingly. Do not produce a thought for something that is already
+obvious or self-explanatory from the task or your prior thoughts -- only
+think when it genuinely helps advance or clarify the task.
+
+Any category may occur multiple times within a single round -- each
+represents a distinct, independent consideration.
+
+# STOP CONDITION
+After you produce your thoughts, if you determine no further thinking
+is needed, then you MUST signal this by using the literal token
+|STOP_THINKING|. Place this signal on its own line after your last thought.
+Do NOT include this token if you are not done thinking.
+
+# THOUGHT LIMIT
+The block of thoughts you produce per round for a given task must contain
+between (AT LEAST) 1 and {thoughts_per_round} (AT MOST) thoughts.
+
+# ROUND LIMIT
+{max_thinking_rounds}
+
+{user_thinking_instructions}""",
+    description="Self-Ask Agent's thinking-phase prompt.",
+)

@@ -71,20 +71,30 @@ return a final value.
 
 Subclass Responsibilities
 -------------------------
-Subclasses must implement two abstract hooks:
+``ToolAgent`` drives every subclass through the shared
+``think`` → ``prepare`` → ``act`` lifecycle (``agents/base.py``); ``act`` is
+concrete and final here. Subclasses implement:
 
 **_initialize_task(*, turns, prompt, inputs)** → ``ToolAgentTask`` (or subclass)
   Build and return a task for this invocation:
-  - Render the system prompt and build the LLM-facing message list
+  - Stamp the system prompt name
   - Snapshot prior cached results if context is enabled
   - Allocate running blackboard slots for current-run tool calls
 
-**_prepare_next_batch(task)** → ``ToolAgentTask`` (or subclass)
-  Prepare the next executable batch:
-  - Decide which tools to invoke based on the current task
-  - Validate tool names, dependencies, and placeholders
-  - Resolve placeholders into concrete arguments
-  - Populate `task.prepared_steps`
+**think(task)** / **async_think(task)** → ``ToolAgentTask`` (or subclass)
+  Make this round's real decision via the LLM: render, call the engine,
+  parse/validate the output, store the decision onto ``task``.
+
+**prepare(task)** / **async_prepare(task)** → ``ToolAgentTask`` (or subclass)
+  Turn that decision into something executable, no further LLM calls:
+  validate/resolve placeholders, cascade-check dependencies, populate
+  `task.prepared_steps`.
+
+**_render_task_messages(task)** → ``list[dict[str, str]]``
+  The one piece of ``Agent.render_task``'s shared pipeline (``base.py``)
+  each subclass still owns — built on the shared ``_render_task_banner``
+  helper below (the pipeline's own ``_render_system_message`` is a sibling
+  step, not something ``_render_task_messages`` itself calls).
 
 The task is extensible: subclasses carry domain-specific fields (batches,
 cursors, planning metadata) on their own ``ToolAgentTask`` subclass
@@ -112,6 +122,7 @@ import json
 from typing import (
     Any,
     Callable,
+    Literal,
     Mapping,
     Optional,
 )
@@ -126,7 +137,7 @@ from ..constants.agents import (
     TOOL_FIELD,
 )
 
-from ..models.agents.records import AgentRecord, ToolAgentRecord
+from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
 from ..models.results.agents import ToolAgentResult, ToolUsageRecord
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from ..models.agents.tasks import ToolAgentTask
@@ -142,7 +153,7 @@ from ..llm.base import LLMEngine
 from ..tools import toolify
 from ..mcp import MCPClientHub
 from ..a2a import PyA2AtomicClient
-from ..utils.agents import extract_dependencies
+from ..utils.agents import extract_dependencies, extract_json_object
 from ..utils.core import run_coro_sync
 from .tools import return_tool
 
@@ -168,32 +179,35 @@ class ToolAgent(Agent, ABC):
 
     1. task = _initialize_task(turns=turns, prompt=prompt, inputs=inputs)   [subclass hook]
     2. while not task.complete:
-        task = _progress(task)                                              [ToolAgent, final]
+        task = think(task)                                                  [subclass hook]
+        task = prepare(task)                                                [subclass hook]
+        task = act(task)                                                    [ToolAgent, final]
     3. record = _build_record_from_task(task, turns)                        [ToolAgent override]
     4. post_invoke -> build_result_from_record(record, ...)                 [ToolAgent override]
 
-    ``_progress`` (final; subclasses should not override) runs exactly one
-    prepare/execute round per call::
+    ``act`` (final; subclasses should not override) trusts ``prepare``'s
+    (and, for tool existence/budget, ``think``'s) contract completely — it
+    does not re-validate indices, tool names, or budget, only whether
+    there's anything to run::
 
-        if task.prepared_steps: raise                # invariant: no re-prepare with a pending batch
-        task = _prepare_next_batch(task)              [subclass hook]
-        if not task.prepared_steps: return task       # cascade-skip: entire batch cascade-failed
-        task = _execute_prepared_batch(task)           [ToolAgent, final]
+        if not task.prepared_steps: return task       # cascade-skip: entire round produced nothing
+        <execute task.prepared_steps concurrently>     [ToolAgent, final]
 
     Each LLM generation made along the way is captured as an ``LLMRecord``
     and accumulated onto ``task.llm_records``. ``_build_record_from_task``
     persists the completed run's blackboard slots via ``update_blackboard``
     — always, regardless of ``context_enabled`` (that flag only gates
-    ``cache_blackboard`` in ``_initialize_task``) — and captures the
-    resulting span as ``blackboard_start``/``blackboard_end`` on the
-    returned ``ToolAgentRecord``. ``build_result_from_record`` re-derives
-    ``tool_usage``/``exception_records`` from that persisted span. Future
-    LLM-facing messages are rendered from the stored ``ToolAgentRecord`` by
+    ``valid_cache_indices``/``failed_cache_indices`` in ``_initialize_task``)
+    — and captures the resulting span as ``blackboard_start``/
+    ``blackboard_end`` on the returned ``ToolAgentRecord``.
+    ``build_result_from_record`` re-derives ``tool_usage``/
+    ``exception_records`` from that persisted span. Future LLM-facing
+    messages are rendered from the stored ``ToolAgentRecord`` by
     ``render_turn(...)``.
 
     Subclass Responsibilities
     -------------------------
-    Subclasses must implement two abstract hooks:
+    Subclasses implement:
 
     **_initialize_task(*, turns, prompt, inputs)** → ``ToolAgentTask`` (or subclass)
         Build and return a task for this invocation. Must:
@@ -201,23 +215,28 @@ class ToolAgent(Agent, ABC):
           active system prompt on demand (never pre-rendered/cached as text)
         - Compute ``valid_cache_indices``/``failed_cache_indices`` via
           ``_compute_cache_index_sets(turns)``
-        - Snapshot cached blackboard entries if context is enabled
         - Create an appropriate running blackboard
         - Initialize ``executed_steps``, ``prepared_steps``, and completion state
 
-    **render_task(task, *, additional_messages=None)** → ``list[dict[str, str]]``
-        Build the exact send-payload message list for one LLM call — see
-        ``Agent.render_task``. Every ``ToolAgent`` subclass fully
-        reimplements this (``ToolAgent`` itself declares no override;
-        ``PlanActAgent``/``ReActAgent`` each implement it directly).
+    **think(task)** / **async_think(task)** → ``ToolAgentTask`` (or subclass)
+        Make this round's real decision via the LLM (render via
+        ``self.render_task(task)``, call the engine, parse/validate the
+        output, store the decision onto ``task``). Responsible for
+        guaranteeing tool names are registered and the decision respects
+        ``tool_calls_limit`` — neither is re-checked downstream.
 
-    **_prepare_next_batch(task)** → ``ToolAgentTask`` (or subclass)
-        Prepare exactly one executable batch per round:
-        - Generate next tool call(s) via LLM, precomputed plan, or another strategy
-        - Validate tool names, placeholder dependencies, and budget
+    **prepare(task)** / **async_prepare(task)** → ``ToolAgentTask`` (or subclass)
+        Turn that decision into something executable, no further LLM calls:
+        - Cascade-check dependencies (``self._check_cascade_failure``)
         - Resolve placeholders with ``self._resolve_placeholders(...)``
         - Fill ``task.prepared_steps`` with indices ready for execution
         - Return the updated task
+
+    **_render_task_messages(task)** → ``list[dict[str, str]]``
+        The one piece of ``Agent.render_task``'s shared pipeline still
+        owned per-family — built on ``_render_task_banner`` below
+        (``_render_system_message`` is a sibling pipeline step, not
+        something this hook itself calls).
 
     Key Features
     ~~~~~~~~~~~~
@@ -231,10 +250,11 @@ class ToolAgent(Agent, ABC):
 
     **Return Semantics**: The canonical ``return_tool`` is registered automatically.
         When return executes, ``task.generated_response`` is set and ``task.complete``
-        becomes ``True``, ending the ``_progress`` loop.
+        becomes ``True``, ending the think→prepare→act loop.
 
-    **Budget Enforcement**: If ``tool_calls_limit`` is set, non-return tool calls are
-        tracked and exceeding the limit raises.
+    **Budget Enforcement**: If ``tool_calls_limit`` is set, ``think`` is responsible for
+        keeping non-return tool calls within it — validated once at decision time,
+        not re-checked when ``act`` executes.
 
     **Context Persistence**: The completed run blackboard is always merged into
         ``self._blackboard`` (``blackboard_start``/``blackboard_end`` always set on
@@ -274,6 +294,7 @@ class ToolAgent(Agent, ABC):
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
+        assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
         """
         Parameters
@@ -292,9 +313,10 @@ class ToolAgent(Agent, ABC):
             ``None`` inherits the base class default.
         context_enabled : bool
             When ``True``, prior blackboard steps are fed into each invocation
-            as LLM context (``cache_blackboard`` is populated in run state).
-            The blackboard is always persisted after each invoke regardless of
-            this setting. Defaults to ``False``.
+            as LLM context (``valid_cache_indices``/``failed_cache_indices``
+            become non-empty in ``_initialize_task``). The blackboard is
+            always persisted after each invoke regardless of this setting.
+            Defaults to ``False``.
         fail_fast : bool
             When ``True`` (default), the first tool call failure immediately
             raises and aborts the run. When ``False``, failing slots are marked
@@ -331,6 +353,10 @@ class ToolAgent(Agent, ABC):
         records_window : int | None
             Maximum number of prior ``AgentRecord`` turns rendered into LLM
             context. ``None`` means all records are rendered.
+        assistant_response_source : "raw" | "final"
+            Whether rendered assistant history uses the raw generated
+            response or the final post-``post_invoke`` result. Defaults to
+            ``"raw"``.
         """
         super().__init__(
             name=name,
@@ -344,6 +370,7 @@ class ToolAgent(Agent, ABC):
             post_result_key=post_result_key,
             records_window=records_window,
             response_preview_limit=response_preview_limit,
+            assistant_response_source=assistant_response_source,
         )
 
         self._toolbox: dict[str, AtomicInvokable] = {}
@@ -1058,7 +1085,10 @@ class ToolAgent(Agent, ABC):
             Object to resolve. Can be nested lists, tuples, sets, dicts, strings,
             or scalar values.
         task : ToolAgentTask
-            Execution task containing cache_blackboard and running_blackboard.
+            Execution task containing running_blackboard. Cache references
+            are resolved directly against the agent-level, always-persisted
+            ``self._blackboard`` (see ``update_blackboard``) — never a
+            task-local snapshot.
 
         Returns
         -------
@@ -1076,7 +1106,7 @@ class ToolAgent(Agent, ABC):
             If a referenced step/cache placeholder is out of bounds or unexecuted,
             or if a referenced constant is not registered.
         """
-        cache = task.cache_blackboard
+        cache = self._blackboard
         running = task.running_blackboard
         constants_by_name: dict[str, ConstantSpec] = {
             spec.name: spec
@@ -1222,29 +1252,17 @@ class ToolAgent(Agent, ABC):
         subclass's generation) can be compiled the same way a full plan
         can:
 
-        - Given: validates it points at a real return-tool slot at the
-          final position, raises on mismatch, and isolates it as its own
-          final batch.
+        - Given: isolates it as its own final batch — the caller
+          (``PlanActAgent.think()``/``async_think()``) is responsible for
+          having already validated it points at a real return-tool slot at
+          the final position; this method trusts that contract rather than
+          re-checking it.
         - ``None``: every given slot participates in leveling; no isolated
-          final batch, no return-shaped validation at all.
+          final batch.
 
         This method does not itself guard against ``planned_slots`` being
         empty — callers must ensure non-emptiness before calling.
-
-        Raises
-        ------
-        ToolAgentError
-            If ``return_idx`` is given but does not point at a real
-            return-tool slot at the final position.
         """
-        if return_idx is not None and (
-            return_idx != len(planned_slots) - 1
-            or planned_slots[return_idx].tool != RETURN_TOOL_FULL_NAME
-        ):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: return_idx mismatch during batch compilation."
-            )
-
         # Only indices in [0, level_span) participate in leveling; when return_idx
         # is given, that final index is isolated below rather than leveled.
         level_span = return_idx if return_idx is not None else len(planned_slots)
@@ -1336,410 +1354,166 @@ class ToolAgent(Agent, ABC):
         return True
 
     # ------------------------------------------------------------------ #
-    # Execution (base-owned)
+    # Shared generation-retry loop (PlanActAgent/ReActAgent think() bodies)
     # ------------------------------------------------------------------ #
-    def _execute_prepared_batch(self, task: ToolAgentTask) -> ToolAgentTask:
+    def _run_generation_retry_loop(
+        self,
+        *,
+        task: ToolAgentTask,
+        validate: Callable[[Any], Any],
+        json_error_template: str,
+        spec_error_template: str,
+    ) -> Any:
         """
-        Execute all steps in the currently prepared batch concurrently.
-
-        This is a core base-owned method (do not override). It executes all steps in
-        ``task.prepared_steps`` using the tool async-invoke path, records results in
-        the running blackboard, and handles termination if the return tool is executed.
-
-        Batch Semantics
-        ~~~~~~~~~~~~~~~
-        - All steps in ``prepared_steps`` are **concurrent**
-        - Multi-step batches use ``asyncio.gather(..., return_exceptions=True)``
-        under a single ``run_coro_sync(...)``
-        - This version favors compactness over strict fail-fast cancellation
-        - **Ordering**: Results are stored in the blackboard; order is immaterial
-
-        Validation & Safety Checks
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~
-        Before execution, validates:
-
-        1. **prepared_steps is non-empty**: Raises ToolAgentError if empty
-        2. **No duplicates**: Raises if any index appears twice
-        3. **Bounds**: Each index must be 0 <= idx < len(running_blackboard)
-        4. **Not already executed**: Raises if slot already has result set
-        5. **Is prepared**: Slot must be prepared for execution
-        6. **Tool exists**: Tool name must be registered in toolbox
-        7. **Budget enforcement**: Non-return calls don't exceed tool_calls_limit
-
-        Execution Flow
-        ~~~~~~~~~~~~~~
-        1. Validate all preconditions (as above)
-        2. Count non-return vs. return tool calls
-        3. If tool_calls_limit set, check budget
-        4. Execute concurrently via ``asyncio.gather(..., return_exceptions=True)``
-        5. Handle gathered failures, branching on ``fail_fast``:
-           - ``fail_fast=True`` (default): identify the first failed step,
-             store the error on that slot, mark it failed, and raise
-             immediately -- no further slots are stored this round.
-           - ``fail_fast=False``: mark **every** failed slot (error +
-             ``FAILED`` status), but only raise if the return tool itself
-             is among the failures (a failed return always ends the run
-             regardless of ``fail_fast``); otherwise fall through to step 6.
-        6. Store each successful ``ToolResult`` envelope whole in
-           ``slot.result`` and mark those slots executed (runs after step 5
-           in both branches -- reached unconditionally under
-           ``fail_fast=True`` only when there were no failures at all, and
-           always reached under ``fail_fast=False`` for the surviving
-           successes).
-        7. If return tool executed: set ``task.generated_response`` and ``task.complete = True``
-        8. Update ``task.executed_steps``, ``task.tool_calls_used``
-        9. Clear ``prepared_steps`` (consumed)
+        Shared retry loop for one-shot/per-step LLM generation: render, call
+        the engine, record the attempt, decode JSON, validate, and retry
+        with injected feedback on either failure category until success or
+        the retry budget (``self._generation_retries``, tracked via
+        ``task.retries_used``) is exhausted.
 
         Parameters
         ----------
         task : ToolAgentTask
-            Task with prepared_steps populated. After execution, updated with
-            results and completion flags.
+            Supplies rendering context and accumulates ``llm_records``/
+            ``retries_used`` directly.
+        validate : Callable[[Any], Any]
+            The family-specific spec validator (``_process_plan_output`` or
+            ``_process_next_step_output``), called with only the ``parsed``
+            JSON value -- every other keyword argument is bound by the
+            caller's own closure. Returns the validated result on success,
+            or a plain feedback string on spec-validation failure.
+        json_error_template : str
+            ``.format(exc=...)`` -- the user-facing retry message when
+            ``_extract_from_json_string`` raises ``json.JSONDecodeError``.
+            Never receives ``raw_output`` -- that already goes into the
+            assistant-turn message alongside it; embedding it a second time
+            in the user text would just repeat what the model can already
+            see one turn up.
+        spec_error_template : str
+            ``.format(feedback=...)`` -- the user-facing retry message when
+            ``validate`` returns a feedback string. Never receives the
+            re-serialized ``parsed`` value, for the same reason.
 
-        Returns
-        -------
-        ToolAgentTask
-            Updated task with results recorded and completion status set.
+        Steps
+        -----
+        1. ``additional_messages`` starts empty.
+        2. Loop:
+           a. Render this attempt's send payload via ``render_task``.
+           b. Call the LLM engine; capture ``engine_result``.
+           c. Append an ``LLMRecord`` (``messages=list(task.task_messages)``)
+              to ``task.llm_records``.
+           d. Try JSON extraction. On ``json.JSONDecodeError``: budget-check
+              (raise if exhausted); else inject assistant/user feedback,
+              increment ``task.retries_used``, continue.
+           e. Call ``validate(parsed)``. On a string return (spec-validation
+              feedback): budget-check (raise if exhausted); else inject
+              assistant/user feedback, increment ``task.retries_used``,
+              continue.
+           f. On success: return the validated result.
 
         Raises
         ------
         ToolAgentError
-            On any validation failure (preconditions, budget, tool not found, etc.)
-            or if any tool invocation raises.
-
-        Side Effects
-        ~~~~~~~~~~~~
-        - ``task.running_blackboard[idx].result`` is set to the whole
-          ``ToolResult`` envelope (an ``AtomicResult``) for executed steps —
-          preserved for richer tracing. Consumers that need the caller-facing
-          value (placeholder resolution, previews, ``generated_response``) read
-          ``result.result``; those sites are always reached only after the
-          slot is confirmed executed
-        - ``task.running_blackboard[idx].error`` is set on failure
-        - ``task.running_blackboard[idx].status`` is updated to executed/failed
-        - ``task.executed_steps`` is updated with executed indices
-        - ``task.tool_calls_used`` incremented by non-return call count
-        - ``task.prepared_steps`` is cleared
-        - ``task.complete`` and ``task.generated_response`` set if return tool executed
+            If either failure category's retry budget is exhausted.
         """
-        indices = list(task.prepared_steps)
-        if not indices:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: no prepared steps to execute (prepared_steps is empty)."
-            )
+        additional_messages: list[dict[str, str]] = []
 
-        if len(indices) != len(set(indices)):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: prepared_steps contains duplicates: {indices!r}."
-            )
+        while True:
+            messages = self.render_task(task, additional_messages=additional_messages)
+            engine_result = self._llm_engine.invoke({"messages": messages})
+            raw_output: str = engine_result.result
 
-        board = task.running_blackboard
-        board_len = len(board)
+            task.llm_records.append(LLMRecord(
+                messages=list(task.task_messages),
+                llm_result=engine_result,
+                system_prompt_name=task.system_prompt_name,
+            ))
 
-        non_return_planned = 0
-        return_indices: list[int] = []
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
+                    )
+                additional_messages = [
+                    {"role": "assistant", "content": raw_output},
+                    {"role": "user", "content": json_error_template.format(exc=exc)},
+                ]
+                task.retries_used += 1
+                continue
 
-        for idx in indices:
-            if idx < 0 or idx >= board_len:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: prepared step index {idx} out of range "
-                    f"(running plan length={board_len})."
-                )
+            result = validate(parsed)
+            if isinstance(result, str):
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error: {result}"
+                    )
+                additional_messages = [
+                    {"role": "assistant", "content": json.dumps(parsed, indent=2)},
+                    {"role": "user", "content": spec_error_template.format(feedback=result)},
+                ]
+                task.retries_used += 1
+                continue
 
-            slot = board[idx]
+            return result
 
-            if slot.step != idx:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: running slot step mismatch at index {idx}: slot.step={slot.step}."
-                )
+    async def _arun_generation_retry_loop(
+        self,
+        *,
+        task: ToolAgentTask,
+        validate: Callable[[Any], Any],
+        json_error_template: str,
+        spec_error_template: str,
+    ) -> Any:
+        """Async mirror of ``_run_generation_retry_loop``: uses
+        ``async_invoke`` for the engine call; identical retry logic,
+        feedback injection, and parameters otherwise."""
+        additional_messages: list[dict[str, str]] = []
 
-            if slot.is_executed() or idx in task.executed_steps:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: prepared step {idx} is already executed."
-                )
-            if not slot.is_prepared():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: slot {idx} is not prepared for execution."
-                )
+        while True:
+            messages = self.render_task(task, additional_messages=additional_messages)
+            engine_result = await self._llm_engine.async_invoke({"messages": messages})
+            raw_output: str = engine_result.result
 
-            tool_name = slot.tool
-            if tool_name is NO_VAL or not isinstance(tool_name, str) or not tool_name.strip():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: slot {idx} has invalid tool name: {tool_name!r}."
-                )
+            task.llm_records.append(LLMRecord(
+                messages=list(task.task_messages),
+                llm_result=engine_result,
+                system_prompt_name=task.system_prompt_name,
+            ))
 
-            if tool_name == RETURN_TOOL_FULL_NAME:
-                return_indices.append(idx)
-            else:
-                non_return_planned += 1
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
+                    )
+                additional_messages = [
+                    {"role": "assistant", "content": raw_output},
+                    {"role": "user", "content": json_error_template.format(exc=exc)},
+                ]
+                task.retries_used += 1
+                continue
 
-        if len(return_indices) > 1:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: multiple return tool calls in one batch: {return_indices!r}."
-            )
+            result = validate(parsed)
+            if isinstance(result, str):
+                if task.retries_used >= self._generation_retries:
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
+                        f"after {task.retries_used + 1} attempt(s). Last error: {result}"
+                    )
+                additional_messages = [
+                    {"role": "assistant", "content": json.dumps(parsed, indent=2)},
+                    {"role": "user", "content": spec_error_template.format(feedback=result)},
+                ]
+                task.retries_used += 1
+                continue
 
-        # Budget enforcement (non-return only).
-        if self._tool_calls_limit is not None:
-            if task.tool_calls_used + non_return_planned > self._tool_calls_limit:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool_calls_limit exceeded "
-                    f"(limit={self._tool_calls_limit}, used={task.tool_calls_used}, planned={non_return_planned})."
-                )
-
-        # Validate tool existence early — same pre-gather guard as async path.
-        for idx in indices:
-            tool_name = board[idx].tool
-            if not self.has_tool(tool_name):
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: prepared step {idx} "
-                    f"references unknown tool {tool_name!r}."
-                )
-
-        async def run_batch() -> list[tuple[int, Any]]:
-            coros: list[Any] = []
-
-            for idx in indices:
-                slot = board[idx]
-                tool_name = slot.tool
-                tool = self.get_tool(tool_name)
-
-                logger.debug(
-                    f"{type(self).__name__}.{self.name}:\nTool: {tool_name}\nArgs: {slot.args}\n\n"
-                )
-
-                coros.append(tool.async_invoke(slot.resolved_args))
-
-            raw_results = await asyncio.gather(*coros, return_exceptions=True)
-            return list(zip(indices, raw_results))
-
-        pairs = run_coro_sync(run_batch())
-
-        failures = [(idx, raw) for idx, raw in pairs if isinstance(raw, BaseException)]
-        successes = [(idx, raw) for idx, raw in pairs if not isinstance(raw, BaseException)]
-
-        if failures:
-            if self._fail_fast:
-                # Existing behavior: mark first failure and raise immediately.
-                idx, raw_error = failures[0]
-                if isinstance(raw_error, ToolInvocationError):
-                    board[idx].error = raw_error
-                    board[idx].status = BlackboardSlot.FAILED
-                    raise raw_error
-                wrapped = ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
-                    f"for {board[idx].tool!r}: {raw_error}"
-                )
-                board[idx].error = wrapped
-                board[idx].status = BlackboardSlot.FAILED
-                raise wrapped from raw_error
-            else:
-                # fail_fast=False: mark all failures, then check for fatal return-tool failure.
-                for idx, raw_error in failures:
-                    if isinstance(raw_error, ToolInvocationError):
-                        board[idx].error = raw_error
-                    else:
-                        board[idx].error = ToolAgentError(
-                            f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
-                            f"for {board[idx].tool!r}: {raw_error}"
-                        )
-                    board[idx].status = BlackboardSlot.FAILED
-
-                # Return-tool failure is always fatal regardless of fail_fast.
-                for idx, raw_error in failures:
-                    if board[idx].tool == RETURN_TOOL_FULL_NAME:
-                        err = board[idx].error
-                        if isinstance(raw_error, ToolInvocationError):
-                            raise err
-                        raise err from raw_error
-
-        for idx, tool_result in successes:
-            board[idx].result = tool_result
-            board[idx].error = NO_VAL
-            board[idx].status = BlackboardSlot.EXECUTED
-            task.executed_steps.add(idx)
-
-        task.tool_calls_used += non_return_planned
-        task.prepared_steps = []
-
-        if return_indices:
-            ret_idx = return_indices[0]
-            if board[ret_idx].is_executed():
-                task.generated_response = board[ret_idx].result.result
-                task.complete = True
-            # else: return slot failed; already raised above in fail_fast=False path
-
-        return task
-
-    async def _async_execute_prepared_batch(self, task: ToolAgentTask) -> ToolAgentTask:
-        """
-        Async analog of ``_execute_prepared_batch(...)``.
-
-        Executes all currently prepared steps concurrently using each tool's
-        ``async_invoke(...)`` path, stores each ``ToolResult`` envelope whole
-        in the running blackboard, and updates return/completion bookkeeping.
-
-        This method intentionally preserves the current compact gather-based
-        semantics rather than introducing stricter cancellation machinery.
-
-        Failure handling mirrors ``_execute_prepared_batch`` exactly: under
-        ``fail_fast=True`` (default), the first failed step is marked and
-        raised immediately; under ``fail_fast=False``, every failed slot is
-        marked but the round only raises if the return tool itself failed --
-        otherwise execution falls through and records the surviving
-        successes.
-        """
-        indices = list(task.prepared_steps)
-        if not indices:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: no prepared steps to execute "
-                "(prepared_steps is empty)."
-            )
-
-        if len(indices) != len(set(indices)):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: prepared_steps contains duplicates: "
-                f"{indices!r}."
-            )
-
-        board = task.running_blackboard
-        board_len = len(board)
-
-        non_return_planned = 0
-        return_indices: list[int] = []
-
-        for idx in indices:
-            if idx < 0 or idx >= board_len:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: prepared step index {idx} out of range "
-                    f"(running plan length={board_len})."
-                )
-
-            slot = board[idx]
-
-            if slot.step != idx:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: running slot step mismatch at index {idx}: "
-                    f"slot.step={slot.step}."
-                )
-
-            if slot.is_executed() or idx in task.executed_steps:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: prepared step {idx} is already executed."
-                )
-
-            if not slot.is_prepared():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: slot {idx} is not prepared for execution."
-                )
-
-            tool_name = slot.tool
-            if tool_name is NO_VAL or not isinstance(tool_name, str) or not tool_name.strip():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: slot {idx} has invalid tool name: "
-                    f"{tool_name!r}."
-                )
-
-            # Validate existence early so failures happen before gather starts.
-            self.get_tool(tool_name)
-
-            if tool_name == RETURN_TOOL_FULL_NAME:
-                return_indices.append(idx)
-            else:
-                non_return_planned += 1
-
-        if len(return_indices) > 1:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: multiple return tool calls in one batch: "
-                f"{return_indices!r}."
-            )
-
-        if self._tool_calls_limit is not None:
-            if task.tool_calls_used + non_return_planned > self._tool_calls_limit:
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool_calls_limit exceeded "
-                    f"(limit={self._tool_calls_limit}, used={task.tool_calls_used}, "
-                    f"planned={non_return_planned})."
-                )
-
-        coros: list[Any] = []
-        for idx in indices:
-            slot = board[idx]
-            tool_name = slot.tool
-            tool = self.get_tool(tool_name)
-
-            logger.debug(
-                f"{type(self).__name__}.{self.name}:\n"
-                f"Tool: {tool_name}\n"
-                f"Args: {slot.args}\n\n"
-            )
-
-            coros.append(tool.async_invoke(slot.resolved_args))
-
-        raw_results = await asyncio.gather(*coros, return_exceptions=True)
-
-        failures = [
-            (idx, raw)
-            for idx, raw in zip(indices, raw_results)
-            if isinstance(raw, BaseException)
-        ]
-        successes = [
-            (idx, raw)
-            for idx, raw in zip(indices, raw_results)
-            if not isinstance(raw, BaseException)
-        ]
-
-        if failures:
-            if self._fail_fast:
-                # Existing behavior: mark first failure and raise immediately.
-                idx, raw_error = failures[0]
-                if isinstance(raw_error, ToolInvocationError):
-                    board[idx].error = raw_error
-                    board[idx].status = BlackboardSlot.FAILED
-                    raise raw_error
-                wrapped = ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
-                    f"for {board[idx].tool!r}: {raw_error}"
-                )
-                board[idx].error = wrapped
-                board[idx].status = BlackboardSlot.FAILED
-                raise wrapped from raw_error
-            else:
-                # fail_fast=False: mark all failures, then check for fatal return-tool failure.
-                for idx, raw_error in failures:
-                    if isinstance(raw_error, ToolInvocationError):
-                        board[idx].error = raw_error
-                    else:
-                        board[idx].error = ToolAgentError(
-                            f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
-                            f"for {board[idx].tool!r}: {raw_error}"
-                        )
-                    board[idx].status = BlackboardSlot.FAILED
-
-                # Return-tool failure is always fatal regardless of fail_fast.
-                for idx, raw_error in failures:
-                    if board[idx].tool == RETURN_TOOL_FULL_NAME:
-                        err = board[idx].error
-                        if isinstance(raw_error, ToolInvocationError):
-                            raise err
-                        raise err from raw_error
-
-        for idx, tool_result in successes:
-            board[idx].result = tool_result
-            board[idx].error = NO_VAL
-            board[idx].status = BlackboardSlot.EXECUTED
-            task.executed_steps.add(idx)
-
-        task.tool_calls_used += non_return_planned
-        task.prepared_steps = []
-
-        if return_indices:
-            ret_idx = return_indices[0]
-            if board[ret_idx].is_executed():
-                task.generated_response = board[ret_idx].result.result
-                task.complete = True
-            # else: return slot failed; already raised above in fail_fast=False path
-
-        return task
+            return result
 
     # ------------------------------------------------------------------ #
     # Finalization helpers
@@ -1749,11 +1523,18 @@ class ToolAgent(Agent, ABC):
         Persist all non-empty run slots into the agent's persisted blackboard.
 
         Called unconditionally by ``_build_record_from_task`` — whether or
-        not ``context_enabled`` is set. This mirrors how base ``Agent``
-        always appends ``_records`` regardless of context settings. The
-        ``context_enabled`` flag controls only whether ``cache_blackboard`` is
-        populated in ``_initialize_task`` (i.e. whether the LLM sees prior
-        steps as context).
+        not ``context_enabled`` is set. Always appends onto the *live*
+        ``self._blackboard``, read fresh right here rather than from a
+        stale invoke-start snapshot. This method already runs under
+        ``self._invoke_lock`` (via ``_commit_emit``), so reading live here
+        is the actual fix for the mutation-safety concern flagged during
+        1a's brainstorming: a stale snapshot as the append base could
+        otherwise silently clobber a concurrently-committed invocation's
+        own persisted results under the narrower 1a lock scope.
+        ``context_enabled`` controls only whether
+        ``valid_cache_indices``/``failed_cache_indices`` are populated in
+        ``_initialize_task`` (i.e. whether the LLM sees prior steps as
+        context) — never whether history is persisted.
 
         All non-empty slots (EXECUTED and FAILED) are persisted so that global
         blackboard indices remain contiguous and correct. FAILED slots are
@@ -1774,7 +1555,7 @@ class ToolAgent(Agent, ABC):
         Placeholder Rewriting Example
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         Initial state:
-        - cache_blackboard has 5 entries (indices 0-4)
+        - self._blackboard has 5 entries (indices 0-4)
         - running_blackboard has 3 executed entries (indices 0-2)
 
         Rewriting in appended slots:
@@ -1783,14 +1564,14 @@ class ToolAgent(Agent, ABC):
         - Step 2's args contain ``<<__s1__>>`` → rewritten to ``<<__c6__>>`` (5 + 1)
 
         After persistence:
-        - cache_blackboard now has 8 entries
+        - self._blackboard now has 8 entries
         - Future invokes can use ``<<__c5__>>``, ``<<__c6__>>``, ``<<__c7__>>``
           to reference steps 0, 1, 2 respectively
 
         Parameters
         ----------
         task : ToolAgentTask
-            Task with executed steps in running_blackboard and cache snapshot.
+            Task with executed steps in running_blackboard.
 
         Returns
         -------
@@ -1801,7 +1582,7 @@ class ToolAgent(Agent, ABC):
         ~~~~~~~~~~~~
         - ``self._blackboard`` is replaced with merged cache + appended slots
         """
-        base_cache: list[BlackboardSlot] = [slot.copy() for slot in task.cache_blackboard]
+        base_cache: list[BlackboardSlot] = [slot.copy() for slot in self._blackboard]
         base_len = len(base_cache)
 
         running: list[BlackboardSlot] = list(task.running_blackboard)
@@ -1882,7 +1663,8 @@ class ToolAgent(Agent, ABC):
         Persists the run's blackboard slots via ``update_blackboard`` and
         captures the half-open span those slots landed in — mirrors how
         base ``Agent`` always appends ``_records`` regardless of
-        ``context_enabled`` (that flag only gates ``cache_blackboard`` in
+        ``context_enabled`` (that flag only gates
+        ``valid_cache_indices``/``failed_cache_indices`` in
         ``_initialize_task``).
         """
         prev = turns[-1] if turns else None
@@ -1970,8 +1752,9 @@ class ToolAgent(Agent, ABC):
         blackboard span ``[blackboard_start, blackboard_end)``. Executed slots
         within those spans go into ``valid``; failed slots go into ``failed``.
         When ``context_enabled=False`` the caller passes an empty turns list
-        (or turns with no blackboard spans), so both sets are empty — consistent
-        with ``cache_blackboard=[]``.
+        (or turns with no blackboard spans), so both sets are empty — the LLM
+        sees no cache context even though ``self._blackboard`` itself may be
+        non-empty (persistence is unconditional; only visibility is gated).
 
         Steps
         -----
@@ -2099,75 +1882,22 @@ class ToolAgent(Agent, ABC):
         """
         Extract the largest decodable JSON array/object from a possibly noisy string.
 
-        This helper is intentionally shape-neutral:
-        - It does not require the decoded value to be a list.
-        - It does not require the decoded value to be a dict.
-        - It does not validate PlanAct/ReAct-specific fields.
-
-        It preserves the current permissive parsing style used by the older
-        `_str_to_steps(...)` and `_str_to_dict(...)` helpers:
-        - Strip a single common markdown fence wrapper if present.
-        - Scan for candidate JSON array/object starts.
-        - Decode with `json.JSONDecoder().raw_decode(...)`.
-        - Return the candidate with the largest decoded span.
-
-        Parameters
-        ----------
-        raw_text : str
-            Raw LLM output that may contain a JSON array/object surrounded by
-            prose, markdown fences, or other text.
-
-        Returns
-        -------
-        Any
-            The decoded Python value for the largest valid JSON array/object found.
+        Thin delegating wrapper — see ``utils.agents.extract_json_object``
+        for the full contract (parsing logic lives there now, shared with
+        any other caller that needs to pull structured output out of
+        free-form LLM text).
 
         Raises
         ------
-        ToolAgentError
+        TypeError
             If ``raw_text`` is not a string (engine contract violation).
+            Changed from ``ToolAgentError`` when the parsing logic was
+            promoted to ``extract_json_object`` — a ``ToolAgent``-specific
+            exception type no longer fit a shared utility.
         json.JSONDecodeError
             If ``raw_text`` is empty or contains no decodable JSON array/object.
         """
-        if not isinstance(raw_text, str):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: LLM returned non-string output."
-            )
-        if not raw_text.strip():
-            raise json.JSONDecodeError("LLM returned empty output", "", 0)
-
-        text = raw_text.strip()
-
-        # Strip a single fenced block wrapper if present.
-        # Examples:
-        # ```json
-        # [...]
-        # ```
-        text = re.sub(r"^\s*```[a-zA-Z0-9]*\s*", "", text)
-        text = re.sub(r"\s*```\s*$", "", text).strip()
-
-        decoder = json.JSONDecoder()
-
-        best_val: Any = NO_VAL
-        best_span_len: int = -1
-
-        # Candidate starts: JSON arrays or objects.
-        # This intentionally mirrors the existing PlanAct/ReAct parser needs.
-        for match in re.finditer(r"[\[{]", text):
-            start = match.start()
-            try:
-                val, end_rel = decoder.raw_decode(text[start:])
-            except json.JSONDecodeError:
-                continue
-
-            if end_rel > best_span_len:
-                best_span_len = end_rel
-                best_val = val
-
-        if best_val is NO_VAL:
-            raise json.JSONDecodeError("no valid JSON array or object found in LLM output", text, 0)
-
-        return best_val
+        return extract_json_object(raw_text, source_label=f"{type(self).__name__}.{self.name}")
 
     # ------------------------------------------------------------------ #
     # Dictionary Validation & Conversion Helpers
@@ -2389,73 +2119,244 @@ class ToolAgent(Agent, ABC):
         """
         ...
 
-    def _progress(self, task: ToolAgentTask) -> ToolAgentTask:
-        """
-        Advance the task by one prepare/execute round.
-
-        Invariant check, prepare the next batch, cascade-skip an empty
-        batch (return early instead of raising — ``task.complete`` stays
-        ``False`` so the generic outer loop calls ``_progress`` again),
-        otherwise execute the batch.
-        """
-        logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
-        if task.prepared_steps:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: violation: prepared_steps is non-empty before prepare. "
-                f"Execute must follow prepare before preparing again."
-            )
-        task = self._prepare_next_batch(task)
-        if not task.prepared_steps:
-            return task
-        task = self._execute_prepared_batch(task)
-        return task
-
-    async def _async_progress(self, task: ToolAgentTask) -> ToolAgentTask:
-        """Async mirror of ``_progress``; awaits the async prepare/execute hooks."""
-        logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
-        if task.prepared_steps:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: violation: prepared_steps is non-empty "
-                "before prepare. Execute must follow prepare before preparing again."
-            )
-        task = await self._aprepare_next_batch(task)
-        if not task.prepared_steps:
-            return task
-        task = await self._async_execute_prepared_batch(task)
-        return task
-
-    # ------------------------------------------------------------------ #
-    # Subclass Hooks
-    # ------------------------------------------------------------------ #
     @abstractmethod
-    def _prepare_next_batch(self, task: ToolAgentTask) -> ToolAgentTask:
+    def think(self, task: ToolAgentTask) -> ToolAgentTask:
         """
-        Prepare exactly one executable batch for the next loop iteration.
+        Make this round's real decision via the LLM.
 
-        Implementations should:
-        - decide which tool call(s) should execute next
-        - validate tool names, step indices, dependencies, and placeholder legality
-        - resolve placeholders with `_resolve_placeholders(...)`
-        - populate `task.prepared_steps` with the running blackboard indices ready
-        for execution
-        - return the updated task
-
-        The base ToolAgent loop will execute the prepared batch and handle return-tool
-        completion.
+        Hard-abstract — every ``ToolAgent`` family has genuine generation
+        work here, overriding base ``Agent``'s no-op default. A concrete
+        override renders via ``self.render_task(task)``, calls the engine,
+        parses/validates the raw output against this family's schema, and
+        stores the validated decision onto ``task``. Responsible for
+        guaranteeing, before any slot ever reaches ``prepare``: the tool
+        name is registered (``self.has_tool(...)``) and the decision as a
+        whole respects ``tool_calls_limit`` — neither is re-checked
+        downstream. May no-op on a later round once there's nothing
+        further to decide (e.g. a one-shot planner with an
+        already-compiled plan).
         """
-        raise NotImplementedError
+        ...
 
-    async def _aprepare_next_batch(
+    @abstractmethod
+    async def async_think(self, task: ToolAgentTask) -> ToolAgentTask:
+        """Async mirror of ``think``. No default — same rationale as base
+        ``Agent.async_act``: every family that reaches this hook performs
+        real I/O of its own."""
+        ...
+
+    @abstractmethod
+    def prepare(self, task: ToolAgentTask) -> ToolAgentTask:
+        """
+        Turn this round's decision into something ``act`` can run, with no
+        further LLM calls.
+
+        Hard-abstract — each family's resolve/cascade logic differs enough
+        (batch-cursor vs. step-cursor) that no shared body fits both. A
+        concrete override cascade-checks dependencies
+        (``self._check_cascade_failure``), resolves placeholders
+        (``self._resolve_placeholders``), marks surviving slots
+        ``PREPARED``, and populates ``task.prepared_steps`` — advancing
+        whatever cursor this family uses. ``act`` trusts this hook
+        completely: every index landing in ``task.prepared_steps`` must be
+        in-bounds, unique, not already executed, and (batch semantics)
+        contain at most one return call. An empty ``task.prepared_steps``
+        on return (a fully cascade-skipped round) is legal, not an error.
+        """
+        ...
+
+    @abstractmethod
+    async def async_prepare(self, task: ToolAgentTask) -> ToolAgentTask:
+        """Async mirror of ``prepare``. No default — a family with a real
+        per-step generation call folded in elsewhere may need this to be
+        genuinely async; no shared body fits both families."""
+        ...
+
+    def _render_system_message(self, task: ToolAgentTask) -> list[dict[str, str]]:
+        """
+        Render this ``ToolAgent``'s active system prompt with tool/constant
+        context injected.
+
+        Overrides base ``Agent``'s ``task.inputs``-only rendering — neither
+        ``PLANNER_PROMPT`` nor ``ORCHESTRATOR_PROMPT`` ever uses an
+        input-derived placeholder, only ``{TOOLS}``/``{TOOL_CALLS_LIMIT}``/
+        ``{CONSTANTS}`` — so this builds that context directly instead of
+        merging with ``task.inputs``. Shared by every ``ToolAgent``
+        subclass; eliminates the identical ``render_context`` dict each one
+        built independently before this sub-pass.
+        """
+        if task.system_prompt_name is None:
+            return []
+        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        render_context = {
+            self.TOOLS_FIELD: self.actions_context(),
+            self.LIMIT_FIELD: limit_text,
+            self.CONSTANTS_FIELD: self.constants_context(),
+        }
+        rendered = self._system_prompts[task.system_prompt_name].render(render_context)
+        return [{"role": "system", "content": rendered}]
+
+    def _render_task_banner(self, task: ToolAgentTask) -> dict[str, str]:
+        """
+        Return the "what is the task" user message shared by every
+        ``ToolAgent`` subclass's ``_render_task_messages``.
+
+        Deduplicates the identical ``===== CURRENT TASK =====`` banner
+        ``planact.py``/``react.py`` each built independently before this
+        sub-pass. No caller in this file — 1d/1e's own
+        ``_render_task_messages`` consumes it (directly as its own message,
+        or with an instruction appended onto its ``content``).
+        """
+        return {
+            "role": "user",
+            "content": f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK =====",
+        }
+
+    def _apply_batch_results(
         self,
         task: ToolAgentTask,
+        indices: list[int],
+        board: list[BlackboardSlot],
+        raw_results: list[Any],
     ) -> ToolAgentTask:
         """
-        Async hook for batch preparation.
+        Shared post-gather bookkeeping for ``act``/``async_act``: partition
+        ``raw_results`` (paired positionally with ``indices``) into
+        failures/successes, apply ``fail_fast`` handling, mutate slots, and
+        check for run completion. Both callers differ only in *how*
+        ``raw_results`` was gathered (``run_coro_sync``-wrapped vs. awaited
+        directly) — everything after that point is identical, so it lives
+        here once instead of twice.
 
-        Default offloads the sync hook to a worker thread. Subclasses override
-        when the hook contains blocking I/O (e.g. a per-step LLM call).
+        Failure handling: ``fail_fast=True`` (default) marks and raises on
+        the first failed step; ``fail_fast=False`` marks every failed slot
+        but only raises if the return tool itself failed, otherwise falling
+        through to record the surviving successes.
         """
-        return await asyncio.to_thread(self._prepare_next_batch, task)
+        non_return_planned = 0
+        return_indices: list[int] = []
+        for idx in indices:
+            if board[idx].tool == RETURN_TOOL_FULL_NAME:
+                return_indices.append(idx)
+            else:
+                non_return_planned += 1
+
+        pairs = list(zip(indices, raw_results))
+        failures = [(idx, raw) for idx, raw in pairs if isinstance(raw, BaseException)]
+        successes = [(idx, raw) for idx, raw in pairs if not isinstance(raw, BaseException)]
+
+        if failures:
+            if self._fail_fast:
+                idx, raw_error = failures[0]
+                if isinstance(raw_error, ToolInvocationError):
+                    board[idx].error = raw_error
+                    board[idx].status = BlackboardSlot.FAILED
+                    raise raw_error
+                wrapped = ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
+                    f"for {board[idx].tool!r}: {raw_error}"
+                )
+                board[idx].error = wrapped
+                board[idx].status = BlackboardSlot.FAILED
+                raise wrapped from raw_error
+            else:
+                for idx, raw_error in failures:
+                    if isinstance(raw_error, ToolInvocationError):
+                        board[idx].error = raw_error
+                    else:
+                        board[idx].error = ToolAgentError(
+                            f"{type(self).__name__}.{self.name}: tool call failed at step {idx} "
+                            f"for {board[idx].tool!r}: {raw_error}"
+                        )
+                    board[idx].status = BlackboardSlot.FAILED
+
+                for idx, raw_error in failures:
+                    if board[idx].tool == RETURN_TOOL_FULL_NAME:
+                        err = board[idx].error
+                        if isinstance(raw_error, ToolInvocationError):
+                            raise err
+                        raise err from raw_error
+
+        for idx, tool_result in successes:
+            board[idx].result = tool_result
+            board[idx].error = NO_VAL
+            board[idx].status = BlackboardSlot.EXECUTED
+            task.executed_steps.add(idx)
+
+        task.tool_calls_used += non_return_planned
+        task.prepared_steps = []
+
+        if return_indices:
+            ret_idx = return_indices[0]
+            if board[ret_idx].is_executed():
+                task.generated_response = board[ret_idx].result.result
+                task.complete = True
+
+        return task
+
+    def act(self, task: ToolAgentTask) -> ToolAgentTask:
+        """
+        Execute the currently prepared batch concurrently, or no-op if
+        ``prepare`` produced nothing to run this round.
+
+        Concrete and final — no ``ToolAgent`` subclass overrides this.
+        Trusts ``prepare``'s (and, for tool existence/budget, ``think``'s)
+        contract completely: every index in ``task.prepared_steps`` is
+        assumed in-bounds, unique, not yet executed, marked ``PREPARED``,
+        naming a registered tool, and within ``tool_calls_limit`` — none of
+        that is re-validated here. A cascade-skipped round (``prepare``
+        left ``task.prepared_steps`` empty) is not an error: this method
+        just returns ``task`` unchanged and the outer loop tries again next
+        round.
+
+        Gathers results via a ``run_coro_sync``-wrapped coroutine (this
+        method itself is sync); ``_apply_batch_results`` does everything
+        after that, shared verbatim with ``async_act``.
+        """
+        logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
+        if not task.prepared_steps:
+            return task
+
+        indices = list(task.prepared_steps)
+        board = task.running_blackboard
+
+        async def run_batch() -> list[Any]:
+            coros: list[Any] = []
+            for idx in indices:
+                slot = board[idx]
+                tool = self.get_tool(slot.tool)
+                logger.debug(
+                    f"{type(self).__name__}.{self.name}:\nTool: {slot.tool}\nArgs: {slot.args}\n\n"
+                )
+                coros.append(tool.async_invoke(slot.resolved_args))
+            return await asyncio.gather(*coros, return_exceptions=True)
+
+        raw_results = run_coro_sync(run_batch())
+        return self._apply_batch_results(task, indices, board, raw_results)
+
+    async def async_act(self, task: ToolAgentTask) -> ToolAgentTask:
+        """Async mirror of ``act``; same trust/trim contract, awaits each
+        tool's ``async_invoke`` directly rather than wrapping in
+        ``run_coro_sync``. ``_apply_batch_results`` does everything past the
+        gather step, shared verbatim with ``act``."""
+        logger.debug(f"{type(self).__name__}.{self.name} has made {task.tool_calls_used} this run")
+        if not task.prepared_steps:
+            return task
+
+        indices = list(task.prepared_steps)
+        board = task.running_blackboard
+
+        coros: list[Any] = []
+        for idx in indices:
+            slot = board[idx]
+            tool = self.get_tool(slot.tool)
+            logger.debug(
+                f"{type(self).__name__}.{self.name}:\nTool: {slot.tool}\nArgs: {slot.args}\n\n"
+            )
+            coros.append(tool.async_invoke(slot.resolved_args))
+
+        raw_results = await asyncio.gather(*coros, return_exceptions=True)
+        return self._apply_batch_results(task, indices, board, raw_results)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a diagnostic snapshot of this ToolAgent.

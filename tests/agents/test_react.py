@@ -3,34 +3,24 @@ from __future__ import annotations
 import pytest
 import json
 import asyncio
-from typing import Any, Mapping
+from typing import Any
 
 from conftest import (
     make_react_agent,
     make_planact_agent,
     react_step_json,
     register_math_tools,
-    make_task,
     executed_slot,
-    prepared_slot,
-    make_llm_result,
-    make_llm_record,
-    make_tool_result,
-    ScriptedTask,
-    ScriptedToolAgent,
     ScriptedLLMEngine,
-    BadRepr,
 )
 
-from atomic_agentic.agents.toolagent import ToolAgent, return_tool
+from atomic_agentic.agents.toolagent import return_tool
 from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot
-from atomic_agentic.models.agents.tasks import ReActTask, ReActStepMeta
-from atomic_agentic.exceptions import (
-    ToolAgentError,
-    ToolInvocationError,
-)
+from atomic_agentic.models.agents.tasks import ReActStepMeta
+from atomic_agentic.exceptions import ToolAgentError
 from atomic_agentic.constants.core import NO_VAL
+
 
 class TestReActAgent:
     def test_requires_concrete_non_negative_tool_calls_limit(self) -> None:
@@ -221,13 +211,10 @@ class TestReActAgent:
             ],
             tool_calls_limit=1,
         )
-        task = agent._initialize_task(
-            turns=[],
-            prompt="react",
-            inputs={},
-        )
+        task = agent._initialize_task(turns=[], prompt="react", inputs={})
+        task = agent.think(task)
 
-        updated = agent._prepare_next_batch(task)
+        updated = agent.prepare(task)
 
         slot = updated.running_blackboard[0]
         assert updated.prepared_steps == [0]
@@ -281,13 +268,10 @@ class TestReActAgent:
             ],
             tool_calls_limit=1,
         )
-        task = agent._initialize_task(
-            turns=[],
-            prompt="react",
-            inputs={},
-        )
+        task = agent._initialize_task(turns=[], prompt="react", inputs={})
+        task = agent.think(task)
 
-        updated = agent._prepare_next_batch(task)
+        updated = agent.prepare(task)
 
         slot = updated.running_blackboard[0]
         assert updated.prepared_steps == [0]
@@ -328,6 +312,11 @@ class TestReActAgent:
             agent.invoke({"prompt": "run react"})
 
     def test_rejects_when_next_step_exceeds_capacity(self) -> None:
+        # Regression test for the budget-enforcement fix (this session): the
+        # last available slot under tool_calls_limit must be the return
+        # tool. think()/_process_next_step_output's own budget check (step
+        # 9) is the only place left that can catch this -- act() no longer
+        # re-validates budget at all (1c dropped that as a dead guard).
         agent = make_react_agent(
             [
                 react_step_json(
@@ -346,10 +335,10 @@ class TestReActAgent:
             tool_calls_limit=1,
         )
 
-        with pytest.raises(ToolAgentError, match="tool_calls_limit exceeded"):
+        with pytest.raises(ToolAgentError, match="last available slot under"):
             agent.invoke({"prompt": "run react"})
 
-    def test_prepare_next_batch_records_slot_metadata(self) -> None:
+    def test_prepare_records_slot_metadata(self) -> None:
         agent = make_react_agent(
             [
                 react_step_json(
@@ -362,13 +351,10 @@ class TestReActAgent:
             ],
             tool_calls_limit=2,
         )
-        task = agent._initialize_task(
-            turns=[],
-            prompt="react",
-            inputs={},
-        )
+        task = agent._initialize_task(turns=[], prompt="react", inputs={})
+        task = agent.think(task)
 
-        updated = agent._prepare_next_batch(task)
+        updated = agent.prepare(task)
 
         slot = updated.running_blackboard[0]
         assert updated.prepared_steps == [0]
@@ -380,7 +366,7 @@ class TestReActAgent:
         assert updated.step_meta[0].observable == 2
         assert updated.step_meta[0].description == "Add the two numbers and keep the result visible for later branching."
 
-    def test_prepare_next_batch_records_step_dependencies(self) -> None:
+    def test_prepare_records_step_dependencies(self) -> None:
         agent = make_react_agent(
             [
                 react_step_json(
@@ -392,16 +378,13 @@ class TestReActAgent:
             ],
             tool_calls_limit=2,
         )
-        task = agent._initialize_task(
-            turns=[],
-            prompt="react",
-            inputs={},
-        )
+        task = agent._initialize_task(turns=[], prompt="react", inputs={})
         task.next_step_index = 1
         task.running_blackboard[0] = executed_slot(0, 5)
         task.step_meta[0].description = "Add the two numbers for the current calculation."
+        task = agent.think(task)
 
-        updated = agent._prepare_next_batch(task)
+        updated = agent.prepare(task)
 
         slot = updated.running_blackboard[1]
         assert slot.status == "prepared"
@@ -458,14 +441,105 @@ class TestReActAgent:
             assert rec.system_prompt_name == "reason_then_act"
 
 
+class TestReActThinkPrepareHandoff:
+    """New 1f coverage: think() generates+validates exactly one step per
+    round onto task.generated_step (a fresh decision every round, unlike
+    PlanAct's once-per-run generated_plan); prepare() unpacks it and resets
+    it back to NO_VAL."""
+
+    def test_think_stashes_generated_step_and_prepare_resets_it(self) -> None:
+        agent = make_react_agent(
+            [react_step_json(tool=return_tool.full_name, args={"val": 1}, duration=0)],
+            tool_calls_limit=1,
+        )
+        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        assert task.generated_step is NO_VAL
+
+        task = agent.think(task)
+        assert task.generated_step is not NO_VAL
+
+        task = agent.prepare(task)
+        assert task.generated_step is NO_VAL
+
+
+class TestReActBlackboardInvariants:
+    """New 1f coverage: across a multi-step run, running_blackboard[i].step
+    == i holds for every slot and no slot is written twice -- under both
+    fail_fast settings. ReAct pre-allocates step=i at construction and never
+    reorders slots, so this is largely structural, but verified end-to-end
+    here rather than assumed."""
+
+    def test_step_matches_index_and_no_double_write_fail_fast_true(self) -> None:
+        agent = make_react_agent(
+            [
+                react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}),
+                react_step_json(step=1, tool="Tool.tests.multiply", args={"x": "<<__s0__>>", "y": 3}),
+                react_step_json(step=2, tool=return_tool.full_name, args={"val": "<<__s1__>>"}, duration=0),
+            ],
+            tool_calls_limit=2,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 9
+        board = agent.blackboard
+        assert len(board) == 3
+        for i, slot in enumerate(board):
+            assert slot.step == i
+            assert slot.status == BlackboardSlot.EXECUTED
+
+    def test_step_matches_index_and_no_double_write_fail_fast_false(self) -> None:
+        agent = make_react_agent(
+            [
+                react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
+                react_step_json(step=1, tool="Tool.tests.add", args={"x": 1, "y": 2}),
+                react_step_json(step=2, tool=return_tool.full_name, args={"val": "<<__s1__>>"}, duration=0),
+            ],
+            tool_calls_limit=2,
+            fail_fast=False,
+        )
+
+        result = agent.invoke({"prompt": "run"})
+
+        assert result.result == 3
+        board = agent.blackboard
+        assert len(board) == 3
+        for i, slot in enumerate(board):
+            assert slot.step == i
+        assert board[0].status == BlackboardSlot.FAILED
+        assert board[1].status == BlackboardSlot.EXECUTED
+        assert board[2].status == BlackboardSlot.EXECUTED
+
+    def test_double_prepare_without_act_is_unreachable_via_the_loop(self) -> None:
+        """Demonstrates why the base loop's fixed think -> prepare -> act
+        ordering is what actually prevents double-prepare-without-act, not
+        a guard inside prepare() itself (the old re-entry check was dropped
+        in 1c as dead). A hand-rolled second prepare() call, with no
+        intervening act(), tries to unpack task.generated_step -- but
+        prepare() already reset it to NO_VAL on the first call, so it
+        breaks loudly (TypeError) rather than silently corrupting state."""
+        agent = make_react_agent(
+            [react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2})],
+            tool_calls_limit=1,
+        )
+        task = agent._initialize_task(turns=[], prompt="run", inputs={})
+        task = agent.think(task)
+
+        task = agent.prepare(task)  # consumes generated_step, resets to NO_VAL
+        assert task.prepared_steps == [0]
+
+        with pytest.raises(TypeError):
+            agent.prepare(task)  # hand-rolled re-entry, no intervening think()/act()
+
+
 class TestReActCascadeFailedPropagation:
     """
     Integration tests for cascade FAILED propagation in ReActAgent.
 
     When a tool step fails (fail_fast=False), a subsequent LLM-generated
     step whose args reference it via <<__sN__>> is cascade-marked FAILED in
-    _apply_react_step_result without raising. The return tool always raises
-    when its arg dependencies failed.
+    prepare() without raising. The return tool always raises when its arg
+    dependencies failed.
     """
 
     def test_react_dependent_step_is_cascade_failed(self) -> None:
@@ -502,8 +576,6 @@ class TestReActCascadeFailedPropagation:
         with pytest.raises(ToolAgentError, match="return step"):
             agent.invoke({"prompt": "react return cascade raise"})
 
-
-# ── TestFailedCacheRefValidation ──────────────────────────────────────────────
 
 class TestReActGenerationRetry:
     """Retry loop in _generate_next_step/_agenerate_next_step: shared budget, feedback, LLMRecord accumulation."""
@@ -597,7 +669,7 @@ class TestReActGenerationRetry:
         assert len(llm_records[1].messages) == 5
 
     def test_budget_exhausted_raises_after_all_attempts(self) -> None:
-        """generation_retries=1: both attempts return invalid JSON → ToolAgentError."""
+        """generation_retries=1: both attempts return invalid JSON -> ToolAgentError."""
         agent = make_react_agent(
             [self.INVALID_JSON, self.INVALID_JSON],
             generation_retries=1,
@@ -653,8 +725,8 @@ class TestReActGenerationRetry:
 
     def test_shared_budget_across_steps(self) -> None:
         """Retries consumed by step 0 reduce availability for step 1."""
-        # generation_retries=1: step 0 uses the 1 retry (bad JSON → valid step).
-        # Step 1 (return) immediately gets bad JSON; no retries left → ToolAgentError.
+        # generation_retries=1: step 0 uses the 1 retry (bad JSON -> valid step).
+        # Step 1 (return) immediately gets bad JSON; no retries left -> ToolAgentError.
         agent = make_react_agent(
             [self.INVALID_JSON, self.VALID_STEP_0, self.INVALID_JSON],
             generation_retries=1,
@@ -667,9 +739,9 @@ class TestReActGenerationRetry:
         """Total LLMRecords equals the sum of all attempt counts across all steps."""
         # step 0: 2 attempts (1 retry); return step: 1 attempt. Total = 3.
         engine = ScriptedLLMEngine([
-            self.INVALID_JSON,       # step 0 attempt 1 — bad JSON
-            self.VALID_STEP_0,       # step 0 attempt 2 — succeeds
-            self.VALID_RETURN,       # return step — succeeds first try
+            self.INVALID_JSON,       # step 0 attempt 1 -- bad JSON
+            self.VALID_STEP_0,       # step 0 attempt 2 -- succeeds
+            self.VALID_RETURN,       # return step -- succeeds first try
         ])
         agent = ReActAgent(
             name="tests",
@@ -690,8 +762,8 @@ class TestReActGenerationRetry:
         # observable for step 0 must still be 2 after the failed retry, and 1 after the success.
         engine = ScriptedLLMEngine([
             self.VALID_STEP_0,           # step 0: observable=1 (duration=1)
-            self.INVALID_JSON,           # return step attempt 1: fails → no counter decrement
-            self.VALID_RETURN,           # return step attempt 2: succeeds → decrements
+            self.INVALID_JSON,           # return step attempt 1: fails -> no counter decrement
+            self.VALID_RETURN,           # return step attempt 2: succeeds -> decrements
         ])
         agent = ReActAgent(
             name="tests",
@@ -711,12 +783,10 @@ class TestReActGenerationRetry:
         assert len(record.llm_records) == 3  # 1 (step0) + 1 (failed return) + 1 (success return)
 
 
-# ── TestExecutePreparedBatchEarlyValidation ───────────────────────────────────
-
 class TestMaxDurationSingleSource:
     """B3/B-7 (superseded by render-task-logic): max_duration is now cheaply
     re-derived independently at each site that needs it (render_task,
-    _generate_next_step, _apply_react_step_result) from
+    _generate_next_step, prepare) from
     max(0, self._tool_calls_limit - prefix_len) rather than computed once
     and threaded through as a parameter. The invariant under test is no
     longer "single computation, threaded through" but "every independent
@@ -727,7 +797,7 @@ class TestMaxDurationSingleSource:
         """A step with duration == remaining budget is accepted."""
         agent = make_react_agent(
             [
-                # Step 0: duration=2 with tool_calls_limit=3 → max_duration=3; fine.
+                # Step 0: duration=2 with tool_calls_limit=3 -> max_duration=3; fine.
                 react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=2),
                 react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
             ],
@@ -737,7 +807,7 @@ class TestMaxDurationSingleSource:
         assert result.result == 3
 
     def test_step_exceeding_max_duration_triggers_retry(self) -> None:
-        """A step with duration > remaining budget is rejected (validation error → retry)."""
+        """A step with duration > remaining budget is rejected (validation error -> retry)."""
         agent = make_react_agent(
             [
                 # Step 0 bad: duration=5 when only 2 slots remain (prefix_len=0, limit=2).
@@ -752,22 +822,22 @@ class TestMaxDurationSingleSource:
         result = agent.invoke({"prompt": "run"})
         assert result.result == 3
 
-    def test_apply_react_step_result_no_longer_takes_max_duration_param(self) -> None:
+    def test_prepare_no_longer_takes_max_duration_param(self) -> None:
         """Locks down the render-task-logic redesign: max_duration is
         recomputed internally from prefix_len rather than accepted as a
-        parameter -- also confirms llm_records was dropped (now mutated
-        directly by _generate_next_step)."""
+        parameter. prepare() (the 1c/1e rename of the old
+        _apply_react_step_result) is a plain (self, task) hook."""
         import inspect
-        sig = inspect.signature(ReActAgent._apply_react_step_result)
+        sig = inspect.signature(ReActAgent.prepare)
         params = sig.parameters
         assert "max_duration" not in params
         assert "llm_records" not in params
 
-    def test_max_duration_flows_from_prepare_to_apply(self) -> None:
+    def test_max_duration_flows_from_think_to_prepare(self) -> None:
         """observe_duration == max_duration at budget boundary is accepted end-to-end."""
         agent = make_react_agent(
             [
-                # prefix_len=0, tool_calls_limit=1 → max_duration = max(0, 1-0) = 1; duration=1 OK.
+                # prefix_len=0, tool_calls_limit=1 -> max_duration = max(0, 1-0) = 1; duration=1 OK.
                 react_step_json(step=0, tool="Tool.tests.add", args={"x": 2, "y": 3}, duration=1),
                 react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
             ],
@@ -775,9 +845,6 @@ class TestMaxDurationSingleSource:
         )
         result = agent.invoke({"prompt": "run"})
         assert result.result == 5
-
-# ── TestCacheRefValidation ───────────────────────────────────────────────────
-
 
 
 class TestCacheRefValidation:
@@ -803,18 +870,19 @@ class TestCacheRefValidation:
     def test_planact_out_of_conv_cache_ref_raises(self) -> None:
         """PlanAct: cache index in range but not in either frozenset raises."""
         agent = make_planact_agent([], context_enabled=True)
-        # Seed a slot in the blackboard (simulates a prior-session entry).
+        # Seed a slot in the blackboard directly (simulates a prior-session
+        # entry) -- ToolAgentTask has no cache_blackboard field; cache state
+        # lives only on the agent.
         prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
         agent._blackboard.append(prior_slot)
 
-        # Build the cache_blackboard as _setup_plan_init would (since context_enabled=True).
         cache_blackboard = [prior_slot.copy()]
 
         # Parse a plan that references cache index 0.
         plan_json = json.dumps([{"tool": return_tool.full_name, "args": {"val": "<<__c0__>>"}}])
         parsed = json.loads(plan_json)
 
-        # Both frozensets are empty — index 0 is in-range but not from this conversation.
+        # Both frozensets are empty -- index 0 is in-range but not from this conversation.
         result = agent._process_plan_output(
             parsed=parsed,
             cache_blackboard=cache_blackboard,
@@ -823,8 +891,6 @@ class TestCacheRefValidation:
         )
         assert isinstance(result, str)
         assert "not part of this conversation" in result
-
-    # ── PlanAct failed-in-conversation (already in TestFailedCacheRefValidation) ──
 
     # ── ReAct out-of-range ───────────────────────────────────────────────────
 
@@ -848,7 +914,6 @@ class TestCacheRefValidation:
         prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
         agent._blackboard.append(prior_slot)
 
-        # Build a step referencing cache index 0.
         parsed = json.loads(react_step_json(step=0, tool="Tool.tests.add", args={"x": "<<__c0__>>", "y": 1}))
         cache_blackboard = [prior_slot.copy()]
 
@@ -880,11 +945,7 @@ class TestCacheRefValidation:
         assert result.result == 99
 
         # Build the snapshot for prefix_len=1 (after step 0 fails, before step 1 is generated).
-        task = agent._initialize_task(
-            turns=[],
-            prompt="react",
-            inputs={},
-        )
+        task = agent._initialize_task(turns=[], prompt="react", inputs={})
         # Manually seed a FAILED slot at index 0 to simulate the post-failure state.
         failed_slot = BlackboardSlot(
             step=0,
@@ -921,12 +982,8 @@ class TestCacheRefValidation:
         result = agent.invoke({"prompt": "run"})
         assert result.result == 3
 
-        # Build snapshot after step 0 executed — check no FAILED markers.
-        task = agent._initialize_task(
-            turns=[],
-            prompt="react",
-            inputs={},
-        )
+        # Build snapshot after step 0 executed -- check no FAILED markers.
+        task = agent._initialize_task(turns=[], prompt="react", inputs={})
         # After invoke, the blackboard is persisted; index 0 is the executed add step.
         exec_slot = agent.blackboard[0]
         task.running_blackboard[0] = exec_slot
