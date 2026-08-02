@@ -342,15 +342,3 @@ between (AT LEAST) 1 and {thoughts_per_round} (AT MOST) thoughts.
 {user_thinking_instructions}""",
     description="Self-Ask Agent's thinking-phase prompt.",
 )
-
-# Wraps a resolved (non-empty) thinking_instructions render into its own
-# labeled section around SELF_ASK_PROMPT's {user_thinking_instructions}
-# slot. Concatenated around the resolved text, not part of any PromptConfig
-# template.
-THINKING_ADDITIONAL_INSTRUCTIONS_HEADER = """\
-# ADDITIONAL INSTRUCTIONS
-Below are additional instructions provided by the user directly for \
-tailored thinking instructions, WHILE ABIDING by the rules above.
-===Additional Instructions Start===
-"""
-THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n"

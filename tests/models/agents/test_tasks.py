@@ -80,7 +80,6 @@ class TestToolAgentTask:
     def test_added_field_defaults(self) -> None:
         task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
 
-        assert task.cache_blackboard == []
         assert task.running_blackboard == []
         assert task.executed_steps == set()
         assert task.prepared_steps == []
@@ -88,6 +87,13 @@ class TestToolAgentTask:
         assert task.valid_cache_indices == frozenset()
         assert task.failed_cache_indices == frozenset()
         assert task.retries_used == 0
+
+    def test_no_cache_blackboard_field(self) -> None:
+        # cache_blackboard was removed -- cache state lives only on the
+        # owning agent's self._blackboard, never on the task.
+        task = ToolAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="role")
+
+        assert not hasattr(task, "cache_blackboard")
 
     def test_no_messages_field(self) -> None:
         # ToolAgentTask.messages was removed -- superseded by base
@@ -166,9 +172,17 @@ class TestThinkingTask:
     def test_added_field_defaults(self) -> None:
         task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
 
-        assert task.retries_used == 0
-        assert task.rounds_used == 0
         assert task.thoughts == []
+
+    def test_no_retries_or_rounds_used_fields(self) -> None:
+        # No retry-budget field: the free-flowing category-marker parser
+        # degrades unmarked text to a single OTHER thought rather than
+        # failing, so there is no malformed-output case to retry. No
+        # separate round counter either -- len(thoughts) is the round count.
+        task = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
+
+        assert not hasattr(task, "retries_used")
+        assert not hasattr(task, "rounds_used")
 
     def test_no_phase_field(self) -> None:
         # ThinkingTask deliberately has no phase field -- system_prompt_name
@@ -178,18 +192,18 @@ class TestThinkingTask:
 
         assert not hasattr(task, "phase")
 
-    def test_thoughts_holds_agent_thought_instances(self) -> None:
-        thought = AgentThought(observation="obs", question="q", answer="a")
+    def test_thoughts_holds_nested_rounds_of_agent_thought_instances(self) -> None:
+        thought = AgentThought(category="OBSERVATION", content="obs")
         task = ThinkingTask(
-            turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking", thoughts=[thought]
+            turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking", thoughts=[[thought]]
         )
 
-        assert task.thoughts == [thought]
+        assert task.thoughts == [[thought]]
 
     def test_default_factories_are_independent_per_instance(self) -> None:
         first = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
         second = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
 
-        first.thoughts.append(AgentThought(observation=None, question="q", answer="a"))
+        first.thoughts.append([AgentThought(category="OTHER", content="x")])
 
         assert second.thoughts == []

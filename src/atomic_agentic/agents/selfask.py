@@ -18,12 +18,12 @@ from typing import Any, Callable, Literal, Optional
 
 from .base import Agent
 from .basic import BasicAgent
-from .prompts import (
-    SELF_ASK_PROMPT,
+from .prompts import SELF_ASK_PROMPT
+from ..constants.agents import (
+    STOP_THINKING_SENTINEL,
     THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER,
     THINKING_ADDITIONAL_INSTRUCTIONS_HEADER,
 )
-from ..constants.agents import STOP_THINKING_SENTINEL
 from ..exceptions import AgentError, AgentInvocationError, ThinkingAgentError
 from ..llm.base import LLMEngine
 from ..models.agents.prompts import PromptConfig

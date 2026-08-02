@@ -29,29 +29,19 @@ ROLE_PROMPT = "You are a deterministic test writer."
 class _MinimalAgent(Agent):
     """Trivial concrete Agent used to test abstract Agent construction and API.
 
-    ``_progress`` performs a single engine call and completes the task;
-    tests that never call invoke() don't need this to run. No
-    ``_initialize_task`` override -- Agent's concrete base implementation
-    (bare AgentTask, ``system_prompt_name=None``) is sufficient.
+    ``act`` performs a single engine call and completes the task; tests
+    that never call invoke() don't need this to run. No ``_initialize_task``
+    override -- Agent's concrete base implementation (bare AgentTask,
+    ``system_prompt_name=None``) is sufficient. ``think``/``prepare`` stay
+    inherited no-ops.
     """
 
-    def render_task(
-        self,
-        task: AgentTask,
-        *,
-        additional_messages: list[dict[str, str]] | None = None,
-    ) -> list[dict[str, str]]:
-        """Minimal implementation satisfying the abstract contract -- not
-        exercised by ``_progress``/``_async_progress``, which build their
-        own inline message list."""
-        system = self._render_system_message(task, {})
-        historic = self._render_historic_messages(task)
+    def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         if not task.task_messages:
             task.task_messages = [{"role": "user", "content": task.user_prompt}]
-        task.task_messages.extend(additional_messages or [])
-        return system + historic + task.task_messages
+        return task.task_messages
 
-    def _progress(self, task: AgentTask) -> AgentTask:
+    def act(self, task: AgentTask) -> AgentTask:
         engine_result = self._llm_engine.invoke({
             "messages": [
                 {"role": "system", "content": "minimal"},
@@ -67,7 +57,7 @@ class _MinimalAgent(Agent):
         task.complete = True
         return task
 
-    async def _async_progress(self, task: AgentTask) -> AgentTask:
+    async def async_act(self, task: AgentTask) -> AgentTask:
         engine_result = await self._llm_engine.async_invoke({
             "messages": [
                 {"role": "system", "content": "minimal"},
@@ -86,8 +76,15 @@ class _MinimalAgent(Agent):
 
 class _EchoAgent(Agent):
     """Concrete Agent fixture with a fixed system prompt and a real
-    single-LLM-call ``_progress`` path. Used in place of ``BasicAgent`` for
+    single-LLM-call ``act`` path. Used in place of ``BasicAgent`` for
     invoke-lifecycle tests in this file for fixture independence.
+
+    ``act``/``async_act`` call ``build_messages`` directly with
+    ``self._echo_system_prompt`` -- a deliberate bypass of the
+    ``render_task``/``_render_system_message`` pipeline (unchanged from the
+    pre-1a design), so ``_render_task_messages`` below is never actually
+    exercised by the main lifecycle; it exists only to satisfy the abstract
+    contract.
     """
 
     def __init__(self, *, system_prompt: str = ROLE_PROMPT, **kwargs: Any) -> None:
@@ -97,23 +94,12 @@ class _EchoAgent(Agent):
             template=system_prompt, description="Echo agent system prompt."
         )
 
-    def render_task(
-        self,
-        task: AgentTask,
-        *,
-        additional_messages: list[dict[str, str]] | None = None,
-    ) -> list[dict[str, str]]:
-        """Minimal implementation satisfying the abstract contract -- not
-        exercised by ``_progress``/``_async_progress``, which call
-        ``build_messages`` directly with ``self._echo_system_prompt``."""
-        system = self._render_system_message(task, {})
-        historic = self._render_historic_messages(task)
+    def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
         if not task.task_messages:
             task.task_messages = [{"role": "user", "content": task.user_prompt}]
-        task.task_messages.extend(additional_messages or [])
-        return system + historic + task.task_messages
+        return task.task_messages
 
-    def _progress(self, task: AgentTask) -> AgentTask:
+    def act(self, task: AgentTask) -> AgentTask:
         messages = self.build_messages(self._echo_system_prompt, task.turns, task.user_prompt)
         engine_result = self._llm_engine.invoke({"messages": messages})
         text = engine_result.result
@@ -127,7 +113,7 @@ class _EchoAgent(Agent):
         task.complete = True
         return task
 
-    async def _async_progress(self, task: AgentTask) -> AgentTask:
+    async def async_act(self, task: AgentTask) -> AgentTask:
         messages = self.build_messages(self._echo_system_prompt, task.turns, task.user_prompt)
         engine_result = await self._llm_engine.async_invoke({"messages": messages})
         text = engine_result.result
@@ -158,6 +144,49 @@ class _ExtraReservedAgent(_MinimalAgent):
     @classmethod
     def get_reserved_parameters(cls) -> list[ParamSpec]:
         return super().get_reserved_parameters() + [cls.EXTRA_RESERVED]
+
+
+class _LifecycleOrderAgent(Agent):
+    """Stub instrumenting think/prepare/act separately to verify the base
+    loop's exact per-round call order and repeat-until-complete behavior --
+    something a single old-style ``_progress`` override could never
+    express, since it fused all three phases into one call."""
+
+    def __init__(self, *, rounds: int, **kwargs: Any) -> None:
+        self._rounds_remaining = rounds
+        self.call_log: list[str] = []
+        super().__init__(**kwargs)
+
+    def _render_task_messages(self, task: AgentTask) -> list[dict[str, str]]:
+        if not task.task_messages:
+            task.task_messages = [{"role": "user", "content": task.user_prompt}]
+        return task.task_messages
+
+    def think(self, task: AgentTask) -> AgentTask:
+        self.call_log.append("think")
+        return task
+
+    def prepare(self, task: AgentTask) -> AgentTask:
+        self.call_log.append("prepare")
+        return task
+
+    def act(self, task: AgentTask) -> AgentTask:
+        self.call_log.append("act")
+        self._rounds_remaining -= 1
+        if self._rounds_remaining <= 0:
+            engine_result = self._llm_engine.invoke({
+                "messages": [{"role": "user", "content": task.user_prompt}]
+            })
+            task.llm_records.append(LLMRecord(
+                messages=({"role": "user", "content": task.user_prompt},),
+                llm_result=engine_result,
+            ))
+            task.generated_response = "done"
+            task.complete = True
+        return task
+
+    async def async_act(self, task: AgentTask) -> AgentTask:
+        return self.act(task)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -336,6 +365,36 @@ def make_agent(
 # ─────────────────────────────────────────────────────────────────────────────
 # Test classes
 # ─────────────────────────────────────────────────────────────────────────────
+class TestBaseLoopOrder:
+    """New 1f coverage: think/prepare/act are called in strict order, every
+    round, unconditionally, until task.complete -- the shape 1a introduced
+    to replace the old single ``_progress`` hook. A single fused hook could
+    never express "was think called before prepare, before act" as a
+    separate assertion; instrumenting all three separately is the point."""
+
+    def test_think_prepare_act_called_in_order_each_round_until_complete(self) -> None:
+        agent = _LifecycleOrderAgent(
+            rounds=3,
+            name="a", namespace="tests", description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+        )
+
+        agent.invoke({"prompt": "hi"})
+
+        assert agent.call_log == ["think", "prepare", "act"] * 3
+
+    def test_async_think_prepare_act_called_in_order_each_round_until_complete(self) -> None:
+        agent = _LifecycleOrderAgent(
+            rounds=2,
+            name="a", namespace="tests", description="d",
+            llm_engine=StatefulEchoLLMEngine(),
+        )
+
+        asyncio.run(agent.async_invoke({"prompt": "hi"}))
+
+        assert agent.call_log == ["think", "prepare", "act"] * 2
+
+
 class TestAgentPipeline:
     def test_pre_invoke_shapes_prompt_and_post_invoke_packages_result(self) -> None:
         engine = StatefulEchoLLMEngine()
@@ -1054,7 +1113,7 @@ class TestExtraParametersNormalization:
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
             ],
         )
-        # _MinimalAgent._invoke ignores inputs entirely, but invoke() must
+        # _MinimalAgent ignores extra inputs entirely, but invoke() must
         # accept the extra top-level key without complaint (no more "context"
         # dict wrapper -- extra_parameters values are flat top-level keys now).
         result = agent.invoke({"prompt": "hi", "lang": "French"})
@@ -1399,7 +1458,8 @@ class TestAgentDescriptionOverrideRemoval:
 
 class TestInvocationLifecycle:
     """Non-destructive run_id read, reserved-name exclusion from pre/post
-    slices, full inputs threading to _invoke, and AgentRecord.inputs widening."""
+    slices, full inputs threading to _initialize_task, and
+    AgentRecord.inputs widening."""
 
     def test_run_id_read_does_not_mutate_caller_inputs_dict(self) -> None:
         agent = _MinimalAgent(
