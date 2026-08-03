@@ -225,7 +225,10 @@ class PyA2AtomicTool(Tool):
             raise ToolInvocationError(
                 f"{self.full_name}: PyA2Atomic tools do not accept positional arguments; got {args!r}."
             )
-        payload = self._function(self._remote_name, inputs=kwargs)
+        try:
+            payload = self._function(self._remote_name, inputs=kwargs)
+        except Exception as e:
+            raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
         return self._handle_a2a_payload(payload)
 
     async def async_execute(

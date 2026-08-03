@@ -288,6 +288,13 @@ class TestPyA2AtomicToolInvocation:
         with pytest.raises(ToolInvocationError, match="do not accept positional"):
             tool.execute((1,), {})
 
+    def test_execute_wraps_client_exception(self) -> None:
+        client = FakePyA2AtomicClient(call_error=RuntimeError("remote boom"))
+        tool = make_tool(client=client)
+
+        with pytest.raises(ToolInvocationError, match="invocation failed"):
+            tool.invoke({"value": "hello"})
+
     def test_async_execute_forwards_to_client_in_thread(self) -> None:
         client = FakePyA2AtomicClient(result={"async": True})
         tool = make_tool(client=client)

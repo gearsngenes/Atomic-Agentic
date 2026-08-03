@@ -60,6 +60,7 @@ class FakeMCPClientHub(MCPClientHub):
         result: Any | None = None,
         async_result: Any | None = None,
         async_error: Exception | None = None,
+        error: Exception | None = None,
     ) -> None:
         self._tools = {"search": search_metadata()} if tools is None else tools
         self.result = (
@@ -73,6 +74,7 @@ class FakeMCPClientHub(MCPClientHub):
         )
         self.async_result = async_result
         self.async_error = async_error
+        self.error = error
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.async_calls: list[tuple[str, dict[str, Any]]] = []
         self._headers: Mapping[str, str] | None = None
@@ -106,6 +108,8 @@ class FakeMCPClientHub(MCPClientHub):
 
     def call_tool(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
         self.calls.append((remote_name, dict(inputs)))
+        if self.error is not None:
+            raise self.error
         return self.result
 
     async def async_call_tool(self, remote_name: str, inputs: Mapping[str, Any]) -> Any:
@@ -387,6 +391,20 @@ class TestMCPProxyToolInvocation:
         tool = make_tool(hub=hub)
 
         with pytest.raises(ToolInvocationError, match="non-mapping result envelope"):
+            tool.invoke({"query": "hello"})
+
+    def test_execute_wraps_non_tool_invocation_errors(self) -> None:
+        hub = FakeMCPClientHub(error=RuntimeError("transport boom"))
+        tool = make_tool(hub=hub)
+
+        with pytest.raises(ToolInvocationError, match="invocation failed"):
+            tool.invoke({"query": "hello"})
+
+    def test_execute_preserves_tool_invocation_error(self) -> None:
+        hub = FakeMCPClientHub(error=ToolInvocationError("known failure"))
+        tool = make_tool(hub=hub)
+
+        with pytest.raises(ToolInvocationError, match="known failure"):
             tool.invoke({"query": "hello"})
 
     def test_execute_rejects_positional_args(self) -> None:

@@ -206,7 +206,12 @@ class MCPProxyTool(Tool):
                 f"{self.full_name}: MCP tools do not accept positional arguments; got {args!r}."
             )
 
-        raw_result = self._function(inputs=kwargs)
+        try:
+            raw_result = self._function(inputs=kwargs)
+        except ToolInvocationError:
+            raise
+        except Exception as e:
+            raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
 
         if not isinstance(raw_result, Mapping):
             raise ToolInvocationError(
