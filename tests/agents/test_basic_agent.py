@@ -7,64 +7,13 @@ import asyncio
 
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.exceptions import AgentError
-from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.agents.prompts import PromptConfig
-from atomic_agentic.models.results import LLMModelData, TokenUsage
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test engine
-# ─────────────────────────────────────────────────────────────────────────────
-class EchoLLMEngine(LLMEngine):
-    """Deterministic echo engine that records all message batches received."""
-
-    def __init__(self, *, prefix: str = "ECHO", **kwargs: Any) -> None:
-        super().__init__(
-            name="echo_engine",
-            description="Echo engine for BasicAgent tests.",
-            **kwargs,
-        )
-        self.prefix = prefix
-        self.calls: list[list[dict[str, str]]] = []
-
-    def _build_provider_payload(
-        self,
-        messages: list[dict[str, str]],
-        attachments: Mapping[str, Mapping[str, Any]],
-    ) -> dict[str, Any]:
-        self.calls.append([dict(m) for m in messages])
-        latest_user = next(
-            (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
-        )
-        return {"latest_user": latest_user}
-
-    def _call_provider(self, payload: Any) -> Any:
-        return payload
-
-    def _extract_text(self, response: Any) -> str:
-        return f"{self.prefix}: {response['latest_user']}"
-
-    def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(
-            input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
-        )
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        return False
-
-    def _get_model_data(self) -> LLMModelData:
-        return LLMModelData(provider="echo")
-
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
-        return {"path": path}
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        return None
+from fake_engines import FakeLLMEngine, echo_latest_user
 
 
 def make_basic_agent(
     *,
-    engine: EchoLLMEngine | None = None,
+    engine: FakeLLMEngine | None = None,
     role_prompt: str | PromptConfig | None = None,
     context_enabled: bool = False,
     **kwargs: Any,
@@ -73,7 +22,7 @@ def make_basic_agent(
         name="basic_agent",
         namespace="tests",
         description="BasicAgent under test.",
-        llm_engine=engine or EchoLLMEngine(),
+        llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
         role_prompt=role_prompt,
         context_enabled=context_enabled,
         **kwargs,
@@ -173,7 +122,7 @@ class TestBasicAgentSchemaComposition:
 
 class TestBasicAgentInvoke:
     def test_invoke_renders_system_prompt_and_passes_to_engine(self) -> None:
-        engine = EchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_basic_agent(
             engine=engine,
             role_prompt="You are a poet.",
@@ -184,7 +133,7 @@ class TestBasicAgentInvoke:
         assert engine.calls[0][0] == {"role": "system", "content": "You are a poet."}
 
     def test_invoke_renders_placeholder_in_system_prompt(self) -> None:
-        engine = EchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         config = PromptConfig(template="You are a {persona}.", description="d")
         agent = make_basic_agent(engine=engine, role_prompt=config)
 
@@ -193,7 +142,7 @@ class TestBasicAgentInvoke:
         assert engine.calls[0][0]["content"] == "You are a pirate."
 
     def test_invoke_uses_placeholder_default_when_omitted(self) -> None:
-        engine = EchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         config = PromptConfig(
             template="Speak as {persona}.",
             description="d",
@@ -213,7 +162,7 @@ class TestBasicAgentInvoke:
             agent.invoke({"prompt": "Speak."})
 
     def test_invoke_result_is_echo_of_prompt(self) -> None:
-        engine = EchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_basic_agent(engine=engine)
 
         result = agent.invoke({"prompt": "Hello."})
@@ -256,7 +205,7 @@ class TestBasicAgentInvoke:
 
 class TestBasicAgentAsyncInvoke:
     def test_async_invoke_result_matches_sync(self) -> None:
-        engine = EchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_basic_agent(engine=engine, role_prompt="You are helpful.")
 
         result = asyncio.run(agent.async_invoke({"prompt": "Hi."}))
@@ -264,7 +213,7 @@ class TestBasicAgentAsyncInvoke:
         assert result.result == "ECHO: Hi."
 
     def test_async_invoke_system_prompt_passed_to_engine(self) -> None:
-        engine = EchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_basic_agent(engine=engine, role_prompt="Async role.")
 
         asyncio.run(agent.async_invoke({"prompt": "Test."}))
@@ -272,7 +221,7 @@ class TestBasicAgentAsyncInvoke:
         assert engine.calls[0][0]["content"] == "Async role."
 
     def test_async_invoke_renders_placeholder_in_system_prompt(self) -> None:
-        engine = EchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         config = PromptConfig(template="You are a {persona}.", description="d")
         agent = make_basic_agent(engine=engine, role_prompt=config)
 

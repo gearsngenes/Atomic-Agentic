@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from conftest import ScriptedLLMEngine
+from conftest import FakeLLMEngine
 
 from atomic_agentic.agents.selfask import SelfAskAgent
 from atomic_agentic.exceptions import AgentError, AgentInvocationError, ThinkingAgentError
@@ -20,7 +20,7 @@ def thought_line(category: str, content: str) -> str:
 
 def make_agent(
     *,
-    engine: ScriptedLLMEngine | None = None,
+    engine: FakeLLMEngine | None = None,
     role_prompt: str | PromptConfig | None = "You are a careful assistant.",
     thinking_instructions: str | PromptConfig | None = None,
     max_thinking_rounds: int = 3,
@@ -31,7 +31,7 @@ def make_agent(
         name="tests",
         namespace="tests",
         description="SelfAskAgent under test.",
-        llm_engine=engine or ScriptedLLMEngine([]),
+        llm_engine=engine or FakeLLMEngine([]),
         role_prompt=role_prompt,
         thinking_instructions=thinking_instructions,
         max_thinking_rounds=max_thinking_rounds,
@@ -118,7 +118,7 @@ class TestConstruction:
 
 class TestThinkPhase:
     def test_max_thinking_rounds_zero_skips_thinking_without_engine_call(self) -> None:
-        engine = ScriptedLLMEngine(["final reply"])
+        engine = FakeLLMEngine(["final reply"])
         agent = make_agent(engine=engine, max_thinking_rounds=0)
 
         result = agent.invoke({"prompt": "hello"})
@@ -128,7 +128,7 @@ class TestThinkPhase:
         assert agent.get_thoughts(result.run_id) == []
 
     def test_stop_sentinel_ends_thinking_after_that_round(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "noted something") + "\n|STOP_THINKING|",
             "final reply",
         ])
@@ -148,7 +148,7 @@ class TestThinkPhase:
         think() switches to the reply phase via |STOP_THINKING|, otherwise
         act() would reuse the stale self-ask-phase "produce next round of
         thoughts" instruction instead of building the real reply prompt."""
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "noted something") + "\n|STOP_THINKING|",
             "final reply",
         ])
@@ -163,7 +163,7 @@ class TestThinkPhase:
         assert "Produce the next round of thoughts" not in joined
 
     def test_round_budget_exhaustion_after_real_round_also_clears_stale_messages(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "only round, no sentinel"),
             "final reply",
         ])
@@ -178,21 +178,21 @@ class TestThinkPhase:
         assert "Produce the next round of thoughts" not in joined
 
     def test_empty_raw_output_raises_thinking_agent_error(self) -> None:
-        engine = ScriptedLLMEngine([""])
+        engine = FakeLLMEngine([""])
         agent = make_agent(engine=engine, max_thinking_rounds=3)
 
         with pytest.raises(ThinkingAgentError):
             agent.invoke({"prompt": "hello"})
 
     def test_bare_stop_sentinel_with_no_content_raises_thinking_agent_error(self) -> None:
-        engine = ScriptedLLMEngine(["|STOP_THINKING|"])
+        engine = FakeLLMEngine(["|STOP_THINKING|"])
         agent = make_agent(engine=engine, max_thinking_rounds=3)
 
         with pytest.raises(ThinkingAgentError):
             agent.invoke({"prompt": "hello"})
 
     def test_unmarked_text_degrades_to_single_other_thought(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             "just some unmarked text" + "\n|STOP_THINKING|",
             "final reply",
         ])
@@ -206,7 +206,7 @@ class TestThinkPhase:
         assert thoughts[0][0].content == "just some unmarked text"
 
     def test_thoughts_per_round_truncates_excess_thoughts_silently(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             "\n".join([
                 thought_line("OBSERVATION", "first"),
                 thought_line("QUESTION", "second"),
@@ -224,7 +224,7 @@ class TestThinkPhase:
         assert [t.content for t in thoughts[0]] == ["first", "second"]
 
     def test_multiple_rounds_accumulate_before_stop(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "round one"),
             thought_line("QUESTION", "round two") + "\n|STOP_THINKING|",
             "final reply",
@@ -239,7 +239,7 @@ class TestThinkPhase:
         assert thoughts[1][0].content == "round two"
 
     def test_async_think_mirrors_sync_behavior(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "noted") + "\n|STOP_THINKING|",
             "final reply",
         ])
@@ -255,7 +255,7 @@ class TestThinkPhase:
 
 class TestActPhase:
     def test_act_no_ops_while_still_thinking(self) -> None:
-        agent = make_agent(engine=ScriptedLLMEngine([]), max_thinking_rounds=3)
+        agent = make_agent(engine=FakeLLMEngine([]), max_thinking_rounds=3)
         task = agent._initialize_task(turns=[], prompt="hello", inputs={})
         assert task.system_prompt_name != "role"
 
@@ -265,7 +265,7 @@ class TestActPhase:
         assert updated.complete is False
 
     def test_async_act_no_ops_while_still_thinking(self) -> None:
-        agent = make_agent(engine=ScriptedLLMEngine([]), max_thinking_rounds=3)
+        agent = make_agent(engine=FakeLLMEngine([]), max_thinking_rounds=3)
         task = agent._initialize_task(turns=[], prompt="hello", inputs={})
 
         updated = asyncio.run(agent.async_act(task))
@@ -274,7 +274,7 @@ class TestActPhase:
         assert updated.complete is False
 
     def test_act_delegates_to_basic_agent_body_once_in_reply_phase(self) -> None:
-        engine = ScriptedLLMEngine(["reply text"])
+        engine = FakeLLMEngine(["reply text"])
         agent = make_agent(engine=engine, max_thinking_rounds=0)
         task = agent._initialize_task(turns=[], prompt="hello", inputs={})
         task = agent.think(task)  # max_thinking_rounds=0 -> switches straight to "role"
@@ -289,7 +289,7 @@ class TestActPhase:
 class TestRenderPipeline:
     def test_self_ask_system_message_resolves_round_limit_and_thoughts_per_round(self) -> None:
         agent = make_agent(
-            engine=ScriptedLLMEngine([]),
+            engine=FakeLLMEngine([]),
             max_thinking_rounds=4,
             thoughts_per_round=2,
         )
@@ -303,7 +303,7 @@ class TestRenderPipeline:
 
     def test_self_ask_system_message_includes_thinking_instructions_when_non_empty(self) -> None:
         agent = make_agent(
-            engine=ScriptedLLMEngine([]),
+            engine=FakeLLMEngine([]),
             thinking_instructions="Focus on edge cases.",
             max_thinking_rounds=3,
         )
@@ -314,7 +314,7 @@ class TestRenderPipeline:
         assert "Focus on edge cases." in rendered[0]["content"]
 
     def test_self_ask_system_message_omits_instructions_section_when_absent(self) -> None:
-        agent = make_agent(engine=ScriptedLLMEngine([]), thinking_instructions=None, max_thinking_rounds=3)
+        agent = make_agent(engine=FakeLLMEngine([]), thinking_instructions=None, max_thinking_rounds=3)
         task = agent._initialize_task(turns=[], prompt="hello", inputs={})
 
         rendered = agent._render_system_message(task)
@@ -323,7 +323,7 @@ class TestRenderPipeline:
 
     def test_role_phase_system_message_delegates_to_role_prompt(self) -> None:
         agent = make_agent(
-            engine=ScriptedLLMEngine([]),
+            engine=FakeLLMEngine([]),
             role_prompt="You are a distinctly-worded persona.",
             max_thinking_rounds=0,
         )
@@ -335,7 +335,7 @@ class TestRenderPipeline:
         assert rendered[0]["content"] == "You are a distinctly-worded persona."
 
     def test_self_ask_task_messages_banner_only_on_first_round(self) -> None:
-        agent = make_agent(engine=ScriptedLLMEngine([]), max_thinking_rounds=3)
+        agent = make_agent(engine=FakeLLMEngine([]), max_thinking_rounds=3)
         task = agent._initialize_task(turns=[], prompt="hello", inputs={})
 
         rendered = agent._render_task_messages(task)
@@ -344,7 +344,7 @@ class TestRenderPipeline:
         assert "hello" in rendered[0]["content"]
 
     def test_self_ask_task_messages_includes_snapshot_on_later_rounds(self) -> None:
-        agent = make_agent(engine=ScriptedLLMEngine([]), max_thinking_rounds=3)
+        agent = make_agent(engine=FakeLLMEngine([]), max_thinking_rounds=3)
         task = agent._initialize_task(turns=[], prompt="hello", inputs={})
         task.thoughts.append([AgentThought(category="OBSERVATION", content="prior thought")])
 
@@ -355,7 +355,7 @@ class TestRenderPipeline:
         assert "Produce the next round of thoughts" in rendered[2]["content"]
 
     def test_role_phase_task_messages_include_thoughts_snapshot_regardless_of_stop_reason(self) -> None:
-        agent = make_agent(engine=ScriptedLLMEngine([]), max_thinking_rounds=3)
+        agent = make_agent(engine=FakeLLMEngine([]), max_thinking_rounds=3)
         task = agent._initialize_task(turns=[], prompt="hello", inputs={})
         task.thoughts.append([AgentThought(category="OBSERVATION", content="reasoned thing")])
         task.system_prompt_name = "role"
@@ -367,7 +367,7 @@ class TestRenderPipeline:
         assert "respond to the current task" in rendered[2]["content"]
 
     def test_role_phase_task_messages_banner_only_when_no_thoughts(self) -> None:
-        agent = make_agent(engine=ScriptedLLMEngine([]), max_thinking_rounds=0)
+        agent = make_agent(engine=FakeLLMEngine([]), max_thinking_rounds=0)
         task = agent._initialize_task(turns=[], prompt="hello", inputs={})
         task.system_prompt_name = "role"
 
@@ -378,7 +378,7 @@ class TestRenderPipeline:
 
 class TestGetThoughts:
     def test_get_thoughts_none_resolves_to_latest_record(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "obs one") + "\n|STOP_THINKING|",
             "reply one",
         ])
@@ -388,18 +388,18 @@ class TestGetThoughts:
         assert agent.get_thoughts(None) == [[AgentThought(category="OBSERVATION", content="obs one")]]
 
     def test_get_thoughts_unknown_run_id_raises(self) -> None:
-        agent = make_agent(engine=ScriptedLLMEngine([]), max_thinking_rounds=3)
+        agent = make_agent(engine=FakeLLMEngine([]), max_thinking_rounds=3)
 
         with pytest.raises(AgentInvocationError):
             agent.get_thoughts("not-a-real-run-id")
 
     def test_get_thoughts_empty_history_returns_empty_list(self) -> None:
-        agent = make_agent(engine=ScriptedLLMEngine([]), max_thinking_rounds=3)
+        agent = make_agent(engine=FakeLLMEngine([]), max_thinking_rounds=3)
 
         assert agent.get_thoughts(None) == []
 
     def test_get_thoughts_by_explicit_run_id_isolates_that_invocation(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "first invoke thought") + "\n|STOP_THINKING|",
             "reply one",
             thought_line("QUESTION", "second invoke thought") + "\n|STOP_THINKING|",
@@ -418,7 +418,7 @@ class TestGetThoughts:
 
 class TestClearMemory:
     def test_clear_memory_clears_records_and_thoughts(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "obs") + "\n|STOP_THINKING|",
             "reply",
         ])
@@ -436,7 +436,7 @@ class TestClearMemory:
 
 class TestRecordAndResultConstruction:
     def test_invoke_returns_thinking_agent_result_with_thoughts_span(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "obs") + "\n|STOP_THINKING|",
             "reply",
         ])
@@ -449,7 +449,7 @@ class TestRecordAndResultConstruction:
         assert result.thoughts_end == 1
 
     def test_second_invocation_thoughts_span_starts_where_first_ended(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "first") + "\n|STOP_THINKING|",
             "reply one",
             thought_line("QUESTION", "second") + "\n|STOP_THINKING|",
@@ -466,7 +466,7 @@ class TestRecordAndResultConstruction:
         assert second_result.thoughts_end == 2
 
     def test_to_dict_includes_persisted_thoughts(self) -> None:
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             thought_line("OBSERVATION", "obs") + "\n|STOP_THINKING|",
             "reply",
         ])

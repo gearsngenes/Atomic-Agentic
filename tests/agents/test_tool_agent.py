@@ -8,7 +8,7 @@ from typing import Any
 
 from conftest import (
     ROLE_TEMPLATE,
-    EchoLLMEngine,
+    FakeLLMEngine,
     ScriptedToolAgent,
     SkipFirstBatchToolAgent,
     make_agent,
@@ -167,7 +167,7 @@ class TestToolAgentAbstractContract:
 
     def test_toolagent_cannot_be_instantiated_directly(self) -> None:
         with pytest.raises(TypeError):
-            ToolAgent(name="a", namespace="tests", description="d", llm_engine=EchoLLMEngine())  # type: ignore[abstract]
+            ToolAgent(name="a", namespace="tests", description="d", llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"))  # type: ignore[abstract]
 
     def test_toolagent_reabstracts_five_hooks(self) -> None:
         assert ToolAgent.__abstractmethods__ == {
@@ -191,7 +191,7 @@ class TestToolAgentAbstractContract:
             # prepare/async_prepare intentionally omitted
 
         with pytest.raises(TypeError):
-            _IncompleteAgent(name="a", namespace="tests", description="d", llm_engine=EchoLLMEngine())
+            _IncompleteAgent(name="a", namespace="tests", description="d", llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"))
 
 
 class TestToolAgentNamespace:
@@ -200,7 +200,7 @@ class TestToolAgentNamespace:
             PlanActAgent(
                 name="a",
                 description="d",
-                llm_engine=EchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"),
             )
 
     def test_plan_act_agent_namespace_explicit(self) -> None:
@@ -208,7 +208,7 @@ class TestToolAgentNamespace:
             name="a",
             namespace="planner_ns",
             description="d",
-            llm_engine=EchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"),
         )
         assert agent.namespace == "planner_ns"
 
@@ -217,7 +217,7 @@ class TestToolAgentNamespace:
             name="a",
             namespace="react_ns",
             description="d",
-            llm_engine=EchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"),
             tool_calls_limit=5,
         )
         assert agent.namespace == "react_ns"

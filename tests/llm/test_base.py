@@ -10,71 +10,7 @@ base_module = importlib.import_module("atomic_agentic.llm.base")
 from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
-
-
-class FakeLLMEngine(LLMEngine):
-    """Concrete test engine for the provider-independent LLMEngine contract."""
-
-    allowed_attachment_exts: set[str] | None = None
-
-    def __init__(
-        self,
-        *,
-        provider_results: list[Any] | None = None,
-        prepare_result: Mapping[str, Any] | Any | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.provider_results = list(provider_results or [{"text": " hello "}])
-        self.prepare_result = prepare_result
-        self.payloads: list[Any] = []
-        self.prepare_calls: list[str] = []
-        self.detach_calls: list[Mapping[str, Any]] = []
-        self.call_count = 0
-
-    def _build_provider_payload(
-        self,
-        messages: list[dict[str, str]],
-        attachments: Mapping[str, Mapping[str, Any]],
-    ) -> dict[str, Any]:
-        return {
-            "messages": messages,
-            "attachments": dict(attachments),
-        }
-
-    def _call_provider(self, payload: Any) -> Any:
-        self.call_count += 1
-        self.payloads.append(payload)
-
-        result = self.provider_results.pop(0)
-        if isinstance(result, BaseException):
-            raise result
-        return result
-
-    def _extract_text(self, response: Any) -> Any:
-        return response["text"]
-
-    def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(
-            input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
-        )
-
-    def _get_model_data(self) -> LLMModelData:
-        return LLMModelData(provider="fake")
-
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
-        self.prepare_calls.append(path)
-        if self.prepare_result is not None:
-            return self.prepare_result
-        return {"path": path, "prepared": True}
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        self.detach_calls.append(meta)
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        if attempt > self._max_retries:
-            return False
-        return isinstance(exc, (TimeoutError, ConnectionError))
+from fake_engines import FakeLLMEngine
 
 
 class TestLLMEngineConstruction:
@@ -191,13 +127,13 @@ class TestLLMEngineMessagesAndInvoke:
             engine.invoke({"messages": [message]})  # type: ignore[list-item]
 
     def test_extract_text_must_return_string(self) -> None:
-        engine = FakeLLMEngine(provider_results=[{"text": 123}])
+        engine = FakeLLMEngine(responses=[123])
 
         with pytest.raises(LLMEngineError, match="must return str"):
             engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
     def test_unexpected_provider_error_is_wrapped_by_invoke(self) -> None:
-        engine = FakeLLMEngine(provider_results=[ValueError("provider failed")])
+        engine = FakeLLMEngine(responses=[ValueError("provider failed")])
 
         with pytest.raises(LLMEngineError, match="invoke failed"):
             engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
@@ -210,9 +146,9 @@ class TestLLMEngineRetries:
 
         engine = FakeLLMEngine(
             max_retries=1,
-            provider_results=[
+            responses=[
                 TimeoutError("temporary"),
-                {"text": " recovered "},
+                " recovered ",
             ],
         )
 
@@ -227,9 +163,9 @@ class TestLLMEngineRetries:
 
         engine = FakeLLMEngine(
             max_retries=1,
-            provider_results=[
+            responses=[
                 ConnectionError("temporary"),
-                {"text": " recovered "},
+                " recovered ",
             ],
         )
 
@@ -243,7 +179,7 @@ class TestLLMEngineRetries:
 
         engine = FakeLLMEngine(
             max_retries=3,
-            provider_results=[LLMEngineError("normalized")],
+            responses=[LLMEngineError("normalized")],
         )
 
         with pytest.raises(LLMEngineError, match="normalized"):
@@ -256,7 +192,7 @@ class TestLLMEngineRetries:
 
         engine = FakeLLMEngine(
             max_retries=3,
-            provider_results=[ValueError("bad request")],
+            responses=[ValueError("bad request")],
         )
 
         with pytest.raises(LLMEngineError, match="invoke failed"):

@@ -11,13 +11,12 @@ from atomic_agentic.agents.base import Agent
 from atomic_agentic.exceptions import AgentError, AgentInvocationError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.constants.agents import RUN_ID_PARAM
-from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.agents.tasks import AgentTask
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.models.results import LLMModelData, TokenUsage
 from atomic_agentic.utils.parameters import to_paramspec_list
+from fake_engines import FakeLLMEngine, echo_latest_user
 
 
 ROLE_PROMPT = "You are a deterministic test writer."
@@ -192,68 +191,6 @@ class _LifecycleOrderAgent(Agent):
 # ─────────────────────────────────────────────────────────────────────────────
 # Test engine and helper functions
 # ─────────────────────────────────────────────────────────────────────────────
-class StatefulEchoLLMEngine(LLMEngine):
-    """Concrete deterministic LLMEngine for Agent tests.
-
-    Records every normalized message batch it receives and returns
-    the latest user message with a stable prefix.
-    """
-
-    def __init__(self, *, prefix: str = "ECHO", **kwargs: Any) -> None:
-        super().__init__(
-            name="stateful_echo_engine",
-            description="Stateful echo engine.",
-            **kwargs,
-        )
-        self.prefix = prefix
-        self.calls: list[list[dict[str, str]]] = []
-
-    def _build_provider_payload(
-        self,
-        messages: list[dict[str, str]],
-        attachments: Mapping[str, Mapping[str, Any]],
-    ) -> dict[str, Any]:
-        copied_messages = [dict(message) for message in messages]
-        self.calls.append(copied_messages)
-
-        latest_user = next(
-            (
-                message["content"]
-                for message in reversed(copied_messages)
-                if message["role"] == "user"
-            ),
-            "",
-        )
-
-        return {
-            "latest_user": latest_user,
-            "message_count": len(copied_messages),
-        }
-
-    def _call_provider(self, payload: Any) -> Any:
-        return payload
-
-    def _extract_text(self, response: Any) -> str:
-        return f"{self.prefix}: {response['latest_user']}"
-
-    def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(
-            input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
-        )
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        return False
-
-    def _get_model_data(self) -> LLMModelData:
-        return LLMModelData(provider="stateful-echo")
-
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
-        return {"path": path}
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        return None
-
-
 def build_prompt(topic: str, tone: str = "neutral") -> str:
     return f"Write about {topic} in a {tone} tone."
 
@@ -329,14 +266,14 @@ class _NonStringEngineEnvelope:
         self.result = result
 
 
-class NonStringAsyncLLMEngine(StatefulEchoLLMEngine):
+class NonStringAsyncLLMEngine(FakeLLMEngine):
     async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
         return _NonStringEngineEnvelope(123)
 
 
 def make_agent(
     *,
-    engine: StatefulEchoLLMEngine | None = None,
+    engine: FakeLLMEngine | None = None,
     context_enabled: bool = False,
     records_window: int | None = None,
     pre_invoke: Any = build_prompt,
@@ -350,7 +287,7 @@ def make_agent(
         name="writer_agent",
         namespace="tests",
         description="Deterministic writer test agent.",
-        llm_engine=engine or StatefulEchoLLMEngine(),
+        llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
         system_prompt=system_prompt,
         context_enabled=context_enabled,
         records_window=records_window,
@@ -376,7 +313,7 @@ class TestBaseLoopOrder:
         agent = _LifecycleOrderAgent(
             rounds=3,
             name="a", namespace="tests", description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
         agent.invoke({"prompt": "hi"})
@@ -387,7 +324,7 @@ class TestBaseLoopOrder:
         agent = _LifecycleOrderAgent(
             rounds=2,
             name="a", namespace="tests", description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
 
         asyncio.run(agent.async_invoke({"prompt": "hi"}))
@@ -397,7 +334,7 @@ class TestBaseLoopOrder:
 
 class TestAgentPipeline:
     def test_pre_invoke_shapes_prompt_and_post_invoke_packages_result(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(engine=engine)
 
         result = agent.invoke({"topic": "pytest", "tone": "strict"})
@@ -418,7 +355,7 @@ class TestAgentPipeline:
         ]
 
     def test_engine_receives_system_and_current_user_message(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(engine=engine)
 
         agent.invoke({"topic": "agents", "tone": "concise"})
@@ -429,7 +366,7 @@ class TestAgentPipeline:
         ]
 
     def test_default_identity_pre_and_post_invoke_path(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _EchoAgent(
             name="identity_agent",
             namespace="tests",
@@ -604,7 +541,7 @@ class TestAgentPostInvokeRouting:
 
 class TestAgentContext:
     def test_context_disabled_does_not_resend_history_but_still_stores_records(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(engine=engine, context_enabled=False)
 
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
@@ -623,7 +560,7 @@ class TestAgentContext:
         assert engine.calls[1][-1]["content"] == "Write about agents in a concise tone."
 
     def test_context_enabled_stores_history(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(engine=engine, context_enabled=True)
 
         first = agent.invoke({"topic": "pytest", "tone": "strict"})
@@ -638,7 +575,7 @@ class TestAgentContext:
         assert rendered[1]["content"] == "ECHO: Write about pytest in a strict tone."
 
     def test_context_enabled_resends_prior_history_on_second_call(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(engine=engine, context_enabled=True)
 
         agent.invoke({"topic": "pytest", "tone": "strict"})
@@ -658,7 +595,7 @@ class TestAgentContext:
         assert second_call_messages[3]["content"] == "Write about agents in a concise tone."
 
     def test_records_window_none_sends_all_prior_turns(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(
             engine=engine,
             context_enabled=True,
@@ -685,7 +622,7 @@ class TestAgentContext:
         assert "third topic" in joined_contents
 
     def test_records_window_one_sends_only_last_prior_turn(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(
             engine=engine,
             context_enabled=True,
@@ -710,7 +647,7 @@ class TestAgentContext:
         assert "third topic" in joined_contents
 
     def test_records_window_zero_sends_no_prior_turns_but_still_stores_history(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(
             engine=engine,
             context_enabled=True,
@@ -733,7 +670,7 @@ class TestAgentContext:
         assert agent.records[1].user_prompt == "Write about second topic in a plain tone."
 
     def test_clear_memory_removes_stored_history(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(engine=engine, context_enabled=True)
 
         agent.invoke({"topic": "pytest", "tone": "strict"})
@@ -801,7 +738,7 @@ class TestAgentNamespace:
             _MinimalAgent(
                 name="a",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             )
 
     def test_agent_namespace_explicit(self) -> None:
@@ -809,7 +746,7 @@ class TestAgentNamespace:
             name="a",
             namespace="my_team",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
         assert agent.namespace == "my_team"
 
@@ -818,14 +755,14 @@ class TestAgentNamespace:
             name="a",
             namespace="my_team",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
         assert agent.to_dict()["namespace"] == "my_team"
 
 
 class TestAgentSerialization:
     def test_to_dict_includes_agent_configuration(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(
             engine=engine,
             context_enabled=True,
@@ -846,7 +783,7 @@ class TestAgentSerialization:
         assert data["pre_invoke"]["name"] == "pre_invoke"
         assert data["post_invoke"]["name"] == "post_invoke"
         assert data["post_result_key"] == agent.post_result_key
-        assert data["llm"]["type"] == "StatefulEchoLLMEngine"
+        assert data["llm"]["type"] == "FakeLLMEngine"
         assert "secret" not in str(data)
 
     def test_to_dict_includes_system_prompts_key(self) -> None:
@@ -867,7 +804,7 @@ class TestAgentSerialization:
 
 class TestAgentAsyncInvoke:
     def test_async_invoke_shapes_prompt_and_post_invoke_packages_result(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(engine=engine)
 
         result = asyncio.run(
@@ -890,7 +827,7 @@ class TestAgentAsyncInvoke:
         ]
 
     def test_async_context_enabled_stores_history(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(engine=engine, context_enabled=True)
 
         first = asyncio.run(
@@ -909,7 +846,7 @@ class TestAgentAsyncInvoke:
         assert rendered[1]["content"] == "ECHO: Write about pytest in a strict tone."
 
     def test_async_context_enabled_resends_prior_history_on_second_call(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(engine=engine, context_enabled=True)
 
         asyncio.run(agent.async_invoke({"topic": "pytest", "tone": "strict"}))
@@ -1038,7 +975,7 @@ class TestGetReservedParameters:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
         names = [p.name for p in agent.parameters]
         assert "run_id" in names
@@ -1053,7 +990,7 @@ class TestExtraParametersNormalization:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
         # "prompt" comes from the default identity_pre_tool; no extra_parameters
         # means nothing else is grafted beyond the reserved run_id.
@@ -1064,7 +1001,7 @@ class TestExtraParametersNormalization:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=["persona", "style"],
         )
         names = [p.name for p in agent.parameters]
@@ -1083,7 +1020,7 @@ class TestExtraParametersNormalization:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=specs,
         )
         lang_param = next(p for p in agent.parameters if p.name == "lang")
@@ -1099,7 +1036,7 @@ class TestExtraParametersNormalization:
                 name="a",
                 namespace="tests",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 extra_parameters=specs,
             )
 
@@ -1108,7 +1045,7 @@ class TestExtraParametersNormalization:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
             ],
@@ -1131,7 +1068,7 @@ class TestReservedNameReconciliation:
                 name="a",
                 namespace="tests",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 extra_parameters=[RUN_ID_PARAM],
             )
         # Only one run_id entry survives in the final schema (the framework's).
@@ -1149,7 +1086,7 @@ class TestReservedNameReconciliation:
                 name="a",
                 namespace="tests",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_with_compatible_run_id,
             )
 
@@ -1162,7 +1099,7 @@ class TestReservedNameReconciliation:
                 name="a",
                 namespace="tests",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_with_bad_run_id,
             )
 
@@ -1180,7 +1117,7 @@ class TestReservedNameReconciliation:
                     name="a",
                     namespace="tests",
                     description="d",
-                    llm_engine=StatefulEchoLLMEngine(),
+                    llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                     pre_invoke=build_prompt,
                     post_invoke=post_with_bad_run_id,
                 )
@@ -1192,7 +1129,7 @@ class TestReservedNameReconciliation:
                 name="a",
                 namespace="tests",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 extra_parameters=[bad],
             )
 
@@ -1226,7 +1163,7 @@ class TestPostResultKeyResolution:
                 name="a",
                 namespace="tests",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 post_invoke=post_with_flag,
                 post_result_key="flag",
                 extra_parameters=["flag"],
@@ -1288,7 +1225,7 @@ class TestCombinedVsExtraReconciliation:
                 name="a",
                 namespace="tests",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
                 extra_parameters=[
                     ParamSpec(name="topic", index=0, kind=ParamSpec.KEYWORD_ONLY, type="int", default=NO_VAL),
@@ -1301,7 +1238,7 @@ class TestCombinedVsExtraReconciliation:
                 name="a",
                 namespace="tests",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
                 extra_parameters=[
                     ParamSpec(name="topic", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="fallback"),
@@ -1319,7 +1256,7 @@ class TestCombinedVsExtraReconciliation:
                 name="a",
                 namespace="tests",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=build_prompt,
                 extra_parameters=[
                     ParamSpec(name="topic", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
@@ -1332,7 +1269,7 @@ class TestCombinedVsExtraReconciliation:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             pre_invoke=pre_with_two_fields,
             extra_parameters=[
                 ParamSpec(name="flag", index=0, kind=ParamSpec.KEYWORD_ONLY, type="bool", default=False),
@@ -1358,7 +1295,7 @@ class TestFinalReservedGraftOrdering:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
             ],
@@ -1377,7 +1314,7 @@ class TestUpdatePrompt:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
         copy = agent.system_prompts
         copy["mutated"] = PromptConfig(template="x", description="d")
@@ -1387,7 +1324,7 @@ class TestUpdatePrompt:
 
 class TestAgentRecordsAlwaysAppended:
     def test_context_disabled_records_always_appended(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _MinimalAgent(
             name="a",
             namespace="tests",
@@ -1402,7 +1339,7 @@ class TestAgentRecordsAlwaysAppended:
         assert len(agent.records) == 2
 
     def test_context_disabled_turns_always_empty(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _MinimalAgent(
             name="a",
             namespace="tests",
@@ -1424,7 +1361,7 @@ class TestAgentRenderTurnGuards:
     """Tests for render_turn defensive checks."""
 
     def test_render_turn_final_source_on_draft_record_raises(self) -> None:
-        engine = StatefulEchoLLMEngine()
+        engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(
             engine=engine,
             assistant_response_source="final",
@@ -1466,7 +1403,7 @@ class TestInvocationLifecycle:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
         )
         caller_inputs = {"prompt": "hello", "run_id": None}
         agent.invoke(caller_inputs)
@@ -1486,7 +1423,7 @@ class TestInvocationLifecycle:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
             ],
@@ -1510,7 +1447,7 @@ class TestInvocationLifecycle:
                 name="a",
                 namespace="tests",
                 description="d",
-                llm_engine=StatefulEchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 pre_invoke=pre_with_compatible_run_id,
             )
         agent.invoke({"prompt": "hi"})
@@ -1523,7 +1460,7 @@ class TestInvocationLifecycle:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
             ],
@@ -1537,7 +1474,7 @@ class TestInvocationLifecycle:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
             ],
@@ -1551,7 +1488,7 @@ class TestInvocationLifecycle:
             name="a",
             namespace="tests",
             description="d",
-            llm_engine=StatefulEchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
             extra_parameters=[
                 ParamSpec(name="lang", index=0, kind=ParamSpec.KEYWORD_ONLY, type="str", default="English"),
             ],

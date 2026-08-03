@@ -7,81 +7,17 @@ from typing import Any
 import pytest
 
 from atomic_agentic.agents.basic import BasicAgent
-from atomic_agentic.llm import LLMEngine
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.models.results import LLMModelData, TokenUsage
 from atomic_agentic.models.results.workflows import BasicFlowResult, SequentialFlowResult
 from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.sequential import SequentialFlow
+from fake_engines import FakeLLMEngine, echo_latest_user
 
 
 pytestmark = [pytest.mark.integration]
 
 ROLE_PROMPT = "You are a deterministic integration-test writer."
-
-
-class StatefulEchoLLMEngine(LLMEngine):
-    """Deterministic LLMEngine used for integration tests.
-
-    This engine records every normalized message batch and returns the latest
-    user message with a stable prefix. It exercises the real Agent -> Engine
-    contract without using a network provider.
-    """
-
-    def __init__(self, *, prefix: str = "ECHO", **kwargs: Any) -> None:
-        super().__init__(
-            name="stateful_echo_engine",
-            description="Stateful echo engine for integration tests.",
-            **kwargs,
-        )
-        self.prefix = prefix
-        self.calls: list[list[dict[str, str]]] = []
-
-    def _build_provider_payload(
-        self,
-        messages: list[dict[str, str]],
-        attachments: Mapping[str, Mapping[str, Any]],
-    ) -> dict[str, Any]:
-        copied_messages = [dict(message) for message in messages]
-        self.calls.append(copied_messages)
-
-        latest_user = next(
-            (
-                message["content"]
-                for message in reversed(copied_messages)
-                if message["role"] == "user"
-            ),
-            "",
-        )
-
-        return {
-            "latest_user": latest_user,
-            "message_count": len(copied_messages),
-        }
-
-    def _call_provider(self, payload: Any) -> Any:
-        return payload
-
-    def _extract_text(self, response: Any) -> str:
-        return f"{self.prefix}: {response['latest_user']}"
-
-    def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(
-            input_tokens=1, generated_tokens=1, total_tokens=2, response_tokens=1
-        )
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        return False
-
-    def _get_model_data(self) -> LLMModelData:
-        return LLMModelData(provider="stateful-echo")
-
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
-        return {"path": path}
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        return None
 
 
 def build_prompt(topic: str, tone: str = "neutral") -> str:
@@ -108,7 +44,7 @@ def summarize_agent_result(
 
 def make_agent(
     *,
-    engine: StatefulEchoLLMEngine | None = None,
+    engine: FakeLLMEngine | None = None,
     context_enabled: bool = False,
     records_window: int | None = None,
 ) -> BasicAgent:
@@ -116,7 +52,7 @@ def make_agent(
         name="writer_agent",
         namespace="integration",
         description="Deterministic writer integration-test agent.",
-        llm_engine=engine or StatefulEchoLLMEngine(),
+        llm_engine=engine or FakeLLMEngine(response_fn=echo_latest_user()),
         role_prompt=ROLE_PROMPT,
         context_enabled=context_enabled,
         records_window=records_window,
@@ -127,11 +63,11 @@ def make_agent(
 
 def make_structured_agent(
     *,
-    engine: StatefulEchoLLMEngine | None = None,
+    engine: FakeLLMEngine | None = None,
     context_enabled: bool = False,
     records_window: int | None = None,
-) -> tuple[StatefulEchoLLMEngine, BasicAgent, StructuredInvokable]:
-    resolved_engine = engine or StatefulEchoLLMEngine()
+) -> tuple[FakeLLMEngine, BasicAgent, StructuredInvokable]:
+    resolved_engine = engine or FakeLLMEngine(response_fn=echo_latest_user())
     agent = make_agent(
         engine=resolved_engine,
         context_enabled=context_enabled,
@@ -148,10 +84,10 @@ def make_structured_agent(
 
 def make_basic_agent_flow(
     *,
-    engine: StatefulEchoLLMEngine | None = None,
+    engine: FakeLLMEngine | None = None,
     context_enabled: bool = False,
     records_window: int | None = None,
-) -> tuple[StatefulEchoLLMEngine, BasicAgent, StructuredInvokable, BasicFlow]:
+) -> tuple[FakeLLMEngine, BasicAgent, StructuredInvokable, BasicFlow]:
     resolved_engine, agent, structured_agent = make_structured_agent(
         engine=engine,
         context_enabled=context_enabled,
@@ -323,6 +259,6 @@ class TestAgentStructuredBasicPipeline:
         assert agent_snapshot["records_window"] == 1
         assert agent_snapshot["pre_invoke"]["name"] == "pre_invoke"
         assert agent_snapshot["post_invoke"]["name"] == "post_invoke"
-        assert agent_snapshot["llm"]["type"] == "StatefulEchoLLMEngine"
+        assert agent_snapshot["llm"]["type"] == "FakeLLMEngine"
         assert "secret" not in str(data).lower()
         assert "api_key" not in str(data).lower()
