@@ -786,23 +786,28 @@ class ToolAgent(Agent, ABC):
     ) -> str:
         """Register one invokable on this ToolAgent.
 
-        AtomicInvokables are stored directly under their own ``full_name``;
-        ``name`` and ``description`` overrides are not permitted for this route.
-        Plain callables are normalized through ``toolify`` with this agent's
-        ``name`` as their namespace; ``name`` and ``description`` may override
-        the inferred values.
+        AtomicInvokables are stored directly under their own ``full_name``
+        when no ``name``/``description`` override is requested. When either
+        is supplied, the AtomicInvokable is routed through ``toolify``
+        instead, producing a new Tool that delegates to it by reference
+        under the requested identity — the original is never mutated. Plain
+        callables always go through ``toolify`` with this agent's ``name``
+        as their namespace.
 
         Parameters
         ----------
         component : AtomicInvokable | Callable
-            The item to register. AtomicInvokables are stored as-is; callables
-            are wrapped via ``toolify(namespace=self.name)``.
+            The item to register. AtomicInvokables are stored as-is unless
+            an override is requested; callables always go through
+            ``toolify(namespace=self.name)``.
         name : str | None
-            Override the tool name (callable route only). ``None`` infers from
-            ``component.__name__``.
+            Override the tool name. For callables, ``None`` infers from
+            ``component.__name__``. For AtomicInvokables, supplying this
+            routes registration through ``toolify`` instead of direct store.
         description : str | None
-            Override the tool description (callable route only). ``None``
-            infers from ``component.__doc__``.
+            Override the tool description. For callables, ``None`` infers
+            from ``component.__doc__``. For AtomicInvokables, supplying this
+            routes registration through ``toolify`` instead of direct store.
         name_collision_mode : str
             Controls behavior when the resolved ``full_name`` is already
             registered. One of ``"raise"`` (default), ``"skip"``, or
@@ -816,10 +821,8 @@ class ToolAgent(Agent, ABC):
         Raises
         ------
         ToolRegistrationError
-            If ``name_collision_mode`` is invalid; if ``name`` or
-            ``description`` overrides are supplied for an ``AtomicInvokable``
-            component; if ``toolify`` fails; or if a collision is detected
-            under ``"raise"`` mode.
+            If ``name_collision_mode`` is invalid; if ``toolify`` fails; or
+            if a collision is detected under ``"raise"`` mode.
         """
         name_collision_mode = name_collision_mode.lower().strip()
         if name_collision_mode not in ("raise", "skip", "replace"):
@@ -827,16 +830,25 @@ class ToolAgent(Agent, ABC):
                 "name_collision_mode must be one of: 'raise', 'skip', 'replace'."
             )
 
-        # AtomicInvokable route — store directly under its own identity
+        # AtomicInvokable route — store directly under its own identity,
+        # unless an override is requested, in which case toolify it.
         if isinstance(component, AtomicInvokable):
-            if name is not None or description is not None:
-                raise ToolRegistrationError(
-                    f"{type(self).__name__}.{self.name}: name and description "
-                    "overrides are not supported when registering an AtomicInvokable "
-                    "directly. Use the component's own identity."
-                )
-            key = component.full_name
-            invokable = component
+            if name is None and description is None:
+                key = component.full_name
+                invokable = component
+            else:
+                try:
+                    invokable = toolify(
+                        component=component,
+                        name=name,
+                        description=description,
+                        namespace=self.name,
+                    )
+                except Exception as e:
+                    raise ToolRegistrationError(
+                        f"{type(self).__name__}.{self.name}: failed to toolify component: {e}"
+                    ) from e
+                key = invokable.full_name
 
         # Callable route — normalize via toolify with self.name as namespace
         elif callable(component):
@@ -889,8 +901,10 @@ class ToolAgent(Agent, ABC):
         Parameters
         ----------
         tools : list[AtomicInvokable | Callable] | None
-            Local items to register. AtomicInvokables are stored as-is;
-            callables are normalized via ``toolify(namespace=self.name)``.
+            Local items to register. AtomicInvokables are stored as-is when
+            ``batch_filter_inputs`` is ``None``; otherwise (and always for
+            callables) items are normalized via
+            ``toolify(namespace=self.name, filter_extraneous_inputs=batch_filter_inputs)``.
         client : PyA2AtomicClient | MCPClientHub | None
             Remote client to enumerate and register tools from. Combined with
             ``tools`` in one registration pass when both are provided.
@@ -958,9 +972,9 @@ class ToolAgent(Agent, ABC):
 
         if tools is not None:
             for item in tools:
-                if isinstance(item, AtomicInvokable):
+                if isinstance(item, AtomicInvokable) and batch_filter_inputs is None:
                     combined.append((item.full_name, item))
-                elif callable(item):
+                elif isinstance(item, AtomicInvokable) or callable(item):
                     try:
                         t = toolify(
                             component=item,

@@ -14,10 +14,9 @@ from typing import (
 
 from ..exceptions import ToolDefinitionError, ToolInvocationError
 from ..core.Invokable import AtomicInvokable
+from ..core.core_api import extract_io
 from ..models.parameters import ParamSpec
-from ..utils.parameters import extract_io
 from ..utils.core import run_coro_sync
-from ..constants.core import NO_VAL
 from ..models.results.tools import ToolResult
 
 
@@ -30,16 +29,23 @@ logger = logging.getLogger(__name__)
 class Tool(AtomicInvokable):
     """Concrete base Tool primitive.
 
-    ``Tool`` provides a dict-first invocation interface around either a plain
-    Python callable or another ``AtomicInvokable``. It implements the template
+    ``Tool`` provides a dict-first invocation interface around a plain
+    Python callable *or* an ``AtomicInvokable``. It implements the template
     method::
 
         invoke(inputs) -> to_arg_kwarg(inputs) -> execute(args, kwargs) -> ToolResult
 
-    Plain callable-backed tools derive their schema from Python signature
-    introspection through ``extract_io(...)``. Invokable-backed tools instead
-    reuse the wrapped invokable's declared ``parameters`` and ``return_type`` so
-    the exposed Tool schema matches the wrapped component's public contract.
+    Schema is derived through ``extract_io(...)``, which recognizes
+    ``AtomicInvokable`` inputs directly (reusing their declared
+    ``parameters``/``return_type``) and falls back to signature introspection
+    otherwise. Name/description inference reads ``__name__``/``__doc__`` off
+    the wrapped target — for an ``AtomicInvokable`` these are kept in sync
+    with ``.name``/``.description`` by the base class itself, so no special
+    handling is needed here. ``Tool`` stays otherwise blind to what kind of
+    callable it wraps, with one narrow, deliberate exception: `async_execute`
+    dispatches to `async_call` for an ``AtomicInvokable`` target, since a
+    plain `iscoroutinefunction` check would miss it and silently thread-offload
+    the *sync* ``__call__`` instead of awaiting the real async path.
 
     Subclasses may override ``_build_tool_signature()`` to customize how
     parameter and return type schemas are built, such as from MCP metadata or
@@ -64,26 +70,14 @@ class Tool(AtomicInvokable):
 
     Execution
     ---------
-    Plain callable-backed tools bind filtered dict-first inputs into ordinary
-    Python call-style ``(*args, **kwargs)`` before calling the stored callable.
-
-    Invokable-backed tools keep execution dict-first: filtered inputs are passed
-    directly to the wrapped invokable's ``invoke(...)`` or ``async_invoke(...)``
-    method. This keeps ``Tool`` aligned with the core ``AtomicInvokable``
-    contract and avoids routing wrapped invokables through their call-style
-    convenience API.
+    Filtered dict-first inputs are bound into ordinary Python call-style
+    ``(*args, **kwargs)`` before calling the stored callable.
 
     ``execute(...)`` and ``async_execute(...)`` return the raw execution payload.
     Public ``invoke(...)`` and ``async_invoke(...)`` wrap that payload in a
     ``ToolResult`` whose ``.result`` field contains the caller-facing value.
-    
-    Subclasses customize result-envelope selection by overriding ``make_result(...)``.
 
-    Serialization
-    -------------
-    ``to_dict()`` includes ``wraps_invokable``. When true, it also includes the
-    wrapped invokable's own ``to_dict()`` output under ``"invokable_function"``
-    for transparency.
+    Subclasses customize result-envelope selection by overriding ``make_result(...)``.
     """
 
     # ------------------------------------------------------------------ #
@@ -97,28 +91,24 @@ class Tool(AtomicInvokable):
         description: Optional[str] = None,
         filter_extraneous_inputs: bool = True,
     ) -> None:
-        """Initialize a Tool from a plain callable or AtomicInvokable.
+        """Initialize a Tool from a plain callable or an AtomicInvokable.
 
         Parameters
         ----------
         function:
-            Plain callable or ``AtomicInvokable`` to expose as a Tool.
-
-            - Plain callables are introspected with ``extract_io(...)``.
-            - Invokable-backed tools reuse the invokable's declared schema and
-              call through the invokable's dict-first invocation API.
+            Plain callable or ``AtomicInvokable`` to expose as a Tool,
+            introspected with ``extract_io(...)``.
 
         name:
-            Optional Tool name override. If omitted, plain callables use
-            ``function.__name__`` and invokables use ``function.name``.
+            Optional Tool name override. If omitted, defaults to
+            ``function.__name__``.
 
         namespace:
             Optional Tool namespace. Defaults to ``"default"``.
 
         description:
-            Optional Tool description override. If omitted, plain callables use
-            their docstring or a fallback description, and invokables use
-            ``function.description``.
+            Optional Tool description override. If omitted, defaults to the
+            callable's docstring or a fallback description.
 
         filter_extraneous_inputs:
             Whether unknown inputs are filtered before invocation when no
@@ -127,7 +117,7 @@ class Tool(AtomicInvokable):
         if not callable(function):
             raise ToolDefinitionError(f"Tool function must be callable, got {type(function)!r}")
 
-        # Underlying callable or invokable-backed execution target and identity.
+        # Underlying callable or AtomicInvokable execution target and identity.
         self._function: AtomicInvokable | Callable[..., Any] = function
         self._module, self._qualname = self._get_mod_qual(function)
 
@@ -144,22 +134,18 @@ class Tool(AtomicInvokable):
 
         # Prepare name and description. AtomicInvokable parent validation
         # requires both to resolve to non-empty strings.
-        if isinstance(function, AtomicInvokable):
-            inferred_name = inferred_name or function.name
-            inferred_description = inferred_description or function._description
-        else:
-            inferred_name = (
-                inferred_name
-                or getattr(function, "__name__", None)
-                or "unnamed_callable"
-            )
+        inferred_name = (
+            inferred_name
+            or getattr(function, "__name__", None)
+            or "unnamed_callable"
+        )
 
-            doc = getattr(function, "__doc__", None)
-            inferred_description = inferred_description or (
-                doc.strip()
-                if isinstance(doc, str) and doc.strip()
-                else "No description available."
-            )
+        doc = getattr(function, "__doc__", None)
+        inferred_description = inferred_description or (
+            doc.strip()
+            if isinstance(doc, str) and doc.strip()
+            else "No description available."
+        )
 
         # Build tool signature (template method)
         parameters, return_type = self._build_tool_signature()
@@ -179,35 +165,19 @@ class Tool(AtomicInvokable):
     # Tool Properties
     # ------------------------------------------------------------------ #
     @property
-    def wraps_invokable(self) -> bool:
-        """Return whether this Tool wraps an ``AtomicInvokable`` target."""
-        return isinstance(self._function, AtomicInvokable)
-
-    @property
     def function(self) -> AtomicInvokable | Callable[..., Any]:
-        """Underlying plain callable or ``AtomicInvokable`` execution target."""
+        """Underlying plain callable or AtomicInvokable execution target."""
         return self._function
 
     @property
     def module(self) -> Optional[str]:
-        """Best-effort module identity for the wrapped callable or invokable target."""
+        """Best-effort module identity for the wrapped callable."""
         return self._module
 
     @property
     def qualname(self) -> Optional[str]:
-        """Best-effort qualified-name identity for the wrapped callable or invokable target."""
+        """Best-effort qualified-name identity for the wrapped callable."""
         return self._qualname
-
-    def _extra_description(self) -> str:
-        """Chain into the wrapped invokable's own extra description.
-
-        Invokable-backed tools surface `self._function`'s `_extra_description()`
-        verbatim. Plain callable-backed tools have no wrapped instance to
-        chain to, so this returns `""`.
-        """
-        if self.wraps_invokable:
-            return self._function._extra_description()
-        return ""
 
     # ------------------------------------------------------------------ #
     # Signature Building (Template Method)
@@ -215,10 +185,8 @@ class Tool(AtomicInvokable):
     def _build_tool_signature(self) -> tuple[list[ParamSpec], str]:
         """Build this Tool's parameter and return schema.
 
-        Plain callable-backed tools derive schema through ``extract_io(...)``.
-        Invokable-backed tools reuse the wrapped invokable's declared
-        ``parameters`` and ``return_type`` instead of introspecting ``__call__``,
-        ``invoke``, or ``async_call``.
+        Schema is derived through ``extract_io(...)`` on the underlying
+        callable.
 
         Subclasses can override this template hook to build signatures from
         alternative metadata sources, such as MCP schemas or remote agent
@@ -229,55 +197,29 @@ class Tool(AtomicInvokable):
         tuple[list[ParamSpec], str]
             Ordered parameter specs and return type string.
         """
-        # If the tool wraps an AtomicInvokable, use the invokable-declared
-        # schema rather than introspecting callables. Do not call
-        # `extract_io()` on invokable instances.
-        if self.wraps_invokable:
-            parameters = list(self._function.parameters)
-            return_type = self._function.return_type
-        else:
-            parameters, return_type = extract_io(self._function)
-
-        return parameters, return_type
+        return extract_io(self._function)
 
     # ------------------------------------------------------------------ #
     # Tool Helpers
     # ------------------------------------------------------------------ #
     def _get_mod_qual(
         self,
-        function: AtomicInvokable | Callable[..., Any],
+        function: Callable[..., Any],
     ) -> tuple[Optional[str], Optional[str]]:
-        """Determine ``(module, qualname)`` for callable- or invokable-backed tools.
+        """Determine ``(module, qualname)`` for a callable-backed tool.
 
-        For invokable-backed tools, identity is derived from the bound
-        ``invoke`` method because the invokable object itself may not expose a
-        useful import path. Subclasses that do not use Python import identity,
-        such as MCP-backed tools, should override this method.
+        Subclasses that do not use Python import identity, such as
+        MCP-backed tools, should override this method.
         """
-        # For invokable objects, derive import identity from the bound
-        # `invoke` method for more useful module/qualname metadata. Use the
-        # passed `function` argument (not `self._function`) to avoid relying
-        # on instance state during construction.
-        if isinstance(function, AtomicInvokable):
-            module = getattr(function.invoke, "__module__", None)
-            qualname = getattr(function.invoke, "__qualname__", None)
-        else:
-            module = getattr(function, "__module__", None)
-            qualname = getattr(function, "__qualname__", None)
-
+        module = getattr(function, "__module__", None)
+        qualname = getattr(function, "__qualname__", None)
         return module, qualname
 
     def to_arg_kwarg(self, inputs: Mapping[str, Any]) -> tuple[tuple[Any, ...], Dict[str, Any]]:
         """Map filtered dict-first inputs into execution arguments.
 
-        Plain callable-backed tools bind inputs into normal Python call-style
-        ``(*args, **kwargs)`` using ``AtomicInvokable._dict_to_args_kwargs()``.
-
-        Invokable-backed tools preserve the dict-first contract by returning an
-        empty positional tuple and a shallow dictionary payload. Declared
-        non-variadic defaults are materialized into that payload before
-        execution so the wrapped invokable receives the same explicit defaulted
-        inputs that the old call-binding path produced.
+        Binds inputs into normal Python call-style ``(*args, **kwargs)``
+        using ``AtomicInvokable._dict_to_args_kwargs()``.
 
         Subclasses may override this method when their execution transport has
         a different binding shape, such as MCP-backed or A2A-backed proxy tools.
@@ -286,32 +228,15 @@ class Tool(AtomicInvokable):
         ------
         TypeError
             If the input mapping cannot be bound to this tool's declared
-            parameter contract for callable-backed execution.
+            parameter contract.
         """
-        if self.wraps_invokable:
-            payload: Dict[str, Any] = dict(inputs)
-
-            for spec in self.parameters:
-                if spec.kind in {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}:
-                    continue
-                if spec.name not in payload and spec.default is not NO_VAL:
-                    payload[spec.name] = spec.default
-
-            return tuple(), payload
-
         args, kwargs = self._dict_to_args_kwargs(inputs)
         return args, kwargs
 
     def execute(self, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Any:
         """Synchronously execute the underlying target.
 
-        Plain callable-backed tools call the stored callable directly with
-        ``(*args, **kwargs)``.
-
-        Invokable-backed tools call the wrapped invokable's dict-first
-        ``invoke(...)`` method directly with ``kwargs`` as the input mapping.
-        The positional ``args`` tuple is ignored for invokable-backed execution
-        because ``to_arg_kwarg(...)`` returns an empty tuple for that path.
+        Calls the stored callable directly with ``(*args, **kwargs)``.
 
         Subclasses may override this to change *how* a tool is executed, such
         as by making a remote MCP call or invoking a transport client.
@@ -320,13 +245,9 @@ class Tool(AtomicInvokable):
         using the shared sync-over-async bridge.
         """
         try:
-            if self.wraps_invokable:
-                result = self._function.invoke(kwargs)
-                result = self._unwrap_result_payload(result)
-            else:
-                result = self._function(*args, **kwargs)
-                if inspect.isawaitable(result):
-                    result = run_coro_sync(result)
+            result = self._function(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = run_coro_sync(result)
 
         except ToolInvocationError:
             raise
@@ -344,16 +265,14 @@ class Tool(AtomicInvokable):
 
         Execution dispatch:
 
-        - Invokable-backed tools call the wrapped invokable's dict-first
-          ``async_invoke(...)`` path.
+        - AtomicInvokable targets use their own native async_call.
         - Native async callables are awaited directly.
         - Sync callables are offloaded to a worker thread.
         - Awaitable results are awaited before returning.
         """
         try:
-            if self.wraps_invokable:
-                result = await self._function.async_invoke(kwargs)
-                result = self._unwrap_result_payload(result)
+            if isinstance(self._function, AtomicInvokable):
+                result = await self._function.async_call(*args, **kwargs)
             elif inspect.iscoroutinefunction(self._function):
                 result = await self._function(*args, **kwargs)
             else:
@@ -383,8 +302,8 @@ class Tool(AtomicInvokable):
         3. Dispatch through ``async_execute(...)``.
         4. Wrap the raw execution payload in ``ToolResult``.
 
-        ``async_execute(...)`` owns the distinction between invokable-backed
-        tools, native async callables, and sync callables.
+        ``async_execute(...)`` owns the distinction between AtomicInvokable
+        targets, native async callables, and sync callables.
         """
         started_at = datetime.now(timezone.utc)
 
@@ -450,25 +369,14 @@ class Tool(AtomicInvokable):
     def to_dict(self) -> Dict[str, Any]:
         """Serialize this tool's metadata and argument schema.
 
-        The base metadata includes identity, schema, namespace, import-path
-        hints, and whether this Tool wraps an ``AtomicInvokable``.
-
-        If ``wraps_invokable`` is true, the wrapped invokable's own
-        ``to_dict()`` output is included under ``"invokable_function"`` for
-        transparency. This method does not guarantee that the Tool is
+        The base metadata includes identity, schema, namespace, and
+        import-path hints. This method does not guarantee that the Tool is
         reconstructable; reconstruction is left to future factory logic.
         """
         d = super().to_dict()
         # "namespace" is emitted by super().to_dict(); not repeated here
         d.update({
-            "wraps_invokable": self.wraps_invokable,
             "module": self.module,
             "qualname": self.qualname,
         })
-
-        # If wrapping an invokable, include the invokable's own serialization
-        # under the agreed key name.
-        if self.wraps_invokable:
-            d["invokable_function"] = self._function.to_dict()
-
         return d

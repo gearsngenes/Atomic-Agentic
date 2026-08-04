@@ -381,17 +381,39 @@ class TestToolRegistration:
         assert key == "Tool.myns.adder"
         assert agent.get_tool(key) is tool
 
-    def test_register_atomic_invokable_name_override_raises(self) -> None:
+    def test_register_atomic_invokable_name_override_wraps_via_toolify(self) -> None:
         agent = make_agent()
         tool = Tool(function=add, name="adder", namespace="myns", description="Add.")
-        with pytest.raises(ToolRegistrationError, match="name and description overrides"):
-            agent.register(tool, name="other")
 
-    def test_register_atomic_invokable_description_override_raises(self) -> None:
+        key = agent.register(tool, name="other")
+
+        assert key == f"Tool.{agent.name}.other"
+        registered = agent.get_tool(key)
+        assert registered is not tool
+        assert registered.function is tool
+        assert registered.name == "other"
+        assert registered.namespace == agent.name
+        assert registered.description == "Add."
+        # original tool is untouched
+        assert tool.name == "adder"
+        assert tool.namespace == "myns"
+
+    def test_register_atomic_invokable_description_override_wraps_via_toolify(self) -> None:
         agent = make_agent()
         tool = Tool(function=add, name="adder", namespace="myns", description="Add.")
-        with pytest.raises(ToolRegistrationError, match="name and description overrides"):
-            agent.register(tool, description="other")
+
+        key = agent.register(tool, description="other")
+
+        assert key == f"Tool.{agent.name}.adder"
+        registered = agent.get_tool(key)
+        assert registered is not tool
+        assert registered.function is tool
+        assert registered.name == "adder"
+        assert registered.namespace == agent.name
+        assert registered.description == "other"
+        # original tool is untouched
+        assert tool.namespace == "myns"
+        assert tool.description == "Add."
 
     def test_register_callable_uses_self_name_as_namespace(self) -> None:
         """Callable registration uses agent.name as the tool namespace."""

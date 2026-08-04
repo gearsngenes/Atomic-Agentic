@@ -106,6 +106,7 @@ class AtomicInvokable(ABC):
                 f"name must be alphanumeric/underscore and not start with a digit; got {name!r}"
             )
         self._name = name
+        self.__name__ = self._name
         self.description = description
 
         # Validate and store namespace — same identifier rules as name.
@@ -142,6 +143,12 @@ class AtomicInvokable(ABC):
             if not IDENTIFIER_PATTERN.fullmatch(p.name):
                 raise ValueError(
                     f"{type(self).__name__}: parameter name {p.name!r} is not a valid identifier"
+                )
+            if p.name == "return_atomic_result_object":
+                raise TypeError(
+                    f"{type(self).__name__}: parameter name 'return_atomic_result_object' is "
+                    "reserved for the __call__/async_call convenience API and cannot be used "
+                    "as a declared parameter name."
                 )
 
         # Validate indices are consistent with list position
@@ -209,6 +216,7 @@ class AtomicInvokable(ABC):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("description must be a non-empty string")
         self._description = value.strip()
+        self.__doc__ = self._description
 
     def _extra_description(self) -> str:
         """
@@ -530,29 +538,47 @@ class AtomicInvokable(ABC):
     # ---------------------------------------------------------------- #
     # callable contract
     # ---------------------------------------------------------------- #
-    def __call__(self, *args: Any, **kwargs: Any) -> AtomicResult:
+    def __call__(
+        self,
+        *args: Any,
+        return_atomic_result_object: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         """
         Allows the invokable to be called like a regular function.
 
         Check for varargs/kwargs parameters and construct the inputs dict
-        accordingly before invoking. The return value mirrors ``invoke(...)``:
-        an AtomicResult-family envelope whose ``.result`` field contains the
-        caller-facing payload.
+        accordingly before invoking. By default returns the unwrapped
+        caller-facing payload (``.result``), not the ``AtomicResult``
+        envelope — pass ``return_atomic_result_object=True`` to get the full
+        envelope back, matching ``invoke(...)``'s return shape.
+        ``return_atomic_result_object`` is consumed here directly and never
+        reaches ``invoke(...)``.
         """
         inputs = self._args_kwargs_to_dict(*args, **kwargs)
-        return self.invoke(inputs)
+        result = self.invoke(inputs)
+        if return_atomic_result_object:
+            return result
+        return self._unwrap_result_payload(result)
 
-    async def async_call(self, *args: Any, **kwargs: Any) -> AtomicResult:
+    async def async_call(
+        self,
+        *args: Any,
+        return_atomic_result_object: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         """
         Async analog of __call__.
 
         Bind normal call-style args/kwargs into the dict-first inputs shape,
-        then delegate to async_invoke(). The return value mirrors
-        ``async_invoke(...)``.
+        then delegate to async_invoke(). Same unwrap-by-default behavior as
+        __call__.
         """
         inputs = self._args_kwargs_to_dict(*args, **kwargs)
-
-        return await self.async_invoke(inputs)
+        result = await self.async_invoke(inputs)
+        if return_atomic_result_object:
+            return result
+        return self._unwrap_result_payload(result)
 
     @staticmethod
     def _unwrap_result_payload(value: Any) -> Any:

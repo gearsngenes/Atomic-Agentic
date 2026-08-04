@@ -1,8 +1,14 @@
-﻿"""
+"""
 Base Tool demo: wrapping an Agent directly as a Tool.
 
-This mirrors the deprecated AdapterTool from v1.x example, but uses the v1.4-style base Tool support
-for AtomicInvokable objects.
+``Tool`` treats any ``AtomicInvokable`` as a naturally well-behaved plain
+callable — no special wrapper type, no explicit "this is an invokable" flag.
+Schema comes straight from the wrapped Agent's own declared ``parameters``/
+``return_type`` (via ``extract_io``); name/description default to the
+Agent's own ``.name``/``.description`` (kept in sync as ``__name__``/
+``__doc__`` by the base class). Invoking the resulting Tool calls the Agent
+through its own ``__call__``, which returns the unwrapped text response
+directly — Tool re-wraps that into its own ``ToolResult`` envelope.
 """
 
 from dotenv import load_dotenv
@@ -46,7 +52,7 @@ agent_tool = Tool(
     description="Base Tool wrapping the Writer Agent directly.",
 )
 
-assert agent_tool.wraps_invokable is True
+assert agent_tool.function is agent  # delegates by reference, doesn't copy/mutate the Agent
 
 
 # --- 4) Utility helpers for inspection & runs ---
@@ -55,7 +61,7 @@ def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
 
     print(f"\n-- {tool.full_name} call plan --")
-    print("wraps_invokable:", tool.wraps_invokable)
+    print("wraps:", type(tool.function).__name__)
     print("signature:", tool.signature)
     print("parameters:")
 
@@ -69,8 +75,8 @@ def show_plan(tool: Tool) -> None:
 
     print("metadata:")
     print("  namespace:", meta.get("namespace"))
-    print("  wraps_invokable:", meta.get("wraps_invokable"))
-    print("  has invokable_function:", "invokable_function" in meta)
+    print("  module:", meta.get("module"))
+    print("  qualname:", meta.get("qualname"))
 
 
 def run_case(label: str, tool: Tool, inputs: dict) -> None:

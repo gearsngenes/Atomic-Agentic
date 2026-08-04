@@ -33,15 +33,16 @@ def toolify(
     1) If ``component`` is already a ``Tool``:
        - return it unchanged when no local wrapper overrides are provided;
        - if ``name``, ``namespace``, ``description``, or
-         ``filter_extraneous_inputs`` is provided, return a new ``Tool`` wrapping
-         the existing Tool;
-       - never mutate the existing Tool in place.
+         ``filter_extraneous_inputs`` is provided, return a new ``Tool``
+         that delegates to ``component`` by reference (calls its real
+         ``invoke``/``async_invoke`` under the hood) under the requested
+         identity — the original is never mutated. Works uniformly for
+         plain ``Tool`` and ``Tool`` subclasses (``MCPProxyTool``,
+         ``PyA2AtomicTool``) alike.
 
     2) If ``component`` is a non-tool ``AtomicInvokable``:
-       - wrap it directly in ``Tool`` using the invokable's declared schema and
-         dict-first execution path;
-       - if ``filter_extraneous_inputs`` is omitted, inherit
-         ``component.filter_extraneous_inputs``.
+       - wrap it the same way — a new ``Tool`` delegating to ``component``
+         by reference under the requested (or inferred) identity.
 
     3) If ``component`` is an ``MCPClientHub``:
        - ``remote_name`` is required;
@@ -121,8 +122,8 @@ def toolify(
 
     # 2) Non-tool AtomicInvokable.
     #
-    # Base Tool now owns the invokable and can reuse the invokable's declared
-    # schema and call through the invokable's dict-first invoke/async_invoke path.
+    # Same treatment as route 1's override case: a new Tool delegating to
+    # component by reference.
     if isinstance(component, AtomicInvokable):
         if remote_name_provided:
             raise ToolDefinitionError(
@@ -138,9 +139,9 @@ def toolify(
 
         return Tool(
             function=component,
-            name=name,
-            namespace=namespace if namespace is not None else component.namespace,  # parallel to filter_extraneous_inputs
-            description=description,
+            name=name if name is not None else component.name,
+            namespace=namespace if namespace is not None else component.namespace,
+            description=description if description is not None else component._description,
             filter_extraneous_inputs=resolved_filter,
         )
 
@@ -235,7 +236,8 @@ def batch_toolify(
 
     Behavior
     --------
-    - Local AtomicInvokables and callables are each toolified into one Tool.
+    - Callables and AtomicInvokables are each toolified into one Tool
+      (AtomicInvokable-backed Tools delegate to the original by reference).
     - Existing Tool instances are returned unchanged unless batch-level wrapper
       overrides are provided, in which case a new Tool wrapper is created.
     - Each MCPClientHub is expanded by listing all remote tools and toolifying
@@ -246,8 +248,8 @@ def batch_toolify(
     Parameters
     ----------
     sources : list[AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient]
-        Mixed list of local invokables, callables, tools, and/or remote client
-        hubs.
+        Mixed list of local invokables, callables, Tools, and/or remote
+        client hubs.
     batch_namespace : str | None
         Namespace override passed to each produced local or remote tool.
     batch_filter_inputs : Optional[bool]

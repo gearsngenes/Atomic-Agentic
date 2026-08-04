@@ -15,6 +15,7 @@ from atomic_agentic.tools.Toolify import batch_toolify, toolify
 from atomic_agentic.tools.a2a import PyA2AtomicTool
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.tools.mcp import MCPProxyTool
+from atomic_agentic.agents.tools import return_tool
 
 
 def add(a: int, b: int) -> int:
@@ -370,7 +371,6 @@ class TestToolifyExistingTool:
         assert result is not original
         assert type(result) is Tool
         assert result.function is original
-        assert result.wraps_invokable is True
 
         assert result.name == "sum_values"
         assert result.namespace == "math"
@@ -438,71 +438,29 @@ class TestToolifyExistingTool:
             toolify(original, remote_name="remote_add")
 
 
-class TestToolifyAtomicInvokable:
-    def test_atomic_invokable_becomes_base_tool_wrapper(self) -> None:
+class TestToolifyAtomicInvokableWrapping:
+    def test_non_tool_atomic_invokable_wraps_by_reference(self) -> None:
         invokable = EchoInvokable()
 
         tool = toolify(invokable)
 
         assert type(tool) is Tool
         assert tool.function is invokable
-        assert tool.wraps_invokable is True
         assert tool.name == "echo_invokable"
         assert tool.description == "Echo invokable."
         assert tool.invoke({"value": 123}).result == {"value": 123}
 
-    def test_atomic_invokable_uses_schema_and_return_type(self) -> None:
-        invokable = EchoInvokable()
 
-        tool = toolify(invokable)
+class TestToolifyReturnToolIdentity:
+    def test_toolify_return_tool_with_override_delegates_by_reference(self) -> None:
+        result = toolify(return_tool, name="alias")
 
-        assert tool.parameters == invokable.parameters
-        assert tool.return_type == invokable.return_type
-
-    def test_atomic_invokable_applies_overrides(self) -> None:
-        invokable = EchoInvokable(filter_extraneous_inputs=False)
-
-        tool = toolify(
-            invokable,
-            name="local_echo",
-            namespace="wrapped",
-            description="Wrapped echo.",
-            filter_extraneous_inputs=True,
-        )
-
-        assert type(tool) is Tool
-        assert tool.function is invokable
-        assert tool.wraps_invokable is True
-        assert tool.name == "local_echo"
-        assert tool.namespace == "wrapped"
-        assert tool.description == "Wrapped echo."
-        assert tool.filter_extraneous_inputs is True
-
-    def test_atomic_invokable_inherits_filter_policy_when_not_overridden(self) -> None:
-        invokable = EchoInvokable(filter_extraneous_inputs=False)
-
-        tool = toolify(invokable)
-
-        assert tool.filter_extraneous_inputs is False
-
-    def test_atomic_invokable_rejects_remote_name(self) -> None:
-        invokable = EchoInvokable()
-
-        with pytest.raises(ToolDefinitionError, match="remote_name"):
-            toolify(invokable, remote_name="remote_echo")
+        assert result is not return_tool
+        assert result.function is return_tool
+        assert result.name == "alias"
 
 
 class TestToolifyAtomicInvokableNamespace:
-    def test_route2_inherits_namespace_from_invokable(self) -> None:
-        invokable = EchoInvokable(namespace="team_ns")
-        tool = toolify(invokable)
-        assert tool.namespace == "team_ns"
-
-    def test_route2_explicit_namespace_overrides_invokable(self) -> None:
-        invokable = EchoInvokable(namespace="team_ns")
-        tool = toolify(invokable, namespace="override_ns")
-        assert tool.namespace == "override_ns"
-
     def test_route1_existing_tool_returned_unchanged(self) -> None:
         t = Tool(function=add, name="add", namespace="ns", description="d")
         result = toolify(t)
@@ -606,19 +564,6 @@ class TestBatchToolifyLocalSources:
         assert batch_toolify([]) == []
         assert batch_toolify(None) == []
 
-    def test_batch_toolify_mixed_callables_and_invokable_preserves_order(self) -> None:
-        invokable = EchoInvokable()
-
-        tools = batch_toolify([add, invokable], batch_namespace="batch")
-
-        assert len(tools) == 2
-        assert type(tools[0]) is Tool
-        assert type(tools[1]) is Tool
-        assert tools[1].function is invokable
-        assert tools[1].wraps_invokable is True
-        assert tools[0].full_name == "Tool.batch.add"
-        assert tools[1].full_name == "Tool.batch.echo_invokable"
-
     def test_batch_toolify_applies_batch_namespace_to_local_tools(self) -> None:
         tools = batch_toolify([add, multiply], batch_namespace="math")
 
@@ -628,9 +573,21 @@ class TestBatchToolifyLocalSources:
         ]
 
     def test_batch_toolify_applies_batch_filter_inputs(self) -> None:
-        tools = batch_toolify([add, EchoInvokable()], batch_filter_inputs=False)
+        tools = batch_toolify([add], batch_filter_inputs=False)
 
-        assert [tool.filter_extraneous_inputs for tool in tools] == [False, False]
+        assert [tool.filter_extraneous_inputs for tool in tools] == [False]
+
+    def test_batch_toolify_wraps_non_tool_atomic_invokable(self) -> None:
+        invokable = EchoInvokable()
+
+        tools = batch_toolify([add, invokable], batch_namespace="batch")
+
+        assert len(tools) == 2
+        assert type(tools[0]) is Tool
+        assert type(tools[1]) is Tool
+        assert tools[1].function is invokable
+        assert tools[0].full_name == "Tool.batch.add"
+        assert tools[1].full_name == "Tool.batch.echo_invokable"
 
     def test_batch_toolify_existing_tool_namespace_override_wraps_without_mutating_original(self) -> None:
         original = Tool(

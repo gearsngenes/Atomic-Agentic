@@ -218,7 +218,7 @@ class TestCommandInvocation:
             fixed_inputs={"a": 2, "b": 3},
         )
 
-        assert command().result == 5
+        assert command() == 5
 
     def test_invoke_rejects_runtime_inputs(self) -> None:
         command = Command(
@@ -290,7 +290,7 @@ class TestCommandAsyncInvocation:
             fixed_inputs={"a": 2, "b": 3},
         )
 
-        result = asyncio.run(command.async_call())
+        result = asyncio.run(command.async_call(return_atomic_result_object=True))
 
         assert isinstance(result, CommandResult)
         assert result.result == 5

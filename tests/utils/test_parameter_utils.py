@@ -6,13 +6,13 @@ from typing import Annotated, Any, Optional, TypedDict
 import pytest
 
 from atomic_agentic.exceptions import SchemaError
+from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.utils.parameters import (
     _insertion_category,
     _normalize_prompt_template,
     _try_parse_clean_field,
     _validate_parameter_order,
-    extract_io,
     insert_by_category,
     is_valid_parameter_order,
     parameter_collisions,
@@ -22,6 +22,7 @@ from atomic_agentic.utils.parameters import (
     to_paramspec_list,
     variadic_compatible,
 )
+from atomic_agentic.core.core_api import extract_io
 from atomic_agentic.constants.core import NO_VAL
 
 
@@ -42,10 +43,39 @@ def make_param(
     )
 
 
+class _AddInvokable(AtomicInvokable):
+    def __init__(self) -> None:
+        super().__init__(
+            name="add_invokable",
+            namespace="tests",
+            description="Add invokable.",
+            parameters=[
+                make_param("a", 0, type_="int"),
+                make_param("b", 1, type_="int", default=0),
+            ],
+            return_type="int",
+        )
+
+    def invoke(self, inputs):
+        filtered = self.filter_inputs(inputs)
+        return int(filtered["a"]) + int(filtered.get("b", 0))
+
+    async def async_invoke(self, inputs):
+        return self.invoke(inputs)
+
+
 class TestExtractIO:
     def test_extract_io_rejects_non_callable(self) -> None:
         with pytest.raises(TypeError):
             extract_io(123)  # type: ignore[arg-type]
+
+    def test_extract_io_returns_atomic_invokable_declared_schema_directly(self) -> None:
+        invokable = _AddInvokable()
+
+        parameters, return_type = extract_io(invokable)
+
+        assert parameters == invokable.parameters
+        assert return_type == invokable.return_type == "int"
 
     def test_extract_io_extracts_basic_parameters_and_return_type(self) -> None:
         def sample(x: int, y: str = "default") -> bool:

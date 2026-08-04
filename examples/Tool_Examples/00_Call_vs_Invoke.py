@@ -26,6 +26,22 @@ print()
 
 
 def run_case(label: str, fn) -> None:
+    """Prints whatever fn() returns as-is.
+
+    Used for call-style (`sample_tool(...)`) and `return_atomic_result_object=True`
+    cases below, where the return shape differs deliberately from `.invoke(...)`.
+    """
+    print(f"--- {label} ---")
+    try:
+        print(fn())
+    except Exception as exc:
+        print(f"{type(exc).__name__}: {exc}")
+    print()
+
+
+def run_invoke_case(label: str, fn) -> None:
+    """Prints fn().result — for `.invoke(...)`/`.async_invoke(...)` cases,
+    which always return the full AtomicResult envelope."""
     print(f"--- {label} ---")
     try:
         result = fn()
@@ -36,7 +52,33 @@ def run_case(label: str, fn) -> None:
 
 
 # ------------------------------------------------------------------ #
-# __call__ samples
+# __call__ vs invoke(...): the real distinction
+# ------------------------------------------------------------------ #
+# `.invoke(...)`/`.async_invoke(...)` always return the full AtomicResult
+# envelope (.result, .run_id, .started_at/.ended_at, ...). `sample_tool(...)`/
+# `await sample_tool.async_call(...)` are the "interpreted convenience path" —
+# by default they unwrap straight to the raw .result payload, since calling
+# something like a plain function is normally not asking for provenance
+# metadata back. Pass `return_atomic_result_object=True` to get the full
+# envelope from the call-style path too.
+
+run_case(
+    "CALL: returns the unwrapped value directly (no .result needed)",
+    lambda: sample_tool(1, "hello"),
+)
+
+run_invoke_case(
+    "INVOKE: returns the full envelope (.result needed)",
+    lambda: sample_tool.invoke({"id": 1, "text": "hello"}),
+)
+
+run_case(
+    "CALL + return_atomic_result_object=True: envelope, same as invoke(...)",
+    lambda: sample_tool(1, "hello", return_atomic_result_object=True),
+)
+
+# ------------------------------------------------------------------ #
+# __call__ samples — argument-binding styles, all unwrapped by default
 # ------------------------------------------------------------------ #
 
 run_case(
@@ -70,15 +112,15 @@ run_case(
 )
 
 # ------------------------------------------------------------------ #
-# invoke(...) samples
+# invoke(...) samples — always the full envelope
 # ------------------------------------------------------------------ #
 
-run_case(
+run_invoke_case(
     "INVOKE: minimal named inputs",
     lambda: sample_tool.invoke({"id": 7, "text": "invoke basic"}),
 )
 
-run_case(
+run_invoke_case(
     "INVOKE: explicit *args payload under declared vararg name",
     lambda: sample_tool.invoke({
         "id": 8,
@@ -87,7 +129,7 @@ run_case(
     }),
 )
 
-run_case(
+run_invoke_case(
     "INVOKE: explicit **kwargs payload under declared varkwarg name",
     lambda: sample_tool.invoke({
         "id": 9,
@@ -96,7 +138,7 @@ run_case(
     }),
 )
 
-run_case(
+run_invoke_case(
     "INVOKE: explicit *args and **kwargs payloads together",
     lambda: sample_tool.invoke({
         "id": 10,
@@ -106,7 +148,7 @@ run_case(
     }),
 )
 
-run_case(
+run_invoke_case(
     "INVOKE: named params + empty vararg/varkwarg payloads",
     lambda: sample_tool.invoke({
         "id": 11,
@@ -120,17 +162,17 @@ run_case(
 # negative / validation samples
 # ------------------------------------------------------------------ #
 
-run_case(
+run_invoke_case(
     "ERROR: missing required parameter",
     lambda: sample_tool.invoke({"id": 12}),
 )
 
-run_case(
+run_invoke_case(
     "ERROR: unknown parameter in invoke",
     lambda: sample_tool.invoke({"id": 13, "text": "bad", "extra": "nope"}),
 )
 
-run_case(
+run_invoke_case(
     "ERROR: invalid explicit varargs payload",
     lambda: sample_tool.invoke({
         "id": 14,
@@ -139,7 +181,7 @@ run_case(
     }),
 )
 
-run_case(
+run_invoke_case(
     "ERROR: invalid explicit varkwargs payload",
     lambda: sample_tool.invoke({
         "id": 15,
