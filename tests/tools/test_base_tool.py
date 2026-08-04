@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from atomic_agentic.exceptions import ToolDefinitionError, ToolInvocationError
-from atomic_agentic.core.Invokable import AtomicInvokable
+from atomic_agentic.core.Invokable import AtomicInvokable, StructuredInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.tools.base import Tool
@@ -175,6 +175,13 @@ class TestToolExtraDescription:
 
         assert tool._extra_description() == ""
         assert tool.description == tool._description
+
+    def test_invokable_backed_tool_chains_wrapped_extra_description(self) -> None:
+        inner = Tool(function=add, name="add", namespace="tests")
+        structured = StructuredInvokable(component=inner, output_schema=["result"])
+        tool = Tool(function=structured, name="structured_add", namespace="tests")
+
+        assert tool._extra_description() == "Output schema: [result]"
 
 
 

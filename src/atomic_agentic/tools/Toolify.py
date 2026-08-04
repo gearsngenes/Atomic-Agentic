@@ -83,7 +83,7 @@ def toolify(
     #
     # A Tool is already normalized. With no local wrapper overrides, return it
     # unchanged. With local wrapper overrides, create a new Tool wrapping the
-    # existing Tool so the original identity and filter policy are not mutated.
+    # existing Tool so the original identity is not mutated.
     if isinstance(component, Tool):
         if remote_name_provided:
             raise ToolDefinitionError(

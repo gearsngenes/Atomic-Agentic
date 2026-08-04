@@ -397,8 +397,7 @@ class AtomicInvokable(ABC):
         - Explicit *args payloads must be list or tuple.
         - Explicit **kwargs payloads must be a Mapping.
         - Unknown keys are merged into the **kwargs payload when VAR_KEYWORD exists.
-        - Unknown keys are dropped when no VAR_KEYWORD exists and filtering is enabled.
-        - Unknown keys raise when no VAR_KEYWORD exists and filtering is disabled.
+        - Unknown keys are dropped when no VAR_KEYWORD exists.
         - Explicit **kwargs payload keys may not overlap with loose unknown input keys.
         """
         if not isinstance(inputs, Mapping):
