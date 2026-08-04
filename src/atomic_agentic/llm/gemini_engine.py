@@ -91,7 +91,6 @@ class GeminiEngine(LLMEngine):
             max_output_tokens: int | None = None,
             thinking_config: dict[str, Any] | None = None,
             *,
-            filter_extraneous_inputs: bool = True,
             timeout_seconds: float = 600.0,
             max_retries: int = 2,
             retry_backoff_base: float = 0.5,
@@ -125,7 +124,7 @@ class GeminiEngine(LLMEngine):
             ``{"thinking_budget": 2000}`` or ``{"thinking_level": "high"}``).
             Expanded into ``genai.types.ThinkingConfig(**thinking_config)`` at call
             time. ``None`` omits the field.
-        filter_extraneous_inputs, timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
+        timeout_seconds, max_retries, retry_backoff_base, retry_backoff_max:
             Shared ``LLMEngine`` configuration (see base class).
         **client_kwargs:
             Additional keyword arguments forwarded verbatim to ``genai.Client(...)``
@@ -141,7 +140,6 @@ class GeminiEngine(LLMEngine):
             name=sanitized_name,
             namespace=namespace,
             description=description or "Gemini LLM Engine",
-            filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,

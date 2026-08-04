@@ -222,25 +222,12 @@ class TestToolBindingBasic:
         with pytest.raises(TypeError, match="missing required"):
             tool.invoke({"a": 1})
 
-    def test_unknown_input_raises_when_filtering_disabled(self) -> None:
+    def test_unknown_input_is_filtered(self) -> None:
         tool = Tool(
             function=add,
             name="add",
             namespace="tests",
             description="Add values.",
-            filter_extraneous_inputs=False,
-        )
-
-        with pytest.raises(TypeError, match="unexpected input key"):
-            tool.invoke({"a": 1, "b": 2, "extra": 3})
-
-    def test_filter_extraneous_inputs_true_filters_unknown_inputs(self) -> None:
-        tool = Tool(
-            function=add,
-            name="add",
-            namespace="tests",
-            description="Add values.",
-            filter_extraneous_inputs=True,
         )
 
         assert tool.invoke({"a": 1, "b": 2, "extra": 3}).result == 3
@@ -344,7 +331,6 @@ class TestToolBindingPositionalKinds:
             name="collect_kwargs",
             namespace="tests",
             description="Collect kwargs.",
-            filter_extraneous_inputs=False,
         )
 
         assert tool.invoke({"a": 1, "debug": True}).result == {

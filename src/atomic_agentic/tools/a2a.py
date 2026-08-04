@@ -53,7 +53,6 @@ class PyA2AtomicTool(Tool):
         client: PyA2AtomicClient | None = None,
         url: str | None = None,
         headers: Mapping[str, HeaderValue] | None = None,
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         resolved_remote_name = str(remote_name).strip()
         if not resolved_remote_name:
@@ -107,7 +106,6 @@ class PyA2AtomicTool(Tool):
             name=resolved_name,
             namespace=resolved_namespace,
             description=resolved_description,
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     @property

@@ -127,7 +127,6 @@ class LiteLLMEngine(LLMEngine):
         base_url: str | None = None,
         api_version: str | None = None,
         *,
-        filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 600.0,
         max_retries: int = 2,
         retry_backoff_base: float = 0.5,
@@ -160,9 +159,6 @@ class LiteLLMEngine(LLMEngine):
         api_key, base_url, api_version:
             Per-call request-level fields (no client object exists to hold
             these); omitted when ``None``.
-        filter_extraneous_inputs:
-            Whether to silently drop inputs not declared in the engine's
-            schema.
         timeout_seconds:
             Per-call timeout, forwarded as ``timeout=`` on every call.
         max_retries, retry_backoff_base, retry_backoff_max:
@@ -179,7 +175,6 @@ class LiteLLMEngine(LLMEngine):
             name=sanitized,
             namespace=namespace,
             description=description or "LiteLLM provider-agnostic language model engine.",
-            filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,

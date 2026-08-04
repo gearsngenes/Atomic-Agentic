@@ -36,7 +36,6 @@ class EchoWorkflow(Workflow):
         namespace: str = "tests",
         description: str | None = None,
         return_type: str = "dict[str, Any]",
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name or f"echo_{tag}",
@@ -44,7 +43,6 @@ class EchoWorkflow(Workflow):
             description=description or f"Echo workflow {tag}.",
             parameters=[make_value_param()],
             return_type=return_type,
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
         self._tag = tag
 
@@ -86,7 +84,6 @@ class RouterWorkflow(Workflow):
             description="Router workflow returning a constant selector.",
             parameters=[make_value_param()],
             return_type="Any",
-            filter_extraneous_inputs=True,
         )
         self._selector = selector
         self._raise_error = raise_error
@@ -111,7 +108,6 @@ class RaisingBranch(Workflow):
             description="Branch that always raises.",
             parameters=[make_value_param()],
             return_type="dict[str, Any]",
-            filter_extraneous_inputs=True,
         )
 
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -128,7 +124,6 @@ class UnhashableSelectorRouter(Workflow):
             description="Router returning an unhashable selector.",
             parameters=[make_value_param()],
             return_type="Any",
-            filter_extraneous_inputs=True,
         )
 
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:

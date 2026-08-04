@@ -81,7 +81,6 @@ class SequentialFlow(Workflow):
         steps: list[Workflow | AtomicInvokable],
         *,
         return_index: Optional[int] = None,
-        filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         if not isinstance(steps, list):
             raise TypeError(
@@ -106,19 +105,12 @@ class SequentialFlow(Workflow):
                 f"return_index must be an int or None, got {type(return_index)!r}"
             )
 
-        resolved_filter = (
-            filter_extraneous_inputs
-            if filter_extraneous_inputs is not None
-            else True
-        )
-
         super().__init__(
             name=name,
             namespace=namespace,
             description=description,
             parameters=normalized_steps[0].parameters,
             return_type=normalized_steps[resolved_return_index].return_type,
-            filter_extraneous_inputs=resolved_filter,
         )
 
         self._steps: tuple[Workflow, ...] = normalized_steps

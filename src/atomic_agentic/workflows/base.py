@@ -43,8 +43,6 @@ class Workflow(AtomicInvokable, ABC):
         description: str,
         parameters: list[ParamSpec],
         return_type: str,
-        *,
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name,
@@ -52,7 +50,6 @@ class Workflow(AtomicInvokable, ABC):
             description=description,
             parameters=parameters,
             return_type=return_type,
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
         self._checkpoints: list[WorkflowCheckpoint] = []

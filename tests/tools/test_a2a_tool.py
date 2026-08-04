@@ -52,7 +52,6 @@ def remote_metadata(
             ]
         ),
         "return_type": return_type,
-        "filter_extraneous_inputs": True,
         "invokable_type": "EchoInvokable",
         "extra_description": extra_description,
     }

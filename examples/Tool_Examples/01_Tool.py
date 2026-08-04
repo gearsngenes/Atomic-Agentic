@@ -42,7 +42,6 @@ t_add = Tool(
     name="add",
     description="Add two integers.",
     namespace="local",
-    filter_extraneous_inputs=False,
 )
 
 t_greet = Tool(
@@ -102,4 +101,4 @@ if __name__ == "__main__":
 
     # Common mistakes (to see helpful errors)
     run_case("greet: missing required 'name'", t_greet, {"excited": True})
-    run_case("add: unknown key error", t_add, {"a": 1, "b": 2, "extra": 99})
+    run_case("add: unknown key silently filtered", t_add, {"a": 1, "b": 2, "extra": 99})  # -> 3

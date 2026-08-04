@@ -66,7 +66,6 @@ class ParallelFlow(Workflow):
         output_indices: list[int] | None = None,
         output_range: tuple[int, int] | None = None,
         output_names: list[str] | None = None,
-        filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         if not isinstance(branches, list):
             raise TypeError(
@@ -83,12 +82,6 @@ class ParallelFlow(Workflow):
             declared_parameters = to_paramspec_list(parameters)
             _validate_parameter_order(declared_parameters)
 
-        resolved_filter = (
-            filter_extraneous_inputs
-            if filter_extraneous_inputs is not None
-            else True
-        )
-
         resolved_output_type, resolved_indices, resolved_names, resolved_return_type = self._configure_output(
             branch_count=len(normalized_branches),
             branches=normalized_branches,
@@ -104,7 +97,6 @@ class ParallelFlow(Workflow):
             description=description,
             parameters=list(declared_parameters),
             return_type=resolved_return_type,
-            filter_extraneous_inputs=resolved_filter,
         )
 
         self._branches: tuple[Workflow, ...] = normalized_branches

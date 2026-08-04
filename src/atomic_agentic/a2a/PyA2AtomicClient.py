@@ -211,7 +211,6 @@ class PyA2AtomicClient:
             "description",
             "parameters",
             "return_type",
-            "filter_extraneous_inputs",
             "invokable_type",
         }
         missing = required_keys - set(payload.keys())

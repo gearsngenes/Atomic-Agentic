@@ -89,7 +89,6 @@ class Tool(AtomicInvokable):
         name: Optional[str] = None,
         namespace: Optional[str] = None,
         description: Optional[str] = None,
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         """Initialize a Tool from a plain callable or an AtomicInvokable.
 
@@ -109,10 +108,6 @@ class Tool(AtomicInvokable):
         description:
             Optional Tool description override. If omitted, defaults to the
             callable's docstring or a fallback description.
-
-        filter_extraneous_inputs:
-            Whether unknown inputs are filtered before invocation when no
-            ``VAR_KEYWORD`` parameter is present.
         """
         if not callable(function):
             raise ToolDefinitionError(f"Tool function must be callable, got {type(function)!r}")
@@ -158,7 +153,6 @@ class Tool(AtomicInvokable):
             namespace=namespace or "default",
             parameters=parameters,
             return_type=return_type,
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     # ------------------------------------------------------------------ #

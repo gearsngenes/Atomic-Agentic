@@ -365,7 +365,6 @@ class PyA2AtomicHost(A2AServer):
             "description": invokable._description,
             "parameters": [spec.to_dict() for spec in invokable.parameters],
             "return_type": invokable.return_type,
-            "filter_extraneous_inputs": invokable.filter_extraneous_inputs,
             "invokable_type": type(invokable).__name__,
             "extra_description": invokable._extra_description(),
         }

@@ -281,7 +281,6 @@ class ToolAgent(Agent, ABC):
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = False,
         *,
         fail_fast: bool = True,
@@ -307,10 +306,6 @@ class ToolAgent(Agent, ABC):
             Human-readable description of this agent's purpose.
         llm_engine : LLMEngine
             Provider-facing LLM engine used for all generation calls.
-        filter_extraneous_inputs : bool | None
-            When ``True``, inputs not declared in ``parameters`` are silently
-            dropped before invocation. When ``False``, extraneous inputs raise.
-            ``None`` inherits the base class default.
         context_enabled : bool
             When ``True``, prior blackboard steps are fed into each invocation
             as LLM context (``valid_cache_indices``/``failed_cache_indices``
@@ -363,7 +358,6 @@ class ToolAgent(Agent, ABC):
             namespace=namespace,
             description=description,
             llm_engine=llm_engine,
-            filter_extraneous_inputs=filter_extraneous_inputs,
             context_enabled=context_enabled,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
@@ -889,7 +883,6 @@ class ToolAgent(Agent, ABC):
         *,
         remote_names: list[str] | None = None,
         name_collision_mode: str = "raise",
-        batch_filter_inputs: Optional[bool] = None,
     ) -> list[str]:
         """Register a batch of invokables on this ToolAgent.
 
@@ -901,10 +894,8 @@ class ToolAgent(Agent, ABC):
         Parameters
         ----------
         tools : list[AtomicInvokable | Callable] | None
-            Local items to register. AtomicInvokables are stored as-is when
-            ``batch_filter_inputs`` is ``None``; otherwise (and always for
-            callables) items are normalized via
-            ``toolify(namespace=self.name, filter_extraneous_inputs=batch_filter_inputs)``.
+            Local items to register. AtomicInvokables are stored as-is;
+            callables are normalized via ``toolify(namespace=self.name)``.
         client : PyA2AtomicClient | MCPClientHub | None
             Remote client to enumerate and register tools from. Combined with
             ``tools`` in one registration pass when both are provided.
@@ -915,10 +906,6 @@ class ToolAgent(Agent, ABC):
             Per-item collision policy for toolbox conflicts. One of
             ``"raise"`` (default), ``"skip"``, or ``"replace"``. Does not
             affect intra-batch dedup, which always raises.
-        batch_filter_inputs : bool | None
-            ``filter_extraneous_inputs`` override applied uniformly to all
-            callables and remote tools toolified in this batch. ``None``
-            inherits each tool's own default.
 
         Returns
         -------
@@ -972,14 +959,13 @@ class ToolAgent(Agent, ABC):
 
         if tools is not None:
             for item in tools:
-                if isinstance(item, AtomicInvokable) and batch_filter_inputs is None:
+                if isinstance(item, AtomicInvokable):
                     combined.append((item.full_name, item))
-                elif isinstance(item, AtomicInvokable) or callable(item):
+                elif callable(item):
                     try:
                         t = toolify(
                             component=item,
                             namespace=self.name,
-                            filter_extraneous_inputs=batch_filter_inputs,
                         )
                     except Exception as exc:
                         raise ToolRegistrationError(
@@ -1017,7 +1003,6 @@ class ToolAgent(Agent, ABC):
                         component=client,
                         namespace=self.name,
                         remote_name=remote_name,
-                        filter_extraneous_inputs=batch_filter_inputs,
                     )
                 except Exception as exc:
                     raise ToolRegistrationError(

@@ -66,7 +66,6 @@ class MistralEngine(LLMEngine):
             temperature: float | None = 0.1,
             inline_cutoff_chars: int = 200_000,
             *,
-            filter_extraneous_inputs: bool = True,
             timeout_seconds: float = 600.0,
             max_retries: int = 2,
             retry_backoff_base: float = 0.5,
@@ -95,7 +94,7 @@ class MistralEngine(LLMEngine):
             entirely, letting the SDK apply its own default sentinel.
         inline_cutoff_chars:
             Maximum characters to inline from text/code attachments.
-        filter_extraneous_inputs, timeout_seconds, max_retries,
+        timeout_seconds, max_retries,
         retry_backoff_base, retry_backoff_max:
             Shared ``LLMEngine`` configuration (see base class).
         **client_kwargs:
@@ -115,7 +114,6 @@ class MistralEngine(LLMEngine):
             name=sanitized_name,
             namespace=namespace,
             description=description or "Mistral LLM Engine",
-            filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,

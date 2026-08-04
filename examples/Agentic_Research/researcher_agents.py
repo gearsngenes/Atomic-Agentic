@@ -44,7 +44,6 @@ writer = BasicAgent(
     ),
     pre_invoke=writer_pre,
     post_invoke=writer_post,
-    filter_extraneous_inputs=True,
     context_enabled=True,
 )
 
@@ -78,7 +77,6 @@ critic = BasicAgent(
     ),
     pre_invoke=critic_pre,
     post_invoke=critic_post,
-    filter_extraneous_inputs=True,
     context_enabled=False,
 )
 

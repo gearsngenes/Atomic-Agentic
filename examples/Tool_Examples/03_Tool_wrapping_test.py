@@ -113,24 +113,15 @@ if __name__ == "__main__":
         },
     )
 
-    # Common mistakes to see strict errors.
-    # This version disables filtering so unknown keys surface as binding errors.
-    agent_tool_strict = Tool(
-        function=agent,
-        name="strict_writer_tool",
-        namespace="agent_wrapped",
-        description="Strict base Tool wrapping the Writer Agent directly.",
-        filter_extraneous_inputs=False,
-    )
-
+    # Common mistakes.
     run_case(
         "base Tool wrapped Agent: missing required 'topic'",
-        agent_tool_strict,
+        agent_tool,
         {"style": "formal", "audience": "execs"},
     )
 
     run_case(
-        "base Tool wrapped Agent: unknown key",
-        agent_tool_strict,
+        "base Tool wrapped Agent: unknown key is silently filtered",
+        agent_tool,
         {"topic": "refactoring", "style": "guide", "extra": 123},
     )

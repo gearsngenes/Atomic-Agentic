@@ -99,7 +99,6 @@ class LLMEngine(AtomicInvokable, ABC):
         name: Optional[str] = None,
         namespace: str = "llm",
         description: str = "",
-        filter_extraneous_inputs: bool = True,
         timeout_seconds: float = 30.0,
         max_retries: int = 2,
         retry_backoff_base: float = 0.5,
@@ -135,7 +134,6 @@ class LLMEngine(AtomicInvokable, ABC):
                                   type="List[Dict[str, str]]",
                                   default = NO_VAL)],
             return_type="str",
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
         self._timeout_seconds = float(timeout_seconds)

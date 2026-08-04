@@ -20,7 +20,6 @@ class TestLLMEngineConstruction:
         assert engine.name == "FakeLLMEngine"
         assert engine.description == "LLM Engine"
         assert engine.return_type == "str"
-        assert engine.filter_extraneous_inputs is True
         assert [(param.name, param.kind, param.type) for param in engine.parameters] == [
             ("messages", "POSITIONAL_OR_KEYWORD", "List[Dict[str, str]]")
         ]

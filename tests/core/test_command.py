@@ -32,16 +32,12 @@ def add_with_variadics(a: int, *args: int, **kwargs: int) -> int:
     return a + sum(args) + sum(kwargs.values())
 
 
-def make_add_tool(
-    *,
-    filter_extraneous_inputs: bool = True,
-) -> Tool:
+def make_add_tool() -> Tool:
     return Tool(
         function=add,
         name="add",
         namespace="tests",
         description="Add two integers.",
-        filter_extraneous_inputs=filter_extraneous_inputs,
     )
 
 
@@ -60,7 +56,6 @@ class TestCommandConstruction:
         assert command.fixed_inputs == {"a": 2, "b": 3}
         assert command.parameters == []
         assert command.return_type == "int"
-        assert command.filter_extraneous_inputs is False
         assert command.name == "add_two_and_three"
         assert command.description == "Add 2 and 3."
         assert command.signature == "Command.tests.add_two_and_three() -> int"
@@ -142,17 +137,8 @@ class TestCommandFixedInputValidation:
 
         assert command.invoke({}).result == 15
 
-    def test_strict_executor_rejects_extra_fixed_input_at_construction(self) -> None:
-        executor = make_add_tool(filter_extraneous_inputs=False)
-
-        with pytest.raises(TypeError, match="unexpected input key"):
-            Command(
-                executor=executor,
-                fixed_inputs={"a": 2, "b": 3, "unused": 4},
-            )
-
     def test_filtering_executor_drops_extra_fixed_input_at_construction(self) -> None:
-        executor = make_add_tool(filter_extraneous_inputs=True)
+        executor = make_add_tool()
 
         command = Command(
             executor=executor,
@@ -177,21 +163,6 @@ class TestCommandFixedInputValidation:
 
         assert command.fixed_inputs == {"a": 1, "kwargs": {}}
         assert command.invoke({}).result == 1
-
-
-class TestCommandFilterPolicy:
-    @pytest.mark.parametrize("value", ["false", 0, 1, None, [], {}])
-    def test_filter_extraneous_inputs_rejects_non_bool_assignment(
-        self,
-        value: object,
-    ) -> None:
-        command = Command(
-            executor=make_add_tool(),
-            fixed_inputs={"a": 2, "b": 3},
-        )
-
-        with pytest.raises(TypeError, match="must be a bool"):
-            command.filter_extraneous_inputs = value  # type: ignore[assignment]
 
 
 class TestCommandInvocation:
@@ -220,14 +191,13 @@ class TestCommandInvocation:
 
         assert command() == 5
 
-    def test_invoke_rejects_runtime_inputs(self) -> None:
+    def test_invoke_silently_ignores_runtime_inputs(self) -> None:
         command = Command(
             executor=make_add_tool(),
             fixed_inputs={"a": 2, "b": 3},
         )
 
-        with pytest.raises(TypeError, match="unexpected input key"):
-            command.invoke({"a": 100})
+        assert command.invoke({"a": 100}).result == 5
 
     def test_invoke_requires_mapping(self) -> None:
         command = Command(
@@ -295,14 +265,15 @@ class TestCommandAsyncInvocation:
         assert isinstance(result, CommandResult)
         assert result.result == 5
 
-    def test_async_invoke_rejects_runtime_inputs(self) -> None:
+    def test_async_invoke_silently_ignores_runtime_inputs(self) -> None:
         command = Command(
             executor=make_add_tool(),
             fixed_inputs={"a": 2, "b": 3},
         )
 
-        with pytest.raises(TypeError, match="unexpected input key"):
-            asyncio.run(command.async_invoke({"a": 100}))
+        result = asyncio.run(command.async_invoke({"a": 100}))
+
+        assert result.result == 5
 
 
 class TestCommandSerialization:
@@ -322,7 +293,6 @@ class TestCommandSerialization:
         assert data["description"] == "Add 2 and 3."
         assert data["parameters"] == []
         assert data["return_type"] == "int"
-        assert data["filter_extraneous_inputs"] is False
         assert data["fixed_inputs"] == {"a": 2, "b": 3}
         assert data["executor"]["type"] == "Tool"
         assert data["executor"]["name"] == "add"

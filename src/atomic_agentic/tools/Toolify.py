@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from ..exceptions import ToolDefinitionError
 from ..core.Invokable import AtomicInvokable
@@ -22,7 +22,6 @@ def toolify(
     name: str | None = None,
     namespace: str | None = None,
     description: str | None = None,
-    filter_extraneous_inputs: bool | None = None,
     remote_name: str | None = None,
 ) -> Tool:
     """
@@ -32,13 +31,12 @@ def toolify(
     -------------
     1) If ``component`` is already a ``Tool``:
        - return it unchanged when no local wrapper overrides are provided;
-       - if ``name``, ``namespace``, ``description``, or
-         ``filter_extraneous_inputs`` is provided, return a new ``Tool``
-         that delegates to ``component`` by reference (calls its real
-         ``invoke``/``async_invoke`` under the hood) under the requested
-         identity — the original is never mutated. Works uniformly for
-         plain ``Tool`` and ``Tool`` subclasses (``MCPProxyTool``,
-         ``PyA2AtomicTool``) alike.
+       - if ``name``, ``namespace``, or ``description`` is provided, return
+         a new ``Tool`` that delegates to ``component`` by reference (calls
+         its real ``invoke``/``async_invoke`` under the hood) under the
+         requested identity — the original is never mutated. Works
+         uniformly for plain ``Tool`` and ``Tool`` subclasses
+         (``MCPProxyTool``, ``PyA2AtomicTool``) alike.
 
     2) If ``component`` is a non-tool ``AtomicInvokable``:
        - wrap it the same way — a new ``Tool`` delegating to ``component``
@@ -68,23 +66,13 @@ def toolify(
             "toolify: expected a non-empty `component`."
         )
 
-    # Default filtering for routes that do not inherit an existing invokable's
-    # filtering policy. Local AtomicInvokable wrapping handles inheritance in
-    # its own branch below.
-    default_filter_flag = (
-        filter_extraneous_inputs
-        if filter_extraneous_inputs is not None
-        else True
-    )
-
-    # Local wrapper overrides are identity/filter settings for local Tool
-    # wrapping. Passing any of these with an existing Tool means the caller wants
-    # a new wrapper Tool, not mutation of the original Tool.
+    # Local wrapper overrides are identity settings for local Tool wrapping.
+    # Passing any of these with an existing Tool means the caller wants a new
+    # wrapper Tool, not mutation of the original Tool.
     local_tool_override_requested = (
         name is not None
         or namespace is not None
         or description is not None
-        or filter_extraneous_inputs is not None
     )
 
     # Treat None, "", and whitespace as "not provided" for local-route rejection.
@@ -106,18 +94,11 @@ def toolify(
         if not local_tool_override_requested:
             return component
 
-        resolved_filter = (
-            filter_extraneous_inputs
-            if filter_extraneous_inputs is not None
-            else component.filter_extraneous_inputs
-        )
-
         return Tool(
             function=component,
             name=name if name is not None else component.name,
             namespace=namespace if namespace is not None else component.namespace,
             description=description if description is not None else component._description,
-            filter_extraneous_inputs=resolved_filter,
         )
 
     # 2) Non-tool AtomicInvokable.
@@ -131,18 +112,11 @@ def toolify(
                 "PyA2AtomicClient components; got `remote_name` for a local AtomicInvokable."
             )
 
-        resolved_filter = (
-            filter_extraneous_inputs
-            if filter_extraneous_inputs is not None
-            else component.filter_extraneous_inputs
-        )
-
         return Tool(
             function=component,
             name=name if name is not None else component.name,
             namespace=namespace if namespace is not None else component.namespace,
             description=description if description is not None else component._description,
-            filter_extraneous_inputs=resolved_filter,
         )
 
     # 3) MCP client hub -> MCPProxyTool.
@@ -159,7 +133,6 @@ def toolify(
             namespace=namespace,
             description=description or "",
             client_hub=component,
-            filter_extraneous_inputs=default_filter_flag,
         )
 
     # 4) PyA2AtomicClient -> PyA2AtomicTool.
@@ -176,7 +149,6 @@ def toolify(
             namespace=namespace,
             description=description,
             client=component,
-            filter_extraneous_inputs=default_filter_flag,
         )
 
     # 5) Raw callable -> Tool.
@@ -216,7 +188,6 @@ def toolify(
             name=resolved_name,
             namespace=namespace,
             description=effective_description,
-            filter_extraneous_inputs=default_filter_flag,
         )
 
     raise ToolDefinitionError(
@@ -229,7 +200,6 @@ def batch_toolify(
     sources: list[AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient] | None = None,
     *,
     batch_namespace: str | None = None,
-    batch_filter_inputs: Optional[bool] = None,
 ) -> list[Tool]:
     """
     Toolify every provided source into Tool objects.
@@ -252,8 +222,6 @@ def batch_toolify(
         client hubs.
     batch_namespace : str | None
         Namespace override passed to each produced local or remote tool.
-    batch_filter_inputs : Optional[bool]
-        Filter flag override passed to each produced tool.
 
     Returns
     -------
@@ -275,7 +243,6 @@ def batch_toolify(
                         source,
                         remote_name=remote_name,
                         namespace=batch_namespace,
-                        filter_extraneous_inputs=batch_filter_inputs,
                     )
                 )
 
@@ -291,7 +258,6 @@ def batch_toolify(
                         source,
                         remote_name=remote_name,
                         namespace=batch_namespace,
-                        filter_extraneous_inputs=batch_filter_inputs,
                     )
                 )
 
@@ -302,7 +268,6 @@ def batch_toolify(
             toolify(
                 source,
                 namespace=batch_namespace,
-                filter_extraneous_inputs=batch_filter_inputs,
             )
         )
 

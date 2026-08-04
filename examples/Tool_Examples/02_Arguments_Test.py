@@ -9,10 +9,9 @@ This example demonstrates:
    - *args payloads use the callable's actual VAR_POSITIONAL parameter name.
    - **kwargs payloads use the callable's actual VAR_KEYWORD parameter name.
    - There is no reserved "_args" / "_kwargs" convention by default.
-3. The effect of filter_extraneous_inputs:
-   - Default True: unknown keys are dropped when no **kwargs exists.
-   - Default True + **kwargs exists: unknown top-level keys are collected into **kwargs.
-   - False: unknown keys are retained and binding errors if no **kwargs can consume them.
+3. Unknown-key filtering, which is always on:
+   - No **kwargs exists: unknown keys are dropped.
+   - **kwargs exists: unknown top-level keys are collected into **kwargs.
 """
 
 from __future__ import annotations
@@ -69,37 +68,10 @@ class Accumulator:
 
 # ---------- Wrap them as Tools ----------
 
-# Default filtering behavior: filter_extraneous_inputs=True.
 t_mix = Tool(mix_sig, name="mix_sig", description="Mixed kinds", namespace="local")
 t_kwargs = Tool(kwargs_only, name="kwargs_only", description="KW-only", namespace="local")
 t_var = Tool(with_varargs, name="with_varargs", description="Varargs + Varkw", namespace="local")
 t_defs = Tool(defaults_only, name="defaults_only", description="Defaults only", namespace="local")
-
-# Explicitly unfiltered variants, used to demonstrate stricter error behavior
-# when unknown keys are retained and the callable has no **kwargs sink.
-t_mix_unfiltered = Tool(
-    mix_sig,
-    name="mix_sig_unfiltered",
-    description="Mixed kinds, filtering disabled",
-    namespace="local",
-    filter_extraneous_inputs=False,
-)
-
-t_kwargs_unfiltered = Tool(
-    kwargs_only,
-    name="kwargs_only_unfiltered",
-    description="KW-only, filtering disabled",
-    namespace="local",
-    filter_extraneous_inputs=False,
-)
-
-t_defs_unfiltered = Tool(
-    defaults_only,
-    name="defaults_only_unfiltered",
-    description="Defaults only, filtering disabled",
-    namespace="local",
-    filter_extraneous_inputs=False,
-)
 
 acc = Accumulator()
 t_add = Tool(acc.add, name="acc_add", description="Bound method add", namespace="local")
@@ -239,48 +211,26 @@ if __name__ == "__main__":
     # args=[] and z={"_args": [...], "_kwargs": {...}}
 
     # ------------------------------------------------------------------
-    # Demonstrate default filter_extraneous_inputs=True
+    # Demonstrate unknown-key filtering (always on)
     # ------------------------------------------------------------------
 
     run_case(
-        "defaults_only: unknown key is dropped when filtering is enabled",
+        "defaults_only: unknown key is dropped",
         t_defs,
         {"unused": 999},
     )
     # Expect: 2
 
     run_case(
-        "mix_sig: _args is dropped when filtering is enabled and no *args exists",
+        "mix_sig: _args is dropped since no *args exists",
         t_mix,
         {"a": 1, "b": 2, "c": 3, "e": "hello", "_args": [99]},
     )
-    # Expect: OK, because _args is extraneous and filtering is enabled.
+    # Expect: OK, because _args is extraneous and silently dropped.
 
     run_case(
-        "kwargs_only: _kwargs is dropped when filtering is enabled and no **kwargs exists",
+        "kwargs_only: _kwargs is dropped since no **kwargs exists",
         t_kwargs,
         {"x": 1, "_kwargs": {"z": 10}},
     )
-    # Expect: 2, because _kwargs is extraneous and filtering is enabled.
-
-    # ------------------------------------------------------------------
-    # Demonstrate filter_extraneous_inputs=False
-    # ------------------------------------------------------------------
-
-    run_case(
-        "defaults_only_unfiltered: unknown key errors when filtering is disabled",
-        t_defs_unfiltered,
-        {"unused": 999},
-    )
-
-    run_case(
-        "mix_sig_unfiltered: _args errors when filtering is disabled and no *args exists",
-        t_mix_unfiltered,
-        {"a": 1, "b": 2, "c": 3, "e": "hello", "_args": [99]},
-    )
-
-    run_case(
-        "kwargs_only_unfiltered: _kwargs errors when filtering is disabled and no **kwargs exists",
-        t_kwargs_unfiltered,
-        {"x": 1, "_kwargs": {"z": 10}},
-    )
+    # Expect: 2, because _kwargs is extraneous and silently dropped.

@@ -69,7 +69,6 @@ def dummy_component() -> Tool:
         name="echo_value",
         namespace="tests",
         description="Echo test value.",
-        filter_extraneous_inputs=True,
     )
 
 
@@ -94,7 +93,6 @@ class RecordingInvokable(AtomicInvokable):
         name: str = "recording_invokable",
         namespace: str = "tests",
         description: str = "Recording invokable.",
-        filter_extraneous_inputs: bool = True,
         raise_sync: Exception | None = None,
         raise_async: Exception | None = None,
     ) -> None:
@@ -106,7 +104,6 @@ class RecordingInvokable(AtomicInvokable):
                 make_param("value", 0, type_="Any"),
             ],
             return_type="Any",
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
         self.raw_result = raw_result
         self.raise_sync = raise_sync
@@ -163,13 +160,12 @@ class TestStructuredInvokableConstruction:
         with pytest.raises(TypeError, match="AtomicInvokable"):
             StructuredInvokable(component=object())  # type: ignore[arg-type]
 
-    def test_inherits_component_identity_parameters_and_filter_flag(self) -> None:
+    def test_inherits_component_identity_and_parameters(self) -> None:
         component = Tool(
             function=return_mapping,
             name="return_mapping",
             namespace="tests",
             description="Return a mapping.",
-            filter_extraneous_inputs=False,
         )
 
         wrapper = StructuredInvokable(component=component, output_schema=["a"])
@@ -178,16 +174,14 @@ class TestStructuredInvokableConstruction:
         assert wrapper.name == component.name
         assert "Return a mapping." in wrapper.description
         assert wrapper.parameters == component.parameters
-        assert wrapper.filter_extraneous_inputs is False
         assert wrapper.return_type == "dict[str, Any]"
 
-    def test_explicit_identity_and_filter_override_component(self) -> None:
+    def test_explicit_identity_overrides_component(self) -> None:
         component = Tool(
             function=return_mapping,
             name="return_mapping",
             namespace="tests",
             description="Return a mapping.",
-            filter_extraneous_inputs=False,
         )
 
         wrapper = StructuredInvokable(
@@ -195,12 +189,10 @@ class TestStructuredInvokableConstruction:
             name="structured_mapping",
             description="Structured mapping.",
             output_schema=["a"],
-            filter_extraneous_inputs=True,
         )
 
         assert wrapper.name == "structured_mapping"
         assert "Structured mapping." in wrapper.description
-        assert wrapper.filter_extraneous_inputs is True
 
     def test_output_schema_normalizes_string_list_and_properties(self) -> None:
         wrapper = structured(output_schema=["a", "b"])

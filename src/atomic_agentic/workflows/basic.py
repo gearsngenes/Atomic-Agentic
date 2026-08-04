@@ -48,7 +48,6 @@ class BasicFlow(Workflow):
         name: Optional[str] = None,
         namespace: Optional[str] = None,
         description: Optional[str] = None,
-        filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         if not isinstance(component, AtomicInvokable):
             raise TypeError(
@@ -58,19 +57,12 @@ class BasicFlow(Workflow):
 
         self._component = component
 
-        resolved_filter = (
-            filter_extraneous_inputs
-            if filter_extraneous_inputs is not None
-            else component.filter_extraneous_inputs
-        )
-
         super().__init__(
             name=name or component.name,
             namespace=namespace or component.namespace,  # inherit when not supplied
             description=description or component._description,
             parameters=component.parameters,
             return_type=component.return_type,
-            filter_extraneous_inputs=resolved_filter,
         )
 
     # ------------------------------------------------------------------ #

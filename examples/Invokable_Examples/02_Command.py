@@ -12,7 +12,6 @@ multiply_tool = Tool(
     name="multiply",
     namespace="example",
     description="Multiply two integers.",
-    filter_extraneous_inputs=False,
 )
 
 multiply_6_by_7 = Command(
@@ -33,10 +32,9 @@ pprint(result.result)
 # 42
 
 result = multiply_6_by_7()
-pprint(result.result)
+pprint(result)
 # 42
 
-try:
-    multiply_6_by_7.invoke({"a": 100})
-except TypeError as exc:
-    print(f"Rejected runtime inputs: {exc}")
+result = multiply_6_by_7.invoke({"a": 100})
+pprint(result.result)
+# 42 - runtime inputs are silently ignored, never merged into fixed_inputs
