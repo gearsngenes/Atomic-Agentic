@@ -4,7 +4,7 @@ import logging
 from collections.abc import Hashable, Mapping
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Optional
+from typing import Any
 
 from ..exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
@@ -12,7 +12,6 @@ from ..models.parameters import ParamSpec
 from ..utils.parameters import _validate_parameter_order, to_paramspec_list
 from ..models.results.workflows import RoutingFlowResult
 from .base import Workflow
-from .basic import BasicFlow
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +31,15 @@ class RoutingFlow(Workflow):
     Construction contract
     ----------------------
     - ``branches`` is either:
-        - a non-empty ``list[Workflow | AtomicInvokable]``, normalized to
-          ``tuple[Workflow, ...]``. Selectors must be ``int`` indices.
-        - a non-empty ``dict[Hashable, Workflow | AtomicInvokable]``,
-          normalized to ``dict[Hashable, Workflow]``. Selectors must be keys
-          present in this mapping.
-    - ``router`` may be a ``Workflow`` (kept as-is) or any other
-      ``AtomicInvokable`` (wrapped once in ``BasicFlow``). The normalized
-      router is exposed read-only via :attr:`router`.
+        - a non-empty ``list[AtomicInvokable]``, stored as
+          ``tuple[AtomicInvokable, ...]``. Selectors must be ``int`` indices.
+        - a non-empty ``dict[Hashable, AtomicInvokable]``, stored as
+          configured. Selectors must be keys present in this mapping.
+      Any invokable, ``Workflow`` or not, is stored exactly as configured
+      with no wrapping.
+    - ``router`` may be any ``AtomicInvokable``, stored as configured with
+      no wrapping. The normalized router is exposed read-only via
+      :attr:`router`.
     - ``parameters`` defaults to the normalized router's parameters (the
       router is the first node invoked, so its contract is the natural
       ground truth for the outer workflow). An explicit override may be
@@ -73,16 +73,16 @@ class RoutingFlow(Workflow):
         name: str,
         namespace: str,
         description: str,
-        branches: tuple[Workflow | AtomicInvokable] | list[Workflow | AtomicInvokable] | dict[Hashable, Workflow | AtomicInvokable],
-        router: Workflow | AtomicInvokable,
+        branches: tuple[AtomicInvokable, ...] | list[AtomicInvokable] | dict[Hashable, AtomicInvokable],
+        router: AtomicInvokable,
         *,
         parameters: type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec] | None = None,
     ) -> None:
         # Topology is fixed at construction: list/tuple branches are selected
-        # by int index, dict branches are selected by key. Both are
-        # normalized the same way as branches elsewhere (Workflow kept as-is,
-        # AtomicInvokable wrapped in BasicFlow).
-        normalized_branches: tuple[Workflow, ...] | dict[Hashable, Workflow]
+        # by int index, dict branches are selected by key. Every branch is
+        # validated as an AtomicInvokable and stored as configured, no
+        # wrapping.
+        normalized_branches: tuple[AtomicInvokable, ...] | dict[Hashable, AtomicInvokable]
         if isinstance(branches, dict):
             if not branches:
                 raise ValueError("branches must not be empty")
@@ -95,7 +95,7 @@ class RoutingFlow(Workflow):
             normalized_branches = tuple(self._normalize_branch(branch) for branch in branches)
         else:
             raise TypeError(
-                "branches must be a non-empty list, tuple, or dict of [Workflow | AtomicInvokable] nodes, "
+                "branches must be a non-empty list, tuple, or dict of AtomicInvokable nodes, "
                 f"got {type(branches)!r}"
             )
 
@@ -132,25 +132,26 @@ class RoutingFlow(Workflow):
             return_type=resolved_return_type,
         )
 
-        self._branches: tuple[Workflow, ...] | dict[Hashable, Workflow] = normalized_branches
-        self._router: Workflow = normalized_router
+        self._branches: tuple[AtomicInvokable, ...] | dict[Hashable, AtomicInvokable] = normalized_branches
+        self._router: AtomicInvokable = normalized_router
 
     # ------------------------------------------------------------------ #
     # Read-only properties
     # ------------------------------------------------------------------ #
     @property
-    def branches(self) -> tuple[Workflow, ...] | MappingProxyType:
+    def branches(self) -> tuple[AtomicInvokable, ...] | MappingProxyType:
         """Return the fixed normalized branch topology.
 
-        ``tuple[Workflow, ...]`` if configured from a list, or a read-only
-        ``MappingProxyType[Hashable, Workflow]`` if configured from a dict.
+        ``tuple[AtomicInvokable, ...]`` if configured from a list, or a
+        read-only ``MappingProxyType[Hashable, AtomicInvokable]`` if
+        configured from a dict.
         """
         if isinstance(self._branches, dict):
             return MappingProxyType(self._branches)
         return self._branches
 
     @property
-    def router(self) -> Workflow:
+    def router(self) -> AtomicInvokable:
         """Return the fixed normalized router."""
         return self._router
 
@@ -175,43 +176,16 @@ class RoutingFlow(Workflow):
         return base
 
     # ------------------------------------------------------------------ #
-    # Public retrieval helper
-    # ------------------------------------------------------------------ #
-    def get_router_decision(self, run_id: str) -> Optional[Any]:
-        """Return the validated router selector for one parent routing run.
-
-        Returns
-        -------
-        Optional[Any]
-            - ``None`` if the parent checkpoint is not found, or if the
-              router's own checkpoint is no longer retained
-            - otherwise, the router's unwrapped result (the selector used to
-              choose the executed branch)
-        """
-        checkpoint = self.get_checkpoint(run_id)
-        if checkpoint is None:
-            return None
-
-        # The selector itself isn't stored on RoutingFlowResult - it's
-        # recovered by following router_run_id back to the router's own
-        # checkpoint, whose result IS the validated selector.
-        router_checkpoint = self._router.get_checkpoint(checkpoint.result.router_run_id)
-        return router_checkpoint.result.result if router_checkpoint else None
-
-    # ------------------------------------------------------------------ #
     # Internal normalization / validation helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _normalize_branch(branch: Workflow | AtomicInvokable) -> Workflow:
-        """Normalize one configured branch or router into a workflow-shaped node."""
-        if isinstance(branch, Workflow):
-            return branch
-        if isinstance(branch, AtomicInvokable):
-            return BasicFlow(component=branch)
-        raise TypeError(
-            "RoutingFlow branches/router must be Workflow or AtomicInvokable, "
-            f"got {type(branch)!r}"
-        )
+    def _normalize_branch(branch: AtomicInvokable) -> AtomicInvokable:
+        """Validate one configured branch or router is an AtomicInvokable."""
+        if not isinstance(branch, AtomicInvokable):
+            raise TypeError(
+                f"RoutingFlow branches/router must be AtomicInvokable, got {type(branch)!r}"
+            )
+        return branch
 
     def _extract_selector(self, selector: Any) -> Hashable:
         """Validate and return the router-provided selector for the configured branches."""

@@ -13,7 +13,6 @@ from ..utils.parameters import _validate_parameter_order, to_paramspec_list
 from ..constants.core import IDENTIFIER_PATTERN
 from ..models.results.workflows import ParallelFlowResult, WorkflowResult
 from .base import Workflow
-from .basic import BasicFlow
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +58,7 @@ class ParallelFlow(Workflow):
         name: str,
         namespace: str,
         description: str,
-        branches: list[Workflow | AtomicInvokable],
+        branches: list[AtomicInvokable],
         *,
         parameters: type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec] | None = None,
         output_type: str = LIST,
@@ -69,7 +68,7 @@ class ParallelFlow(Workflow):
     ) -> None:
         if not isinstance(branches, list):
             raise TypeError(
-                f"branches must be a non-empty list[Workflow | AtomicInvokable], got {type(branches)!r}"
+                f"branches must be a non-empty list[AtomicInvokable], got {type(branches)!r}"
             )
         if not branches:
             raise ValueError("branches must not be empty")
@@ -99,7 +98,7 @@ class ParallelFlow(Workflow):
             return_type=resolved_return_type,
         )
 
-        self._branches: tuple[Workflow, ...] = normalized_branches
+        self._branches: tuple[AtomicInvokable, ...] = normalized_branches
         self._output_type: str = resolved_output_type
         self._output_indices: tuple[int, ...] = resolved_indices
         self._output_names: Optional[tuple[str, ...]] = resolved_names
@@ -108,7 +107,7 @@ class ParallelFlow(Workflow):
     # Read-only topology / contract properties
     # ------------------------------------------------------------------ #
     @property
-    def branches(self) -> tuple[Workflow, ...]:
+    def branches(self) -> tuple[AtomicInvokable, ...]:
         """Return the fixed normalized branch tuple."""
         return self._branches
 
@@ -151,16 +150,13 @@ class ParallelFlow(Workflow):
     # Internal normalization / configuration helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _normalize_branch(branch: Workflow | AtomicInvokable) -> Workflow:
-        """Normalize one configured branch into a workflow-shaped node."""
-        if isinstance(branch, Workflow):
-            return branch
-        if isinstance(branch, AtomicInvokable):
-            return BasicFlow(component=branch)
-        raise TypeError(
-            "ParallelFlow branches must be Workflow or AtomicInvokable, "
-            f"got {type(branch)!r}"
-        )
+    def _normalize_branch(branch: AtomicInvokable) -> AtomicInvokable:
+        """Validate one configured branch is an AtomicInvokable."""
+        if not isinstance(branch, AtomicInvokable):
+            raise TypeError(
+                f"ParallelFlow branches must be AtomicInvokable, got {type(branch)!r}"
+            )
+        return branch
 
     @staticmethod
     def _resolve_output_indices(
@@ -221,7 +217,7 @@ class ParallelFlow(Workflow):
         cls,
         *,
         branch_count: int,
-        branches: tuple[Workflow, ...],
+        branches: tuple[AtomicInvokable, ...],
         output_type: str,
         output_indices: list[int] | None,
         output_range: tuple[int, int] | None,
@@ -298,57 +294,6 @@ class ParallelFlow(Workflow):
         return dict(zip(self._output_names, payloads))
 
     # ------------------------------------------------------------------ #
-    # Run-oriented retrieval
-    # ------------------------------------------------------------------ #
-    def get_branch_results(self, run_id: str) -> Optional[list[Any]]:
-        """Return all child branch result objects for one parallel run.
-
-        Returns
-        -------
-        Optional[list[Any]]
-            - ``None`` if the parent parallel run is not found
-            - otherwise, one entry per configured branch, in order
-            - each entry is the branch's result object (an ``AtomicResult``-family
-              instance, ``child_checkpoint.result``), or ``None`` if that
-              branch's run id no longer resolves to a retained child checkpoint
-        """
-        checkpoint = self.get_checkpoint(run_id)
-        if checkpoint is None:
-            return None
-
-        results: list[Any] = []
-        for branch, branch_run_id in zip(self._branches, checkpoint.result.branch_runs):
-            child_checkpoint = branch.get_checkpoint(branch_run_id)
-            results.append(child_checkpoint.result if child_checkpoint else None)
-
-        return results
-
-    def get_branch_result(self, run_id: str, branch_index: int) -> Optional[Any]:
-        """Return one child branch's result object for one parallel run.
-
-        Raises
-        ------
-        TypeError
-            If ``branch_index`` is not an int.
-        IndexError
-            If ``branch_index`` is out of range for the configured branches.
-            There is no negative-index wraparound.
-        """
-        if not isinstance(branch_index, int):
-            raise TypeError(f"branch_index must be an int, got {type(branch_index)!r}")
-
-        if not (0 <= branch_index < len(self._branches)):
-            raise IndexError(
-                f"branch_index {branch_index} out of range for {len(self._branches)} configured branch(es)"
-            )
-
-        results = self.get_branch_results(run_id)
-        if results is None:
-            return None
-
-        return results[branch_index]
-
-    # ------------------------------------------------------------------ #
     # Result construction
     # ------------------------------------------------------------------ #
     def make_result(
@@ -374,7 +319,7 @@ class ParallelFlow(Workflow):
         """Synchronously execute all configured branches concurrently."""
         branch_inputs = [dict(inputs) for _ in self._branches]
 
-        def run_one(item: tuple[int, Workflow, dict[str, Any]]) -> WorkflowResult:
+        def run_one(item: tuple[int, AtomicInvokable, dict[str, Any]]) -> WorkflowResult:
             index, branch, branch_input = item
             try:
                 return branch.invoke(branch_input)
@@ -400,7 +345,7 @@ class ParallelFlow(Workflow):
         """Asynchronously execute all configured branches concurrently."""
         branch_inputs = [dict(inputs) for _ in self._branches]
 
-        async def run_one(index: int, branch: Workflow, branch_input: dict[str, Any]) -> WorkflowResult:
+        async def run_one(index: int, branch: AtomicInvokable, branch_input: dict[str, Any]) -> WorkflowResult:
             try:
                 return await branch.async_invoke(branch_input)
             except Exception as exc:

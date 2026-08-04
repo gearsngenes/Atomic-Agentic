@@ -8,12 +8,9 @@ from typing import Any, Optional
 from ..constants.core import NO_VAL
 from ..exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
-from ..models.results.workflows import IterativeFlowResult, WorkflowResult
+from ..models.results.workflows import IterativeFlowResult
 from .base import Workflow
-from .basic import BasicFlow
 from .sequential import SequentialFlow
-
-from .tools import create_fallback_judge_tool
 
 logger = logging.getLogger(__name__)
 
@@ -32,19 +29,18 @@ class IterativeFlow(Workflow):
 
     Construction contract
     ----------------------
-    - ``body_steps`` must be a non-empty ``list[Workflow | AtomicInvokable]``.
+    - ``body_steps`` must be a non-empty ``list[AtomicInvokable]``.
     - The body is always normalized inline into a private ``SequentialFlow``.
     - The normalized loop body topology is fixed at construction.
     - The normalized loop body is exposed read-only via :attr:`loop_body`.
     - ``judge`` accepts any ``AtomicInvokable`` or ``None``:
-        - If ``None``, the shared fallback judge (always returns ``False``)
-          is installed, and ``approval_value`` must be left as ``NO_VAL``
-          (raises ``ValueError`` if a value is provided).
-        - Otherwise, the judge is normalized ``_normalize_branch``-style:
-          ``Workflow`` instances are kept as-is, other ``AtomicInvokable``
-          instances are wrapped once in ``BasicFlow``. In this case
-          ``approval_value`` must be provided (raises ``ValueError`` if it
-          is left as ``NO_VAL``).
+        - If ``None``, no judge is invoked at all; the loop always runs
+          every configured iteration to ``max_iterations``.
+          ``approval_value`` must be left as ``NO_VAL`` (raises
+          ``ValueError`` if a value is provided).
+        - Otherwise, the judge is validated as an ``AtomicInvokable`` and
+          stored as configured, no wrapping. ``approval_value`` must be
+          provided (raises ``ValueError`` if it is left as ``NO_VAL``).
     - ``approval_value`` is fixed at construction (read-only thereafter).
     - ``return_index``, ``handoff_index``, ``evaluate_index`` each default to
       the last body step when ``None``. Explicit values support normal
@@ -53,11 +49,13 @@ class IterativeFlow(Workflow):
 
     Judge contract
     --------------
-    At runtime, the normalized judge is invoked with the mapping-shaped
-    result of the configured ``evaluate_index`` body step. The loop exits
-    early once ``judge_result.result == approval_value``. Any value may be
-    used for ``approval_value`` as long as it supports ``==`` against the
-    judge's unwrapped result.
+    At runtime, when a judge is configured, it is invoked with the
+    mapping-shaped result of the configured ``evaluate_index`` body step.
+    The loop exits early once ``judge_result.result == approval_value``. Any
+    value may be used for ``approval_value`` as long as it supports ``==``
+    against the judge's unwrapped result. When no judge is configured, this
+    step is skipped entirely every iteration and the loop always runs to
+    ``max_iterations``.
 
     Loop semantics
     --------------
@@ -87,11 +85,6 @@ class IterativeFlow(Workflow):
     See ``IterativeFlowResult`` for per-run fields (``iteration_runs``,
     ``judge_runs``, ``return_step_index``, ``handoff_step_index``,
     ``evaluate_step_index``, ``max_iterations``).
-
-    Retrieval helpers
-    ------------------
-    - ``get_iteration_results(run_id)`` resolves, for each completed
-      iteration, the ``(body_result, judge_result)`` pair of result objects.
     """
 
     def __init__(
@@ -99,7 +92,7 @@ class IterativeFlow(Workflow):
         name: str,
         namespace: str,
         description: str,
-        body_steps: list[Workflow | AtomicInvokable],
+        body_steps: list[AtomicInvokable],
         judge: AtomicInvokable | None = None,
         max_iterations: int = 1,
         *,
@@ -120,10 +113,10 @@ class IterativeFlow(Workflow):
             Non-empty list of workflow-shaped or structured steps that will be
             normalized into the private sequential loop body.
         judge:
-            Optional judge invokable. Passing ``None`` installs the shared
-            fallback always-false judge, causing the loop to continue until
-            ``max_iterations`` is exhausted (``approval_value`` must be left
-            as ``NO_VAL`` in that case).
+            Optional judge invokable. Passing ``None`` means no judge is
+            invoked at all; the loop always runs every configured iteration
+            to ``max_iterations`` (``approval_value`` must be left as
+            ``NO_VAL`` in that case).
         max_iterations:
             Maximum number of body iterations to execute per run. Must be > 0.
         return_index:
@@ -144,7 +137,7 @@ class IterativeFlow(Workflow):
         """
         if not isinstance(body_steps, list):
             raise TypeError(
-                f"body_steps must be a list[Workflow | AtomicInvokable], got {type(body_steps)!r}"
+                f"body_steps must be a list[AtomicInvokable], got {type(body_steps)!r}"
             )
         if not body_steps:
             raise ValueError("body_steps must not be empty")
@@ -152,7 +145,7 @@ class IterativeFlow(Workflow):
         for index, step in enumerate(body_steps):
             if not isinstance(step, AtomicInvokable):
                 raise TypeError(
-                    "body_steps items must be Workflow or AtomicInvokable, "
+                    "body_steps items must be AtomicInvokable, "
                     f"got {type(step)!r} at index {index}"
                 )
 
@@ -183,15 +176,14 @@ class IterativeFlow(Workflow):
                     f"{name}: approval_value must be NO_VAL when judge is None; "
                     f"got {approval_value!r}"
                 )
-            resolved_judge: AtomicInvokable = create_fallback_judge_tool()
+            self._judge: AtomicInvokable | None = None
         else:
             if approval_value is NO_VAL:
                 raise ValueError(
                     f"{name}: approval_value must be provided when an explicit judge is given"
                 )
-            resolved_judge = judge
+            self._judge = self._normalize_judge(judge)
 
-        self._judge = self._normalize_judge(resolved_judge)
         self._approval_value = approval_value
 
         super().__init__(
@@ -211,8 +203,8 @@ class IterativeFlow(Workflow):
         return self._loop_body
 
     @property
-    def judge(self) -> Workflow:
-        """The fixed normalized judge."""
+    def judge(self) -> AtomicInvokable | None:
+        """The fixed configured judge, or None if no judge was provided."""
         return self._judge
 
     @property
@@ -280,49 +272,13 @@ class IterativeFlow(Workflow):
         return resolved
 
     @staticmethod
-    def _normalize_judge(judge: AtomicInvokable) -> Workflow:
-        """Normalize the configured judge into a workflow-shaped node."""
-        if isinstance(judge, Workflow):
-            return judge
-        if isinstance(judge, AtomicInvokable):
-            return BasicFlow(component=judge)
-        raise TypeError(
-            f"IterativeFlow judge must be Workflow or AtomicInvokable, got {type(judge)!r}"
-        )
-
-    # ------------------------------------------------------------------ #
-    # Run-oriented retrieval
-    # ------------------------------------------------------------------ #
-    def get_iteration_results(
-        self, run_id: str
-    ) -> Optional[list[tuple[Optional[WorkflowResult], Optional[WorkflowResult]]]]:
-        """Return ``(body_result, judge_result)`` pairs for one iterative run.
-
-        Returns
-        -------
-        Optional[list[tuple[Optional[WorkflowResult], Optional[WorkflowResult]]]]
-            - ``None`` if the parent iterative run is not found
-            - otherwise, one ``(body_result, judge_result)`` tuple per
-              completed iteration, in iteration order
-            - either element of a tuple is ``None`` if the corresponding
-              child run id no longer resolves to a retained checkpoint
-        """
-        checkpoint = self.get_checkpoint(run_id)
-        if checkpoint is None:
-            return None
-
-        pairs: list[tuple[Optional[WorkflowResult], Optional[WorkflowResult]]] = []
-        for body_run_id, judge_run_id in zip(
-            checkpoint.result.iteration_runs, checkpoint.result.judge_runs
-        ):
-            body_checkpoint = self._loop_body.get_checkpoint(body_run_id)
-            judge_checkpoint = self._judge.get_checkpoint(judge_run_id)
-            pairs.append((
-                body_checkpoint.result if body_checkpoint else None,
-                judge_checkpoint.result if judge_checkpoint else None,
-            ))
-
-        return pairs
+    def _normalize_judge(judge: AtomicInvokable) -> AtomicInvokable:
+        """Validate the configured judge is an AtomicInvokable."""
+        if not isinstance(judge, AtomicInvokable):
+            raise TypeError(
+                f"IterativeFlow judge must be AtomicInvokable, got {type(judge)!r}"
+            )
+        return judge
 
     # ------------------------------------------------------------------ #
     # Result construction
@@ -368,10 +324,6 @@ class IterativeFlow(Workflow):
                     f"must be mapping-shaped, got {type(evaluate_payload)!r}"
                 )
 
-            logger.info("%s: invoking judge for iteration %d", self.full_name, iteration)
-            judge_result = self._judge.invoke(evaluate_payload)
-            judge_runs.append(judge_result.run_id)
-
             handoff_payload = self._loop_body.get_step_result(
                 body_result.run_id, self._handoff_step_index
             ).result
@@ -381,7 +333,14 @@ class IterativeFlow(Workflow):
                     f"must be mapping-shaped, got {type(handoff_payload)!r}"
                 )
 
-            if judge_result.result == self._approval_value:
+            approved = False
+            if self._judge is not None:
+                logger.info("%s: invoking judge for iteration %d", self.full_name, iteration)
+                judge_result = self._judge.invoke(evaluate_payload)
+                judge_runs.append(judge_result.run_id)
+                approved = judge_result.result == self._approval_value
+
+            if approved:
                 break
 
             current_inputs = handoff_payload
@@ -417,10 +376,6 @@ class IterativeFlow(Workflow):
                     f"must be mapping-shaped, got {type(evaluate_payload)!r}"
                 )
 
-            logger.info("[Async %s]: invoking judge for iteration %d", self.full_name, iteration)
-            judge_result = await self._judge.async_invoke(evaluate_payload)
-            judge_runs.append(judge_result.run_id)
-
             handoff_payload = self._loop_body.get_step_result(
                 body_result.run_id, self._handoff_step_index
             ).result
@@ -430,7 +385,14 @@ class IterativeFlow(Workflow):
                     f"must be mapping-shaped, got {type(handoff_payload)!r}"
                 )
 
-            if judge_result.result == self._approval_value:
+            approved = False
+            if self._judge is not None:
+                logger.info("[Async %s]: invoking judge for iteration %d", self.full_name, iteration)
+                judge_result = await self._judge.async_invoke(evaluate_payload)
+                judge_runs.append(judge_result.run_id)
+                approved = judge_result.result == self._approval_value
+
+            if approved:
                 break
 
             current_inputs = handoff_payload
@@ -453,7 +415,7 @@ class IterativeFlow(Workflow):
         data.update(
             {
                 "loop_body": self.loop_body.to_dict(),
-                "judge": self._judge.to_dict(),
+                "judge": self._judge.to_dict() if self._judge is not None else None,
                 "max_iterations": self._max_iterations,
                 "return_index": self.return_index,
                 "handoff_index": self._handoff_step_index,

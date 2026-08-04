@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Hashable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .atomic import AtomicResult
 
 __all__ = [
     "WorkflowResult",
-    "BasicFlowResult",
     "SequentialFlowResult",
     "RoutingFlowResult",
     "IterativeFlowResult",
@@ -21,33 +20,19 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class WorkflowResult(AtomicResult):
-    """Base successful Workflow invocation result."""
-
-
-@dataclass(frozen=True, slots=True)
-class BasicFlowResult(WorkflowResult):
-    """Result for a BasicFlow run.
-
-    ``result`` holds the unwrapped child payload (``child_result.result``),
-    not the child's AtomicResult envelope.
+    """Base successful Workflow invocation result.
 
     Fields
     ------
-    child_id:
-        ``child_result.invoker_id`` — instance identifier of the wrapped
-        component that executed.
-    child_type:
-        ``type(component).__name__`` — the wrapped component's class name.
-    child_run_id:
-        ``child_result.run_id`` — run identifier of the wrapped component's
-        invocation, usable to correlate against the component's own history
-        (e.g. ``Agent._history`` or a child ``Workflow``'s checkpoints), when
-        the component retains one.
+    trace:
+        Full ordered tuple of this invocation's child ``AtomicResult``
+        objects, populated by the executing subclass's own ``_run``/
+        ``_async_run`` when ``include_trace`` is enabled. ``None`` when
+        trace collection is disabled, or when the executing subclass has
+        not yet been updated to populate it.
     """
 
-    child_id: str
-    child_type: str
-    child_run_id: str
+    trace: tuple[AtomicResult, ...] | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)

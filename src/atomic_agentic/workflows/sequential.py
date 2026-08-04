@@ -7,9 +7,8 @@ from typing import Any, Optional
 
 from ..exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
-from ..models.results.workflows import SequentialFlowResult, WorkflowResult
+from ..models.results.workflows import SequentialFlowResult
 from .base import Workflow
-from .basic import BasicFlow
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +18,11 @@ __all__ = ["SequentialFlow"]
 class SequentialFlow(Workflow):
     """Execute a fixed ordered sequence of workflow-shaped steps.
 
-    Step normalization
-    ------------------
-    - Existing ``Workflow`` instances are kept as-is.
-    - Non-workflow ``AtomicInvokable`` instances are wrapped once in ``BasicFlow``.
-
     Construction contract
     ---------------------
-    - ``steps`` must be a non-empty ``list[Workflow | AtomicInvokable]``.
+    - ``steps`` must be a non-empty ``list[AtomicInvokable]`` — any
+      invokable, ``Workflow`` or not, stored exactly as configured with no
+      wrapping.
     - The topology is fixed at construction.
     - The configured step instances are fixed at construction.
     - No post-construction step mutation API is provided.
@@ -58,14 +54,6 @@ class SequentialFlow(Workflow):
     - ``return_index``:
         The fixed step index whose result became the outer result payload.
 
-    Retrieval helpers
-    -----------------
-    - ``get_step_results(run_id)`` resolves each step's result object (an
-      ``AtomicResult``-family instance) for a parent sequential run, returning
-      ``list[Any | None]``, or ``None`` if the parent run is not found.
-    - ``get_step_result(run_id, step_index)`` is a convenience wrapper over
-      ``get_step_results(run_id)``.
-
     Notes
     -----
     This class enforces *fixed sequence topology*, but this is still only
@@ -78,13 +66,13 @@ class SequentialFlow(Workflow):
         name: str,
         namespace: str,
         description: str,
-        steps: list[Workflow | AtomicInvokable],
+        steps: list[AtomicInvokable],
         *,
         return_index: Optional[int] = None,
     ) -> None:
         if not isinstance(steps, list):
             raise TypeError(
-                f"steps must be a non-empty list[Workflow | AtomicInvokable], got {type(steps)!r}"
+                f"steps must be a non-empty list[AtomicInvokable], got {type(steps)!r}"
             )
         if not steps:
             raise ValueError("steps must not be empty")
@@ -113,14 +101,14 @@ class SequentialFlow(Workflow):
             return_type=normalized_steps[resolved_return_index].return_type,
         )
 
-        self._steps: tuple[Workflow, ...] = normalized_steps
+        self._steps: tuple[AtomicInvokable, ...] = normalized_steps
         self._return_index: int = resolved_return_index
 
     # ------------------------------------------------------------------ #
     # Properties
     # ------------------------------------------------------------------ #
     @property
-    def steps(self) -> tuple[Workflow, ...]:
+    def steps(self) -> tuple[AtomicInvokable, ...]:
         """Return the fixed normalized step tuple."""
         return self._steps
 
@@ -142,84 +130,13 @@ class SequentialFlow(Workflow):
     # Internal helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _normalize_step(step: Workflow | AtomicInvokable) -> Workflow:
-        """Normalize one configured step into a workflow-shaped step."""
-        if isinstance(step, Workflow):
-            return step
-        if isinstance(step, AtomicInvokable):
-            return BasicFlow(component=step)
-        raise TypeError(
-            "SequentialFlow steps must be Workflow or AtomicInvokable, "
-            f"got {type(step)!r}"
-        )
-
-    def _resolve_step_index(self, index: int) -> int:
-        """Resolve a configured step index using normal Python negative indexing."""
-        if not isinstance(index, int):
-            raise TypeError(f"step index must be an int, got {type(index)!r}")
-
-        length = len(self._steps)
-        resolved = index if index >= 0 else length + index
-        if resolved < 0 or resolved >= length:
-            raise IndexError(
-                f"step index {index} out of range for {length} configured step(s)"
+    def _normalize_step(step: AtomicInvokable) -> AtomicInvokable:
+        """Validate one configured step is an AtomicInvokable."""
+        if not isinstance(step, AtomicInvokable):
+            raise TypeError(
+                f"SequentialFlow steps must be AtomicInvokable, got {type(step)!r}"
             )
-        return resolved
-
-    # ------------------------------------------------------------------ #
-    # Run-oriented retrieval
-    # ------------------------------------------------------------------ #
-    def get_step_results(self, run_id: str) -> Optional[list[WorkflowResult]]:
-        """Return all child step result objects for one sequential run.
-
-        Returns
-        -------
-        Optional[list[WorkflowResult]]
-            - ``None`` if the parent sequential run is not found
-            - otherwise, one entry per configured step, in order
-            - each entry is the step's result object (an ``AtomicResult``-family
-              instance, ``child_checkpoint.result``), or ``None`` if that
-              step's run id no longer resolves to a retained child checkpoint
-        """
-        checkpoint = self.get_checkpoint(run_id)
-        if checkpoint is None:
-            return None
-
-        results: list[Any] = []
-        for step, step_run_id in zip(self._steps, checkpoint.result.step_runs):
-            child_checkpoint = step.get_checkpoint(step_run_id)
-            results.append(child_checkpoint.result if child_checkpoint else None)
-
-        return results
-
-    def get_step_result(self, run_id: str, step_index: int) -> Optional[WorkflowResult]:
-        """Return one child step's result object for one sequential run.
-
-        This method uses :meth:`get_step_results` as its source of truth.
-
-        Returns
-        -------
-        Optional[Any]
-            - ``None`` if the parent sequential run is not found
-            - the resolved child step's result object (an ``AtomicResult``-family
-              instance)
-            - ``None`` if the child checkpoint for that recorded step run id is
-              no longer available
-
-        Raises
-        ------
-        TypeError
-            If ``step_index`` is not an int.
-        IndexError
-            If ``step_index`` is out of range for the configured steps.
-        """
-        resolved_index = self._resolve_step_index(step_index)
-
-        results = self.get_step_results(run_id)
-        if results is None:
-            return None
-
-        return results[resolved_index]
+        return step
 
     # ------------------------------------------------------------------ #
     # Result construction
