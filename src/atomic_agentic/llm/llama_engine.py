@@ -105,7 +105,6 @@ class LlamaCppEngine(LLMEngine):
             local_dir: str | None = None,
             local_files_only: bool = False,
             # ── Base engine config ────────────────────────────────────────────────
-            filter_extraneous_inputs: bool = True,
             timeout_seconds: float = 30.0,
             max_retries: int = 2,
             retry_backoff_base: float = 0.5,
@@ -146,7 +145,7 @@ class LlamaCppEngine(LLMEngine):
             Optional local directory where the model file is materialized.
         local_files_only:
             If True, resolve only from local cache; do not download.
-        filter_extraneous_inputs, timeout_seconds, max_retries,
+        timeout_seconds, max_retries,
         retry_backoff_base, retry_backoff_max:
             Shared ``LLMEngine`` configuration.
         **llama_kwargs:
@@ -162,7 +161,6 @@ class LlamaCppEngine(LLMEngine):
             name=sanitized_name,
             namespace=namespace,
             description=description or "Llama.cpp LLM Engine",
-            filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,

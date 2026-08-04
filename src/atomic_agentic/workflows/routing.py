@@ -44,7 +44,6 @@ class RoutingFlow(Workflow):
       router is the first node invoked, so its contract is the natural
       ground truth for the outer workflow). An explicit override may be
       provided when branches require inputs beyond the router's contract.
-    - ``filter_extraneous_inputs`` defaults to ``True``.
     - ``return_type`` is the shared branch return type if all branches agree,
       otherwise a ``" | "``-joined union of each unique branch return type,
       in branch order.
@@ -78,7 +77,6 @@ class RoutingFlow(Workflow):
         router: Workflow | AtomicInvokable,
         *,
         parameters: type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec] | None = None,
-        filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         # Topology is fixed at construction: list/tuple branches are selected
         # by int index, dict branches are selected by key. Both are
@@ -111,10 +109,6 @@ class RoutingFlow(Workflow):
             declared_parameters = to_paramspec_list(parameters)
             _validate_parameter_order(declared_parameters)
 
-        resolved_filter = (
-            filter_extraneous_inputs if filter_extraneous_inputs is not None else True
-        )
-
         # return_type reflects every branch that could be selected at runtime:
         # the shared type if all branches agree, otherwise a "|"-joined union
         # of each unique branch return type, in branch order.
@@ -136,7 +130,6 @@ class RoutingFlow(Workflow):
             description=description,
             parameters=list(declared_parameters),
             return_type=resolved_return_type,
-            filter_extraneous_inputs=resolved_filter,
         )
 
         self._branches: tuple[Workflow, ...] | dict[Hashable, Workflow] = normalized_branches

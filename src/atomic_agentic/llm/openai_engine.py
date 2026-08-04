@@ -101,7 +101,6 @@ class OpenAIEngine(LLMEngine):
             truncation: str | None = None,
             inline_cutoff_chars: int = 200_000,
             *,
-            filter_extraneous_inputs: bool = True,
             timeout_seconds: float = 600.0,
             max_retries: int = 2,
             retry_backoff_base: float = 0.5,
@@ -138,8 +137,6 @@ class OpenAIEngine(LLMEngine):
             Optional truncation strategy string (e.g. ``"auto"``).
         inline_cutoff_chars:
             Maximum characters to inline from text/code attachments.
-        filter_extraneous_inputs:
-            Whether to silently drop inputs not declared in the engine's schema.
         timeout_seconds:
             Per-call timeout inserted into the client's ``timeout`` option via
             ``setdefault`` (user-supplied ``timeout`` in ``client_kwargs`` wins).
@@ -160,7 +157,6 @@ class OpenAIEngine(LLMEngine):
             name=sanitized_name,
             namespace=namespace,
             description=description or "OpenAI LLM Engine",
-            filter_extraneous_inputs=filter_extraneous_inputs,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             retry_backoff_base=retry_backoff_base,

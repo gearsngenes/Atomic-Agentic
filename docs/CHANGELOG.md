@@ -5,6 +5,104 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a25] - 2026-08-04
+
+Cleanup release: four independent, low-risk tracks bundled into one pass
+(not a single signature feature the way a24 was).
+
+### Added
+
+- `AtomicInvokable.__call__`/`async_call` gain `return_atomic_result_object:
+  bool = False` — a keyword-only opt-in for the full `AtomicResult` envelope;
+  guarded at construction time against colliding with a declared parameter
+  name.
+- `tests/fake_engines.py` — canonical `FakeLLMEngine` (dual response mode:
+  dynamic `response_fn` or static `responses` list, with a friendly
+  exhaustion error) plus an `echo_latest_user(prefix=...)` helper,
+  consolidating 5 independently-duplicated fake-LLM-engine fixtures
+  scattered across `tests/`. Includes a real `_call_provider_async`
+  override — none of the prior fixtures supported scripted async responses.
+  Test-only; not exported from `src/`.
+
+### Changed
+
+- breaking: `AtomicInvokable.__call__`/`async_call` now return the
+  unwrapped `.result` payload by default instead of the full `AtomicResult`
+  envelope — pass `return_atomic_result_object=True` to get the envelope
+  back.
+- `AtomicInvokable.__name__`/`__doc__` are now kept in sync with
+  `.name`/`.description` (refreshed on every `description` mutation, not
+  just at construction), letting `Tool` treat any `AtomicInvokable` as an
+  already-well-behaved plain callable with no special-case branch — except
+  one narrow, deliberate exception: `Tool.async_execute` dispatches through
+  `async_call` for an `AtomicInvokable` target, so the real async path is
+  awaited instead of silently thread-offloading the sync `__call__`.
+- `extract_io` relocated from `utils/parameters.py` to new
+  `core/core_api.py` (resolves a real circular-import constraint — `utils`
+  sits below `core` in the layered dependency topology) and gained a direct
+  `AtomicInvokable` branch that reuses declared `parameters`/`return_type`
+  instead of falling back to signature introspection. Remains a public root
+  export.
+- `toolify()` / `ToolAgent.register()` / `batch_register()`: wrapping an
+  existing `AtomicInvokable` (`Tool` subclasses included) with identity
+  overrides is now delegation-by-reference — a new `Tool` that calls the
+  original's real `.invoke()`/`__call__` under the hood, never mutating the
+  original — instead of raising `ToolRegistrationError`.
+- breaking: `filter_extraneous_inputs: bool` removed as a constructor
+  parameter across every `AtomicInvokable` subclass (`Tool`, `MCPProxyTool`,
+  `PyA2AtomicTool`, every `Workflow` kind, every `Agent` kind, every
+  `LLMEngine` adapter) — `invoke()`/`async_invoke()` now always silently
+  drop unrecognized input keys; there is no longer a way to opt into a
+  hard-reject `TypeError` on extras via that path. (`__call__`/`async_call`'s
+  own keyword-argument binding was already unconditionally strict,
+  independent of this flag, and required no change.)
+- `Command`'s runtime-input handling softened: caller-supplied inputs to
+  `invoke()`/`async_invoke()` are now silently ignored (never merged into
+  `fixed_inputs`) instead of raising `TypeError`.
+- `toolify()`/`batch_toolify()` and `ToolAgent.register()`/`batch_register()`
+  drop their own `filter_extraneous_inputs`/`batch_filter_inputs` override
+  parameters.
+- A2A wire protocol: `PyA2AtomicHost` no longer emits
+  `filter_extraneous_inputs` in remote invokable metadata;
+  `PyA2AtomicClient.get_invokable_metadata()` no longer requires it as a
+  response key. MCP unaffected (never referenced it).
+
+### Fixed
+
+- `MCPProxyTool.execute()` / `PyA2AtomicTool.execute()` now wrap their
+  transport call in the same `try/except -> ToolInvocationError` handling
+  their `async_execute()` overrides already had — a sync/async
+  exception-parity gap identified during the a24 hygiene audit, dormant for
+  every internal `ToolAgent` call path (always dispatches via
+  `async_invoke`) but real for any caller invoking one of these proxy tools
+  directly.
+- `Tool._extra_description()` — restored the override (lost during the
+  `AtomicInvokable`-as-plain-callable rework) that chains into a wrapped
+  `AtomicInvokable`'s own `_extra_description()`. Wrapping a
+  `Workflow`/`Command`/`StructuredInvokable` in a `Tool` — directly, via
+  `toolify()`, or via `register(name=..., description=...)` — was silently
+  dropping that descriptive text (e.g. "Output schema: [...]") from both
+  `.description` and A2A metadata. Found by a post-implementation
+  code-integrity audit, not by the test suite: the regression test that
+  would have caught it was deleted rather than adapted during the rework.
+- Stale docstrings/comments describing the removed `filter_extraneous_inputs`
+  dual-mode behavior (`core/Invokable.py`'s `filter_inputs()` docstring,
+  `tools/Toolify.py`'s existing-Tool route comment).
+- `examples/Agent_Examples/03_Schema_Test.py`'s "STRICT vs PERMISSIVE"
+  narrative — this file never referenced `filter_extraneous_inputs` directly
+  so it was invisible to the grep-based casualty sweep, but its premise
+  (unknown keys raise on the "strict" tool) broke once filtering became
+  unconditional; rewritten to describe the real distinction (required
+  keyword-only params with no `**kwargs` sink vs. a permissive `**kwargs`
+  catch-all).
+- `examples/Invokable_Examples/02_Command.py`: a pre-existing bug where
+  `multiply_6_by_7()`'s `__call__` result — now unwrapped by default per
+  this release's own `__call__` change — was still accessed via `.result`.
+
+### Removed
+
+- `AtomicInvokable.filter_extraneous_inputs` property/setter.
+
 ## [2.0.0a24] - 2026-08-02
 
 ### Added

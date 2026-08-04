@@ -26,7 +26,6 @@ class EchoWorkflow(Workflow):
         name: str = "echo_workflow",
         namespace: str = "tests",
         description: str = "Echo workflow.",
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name,
@@ -41,7 +40,6 @@ class EchoWorkflow(Workflow):
                 )
             ],
             return_type="dict[str, Any]",
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -68,14 +66,12 @@ def make_structured_component(
     *,
     name: str,
     output_schema: list[str],
-    filter_extraneous_inputs: bool = True,
 ) -> StructuredInvokable:
     tool = Tool(
         function=function,
         name=name,
         namespace="tests",
         description=f"Test tool {name}.",
-        filter_extraneous_inputs=filter_extraneous_inputs,
     )
     return StructuredInvokable(
         component=tool,

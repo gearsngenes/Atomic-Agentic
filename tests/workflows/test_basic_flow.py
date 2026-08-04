@@ -29,16 +29,12 @@ def return_scalar(value: Any) -> Any:
     return value
 
 
-def make_structured_component(
-    *,
-    filter_extraneous_inputs: bool = True,
-) -> StructuredInvokable:
+def make_structured_component() -> StructuredInvokable:
     tool = Tool(
         function=return_scalar,
         name="return_scalar",
         namespace="tests",
         description="Return raw scalar.",
-        filter_extraneous_inputs=filter_extraneous_inputs,
     )
     return StructuredInvokable(
         component=tool,
@@ -57,7 +53,6 @@ class EchoWorkflow(Workflow):
         name: str = "echo_workflow",
         namespace: str = "tests",
         description: str = "Echo workflow.",
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name,
@@ -65,7 +60,6 @@ class EchoWorkflow(Workflow):
             description=description,
             parameters=[make_value_param()],
             return_type="dict[str, Any]",
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -95,29 +89,26 @@ class TestBasicFlowConstruction:
         with pytest.raises(TypeError, match="AtomicInvokable"):
             BasicFlow(component=object())  # type: ignore[arg-type]
 
-    def test_inherits_component_metadata_and_filter_flag_by_default(self) -> None:
-        component = EchoWorkflow(filter_extraneous_inputs=False)
+    def test_inherits_component_metadata_by_default(self) -> None:
+        component = EchoWorkflow()
 
         flow = BasicFlow(component=component)
 
         assert flow.name == "echo_workflow"
         assert flow.description == "Echo workflow."
         assert flow.parameters == component.parameters
-        assert flow.filter_extraneous_inputs is False
 
-    def test_explicit_name_description_and_filter_override_component(self) -> None:
-        component = EchoWorkflow(filter_extraneous_inputs=False)
+    def test_explicit_name_and_description_override_component(self) -> None:
+        component = EchoWorkflow()
 
         flow = BasicFlow(
             component=component,
             name="wrapped_echo",
             description="Wrapped echo.",
-            filter_extraneous_inputs=True,
         )
 
         assert flow.name == "wrapped_echo"
         assert flow.description == "Wrapped echo."
-        assert flow.filter_extraneous_inputs is True
 
 
 class TestBasicFlowExtraDescription:

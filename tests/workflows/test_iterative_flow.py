@@ -37,7 +37,6 @@ class CounterStepWorkflow(Workflow):
             description="Increment count by 1.",
             parameters=[make_count_param()],
             return_type="dict[str, Any]",
-            filter_extraneous_inputs=True,
         )
 
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -54,7 +53,6 @@ class ScalarStepWorkflow(Workflow):
             description="Return count as a raw scalar.",
             parameters=[make_count_param()],
             return_type="int",
-            filter_extraneous_inputs=True,
         )
 
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:

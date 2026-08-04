@@ -97,7 +97,6 @@ class AtomicInvokable(ABC):
         description: str,
         parameters: list[ParamSpec],
         return_type: str,
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("name must be a non-empty string")
@@ -106,6 +105,7 @@ class AtomicInvokable(ABC):
                 f"name must be alphanumeric/underscore and not start with a digit; got {name!r}"
             )
         self._name = name
+        self.__name__ = self._name
         self.description = description
 
         # Validate and store namespace — same identifier rules as name.
@@ -143,6 +143,12 @@ class AtomicInvokable(ABC):
                 raise ValueError(
                     f"{type(self).__name__}: parameter name {p.name!r} is not a valid identifier"
                 )
+            if p.name == "return_atomic_result_object":
+                raise TypeError(
+                    f"{type(self).__name__}: parameter name 'return_atomic_result_object' is "
+                    "reserved for the __call__/async_call convenience API and cannot be used "
+                    "as a declared parameter name."
+                )
 
         # Validate indices are consistent with list position
         for i, p in enumerate(parameters):
@@ -162,7 +168,6 @@ class AtomicInvokable(ABC):
 
         self._parameters: list[ParamSpec] = parameters
         self._return_type: str = return_type
-        self.filter_extraneous_inputs = filter_extraneous_inputs
         self._invoke_lock = threading.RLock()
         # unique identifier for this invokable instance
         self._instance_id = str(uuid4())
@@ -209,6 +214,7 @@ class AtomicInvokable(ABC):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("description must be a non-empty string")
         self._description = value.strip()
+        self.__doc__ = self._description
 
     def _extra_description(self) -> str:
         """
@@ -266,20 +272,6 @@ class AtomicInvokable(ABC):
     def return_type(self) -> str:
         """Payload return type stored inside ``AtomicResult.result``."""
         return self._return_type
-
-    @property
-    def filter_extraneous_inputs(self) -> bool:
-        """Whether to filter extraneous inputs not used by the component's parameters."""
-        return self._filter_extraneous_inputs
-    
-    @filter_extraneous_inputs.setter
-    def filter_extraneous_inputs(self, value: bool) -> None:
-        if not isinstance(value, bool):
-            raise TypeError(
-                f"{type(self).__name__}.filter_extraneous_inputs must be a bool, "
-                f"got {type(value)!r}"
-            )
-        self._filter_extraneous_inputs = value
 
     # ---------------------------------------------------------------- #
     # Secondary Access compatibility properties
@@ -405,8 +397,7 @@ class AtomicInvokable(ABC):
         - Explicit *args payloads must be list or tuple.
         - Explicit **kwargs payloads must be a Mapping.
         - Unknown keys are merged into the **kwargs payload when VAR_KEYWORD exists.
-        - Unknown keys are dropped when no VAR_KEYWORD exists and filtering is enabled.
-        - Unknown keys raise when no VAR_KEYWORD exists and filtering is disabled.
+        - Unknown keys are dropped when no VAR_KEYWORD exists.
         - Explicit **kwargs payload keys may not overlap with loose unknown input keys.
         """
         if not isinstance(inputs, Mapping):
@@ -476,10 +467,6 @@ class AtomicInvokable(ABC):
             merged = dict(explicit)
             merged.update(extras)
             filtered[varkwarg_name] = merged
-        elif extras and not self._filter_extraneous_inputs:
-            raise TypeError(
-                f"{self.full_name}: unexpected input key(s): {sorted(extras)!r}"
-            )
 
         return filtered
 
@@ -500,7 +487,6 @@ class AtomicInvokable(ABC):
             "description": self._description,
             "parameters": [spec.to_dict() for spec in self._parameters],
             "return_type": self.return_type,
-            "filter_extraneous_inputs": self._filter_extraneous_inputs,
         }
 
     # ---------------------------------------------------------------- #
@@ -530,29 +516,47 @@ class AtomicInvokable(ABC):
     # ---------------------------------------------------------------- #
     # callable contract
     # ---------------------------------------------------------------- #
-    def __call__(self, *args: Any, **kwargs: Any) -> AtomicResult:
+    def __call__(
+        self,
+        *args: Any,
+        return_atomic_result_object: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         """
         Allows the invokable to be called like a regular function.
 
         Check for varargs/kwargs parameters and construct the inputs dict
-        accordingly before invoking. The return value mirrors ``invoke(...)``:
-        an AtomicResult-family envelope whose ``.result`` field contains the
-        caller-facing payload.
+        accordingly before invoking. By default returns the unwrapped
+        caller-facing payload (``.result``), not the ``AtomicResult``
+        envelope — pass ``return_atomic_result_object=True`` to get the full
+        envelope back, matching ``invoke(...)``'s return shape.
+        ``return_atomic_result_object`` is consumed here directly and never
+        reaches ``invoke(...)``.
         """
         inputs = self._args_kwargs_to_dict(*args, **kwargs)
-        return self.invoke(inputs)
+        result = self.invoke(inputs)
+        if return_atomic_result_object:
+            return result
+        return self._unwrap_result_payload(result)
 
-    async def async_call(self, *args: Any, **kwargs: Any) -> AtomicResult:
+    async def async_call(
+        self,
+        *args: Any,
+        return_atomic_result_object: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         """
         Async analog of __call__.
 
         Bind normal call-style args/kwargs into the dict-first inputs shape,
-        then delegate to async_invoke(). The return value mirrors
-        ``async_invoke(...)``.
+        then delegate to async_invoke(). Same unwrap-by-default behavior as
+        __call__.
         """
         inputs = self._args_kwargs_to_dict(*args, **kwargs)
-
-        return await self.async_invoke(inputs)
+        result = await self.async_invoke(inputs)
+        if return_atomic_result_object:
+            return result
+        return self._unwrap_result_payload(result)
 
     @staticmethod
     def _unwrap_result_payload(value: Any) -> Any:
@@ -803,7 +807,7 @@ class Command(AtomicInvokable):
     - the fixed input mapping is validated through the executor's own
       `filter_inputs(...)` path and then shallow-copied;
     - the Command itself exposes no parameters;
-    - caller-provided runtime inputs are never accepted;
+    - caller-provided runtime inputs are silently ignored, never merged in;
     - invocation delegates to the wrapped executor with the fixed input mapping.
 
     This is useful when an invokable should be registered, stored, composed, or
@@ -858,7 +862,6 @@ class Command(AtomicInvokable):
             description=resolved_description,
             parameters=[],
             return_type=executor.return_type,
-            filter_extraneous_inputs=False,
         )
 
     # ---------------------------------------------------------------- #
@@ -946,9 +949,10 @@ class Command(AtomicInvokable):
         """
         Invoke the wrapped executor with this command's fixed input mapping.
 
-        Runtime inputs must be an empty mapping. The validation is routed through
-        `self.filter_inputs(inputs)` so errors remain consistent with the base
-        AtomicInvokable contract. The executor's returned AtomicResult is
+        Runtime inputs are silently ignored — `Command` declares no
+        parameters, so `self.filter_inputs(inputs)` always returns `{}` for
+        any caller input; that call still independently validates `inputs`
+        is a Mapping at all. The executor's returned AtomicResult is
         unwrapped — `executor_result.result` becomes this command's payload,
         and `executor_result.run_id` plus the executor's `instance_id` are
         carried forward for cross-envelope tracing.
@@ -957,8 +961,9 @@ class Command(AtomicInvokable):
             logger.info("[%s started]", self.full_name)
             started_at = datetime.now(timezone.utc)
 
-            self.filter_inputs(inputs)
-            executor_result = self.executor.invoke(dict(self._fixed_inputs))
+            filtered = self.filter_inputs(inputs)
+            filtered.update(self._fixed_inputs)
+            executor_result = self.executor.invoke(filtered)
 
             ended_at = datetime.now(timezone.utc)
             logger.info("[%s finished]", self.full_name)
@@ -980,10 +985,10 @@ class Command(AtomicInvokable):
         logger.info("[%s started]", self.full_name)
         started_at = datetime.now(timezone.utc)
 
-        self.filter_inputs(inputs)
-        fixed_inputs = dict(self._fixed_inputs)
+        filtered = self.filter_inputs(inputs)
+        filtered.update(self._fixed_inputs)
 
-        executor_result = await self.executor.async_invoke(fixed_inputs)
+        executor_result = await self.executor.async_invoke(filtered)
 
         ended_at = datetime.now(timezone.utc)
         logger.info("[%s finished]", self.full_name)
@@ -1062,7 +1067,6 @@ class StructuredInvokable(AtomicInvokable):
         default_absent_value: Any = None,
         none_is_absent: bool = False,
         coerce_to_collection: bool = False,
-        filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         """
         Parameters
@@ -1106,20 +1110,11 @@ class StructuredInvokable(AtomicInvokable):
         coerce_to_collection : bool
             When ``True``, object-like outputs may be coerced to a list/dict
             before field extraction. Defaults to ``False``.
-        filter_extraneous_inputs : bool | None
-            Input-filtering override for this wrapper. ``None`` (default)
-            inherits from the wrapped component.
         """
         if not isinstance(component, AtomicInvokable):
             raise TypeError(
                 f"component must be an AtomicInvokable, got {type(component)!r}"
             )
-
-        resolved_filter = (
-            filter_extraneous_inputs
-            if filter_extraneous_inputs is not None
-            else component.filter_extraneous_inputs
-        )
 
         # Store the wrapped component before any downstream property usage.
         self._component = component
@@ -1133,7 +1128,6 @@ class StructuredInvokable(AtomicInvokable):
             description=description or component._description,
             parameters=component.parameters,
             return_type="dict[str, Any]",
-            filter_extraneous_inputs=resolved_filter,
         )
 
         normalized_schema = to_paramspec_list(output_schema)

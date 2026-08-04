@@ -5,11 +5,13 @@ This script shows how to define a custom pre-invoke Tool that expects a specific
 input schema and converts that mapping into a single prompt string for the Agent.
 
 It includes:
-  1) A STRICT Tool (unknown top-level keys -> error).
-  2) A PERMISSIVE Tool (accepts extra keys via **kwargs pattern).
+  1) A REQUIRED-SCHEMA Tool (explicit keyword-only params, no **kwargs sink;
+     missing required keys raise, unrecognized keys are silently dropped).
+  2) A PERMISSIVE Tool (accepts any keys via **kwargs; known ones are read
+     with defaults, unrecognized ones are simply unused).
 
 Usage:
-  - Run as-is to use the STRICT tool.
+  - Run as-is to use the required-schema tool.
   - Set use_permissive=True in main() to try the permissive variant.
 """
 from atomic_agentic.agents import BasicAgent
@@ -20,7 +22,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --------------------------- STRICT schema Tool --------------------------- #
+# --------------------------- Required-schema Tool -------------------------- #
 def lesson_prompt_strict(
     *,
     grade_level: str,
@@ -32,10 +34,11 @@ def lesson_prompt_strict(
     tone: str = "practical",
 ) -> str:
     """
-    STRICT schema:
+    Required schema:
       Required keys: grade_level, subject, topic, objectives(list[str])
       Optional keys: duration_min(int, default 45), constraints(list[str], default []), tone(str, default 'practical')
-    Unknown top-level keys will raise (matches Tool's strict binding rules).
+    Missing required keys raise; unknown top-level keys are silently dropped
+    (there is no **kwargs sink here to collect them).
     Returns a single prompt string to feed the Agent/LLM.
     """
     constraints = constraints or []
@@ -66,7 +69,7 @@ def lesson_prompt_strict(
 strict_tool = Tool(
     function=lesson_prompt_strict,
     name="lesson_prompt_strict",
-    description="Strict schema: {grade_level, subject, topic, duration_min?, objectives[], constraints[]?, tone?} → prompt",
+    description="Required schema: {grade_level, subject, topic, duration_min?, objectives[], constraints[]?, tone?} → prompt",
 )
 
 
@@ -148,11 +151,12 @@ def main(use_permissive: bool = False) -> None:
             "No live electricity experiments",
         ],
         "tone": "hands-on",
-        # STRICT tool note:
-        #   Any unknown top-level key here would raise ToolInvocationError.
-        # PERMISSIVE tool note:
-        #   Unknown keys would be ignored.
-        # "extra_note": "This would break strict mode.",
+        # Required-schema tool note:
+        #   An unknown top-level key here would be silently dropped (no
+        #   **kwargs sink to collect it).
+        # Permissive tool note:
+        #   Unknown keys are accepted and simply unused.
+        # "extra_note": "This key would be dropped/unused either way.",
     }
 
     # 4) Invoke (the Tool converts the mapping into a prompt string)

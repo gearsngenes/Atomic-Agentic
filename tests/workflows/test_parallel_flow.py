@@ -36,7 +36,6 @@ class EchoWorkflow(Workflow):
         name: str | None = None,
         namespace: str = "tests",
         description: str = "Echo workflow.",
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name if name is not None else f"echo_workflow_{tag}",
@@ -44,7 +43,6 @@ class EchoWorkflow(Workflow):
             description=description,
             parameters=[make_value_param()],
             return_type="dict[str, Any]",
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
         self._tag = tag
 

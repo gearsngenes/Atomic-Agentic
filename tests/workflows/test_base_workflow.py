@@ -32,7 +32,6 @@ class EchoWorkflow(Workflow):
         description: str = "Echo workflow.",
         parameters: list[ParamSpec] | None = None,
         return_type: str = "dict[str, Any]",
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         super().__init__(
             name=name,
@@ -40,7 +39,6 @@ class EchoWorkflow(Workflow):
             description=description,
             parameters=parameters if parameters is not None else [make_value_param()],
             return_type=return_type,
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -68,7 +66,6 @@ class ConfigurableWorkflow(Workflow):
         result: Any = None,
         run_error: Exception | None = None,
         async_error: Exception | None = None,
-        filter_extraneous_inputs: bool | None = None,
     ) -> None:
         super().__init__(
             name=name,
@@ -76,11 +73,6 @@ class ConfigurableWorkflow(Workflow):
             description=description,
             parameters=parameters if parameters is not None else [make_value_param()],
             return_type=return_type,
-            filter_extraneous_inputs=(
-                filter_extraneous_inputs
-                if filter_extraneous_inputs is not None
-                else True
-            ),
         )
         self._result = result
         self._run_error = run_error
@@ -143,8 +135,8 @@ class TestWorkflowSyncInvoke:
         assert result.started_at <= result.ended_at
         assert result.elapsed_s >= 0
 
-    def test_invoke_filters_extraneous_inputs_when_enabled(self) -> None:
-        workflow = EchoWorkflow(filter_extraneous_inputs=True)
+    def test_invoke_filters_extraneous_inputs(self) -> None:
+        workflow = EchoWorkflow()
 
         result = workflow.invoke({"value": 123, "extra": "ignored"})
 

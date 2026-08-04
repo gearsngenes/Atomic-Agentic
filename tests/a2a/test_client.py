@@ -412,7 +412,6 @@ class TestPyA2AtomicClientPublicAPI:
             "description": "Echo.",
             "parameters": [],
             "return_type": "dict[str, Any]",
-            "filter_extraneous_inputs": True,
             "invokable_type": "EchoInvokable",
         }
 

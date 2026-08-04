@@ -41,7 +41,6 @@ class MCPProxyTool(Tool):
         command: str | None = None,
         args: list[str] | None = None,
         headers: Mapping[str, HeaderValue] | None = None,
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         resolved_remote_name = str(remote_name).strip()
         if not resolved_remote_name:
@@ -104,7 +103,6 @@ class MCPProxyTool(Tool):
             name=resolved_name,
             namespace=namespace or "mcp",
             description=resolved_description,
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     @property
@@ -206,7 +204,12 @@ class MCPProxyTool(Tool):
                 f"{self.full_name}: MCP tools do not accept positional arguments; got {args!r}."
             )
 
-        raw_result = self._function(inputs=kwargs)
+        try:
+            raw_result = self._function(inputs=kwargs)
+        except ToolInvocationError:
+            raise
+        except Exception as e:
+            raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
 
         if not isinstance(raw_result, Mapping):
             raise ToolInvocationError(

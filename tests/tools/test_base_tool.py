@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Mapping
+from typing import Any
 
 import pytest
 
@@ -49,6 +49,14 @@ def fail() -> None:
     raise RuntimeError("boom")
 
 
+def raise_tool_invocation_error() -> None:
+    raise ToolInvocationError("deliberate invocation error")
+
+
+async def async_raise_tool_invocation_error() -> None:
+    raise ToolInvocationError("deliberate async invocation error")
+
+
 async def async_add(a: int, b: int) -> int:
     return a + b
 
@@ -92,111 +100,6 @@ def make_param(
     )
 
 
-class AddInvokable(AtomicInvokable):
-    """Small AtomicInvokable test double for Tool wrapping."""
-
-    def __init__(
-        self,
-        *,
-        name: str = "add_invokable",
-        namespace: str = "tests",
-        description: str = "Add invokable.",
-        filter_extraneous_inputs: bool = True,
-    ) -> None:
-        self.last_inputs: dict[str, Any] | None = None
-        super().__init__(
-            name=name,
-            namespace=namespace,
-            description=description,
-            parameters=[
-                make_param("a", 0, type_="int"),
-                make_param("b", 1, type_="int", default=0),
-            ],
-            return_type="int",
-            filter_extraneous_inputs=filter_extraneous_inputs,
-        )
-
-    def invoke(self, inputs: Mapping[str, Any]) -> int:
-        filtered = self.filter_inputs(inputs)
-        self.last_inputs = dict(filtered)
-        return int(filtered["a"]) + int(filtered.get("b", 0))
-
-
-class AsyncTrackingInvokable(AddInvokable):
-    """Invokable that records whether Tool.async_execute used async_invoke()."""
-
-    def __init__(self, *, fail_async: bool = False) -> None:
-        self.async_invoke_used = False
-        self.async_call_used = False
-        self.call_used = False
-        self.fail_async = fail_async
-        super().__init__(
-            name="async_tracking_invokable",
-            description="Async tracking invokable.",
-        )
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        self.call_used = True
-        return super().__call__(*args, **kwargs)
-
-    async def async_call(self, *args: Any, **kwargs: Any) -> Any:
-        self.async_call_used = True
-        return await super().async_call(*args, **kwargs)
-
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
-        self.async_invoke_used = True
-        if self.fail_async:
-            raise RuntimeError("async invokable boom")
-        return await super().async_invoke(inputs)
-
-
-class BadReturnTypeInvokable(AddInvokable):
-    """Invokable whose return_type property reports a non-str value."""
-
-    @property
-    def return_type(self) -> Any:
-        return 123
-
-
-class VariadicInvokable(AtomicInvokable):
-    """AtomicInvokable test double exposing a variadic parameter spec."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="variadic_invokable",
-            namespace="tests",
-            description="Invokable with a variadic keyword parameter.",
-            parameters=[
-                make_param("a", 0, type_="int"),
-                make_param("extras", 1, kind=ParamSpec.VAR_KEYWORD, type_="dict"),
-            ],
-            return_type="int",
-        )
-
-    def invoke(self, inputs: Mapping[str, Any]) -> int:
-        filtered = self.filter_inputs(inputs)
-        return int(filtered["a"])
-
-
-class RaisingToolInvocationErrorInvokable(AtomicInvokable):
-    """Invokable whose invoke/async_invoke raise ToolInvocationError directly."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="raises_tool_invocation_error",
-            namespace="tests",
-            description="Invokable that raises ToolInvocationError directly.",
-            parameters=[],
-            return_type="None",
-        )
-
-    def invoke(self, inputs: Mapping[str, Any]) -> Any:
-        raise ToolInvocationError("deliberate invocation error")
-
-    async def async_invoke(self, inputs: Mapping[str, Any]) -> Any:
-        raise ToolInvocationError("deliberate async invocation error")
-
-
 class TestToolConstruction:
     def test_valid_construction_from_callable(self) -> None:
         tool = Tool(
@@ -211,7 +114,6 @@ class TestToolConstruction:
         assert tool.description == "Add values."
         assert tool.full_name == "Tool.tests.add"
         assert tool.function is add
-        assert tool.wraps_invokable is False
         assert tool.module == add.__module__
         assert tool.qualname == add.__qualname__
 
@@ -222,7 +124,6 @@ class TestToolConstruction:
         assert tool.namespace == "default"
         assert tool.description == "Add two integers."
         assert tool.full_name == "Tool.default.add"
-        assert tool.wraps_invokable is False
 
     def test_callable_without_docstring_uses_fallback_description(self) -> None:
         tool = Tool(function=add_no_doc)
@@ -266,8 +167,6 @@ class TestToolConstruction:
         assert data["module"] == add.__module__
         assert data["qualname"] == add.__qualname__
         assert data["return_type"] == "int"
-        assert data["wraps_invokable"] is False
-        assert "invokable_function" not in data
 
 
 class TestToolExtraDescription:
@@ -277,103 +176,13 @@ class TestToolExtraDescription:
         assert tool._extra_description() == ""
         assert tool.description == tool._description
 
-    def test_invokable_backed_tool_surfaces_wrapped_extra_description(self) -> None:
+    def test_invokable_backed_tool_chains_wrapped_extra_description(self) -> None:
         inner = Tool(function=add, name="add", namespace="tests")
-        structured = StructuredInvokable(
-            component=inner,
-            output_schema=["result"],
-            name="structured_add",
-            description="Add two numbers.",
-        )
-
-        tool = Tool(function=structured, name="add_tool", namespace="tests")
+        structured = StructuredInvokable(component=inner, output_schema=["result"])
+        tool = Tool(function=structured, name="structured_add", namespace="tests")
 
         assert tool._extra_description() == "Output schema: [result]"
-        assert tool.description == "Add two numbers.\nOutput schema: [result]"
 
-
-class TestToolInvokableBacking:
-    def test_invokable_construction_uses_invokable_metadata_by_default(self) -> None:
-        invokable = AddInvokable()
-        tool = Tool(function=invokable)
-
-        assert tool.name == invokable.name
-        assert tool.namespace == "default"
-        assert tool.description == invokable.description
-        assert tool.full_name == f"Tool.default.{invokable.name}"
-        assert tool.function is invokable
-        assert tool.wraps_invokable is True
-
-    def test_invokable_construction_allows_name_and_description_overrides(self) -> None:
-        invokable = AddInvokable()
-        tool = Tool(
-            function=invokable,
-            name="wrapped_add",
-            description="Wrapped add invokable.",
-        )
-
-        assert tool.name == "wrapped_add"
-        assert tool.description == "Wrapped add invokable."
-        assert tool.wraps_invokable is True
-
-    def test_invokable_construction_treats_blank_metadata_as_omitted(self) -> None:
-        invokable = AddInvokable()
-        tool = Tool(function=invokable, name="", description="   ")
-
-        assert tool.name == invokable.name
-        assert tool.description == invokable.description
-
-    def test_invokable_tool_reuses_declared_schema(self) -> None:
-        invokable = AddInvokable()
-        tool = Tool(function=invokable)
-
-        assert [(p.name, p.kind, p.default) for p in tool.parameters] == [
-            ("a", ParamSpec.POSITIONAL_OR_KEYWORD, NO_VAL),
-            ("b", ParamSpec.POSITIONAL_OR_KEYWORD, 0),
-        ]
-        assert tool.return_type == invokable.return_type
-        assert "a" in tool.signature
-        assert "b" in tool.signature
-        assert "inputs" not in tool.signature
-
-    def test_invokable_tool_sync_invoke_uses_dict_first_path(self) -> None:
-        invokable = AddInvokable()
-        tool = Tool(function=invokable)
-
-        assert tool.invoke({"a": 2, "b": 3}).result == 5
-        assert invokable.last_inputs == {"a": 2, "b": 3}
-
-    def test_invokable_tool_applies_defaults_before_dict_first_invoke(self) -> None:
-        invokable = AddInvokable()
-        tool = Tool(function=invokable)
-
-        assert tool.invoke({"a": 7}).result == 7
-        assert invokable.last_inputs == {"a": 7, "b": 0}
-
-    def test_invokable_tool_module_qualname_come_from_invoke_method(self) -> None:
-        invokable = AddInvokable()
-        tool = Tool(function=invokable)
-
-        assert tool.module == invokable.invoke.__module__
-        assert tool.qualname == invokable.invoke.__qualname__
-
-    def test_to_dict_includes_invokable_function_when_wrapping_invokable(self) -> None:
-        invokable = AddInvokable()
-        tool = Tool(
-            function=invokable,
-            name="wrapped_add",
-            namespace="tests",
-            description="Wrapped add invokable.",
-        )
-
-        data = tool.to_dict()
-
-        assert data["type"] == "Tool"
-        assert data["name"] == "wrapped_add"
-        assert data["namespace"] == "tests"
-        assert data["return_type"] == "int"
-        assert data["wraps_invokable"] is True
-        assert data["invokable_function"] == invokable.to_dict()
 
 
 class TestToolBindingBasic:
@@ -420,25 +229,12 @@ class TestToolBindingBasic:
         with pytest.raises(TypeError, match="missing required"):
             tool.invoke({"a": 1})
 
-    def test_unknown_input_raises_when_filtering_disabled(self) -> None:
+    def test_unknown_input_is_filtered(self) -> None:
         tool = Tool(
             function=add,
             name="add",
             namespace="tests",
             description="Add values.",
-            filter_extraneous_inputs=False,
-        )
-
-        with pytest.raises(TypeError, match="unexpected input key"):
-            tool.invoke({"a": 1, "b": 2, "extra": 3})
-
-    def test_filter_extraneous_inputs_true_filters_unknown_inputs(self) -> None:
-        tool = Tool(
-            function=add,
-            name="add",
-            namespace="tests",
-            description="Add values.",
-            filter_extraneous_inputs=True,
         )
 
         assert tool.invoke({"a": 1, "b": 2, "extra": 3}).result == 3
@@ -542,7 +338,6 @@ class TestToolBindingPositionalKinds:
             name="collect_kwargs",
             namespace="tests",
             description="Collect kwargs.",
-            filter_extraneous_inputs=False,
         )
 
         assert tool.invoke({"a": 1, "debug": True}).result == {
@@ -598,28 +393,6 @@ class TestToolExecution:
         with pytest.raises(ToolInvocationError, match="invocation failed"):
             asyncio.run(tool.async_invoke({}))
 
-    def test_async_invoke_uses_invokable_async_invoke(self) -> None:
-        invokable = AsyncTrackingInvokable()
-        tool = Tool(function=invokable)
-
-        result = asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
-
-        assert result.result == 5
-        assert invokable.async_invoke_used is True
-        assert invokable.async_call_used is False
-        assert invokable.call_used is False
-
-    def test_async_invoke_wraps_invokable_async_invoke_exception(self) -> None:
-        invokable = AsyncTrackingInvokable(fail_async=True)
-        tool = Tool(function=invokable)
-
-        with pytest.raises(ToolInvocationError, match="invocation failed"):
-            asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
-
-        assert invokable.async_invoke_used is True
-        assert invokable.async_call_used is False
-        assert invokable.call_used is False
-
 
 class TestToolMutableMetadata:
     def test_namespace_is_read_only(self) -> None:
@@ -636,16 +409,6 @@ class TestToolMutableMetadata:
             tool.namespace = "math"
 
 class TestToolExecutionEdgeCases:
-    def test_invokable_dict_first_binding_skips_variadic_parameter_defaults(self) -> None:
-        invokable = VariadicInvokable()
-        tool = Tool(function=invokable)
-
-        args, kwargs = tool.to_arg_kwarg({"a": 1})
-
-        assert args == ()
-        assert kwargs == {"a": 1}
-        assert "extras" not in kwargs
-
     def test_sync_execute_runs_awaitable_result_from_sync_callable(self) -> None:
         tool = Tool(
             function=returns_coroutine,
@@ -657,8 +420,12 @@ class TestToolExecutionEdgeCases:
         assert tool.invoke({"a": 2, "b": 3}).result == 5
 
     def test_sync_execute_reraises_tool_invocation_error_without_rewrapping(self) -> None:
-        invokable = RaisingToolInvocationErrorInvokable()
-        tool = Tool(function=invokable)
+        tool = Tool(
+            function=raise_tool_invocation_error,
+            name="raise_tool_invocation_error",
+            namespace="tests",
+            description="Sync callable that raises ToolInvocationError directly.",
+        )
 
         with pytest.raises(ToolInvocationError) as exc_info:
             tool.invoke({})
@@ -678,10 +445,74 @@ class TestToolExecutionEdgeCases:
         assert result.result == 5
 
     def test_async_execute_reraises_tool_invocation_error_without_rewrapping(self) -> None:
-        invokable = RaisingToolInvocationErrorInvokable()
-        tool = Tool(function=invokable)
+        tool = Tool(
+            function=async_raise_tool_invocation_error,
+            name="async_raise_tool_invocation_error",
+            namespace="tests",
+            description="Async callable that raises ToolInvocationError directly.",
+        )
 
         with pytest.raises(ToolInvocationError) as exc_info:
             asyncio.run(tool.async_invoke({}))
 
         assert str(exc_info.value) == "deliberate async invocation error"
+
+
+class AddInvokable(AtomicInvokable):
+    """Small AtomicInvokable test double for natural-callable Tool wrapping."""
+
+    def __init__(self, *, name: str = "add_invokable", namespace: str = "tests") -> None:
+        super().__init__(
+            name=name,
+            namespace=namespace,
+            description="Add invokable.",
+            parameters=[
+                make_param("a", 0, type_="int"),
+                make_param("b", 1, type_="int", default=0),
+            ],
+            return_type="int",
+        )
+
+    def invoke(self, inputs):
+        filtered = self.filter_inputs(inputs)
+        return int(filtered["a"]) + int(filtered.get("b", 0))
+
+    async def async_invoke(self, inputs):
+        return self.invoke(inputs)
+
+
+class TestToolNaturalAtomicInvokableWrapping:
+    def test_construction_infers_name_and_description_from_invokable(self) -> None:
+        invokable = AddInvokable(name="add_invokable")
+        tool = Tool(function=invokable)
+
+        assert tool.name == "add_invokable"
+        assert tool.description == "Add invokable."
+        assert tool.function is invokable
+
+    def test_schema_reuses_invokable_declared_parameters(self) -> None:
+        tool = Tool(function=AddInvokable())
+
+        assert [(p.name, p.kind, p.default) for p in tool.parameters] == [
+            ("a", ParamSpec.POSITIONAL_OR_KEYWORD, NO_VAL),
+            ("b", ParamSpec.POSITIONAL_OR_KEYWORD, 0),
+        ]
+        assert tool.return_type == "int"
+
+    def test_sync_invoke_returns_unwrapped_result(self) -> None:
+        tool = Tool(function=AddInvokable())
+
+        assert tool.invoke({"a": 2, "b": 3}).result == 5
+
+    def test_async_invoke_dispatches_through_invokable_async_call(self) -> None:
+        tool = Tool(function=AddInvokable())
+
+        result = asyncio.run(tool.async_invoke({"a": 2, "b": 3}))
+
+        assert result.result == 5
+
+    def test_explicit_name_and_description_override_invokable_inference(self) -> None:
+        tool = Tool(function=AddInvokable(), name="custom", description="Custom.")
+
+        assert tool.name == "custom"
+        assert tool.description == "Custom."

@@ -21,7 +21,7 @@ from atomic_agentic.exceptions import ToolInvocationError
 from atomic_agentic.constants.core import NO_VAL
 
 
-TRANSPORT_MODE: Literal["stdio", "sse", "streamable_http"] = "stdio"
+TRANSPORT_MODE: Literal["stdio", "sse", "streamable_http"] = "streamable_http"
 SERVER_NAME = "Mathematics_Server"
 HEADERS     = None  # e.g., {"Authorization": "Bearer ..."} if your server needs auth
 

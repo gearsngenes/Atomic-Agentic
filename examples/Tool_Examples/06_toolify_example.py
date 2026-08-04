@@ -56,6 +56,7 @@ agent = BasicAgent(
     pre_invoke=pre_invoke_tool,
 )
 
+
 MCP_ENDPOINT = "http://127.0.0.1:8000/mcp"
 MCP_NAMESPACE = "demo_mcp"
 MCP_HEADERS: Mapping[str, str] | None = None
@@ -117,7 +118,7 @@ def invoke_with_inputs(t: Tool, inputs: Mapping[str, Any] | None = None) -> None
 
 
 def main() -> None:
-    print("\n[1] Agent -> Nested Tool via toolify(agent)")
+    print("\n[1] Agent -> Tool via toolify(agent) — delegates by reference")
     agent_tool = toolify(agent)
     show_plan(agent_tool)
     invoke_with_inputs(

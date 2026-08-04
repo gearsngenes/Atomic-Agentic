@@ -11,7 +11,7 @@ from conftest import (
     react_step_json,
     register_math_tools,
     executed_slot,
-    ScriptedLLMEngine,
+    FakeLLMEngine,
 )
 
 from atomic_agentic.agents.toolagent import return_tool
@@ -29,7 +29,7 @@ class TestReActAgent:
                 name="bad_react",
                 namespace="tests",
                 description="Bad ReAct agent.",
-                llm_engine=ScriptedLLMEngine([]),
+                llm_engine=FakeLLMEngine([]),
                 tool_calls_limit=-1,
             )
 
@@ -92,7 +92,7 @@ class TestReActAgent:
 
         assert result.result == 5
         engine = agent.llm_engine
-        assert isinstance(engine, ScriptedLLMEngine)
+        assert isinstance(engine, FakeLLMEngine)
         assert len(engine.calls) == 2
         second_call_text = "\n".join(message["content"] for message in engine.calls[1])
         assert "RUNNING PLAN STEPS 0-0 SO FAR" in second_call_text
@@ -599,7 +599,7 @@ class TestReActGenerationRetry:
 
     def test_zero_retries_emits_one_llm_call_before_raise(self) -> None:
         """generation_retries=0: exactly one LLM call is made before raising."""
-        engine = ScriptedLLMEngine([self.INVALID_JSON])
+        engine = FakeLLMEngine([self.INVALID_JSON])
         agent = ReActAgent(
             name="tests",
             namespace="tests",
@@ -622,7 +622,7 @@ class TestReActGenerationRetry:
 
     def test_json_error_retry_stores_two_llm_records(self) -> None:
         """Two attempts on a single step produce two LLMRecords."""
-        engine = ScriptedLLMEngine([self.INVALID_JSON, self.VALID_RETURN_LITERAL])
+        engine = FakeLLMEngine([self.INVALID_JSON, self.VALID_RETURN_LITERAL])
         agent = ReActAgent(
             name="tests",
             namespace="tests",
@@ -650,7 +650,7 @@ class TestReActGenerationRetry:
 
     def test_spec_error_retry_stores_two_llm_records(self) -> None:
         """Spec-validation failure + successful retry = two LLMRecords for that step."""
-        engine = ScriptedLLMEngine([self.INVALID_STEP_WRONG_TOOL, self.VALID_RETURN_LITERAL])
+        engine = FakeLLMEngine([self.INVALID_STEP_WRONG_TOOL, self.VALID_RETURN_LITERAL])
         agent = ReActAgent(
             name="tests",
             namespace="tests",
@@ -679,7 +679,7 @@ class TestReActGenerationRetry:
 
     def test_budget_exhausted_records_all_llm_calls(self) -> None:
         """All attempts (including the failing ones) are recorded as LLM calls."""
-        engine = ScriptedLLMEngine([self.INVALID_JSON, self.INVALID_JSON])
+        engine = FakeLLMEngine([self.INVALID_JSON, self.INVALID_JSON])
         agent = ReActAgent(
             name="tests",
             namespace="tests",
@@ -693,7 +693,7 @@ class TestReActGenerationRetry:
 
     def test_json_feedback_appended_to_working_messages(self) -> None:
         """On JSON-decode failure the retry call receives more messages than the first call."""
-        engine = ScriptedLLMEngine([self.INVALID_JSON, self.VALID_RETURN_LITERAL])
+        engine = FakeLLMEngine([self.INVALID_JSON, self.VALID_RETURN_LITERAL])
         agent = ReActAgent(
             name="tests",
             namespace="tests",
@@ -709,7 +709,7 @@ class TestReActGenerationRetry:
 
     def test_spec_feedback_contains_reserialised_step_not_raw_string(self) -> None:
         """On spec-validation failure the retry user message contains the re-serialised step."""
-        engine = ScriptedLLMEngine([self.INVALID_STEP_WRONG_TOOL, self.VALID_RETURN_LITERAL])
+        engine = FakeLLMEngine([self.INVALID_STEP_WRONG_TOOL, self.VALID_RETURN_LITERAL])
         agent = ReActAgent(
             name="tests",
             namespace="tests",
@@ -738,7 +738,7 @@ class TestReActGenerationRetry:
     def test_llm_records_accumulate_all_attempts(self) -> None:
         """Total LLMRecords equals the sum of all attempt counts across all steps."""
         # step 0: 2 attempts (1 retry); return step: 1 attempt. Total = 3.
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             self.INVALID_JSON,       # step 0 attempt 1 -- bad JSON
             self.VALID_STEP_0,       # step 0 attempt 2 -- succeeds
             self.VALID_RETURN,       # return step -- succeeds first try
@@ -760,7 +760,7 @@ class TestReActGenerationRetry:
         # step 0: valid, duration=2 (observable for 2 future successful generations).
         # return step: 1 failed attempt (bad JSON) before succeeding.
         # observable for step 0 must still be 2 after the failed retry, and 1 after the success.
-        engine = ScriptedLLMEngine([
+        engine = FakeLLMEngine([
             self.VALID_STEP_0,           # step 0: observable=1 (duration=1)
             self.INVALID_JSON,           # return step attempt 1: fails -> no counter decrement
             self.VALID_RETURN,           # return step attempt 2: succeeds -> decrements

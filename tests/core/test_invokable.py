@@ -45,7 +45,6 @@ def make_invokable(
     namespace: str = "tests",
     description: str = "Echo test invokable.",
     return_type: str = "dict[str, Any]",
-    filter_extraneous_inputs: bool = True,
 ) -> EchoInvokable:
     return EchoInvokable(
         name=name,
@@ -53,7 +52,6 @@ def make_invokable(
         description=description,
         parameters=parameters if parameters is not None else [make_param("x", 0)],
         return_type=return_type,
-        filter_extraneous_inputs=filter_extraneous_inputs,
     )
 
 
@@ -64,7 +62,6 @@ class TestAtomicInvokableConstruction:
         assert invokable.name == "echo"
         assert invokable.description == "Echo test invokable."
         assert invokable.return_type == "dict[str, Any]"
-        assert invokable.filter_extraneous_inputs is True
 
     @pytest.mark.parametrize("bad_name", ["", "   ", "bad-name", "123bad"])
     def test_invalid_name_raises(self, bad_name: str) -> None:
@@ -254,15 +251,6 @@ class TestAtomicInvokableFiltering:
 
         assert result == {"x": 1}
 
-    def test_extraneous_inputs_raise_when_filtering_disabled_without_varkwargs(self) -> None:
-        invokable = make_invokable(
-            parameters=[make_param("x", 0)],
-            filter_extraneous_inputs=False,
-        )
-
-        with pytest.raises(TypeError, match="unexpected input key"):
-            invokable.invoke({"x": 1, "unused": 2})
-
     def test_extraneous_inputs_merge_into_varkwargs(self) -> None:
         invokable = make_invokable(parameters=[
             make_param("x", 0),
@@ -365,34 +353,6 @@ class TestAtomicInvokableFiltering:
         # VAR_KEYWORD gets an empty dict from the existing varkwarg merge logic,
         # not from default injection — our loop skips both variadic kinds.
         assert result == {"x": 1, "extras": {}}
-
-
-class TestAtomicInvokableFilterFlag:
-    @pytest.mark.parametrize("value", [True, False])
-    def test_filter_extraneous_inputs_accepts_bool_at_construction(self, value: bool) -> None:
-        invokable = make_invokable(filter_extraneous_inputs=value)
-
-        assert invokable.filter_extraneous_inputs is value
-
-    @pytest.mark.parametrize("value", ["false", "true", 1, 0, None, [], {}])
-    def test_filter_extraneous_inputs_rejects_non_bool_at_construction(self, value: object) -> None:
-        with pytest.raises(TypeError):
-            make_invokable(filter_extraneous_inputs=value)  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize("value", [True, False])
-    def test_filter_extraneous_inputs_accepts_bool_assignment(self, value: bool) -> None:
-        invokable = make_invokable()
-
-        invokable.filter_extraneous_inputs = value
-
-        assert invokable.filter_extraneous_inputs is value
-
-    @pytest.mark.parametrize("value", ["false", "true", 1, 0, None, [], {}])
-    def test_filter_extraneous_inputs_rejects_non_bool_assignment(self, value: object) -> None:
-        invokable = make_invokable()
-
-        with pytest.raises(TypeError):
-            invokable.filter_extraneous_inputs = value  # type: ignore[assignment]
 
 
 class TestAtomicInvokableCallBinding:
@@ -587,7 +547,6 @@ class TestAtomicInvokableSerialization:
         assert data["name"] == "echo"
         assert data["description"] == "Echo test invokable."
         assert data["return_type"] == "dict[str, Any]"
-        assert data["filter_extraneous_inputs"] is True
         assert data["parameters"] == [
             {
                 "name": "x",

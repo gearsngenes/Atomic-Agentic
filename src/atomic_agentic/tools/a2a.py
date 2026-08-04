@@ -53,7 +53,6 @@ class PyA2AtomicTool(Tool):
         client: PyA2AtomicClient | None = None,
         url: str | None = None,
         headers: Mapping[str, HeaderValue] | None = None,
-        filter_extraneous_inputs: bool = True,
     ) -> None:
         resolved_remote_name = str(remote_name).strip()
         if not resolved_remote_name:
@@ -107,7 +106,6 @@ class PyA2AtomicTool(Tool):
             name=resolved_name,
             namespace=resolved_namespace,
             description=resolved_description,
-            filter_extraneous_inputs=filter_extraneous_inputs,
         )
 
     @property
@@ -225,7 +223,10 @@ class PyA2AtomicTool(Tool):
             raise ToolInvocationError(
                 f"{self.full_name}: PyA2Atomic tools do not accept positional arguments; got {args!r}."
             )
-        payload = self._function(self._remote_name, inputs=kwargs)
+        try:
+            payload = self._function(self._remote_name, inputs=kwargs)
+        except Exception as e:
+            raise ToolInvocationError(f"{self.full_name}: invocation failed: {e}") from e
         return self._handle_a2a_payload(payload)
 
     async def async_execute(

@@ -23,104 +23,13 @@ from atomic_agentic.exceptions import (
 )
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.constants.core import NO_VAL
-from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from atomic_agentic.tools import Tool
 from atomic_agentic.core.Invokable import AtomicInvokable
+from fake_engines import FakeLLMEngine
 
 
 ROLE_TEMPLATE = "Tools:\n{TOOLS}\nLimit: {TOOL_CALLS_LIMIT}\nConstants:\n{CONSTANTS}"
-
-
-class EchoLLMEngine(LLMEngine):
-    """Minimal deterministic LLMEngine used only to satisfy Agent construction."""
-
-    def __init__(self, *, response: str = "{}", **kwargs: Any) -> None:
-        super().__init__(
-            name="echo_llm_engine",
-            description="Echo LLM engine for ToolAgent tests.",
-            **kwargs,
-        )
-        self.response = response
-        self.calls: list[list[dict[str, str]]] = []
-
-    def _build_provider_payload(
-        self,
-        messages: list[dict[str, str]],
-        attachments: Mapping[str, Mapping[str, Any]],
-    ) -> dict[str, Any]:
-        self.calls.append([dict(message) for message in messages])
-        return {"messages": messages}
-
-    def _call_provider(self, payload: Any) -> str:
-        return self.response
-
-    def _extract_text(self, response: Any) -> str:
-        return str(response)
-
-    def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(
-            input_tokens=10, generated_tokens=5, total_tokens=15, response_tokens=5
-        )
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        return False
-
-    def _get_model_data(self) -> LLMModelData:
-        return LLMModelData(provider="echo")
-
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
-        return {"path": path}
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        return None
-
-
-class ScriptedLLMEngine(LLMEngine):
-    """Deterministic LLMEngine that returns one scripted text response per call."""
-
-    def __init__(self, responses: list[str], **kwargs: Any) -> None:
-        super().__init__(
-            name="scripted_llm_engine",
-            description="Scripted LLM engine for ToolAgent subclass tests.",
-            **kwargs,
-        )
-        self.responses = list(responses)
-        self.calls: list[list[dict[str, str]]] = []
-
-    def _build_provider_payload(
-        self,
-        messages: list[dict[str, str]],
-        attachments: Mapping[str, Mapping[str, Any]],
-    ) -> dict[str, Any]:
-        copied_messages = [dict(message) for message in messages]
-        self.calls.append(copied_messages)
-        return {"messages": copied_messages}
-
-    def _call_provider(self, payload: Any) -> str:
-        if not self.responses:
-            raise RuntimeError("No scripted LLM responses remain.")
-        return self.responses.pop(0)
-
-    def _extract_text(self, response: Any) -> str:
-        return str(response)
-
-    def _extract_token_usage(self, response: Any) -> TokenUsage:
-        return TokenUsage(
-            input_tokens=10, generated_tokens=5, total_tokens=15, response_tokens=5
-        )
-
-    def _should_retry(self, exc: Exception, attempt: int) -> bool:
-        return False
-
-    def _get_model_data(self) -> LLMModelData:
-        return LLMModelData(provider="scripted")
-
-    def _prepare_attachment(self, path: str) -> Mapping[str, Any]:
-        return {"path": path}
-
-    def _on_detach(self, meta: Mapping[str, Any]) -> None:
-        return None
 
 
 class BadRepr:
@@ -148,7 +57,7 @@ def make_planact_agent(
         name="tests",
         namespace="tests",
         description="PlanAct agent under test.",
-        llm_engine=ScriptedLLMEngine(responses),
+        llm_engine=FakeLLMEngine(responses),
         context_enabled=context_enabled,
         tool_calls_limit=tool_calls_limit,
         peek_at_cache=peek_at_cache,
@@ -180,7 +89,7 @@ def make_react_agent(
         name="tests",
         namespace="tests",
         description="ReAct agent under test.",
-        llm_engine=ScriptedLLMEngine(responses),
+        llm_engine=FakeLLMEngine(responses),
         context_enabled=context_enabled,
         tool_calls_limit=tool_calls_limit,
         peek_at_cache=peek_at_cache,
@@ -317,7 +226,7 @@ class ScriptedToolAgent(ToolAgent):
             name="tests",
             namespace="tests",
             description="Scripted ToolAgent for unit tests.",
-            llm_engine=EchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"),
             context_enabled=context_enabled,
             fail_fast=fail_fast,
             generation_retries=generation_retries,

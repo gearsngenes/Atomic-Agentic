@@ -135,7 +135,6 @@ judge = toolify(
     name="approval_judge",
     namespace="workflow",
     description="Return True when the critic has approved the story draft.",
-    filter_extraneous_inputs=True,
 )
 
 

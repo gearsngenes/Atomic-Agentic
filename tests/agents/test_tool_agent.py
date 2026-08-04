@@ -8,7 +8,7 @@ from typing import Any
 
 from conftest import (
     ROLE_TEMPLATE,
-    EchoLLMEngine,
+    FakeLLMEngine,
     ScriptedToolAgent,
     SkipFirstBatchToolAgent,
     make_agent,
@@ -167,7 +167,7 @@ class TestToolAgentAbstractContract:
 
     def test_toolagent_cannot_be_instantiated_directly(self) -> None:
         with pytest.raises(TypeError):
-            ToolAgent(name="a", namespace="tests", description="d", llm_engine=EchoLLMEngine())  # type: ignore[abstract]
+            ToolAgent(name="a", namespace="tests", description="d", llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"))  # type: ignore[abstract]
 
     def test_toolagent_reabstracts_five_hooks(self) -> None:
         assert ToolAgent.__abstractmethods__ == {
@@ -191,7 +191,7 @@ class TestToolAgentAbstractContract:
             # prepare/async_prepare intentionally omitted
 
         with pytest.raises(TypeError):
-            _IncompleteAgent(name="a", namespace="tests", description="d", llm_engine=EchoLLMEngine())
+            _IncompleteAgent(name="a", namespace="tests", description="d", llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"))
 
 
 class TestToolAgentNamespace:
@@ -200,7 +200,7 @@ class TestToolAgentNamespace:
             PlanActAgent(
                 name="a",
                 description="d",
-                llm_engine=EchoLLMEngine(),
+                llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"),
             )
 
     def test_plan_act_agent_namespace_explicit(self) -> None:
@@ -208,7 +208,7 @@ class TestToolAgentNamespace:
             name="a",
             namespace="planner_ns",
             description="d",
-            llm_engine=EchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"),
         )
         assert agent.namespace == "planner_ns"
 
@@ -217,7 +217,7 @@ class TestToolAgentNamespace:
             name="a",
             namespace="react_ns",
             description="d",
-            llm_engine=EchoLLMEngine(),
+            llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"),
             tool_calls_limit=5,
         )
         assert agent.namespace == "react_ns"
@@ -381,17 +381,39 @@ class TestToolRegistration:
         assert key == "Tool.myns.adder"
         assert agent.get_tool(key) is tool
 
-    def test_register_atomic_invokable_name_override_raises(self) -> None:
+    def test_register_atomic_invokable_name_override_wraps_via_toolify(self) -> None:
         agent = make_agent()
         tool = Tool(function=add, name="adder", namespace="myns", description="Add.")
-        with pytest.raises(ToolRegistrationError, match="name and description overrides"):
-            agent.register(tool, name="other")
 
-    def test_register_atomic_invokable_description_override_raises(self) -> None:
+        key = agent.register(tool, name="other")
+
+        assert key == f"Tool.{agent.name}.other"
+        registered = agent.get_tool(key)
+        assert registered is not tool
+        assert registered.function is tool
+        assert registered.name == "other"
+        assert registered.namespace == agent.name
+        assert registered.description == "Add."
+        # original tool is untouched
+        assert tool.name == "adder"
+        assert tool.namespace == "myns"
+
+    def test_register_atomic_invokable_description_override_wraps_via_toolify(self) -> None:
         agent = make_agent()
         tool = Tool(function=add, name="adder", namespace="myns", description="Add.")
-        with pytest.raises(ToolRegistrationError, match="name and description overrides"):
-            agent.register(tool, description="other")
+
+        key = agent.register(tool, description="other")
+
+        assert key == f"Tool.{agent.name}.adder"
+        registered = agent.get_tool(key)
+        assert registered is not tool
+        assert registered.function is tool
+        assert registered.name == "adder"
+        assert registered.namespace == agent.name
+        assert registered.description == "other"
+        # original tool is untouched
+        assert tool.namespace == "myns"
+        assert tool.description == "Add."
 
     def test_register_callable_uses_self_name_as_namespace(self) -> None:
         """Callable registration uses agent.name as the tool namespace."""

@@ -135,7 +135,6 @@ class Agent(AtomicInvokable, ABC):
         namespace: str,
         description: str,
         llm_engine: LLMEngine,
-        filter_extraneous_inputs: Optional[bool] = None,
         context_enabled: bool = True,
         *,
         pre_invoke: Optional[AtomicInvokable | Callable] = None,
@@ -309,19 +308,12 @@ class Agent(AtomicInvokable, ABC):
             raise AgentError("assistant_response_source must be either 'raw' or 'final'.")
         self._assistant_response_source = assistant_response_source
 
-        resolved_filter_extraneous_inputs = (
-            filter_extraneous_inputs
-            if filter_extraneous_inputs is not None
-            else pre_tool.filter_extraneous_inputs
-        )
-
         super().__init__(
             name=name,
             namespace=namespace,
             description=description,
             parameters=agent_parameters,
             return_type=self._post_invoke.return_type,
-            filter_extraneous_inputs=resolved_filter_extraneous_inputs,
         )
 
     # ------------------------------------------------------------------ #

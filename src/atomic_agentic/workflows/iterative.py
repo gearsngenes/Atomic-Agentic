@@ -107,7 +107,6 @@ class IterativeFlow(Workflow):
         handoff_index: Optional[int] = None,
         evaluate_index: Optional[int] = None,
         approval_value: Any = NO_VAL,
-        filter_extraneous_inputs: Optional[bool] = None,
     ) -> None:
         """Initialize the iterative workflow.
 
@@ -142,9 +141,6 @@ class IterativeFlow(Workflow):
             to determine early exit. Required (must not be ``NO_VAL``) when
             an explicit ``judge`` is given; must be left as ``NO_VAL`` when
             ``judge`` is ``None``.
-        filter_extraneous_inputs:
-            Optional outer workflow input-filter flag. When omitted, inherits
-            from the normalized loop body.
         """
         if not isinstance(body_steps, list):
             raise TypeError(
@@ -198,19 +194,12 @@ class IterativeFlow(Workflow):
         self._judge = self._normalize_judge(resolved_judge)
         self._approval_value = approval_value
 
-        resolved_filter = (
-            filter_extraneous_inputs
-            if filter_extraneous_inputs is not None
-            else self._loop_body.filter_extraneous_inputs
-        )
-
         super().__init__(
             name=name,
             namespace=namespace,
             description=description,
             parameters=self._loop_body.parameters,
             return_type=self._loop_body.return_type,
-            filter_extraneous_inputs=resolved_filter,
         )
 
     # ------------------------------------------------------------------ #

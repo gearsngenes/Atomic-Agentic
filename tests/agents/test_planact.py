@@ -5,7 +5,7 @@ import json
 import asyncio
 
 from conftest import (
-    ScriptedLLMEngine,
+    FakeLLMEngine,
     make_planact_agent,
     make_react_agent,
     register_math_tools,
@@ -512,7 +512,7 @@ class TestPlanActGenerationRetry:
             agent.invoke({"prompt": "run"})
 
     def test_zero_retries_emits_one_llm_call_before_raise(self) -> None:
-        engine = ScriptedLLMEngine([self.INVALID_JSON])
+        engine = FakeLLMEngine([self.INVALID_JSON])
         agent = PlanActAgent(
             name="tests",
             namespace="tests",
@@ -533,7 +533,7 @@ class TestPlanActGenerationRetry:
         assert result.result == 3
 
     def test_json_error_retry_stores_two_llm_records(self) -> None:
-        engine = ScriptedLLMEngine([self.INVALID_JSON, self.VALID_PLAN_RETURN_ONLY])
+        engine = FakeLLMEngine([self.INVALID_JSON, self.VALID_PLAN_RETURN_ONLY])
         agent = PlanActAgent(
             name="tests",
             namespace="tests",
@@ -559,7 +559,7 @@ class TestPlanActGenerationRetry:
         assert result.result == 3
 
     def test_spec_error_retry_stores_two_llm_records(self) -> None:
-        engine = ScriptedLLMEngine([self.INVALID_PLAN_WRONG_TOOL, self.VALID_PLAN_RETURN_ONLY])
+        engine = FakeLLMEngine([self.INVALID_PLAN_WRONG_TOOL, self.VALID_PLAN_RETURN_ONLY])
         agent = PlanActAgent(
             name="tests",
             namespace="tests",
@@ -586,7 +586,7 @@ class TestPlanActGenerationRetry:
             agent.invoke({"prompt": "run"})
 
     def test_budget_exhausted_records_all_llm_calls_before_raise(self) -> None:
-        engine = ScriptedLLMEngine([self.INVALID_JSON, self.INVALID_JSON])
+        engine = FakeLLMEngine([self.INVALID_JSON, self.INVALID_JSON])
         agent = PlanActAgent(
             name="tests",
             namespace="tests",
@@ -599,7 +599,7 @@ class TestPlanActGenerationRetry:
         assert len(engine.calls) == 2
 
     def test_json_feedback_appended_to_working_messages(self) -> None:
-        engine = ScriptedLLMEngine([self.INVALID_JSON, self.VALID_PLAN_RETURN_ONLY])
+        engine = FakeLLMEngine([self.INVALID_JSON, self.VALID_PLAN_RETURN_ONLY])
         agent = PlanActAgent(
             name="tests",
             namespace="tests",
@@ -614,7 +614,7 @@ class TestPlanActGenerationRetry:
         assert "could not be parsed" in last_msg["content"]
 
     def test_spec_feedback_contains_reserialised_plan_not_resolved_args(self) -> None:
-        engine = ScriptedLLMEngine([self.INVALID_PLAN_WRONG_TOOL, self.VALID_PLAN_RETURN_ONLY])
+        engine = FakeLLMEngine([self.INVALID_PLAN_WRONG_TOOL, self.VALID_PLAN_RETURN_ONLY])
         agent = PlanActAgent(
             name="tests",
             namespace="tests",
