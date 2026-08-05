@@ -1,8 +1,15 @@
 ﻿"""
-05_IterativeFlow.py
+04_IterativeFlow.py
 
 Beginner-friendly IterativeFlow example.
 Demonstrates an agentic writer/critic loop with an approval judge, using LLM agents and clear schema-driven steps.
+
+NOTE (v2.0.0a26, Pass 2): IterativeFlow is currently non-functional --
+_run/_async_run still call the now-removed SequentialFlow.get_step_result()
+to extract evaluate/handoff payloads. This is deliberate, accepted
+breakage until Pass 6 rebuilds IterativeFlow's trace/result shape; this
+example is left as-is (including get_iteration_results()/get_checkpoint()
+below, also removed) and will need a real rewrite once that pass lands.
 """
 
 from __future__ import annotations

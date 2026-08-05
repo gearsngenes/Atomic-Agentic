@@ -20,9 +20,9 @@ class SequentialFlow(Workflow):
 
     Construction contract
     ---------------------
-    - ``steps`` must be a non-empty ``list[AtomicInvokable]`` — any
-      invokable, ``Workflow`` or not, stored exactly as configured with no
-      wrapping.
+    - ``steps`` must be a non-empty ``list[AtomicInvokable]``; each item is
+      validated inline at construction (``isinstance`` check, ``TypeError``
+      otherwise) and stored exactly as configured, no wrapping.
     - The topology is fixed at construction.
     - The configured step instances are fixed at construction.
     - No post-construction step mutation API is provided.
@@ -33,6 +33,10 @@ class SequentialFlow(Workflow):
         - An explicit ``int`` must satisfy ``0 <= return_index < len(steps)``;
           out-of-range or negative values raise ``IndexError``. There is no
           negative-index wraparound.
+    - ``include_trace`` controls whether invocation results populate
+      ``trace`` with the full per-step ``AtomicResult`` tuple. Defaults to
+      ``True``; mutable post-construction via the inherited ``include_trace``
+      property.
 
     Runtime contract
     ----------------
@@ -48,11 +52,14 @@ class SequentialFlow(Workflow):
     ------
     Per-run result fields (see ``SequentialFlowResult``):
 
-    - ``step_run_ids``:
-        ``tuple[str, ...]`` containing one child run id per executed step, in
-        step order.
+    - ``trace``:
+        Full ordered tuple of each step's own ``AtomicResult``, in step
+        order, populated when ``include_trace`` is enabled (``None``
+        otherwise). Each step's run id is available via ``trace[i].run_id``.
     - ``return_index``:
         The fixed step index whose result became the outer result payload.
+        Injected directly by ``make_result()`` as a constant fact about the
+        instance, not threaded through ``_run``/``_async_run``.
 
     Notes
     -----
@@ -69,6 +76,7 @@ class SequentialFlow(Workflow):
         steps: list[AtomicInvokable],
         *,
         return_index: Optional[int] = None,
+        include_trace: bool = True,
     ) -> None:
         if not isinstance(steps, list):
             raise TypeError(
@@ -77,15 +85,20 @@ class SequentialFlow(Workflow):
         if not steps:
             raise ValueError("steps must not be empty")
 
-        normalized_steps = tuple(self._normalize_step(step) for step in steps)
+        for step in steps:
+            if not isinstance(step, AtomicInvokable):
+                raise TypeError(
+                    f"SequentialFlow steps must be AtomicInvokable, got {type(step)!r}"
+                )
+        steps_tuple = tuple(steps)
 
         if return_index is None:
-            resolved_return_index = len(normalized_steps) - 1
+            resolved_return_index = len(steps_tuple) - 1
         elif isinstance(return_index, int):
-            if not (0 <= return_index < len(normalized_steps)):
+            if not (0 <= return_index < len(steps_tuple)):
                 raise IndexError(
                     f"return_index {return_index} out of range for "
-                    f"{len(normalized_steps)} configured step(s)"
+                    f"{len(steps_tuple)} configured step(s)"
                 )
             resolved_return_index = return_index
         else:
@@ -97,11 +110,12 @@ class SequentialFlow(Workflow):
             name=name,
             namespace=namespace,
             description=description,
-            parameters=normalized_steps[0].parameters,
-            return_type=normalized_steps[resolved_return_index].return_type,
+            parameters=steps_tuple[0].parameters,
+            return_type=steps_tuple[resolved_return_index].return_type,
+            include_trace=include_trace,
         )
 
-        self._steps: tuple[AtomicInvokable, ...] = normalized_steps
+        self._steps: tuple[AtomicInvokable, ...] = steps_tuple
         self._return_index: int = resolved_return_index
 
     # ------------------------------------------------------------------ #
@@ -109,7 +123,7 @@ class SequentialFlow(Workflow):
     # ------------------------------------------------------------------ #
     @property
     def steps(self) -> tuple[AtomicInvokable, ...]:
-        """Return the fixed normalized step tuple."""
+        """Return the fixed configured step tuple."""
         return self._steps
 
     @property
@@ -127,18 +141,6 @@ class SequentialFlow(Workflow):
         return self._steps[self._return_index]._extra_description()
 
     # ------------------------------------------------------------------ #
-    # Internal helpers
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _normalize_step(step: AtomicInvokable) -> AtomicInvokable:
-        """Validate one configured step is an AtomicInvokable."""
-        if not isinstance(step, AtomicInvokable):
-            raise TypeError(
-                f"SequentialFlow steps must be AtomicInvokable, got {type(step)!r}"
-            )
-        return step
-
-    # ------------------------------------------------------------------ #
     # Result construction
     # ------------------------------------------------------------------ #
     def make_result(
@@ -148,12 +150,17 @@ class SequentialFlow(Workflow):
         ended_at: datetime,
         **result_kwargs: Any,
     ) -> SequentialFlowResult:
-        """Construct a SequentialFlowResult envelope for this workflow's invocation."""
+        """Construct a SequentialFlowResult envelope, injecting the fixed return_index."""
+        trace = result_kwargs.pop("trace", None)
+        if trace is not None and not isinstance(trace, tuple):
+            raise TypeError(f"trace must be a tuple, got {type(trace)!r}")
         return self._make_result(
             result=result,
             started_at=started_at,
             ended_at=ended_at,
             result_cls=SequentialFlowResult,
+            return_index=self._return_index,
+            trace=trace,
             **result_kwargs,
         )
 
@@ -180,8 +187,7 @@ class SequentialFlow(Workflow):
                 running_inputs = result.result
 
         return step_results[self._return_index].result, {
-            "step_runs": tuple(r.run_id for r in step_results),
-            "return_index": self._return_index,
+            "trace": tuple(step_results) if self.include_trace else None,
         }
 
     async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -209,8 +215,7 @@ class SequentialFlow(Workflow):
                 running_inputs = result.result
 
         return step_results[self._return_index].result, {
-            "step_runs": tuple(r.run_id for r in step_results),
-            "return_index": self._return_index,
+            "trace": tuple(step_results) if self.include_trace else None,
         }
 
     # ------------------------------------------------------------------ #

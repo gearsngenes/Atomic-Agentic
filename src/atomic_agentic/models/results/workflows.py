@@ -41,17 +41,13 @@ class SequentialFlowResult(WorkflowResult):
 
     Fields
     ------
-    step_runs:
-        Tuple of child run ids, one per executed step, in step order.
-        ``step_runs[i]`` corresponds to ``SequentialFlow.steps[i]`` and can
-        be used with ``steps[i].get_checkpoint(step_runs[i])`` to retrieve
-        that step's own checkpoint.
     return_index:
         The fixed step index whose result became this result's ``result``
-        payload (i.e. ``result == steps[return_index]``'s checkpoint result).
+        payload. When ``trace`` is populated (inherited from
+        ``WorkflowResult``), ``trace[return_index]`` is that step's full
+        ``AtomicResult``, including its own ``run_id``.
     """
 
-    step_runs: tuple[str, ...]
     return_index: int
 
 
@@ -124,18 +120,24 @@ class ParallelFlowResult(WorkflowResult):
 
     Fields
     ------
-    branch_runs:
-        Tuple of child run ids, one per executed branch, in branch order.
-        ``branch_runs[i]`` corresponds to ``ParallelFlow.branches[i]`` and can
-        be used with ``branches[i].get_checkpoint(branch_runs[i])`` to
-        retrieve that branch's own checkpoint.
-    output_indices:
-        Tuple of branch indices, in projection order, whose payloads were
-        combined into ``result``. ``output_indices[k]`` indexes into
-        ``branch_runs``/``ParallelFlow.branches``. For ``output_type``
-        ``"list"``/``"tuple"``, this is the order of ``result``'s elements
-        (``result[k]`` came from branch ``output_indices[k]``).
+    result_mode:
+        The fixed output projection mode (``SCALAR``/``LIST``/``TUPLE``/
+        ``SET``/``DICT``), duplicated from ``ParallelFlow.result_mode``.
+    selected_indices:
+        The fixed branch positions selected for projection, in projection
+        order, duplicated from ``ParallelFlow.selected_indices``. Always
+        ``tuple[int, ...]`` regardless of mode — may be empty (no branch
+        selected). ``trace[i] for i in selected_indices`` is how to pull
+        the actual per-branch results that fed ``result``.
+    result_keys:
+        Single source of truth for the projection's labels, duplicated
+        from ``ParallelFlow.result_keys``. For ``DICT`` mode, the
+        validated ``result_keys`` constructor value (``tuple[str, ...]``).
+        For every other mode, exactly ``selected_indices``
+        (``tuple[int, ...]``) — may be empty (no branch selected), never
+        ``None``.
     """
 
-    branch_runs: tuple[str, ...]
-    output_indices: tuple[int, ...]
+    result_mode: str
+    selected_indices: tuple[int, ...]
+    result_keys: tuple[int, ...] | tuple[str, ...]

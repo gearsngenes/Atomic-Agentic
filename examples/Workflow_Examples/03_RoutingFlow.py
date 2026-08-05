@@ -1,5 +1,5 @@
 """
-04_RoutingFlow.py
+03_RoutingFlow.py
 
 Beginner-friendly RoutingFlow example.
 Demonstrates routing support requests to different branches based on topic and urgency, with clear output and result inspection.
@@ -141,7 +141,6 @@ for i, payload in enumerate(examples, start=1):
     print("Selected index:", result.selected_key)
     print("Chosen branch run:", result.chosen_branch_run)
     print("Router run:", result.router_run_id)
-    print("Router decision:", flow.get_router_decision(result.run_id))
 
 print("\n########## Dict-configured branches (key selector) ##########")
 for i, payload in enumerate(examples, start=1):
@@ -153,7 +152,6 @@ for i, payload in enumerate(examples, start=1):
     print("Selected key:", result.selected_key)
     print("Chosen branch run:", result.chosen_branch_run)
     print("Router run:", result.router_run_id)
-    print("Router decision:", flow_by_key.get_router_decision(result.run_id))
 
 print("\n=== Flow snapshot (list-configured) ===")
 pprint(flow.to_dict())

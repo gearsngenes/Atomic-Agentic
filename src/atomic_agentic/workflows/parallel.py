@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
+from ..exceptions import WorkflowError
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
-from ..utils.parameters import _validate_parameter_order, to_paramspec_list
+from ..utils.core import run_coro_sync
+from ..utils.parameters import (
+    parameter_collisions,
+    parameter_overlap,
+    variadic_compatible,
+    semantically_identical,
+    insert_by_category,
+)
 from ..constants.core import IDENTIFIER_PATTERN
-from ..models.results.workflows import ParallelFlowResult, WorkflowResult
+from ..models.results import AtomicResult
+from ..models.results.workflows import ParallelFlowResult
 from .base import Workflow
 
 logger = logging.getLogger(__name__)
@@ -22,27 +31,66 @@ __all__ = ["ParallelFlow"]
 class ParallelFlow(Workflow):
     """Execute a fixed set of branches concurrently and project one outer result.
 
-    Input contract
-    --------------
-    Inputs are broadcast: the same outer input mapping is forwarded to every
-    branch unchanged. ``parameters`` should ideally be provided explicitly; if
-    omitted, this class mirrors the first branch's parameters verbatim.
+    Construction contract
+    ----------------------
+    - ``branches`` is a non-empty ``list[AtomicInvokable]``. No wrapping,
+      no dict-input option — branches are always positional.
+    - ``parameters`` is not a constructor option. The outer schema is fully
+      derived by folding every branch's own parameters together in
+      declaration order: same-name collisions (incompatible type/kind)
+      raise ``WorkflowError``; two branches independently declaring a
+      same-kind variadic under different names raise ``WorkflowError``;
+      compatible-but-not-identical overlaps keep the earlier branch's
+      declaration (warns).
+    - ``selected_branches`` is a ``list[int]`` of branch positions (each
+      ``0 <= index < len(branches)``, no negative wraparound, no
+      duplicates) choosing which branches feed the projected result, and
+      in what order. ``None`` or ``[]`` both mean "no branches selected" —
+      a legal, meaningful state, not an error.
+    - ``result_mode`` (``SCALAR``/``LIST``/``TUPLE``/``SET``/``DICT`` class
+      constants) selects the projection shape. ``SCALAR`` allows at most
+      one selected branch (zero is legal — see Runtime contract).
+    - ``result_keys`` is a ``list[str]`` of labels, required exactly when
+      ``result_mode='dict'`` and must match ``len(selected_branches)``
+      (raise otherwise). Must be ``None``/empty for every other mode
+      (raise if provided). No auto-derivation from anywhere — always
+      explicit.
+    - ``include_trace`` controls whether invocation results populate
+      ``trace`` with the full per-branch ``AtomicResult`` tuple (ALL
+      branches, not just selected ones). Defaults to ``True``; mutable
+      post-construction via the inherited ``include_trace`` property.
+    - Branch topology, parameter schema, and output projection are all
+      fixed at construction.
 
-    Output contract
-    ----------------
-    All branches always execute. The final outer result is projected from the
-    branches selected by ``output_indices``/``output_range`` (default: all
-    branches, in order), shaped according to ``output_type``:
+    Runtime contract
+    ------------------
+    - The same outer input mapping is broadcast, unchanged, to every branch.
+    - All configured branches always execute, concurrently — selection only
+      affects what's projected into the outer result, not what runs.
+    - The final outer result is projected from the branches named by
+      ``selected_branches``, shaped by ``result_mode``:
+        - ``SCALAR``: one selected branch -> that branch's payload; zero
+          selected -> ``None``.
+        - ``LIST`` / ``TUPLE`` / ``SET``: the selected payloads in that
+          container type (empty selection -> empty container).
+        - ``DICT``: ``dict(zip(result_keys, payloads))`` (empty selection
+          -> ``{}``).
 
-    - ``SCALAR``: exactly one output index; result is that branch's payload.
-    - ``LIST`` / ``TUPLE`` / ``SET``: result is the selected payloads in a
-      ``list`` / ``tuple`` / ``set``.
-    - ``DICT``: requires ``output_names`` of matching length; result is
-      ``dict(zip(output_names, payloads))``.
+    Result
+    ------
+    Per-run result fields (see ``ParallelFlowResult``):
 
-    Mutability
-    ----------
-    Branch topology and output projection are both fixed at construction.
+    - ``trace``: full ordered tuple of every branch's own ``AtomicResult``
+      (all branches, declaration order), when ``include_trace`` is enabled.
+    - ``result_mode``: fixed projection mode, injected directly by
+      ``make_result()``.
+    - ``selected_indices``: fixed branch positions selected for
+      projection, injected directly by ``make_result()``.
+    - ``result_keys``: single source of truth for the projection's labels,
+      computed once at construction and mirrored verbatim onto the result.
+      For ``DICT`` mode it's the (validated) ``result_keys`` constructor
+      value; for every other mode it's exactly ``selected_indices`` — the
+      same tuple, not a separate concept.
     """
 
     SCALAR = "scalar"
@@ -58,240 +106,254 @@ class ParallelFlow(Workflow):
         name: str,
         namespace: str,
         description: str,
-        branches: list[AtomicInvokable],
+        branches: list[AtomicInvokable] | tuple[AtomicInvokable, ...],
         *,
-        parameters: type | list[str] | tuple[str, ...] | set[str] | list[ParamSpec] | None = None,
-        output_type: str = LIST,
-        output_indices: list[int] | None = None,
-        output_range: tuple[int, int] | None = None,
-        output_names: list[str] | None = None,
+        result_mode: str = LIST,
+        selected_branches: list[int] | None = None,
+        result_keys: list[str] | None = None,
+        include_trace: bool = True,
     ) -> None:
-        if not isinstance(branches, list):
+        # 1. branches: always a plain list[AtomicInvokable], no wrapping.
+        if not isinstance(branches, (list, tuple)):
             raise TypeError(
-                f"branches must be a non-empty list[AtomicInvokable], got {type(branches)!r}"
+                f"branches must be a non-empty list or tuple[AtomicInvokable], got {type(branches)!r}"
             )
         if not branches:
             raise ValueError("branches must not be empty")
+        for index, branch in enumerate(branches):
+            if not isinstance(branch, AtomicInvokable):
+                raise TypeError(
+                    f"ParallelFlow branches must be AtomicInvokable, "
+                    f"got {type(branch)!r} at position {index}"
+                )
+        branch_items = tuple(branches)
+        branch_count = len(branch_items)
 
-        normalized_branches = tuple(self._normalize_branch(branch) for branch in branches)
+        # 2. Outer schema is fully derived from branches — no override.
+        declared_parameters = self._reconcile_branch_parameters(branch_items)
 
-        if parameters is None:
-            declared_parameters = list(normalized_branches[0].parameters)
+        # 3. result_mode must be one of the known projection shapes.
+        normalized_mode = str(result_mode).strip().lower()
+        if normalized_mode not in self._OUTPUT_TYPES:
+            raise ValueError(
+                f"result_mode must be one of {sorted(self._OUTPUT_TYPES)!r}, got {result_mode!r}"
+            )
+
+        # 4. selected_branches: None/[] both mean "select nothing" — a
+        #    legal state, not an error. Every item must be an in-range,
+        #    non-negative int (no wraparound); no duplicates.
+        if selected_branches is None:
+            selected_branches = []
+        if not isinstance(selected_branches, (list, tuple)):
+            raise TypeError(
+                f"selected_branches must be a list or tuple or None, got {type(selected_branches)!r}"
+            )
+        for raw in selected_branches:
+            if not isinstance(raw, int) or isinstance(raw, bool):
+                raise TypeError(
+                    f"selected_branches items must be int, got {type(raw)!r}"
+                )
+            if raw < 0 or raw >= branch_count:
+                raise IndexError(
+                    f"selected_branches index {raw} out of range for "
+                    f"{branch_count} configured branch(es)"
+                )
+        if len(selected_branches) != len(set(selected_branches)):
+            raise ValueError("selected_branches must not select the same branch twice")
+        selected_indices: tuple[int, ...] = tuple(selected_branches)
+
+        # 5. SCALAR allows at most one selected branch (zero is legal —
+        #    invoke() then returns None).
+        if normalized_mode == self.SCALAR and len(selected_indices) > 1:
+            raise ValueError("result_mode='scalar' allows at most one selected branch")
+
+        # 6. result_keys: required (and validated) exactly for DICT mode,
+        #    forbidden otherwise. Never auto-derived — always explicit.
+        #    Either way, self._result_keys ends up as ONE of two things:
+        #    the validated label list (DICT), or selected_indices itself
+        #    (every other mode) — no third case, no None special-casing.
+        if normalized_mode == self.DICT:
+            if result_keys is None:
+                result_keys = []
+            if not isinstance(result_keys, (list, tuple)):
+                raise TypeError(
+                    f"result_keys must be a list[str] or tuple[str] or None, got {type(result_keys)!r}"
+                )
+            if len(result_keys) != len(selected_indices):
+                raise ValueError(
+                    "result_keys must match the length of selected_branches "
+                    f"({len(result_keys)} given, {len(selected_indices)} selected)"
+                )
+
+            cleaned_keys: list[str] = []
+            for index, raw_name in enumerate(result_keys):
+                if not isinstance(raw_name, str) or not raw_name.strip():
+                    raise ValueError(f"result_keys[{index}] must be a non-empty string")
+                cleaned = raw_name.strip()
+                if not IDENTIFIER_PATTERN.match(cleaned):
+                    raise ValueError(
+                        f"result_keys[{index}]={cleaned!r} is not a valid parameter-style name"
+                    )
+                cleaned_keys.append(cleaned)
+            if len(cleaned_keys) != len(set(cleaned_keys)):
+                raise ValueError("result_keys must be unique")
+
+            resolved_result_keys: tuple[int, ...] | tuple[str, ...] = tuple(cleaned_keys)
+            resolved_return_type = "dict"
         else:
-            declared_parameters = to_paramspec_list(parameters)
-            _validate_parameter_order(declared_parameters)
-
-        resolved_output_type, resolved_indices, resolved_names, resolved_return_type = self._configure_output(
-            branch_count=len(normalized_branches),
-            branches=normalized_branches,
-            output_type=output_type,
-            output_indices=output_indices,
-            output_range=output_range,
-            output_names=output_names,
-        )
+            if result_keys is not None:
+                raise ValueError(
+                    f"result_keys must be None when result_mode={normalized_mode!r}"
+                )
+            resolved_result_keys = selected_indices
+            if normalized_mode == self.SCALAR:
+                # "None" (the type string) mirrors utils/parameters.py's own
+                # NoneType -> "None" formatting convention.
+                resolved_return_type = (
+                    branch_items[selected_indices[0]].return_type if selected_indices else "None"
+                )
+            else:
+                resolved_return_type = normalized_mode
 
         super().__init__(
             name=name,
             namespace=namespace,
             description=description,
-            parameters=list(declared_parameters),
+            parameters=declared_parameters,
             return_type=resolved_return_type,
+            include_trace=include_trace,
         )
 
-        self._branches: tuple[AtomicInvokable, ...] = normalized_branches
-        self._output_type: str = resolved_output_type
-        self._output_indices: tuple[int, ...] = resolved_indices
-        self._output_names: Optional[tuple[str, ...]] = resolved_names
+        self._branches: tuple[AtomicInvokable, ...] = branch_items
+        self._result_mode: str = normalized_mode
+        self._selected_indices: tuple[int, ...] = selected_indices
+        self._result_keys: tuple[int, ...] | tuple[str, ...] = resolved_result_keys
 
     # ------------------------------------------------------------------ #
     # Read-only topology / contract properties
     # ------------------------------------------------------------------ #
     @property
     def branches(self) -> tuple[AtomicInvokable, ...]:
-        """Return the fixed normalized branch tuple."""
+        """Return the fixed branch tuple, declaration order."""
         return self._branches
 
     @property
-    def output_type(self) -> str:
-        """Return the fixed output projection type."""
-        return self._output_type
+    def result_mode(self) -> str:
+        """Return the fixed output projection mode."""
+        return self._result_mode
 
     @property
-    def output_indices(self) -> list[int]:
-        """Return the fixed ordered output branch indices."""
-        return list(self._output_indices)
+    def selected_indices(self) -> tuple[int, ...]:
+        """Return the fixed branch indices selected for projection, in
+        projection order. May be empty (no branch selected)."""
+        return self._selected_indices
 
     @property
-    def output_names(self) -> Optional[list[str]]:
-        """Return the fixed dict output keys, if ``output_type='dict'``."""
-        return list(self._output_names) if self._output_names is not None else None
+    def result_keys(self) -> tuple[int, ...] | tuple[str, ...]:
+        """Return the fixed projection labels — the single source of truth
+        also mirrored onto ``ParallelFlowResult.result_keys``. For DICT
+        mode, the validated label strings; for every other mode, exactly
+        ``selected_indices`` (same tuple, not a separate value)."""
+        return self._result_keys
 
     def _extra_description(self) -> str:
         """Describe the fixed output projection shape.
 
-        A branch's own extra description is only inlined in the SCALAR case,
-        where the result IS that one branch's payload verbatim (a true 1:1
-        passthrough, not an aggregation). DICT/LIST/TUPLE/SET describe
-        structural shape facts instead of inlining any branch content.
+        A branch's own extra description is only inlined in the SCALAR case
+        with a branch selected, where the result IS that one branch's
+        payload verbatim (a true 1:1 passthrough, not an aggregation).
+        DICT/LIST/TUPLE/SET describe structural shape facts instead of
+        inlining any branch content.
         """
-        if self._output_type == self.SCALAR:
-            return self._branches[self._output_indices[0]]._extra_description()
+        if self._result_mode == self.SCALAR:
+            if not self._selected_indices:
+                return "Returns None (no branch selected)."
+            return self._branches[self._selected_indices[0]]._extra_description()
 
-        if self._output_type == self.DICT:
+        if self._result_mode == self.DICT:
             entries = ", ".join(
                 f"{name} ({self._branches[index].return_type})"
-                for name, index in zip(self._output_names, self._output_indices)
+                for name, index in zip(self._result_keys, self._selected_indices)
             )
-            return f"Returns a dict of {len(self._output_indices)} keys: {entries}"
+            return f"Returns a dict of {len(self._selected_indices)} keys: {entries}"
 
-        return f"Returns a {self._output_type} of {len(self._output_indices)} branch outputs."
+        return f"Returns a {self._result_mode} of {len(self._selected_indices)} branch outputs."
 
     # ------------------------------------------------------------------ #
-    # Internal normalization / configuration helpers
+    # Internal helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _normalize_branch(branch: AtomicInvokable) -> AtomicInvokable:
-        """Validate one configured branch is an AtomicInvokable."""
-        if not isinstance(branch, AtomicInvokable):
-            raise TypeError(
-                f"ParallelFlow branches must be AtomicInvokable, got {type(branch)!r}"
-            )
-        return branch
+    def _reconcile_branch_parameters(branches: tuple[AtomicInvokable, ...]) -> list[ParamSpec]:
+        """Fold every branch's parameters into one combined schema.
 
-    @staticmethod
-    def _resolve_output_indices(
-        *,
-        branch_count: int,
-        output_indices: list[int] | None,
-        output_range: tuple[int, int] | None,
-    ) -> list[int]:
-        """Normalize output filtering into one ordered list of branch indices."""
-        if output_indices is not None and output_range is not None:
-            raise ValueError("Pass either output_indices or output_range, not both")
+        N-way left-fold over branches in declaration order, generalizing
+        the pairwise pattern ``Agent`` uses to reconcile pre/post/extra
+        parameters (``agents/base.py``): for each branch, collisions with
+        the accumulated schema raise, independently-named same-kind
+        variadics raise, compatible-but-not-identical overlaps keep the
+        accumulated (earlier) declaration and warn, and the remainder is
+        merged in via ``insert_by_category``.
+        """
+        combined: list[ParamSpec] = []
 
-        if output_indices is None and output_range is None:
-            return list(range(branch_count))
+        for index, branch in enumerate(branches):
+            branch_params = list(branch.parameters)
 
-        if output_indices is not None:
-            if not isinstance(output_indices, list):
-                raise TypeError(
-                    f"output_indices must be a list[int], got {type(output_indices)!r}"
+            # Same-name, incompatible-type/kind overlap with everything
+            # accumulated so far is a hard error.
+            collisions = parameter_collisions(combined, branch_params)
+            if collisions:
+                raise WorkflowError(
+                    f"ParallelFlow branch {index} ({branch.full_name}) parameter(s) "
+                    f"{collisions!r} conflict with an earlier branch's declaration "
+                    "(same name, incompatible type/kind)."
                 )
 
-            resolved: list[int] = []
-            for raw_index in output_indices:
-                if not isinstance(raw_index, int):
-                    raise TypeError(
-                        f"output_indices items must be int, got {type(raw_index)!r}"
-                    )
-
-                resolved_index = raw_index if raw_index >= 0 else branch_count + raw_index
-                if resolved_index < 0 or resolved_index >= branch_count:
-                    raise IndexError(
-                        f"output index {raw_index} out of range for {branch_count} configured branch(es)"
-                    )
-                resolved.append(resolved_index)
-
-            if len(resolved) != len(set(resolved)):
-                raise ValueError("output_indices must not contain duplicates")
-
-            return resolved
-
-        if (
-            not isinstance(output_range, tuple)
-            or len(output_range) != 2
-            or not all(isinstance(item, int) for item in output_range)
-        ):
-            raise TypeError("output_range must be a 2-int tuple")
-
-        start, end = output_range
-        resolved = list(range(branch_count))[start:end]
-
-        if len(resolved) != len(set(resolved)):
-            raise ValueError("resolved output indices must not contain duplicates")
-
-        return resolved
-
-    @classmethod
-    def _configure_output(
-        cls,
-        *,
-        branch_count: int,
-        branches: tuple[AtomicInvokable, ...],
-        output_type: str,
-        output_indices: list[int] | None,
-        output_range: tuple[int, int] | None,
-        output_names: list[str] | None,
-    ) -> tuple[str, tuple[int, ...], Optional[tuple[str, ...]], str]:
-        """Resolve and validate the fixed output projection for one construction."""
-        normalized_output_type = str(output_type).strip().lower()
-        if normalized_output_type not in cls._OUTPUT_TYPES:
-            raise ValueError(
-                f"output_type must be one of {sorted(cls._OUTPUT_TYPES)!r}, got {output_type!r}"
-            )
-
-        resolved_indices = cls._resolve_output_indices(
-            branch_count=branch_count,
-            output_indices=output_indices,
-            output_range=output_range,
-        )
-
-        if normalized_output_type == cls.SCALAR:
-            if len(resolved_indices) != 1:
-                raise ValueError("output_type='scalar' requires exactly one output index")
-            if output_names is not None:
-                raise ValueError("output_names must be None when output_type='scalar'")
-            resolved_return_type = branches[resolved_indices[0]].return_type
-            return normalized_output_type, tuple(resolved_indices), None, resolved_return_type
-
-        if normalized_output_type == cls.DICT:
-            if output_names is None:
-                raise ValueError("output_names are required when output_type='dict'")
-            if not isinstance(output_names, list):
-                raise TypeError(
-                    f"output_names must be a list[str], got {type(output_names)!r}"
+            # Two independently-named *args/**kwargs of the same kind can't
+            # both survive into one combined signature.
+            overlap = parameter_overlap(combined, branch_params)
+            if not variadic_compatible(combined, branch_params, set(overlap)):
+                raise WorkflowError(
+                    f"ParallelFlow branch {index} ({branch.full_name}) declares an "
+                    "independent variadic parameter of the same kind as an earlier "
+                    "branch under a different name; rename one."
                 )
-            if len(output_names) != len(resolved_indices):
-                raise ValueError("len(output_names) must equal the number of projected outputs")
 
-            cleaned_names: list[str] = []
-            for index, raw_name in enumerate(output_names):
-                if not isinstance(raw_name, str) or not raw_name.strip():
-                    raise ValueError(f"output_names[{index}] must be a non-empty string")
-                cleaned = raw_name.strip()
-                if not IDENTIFIER_PATTERN.match(cleaned):
-                    raise ValueError(
-                        f"output_names[{index}]={cleaned!r} is not a valid parameter-style name"
+            # Same-name, compatible-but-not-identical overlap: the earlier
+            # (accumulated) branch's declaration wins, later one is dropped.
+            combined_by_name = {p.name: p for p in combined}
+            branch_by_name = {p.name: p for p in branch_params}
+            for shared_name in overlap:
+                if not semantically_identical(combined_by_name[shared_name], branch_by_name[shared_name]):
+                    warnings.warn(
+                        f"Parameter {shared_name!r} in branch {index} ({branch.full_name}) "
+                        "is compatible with an earlier branch's declaration but not "
+                        "identical; the earlier branch's declaration wins.",
+                        UserWarning,
+                        stacklevel=3,
                     )
-                cleaned_names.append(cleaned)
 
-            if len(cleaned_names) != len(set(cleaned_names)):
-                raise ValueError("output_names must be unique")
+            # Merge in whatever this branch adds that wasn't already covered.
+            remainder = [p for p in branch_params if p.name not in overlap]
+            combined = insert_by_category(combined, remainder)
 
-            return normalized_output_type, tuple(resolved_indices), tuple(cleaned_names), "dict"
+        return combined
 
-        # LIST / TUPLE / SET
-        if output_names is not None:
-            raise ValueError(
-                f"output_names must be None when output_type={normalized_output_type!r}"
-            )
-        return normalized_output_type, tuple(resolved_indices), None, normalized_output_type
-
-    def _project_result(self, branch_results: list[WorkflowResult]) -> Any:
+    def _project_result(self, branch_results: list[AtomicResult]) -> Any:
         """Project executed branch results into the configured outer result."""
-        payloads = [branch_results[index].result for index in self._output_indices]
+        payloads = [branch_results[index].result for index in self._selected_indices]
 
-        if self._output_type == self.SCALAR:
-            return payloads[0]
-        if self._output_type == self.LIST:
+        if self._result_mode == self.SCALAR:
+            return payloads[0] if payloads else None
+        if self._result_mode == self.LIST:
             return list(payloads)
-        if self._output_type == self.TUPLE:
+        if self._result_mode == self.TUPLE:
             return tuple(payloads)
-        if self._output_type == self.SET:
+        if self._result_mode == self.SET:
             return set(payloads)
 
-        assert self._output_names is not None
-        return dict(zip(self._output_names, payloads))
+        # DICT: self._result_keys IS the label list in this mode.
+        return dict(zip(self._result_keys, payloads))
 
     # ------------------------------------------------------------------ #
     # Result construction
@@ -303,12 +365,17 @@ class ParallelFlow(Workflow):
         ended_at: datetime,
         **result_kwargs: Any,
     ) -> ParallelFlowResult:
-        """Construct a ParallelFlowResult envelope for this workflow's invocation."""
+        """Construct a ParallelFlowResult envelope, injecting the fixed
+        result_mode/selected_indices/result_keys directly — all constant
+        facts about this instance, not per-run data."""
         return self._make_result(
             result=result,
             started_at=started_at,
             ended_at=ended_at,
             result_cls=ParallelFlowResult,
+            result_mode=self._result_mode,
+            selected_indices=self._selected_indices,
+            result_keys=self._result_keys,
             **result_kwargs,
         )
 
@@ -316,36 +383,22 @@ class ParallelFlow(Workflow):
     # Workflow run hooks
     # ------------------------------------------------------------------ #
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
-        """Synchronously execute all configured branches concurrently."""
-        branch_inputs = [dict(inputs) for _ in self._branches]
+        """Synchronously execute all configured branches concurrently.
 
-        def run_one(item: tuple[int, AtomicInvokable, dict[str, Any]]) -> WorkflowResult:
-            index, branch, branch_input = item
-            try:
-                return branch.invoke(branch_input)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"{self.full_name}: branch {index} ({branch.full_name}) failed during invoke"
-                ) from exc
-
-        items = [
-            (index, branch, branch_inputs[index])
-            for index, branch in enumerate(self._branches)
-        ]
-
-        with ThreadPoolExecutor(max_workers=len(items)) as executor:
-            branch_results = list(executor.map(run_one, items))
-
-        return self._project_result(branch_results), {
-            "branch_runs": tuple(r.run_id for r in branch_results),
-            "output_indices": self._output_indices,
-        }
+        Sync is the async path bridged, not a second implementation --
+        matches ToolAgent.act()'s own run_coro_sync(async gather) pattern.
+        Branches without a native async_invoke override already run their
+        real .invoke() inside a background thread by default
+        (AtomicInvokable.async_invoke), so a separate thread-pool mechanism
+        here would just duplicate that.
+        """
+        return run_coro_sync(self._async_run(inputs))
 
     async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
         """Asynchronously execute all configured branches concurrently."""
         branch_inputs = [dict(inputs) for _ in self._branches]
 
-        async def run_one(index: int, branch: AtomicInvokable, branch_input: dict[str, Any]) -> WorkflowResult:
+        async def run_one(index: int, branch: AtomicInvokable, branch_input: dict[str, Any]) -> AtomicResult:
             try:
                 return await branch.async_invoke(branch_input)
             except Exception as exc:
@@ -363,8 +416,7 @@ class ParallelFlow(Workflow):
         )
 
         return self._project_result(branch_results), {
-            "branch_runs": tuple(r.run_id for r in branch_results),
-            "output_indices": self._output_indices,
+            "trace": tuple(branch_results) if self.include_trace else None,
         }
 
     # ------------------------------------------------------------------ #
@@ -377,9 +429,9 @@ class ParallelFlow(Workflow):
             {
                 "branches": [branch.to_dict() for branch in self._branches],
                 "branch_count": len(self._branches),
-                "output_type": self._output_type,
-                "output_indices": list(self._output_indices),
-                "output_names": list(self._output_names) if self._output_names is not None else None,
+                "result_mode": self._result_mode,
+                "selected_indices": list(self._selected_indices),
+                "result_keys": list(self._result_keys),
             }
         )
         return data

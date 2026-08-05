@@ -1,5 +1,5 @@
 """
-02_SequentialFlow.py
+01_SequentialFlow.py
 
 Beginner-friendly SequentialFlow example.
 Step 1 wraps a tuple-returning function in StructuredInvokable to adapt it
@@ -12,7 +12,6 @@ from __future__ import annotations
 from pprint import pprint
 
 from atomic_agentic.workflows import SequentialFlow
-from atomic_agentic import StructuredInvokable
 from atomic_agentic.tools import Tool
 
 
@@ -51,21 +50,26 @@ def main() -> None:
     print("\n=== SequentialFlow run_id ===")
     print(final_result.run_id)
 
-    print("\n=== step_runs / return_index ===")
-    print("step_runs:", final_result.step_runs)
+    print("\n=== return_index ===")
     print("return_index:", final_result.return_index)
 
-    print("\n=== Per-step results (get_step_results) ===")
-    for i, step_result in enumerate(flow.get_step_results(final_result.run_id)):
+    print("\n=== Per-step results (trace) ===")
+    # trace holds every step's own AtomicResult, in step order, whenever
+    # include_trace is enabled (the default). trace[return_index] is the
+    # same result object that produced final_result.result.
+    for i, step_result in enumerate(final_result.trace):
         print(f"Step {i}: run_id={step_result.run_id}, result={step_result.result}")
 
-    print("\n=== Checkpoints ===")
-    for i, step in enumerate(flow.steps):
-        print(f"\nStep {i}: {step.component.name}")
-        for ckpt in step.checkpoints:
-            print(f"  run_id: {ckpt.result.run_id}")
-            print(f"  inputs: {ckpt.inputs}")
-            print(f"  result: {ckpt.result.result}")
+    print("\n=== include_trace=False: no per-step visibility ===")
+    lean_flow = SequentialFlow(
+        name="demo_sequential_lean",
+        namespace="examples",
+        description="Same pipeline, tracing disabled.",
+        steps=[step1, step2, step3],
+        include_trace=False,
+    )
+    lean_result = lean_flow.invoke(inputs)
+    print("trace:", lean_result.trace)  # None -- no per-step run ids at all
 
     print("\nAll steps and outputs complete.")
 
