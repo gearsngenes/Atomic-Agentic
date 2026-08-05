@@ -57,24 +57,18 @@ class RoutingFlowResult(WorkflowResult):
 
     Fields
     ------
-    selected_key:
-        The validated selector returned by the router that determined which
-        branch ran. For list-configured branches, an ``int`` index into
-        ``RoutingFlow.branches``. For dict-configured branches, the dict key
-        used to look up the executed branch.
-    chosen_branch_run:
-        Run id of the selected branch's invocation. Used with
-        ``branches[selected_key].get_checkpoint(chosen_branch_run)`` to
-        retrieve that branch's own checkpoint.
-    router_run_id:
-        Run id of the router's invocation. Use with
-        ``router.get_checkpoint(router_run_id)`` to retrieve the router's
-        own checkpoint.
+    selected_branch:
+        The router's validated selector -- the branch that was actually
+        invoked. An ``int`` index into ``RoutingFlow.branches`` for
+        list-configured topology, or the dict key for dict-configured
+        topology. Always populated, independent of ``include_trace``.
+    trace (inherited):
+        Exactly two entries when ``include_trace`` is enabled: ``trace[0]``
+        is the router's own ``AtomicResult``, ``trace[1]`` is the selected
+        branch's own ``AtomicResult``. ``None`` when tracing is disabled.
     """
 
-    selected_key: Hashable
-    chosen_branch_run: str
-    router_run_id: str
+    selected_branch: Hashable
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,12 +2,17 @@
 03_RoutingFlow.py
 
 Beginner-friendly RoutingFlow example.
-Demonstrates routing support requests to different branches based on topic and urgency, with clear output and result inspection.
+Demonstrates routing support requests to different branches based on topic
+and urgency: int-indexed and dict-keyed branch topologies, trace-based run
+inspection, and the schema_mode construction contract. STRICT (the default)
+requires every branch's parameters to already be covered by the router's own
+schema; PARTIAL/OPEN allow a branch to need more than the router does, at
+the cost of a runtime error if a caller doesn't supply what the selected
+branch actually needs.
 """
 
 from __future__ import annotations
 from pprint import pprint
-from dotenv import load_dotenv
 from atomic_agentic.tools import Tool
 from atomic_agentic.workflows import RoutingFlow
 
@@ -33,7 +38,9 @@ def choose_branch_key(topic: str, urgency: int = 0) -> str:
     return "general"
 
 # ──────────────────────────────────────────────────────────────
-# Branch functions: each returns a string response
+# Branch functions: each declares the SAME (topic, urgency) shape as
+# the router -- required for schema_mode="strict" (the default), since
+# STRICT pins the outer schema to the router's own parameters verbatim.
 # ──────────────────────────────────────────────────────────────
 def handle_billing(topic: str, urgency: int = 0) -> str:
     return (
@@ -56,6 +63,25 @@ def handle_escalation(topic: str, urgency: int = 0) -> str:
         f"Escalation team selected.\n"
         f"Issue: {topic}\n"
         f"Urgency: {urgency}\n"
+        f"Action: prioritize immediate human follow-up and incident review."
+    )
+
+# A branch that needs MORE than the router does -- only legal under
+# schema_mode="partial"/"open". `notes` isn't part of the router's own
+# schema, so RoutingFlow's reconciliation makes it optional (default=None)
+# on the OUTER schema. That's not just a schema-level nicety: filter_inputs
+# (core/Invokable.py) injects declared defaults for absent params at EVERY
+# layer, so an omitted `notes` is backfilled to None by the outer flow and
+# arrives at this branch as a real notes=None value, not a missing
+# argument -- no error, just a silently degraded value. Branches meant to
+# be used under PARTIAL/OPEN should handle None defensively for anything
+# the router doesn't guarantee.
+def handle_escalation_with_notes(topic: str, notes: str, urgency: int = 0) -> str:
+    return (
+        f"Escalation team selected.\n"
+        f"Issue: {topic}\n"
+        f"Urgency: {urgency}\n"
+        f"Handoff notes: {notes}\n"
         f"Action: prioritize immediate human follow-up and incident review."
     )
 
@@ -97,8 +123,16 @@ escalation_tool = Tool(
     description="Handle urgent escalations.",
 )
 
+escalation_notes_tool = Tool(
+    function=handle_escalation_with_notes,
+    name="handle_escalation_with_notes",
+    namespace="support",
+    description="Handle urgent escalations with handoff notes.",
+)
+
 # ──────────────────────────────────────────────────────────────
-# Build the RoutingFlows
+# Build the RoutingFlows -- schema_mode defaults to STRICT, so it's
+# not passed explicitly for these two.
 # ──────────────────────────────────────────────────────────────
 # List-configured branches: router returns an int index into branches.
 flow = RoutingFlow(
@@ -138,9 +172,11 @@ for i, payload in enumerate(examples, start=1):
     print("Inputs:", payload)
     print("Run ID:", result.run_id)
     print("Result:", result.result)
-    print("Selected index:", result.selected_key)
-    print("Chosen branch run:", result.chosen_branch_run)
-    print("Router run:", result.router_run_id)
+    print("Selected branch:", result.selected_branch)
+    # trace is exactly 2 entries when include_trace is on (the default):
+    # trace[0] is the router's own result, trace[1] is the selected branch's.
+    for j, node_result in enumerate(result.trace):
+        print(f"  trace[{j}]: run_id={node_result.run_id}, result={node_result.result!r}")
 
 print("\n########## Dict-configured branches (key selector) ##########")
 for i, payload in enumerate(examples, start=1):
@@ -149,9 +185,36 @@ for i, payload in enumerate(examples, start=1):
     print("Inputs:", payload)
     print("Run ID:", result.run_id)
     print("Result:", result.result)
-    print("Selected key:", result.selected_key)
-    print("Chosen branch run:", result.chosen_branch_run)
-    print("Router run:", result.router_run_id)
+    print("Selected branch:", result.selected_branch)
+    for j, node_result in enumerate(result.trace):
+        print(f"  trace[{j}]: run_id={node_result.run_id}, result={node_result.result!r}")
+
+# ──────────────────────────────────────────────────────────────
+# schema_mode="partial": escalation_notes_tool needs `notes`, which the
+# router never looks at. PARTIAL still requires SOME overlap with the
+# router (topic/urgency here) -- OPEN would allow a branch with zero
+# overlap at all, same fold, no overlap check.
+# ──────────────────────────────────────────────────────────────
+print("\n########## schema_mode=PARTIAL: a branch needing more than the router ##########")
+partial_flow = RoutingFlow(
+    name="support_router_partial",
+    namespace="examples",
+    description="Escalation branch needs handoff notes the router doesn't use.",
+    router=router_tool,
+    branches=[billing_tool, general_tool, escalation_notes_tool],
+    schema_mode=RoutingFlow.PARTIAL,
+)
+print("Reconciled outer parameters:", [p.name for p in partial_flow.parameters])
+notes_param = next(p for p in partial_flow.parameters if p.name == "notes")
+print(f"'notes' param: default={notes_param.default!r} (synthesized -- not in the router's own schema)")
+
+urgent_payload = {"topic": "Production outage affecting all customers", "urgency": 10, "notes": "Customer X escalated via phone"}
+result = partial_flow.invoke(urgent_payload)
+print("\nWith notes supplied:", result.result)
+
+result_no_notes = partial_flow.invoke({"topic": "Production outage affecting all customers", "urgency": 10})
+print("\nWithout notes supplied:", result_no_notes.result)
+print("(no error -- the synthesized default=None was injected and passed straight through)")
 
 print("\n=== Flow snapshot (list-configured) ===")
 pprint(flow.to_dict())
