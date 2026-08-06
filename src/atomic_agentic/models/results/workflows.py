@@ -77,34 +77,39 @@ class IterativeFlowResult(WorkflowResult):
 
     Fields
     ------
-    iteration_runs:
-        Tuple of loop-body run ids, one per completed iteration, in
-        iteration order. ``iteration_runs[i]`` can be used with
-        ``loop_body.get_checkpoint(iteration_runs[i])`` to retrieve that
-        iteration's body result.
-    judge_runs:
-        Tuple of judge run ids, one per completed iteration, in iteration
-        order, parallel to ``iteration_runs``. ``judge_runs[i]`` can be used
-        with ``judge.get_checkpoint(judge_runs[i])`` to retrieve that
-        iteration's judge result (and, via a retrieval helper, the judge's
-        decision for that iteration).
-    return_step_index:
-        Fixed loop-body step index whose result became this result's
-        ``result`` payload.
-    handoff_step_index:
-        Fixed loop-body step index whose result became the next iteration's
-        inputs.
-    evaluate_step_index:
-        Fixed loop-body step index whose result was passed to the judge.
+    exited_early:
+        True if the run stopped because a checker's judge matched its
+        approval_value; False if it ran to ``max_iterations``.
+    iterations_completed:
+        Number of iterations actually executed. May be less than
+        ``max_iterations`` when ``exited_early`` is True.
+    triggering_step:
+        The body-step index whose checker matched its ``approval_value`` and
+        stopped the loop. ``None`` if ``exited_early`` is False. A plain
+        ``int`` rather than the ``CheckerSpec`` itself -- a result should not
+        carry a callable (``CheckerSpec.judge``); look the checker up on the
+        live flow via this index if the full spec is needed.
+    result_setting_indices:
+        Fixed body-step positions whose results update the running
+        "current answer", duplicated from
+        ``IterativeFlow.result_setting_indices``.
+    handoff_index:
+        Fixed body-step position whose result feeds the next iteration,
+        duplicated from ``IterativeFlow.handoff_index``.
     max_iterations:
-        Iteration bound configured for this run.
+        Iteration bound configured for this run (mutable knob, snapshotted
+        at invocation time).
+    trace (inherited):
+        Every ``AtomicResult`` actually produced this run -- body-step
+        results and checker judge-invocation results, interleaved in true
+        execution order. ``None`` when tracing is disabled.
     """
 
-    iteration_runs: tuple[str, ...]
-    judge_runs: tuple[str, ...]
-    return_step_index: int
-    handoff_step_index: int
-    evaluate_step_index: int
+    exited_early: bool
+    iterations_completed: int
+    triggering_step: int | None
+    result_setting_indices: tuple[int, ...]
+    handoff_index: int
     max_iterations: int
 
 
