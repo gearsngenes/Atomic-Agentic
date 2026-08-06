@@ -8,7 +8,7 @@ import pytest
 
 from atomic_agentic.exceptions import ExecutionError
 from atomic_agentic.models.parameters import ParamSpec
-from atomic_agentic.workflows.base import Workflow, WorkflowCheckpoint
+from atomic_agentic.workflows.base import Workflow
 from atomic_agentic.models.results.workflows import WorkflowResult
 
 
@@ -32,6 +32,7 @@ class EchoWorkflow(Workflow):
         description: str = "Echo workflow.",
         parameters: list[ParamSpec] | None = None,
         return_type: str = "dict[str, Any]",
+        include_trace: bool = True,
     ) -> None:
         super().__init__(
             name=name,
@@ -39,6 +40,7 @@ class EchoWorkflow(Workflow):
             description=description,
             parameters=parameters if parameters is not None else [make_value_param()],
             return_type=return_type,
+            include_trace=include_trace,
         )
 
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -50,6 +52,25 @@ class NativeAsyncEchoWorkflow(EchoWorkflow):
 
     async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
         return {"value": inputs["value"]}, {}
+
+
+class TraceEmittingWorkflow(Workflow):
+    """Workflow whose ``_run``/``_async_run`` explicitly populate ``trace``."""
+
+    def __init__(self, *, name: str = "trace_workflow", namespace: str = "tests") -> None:
+        super().__init__(
+            name=name,
+            namespace=namespace,
+            description="Trace-emitting workflow.",
+            parameters=[make_value_param()],
+            return_type="dict[str, Any]",
+        )
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"value": inputs["value"]}, {"trace": ("child-a", "child-b")}
+
+    async def _async_run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"value": inputs["value"]}, {"trace": ("child-a", "child-b")}
 
 
 class ConfigurableWorkflow(Workflow):
@@ -117,10 +138,30 @@ class TestWorkflowConstruction:
         assert workflow.parameters == params
         assert workflow.return_type == "dict[str, Any]"
 
-    def test_checkpoints_initially_empty(self) -> None:
+    def test_include_trace_defaults_to_true(self) -> None:
         workflow = EchoWorkflow()
 
-        assert workflow.checkpoints == []
+        assert workflow.include_trace is True
+
+
+class TestWorkflowIncludeTrace:
+    def test_include_trace_settable_post_construction(self) -> None:
+        workflow = EchoWorkflow()
+
+        workflow.include_trace = False
+
+        assert workflow.include_trace is False
+
+    def test_include_trace_setter_rejects_non_bool(self) -> None:
+        workflow = EchoWorkflow()
+
+        with pytest.raises(TypeError, match="include_trace must be a bool"):
+            workflow.include_trace = "yes"  # type: ignore[assignment]
+
+    def test_include_trace_accepted_at_construction(self) -> None:
+        workflow = EchoWorkflow(include_trace=False)
+
+        assert workflow.include_trace is False
 
 
 class TestWorkflowSyncInvoke:
@@ -142,76 +183,19 @@ class TestWorkflowSyncInvoke:
 
         assert result.result == {"value": 123}
 
-    def test_invoke_appends_checkpoint_matching_returned_result(self) -> None:
+    def test_trace_defaults_to_none_when_run_omits_it(self) -> None:
         workflow = EchoWorkflow()
 
-        result = workflow.invoke({"value": 123})
-        checkpoint = workflow.checkpoints[-1]
+        result = workflow.invoke({"value": 1})
 
-        assert isinstance(checkpoint, WorkflowCheckpoint)
-        assert checkpoint.result is result
-        assert checkpoint.inputs == {"value": 123}
+        assert result.trace is None
 
-    def test_get_checkpoint_by_index_run_id_and_result_identity(self) -> None:
-        workflow = EchoWorkflow()
+    def test_trace_populated_when_run_hook_supplies_it(self) -> None:
+        workflow = TraceEmittingWorkflow()
 
-        result = workflow.invoke({"value": 123})
-        checkpoint = workflow.checkpoints[0]
+        result = workflow.invoke({"value": 1})
 
-        assert workflow.get_checkpoint(0) is checkpoint
-        assert workflow.get_checkpoint(result.run_id) is checkpoint
-        assert workflow.get_checkpoint(result) is checkpoint
-        assert workflow.get_checkpoint("missing-run-id") is None
-        with pytest.raises(IndexError):
-            workflow.get_checkpoint(5)
-
-    def test_multiple_invokes_each_get_distinct_run_ids_and_ordered_checkpoints(
-        self,
-    ) -> None:
-        workflow = EchoWorkflow()
-
-        first = workflow.invoke({"value": 1})
-        second = workflow.invoke({"value": 2})
-
-        assert first.run_id != second.run_id
-        assert [checkpoint.result.run_id for checkpoint in workflow.checkpoints] == [
-            first.run_id,
-            second.run_id,
-        ]
-
-
-class TestWorkflowMemoryAndSerialization:
-    def test_checkpoints_property_is_shallow_copy(self) -> None:
-        workflow = EchoWorkflow()
-        workflow.invoke({"value": 1})
-
-        snapshot = workflow.checkpoints
-        snapshot.clear()
-
-        assert len(snapshot) == 0
-        assert len(workflow.checkpoints) == 1
-
-    def test_clear_memory_empties_checkpoints(self) -> None:
-        workflow = EchoWorkflow()
-        workflow.invoke({"value": 1})
-
-        workflow.clear_memory()
-
-        assert workflow.checkpoints == []
-
-    def test_to_dict_includes_checkpoint_count_and_runs_not_raw_checkpoints(
-        self,
-    ) -> None:
-        workflow = EchoWorkflow()
-
-        first = workflow.invoke({"value": 1})
-        second = workflow.invoke({"value": 2})
-        data = workflow.to_dict()
-
-        assert data["checkpoint_count"] == 2
-        assert data["runs"] == [first.run_id, second.run_id]
-        assert "checkpoints" not in data
-        assert data["type"] == "EchoWorkflow"
+        assert result.trace == ("child-a", "child-b")
 
 
 class TestWorkflowAsyncInvoke:
@@ -222,8 +206,6 @@ class TestWorkflowAsyncInvoke:
 
         assert isinstance(result, WorkflowResult)
         assert result.result == {"value": 1}
-        assert len(workflow.checkpoints) == 1
-        assert workflow.checkpoints[-1].result is result
 
     def test_async_invoke_default_dispatches_sync_run_via_thread(self) -> None:
         workflow = EchoWorkflow()
@@ -232,7 +214,13 @@ class TestWorkflowAsyncInvoke:
 
         assert isinstance(result, WorkflowResult)
         assert result.result == {"value": 1}
-        assert len(workflow.checkpoints) == 1
+
+    def test_async_trace_populated_when_async_run_hook_supplies_it(self) -> None:
+        workflow = TraceEmittingWorkflow()
+
+        result = asyncio.run(workflow.async_invoke({"value": 1}))
+
+        assert result.trace == ("child-a", "child-b")
 
 
 class TestWorkflowValidationAndErrors:
@@ -260,16 +248,15 @@ class TestWorkflowValidationAndErrors:
         with pytest.raises(ExecutionError, match="_async_run failed"):
             asyncio.run(workflow.async_invoke({"value": 1}))
 
-    def test_failed_invoke_does_not_append_checkpoint(self) -> None:
-        workflow = ConfigurableWorkflow(
-            name="configurable_workflow",
-            description="Configurable workflow.",
-            parameters=[make_value_param()],
-            return_type="dict[str, Any]",
-            run_error=RuntimeError("boom"),
-        )
 
-        with pytest.raises(ExecutionError):
-            workflow.invoke({"value": 1})
+class TestWorkflowSerialization:
+    def test_to_dict_includes_include_trace_and_type(self) -> None:
+        workflow = EchoWorkflow(include_trace=False)
 
-        assert workflow.checkpoints == []
+        data = workflow.to_dict()
+
+        assert data["include_trace"] is False
+        assert data["type"] == "EchoWorkflow"
+        assert "checkpoints" not in data
+        assert "checkpoint_count" not in data
+        assert "runs" not in data

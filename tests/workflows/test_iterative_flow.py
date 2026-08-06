@@ -11,11 +11,10 @@ from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.exceptions import ExecutionError, ValidationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.workflows import IterativeFlowResult
+from atomic_agentic.models.workflows import CheckerSpec
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.workflows.base import Workflow
-from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.iterative import IterativeFlow
-from atomic_agentic.workflows.sequential import SequentialFlow
 
 
 def make_count_param() -> ParamSpec:
@@ -89,28 +88,40 @@ def make_iterative_flow(
     *,
     body_steps: list[Any] | None = None,
     max_iterations: int = 3,
-    judge: Any = None,
-    approval_value: Any = NO_VAL,
-    return_index: int | None = None,
+    checkers: list[CheckerSpec] | None = None,
+    result_setting_indices: list[int] | None = None,
     handoff_index: int | None = None,
-    evaluate_index: int | None = None,
+    fallback_value: Any = NO_VAL,
     name: str = "iterative_flow",
 ) -> IterativeFlow:
+    resolved_body_steps = body_steps if body_steps is not None else [CounterStepWorkflow()]
+    resolved_result_setting = (
+        result_setting_indices if result_setting_indices is not None else [0]
+    )
     return IterativeFlow(
         name=name,
         namespace="tests",
         description="Iterative test flow.",
-        body_steps=body_steps if body_steps is not None else [CounterStepWorkflow()],
-        judge=judge,
+        body_steps=resolved_body_steps,
         max_iterations=max_iterations,
-        return_index=return_index,
+        checkers=checkers,
+        result_setting_indices=resolved_result_setting,
         handoff_index=handoff_index,
-        evaluate_index=evaluate_index,
-        approval_value=approval_value,
+        fallback_value=fallback_value,
     )
 
 
 class TestIterativeFlowConstruction:
+    def test_body_steps_must_be_list_type(self) -> None:
+        with pytest.raises(TypeError, match="body_steps must be a list"):
+            IterativeFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                body_steps=(CounterStepWorkflow(),),  # type: ignore[arg-type]
+                result_setting_indices=[0],
+            )
+
     def test_body_steps_must_be_non_empty_list(self) -> None:
         with pytest.raises(ValueError, match="body_steps must not be empty"):
             IterativeFlow(
@@ -118,11 +129,18 @@ class TestIterativeFlowConstruction:
                 namespace="tests",
                 description="Bad flow.",
                 body_steps=[],
-                judge=make_threshold_judge(1),
-                approval_value=True,
             )
 
-    def test_non_workflow_body_steps_normalized_into_loop_body(self) -> None:
+    def test_body_steps_items_must_be_atomic_invokable(self) -> None:
+        with pytest.raises(TypeError, match="body_steps items must be AtomicInvokable"):
+            IterativeFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                body_steps=[object()],  # type: ignore[list-item]
+            )
+
+    def test_body_steps_stored_exactly_as_configured_no_wrapping(self) -> None:
         component = Tool(
             function=lambda count: {"count": count + 1},
             name="raw_increment",
@@ -135,107 +153,149 @@ class TestIterativeFlowConstruction:
             namespace="tests",
             description="Iterative test flow.",
             body_steps=[component],
-            judge=make_threshold_judge(1),
-            approval_value=True,
+            result_setting_indices=[0],
         )
 
-        assert isinstance(flow.loop_body, SequentialFlow)
-        assert isinstance(flow.loop_body.steps[0], BasicFlow)
-        assert flow.loop_body.steps[0].component is component  # type: ignore[attr-defined]
+        assert flow.body_steps == (component,)
+        assert flow.body_steps[0] is component
 
-    def test_loop_body_named_with_suffix(self) -> None:
-        flow = make_iterative_flow(judge=make_threshold_judge(1), approval_value=True)
+    def test_max_iterations_rejects_non_int_at_construction(self) -> None:
+        with pytest.raises(TypeError, match="max_iterations must be an int"):
+            make_iterative_flow(max_iterations="3")  # type: ignore[arg-type]
 
-        assert flow.loop_body.name == f"{flow.name}_loop_body"
+    def test_max_iterations_rejects_non_positive_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="max_iterations must be > 0"):
+            make_iterative_flow(max_iterations=0)
 
-    def test_judge_none_installs_fallback_and_requires_no_val_approval(self) -> None:
-        flow = make_iterative_flow(judge=None, approval_value=NO_VAL)
+    def test_result_setting_indices_default_empty(self) -> None:
+        flow = IterativeFlow(
+            name="iterative_flow",
+            namespace="tests",
+            description="Iterative test flow.",
+            body_steps=[CounterStepWorkflow()],
+            fallback_value=0,
+        )
 
-        assert isinstance(flow.judge, BasicFlow)
-        assert flow.judge.component.name == "always_false_judge"  # type: ignore[attr-defined]
+        assert flow.result_setting_indices == ()
 
-    def test_judge_none_with_non_no_val_approval_raises(self) -> None:
-        with pytest.raises(ValueError):
-            make_iterative_flow(judge=None, approval_value=True)
-
-    def test_judge_given_requires_non_no_val_approval(self) -> None:
-        with pytest.raises(ValueError):
-            make_iterative_flow(judge=make_threshold_judge(2), approval_value=NO_VAL)
-
-    def test_judge_given_with_approval_value_constructs_ok(self) -> None:
-        judge = make_threshold_judge(2)
-        flow = make_iterative_flow(judge=judge, approval_value=True)
-
-        assert isinstance(flow.judge, BasicFlow)
-        assert flow.judge.component is judge  # type: ignore[attr-defined]
-
-    def test_indices_default_to_last_body_step(self) -> None:
+    def test_result_setting_indices_resolve_negative_and_reject_out_of_range(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
             namespace="tests",
             description="Iterative test flow.",
             body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
-            judge=make_threshold_judge(1),
-            approval_value=True,
+            result_setting_indices=[-1],
         )
+        assert flow.result_setting_indices == (1,)
 
-        assert flow.return_index == 1
-        assert flow.handoff_index == 1
-        assert flow.evaluate_index == 1
-
-    def test_indices_accept_negative_resolution_at_construction(self) -> None:
-        flow = IterativeFlow(
-            name="iterative_flow",
-            namespace="tests",
-            description="Iterative test flow.",
-            body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
-            judge=make_threshold_judge(1),
-            approval_value=True,
-            return_index=-1,
-            handoff_index=-1,
-            evaluate_index=-1,
-        )
-
-        assert flow.return_index == 1
-        assert flow.handoff_index == 1
-        assert flow.evaluate_index == 1
-
-    def test_indices_reject_out_of_range_at_construction(self) -> None:
         with pytest.raises(IndexError, match="out of range"):
             IterativeFlow(
-                name="iterative_flow",
+                name="bad_flow",
                 namespace="tests",
-                description="Iterative test flow.",
+                description="Bad flow.",
                 body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
-                judge=make_threshold_judge(1),
-                approval_value=True,
-                evaluate_index=5,
+                result_setting_indices=[5],
             )
 
-    def test_indices_reject_non_int_at_construction(self) -> None:
+    def test_result_setting_indices_reject_non_int(self) -> None:
+        with pytest.raises(TypeError, match="result_setting_indices items must be int"):
+            IterativeFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                body_steps=[CounterStepWorkflow()],
+                result_setting_indices=["0"],  # type: ignore[list-item]
+            )
+
+    def test_handoff_index_defaults_to_last_step(self) -> None:
+        flow = IterativeFlow(
+            name="iterative_flow",
+            namespace="tests",
+            description="Iterative test flow.",
+            body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
+            result_setting_indices=[0],
+        )
+        assert flow.handoff_index == 1
+
+    def test_handoff_index_accepts_negative_resolution(self) -> None:
+        flow = IterativeFlow(
+            name="iterative_flow",
+            namespace="tests",
+            description="Iterative test flow.",
+            body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
+            result_setting_indices=[0],
+            handoff_index=-2,
+        )
+        assert flow.handoff_index == 0
+
+    def test_handoff_index_rejects_non_int(self) -> None:
         with pytest.raises(TypeError, match="step index must be an int"):
             IterativeFlow(
-                name="iterative_flow",
+                name="bad_flow",
                 namespace="tests",
-                description="Iterative test flow.",
+                description="Bad flow.",
                 body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
-                judge=make_threshold_judge(1),
-                approval_value=True,
+                result_setting_indices=[0],
                 handoff_index="0",  # type: ignore[arg-type]
             )
 
-    def test_return_handoff_evaluate_indices_have_no_setters(self) -> None:
-        flow = make_iterative_flow(judge=make_threshold_judge(1), approval_value=True)
+    def test_handoff_index_rejects_out_of_range(self) -> None:
+        with pytest.raises(IndexError, match="out of range"):
+            IterativeFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                body_steps=[CounterStepWorkflow(name="first"), CounterStepWorkflow(name="second")],
+                result_setting_indices=[0],
+                handoff_index=5,
+            )
 
-        with pytest.raises(AttributeError):
-            flow.return_index = 0  # type: ignore[misc]
-        with pytest.raises(AttributeError):
-            flow.handoff_index = 0  # type: ignore[misc]
-        with pytest.raises(AttributeError):
-            flow.evaluate_index = 0  # type: ignore[misc]
+    def test_empty_result_setting_indices_without_fallback_raises(self) -> None:
+        with pytest.raises(ValueError, match="fallback_value is NO_VAL"):
+            IterativeFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                body_steps=[CounterStepWorkflow()],
+            )
+
+    def test_empty_result_setting_indices_with_fallback_constructs_ok(self) -> None:
+        flow = IterativeFlow(
+            name="iterative_flow",
+            namespace="tests",
+            description="Iterative test flow.",
+            body_steps=[CounterStepWorkflow()],
+            fallback_value=0,
+        )
+        assert flow.fallback_value == 0
+        assert flow.return_type == "int"
+
+    def test_return_type_from_single_result_setting_step(self) -> None:
+        flow = make_iterative_flow(result_setting_indices=[0])
+        assert flow.return_type == "dict[str, Any]"
+
+    def test_return_type_union_when_result_setting_steps_differ(self) -> None:
+        flow = IterativeFlow(
+            name="iterative_flow",
+            namespace="tests",
+            description="Iterative test flow.",
+            body_steps=[CounterStepWorkflow(name="first"), ScalarStepWorkflow(name="second")],
+            result_setting_indices=[0, 1],
+            handoff_index=0,
+        )
+        assert flow.return_type == "dict[str, Any] | int"
+
+    def test_checkers_bulk_construction_replays_add_checker(self) -> None:
+        judge = make_threshold_judge(3)
+        flow = make_iterative_flow(checkers=[CheckerSpec(index=0, judge=judge, approval_value=True)])
+
+        checker = flow.checkers[0]
+        assert checker.judge is judge
+        assert checker.approval_value is True
+        assert checker.index == 0
 
     def test_max_iterations_setter_validates_positive_int(self) -> None:
-        flow = make_iterative_flow(judge=make_threshold_judge(1), approval_value=True)
+        flow = make_iterative_flow()
 
         flow.max_iterations = 5
         assert flow.max_iterations == 5
@@ -245,6 +305,65 @@ class TestIterativeFlowConstruction:
 
         with pytest.raises(ValueError):
             flow.max_iterations = 0
+
+    def test_include_trace_defaults_to_true_and_is_mutable(self) -> None:
+        flow = make_iterative_flow()
+
+        assert flow.include_trace is True
+        flow.include_trace = False
+        assert flow.include_trace is False
+
+
+class TestIterativeFlowCheckerMutation:
+    def test_add_checker_registers_and_visible_via_checkers_property(self) -> None:
+        flow = make_iterative_flow(checkers=None)
+        judge = make_threshold_judge(3)
+
+        flow.add_checker(0, judge, True)
+
+        assert 0 in flow.checkers
+        assert flow.checkers[0].judge is judge
+        assert flow.checkers[0].approval_value is True
+
+    def test_add_checker_rejects_non_int_index(self) -> None:
+        flow = make_iterative_flow()
+
+        with pytest.raises(TypeError, match="checker index must be an int"):
+            flow.add_checker("0", make_threshold_judge(3), True)  # type: ignore[arg-type]
+
+    def test_add_checker_rejects_out_of_range_index_no_wraparound(self) -> None:
+        flow = make_iterative_flow()
+
+        with pytest.raises(IndexError, match="out of range"):
+            flow.add_checker(-1, make_threshold_judge(3), True)
+
+        with pytest.raises(IndexError, match="out of range"):
+            flow.add_checker(5, make_threshold_judge(3), True)
+
+    def test_add_checker_rejects_non_atomic_judge(self) -> None:
+        flow = make_iterative_flow()
+
+        with pytest.raises(TypeError, match="checker judge must be AtomicInvokable"):
+            flow.add_checker(0, object(), True)  # type: ignore[arg-type]
+
+    def test_add_checker_rejects_duplicate_index(self) -> None:
+        flow = make_iterative_flow(checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)])
+
+        with pytest.raises(ValueError, match="already registered"):
+            flow.add_checker(0, make_threshold_judge(1), True)
+
+    def test_remove_checker_removes_registered_checker(self) -> None:
+        flow = make_iterative_flow(checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)])
+
+        flow.remove_checker(0)
+
+        assert 0 not in flow.checkers
+
+    def test_remove_checker_rejects_unregistered_index(self) -> None:
+        flow = make_iterative_flow()
+
+        with pytest.raises(ValueError, match="no checker is registered"):
+            flow.remove_checker(0)
 
 
 def make_structured_step(name: str, output_schema: list[str]) -> StructuredInvokable:
@@ -266,168 +385,186 @@ def make_structured_step(name: str, output_schema: list[str]) -> StructuredInvok
 
 
 class TestIterativeFlowExtraDescription:
-    def test_surfaces_loop_body_extra_description_plus_iteration_bound(self) -> None:
+    def test_surfaces_result_setting_step_extra_description_plus_iteration_bound(self) -> None:
         step = make_structured_step("counter", ["count"])
-        flow = make_iterative_flow(body_steps=[step], max_iterations=5)
+        flow = make_iterative_flow(body_steps=[step], max_iterations=5, result_setting_indices=[0])
 
         assert flow._extra_description() == (
             "Output schema: [count]\nRuns up to 5 iteration(s)."
         )
 
-    def test_states_iteration_bound_only_when_loop_body_has_no_extra_description(self) -> None:
+    def test_states_iteration_bound_only_when_no_result_setting_extra(self) -> None:
         flow = make_iterative_flow(max_iterations=2)
 
         assert flow._extra_description() == "Runs up to 2 iteration(s)."
 
 
 class TestIterativeFlowSyncInvoke:
-    def test_loop_runs_until_judge_approves(self) -> None:
+    def test_loop_runs_until_checker_approves(self) -> None:
         flow = make_iterative_flow(
-            max_iterations=5, judge=make_threshold_judge(3), approval_value=True
+            max_iterations=5,
+            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)],
         )
 
         result = flow.invoke({"count": 0})
 
-        assert result.result == {"count": 3}
         assert isinstance(result, IterativeFlowResult)
-        assert len(result.iteration_runs) == 3
-        assert len(result.judge_runs) == 3
+        assert result.result == {"count": 3}
+        assert result.exited_early is True
+        assert result.iterations_completed == 3
+        assert result.triggering_step == 0
+        assert len(result.trace) == 6
+        assert [r.result for r in result.trace] == [
+            {"count": 1}, False,
+            {"count": 2}, False,
+            {"count": 3}, True,
+        ]
 
     def test_loop_stops_at_max_iterations_if_never_approved(self) -> None:
         flow = make_iterative_flow(
-            max_iterations=2, judge=make_threshold_judge(100), approval_value=True
+            max_iterations=2,
+            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(100), approval_value=True)],
         )
 
         result = flow.invoke({"count": 0})
 
-        assert len(result.iteration_runs) == 2
+        assert result.exited_early is False
+        assert result.triggering_step is None
+        assert result.iterations_completed == 2
         assert result.result == {"count": 2}
+        assert len(result.trace) == 4
 
-    def test_fallback_judge_never_approves_runs_to_max_iterations(self) -> None:
-        flow = make_iterative_flow(max_iterations=2, judge=None, approval_value=NO_VAL)
+    def test_no_checkers_runs_to_max_iterations(self) -> None:
+        flow = make_iterative_flow(max_iterations=2, checkers=None)
 
         result = flow.invoke({"count": 0})
 
-        assert len(result.iteration_runs) == 2
-        assert len(result.judge_runs) == 2
+        assert result.exited_early is False
+        assert result.iterations_completed == 2
         assert result.result == {"count": 2}
+        assert len(result.trace) == 2
 
-    def test_iterative_flow_result_index_fields(self) -> None:
+    def test_trace_none_when_include_trace_disabled(self) -> None:
+        flow = make_iterative_flow(max_iterations=2, checkers=None)
+        flow.include_trace = False
+
+        result = flow.invoke({"count": 0})
+
+        assert result.trace is None
+
+    def test_iterative_flow_result_policy_fields(self) -> None:
         flow = make_iterative_flow(
-            max_iterations=3, judge=make_threshold_judge(3), approval_value=True
+            max_iterations=3,
+            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)],
         )
 
         result = flow.invoke({"count": 0})
 
-        assert result.return_step_index == flow.return_index
-        assert result.handoff_step_index == flow.handoff_index
-        assert result.evaluate_step_index == flow.evaluate_index
+        assert result.result_setting_indices == flow.result_setting_indices
+        assert result.handoff_index == flow.handoff_index
         assert result.max_iterations == flow.max_iterations
 
 
-class TestIterativeFlowRetrieval:
-    def test_get_iteration_results_returns_body_and_judge_pairs(self) -> None:
-        flow = make_iterative_flow(
-            max_iterations=3, judge=make_threshold_judge(3), approval_value=True
-        )
-
-        result = flow.invoke({"count": 0})
-        pairs = flow.get_iteration_results(result.run_id)
-
-        assert pairs is not None
-        assert len(pairs) == len(result.iteration_runs)
-        for body_result, judge_result in pairs:
-            assert body_result is not None
-            assert judge_result is not None
-            assert isinstance(judge_result.result, bool)
-
-    def test_get_iteration_results_returns_none_for_unknown_run_id(self) -> None:
-        flow = make_iterative_flow(judge=make_threshold_judge(1), approval_value=True)
-
-        flow.invoke({"count": 0})
-
-        assert flow.get_iteration_results("nope") is None
-
-
 class TestIterativeFlowAsyncInvoke:
-    def test_async_invoke_runs_until_judge_approves(self) -> None:
+    def test_async_invoke_runs_until_checker_approves(self) -> None:
         flow = make_iterative_flow(
-            max_iterations=5, judge=make_threshold_judge(3), approval_value=True
+            max_iterations=5,
+            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)],
         )
 
         result = asyncio.run(flow.async_invoke({"count": 0}))
 
         assert result.result == {"count": 3}
         assert isinstance(result, IterativeFlowResult)
-        assert len(result.iteration_runs) == 3
-        assert len(result.judge_runs) == 3
+        assert result.exited_early is True
+        assert result.iterations_completed == 3
+        assert len(result.trace) == 6
 
 
 class TestIterativeFlowValidationAndErrors:
-    def test_evaluate_step_non_mapping_result_raises_validation_error(self) -> None:
+    def test_checker_step_non_mapping_result_raises_validation_error(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
             namespace="tests",
             description="Iterative test flow.",
-            body_steps=[CounterStepWorkflow(), ScalarStepWorkflow()],
-            judge=make_threshold_judge(3),
-            approval_value=True,
-            return_index=0,
+            body_steps=[ScalarStepWorkflow()],
+            max_iterations=1,
+            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)],
+            result_setting_indices=[0],
             handoff_index=0,
-            evaluate_index=1,
         )
 
         with pytest.raises(ExecutionError, match="_run failed") as exc_info:
             flow.invoke({"count": 0})
 
         assert isinstance(exc_info.value.__cause__, ValidationError)
-        assert "evaluate step" in str(exc_info.value.__cause__)
-        assert "must be mapping-shaped" in str(exc_info.value.__cause__)
+        assert "checker at step 0" in str(exc_info.value.__cause__)
+        assert "mapping-shaped result" in str(exc_info.value.__cause__)
 
-    def test_handoff_step_non_mapping_result_raises_validation_error(self) -> None:
+    def test_handoff_step_non_mapping_result_raises_validation_error_when_continuing(self) -> None:
         flow = IterativeFlow(
             name="iterative_flow",
             namespace="tests",
             description="Iterative test flow.",
-            body_steps=[CounterStepWorkflow(), ScalarStepWorkflow()],
-            judge=make_threshold_judge(0),
-            approval_value=True,
-            return_index=0,
-            handoff_index=1,
-            evaluate_index=0,
+            body_steps=[ScalarStepWorkflow()],
+            max_iterations=2,
+            result_setting_indices=[0],
+            handoff_index=0,
         )
 
-        # judge approves on the first iteration (count starts at 0, threshold 0),
-        # but the handoff step must still be validated unconditionally.
         with pytest.raises(ExecutionError, match="_run failed") as exc_info:
             flow.invoke({"count": 0})
 
         assert isinstance(exc_info.value.__cause__, ValidationError)
-        assert "handoff step" in str(exc_info.value.__cause__)
-        assert "must be mapping-shaped" in str(exc_info.value.__cause__)
+        assert "handoff step 0" in str(exc_info.value.__cause__)
+        assert "mapping-shaped result" in str(exc_info.value.__cause__)
+
+    def test_non_final_step_non_mapping_result_raises_validation_error_when_chaining(self) -> None:
+        flow = IterativeFlow(
+            name="iterative_flow",
+            namespace="tests",
+            description="Iterative test flow.",
+            body_steps=[ScalarStepWorkflow(), CounterStepWorkflow()],
+            max_iterations=1,
+            result_setting_indices=[1],
+        )
+
+        with pytest.raises(ExecutionError, match="_run failed") as exc_info:
+            flow.invoke({"count": 0})
+
+        assert isinstance(exc_info.value.__cause__, ValidationError)
+        assert "must produce a mapping-shaped result to chain" in str(exc_info.value.__cause__)
 
     def test_judge_invoke_failure_wrapped_as_execution_error(self) -> None:
-        flow = make_iterative_flow(judge=make_raising_judge(), approval_value=True)
+        flow = make_iterative_flow(
+            checkers=[CheckerSpec(index=0, judge=make_raising_judge(), approval_value=True)],
+        )
 
         with pytest.raises(ExecutionError, match="_run failed"):
             flow.invoke({"count": 0})
 
 
 class TestIterativeFlowSerialization:
-    def test_to_dict_includes_loop_body_judge_and_policy_fields(self) -> None:
+    def test_to_dict_includes_body_steps_checkers_and_policy_fields(self) -> None:
         flow = make_iterative_flow(
-            max_iterations=3, judge=make_threshold_judge(3), approval_value=True
+            max_iterations=3,
+            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)],
         )
 
-        result = flow.invoke({"count": 0})
+        flow.invoke({"count": 0})
         data = flow.to_dict()
 
-        assert data["loop_body"] == flow.loop_body.to_dict()
-        assert data["judge"] == flow.judge.to_dict()
-        assert data["max_iterations"] == flow.max_iterations
-        assert data["return_index"] == flow.return_index
+        assert data["step_count"] == 1
+        assert data["checkers"] == [
+            {
+                "index": 0,
+                "judge": flow.checkers[0].judge.to_dict(),
+                "approval_value": True,
+            }
+        ]
+        assert data["result_setting_indices"] == list(flow.result_setting_indices)
         assert data["handoff_index"] == flow.handoff_index
-        assert data["evaluate_index"] == flow.evaluate_index
-        assert "approval_value" in data
-        assert data["checkpoint_count"] == 1
-        assert data["runs"] == [result.run_id]
+        assert data["fallback_value"] == flow.fallback_value
+        assert data["max_iterations"] == flow.max_iterations
+        assert "checkpoints" not in data
+        assert "loop_body" not in data

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import os
@@ -14,8 +14,8 @@ except ImportError:  # pragma: no cover
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.models.results.workflows import BasicFlowResult
-from atomic_agentic.workflows.basic import BasicFlow
+from atomic_agentic.models.results.workflows import SequentialFlowResult
+from atomic_agentic.workflows.sequential import SequentialFlow
 
 
 pytestmark = [
@@ -88,7 +88,7 @@ def make_live_openai_agent() -> BasicAgent:
     )
 
 
-def make_live_openai_basic_flow() -> tuple[BasicAgent, StructuredInvokable, BasicFlow]:
+def make_live_openai_sequential_flow() -> tuple[BasicAgent, StructuredInvokable, SequentialFlow]:
     agent = make_live_openai_agent()
     structured_agent = StructuredInvokable(
         component=agent,
@@ -96,16 +96,17 @@ def make_live_openai_basic_flow() -> tuple[BasicAgent, StructuredInvokable, Basi
         description="Structured live OpenAI writer agent.",
         output_schema=["final", "length", "was_postprocessed"],
     )
-    flow = BasicFlow(
-        component=structured_agent,
-        name="live_openai_writer_basic_flow",
-        description="BasicFlow wrapping a structured live OpenAI Agent.",
+    flow = SequentialFlow(
+        name="live_openai_writer_sequential_flow",
+        namespace="integration",
+        description="SequentialFlow wrapping a structured live OpenAI Agent.",
+        steps=[structured_agent],
     )
     return agent, structured_agent, flow
 
 
-def _assert_live_structured_result(result: BasicFlowResult) -> None:
-    assert isinstance(result, BasicFlowResult)
+def _assert_live_structured_result(result: SequentialFlowResult) -> None:
+    assert isinstance(result, SequentialFlowResult)
     assert set(result.result.keys()) == {"final", "length", "was_postprocessed"}
     assert isinstance(result.result["final"], str)
     assert result.result["final"].strip()
@@ -115,54 +116,43 @@ def _assert_live_structured_result(result: BasicFlowResult) -> None:
 
 
 class TestLiveAgentStructuredBasicPipeline:
-    def test_live_openai_agent_can_be_structured_and_wrapped_in_basic_flow(
+    def test_live_openai_agent_can_be_structured_and_wrapped_in_sequential_flow(
         self,
     ) -> None:
-        _agent, _structured_agent, flow = make_live_openai_basic_flow()
+        _agent, _structured_agent, flow = make_live_openai_sequential_flow()
 
         result = flow.invoke({"topic": "pytest integration tests", "tone": "clear"})
 
         _assert_live_structured_result(result)
-        assert result.run_id == flow.checkpoints[-1].result.run_id
-        assert len(flow.checkpoints) == 1
+        assert len(result.trace) == 1
+        assert result.trace[0].result == result.result
 
-        checkpoint = flow.get_checkpoint(result.run_id)
-        assert checkpoint is not None
-        assert checkpoint.result is result
-        assert checkpoint.result.child_type == "StructuredInvokable"
-
-    def test_live_openai_structured_agent_basic_flow_async_pipeline(
+    def test_live_openai_structured_agent_sequential_flow_async_pipeline(
         self,
     ) -> None:
-        _agent, _structured_agent, flow = make_live_openai_basic_flow()
+        _agent, _structured_agent, flow = make_live_openai_sequential_flow()
 
         result = asyncio.run(
             flow.async_invoke({"topic": "async pytest integration tests", "tone": "brief"})
         )
 
         _assert_live_structured_result(result)
-        assert result.run_id == flow.checkpoints[-1].result.run_id
-        assert len(flow.checkpoints) == 1
-
-        checkpoint = flow.get_checkpoint(result.run_id)
-        assert checkpoint is not None
-        assert checkpoint.result is result
-        assert checkpoint.result.child_type == "StructuredInvokable"
+        assert len(result.trace) == 1
+        assert result.trace[0].result == result.result
 
     def test_live_openai_composed_pipeline_to_dict_does_not_expose_secrets(
         self,
     ) -> None:
-        agent, structured_agent, flow = make_live_openai_basic_flow()
+        agent, structured_agent, flow = make_live_openai_sequential_flow()
 
-        result = flow.invoke({"topic": "safe serialization", "tone": "plain"})
+        flow.invoke({"topic": "safe serialization", "tone": "plain"})
         data = flow.to_dict()
 
-        assert data["type"] == "BasicFlow"
-        assert data["name"] == "live_openai_writer_basic_flow"
-        assert data["checkpoint_count"] == 1
-        assert data["runs"] == [result.run_id]
+        assert data["type"] == "SequentialFlow"
+        assert data["name"] == "live_openai_writer_sequential_flow"
+        assert data["step_count"] == 1
 
-        structured_snapshot = data["component"]
+        structured_snapshot = data["steps"][0]
         assert structured_snapshot["type"] == "StructuredInvokable"
         assert structured_snapshot["name"] == structured_agent.name
 
