@@ -11,6 +11,7 @@ __all__ = [
     "RoutingFlowResult",
     "IterativeFlowResult",
     "ParallelFlowResult",
+    "GraphFlowResult",
 ]
 
 
@@ -140,3 +141,40 @@ class ParallelFlowResult(WorkflowResult):
     result_mode: str
     selected_indices: tuple[int, ...]
     result_keys: tuple[int, ...] | tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GraphFlowResult(WorkflowResult):
+    """Result for a GraphFlow run.
+
+    Fields
+    ------
+    edge_traversals:
+        Node aliases fired per superstep, in fixed nodes-declaration order
+        within each superstep, router invocations excluded. Always
+        populated, independent of ``include_trace`` (unlike ``trace``
+        itself, which follows the base ``WorkflowResult`` opt-out).
+    termination_reason:
+        ``"queue_empty"`` / ``"cap_hit"`` / ``"early_exit"`` -- why the run
+        stopped.
+    max_edge_traversals:
+        Superstep cap configured for this run (mutable knob, snapshotted at
+        invocation time). ``None`` means unbounded.
+    result_mode:
+        Fixed output projection mode, duplicated from
+        ``GraphFlow.result_mode``.
+    return_keys:
+        Fixed set of requested state keys, in requested order, duplicated
+        from ``GraphFlow.return_keys``. May be empty (nothing requested).
+    trace (inherited):
+        Every ``AtomicResult`` actually produced this run -- node and
+        router invocation results, interleaved in true execution order
+        (a round's node results before that same round's router results).
+        ``None`` when tracing is disabled.
+    """
+
+    edge_traversals: tuple[tuple[str, ...], ...]
+    termination_reason: str
+    max_edge_traversals: int | None
+    result_mode: str
+    return_keys: tuple[str, ...]

@@ -25,6 +25,7 @@ from .workflows import (
     RoutingFlowResult,
     IterativeFlowResult,
     ParallelFlowResult,
+    GraphFlowResult,
 )
 
 __all__ = [
@@ -55,4 +56,5 @@ __all__ = [
     "RoutingFlowResult",
     "IterativeFlowResult",
     "ParallelFlowResult",
+    "GraphFlowResult",
 ]

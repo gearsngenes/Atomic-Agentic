@@ -19,7 +19,7 @@ from typing import Any, ClassVar, Mapping
 
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
 
-__all__ = ["ParamSpec"]
+__all__ = ["ParamSpec", "ParamNameReport"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,3 +200,48 @@ class ParamSpec:
             )
 
         return cls(name=name, index=idx, kind=kind, type=type_str, default=default, description=description)
+
+
+@dataclass(frozen=True, slots=True)
+class ParamNameReport:
+    """One parameter name's cross-source aggregation.
+
+    Produced by ``utils.parameters.n_way_parameter_report``, which folds
+    N independent ``list[ParamSpec]`` sources into one report per distinct
+    name observed across them. Internal-construction-only -- no
+    ``__post_init__`` validation, since values are already known-good by
+    the time the aggregator builds one.
+
+    Fields
+    ------
+    name:
+        The parameter name this report covers.
+    source_count:
+        Number of distinct sources (by index) that declared this name.
+    types:
+        Distinct ``ParamSpec.type`` strings observed for this name.
+    kinds:
+        Distinct ``ParamSpec.kind`` strings observed for this name.
+    unique_default_count:
+        Count of distinct default values observed (equality-grouped, not a
+        literal ``set()`` -- a default may be unhashable, e.g. a list;
+        ``NO_VAL`` is an ordinary member of this grouping, not
+        special-cased).
+    unique_description_count:
+        Count of distinct description values observed (a real ``set()``
+        is safe here -- description is always ``None`` or ``str``, both
+        hashable).
+    observations:
+        Raw ``(source_index, ParamSpec)`` pairs for this name, in
+        first-seen order -- lets a caller build an actionable error
+        message naming the actual conflicting sources, not just an
+        aggregate count.
+    """
+
+    name: str
+    source_count: int
+    types: set[str]
+    kinds: set[str]
+    unique_default_count: int
+    unique_description_count: int
+    observations: tuple[tuple[int, ParamSpec], ...]
