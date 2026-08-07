@@ -106,7 +106,7 @@ fact_checker = BasicAgent(
         "You are a meticulous continuity checker for fiction. You care about internal "
         "consistency only -- timeline, character details, and established rules of the "
         "story's own world -- never real-world fact-checking. If the draft is internally "
-        "consistent, respond with exactly APPROVED and nothing else. Otherwise, list the "
+        "consistent, respond with exactly 'APPROVED' and nothing else. Otherwise, list the "
         "specific inconsistencies concisely."
     ),
     pre_invoke=fact_pre,
@@ -184,7 +184,7 @@ triage = toolify(
 # contract. router_a defers (returns None) past the threshold so the two
 # don't fire contradictory targets in the same round.
 # ---------------------------------------------------------------------
-REVISION_THRESHOLD = 3
+REVISION_THRESHOLD = 5
 
 
 def loop_or_finalize(*, passed: bool, revision_count: int) -> str | None:
@@ -282,7 +282,7 @@ flow = GraphFlow(
     ],
     start="drafter",
     priorities={"style_editor": 2},  # style_editor's "checked_by" wins ties with fact_checker
-    max_edge_traversals=15,  # safety cap; a normal run needs ~3 supersteps per revision cycle
+    max_edge_traversals=20,  # safety cap; a normal run needs ~3 supersteps per revision cycle
     result_mode=GraphFlow.DICT,
     return_keys=["final_story", "total_revisions", "outcome"],
 )
@@ -313,7 +313,7 @@ if __name__ == "__main__":
         # Every triage firing, found via invoker_id rather than trace
         # indexing -- robust to how many revision cycles actually ran.
         f.write("\n=== TRIAGE DECISIONS (collision resolution + routing input) ===\n")
-        triage_entries = [e for e in final.trace if e.invoker_id == triage.full_name]
+        triage_entries = [e for e in final.trace if e.invoker_id == triage.instance_id]
         for i, entry in enumerate(triage_entries):
             f.write(f"\n-- triage firing {i} -- checked_by resolved to: {entry.result['checked_by']!r}\n")
             pprint(entry.result, stream=f)
