@@ -23,6 +23,10 @@ Public surface
 - ``insert_by_category`` — batch-inserts new ``ParamSpec`` items into an
   already-valid composed list at the position that preserves a valid
   Python-style ordering.
+- ``n_way_parameter_report`` — folds N independent ``list[ParamSpec]``
+  sources into one ``ParamNameReport`` per distinct name observed across
+  them. Pure aggregation, no raising -- the caller decides what counts as
+  a genuine collision.
 
 Private helpers
 ---------------
@@ -52,7 +56,7 @@ from typing import Annotated, Any, Optional, get_args, get_origin, get_type_hint
 
 from ..constants.core import IDENTIFIER_PATTERN, IDENTIFIER_PATTERN_TEXT, NO_VAL
 from ..exceptions import SchemaError
-from ..models.parameters import ParamSpec
+from ..models.parameters import ParamNameReport, ParamSpec
 
 __all__ = [
     "extract_io",
@@ -64,6 +68,7 @@ __all__ = [
     "parameter_collisions",
     "variadic_compatible",
     "insert_by_category",
+    "n_way_parameter_report",
 ]
 
 
@@ -819,3 +824,51 @@ def insert_by_category(
     ]
     _validate_parameter_order(result)
     return result
+
+
+def n_way_parameter_report(sources: list[list[ParamSpec]]) -> list[ParamNameReport]:
+    """Aggregate N parameter-list sources into one report per distinct name.
+
+    Pure aggregation, no raising -- mirrors how ``parameter_collisions``/
+    ``parameter_overlap`` already separate detection from the caller's
+    raise/warn policy decision. The caller inspects the returned reports
+    and decides what counts as a genuine collision for its own purposes.
+    """
+    accumulator: dict[str, dict[str, Any]] = {}
+
+    for source_index, param_list in enumerate(sources):
+        for spec in param_list:
+            entry = accumulator.setdefault(
+                spec.name,
+                {
+                    "observations": [],
+                    "types": set(),
+                    "kinds": set(),
+                    "default_groups": [],
+                    "description_values": set(),
+                    "source_indices": set(),
+                },
+            )
+            entry["observations"].append((source_index, spec))
+            entry["types"].add(spec.type)
+            entry["kinds"].add(spec.kind)
+            entry["source_indices"].add(source_index)
+            entry["description_values"].add(spec.description)
+            # Default may be unhashable (e.g. a list), so group by equality
+            # rather than a literal set(). NO_VAL is an ordinary member of
+            # this grouping, not special-cased.
+            if not any(spec.default == existing for existing in entry["default_groups"]):
+                entry["default_groups"].append(spec.default)
+
+    return [
+        ParamNameReport(
+            name=name,
+            source_count=len(entry["source_indices"]),
+            types=entry["types"],
+            kinds=entry["kinds"],
+            unique_default_count=len(entry["default_groups"]),
+            unique_description_count=len(entry["description_values"]),
+            observations=tuple(entry["observations"]),
+        )
+        for name, entry in accumulator.items()
+    ]

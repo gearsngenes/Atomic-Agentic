@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from typing import Any, Mapping
 
 import pytest
 
-from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.models.parameters import ParamNameReport, ParamSpec
 from atomic_agentic.constants.core import NO_VAL
 
 
@@ -246,3 +247,53 @@ class TestParamSpecDescription:
 
         result = to_paramspec_list(["x", "y"])
         assert all(p.description is None for p in result)
+
+
+class TestParamNameReport:
+    def test_construction_stores_all_fields(self) -> None:
+        spec = make_param("x", 0, type_="int")
+        report = ParamNameReport(
+            name="x",
+            source_count=1,
+            types={"int"},
+            kinds={ParamSpec.POSITIONAL_OR_KEYWORD},
+            unique_default_count=1,
+            unique_description_count=1,
+            observations=((0, spec),),
+        )
+
+        assert report.name == "x"
+        assert report.source_count == 1
+        assert report.types == {"int"}
+        assert report.kinds == {ParamSpec.POSITIONAL_OR_KEYWORD}
+        assert report.unique_default_count == 1
+        assert report.unique_description_count == 1
+        assert report.observations == ((0, spec),)
+
+    def test_is_frozen(self) -> None:
+        report = ParamNameReport(
+            name="x",
+            source_count=1,
+            types=set(),
+            kinds=set(),
+            unique_default_count=0,
+            unique_description_count=0,
+            observations=(),
+        )
+        with pytest.raises(FrozenInstanceError):
+            report.name = "y"  # type: ignore[misc]
+
+    def test_no_construction_time_validation(self) -> None:
+        # Internal-construction-only -- n_way_parameter_report is the real
+        # producer; the dataclass itself trusts its inputs, same posture
+        # as GraphFlowNode's un-validated AtomicInvokable fields.
+        report = ParamNameReport(
+            name=123,  # type: ignore[arg-type]
+            source_count=-1,
+            types="not a set",  # type: ignore[arg-type]
+            kinds=None,  # type: ignore[arg-type]
+            unique_default_count=-5,
+            unique_description_count=-5,
+            observations=[],  # type: ignore[arg-type]
+        )
+        assert report.name == 123

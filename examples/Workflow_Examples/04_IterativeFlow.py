@@ -1,8 +1,12 @@
 ﻿"""
-05_IterativeFlow.py
+04_IterativeFlow.py
 
 Beginner-friendly IterativeFlow example.
-Demonstrates an agentic writer/critic loop with an approval judge, using LLM agents and clear schema-driven steps.
+Demonstrates an agentic writer/critic loop with a checker-gated approval
+judge, using LLM agents and clear schema-driven steps. IterativeFlow owns
+its loop body directly (no nested SequentialFlow); the approval judge is
+registered as a checker at the critic step, and the writer's draft is the
+result-setting step.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from atomic_agentic.agents import BasicAgent
 from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.tools import toolify
 from atomic_agentic import StructuredInvokable
-from atomic_agentic.workflows import IterativeFlow
+from atomic_agentic.workflows import IterativeFlow, CheckerSpec
 
 load_dotenv()
 
@@ -144,14 +148,12 @@ judge = toolify(
 flow = IterativeFlow(
     name="story_writer_checker_flow",
     namespace="examples",
-    description="Iterative writer/critic loop with approval judge.",
+    description="Iterative writer/critic loop with a checker-gated approval judge.",
     body_steps=[writer, critic],
-    judge=judge,
-    approval_value=True,
     max_iterations=5,
-    return_index=0,    # outer result is the writer's draft
-    handoff_index=1,   # critic notes become next writer input
-    evaluate_index=1,  # critic notes are also sent to judge
+    checkers=[CheckerSpec(index=1, judge=judge, approval_value=True)],  # critic's notes checked for approval
+    result_setting_indices=[0],  # outer result is the writer's draft
+    handoff_index=1,             # critic notes become next writer input
 )
 
 
@@ -176,15 +178,31 @@ if __name__ == "__main__":
         pprint(final, stream=f)
         f.write(f"\nouter run_id: {final.run_id}\n")
 
-        f.write("\n=== ITERATION-BY-ITERATION RESULTS ===\n")
-        for i, (body_result, judge_result) in enumerate(flow.get_iteration_results(final.run_id)):
-            approved = judge_result.result == flow.approval_value
-            f.write(f"\n-- iteration {i} -- judge result: {judge_result.result!r} (approved={approved})\n")
-            pprint(body_result.result, stream=f)
+        # The checker sits at the body's last step (critic, index 1), so no
+        # step is ever skipped by an early exit here -- every completed
+        # iteration contributes exactly len(body_steps) + len(checkers)
+        # trace entries (writer, critic, judge), in order. approval_value
+        # is read from the live flow (checkers are mutable post-construction),
+        # not the result -- the result only records which step index, if
+        # any, actually triggered the early exit.
+        stride = len(flow.body_steps) + len(flow.checkers)
+        approval_value = flow.checkers[1].approval_value
 
-        f.write("\n=== CHECKPOINT ===\n")
-        checkpoint = flow.get_checkpoint(final.run_id)
-        pprint(checkpoint, stream=f)
+        f.write("\n=== ITERATION-BY-ITERATION RESULTS ===\n")
+        for i in range(final.iterations_completed):
+            writer_result, critic_result, judge_result = final.trace[i * stride : (i + 1) * stride]
+            approved = judge_result.result == approval_value
+            f.write(f"\n-- iteration {i} -- judge result: {judge_result.result!r} (approved={approved})\n")
+            pprint(writer_result.result, stream=f)
+            pprint(critic_result.result, stream=f)
+
+        f.write("\n=== RUN SUMMARY ===\n")
+        f.write(f"exited_early: {final.exited_early}\n")
+        f.write(f"triggering_step: {final.triggering_step!r}\n")
+        f.write(f"iterations_completed: {final.iterations_completed}\n")
+        f.write(f"result_setting_indices: {final.result_setting_indices}\n")
+        f.write(f"handoff_index: {final.handoff_index}\n")
+        f.write(f"max_iterations: {final.max_iterations}\n")
 
     print(f"Final draft written to: {draft_path}")
     print(f"Checkpoints written to: {checkpoints_path}")

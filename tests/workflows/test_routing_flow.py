@@ -2,26 +2,27 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 import pytest
 
-from atomic_agentic.exceptions import ExecutionError, ValidationError
+from atomic_agentic.exceptions import ExecutionError, ValidationError, WorkflowError
 from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.workflows import RoutingFlowResult
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.workflows.base import Workflow
-from atomic_agentic.workflows.basic import BasicFlow
 from atomic_agentic.workflows.routing import RoutingFlow
 
 
-def make_value_param() -> ParamSpec:
+def make_value_param(*, description: str | None = None) -> ParamSpec:
     return ParamSpec(
         name="value",
         index=0,
         kind=ParamSpec.POSITIONAL_OR_KEYWORD,
         type="int",
+        description=description,
     )
 
 
@@ -36,12 +37,13 @@ class EchoWorkflow(Workflow):
         namespace: str = "tests",
         description: str | None = None,
         return_type: str = "dict[str, Any]",
+        param_description: str | None = None,
     ) -> None:
         super().__init__(
             name=name or f"echo_{tag}",
             namespace=namespace,
             description=description or f"Echo workflow {tag}.",
-            parameters=[make_value_param()],
+            parameters=[make_value_param(description=param_description)],
             return_type=return_type,
         )
         self._tag = tag
@@ -54,24 +56,35 @@ def make_branch(tag: str, **kwargs: Any) -> EchoWorkflow:
     return EchoWorkflow(tag, **kwargs)
 
 
-def make_structured_router(selector: Any) -> StructuredInvokable:
-    """Router whose .invoke(inputs).result == selector (the raw selector)."""
+class OtherParamWorkflow(Workflow):
+    """A branch declaring a param the router doesn't share, no default.
 
-    def select(value: Any) -> Any:
-        return selector
+    Declares only ``other`` when ``with_overlap=False`` (zero overlap with a
+    router whose sole param is ``value``); when ``with_overlap=True`` it also
+    declares ``value``, satisfying PARTIAL's "at least one overlapping
+    parameter" requirement while still introducing the new ``other`` param.
+    """
 
-    tool = Tool(
-        function=select,
-        name="select_constant",
-        namespace="tests",
-        description="Return a constant selector.",
-    )
-    return StructuredInvokable(
-        component=tool,
-        output_schema=None,
-        name="structured_router",
-        description="Structured router returning a raw selector.",
-    )
+    def __init__(self, *, tag: str = "other", with_overlap: bool = False) -> None:
+        parameters = [
+            ParamSpec(name="other", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str"),
+        ]
+        if with_overlap:
+            parameters = [make_value_param(), *[
+                ParamSpec(name=p.name, index=p.index + 1, kind=p.kind, type=p.type)
+                for p in parameters
+            ]]
+        super().__init__(
+            name=f"other_param_{tag}",
+            namespace="tests",
+            description="Branch with a non-overlapping required param.",
+            parameters=parameters,
+            return_type="dict[str, Any]",
+        )
+        self._tag = tag
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"branch": self._tag}, {}
 
 
 class RouterWorkflow(Workflow):
@@ -170,35 +183,33 @@ class TestRoutingFlowConstruction:
                 router=make_router(0),
             )
 
-    def test_list_branches_normalized_to_basic_flow(self) -> None:
-        component = make_structured_router(0)
+    def test_list_branches_stored_exactly_as_configured(self) -> None:
+        b0, b1 = make_branch("a"), make_branch("b")
         flow = RoutingFlow(
             name="routing_flow",
             namespace="tests",
             description="Routing test flow.",
-            branches=[component, make_branch("b")],
+            branches=[b0, b1],
             router=make_router(0),
         )
 
-        assert isinstance(flow.branches[0], BasicFlow)
-        assert flow.branches[0].component is component  # type: ignore[attr-defined]
-        assert isinstance(flow.branches[1], EchoWorkflow)
+        assert flow.branches == (b0, b1)
+        assert flow.branches[0] is b0
 
-    def test_dict_branches_normalized_per_value(self) -> None:
-        component = make_structured_router(0)
+    def test_dict_branches_stored_exactly_as_configured(self) -> None:
+        b0 = make_branch("a")
         flow = RoutingFlow(
             name="routing_flow",
             namespace="tests",
             description="Routing test flow.",
-            branches={"a": component, "b": make_branch("b")},
+            branches={"a": b0, "b": make_branch("b")},
             router=make_router("a"),
         )
 
-        assert isinstance(flow.branches["a"], BasicFlow)
-        assert flow.branches["a"].component is component  # type: ignore[attr-defined]
-        assert isinstance(flow.branches["b"], EchoWorkflow)
+        assert isinstance(flow.branches, MappingProxyType)
+        assert flow.branches["a"] is b0
 
-    def test_router_normalized_workflow_kept_as_is_other_wrapped(self) -> None:
+    def test_router_stored_exactly_as_configured(self) -> None:
         router = make_router(0)
         flow = RoutingFlow(
             name="routing_flow",
@@ -209,19 +220,8 @@ class TestRoutingFlowConstruction:
         )
         assert flow.router is router
 
-        component_router = make_structured_router(0)
-        flow2 = RoutingFlow(
-            name="routing_flow",
-            namespace="tests",
-            description="Routing test flow.",
-            branches=[make_branch("a"), make_branch("b")],
-            router=component_router,
-        )
-        assert isinstance(flow2.router, BasicFlow)
-        assert flow2.router.component is component_router  # type: ignore[attr-defined]
-
     def test_constructor_rejects_non_atomic_router(self) -> None:
-        with pytest.raises(TypeError, match="Workflow or AtomicInvokable"):
+        with pytest.raises(TypeError, match="router must be AtomicInvokable"):
             RoutingFlow(
                 name="bad_flow",
                 namespace="tests",
@@ -230,7 +230,38 @@ class TestRoutingFlowConstruction:
                 router=object(),  # type: ignore[arg-type]
             )
 
-    def test_parameters_default_to_router_parameters(self) -> None:
+    def test_constructor_rejects_non_atomic_branch(self) -> None:
+        with pytest.raises(TypeError, match="branches must be AtomicInvokable"):
+            RoutingFlow(
+                name="bad_flow",
+                namespace="tests",
+                description="Bad flow.",
+                branches=[object()],  # type: ignore[list-item]
+                router=make_router(0),
+            )
+
+    def test_schema_mode_defaults_to_strict(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            namespace="tests",
+            description="Routing test flow.",
+            branches=[make_branch("a"), make_branch("b")],
+            router=make_router(0),
+        )
+        assert flow.schema_mode == RoutingFlow.STRICT
+
+    def test_schema_mode_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValueError, match="schema_mode"):
+            RoutingFlow(
+                name="routing_flow",
+                namespace="tests",
+                description="Routing test flow.",
+                branches=[make_branch("a"), make_branch("b")],
+                router=make_router(0),
+                schema_mode="weird",
+            )
+
+    def test_strict_parameters_equal_router_parameters(self) -> None:
         router = make_router(0)
         flow = RoutingFlow(
             name="routing_flow",
@@ -240,7 +271,68 @@ class TestRoutingFlowConstruction:
             router=router,
         )
 
-        assert flow.parameters == router.parameters
+        assert list(flow.parameters) == list(router.parameters)
+
+    def test_strict_rejects_branch_param_not_in_router_schema(self) -> None:
+        with pytest.raises(WorkflowError, match="not present in the router"):
+            RoutingFlow(
+                name="routing_flow",
+                namespace="tests",
+                description="Routing test flow.",
+                branches=[OtherParamWorkflow(), make_branch("b")],
+                router=make_router(0),
+                schema_mode=RoutingFlow.STRICT,
+            )
+
+    def test_strict_compatible_but_not_identical_overlap_warns(self) -> None:
+        with pytest.warns(UserWarning, match="compatible with the router's declaration"):
+            RoutingFlow(
+                name="routing_flow",
+                namespace="tests",
+                description="Routing test flow.",
+                branches=[make_branch("a", param_description="different")],
+                router=make_router(0),
+            )
+
+    def test_partial_requires_overlap_with_router(self) -> None:
+        with pytest.raises(WorkflowError, match="shares no parameters with the router"):
+            RoutingFlow(
+                name="routing_flow",
+                namespace="tests",
+                description="Routing test flow.",
+                branches=[OtherParamWorkflow(with_overlap=False)],
+                router=make_router(0),
+                schema_mode=RoutingFlow.PARTIAL,
+            )
+
+    def test_partial_folds_new_branch_param_as_optional(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            namespace="tests",
+            description="Routing test flow.",
+            branches=[make_branch("a"), OtherParamWorkflow(with_overlap=True)],
+            router=make_router(0),
+            schema_mode=RoutingFlow.PARTIAL,
+        )
+
+        by_name = {p.name: p for p in flow.parameters}
+        assert "other" in by_name
+        assert by_name["other"].default is None
+
+    def test_open_allows_branch_with_zero_overlap(self) -> None:
+        flow = RoutingFlow(
+            name="routing_flow",
+            namespace="tests",
+            description="Routing test flow.",
+            branches=[OtherParamWorkflow()],
+            router=make_router(0),
+            schema_mode=RoutingFlow.OPEN,
+        )
+
+        by_name = {p.name: p for p in flow.parameters}
+        assert "value" in by_name
+        assert "other" in by_name
+        assert by_name["other"].default is None
 
     def test_return_type_is_shared_or_union_of_branch_return_types(self) -> None:
         flow = RoutingFlow(
@@ -264,6 +356,13 @@ class TestRoutingFlowConstruction:
         )
         assert flow2.return_type == "dict[str, Any] | str"
 
+    def test_include_trace_defaults_to_true_and_is_mutable(self) -> None:
+        flow = make_list_routing_flow(0)
+
+        assert flow.include_trace is True
+        flow.include_trace = False
+        assert flow.include_trace is False
+
 
 def make_structured_branch(tag: str, output_schema: list[str] | None) -> StructuredInvokable:
     def select(value: Any) -> Any:
@@ -283,6 +382,26 @@ def make_structured_branch(tag: str, output_schema: list[str] | None) -> Structu
     )
 
 
+def make_structured_router(selector: Any) -> StructuredInvokable:
+    """Router whose .invoke(inputs).result == selector (the raw selector)."""
+
+    def select(value: Any) -> Any:
+        return selector
+
+    tool = Tool(
+        function=select,
+        name="select_constant",
+        namespace="tests",
+        description="Return a constant selector.",
+    )
+    return StructuredInvokable(
+        component=tool,
+        output_schema=None,
+        name="structured_router",
+        description="Structured router returning a raw selector.",
+    )
+
+
 class TestRoutingFlowExtraDescription:
     def test_unanimous_non_empty_extra_appends_shared_content(self) -> None:
         flow = RoutingFlow(
@@ -294,6 +413,7 @@ class TestRoutingFlowExtraDescription:
                 make_structured_branch("b", ["value"]),
             ],
             router=make_structured_router(0),
+            schema_mode=RoutingFlow.OPEN,
         )
 
         assert flow._extra_description() == (
@@ -310,6 +430,7 @@ class TestRoutingFlowExtraDescription:
                 make_branch("b"),
             ],
             router=make_structured_router(0),
+            schema_mode=RoutingFlow.OPEN,
         )
 
         assert flow._extra_description() == "Selects 1 of 2 branches at runtime."
@@ -321,6 +442,7 @@ class TestRoutingFlowExtraDescription:
             description="Routing test flow.",
             branches=[make_branch("a"), make_branch("b")],
             router=make_structured_router(0),
+            schema_mode=RoutingFlow.OPEN,
         )
 
         assert flow._extra_description() == "Selects 1 of 2 branches at runtime."
@@ -340,23 +462,20 @@ class TestRoutingFlowSyncInvokeListBranches:
         result = flow.invoke({"value": 5})
 
         assert isinstance(result, RoutingFlowResult)
-        assert result.selected_key == 1
-        assert result.chosen_branch_run == flow.branches[1].checkpoints[-1].result.run_id
-        assert isinstance(result.router_run_id, str)
+        assert result.selected_branch == 1
+        assert result.trace is not None
+        assert len(result.trace) == 2
+        assert result.trace[0].result == 1  # router's own raw result
+        assert result.trace[1].result == {"value": 5, "branch": "b"}
 
-    def test_get_router_decision_returns_raw_selector(self) -> None:
+    def test_trace_none_when_include_trace_disabled(self) -> None:
         flow = make_list_routing_flow(1)
+        flow.include_trace = False
 
         result = flow.invoke({"value": 5})
 
-        assert flow.get_router_decision(result.run_id) == 1
-
-    def test_get_router_decision_returns_none_for_unknown_run_id(self) -> None:
-        flow = make_list_routing_flow(1)
-
-        flow.invoke({"value": 5})
-
-        assert flow.get_router_decision("nope") is None
+        assert result.trace is None
+        assert result.selected_branch == 1
 
 
 class TestRoutingFlowSyncInvokeDictBranches:
@@ -366,7 +485,7 @@ class TestRoutingFlowSyncInvokeDictBranches:
         result = flow.invoke({"value": 5})
 
         assert result.result == {"value": 5, "branch": "right"}
-        assert result.selected_key == "right"
+        assert result.selected_branch == "right"
 
     def test_dict_branch_selector_must_be_present_key(self) -> None:
         flow = make_dict_routing_flow("missing")
@@ -468,25 +587,23 @@ class TestRoutingFlowValidationAndErrors:
 
 
 class TestRoutingFlowSerialization:
-    def test_to_dict_includes_router_and_branches_list(self) -> None:
+    def test_to_dict_includes_router_branches_list_and_schema_mode(self) -> None:
         flow = make_list_routing_flow(1)
 
-        result = flow.invoke({"value": 5})
+        flow.invoke({"value": 5})
         data = flow.to_dict()
 
         assert data["router"] == flow.router.to_dict()
         assert isinstance(data["branches"], list)
         assert len(data["branches"]) == 3
-        assert data["checkpoint_count"] == 1
-        assert data["runs"] == [result.run_id]
+        assert data["schema_mode"] == RoutingFlow.STRICT
+        assert "checkpoints" not in data
 
     def test_to_dict_includes_branches_dict_for_dict_branches(self) -> None:
         flow = make_dict_routing_flow("right")
 
-        result = flow.invoke({"value": 5})
+        flow.invoke({"value": 5})
         data = flow.to_dict()
 
         assert isinstance(data["branches"], dict)
         assert set(data["branches"].keys()) == {"left", "right"}
-        assert data["checkpoint_count"] == 1
-        assert data["runs"] == [result.run_id]

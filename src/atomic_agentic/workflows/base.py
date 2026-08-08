@@ -5,24 +5,22 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from ..exceptions import ExecutionError
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec
 from ..models.results.workflows import WorkflowResult
-from ..models.workflows.checkpoints import WorkflowCheckpoint
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "WorkflowCheckpoint",
     "Workflow",
 ]
 
 class Workflow(AtomicInvokable, ABC):
     """
-    Base workflow primitive focused on orchestration and checkpointing.
+    Base workflow primitive focused on orchestration and result tracing.
 
     Contract
     --------
@@ -31,9 +29,11 @@ class Workflow(AtomicInvokable, ABC):
     - Both run hooks must return ``(payload, result_kwargs)`` where:
         * ``payload`` is the caller-facing result value (any type)
         * ``result_kwargs`` is a dict of per-kind extra fields forwarded to
-          the result subclass constructor via ``make_result()``
+          the result subclass constructor via ``make_result()`` — including,
+          when the executing subclass populates it, a ``trace`` entry.
     - Public ``invoke()`` / ``async_invoke()`` wrap the payload in a
-      ``WorkflowResult``-family envelope and record a ``WorkflowCheckpoint``.
+      ``WorkflowResult``-family envelope. Whether that envelope's ``trace``
+      field is populated is controlled by ``include_trace``.
     """
 
     def __init__(
@@ -43,6 +43,7 @@ class Workflow(AtomicInvokable, ABC):
         description: str,
         parameters: list[ParamSpec],
         return_type: str,
+        include_trace: bool = True,
     ) -> None:
         super().__init__(
             name=name,
@@ -52,15 +53,23 @@ class Workflow(AtomicInvokable, ABC):
             return_type=return_type,
         )
 
-        self._checkpoints: list[WorkflowCheckpoint] = []
+        self.include_trace = include_trace
 
     # ------------------------------------------------------------------ #
-    # Checkpoint properties
+    # Trace toggle
     # ------------------------------------------------------------------ #
     @property
-    def checkpoints(self) -> list[WorkflowCheckpoint]:
-        """Return a shallow copy of recorded checkpoints."""
-        return list(self._checkpoints)
+    def include_trace(self) -> bool:
+        """Whether this workflow's results populate their ``trace`` field."""
+        return self._include_trace
+
+    @include_trace.setter
+    def include_trace(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise TypeError(
+                f"include_trace must be a bool, got {type(value).__name__}."
+            )
+        self._include_trace = value
 
     # ------------------------------------------------------------------ #
     # Subclass run hooks
@@ -114,62 +123,30 @@ class Workflow(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
-    def get_checkpoint(
-        self, key: int | str | WorkflowResult
-    ) -> Optional[WorkflowCheckpoint]:
-        """Return the checkpoint matching the given key.
-
-        Parameters
-        ----------
-        key:
-            - ``int`` — positional index into the checkpoint list. Raises
-              ``IndexError`` naturally for out-of-range access.
-            - ``WorkflowResult`` — identity match on ``checkpoint.result``.
-              Returns the first match or ``None``.
-            - ``str`` — run id match on ``checkpoint.result.run_id``.
-              Returns the first match or ``None``.
-        """
-        if isinstance(key, int):
-            return self._checkpoints[key]
-        if isinstance(key, WorkflowResult):
-            for checkpoint in self._checkpoints:
-                if checkpoint.result is key:
-                    return checkpoint
-            return None
-        for checkpoint in self._checkpoints:
-            if checkpoint.result.run_id == key:
-                return checkpoint
-        return None
-
     def invoke(self, inputs: Mapping[str, Any]) -> WorkflowResult:
         """Synchronously invoke the workflow."""
-        with self._invoke_lock:
-            logger.info("[%s started]", self.full_name)
+        logger.info("[%s started]", self.full_name)
 
-            started_at = datetime.now(timezone.utc)
-            filtered_inputs = self.filter_inputs(inputs)
+        started_at = datetime.now(timezone.utc)
+        filtered_inputs = self.filter_inputs(inputs)
 
-            try:
-                payload, result_kwargs = self._run(filtered_inputs)
-            except Exception as exc:
-                raise ExecutionError(
-                    f"{type(self).__name__}._run failed: {exc}"
-                ) from exc
+        try:
+            payload, result_kwargs = self._run(filtered_inputs)
+        except Exception as exc:
+            raise ExecutionError(
+                f"{type(self).__name__}._run failed: {exc}"
+            ) from exc
 
-            ended_at = datetime.now(timezone.utc)
-            workflow_result = self.make_result(
-                result=payload,
-                started_at=started_at,
-                ended_at=ended_at,
-                **result_kwargs,
-            )
+        ended_at = datetime.now(timezone.utc)
+        workflow_result = self.make_result(
+            result=payload,
+            started_at=started_at,
+            ended_at=ended_at,
+            **result_kwargs,
+        )
 
-            self._checkpoints.append(
-                WorkflowCheckpoint(result=workflow_result, inputs=dict(filtered_inputs))
-            )
-
-            logger.info("[%s finished]", self.full_name)
-            return workflow_result
+        logger.info("[%s finished]", self.full_name)
+        return workflow_result
 
     async def async_invoke(self, inputs: Mapping[str, Any]) -> WorkflowResult:
         """Asynchronously invoke the workflow."""
@@ -193,29 +170,18 @@ class Workflow(AtomicInvokable, ABC):
             **result_kwargs,
         )
 
-        self._checkpoints.append(
-            WorkflowCheckpoint(result=workflow_result, inputs=dict(filtered_inputs))
-        )
-
         logger.info("[Async %s finished]", self.full_name)
         return workflow_result
 
     # ------------------------------------------------------------------ #
-    # Memory / serialization
+    # Serialization
     # ------------------------------------------------------------------ #
-    def clear_memory(self) -> None:
-        """Clear workflow-owned checkpoint history."""
-        self._checkpoints.clear()
-
     def to_dict(self) -> Dict[str, Any]:
         """Minimal diagnostic snapshot."""
         data = super().to_dict()
         data.update(
             {
-                "checkpoint_count": len(self._checkpoints),
-                "runs": [
-                    checkpoint.result.run_id for checkpoint in self._checkpoints
-                ],
+                "include_trace": self._include_trace,
             }
         )
         return data

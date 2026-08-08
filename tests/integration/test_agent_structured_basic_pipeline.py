@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
@@ -9,8 +9,8 @@ import pytest
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.models.results.workflows import BasicFlowResult, SequentialFlowResult
-from atomic_agentic.workflows.basic import BasicFlow
+from atomic_agentic.models.results.structured import StructuredResult
+from atomic_agentic.models.results.workflows import SequentialFlowResult
 from atomic_agentic.workflows.sequential import SequentialFlow
 from fake_engines import FakeLLMEngine, echo_latest_user
 
@@ -82,21 +82,22 @@ def make_structured_agent(
     return resolved_engine, agent, structured_agent
 
 
-def make_basic_agent_flow(
+def make_agent_sequential_flow(
     *,
     engine: FakeLLMEngine | None = None,
     context_enabled: bool = False,
     records_window: int | None = None,
-) -> tuple[FakeLLMEngine, BasicAgent, StructuredInvokable, BasicFlow]:
+) -> tuple[FakeLLMEngine, BasicAgent, StructuredInvokable, SequentialFlow]:
     resolved_engine, agent, structured_agent = make_structured_agent(
         engine=engine,
         context_enabled=context_enabled,
         records_window=records_window,
     )
-    flow = BasicFlow(
-        component=structured_agent,
-        name="writer_agent_basic_flow",
-        description="BasicFlow wrapping a structured Agent.",
+    flow = SequentialFlow(
+        name="writer_agent_sequential_flow",
+        namespace="integration",
+        description="SequentialFlow wrapping a structured Agent.",
+        steps=[structured_agent],
     )
     return resolved_engine, agent, structured_agent, flow
 
@@ -117,22 +118,21 @@ def make_summary_step() -> StructuredInvokable:
 
 
 class TestAgentStructuredBasicPipeline:
-    def test_agent_can_be_structured_and_wrapped_in_basic_flow(self) -> None:
-        engine, _agent, _structured_agent, flow = make_basic_agent_flow()
+    def test_agent_can_be_structured_and_wrapped_in_sequential_flow(self) -> None:
+        engine, _agent, _structured_agent, flow = make_agent_sequential_flow()
 
         result = flow.invoke({"topic": "pytest", "tone": "strict"})
 
         expected_prompt = "Write about pytest in a strict tone."
         expected_raw = f"ECHO: {expected_prompt}"
 
-        assert isinstance(result, BasicFlowResult)
+        assert isinstance(result, SequentialFlowResult)
         assert result.result == {
             "final": expected_raw,
             "length": len(expected_raw),
             "was_postprocessed": True,
         }
-        assert result.run_id == flow.checkpoints[-1].result.run_id
-        assert len(flow.checkpoints) == 1
+        assert len(result.trace) == 1
         assert engine.calls == [
             [
                 {"role": "system", "content": ROLE_PROMPT},
@@ -140,15 +140,14 @@ class TestAgentStructuredBasicPipeline:
             ]
         ]
 
-    def test_basic_flow_checkpoint_records_agent_raw_result(self) -> None:
-        _engine, agent, structured_agent, flow = make_basic_agent_flow()
+    def test_sequential_flow_trace_records_structured_agent_result(self) -> None:
+        _engine, agent, structured_agent, flow = make_agent_sequential_flow()
 
         result = flow.invoke({"topic": "agents", "tone": "concise"})
-        checkpoint = flow.get_checkpoint(result.run_id)
-        assert checkpoint is not None
+        step_result = result.trace[0]
 
-        assert checkpoint.result.child_id == structured_agent.instance_id
-        assert checkpoint.result.child_type == "StructuredInvokable"
+        assert isinstance(step_result, StructuredResult)
+        assert step_result.result == result.result
         # Records are always stored regardless of context_enabled.
         assert len(agent.records) == 1
 
@@ -177,18 +176,15 @@ class TestAgentStructuredBasicPipeline:
 
         assert isinstance(result, SequentialFlowResult)
         assert result.result == expected_second
-        step_results = flow.get_step_results(result.run_id)
-        assert [r.result for r in step_results] == [
+        assert [r.result for r in result.trace] == [
             expected_first,
             expected_second,
         ]
-        assert flow.get_step_result(result.run_id, 0).result == expected_first
-        assert flow.get_step_result(result.run_id, 1).result == expected_second
 
     def test_wrapped_context_enabled_agent_preserves_history_across_flow_invokes(
         self,
     ) -> None:
-        engine, agent, _structured_agent, flow = make_basic_agent_flow(
+        engine, agent, _structured_agent, flow = make_agent_sequential_flow(
             context_enabled=True,
         )
 
@@ -197,7 +193,6 @@ class TestAgentStructuredBasicPipeline:
 
         assert first.result["final"] == "ECHO: Write about first topic in a plain tone."
         assert second.result["final"] == "ECHO: Write about second topic in a plain tone."
-        assert len(flow.checkpoints) == 2
         assert len(engine.calls) == 2
 
         second_call_messages = engine.calls[1]
@@ -211,8 +206,8 @@ class TestAgentStructuredBasicPipeline:
         assert second_call_messages[2]["content"] == "ECHO: Write about first topic in a plain tone."
         assert second_call_messages[3]["content"] == "Write about second topic in a plain tone."
 
-    def test_async_structured_agent_basic_flow_pipeline_records_checkpoint(self) -> None:
-        engine, _agent, _structured_agent, flow = make_basic_agent_flow()
+    def test_async_structured_agent_sequential_flow_pipeline(self) -> None:
+        engine, _agent, _structured_agent, flow = make_agent_sequential_flow()
 
         result = asyncio.run(
             flow.async_invoke({"topic": "async pytest", "tone": "strict"})
@@ -221,33 +216,31 @@ class TestAgentStructuredBasicPipeline:
         expected_prompt = "Write about async pytest in a strict tone."
         expected_raw = f"ECHO: {expected_prompt}"
 
-        assert isinstance(result, BasicFlowResult)
+        assert isinstance(result, SequentialFlowResult)
         assert result.result == {
             "final": expected_raw,
             "length": len(expected_raw),
             "was_postprocessed": True,
         }
-        assert len(flow.checkpoints) == 1
-        assert flow.checkpoints[0].result.run_id == result.run_id
+        assert len(result.trace) == 1
         assert len(engine.calls) == 1
 
     def test_composed_agent_pipeline_to_dict_exposes_agent_and_engine_snapshot(
         self,
     ) -> None:
-        _engine, agent, structured_agent, flow = make_basic_agent_flow(
+        _engine, agent, structured_agent, flow = make_agent_sequential_flow(
             context_enabled=True,
             records_window=1,
         )
 
-        result = flow.invoke({"topic": "serialization", "tone": "careful"})
+        flow.invoke({"topic": "serialization", "tone": "careful"})
         data = flow.to_dict()
 
-        assert data["type"] == "BasicFlow"
-        assert data["name"] == "writer_agent_basic_flow"
-        assert data["checkpoint_count"] == 1
-        assert data["runs"] == [result.run_id]
+        assert data["type"] == "SequentialFlow"
+        assert data["name"] == "writer_agent_sequential_flow"
+        assert data["step_count"] == 1
 
-        structured_snapshot = data["component"]
+        structured_snapshot = data["steps"][0]
         assert structured_snapshot["type"] == "StructuredInvokable"
         assert structured_snapshot["name"] == structured_agent.name
 

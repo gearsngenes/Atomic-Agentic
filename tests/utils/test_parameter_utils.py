@@ -7,7 +7,7 @@ import pytest
 
 from atomic_agentic.exceptions import SchemaError
 from atomic_agentic.core.Invokable import AtomicInvokable
-from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.models.parameters import ParamNameReport, ParamSpec
 from atomic_agentic.utils.parameters import (
     _insertion_category,
     _normalize_prompt_template,
@@ -15,6 +15,7 @@ from atomic_agentic.utils.parameters import (
     _validate_parameter_order,
     insert_by_category,
     is_valid_parameter_order,
+    n_way_parameter_report,
     parameter_collisions,
     parameter_overlap,
     semantically_compatible,
@@ -940,3 +941,154 @@ class TestInsertByCategory:
 
         with pytest.raises(SchemaError, match="Duplicate"):
             insert_by_category(composed, items)
+
+
+class TestNWayParameterReport:
+    def test_empty_sources_yields_empty_report(self) -> None:
+        assert n_way_parameter_report([]) == []
+
+    def test_sources_with_no_params_yield_empty_report(self) -> None:
+        assert n_way_parameter_report([[], []]) == []
+
+    def test_single_source_single_param(self) -> None:
+        spec = make_param("x", 0, type_="int")
+        report = n_way_parameter_report([[spec]])
+
+        assert len(report) == 1
+        entry = report[0]
+        assert entry.name == "x"
+        assert entry.source_count == 1
+        assert entry.types == {"int"}
+        assert entry.kinds == {ParamSpec.POSITIONAL_OR_KEYWORD}
+        assert entry.unique_default_count == 1
+        assert entry.unique_description_count == 1
+        assert entry.observations == ((0, spec),)
+
+    def test_name_only_in_some_sources_gets_partial_source_count(self) -> None:
+        a = make_param("shared", 0, type_="int")
+        b = make_param("shared", 0, type_="int")
+        report = n_way_parameter_report([[a], [b], []])
+
+        entry = next(r for r in report if r.name == "shared")
+        assert entry.source_count == 2
+
+    def test_distinct_names_produce_separate_reports(self) -> None:
+        report = n_way_parameter_report([
+            [make_param("x", 0, type_="int")],
+            [make_param("y", 0, type_="str")],
+        ])
+
+        names = {r.name for r in report}
+        assert names == {"x", "y"}
+
+    def test_names_reported_in_first_seen_order(self) -> None:
+        report = n_way_parameter_report([
+            [make_param("second", 0), make_param("first", 1)],
+            [make_param("third", 0)],
+        ])
+
+        assert [r.name for r in report] == ["second", "first", "third"]
+
+    def test_observations_preserve_first_seen_order_across_sources(self) -> None:
+        a = make_param("x", 0, type_="int")
+        b = make_param("x", 0, type_="Any")
+        c = make_param("x", 0, type_="Any")
+
+        entry = n_way_parameter_report([[a], [b], [c]])[0]
+
+        assert entry.observations == ((0, a), (1, b), (2, c))
+
+    def test_types_aggregate_into_a_set(self) -> None:
+        report = n_way_parameter_report([
+            [make_param("x", 0, type_="int")],
+            [make_param("x", 0, type_="int")],
+            [make_param("x", 0, type_="str")],
+        ])
+
+        assert report[0].types == {"int", "str"}
+
+    def test_kinds_aggregate_into_a_set(self) -> None:
+        report = n_way_parameter_report([
+            [make_param("x", 0, ParamSpec.POSITIONAL_ONLY)],
+            [make_param("x", 0, ParamSpec.KEYWORD_ONLY)],
+        ])
+
+        assert report[0].kinds == {ParamSpec.POSITIONAL_ONLY, ParamSpec.KEYWORD_ONLY}
+
+    def test_unique_default_count_one_when_all_defaults_match(self) -> None:
+        report = n_way_parameter_report([
+            [make_param("x", 0, default=5)],
+            [make_param("x", 0, default=5)],
+        ])
+        assert report[0].unique_default_count == 1
+
+    def test_unique_default_count_counts_distinct_values(self) -> None:
+        report = n_way_parameter_report([
+            [make_param("x", 0, default=5)],
+            [make_param("x", 0, default=6)],
+        ])
+        assert report[0].unique_default_count == 2
+
+    def test_no_val_is_an_ordinary_default_member_not_excluded(self) -> None:
+        # A mix of NO_VAL and a real default must count as 2 distinct
+        # values -- NO_VAL is never special-cased out of the grouping.
+        report = n_way_parameter_report([
+            [make_param("x", 0, default=NO_VAL)],
+            [make_param("x", 0, default=5)],
+        ])
+        assert report[0].unique_default_count == 2
+
+    def test_shared_no_val_default_counts_as_one_unique_value(self) -> None:
+        report = n_way_parameter_report([
+            [make_param("x", 0, default=NO_VAL)],
+            [make_param("x", 0, default=NO_VAL)],
+        ])
+        assert report[0].unique_default_count == 1
+
+    def test_unhashable_defaults_grouped_by_equality_not_identity(self) -> None:
+        # Two separately-constructed but equal lists must count as one
+        # unique default -- equality grouping, not a literal set() (which
+        # would crash on unhashable values) and not identity comparison.
+        report = n_way_parameter_report([
+            [make_param("x", 0, default=[1, 2])],
+            [make_param("x", 0, default=[1, 2])],
+        ])
+        assert report[0].unique_default_count == 1
+
+    def test_unhashable_defaults_distinguish_unequal_values(self) -> None:
+        report = n_way_parameter_report([
+            [make_param("x", 0, default=[1, 2])],
+            [make_param("x", 0, default=[3, 4])],
+        ])
+        assert report[0].unique_default_count == 2
+
+    def test_unique_description_count_via_real_set(self) -> None:
+        a = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", description="first")
+        b = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", description="second")
+        c = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", description="first")
+
+        report = n_way_parameter_report([[a], [b], [c]])
+
+        assert report[0].unique_description_count == 2
+
+    def test_none_description_counts_as_its_own_value(self) -> None:
+        a = make_param("x", 0)  # description=None by default
+        b = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", description="set")
+
+        report = n_way_parameter_report([[a], [b]])
+
+        assert report[0].unique_description_count == 2
+
+    def test_report_entries_are_paramnamereport_instances(self) -> None:
+        report = n_way_parameter_report([[make_param("x", 0)]])
+        assert isinstance(report[0], ParamNameReport)
+
+    def test_no_raising_on_type_or_kind_conflicts_pure_aggregation(self) -> None:
+        # Detection is separate from any raise/warn policy decision -- this
+        # utility never raises regardless of how divergent the inputs are.
+        report = n_way_parameter_report([
+            [make_param("x", 0, ParamSpec.VAR_POSITIONAL, type_="int")],
+            [make_param("x", 0, ParamSpec.VAR_KEYWORD, type_="str")],
+        ])
+        assert report[0].types == {"int", "str"}
+        assert report[0].kinds == {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}

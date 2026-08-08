@@ -7,6 +7,7 @@ import pytest
 
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
+from atomic_agentic.models.workflows import CheckerSpec
 from atomic_agentic.models.results.workflows import (
     IterativeFlowResult,
     ParallelFlowResult,
@@ -158,9 +159,9 @@ def make_parallel_enrichment_flow() -> ParallelFlow:
                 output_schema=["summary"],
             ),
         ],
-        parameters=["topic"],
-        output_type=ParallelFlow.DICT,
-        output_names=["title_branch", "keywords_branch", "summary_branch"],
+        result_mode=ParallelFlow.DICT,
+        selected_branches=[0, 1, 2],
+        result_keys=["title_branch", "keywords_branch", "summary_branch"],
     )
 
 
@@ -262,6 +263,7 @@ def make_routing_between_sequences_flow() -> RoutingFlow:
             make_text_sequence_branch(),
             make_number_sequence_branch(),
         ],
+        schema_mode=RoutingFlow.PARTIAL,
     )
 
 
@@ -344,9 +346,9 @@ def make_parallel_sequence_branches_flow() -> ParallelFlow:
             make_title_sequence_branch(),
             make_tag_sequence_branch(),
         ],
-        parameters=["article"],
-        output_type=ParallelFlow.DICT,
-        output_names=["title_branch", "tag_branch"],
+        result_mode=ParallelFlow.DICT,
+        selected_branches=[0, 1],
+        result_keys=["title_branch", "tag_branch"],
     )
 
 
@@ -393,12 +395,10 @@ def make_iterative_score_flow() -> IterativeFlow:
                 output_schema=["score"],
             )
         ],
-        judge=judge,
-        approval_value=True,
         max_iterations=5,
-        return_index=0,
+        checkers=[CheckerSpec(index=0, judge=judge, approval_value=True)],
+        result_setting_indices=[0],
         handoff_index=0,
-        evaluate_index=0,
     )
 
 
@@ -434,6 +434,7 @@ class TestCompositeWorkflows:
                 make_text_branch(),
                 make_number_branch(),
             ],
+            schema_mode=RoutingFlow.PARTIAL,
         )
         flow = SequentialFlow(
             name="sequential_routing_finalizer",
@@ -454,20 +455,16 @@ class TestCompositeWorkflows:
         assert isinstance(result, SequentialFlowResult)
         assert result.result == {"final": "text:HELLO WORLD"}
 
-        step_results = flow.get_step_results(result.run_id)
-        assert [r.result for r in step_results] == [
+        assert [r.result for r in result.trace] == [
             {"branch": "text", "payload": "HELLO WORLD"},
             {"final": "text:HELLO WORLD"},
         ]
 
-        routing_step_result = flow.get_step_result(result.run_id, 0)
-        assert routing_step_result.result == {"branch": "text", "payload": "HELLO WORLD"}
-
-        routing_checkpoint = routing_flow.checkpoints[0]
-        assert isinstance(routing_checkpoint.result, RoutingFlowResult)
-        assert routing_checkpoint.result.selected_key == 0
-        assert len(routing_flow.branches[0].checkpoints) == 1
-        assert len(routing_flow.branches[1].checkpoints) == 0
+        routing_result = result.trace[0]
+        assert isinstance(routing_result, RoutingFlowResult)
+        assert routing_result.result == {"branch": "text", "payload": "HELLO WORLD"}
+        assert routing_result.selected_branch == 0
+        assert len(routing_result.trace) == 2
 
     def test_sequential_parallel_enrichment_then_merge(self) -> None:
         flow = make_sequential_parallel_report_flow()
@@ -489,16 +486,13 @@ class TestCompositeWorkflows:
         assert isinstance(result, SequentialFlowResult)
         assert result.result == expected_result
 
-        step_results = flow.get_step_results(result.run_id)
-        assert step_results[0].result == {"topic": "atomic agents"}
-        assert step_results[1].result == expected_parallel_result
-        assert step_results[2].result == result.result
+        assert result.trace[0].result == {"topic": "atomic agents"}
+        assert result.trace[1].result == expected_parallel_result
+        assert result.trace[2].result == result.result
 
-        parallel_flow = flow.steps[1]
-        assert isinstance(parallel_flow, ParallelFlow)
-        parallel_result = parallel_flow.checkpoints[0].result
+        parallel_result = result.trace[1]
         assert isinstance(parallel_result, ParallelFlowResult)
-        assert len(parallel_result.branch_runs) == 3
+        assert len(parallel_result.trace) == 3
 
     def test_routing_can_select_sequential_branch(self) -> None:
         flow = make_routing_between_sequences_flow()
@@ -507,24 +501,16 @@ class TestCompositeWorkflows:
 
         assert isinstance(result, RoutingFlowResult)
         assert result.result == {"number_result": 25}
-
-        checkpoint = flow.get_checkpoint(result.run_id)
-        assert checkpoint is not None
-        assert checkpoint.result.selected_key == 1
+        assert result.selected_branch == 1
 
         text_sequence = flow.branches[0]
         number_sequence = flow.branches[1]
         assert isinstance(text_sequence, SequentialFlow)
         assert isinstance(number_sequence, SequentialFlow)
 
-        assert len(text_sequence.checkpoints) == 0
-        assert len(number_sequence.checkpoints) == 1
-        assert checkpoint.result.chosen_branch_run == number_sequence.checkpoints[-1].result.run_id
-
-        selected_branch_results = number_sequence.get_step_results(
-            number_sequence.checkpoints[-1].result.run_id
-        )
-        assert [r.result for r in selected_branch_results] == [
+        selected_result = result.trace[1]
+        assert isinstance(selected_result, SequentialFlowResult)
+        assert [r.result for r in selected_result.trace] == [
             {"number": 5},
             {"number_result": 25},
         ]
@@ -547,26 +533,16 @@ class TestCompositeWorkflows:
         assert isinstance(title_sequence, SequentialFlow)
         assert isinstance(tag_sequence, SequentialFlow)
 
-        assert len(title_sequence.checkpoints) == 1
-        assert len(tag_sequence.checkpoints) == 1
-        title_step_results = title_sequence.get_step_results(
-            title_sequence.checkpoints[-1].result.run_id
-        )
-        assert [r.result for r in title_step_results] == [
+        assert len(result.trace) == 2
+        title_result, tag_result = result.trace
+        assert [r.result for r in title_result.trace] == [
             {"title": "Atomic"},
             {"title": "Atomic", "title_score": 6},
         ]
-        tag_step_results = tag_sequence.get_step_results(
-            tag_sequence.checkpoints[-1].result.run_id
-        )
-        assert [r.result for r in tag_step_results] == [
+        assert [r.result for r in tag_result.trace] == [
             {"tags": ["atomic", "agentic"]},
             {"tags": ["atomic", "agentic"], "tag_score": 2},
         ]
-
-        checkpoint = flow.get_checkpoint(result.run_id)
-        assert checkpoint is not None
-        assert len(checkpoint.result.branch_runs) == 2
 
     def test_sequential_iterative_refinement_then_finalize(self) -> None:
         flow = make_sequential_iterative_score_flow()
@@ -578,27 +554,22 @@ class TestCompositeWorkflows:
             "final_score": 3,
             "status": "approved",
         }
-        step_results = flow.get_step_results(result.run_id)
-        assert [r.result for r in step_results] == [
+        assert [r.result for r in result.trace] == [
             {"score": 0},
             {"score": 3},
             {"final_score": 3, "status": "approved"},
         ]
 
-        iterative_flow = flow.steps[1]
-        assert isinstance(iterative_flow, IterativeFlow)
-        iterative_result = iterative_flow.checkpoints[0].result
+        iterative_result = result.trace[1]
         assert isinstance(iterative_result, IterativeFlowResult)
-        assert len(iterative_result.iteration_runs) == 3
+        assert iterative_result.exited_early is True
+        assert iterative_result.iterations_completed == 3
         assert iterative_result.max_iterations == 5
-        assert len(iterative_result.iteration_runs) < iterative_result.max_iterations
+        assert iterative_result.iterations_completed < iterative_result.max_iterations
+        assert len(iterative_result.trace) == 6
 
-        pairs = iterative_flow.get_iteration_results(iterative_result.run_id)
-        assert [judge_result.result for _, judge_result in pairs] == [
-            False,
-            False,
-            True,
-        ]
+        judge_results = [iterative_result.trace[i].result for i in range(1, 6, 2)]
+        assert judge_results == [False, False, True]
 
 
 class TestCompositeWorkflowAsync:
@@ -624,14 +595,10 @@ class TestCompositeWorkflowAsync:
         assert isinstance(result, SequentialFlowResult)
         assert result.result == expected_result
 
-        step_results = flow.get_step_results(result.run_id)
-        assert step_results[0].result == {"topic": "async atomic agents"}
-        assert step_results[1].result == expected_parallel_result
-        assert step_results[2].result == result.result
+        assert result.trace[0].result == {"topic": "async atomic agents"}
+        assert result.trace[1].result == expected_parallel_result
+        assert result.trace[2].result == result.result
 
-        parallel_flow = flow.steps[1]
-        assert isinstance(parallel_flow, ParallelFlow)
-        assert len(parallel_flow.checkpoints) == 1
-        parallel_result = parallel_flow.checkpoints[0].result
+        parallel_result = result.trace[1]
         assert isinstance(parallel_result, ParallelFlowResult)
-        assert len(parallel_result.branch_runs) == 3
+        assert len(parallel_result.trace) == 3

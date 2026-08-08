@@ -21,11 +21,11 @@ from .llm import (
 from .tools import ToolResult, MCPToolResult, PyA2AtomicToolResult
 from .workflows import (
     WorkflowResult,
-    BasicFlowResult,
     SequentialFlowResult,
     RoutingFlowResult,
     IterativeFlowResult,
     ParallelFlowResult,
+    GraphFlowResult,
 )
 
 __all__ = [
@@ -52,9 +52,9 @@ __all__ = [
     "ToolAgentResult",
     "ThinkingAgentResult",
     "WorkflowResult",
-    "BasicFlowResult",
     "SequentialFlowResult",
     "RoutingFlowResult",
     "IterativeFlowResult",
     "ParallelFlowResult",
+    "GraphFlowResult",
 ]

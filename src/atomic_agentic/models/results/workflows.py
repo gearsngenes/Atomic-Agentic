@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Hashable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .atomic import AtomicResult
 
 __all__ = [
     "WorkflowResult",
-    "BasicFlowResult",
     "SequentialFlowResult",
     "RoutingFlowResult",
     "IterativeFlowResult",
     "ParallelFlowResult",
+    "GraphFlowResult",
 ]
 
 
@@ -21,33 +21,19 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class WorkflowResult(AtomicResult):
-    """Base successful Workflow invocation result."""
-
-
-@dataclass(frozen=True, slots=True)
-class BasicFlowResult(WorkflowResult):
-    """Result for a BasicFlow run.
-
-    ``result`` holds the unwrapped child payload (``child_result.result``),
-    not the child's AtomicResult envelope.
+    """Base successful Workflow invocation result.
 
     Fields
     ------
-    child_id:
-        ``child_result.invoker_id`` — instance identifier of the wrapped
-        component that executed.
-    child_type:
-        ``type(component).__name__`` — the wrapped component's class name.
-    child_run_id:
-        ``child_result.run_id`` — run identifier of the wrapped component's
-        invocation, usable to correlate against the component's own history
-        (e.g. ``Agent._history`` or a child ``Workflow``'s checkpoints), when
-        the component retains one.
+    trace:
+        Full ordered tuple of this invocation's child ``AtomicResult``
+        objects, populated by the executing subclass's own ``_run``/
+        ``_async_run`` when ``include_trace`` is enabled. ``None`` when
+        trace collection is disabled, or when the executing subclass has
+        not yet been updated to populate it.
     """
 
-    child_id: str
-    child_type: str
-    child_run_id: str
+    trace: tuple[AtomicResult, ...] | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,17 +42,13 @@ class SequentialFlowResult(WorkflowResult):
 
     Fields
     ------
-    step_runs:
-        Tuple of child run ids, one per executed step, in step order.
-        ``step_runs[i]`` corresponds to ``SequentialFlow.steps[i]`` and can
-        be used with ``steps[i].get_checkpoint(step_runs[i])`` to retrieve
-        that step's own checkpoint.
     return_index:
         The fixed step index whose result became this result's ``result``
-        payload (i.e. ``result == steps[return_index]``'s checkpoint result).
+        payload. When ``trace`` is populated (inherited from
+        ``WorkflowResult``), ``trace[return_index]`` is that step's full
+        ``AtomicResult``, including its own ``run_id``.
     """
 
-    step_runs: tuple[str, ...]
     return_index: int
 
 
@@ -76,24 +58,18 @@ class RoutingFlowResult(WorkflowResult):
 
     Fields
     ------
-    selected_key:
-        The validated selector returned by the router that determined which
-        branch ran. For list-configured branches, an ``int`` index into
-        ``RoutingFlow.branches``. For dict-configured branches, the dict key
-        used to look up the executed branch.
-    chosen_branch_run:
-        Run id of the selected branch's invocation. Used with
-        ``branches[selected_key].get_checkpoint(chosen_branch_run)`` to
-        retrieve that branch's own checkpoint.
-    router_run_id:
-        Run id of the router's invocation. Use with
-        ``router.get_checkpoint(router_run_id)`` to retrieve the router's
-        own checkpoint.
+    selected_branch:
+        The router's validated selector -- the branch that was actually
+        invoked. An ``int`` index into ``RoutingFlow.branches`` for
+        list-configured topology, or the dict key for dict-configured
+        topology. Always populated, independent of ``include_trace``.
+    trace (inherited):
+        Exactly two entries when ``include_trace`` is enabled: ``trace[0]``
+        is the router's own ``AtomicResult``, ``trace[1]`` is the selected
+        branch's own ``AtomicResult``. ``None`` when tracing is disabled.
     """
 
-    selected_key: Hashable
-    chosen_branch_run: str
-    router_run_id: str
+    selected_branch: Hashable
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,34 +78,39 @@ class IterativeFlowResult(WorkflowResult):
 
     Fields
     ------
-    iteration_runs:
-        Tuple of loop-body run ids, one per completed iteration, in
-        iteration order. ``iteration_runs[i]`` can be used with
-        ``loop_body.get_checkpoint(iteration_runs[i])`` to retrieve that
-        iteration's body result.
-    judge_runs:
-        Tuple of judge run ids, one per completed iteration, in iteration
-        order, parallel to ``iteration_runs``. ``judge_runs[i]`` can be used
-        with ``judge.get_checkpoint(judge_runs[i])`` to retrieve that
-        iteration's judge result (and, via a retrieval helper, the judge's
-        decision for that iteration).
-    return_step_index:
-        Fixed loop-body step index whose result became this result's
-        ``result`` payload.
-    handoff_step_index:
-        Fixed loop-body step index whose result became the next iteration's
-        inputs.
-    evaluate_step_index:
-        Fixed loop-body step index whose result was passed to the judge.
+    exited_early:
+        True if the run stopped because a checker's judge matched its
+        approval_value; False if it ran to ``max_iterations``.
+    iterations_completed:
+        Number of iterations actually executed. May be less than
+        ``max_iterations`` when ``exited_early`` is True.
+    triggering_step:
+        The body-step index whose checker matched its ``approval_value`` and
+        stopped the loop. ``None`` if ``exited_early`` is False. A plain
+        ``int`` rather than the ``CheckerSpec`` itself -- a result should not
+        carry a callable (``CheckerSpec.judge``); look the checker up on the
+        live flow via this index if the full spec is needed.
+    result_setting_indices:
+        Fixed body-step positions whose results update the running
+        "current answer", duplicated from
+        ``IterativeFlow.result_setting_indices``.
+    handoff_index:
+        Fixed body-step position whose result feeds the next iteration,
+        duplicated from ``IterativeFlow.handoff_index``.
     max_iterations:
-        Iteration bound configured for this run.
+        Iteration bound configured for this run (mutable knob, snapshotted
+        at invocation time).
+    trace (inherited):
+        Every ``AtomicResult`` actually produced this run -- body-step
+        results and checker judge-invocation results, interleaved in true
+        execution order. ``None`` when tracing is disabled.
     """
 
-    iteration_runs: tuple[str, ...]
-    judge_runs: tuple[str, ...]
-    return_step_index: int
-    handoff_step_index: int
-    evaluate_step_index: int
+    exited_early: bool
+    iterations_completed: int
+    triggering_step: int | None
+    result_setting_indices: tuple[int, ...]
+    handoff_index: int
     max_iterations: int
 
 
@@ -139,18 +120,61 @@ class ParallelFlowResult(WorkflowResult):
 
     Fields
     ------
-    branch_runs:
-        Tuple of child run ids, one per executed branch, in branch order.
-        ``branch_runs[i]`` corresponds to ``ParallelFlow.branches[i]`` and can
-        be used with ``branches[i].get_checkpoint(branch_runs[i])`` to
-        retrieve that branch's own checkpoint.
-    output_indices:
-        Tuple of branch indices, in projection order, whose payloads were
-        combined into ``result``. ``output_indices[k]`` indexes into
-        ``branch_runs``/``ParallelFlow.branches``. For ``output_type``
-        ``"list"``/``"tuple"``, this is the order of ``result``'s elements
-        (``result[k]`` came from branch ``output_indices[k]``).
+    result_mode:
+        The fixed output projection mode (``SCALAR``/``LIST``/``TUPLE``/
+        ``SET``/``DICT``), duplicated from ``ParallelFlow.result_mode``.
+    selected_indices:
+        The fixed branch positions selected for projection, in projection
+        order, duplicated from ``ParallelFlow.selected_indices``. Always
+        ``tuple[int, ...]`` regardless of mode — may be empty (no branch
+        selected). ``trace[i] for i in selected_indices`` is how to pull
+        the actual per-branch results that fed ``result``.
+    result_keys:
+        Single source of truth for the projection's labels, duplicated
+        from ``ParallelFlow.result_keys``. For ``DICT`` mode, the
+        validated ``result_keys`` constructor value (``tuple[str, ...]``).
+        For every other mode, exactly ``selected_indices``
+        (``tuple[int, ...]``) — may be empty (no branch selected), never
+        ``None``.
     """
 
-    branch_runs: tuple[str, ...]
-    output_indices: tuple[int, ...]
+    result_mode: str
+    selected_indices: tuple[int, ...]
+    result_keys: tuple[int, ...] | tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GraphFlowResult(WorkflowResult):
+    """Result for a GraphFlow run.
+
+    Fields
+    ------
+    edge_traversals:
+        Node aliases fired per superstep, in fixed nodes-declaration order
+        within each superstep, router invocations excluded. Always
+        populated, independent of ``include_trace`` (unlike ``trace``
+        itself, which follows the base ``WorkflowResult`` opt-out).
+    termination_reason:
+        ``"queue_empty"`` / ``"cap_hit"`` / ``"early_exit"`` -- why the run
+        stopped.
+    max_edge_traversals:
+        Superstep cap configured for this run (mutable knob, snapshotted at
+        invocation time). ``None`` means unbounded.
+    result_mode:
+        Fixed output projection mode, duplicated from
+        ``GraphFlow.result_mode``.
+    return_keys:
+        Fixed set of requested state keys, in requested order, duplicated
+        from ``GraphFlow.return_keys``. May be empty (nothing requested).
+    trace (inherited):
+        Every ``AtomicResult`` actually produced this run -- node and
+        router invocation results, interleaved in true execution order
+        (a round's node results before that same round's router results).
+        ``None`` when tracing is disabled.
+    """
+
+    edge_traversals: tuple[tuple[str, ...], ...]
+    termination_reason: str
+    max_edge_traversals: int | None
+    result_mode: str
+    return_keys: tuple[str, ...]
