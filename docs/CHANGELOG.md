@@ -5,6 +5,79 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a26] - 2026-08-07
+
+Workflow revision: removes `Workflow`'s checkpoint/run-history mechanism in
+favor of a per-run trace on the result envelope, and ships `GraphFlow` —
+the first cyclic, dynamically-routed workflow kind.
+
+### Added
+
+- `GraphFlow` — a new `Workflow` kind for cyclic, dynamically-routed node
+  graphs. Construction: `nodes: dict[str, AtomicInvokable]` (alias → node),
+  `edges: list[tuple[str, str | None | AtomicInvokable]]` (a fixed edge, an
+  explicit dead-end marker, or a router attachment — multiple routers per
+  node fall out of the same flat list), a single `start: str`. Execution is
+  superstep-batched: everything ready runs concurrently against a frozen
+  state snapshot each round, and nothing merges until the whole round
+  completes. A node can loop back to an earlier node based on a runtime
+  routing decision — the capability none of the other five workflow kinds
+  support. State flows through one shared, accumulating pool of named
+  values (every node must return a dict); same-round write collisions are
+  resolved via per-key `raise_on_collision`/`tiebreak` policy plus
+  per-node, mutable `priority`. `max_edge_traversals` bounds runaway
+  cycles; `stop_early` opts into stopping as soon as everything requested
+  is already available. Returns a `GraphFlowResult` with `edge_traversals`
+  (which nodes fired, round by round — always populated, independent of
+  `include_trace`) and `termination_reason`
+  (`"queue_empty"`/`"cap_hit"`/`"early_exit"`). See
+  `examples/Workflow_Examples/05_GraphFlow.py`.
+- `Workflow.include_trace: bool = True` — every workflow kind now exposes a
+  mutable toggle for whether its result populates `trace` (see Changed).
+- `IterativeFlow.checkers` — a list of `CheckerSpec` (judge + approval
+  value tied to a specific body-step position), mutable post-construction
+  via `add_checker`/`remove_checker`, replacing the old single fixed judge.
+  `result_setting_indices` (plural) replaces `return_index`, letting more
+  than one body step contribute to the running "current answer."
+- `RoutingFlow.schema_mode` (`STRICT`/`PARTIAL`/`OPEN`, default `STRICT`) —
+  controls how far a branch's own parameters may diverge from the
+  router's, replacing the old `parameters` constructor override.
+- `ParallelFlow.result_mode`/`selected_branches`/`result_keys` — replaces
+  `output_type`/`output_indices`/`output_range`; automatic N-way
+  cross-branch parameter reconciliation replaces the old `parameters`
+  constructor override.
+
+### Changed
+
+- breaking: `Workflow`'s checkpoint/run-history mechanism is removed
+  entirely — `checkpoints`, `get_checkpoint()`, `clear_memory()` no longer
+  exist on any workflow. In its place, every `*FlowResult` carries a
+  `trace: tuple[AtomicResult, ...] | None` field (the actual child results
+  produced by that run, in true execution order), populated whenever
+  `include_trace=True` (the default).
+- breaking: `IterativeFlow`'s loop body now executes step-by-step directly
+  (no nested `SequentialFlow`), letting a checker's early exit fire
+  mid-body instead of only after the whole body completes each iteration.
+- `IterativeFlowResult`/`RoutingFlowResult`/`ParallelFlowResult` gain
+  fields reflecting the above (`exited_early`, `triggering_step`,
+  `selected_branch`, `result_mode`, `selected_indices`, etc.) — see each
+  class's own docstring for the full field list.
+
+### Removed
+
+- breaking: `BasicFlow` and `BasicFlowResult` — deleted outright.
+  `BasicFlow`'s only reason to exist beyond calling its wrapped component
+  directly was giving that component a `get_checkpoint()` method; once
+  checkpoints are gone, nothing needs a `Workflow`-typed wrapper around a
+  plain `AtomicInvokable` child anymore. `Sequential`/`Parallel`/`Routing`/
+  `Iterative` now accept any `AtomicInvokable` step/branch/judge directly,
+  no wrapping.
+- breaking: `ParallelFlow.get_branch_results()`/`get_branch_result()`,
+  `SequentialFlow.get_step_results()`/`get_step_result()`,
+  `RoutingFlow.get_router_decision()`, `IterativeFlow.get_iteration_results()`
+  — all removed outright (relied on the removed checkpoint mechanism). Use
+  the new `trace` field on the result envelope instead.
+
 ## [2.0.0a25] - 2026-08-04
 
 Cleanup release: four independent, low-risk tracks bundled into one pass

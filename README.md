@@ -29,7 +29,7 @@ composable primitives:
 -   **StructuredInvokable** -- An explicit output-projection adapter
     that wraps any other primitive and maps its raw output into a
     validated, dictionary-based output schema.
--   **Workflow** -- An **orchestration and checkpointing** layer that
+-   **Workflow** -- An **orchestration and tracing** layer that
     coordinates tools, engines, agents, and other workflows into structured
     pipelines.
 
@@ -229,14 +229,20 @@ See the `StructuredInvokable` docstring for advanced options (absent value handl
 Workflows orchestrate Atomic-Agentic primitives into deterministic pipelines. They provide patterns for composition, branching, iteration, and parallelism, enabling you to build complex agentic systems from modular components.
 
 **Workflow classes include:**
-- `BasicFlow` — wraps a single component
 - `SequentialFlow` — chains steps in sequence
 - `ParallelFlow` — runs branches concurrently
 - `RoutingFlow` — routes input to a selected branch
-- `IterativeFlow` — loops until a judge condition is met
+- `IterativeFlow` — loops until a checker condition is met
+- `GraphFlow` — cyclic, dynamically-routed node graph; nodes can loop back
+  to earlier nodes based on runtime routing decisions, superstep-batched
+  concurrent execution
 
 **Note:**
-Workflows return typed result envelopes (`*FlowResult`) with `.result` and full run metadata. Use `StructuredInvokable` explicitly when you need to project a step's output dict to a fixed schema â€” workflow steps themselves do not apply schema projection.
+Workflows return typed result envelopes (`*FlowResult`) with `.result`, a
+`trace` of the actual child results produced that run (opt out via
+`include_trace=False`), and full run metadata. Use `StructuredInvokable`
+explicitly when you need to project a step's output dict to a fixed schema
+— workflow steps themselves do not apply schema projection.
 
 **For practical workflow usage and advanced patterns, see the examples in:**
 `examples/Workflow_Examples/`
@@ -262,8 +268,9 @@ caller-facing payload; envelope fields (`run_id`, `started_at`,
 `ended_at`, `elapsed_s`, `invoker_id`, and subclass-specific fields
 like token usage, step traces, and tool-call accounting) carry timing
 and provenance. Workflows return typed `*FlowResult` envelopes
-(`SequentialFlowResult`, `IterativeFlowResult`, etc.) with per-run
-history accessible via checkpoint helpers.
+(`SequentialFlowResult`, `IterativeFlowResult`, `GraphFlowResult`, etc.)
+with a per-run `trace` of the actual child results produced, opt-out via
+`include_trace=False`.
 
 For a full breakdown of breaking changes and a v1→v2 migration guide:
 - [`docs/MIGRATION.md`](docs/MIGRATION.md) â€” v1→v2 migration guide *(coming soon)*
