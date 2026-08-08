@@ -227,6 +227,37 @@ class TestGraphFlowConstruction:
         flow = make_graph_flow(result_mode=GraphFlow.SCALAR, return_keys=["never_declared"])
         assert flow.return_type == "Any"
 
+    def test_scalar_return_type_any_when_any_suppressed_a_real_type_conflict(self) -> None:
+        # "y" declared as int by one node, str by another, Any by a third --
+        # the Any presence suppresses the construction-time collision (by
+        # design), but the SCALAR return_type must not then arbitrarily pick
+        # one of the two genuinely conflicting concrete types as if it were
+        # unambiguous; it must fall back to "Any" the same way the collision
+        # check itself treats this as "opted out of strict typing."
+        def start_fn(x: int) -> dict:
+            return {"x": x, "y": 0}
+
+        def int_reader(y: int) -> dict:
+            return {"y": y}
+
+        def str_reader(y: str) -> dict:
+            return {"y": y}
+
+        def any_reader(y) -> dict:  # noqa: ANN001 -- deliberately untyped -> "Any"
+            return {"y": y}
+
+        flow = make_graph_flow(
+            nodes={
+                "start": T(start_fn, "start"),
+                "int_reader": T(int_reader, "int_reader"),
+                "str_reader": T(str_reader, "str_reader"),
+                "any_reader": T(any_reader, "any_reader"),
+            },
+            result_mode=GraphFlow.SCALAR,
+            return_keys=["y"],
+        )
+        assert flow.return_type == "Any"
+
     def test_scalar_return_type_none_when_no_return_keys(self) -> None:
         flow = make_graph_flow(result_mode=GraphFlow.SCALAR, return_keys=None)
         assert flow.return_type == "None"
@@ -853,6 +884,27 @@ class TestGraphFlowValidationAndErrors:
             flow.invoke({"x": 1})
         assert isinstance(exc_info.value.__cause__, RuntimeError)
         assert "node 'start'" in str(exc_info.value.__cause__)
+
+    def test_router_invoke_failure_wrapped_with_router_context(self) -> None:
+        def start_fn(x: int) -> dict:
+            return {"x": x}
+
+        def raising_router(x: int) -> str | None:
+            raise RuntimeError("router boom")
+
+        router = T(raising_router, "raising_router")
+        flow = GraphFlow(
+            name="raising_router_flow",
+            namespace="tests",
+            description=".",
+            nodes={"start": T(start_fn, "start")},
+            edges=[("start", router)],
+            start="start",
+        )
+        with pytest.raises(ExecutionError) as exc_info:
+            flow.invoke({"x": 1})
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert "router attached to node 'start'" in str(exc_info.value.__cause__)
 
 
 class TestGraphFlowSerialization:

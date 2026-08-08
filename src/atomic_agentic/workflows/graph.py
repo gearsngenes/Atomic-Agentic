@@ -267,8 +267,15 @@ class GraphFlow(Workflow):
             if self._return_keys:
                 key_report = next((r for r in report if r.name == self._return_keys[0]), None)
                 if key_report is not None:
+                    # Exactly one concrete type -> unambiguous. Zero, or two-
+                    # plus (only reachable when "Any" suppressed a real
+                    # collision at the check above), both collapse to "Any" --
+                    # same permissive-Any philosophy as the collision check
+                    # itself, not an arbitrary pick among genuine candidates.
                     concrete_types = key_report.types - {"Any"}
-                    return_type = next(iter(concrete_types)) if concrete_types else "Any"
+                    return_type = (
+                        next(iter(concrete_types)) if len(concrete_types) == 1 else "Any"
+                    )
                 else:
                     return_type = "Any"
             else:
