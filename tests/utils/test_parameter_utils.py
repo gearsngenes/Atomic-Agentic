@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Annotated, Any, Optional, TypedDict
+from typing import Annotated, Any, Literal, Optional, TypedDict
 
 import pytest
 
@@ -90,7 +90,7 @@ class TestExtractIO:
             ParamSpec.POSITIONAL_OR_KEYWORD,
             ParamSpec.POSITIONAL_OR_KEYWORD,
         ]
-        assert [param.type for param in parameters] == ["int", "str"]
+        assert [param.type for param in parameters] == [("int",), ("str",)]
         assert parameters[0].default is NO_VAL
         assert parameters[1].default == "default"
 
@@ -102,7 +102,7 @@ class TestExtractIO:
 
         assert return_type == "Any"
         assert parameters[0].name == "limit"
-        assert parameters[0].type == "int"
+        assert parameters[0].type == ("int",)
         assert parameters[0].default == 10
 
     def test_extract_io_handles_varargs_keyword_only_and_varkwargs(self) -> None:
@@ -113,10 +113,10 @@ class TestExtractIO:
 
         assert return_type == "None"
         assert [(param.name, param.kind, param.type) for param in parameters] == [
-            ("x", ParamSpec.POSITIONAL_OR_KEYWORD, "int"),
-            ("args", ParamSpec.VAR_POSITIONAL, "str"),
-            ("debug", ParamSpec.KEYWORD_ONLY, "bool"),
-            ("extras", ParamSpec.VAR_KEYWORD, "float"),
+            ("x", ParamSpec.POSITIONAL_OR_KEYWORD, ("int",)),
+            ("args", ParamSpec.VAR_POSITIONAL, ("str",)),
+            ("debug", ParamSpec.KEYWORD_ONLY, ("bool",)),
+            ("extras", ParamSpec.VAR_KEYWORD, ("float",)),
         ]
 
     def test_extract_io_handles_positional_only_parameters(self) -> None:
@@ -137,7 +137,7 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert [param.type for param in parameters] == ["list[int]", "dict[str, Any]"]
+        assert [param.type for param in parameters] == [("list[int]",), ("dict[str, Any]",)]
         assert return_type == "list[str]"
 
     def test_extract_io_preserves_string_annotations(self) -> None:
@@ -146,7 +146,7 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert parameters[0].type in {"CustomType", "'CustomType'"}
+        assert parameters[0].type in {("CustomType",), ("'CustomType'",)}
         assert return_type in {"OtherType", "'OtherType'"}
 
     def test_extract_io_formats_optional_annotation(self) -> None:
@@ -155,8 +155,25 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert parameters[0].type in {"Union[int, NoneType]", "Union[int, None]", "Optional[int]", "int | None"}
-        assert return_type in {"Union[str, NoneType]", "Union[str, None]", "Optional[str]", "str | None"}
+        assert parameters[0].type == ("None", "int")
+        assert return_type == "None | str"
+
+    def test_extract_io_pep604_union_matches_typing_union(self) -> None:
+        def sample(value: int | None) -> str | None:
+            return str(value) if value is not None else None
+
+        parameters, return_type = extract_io(sample)
+
+        assert parameters[0].type == ("None", "int")
+        assert return_type == "None | str"
+
+    def test_extract_io_literal_none_is_not_corrupted_to_any(self) -> None:
+        def sample(value: Literal[None]) -> None:
+            return None
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].type == ("Literal[None]",)
 
 
 class TestParameterOrderValidation:
@@ -280,8 +297,8 @@ class TestToParamSpecList:
         parameters = to_paramspec_list(Config)
 
         assert [(param.name, param.index, param.kind, param.type) for param in parameters] == [
-            ("query", 0, ParamSpec.POSITIONAL_OR_KEYWORD, "str"),
-            ("top_k", 1, ParamSpec.POSITIONAL_OR_KEYWORD, "int"),
+            ("query", 0, ParamSpec.POSITIONAL_OR_KEYWORD, ("str",)),
+            ("top_k", 1, ParamSpec.POSITIONAL_OR_KEYWORD, ("int",)),
         ]
 
     def test_list_of_paramspecs_is_reindexed_into_fresh_specs(self) -> None:
@@ -294,8 +311,8 @@ class TestToParamSpecList:
 
         assert parameters is not original
         assert [(param.name, param.index, param.type, param.default) for param in parameters] == [
-            ("x", 0, "int", NO_VAL),
-            ("y", 1, "str", "hello"),
+            ("x", 0, ("int",), NO_VAL),
+            ("y", 1, ("str",), "hello"),
         ]
         assert parameters[0] is not original[0]
         assert parameters[1] is not original[1]
@@ -318,8 +335,8 @@ class TestToParamSpecListStringGrammar:
         parameters = to_paramspec_list(["x", "y"])
 
         assert [(param.name, param.index, param.kind, param.type) for param in parameters] == [
-            ("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, "Any"),
-            ("y", 1, ParamSpec.POSITIONAL_OR_KEYWORD, "Any"),
+            ("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, ("Any",)),
+            ("y", 1, ParamSpec.POSITIONAL_OR_KEYWORD, ("Any",)),
         ]
 
     def test_slash_marker_converts_previous_plain_names_to_positional_only(self) -> None:
@@ -421,7 +438,7 @@ class TestExtractIOAnnotated:
 
         parameters, _ = extract_io(sample)
 
-        assert parameters[0].type == "str"
+        assert parameters[0].type == ("str",)
         assert parameters[0].description == "the x value"
 
     def test_plain_param_has_none_description(self) -> None:
@@ -446,7 +463,7 @@ class TestExtractIOAnnotated:
 
         parameters, _ = extract_io(sample)
 
-        assert parameters[0].type == "float"
+        assert parameters[0].type == ("float",)
         assert parameters[0].description == "valid"
 
     def test_annotated_whitespace_only_description_coerced_to_none(self) -> None:
@@ -472,7 +489,7 @@ class TestExtractIOAnnotated:
         parameters, _ = extract_io(sample)
 
         assert parameters[0].kind == ParamSpec.VAR_POSITIONAL
-        assert parameters[0].type == "int"
+        assert parameters[0].type == ("int",)
         assert parameters[0].description == "positional items"
 
     def test_annotated_varkwargs_description_extracted(self) -> None:
@@ -518,7 +535,7 @@ class TestToParamSpecListTypedDictAnnotated:
 
         query_param = next(p for p in parameters if p.name == "query")
         limit_param = next(p for p in parameters if p.name == "limit")
-        assert query_param.type == "str"
+        assert query_param.type == ("str",)
         assert query_param.description == "the search string"
         assert limit_param.description is None
 
@@ -698,6 +715,38 @@ class TestSemanticallyCompatible:
         b = make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int")
         assert semantically_compatible(a, b) is False
 
+    def test_bare_generic_origin_is_compatible_with_any_parameterization(self) -> None:
+        a = make_param("x", 0, type_="dict")
+        b = make_param("x", 0, type_="dict[str, Any]")
+        assert semantically_compatible(a, b) is True
+        assert semantically_compatible(b, a) is True
+
+    def test_same_origin_incompatible_args_are_incompatible(self) -> None:
+        a = make_param("x", 0, type_="dict[str, int]")
+        b = make_param("x", 0, type_="dict[str, str]")
+        assert semantically_compatible(a, b) is False
+
+    def test_same_origin_any_wildcarded_arg_is_compatible(self) -> None:
+        a = make_param("x", 0, type_="dict[str, int]")
+        b = make_param("x", 0, type_="dict[str, Any]")
+        assert semantically_compatible(a, b) is True
+
+    def test_literal_reordered_values_are_compatible(self) -> None:
+        def sample_ab(x: Literal["a", "b"]) -> None:
+            pass
+
+        def sample_ba(x: Literal["b", "a"]) -> None:
+            pass
+
+        a = extract_io(sample_ab)[0][0]
+        b = extract_io(sample_ba)[0][0]
+        assert semantically_compatible(a, b) is True
+
+    def test_union_member_overlap_is_compatible(self) -> None:
+        a = make_param("x", 0, type_=("int", "str"))
+        b = make_param("x", 0, type_="str")
+        assert semantically_compatible(a, b) is True
+
 
 class TestSemanticallyIdentical:
     def _base(self) -> ParamSpec:
@@ -745,6 +794,17 @@ class TestSemanticallyIdentical:
         a = self._base()
         b = replace(self._base(), name="y")
         assert semantically_identical(a, b) is False
+
+    def test_literal_reordered_values_are_identical(self) -> None:
+        def sample_ab(x: Literal["a", "b"]) -> None:
+            pass
+
+        def sample_ba(x: Literal["b", "a"]) -> None:
+            pass
+
+        a = extract_io(sample_ab)[0][0]
+        b = extract_io(sample_ba)[0][0]
+        assert semantically_identical(a, b) is True
 
 
 class TestParameterOverlapAndCollisions:
@@ -890,7 +950,7 @@ class TestInsertByCategory:
 
         assert result is not composed
         assert result[0] is not composed[0]
-        assert [(p.name, p.index, p.type) for p in result] == [("a", 0, "int")]
+        assert [(p.name, p.index, p.type) for p in result] == [("a", 0, ("int",))]
 
     def test_simple_keyword_only_append(self) -> None:
         composed = [make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD)]
@@ -958,7 +1018,7 @@ class TestNWayParameterReport:
         entry = report[0]
         assert entry.name == "x"
         assert entry.source_count == 1
-        assert entry.types == {"int"}
+        assert entry.types == {("int",)}
         assert entry.kinds == {ParamSpec.POSITIONAL_OR_KEYWORD}
         assert entry.unique_default_count == 1
         assert entry.unique_description_count == 1
@@ -1005,7 +1065,7 @@ class TestNWayParameterReport:
             [make_param("x", 0, type_="str")],
         ])
 
-        assert report[0].types == {"int", "str"}
+        assert report[0].types == {("int",), ("str",)}
 
     def test_kinds_aggregate_into_a_set(self) -> None:
         report = n_way_parameter_report([
@@ -1090,5 +1150,43 @@ class TestNWayParameterReport:
             [make_param("x", 0, ParamSpec.VAR_POSITIONAL, type_="int")],
             [make_param("x", 0, ParamSpec.VAR_KEYWORD, type_="str")],
         ])
-        assert report[0].types == {"int", "str"}
+        assert report[0].types == {("int",), ("str",)}
         assert report[0].kinds == {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
+
+
+class TestParamSpecTypeConstruction:
+    def test_bare_string_type_is_wrapped_into_a_one_tuple(self) -> None:
+        spec = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int")
+        assert spec.type == ("int",)
+
+    def test_list_type_is_normalized_into_a_sorted_tuple(self) -> None:
+        spec = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=["str", "int"])
+        assert spec.type == ("int", "str")
+
+    def test_tuple_type_is_deduplicated(self) -> None:
+        spec = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=("int", "int", "str"))
+        assert spec.type == ("int", "str")
+
+    def test_non_str_non_sequence_type_raises_type_error(self) -> None:
+        with pytest.raises(TypeError):
+            ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=123)  # type: ignore[arg-type]
+
+    def test_empty_tuple_type_raises_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=())
+
+    def test_non_str_member_raises_type_error(self) -> None:
+        with pytest.raises(TypeError):
+            ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=("int", 5))  # type: ignore[arg-type]
+
+    def test_to_dict_from_dict_round_trips_multi_member_type(self) -> None:
+        spec = ParamSpec(
+            name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=("int", "str"), default=1,
+        )
+        rebuilt = ParamSpec.from_dict(spec.to_dict())
+        assert rebuilt.type == ("int", "str")
+        assert rebuilt == spec
+
+    def test_to_dict_emits_a_list_for_type(self) -> None:
+        spec = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=("int", "str"))
+        assert spec.to_dict()["type"] == ["int", "str"]

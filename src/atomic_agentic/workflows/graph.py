@@ -15,7 +15,7 @@ from ..models.workflows.graph import GraphFlowNode, StatePolicySpec
 from ..models.results import AtomicResult
 from ..models.results.workflows import GraphFlowResult
 from ..utils.core import run_coro_sync
-from ..utils.parameters import n_way_parameter_report
+from ..utils.parameters import _simplify_type_set, n_way_parameter_report, semantically_compatible
 from .base import Workflow
 
 logger = logging.getLogger(__name__)
@@ -248,14 +248,18 @@ class GraphFlow(Workflow):
             [list(self._node_data[n].invokable.parameters) for n in node_names_in_order]
         )
         for entry in report:
-            type_collision = "Any" not in entry.types and len(entry.types) > 1
+            type_collision = any(
+                not semantically_compatible(a, b)
+                for i, (_, a) in enumerate(entry.observations)
+                for _, b in entry.observations[i + 1:]
+            )
             kind_collision = (
                 any(k in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD) for k in entry.kinds)
                 and len(entry.kinds) > 1
             )
             if type_collision or kind_collision:
                 conflicting = ", ".join(
-                    f"{node_names_in_order[index]!r} ({spec.type}/{spec.kind})"
+                    f"{node_names_in_order[index]!r} ({' | '.join(spec.type)}/{spec.kind})"
                     for index, spec in entry.observations
                 )
                 raise WorkflowError(
@@ -267,15 +271,22 @@ class GraphFlow(Workflow):
             if self._return_keys:
                 key_report = next((r for r in report if r.name == self._return_keys[0]), None)
                 if key_report is not None:
-                    # Exactly one concrete type -> unambiguous. Zero, or two-
-                    # plus (only reachable when "Any" suppressed a real
-                    # collision at the check above), both collapse to "Any" --
-                    # same permissive-Any philosophy as the collision check
-                    # itself, not an arbitrary pick among genuine candidates.
-                    concrete_types = key_report.types - {"Any"}
-                    return_type = (
-                        next(iter(concrete_types)) if len(concrete_types) == 1 else "Any"
-                    )
+                    # Flatten every surviving observation's members (each
+                    # itself already a proven-mutually-compatible tuple, per
+                    # the collision check above) into one set, drop the
+                    # wildcard "Any" (adds no real information), collapse
+                    # any bare-origin/parameterized-sibling redundancy
+                    # (dict + dict[str, int] -> dict), then join what's left
+                    # as a union -- same representation convention as every
+                    # other return_type in this pass. Empty after dropping
+                    # "Any" (every node typed this key Any, or key_report
+                    # doesn't exist) -> "Any" is the honest answer, not an
+                    # arbitrary pick among genuine candidates.
+                    flat_types: set[str] = set()
+                    for type_tuple in key_report.types:
+                        flat_types.update(type_tuple)
+                    concrete_types = _simplify_type_set(flat_types - {"Any"})
+                    return_type = " | ".join(sorted(concrete_types)) if concrete_types else "Any"
                 else:
                     return_type = "Any"
             else:

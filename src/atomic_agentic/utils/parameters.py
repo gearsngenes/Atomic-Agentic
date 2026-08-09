@@ -52,7 +52,8 @@ from __future__ import annotations
 
 import inspect
 import re
-from typing import Annotated, Any, Optional, get_args, get_origin, get_type_hints
+from types import UnionType
+from typing import Annotated, Any, Literal, Optional, Union, get_args, get_origin, get_type_hints
 
 from ..constants.core import IDENTIFIER_PATTERN, IDENTIFIER_PATTERN_TEXT, NO_VAL
 from ..exceptions import SchemaError
@@ -87,16 +88,26 @@ def _format_annotation(ann: Any) -> str:
     generic types (e.g. ``dict[str, int]``), and ``typing`` module types
     (e.g. ``List[Dict[str, int]]``).
 
-    Returns ``'Any'`` for missing/empty annotations, the string as-is for
-    forward references, a nested ``origin[args]`` form for parameterized types,
-    the class name for plain types, and ``str(ann)`` as a fallback.
+    Returns ``'Any'`` for missing/empty annotations, ``'None'`` for the
+    ``NoneType``/``None`` value, the string as-is for forward references, a
+    nested ``origin[args]`` form for parameterized types (union origins
+    rendered as ``"a | b"`` rather than bracketed; ``Literal`` args sorted
+    since their order carries no meaning), the class name for plain types,
+    and ``str(ann)`` as a fallback.
     """
-    # Missing / unknown annotation
-    if ann is inspect._empty or ann is None:
+    # Missing / unknown annotation. Only reachable from a genuine top-level
+    # "nothing was annotated" call -- get_args() of any real Union/Literal/
+    # generic never produces this sentinel, so this branch is inert during
+    # recursion, not a source of the bug fixed by the next branch.
+    if ann is inspect._empty:
         return "Any"
 
-    # NoneType -> "None" to match Python -> None annotation convention
-    if ann is type(None):
+    # NoneType, or the literal value None -- the latter only reachable when
+    # recursing into a Literal arg (e.g. Literal[None]); Union/Optional
+    # never hit this since typing auto-converts None to NoneType at Union
+    # construction time. Previously grouped with the missing-annotation
+    # case above, which silently corrupted Literal[None] into "Any".
+    if ann is type(None) or ann is None:
         return "None"
 
     # Forward reference or explicit string annotation
@@ -106,12 +117,23 @@ def _format_annotation(ann: Any) -> str:
     # typing / generic / PEP 585 parameterized types
     origin = get_origin(ann)
     if origin is not None:
+        args = get_args(ann)
+        # Nested union (the top-level case is intercepted before this
+        # function is ever called, by _format_annotation_tuple).
+        if origin is Union or origin is UnionType:
+            return " | ".join(sorted(_format_annotation(a) for a in args))
         # Recursively format origin and args.
         origin_str = _format_annotation(origin)
-        args = get_args(ann)
         if not args:
             return origin_str
-        args_str = ", ".join(_format_annotation(a) for a in args)
+        # Literal's args are a value SET, not a positional structure (unlike
+        # e.g. dict[K, V]) -- sort so declaration order doesn't affect the
+        # rendered string, letting exact-match comparisons recognize
+        # differently-ordered-but-equivalent Literals as identical.
+        if origin is Literal:
+            args_str = ", ".join(sorted(_format_annotation(a) for a in args))
+        else:
+            args_str = ", ".join(_format_annotation(a) for a in args)
         return f"{origin_str}[{args_str}]"
 
     # Plain classes / types
@@ -126,6 +148,25 @@ def _format_annotation(ann: Any) -> str:
 
     # Fallback: best-effort string representation.
     return str(ann)
+
+
+def _format_annotation_tuple(ann: Any) -> tuple[str, ...]:
+    """Format an annotation as a canonical ``ParamSpec.type`` tuple.
+
+    Top-level, tuple-producing entry point -- the only place a top-level
+    ``Union``/``Optional``/``X | Y`` gets split into multiple members.
+    Called once per parameter and once for a return type; recursion (union
+    members, generic args, ``Literal`` args) always goes through
+    ``_format_annotation`` above, never back through here, so nested unions
+    stay a single joined string rather than nesting tuples.
+
+    Returns a sorted, deduplicated tuple of member strings -- more than one
+    only for a top-level union, exactly one otherwise.
+    """
+    origin = get_origin(ann)
+    if origin is Union or origin is UnionType:
+        return tuple(sorted({_format_annotation(a) for a in get_args(ann)}))
+    return (_format_annotation(ann),)
 
 
 def _is_typed_dict_class(obj: Any) -> bool:
@@ -611,7 +652,7 @@ def to_paramspec_list(
                 name=name,
                 index=index,
                 kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-                type=_format_annotation(base_ann),
+                type=_format_annotation_tuple(base_ann),
                 default=NO_VAL,
                 description=description,
             ))
@@ -683,18 +724,129 @@ def is_valid_parameter_order(parameters: list[ParamSpec]) -> bool:
         return False
 
 
+def _parse_generic(type_str: str) -> tuple[str, tuple[str, ...]] | None:
+    """Recover ``(origin, args)`` structure from an already-formatted type string.
+
+    Operates on stored strings only, never live ``typing`` objects, since a
+    ``ParamSpec.type`` string may have come from MCP or a deserialized
+    record and never had one. Scoped to this system's own canonical
+    ``"origin[arg, arg, ...]"`` dialect -- the shape ``_format_annotation``
+    itself produces -- not general Python type-string parsing.
+
+    Returns ``None`` for anything that doesn't have that bracket shape at
+    all, letting the caller fall back to plain string equality.
+    """
+    stripped = type_str.strip()
+    if "[" not in stripped or not stripped.endswith("]"):
+        return None
+
+    depth = 0
+    bracket_start = None
+    for i, ch in enumerate(stripped):
+        if ch == "[":
+            if depth == 0:
+                bracket_start = i
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+
+    if bracket_start is None:
+        return None
+
+    origin = stripped[:bracket_start].strip()
+    inner = stripped[bracket_start + 1 : -1]
+
+    args: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in inner:
+        if ch == "[":
+            depth += 1
+            current.append(ch)
+        elif ch == "]":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            args.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        args.append("".join(current).strip())
+
+    if not origin or not args:
+        return None
+
+    return origin, tuple(args)
+
+
+def _single_type_compatible(a: str, b: str) -> bool:
+    """Structural compatibility between two individual type strings.
+
+    The pairwise judgment ``semantically_compatible`` delegates to once
+    it's picked which pair of a (possibly multi-member) type to compare.
+    Exact match or either side ``"Any"`` are compatible; otherwise a bare
+    origin (e.g. ``"dict"``) is compatible with any parameterization of
+    that same origin, and two parameterized instances of the same origin
+    are compatible when every argument position is, recursively. Anything
+    that doesn't parse as this system's own canonical dialect falls back to
+    the plain-equality check already covered above -- never raises.
+    """
+    if a == b or a == "Any" or b == "Any":
+        return True
+
+    parsed_a = _parse_generic(a)
+    parsed_b = _parse_generic(b)
+
+    if parsed_a is None and parsed_b is not None:
+        return a == parsed_b[0]
+    if parsed_b is None and parsed_a is not None:
+        return b == parsed_a[0]
+    if parsed_a is not None and parsed_b is not None:
+        origin_a, args_a = parsed_a
+        origin_b, args_b = parsed_b
+        if origin_a != origin_b or len(args_a) != len(args_b):
+            return False
+        return all(_single_type_compatible(x, y) for x, y in zip(args_a, args_b))
+
+    return False
+
+
+def _simplify_type_set(types: set[str]) -> set[str]:
+    """Drop parameterized entries whose bare origin is also present.
+
+    ``{"dict", "dict[str, int]"}`` -> ``{"dict"}`` -- a bare origin already
+    accepts any parameterization of itself (the same fact
+    ``_single_type_compatible`` relies on for compatibility), so keeping a
+    more specific sibling alongside it is pure redundancy, not real
+    ambiguity. Deliberately non-recursive: ``dict[str, Any]`` alongside
+    ``dict[str, int]`` (no bare ``dict`` present) is a related but distinct
+    redundancy -- catching it would mean reasoning about "Any" absorbing a
+    concrete type at a specific argument position, not just a flat
+    bare-vs-parameterized check -- and is intentionally left alone here.
+    """
+    bare_origins = {t for t in types if _parse_generic(t) is None}
+    return {
+        t for t in types
+        if (parsed := _parse_generic(t)) is None or parsed[0] not in bare_origins
+    }
+
+
 def semantically_compatible(a: ParamSpec, b: ParamSpec) -> bool:
     """Whether two same-named ``ParamSpec``s are compatible enough to merge.
 
-    Type must match exactly, or either side may be ``"Any"``. Kind must be
-    compatible: any two non-variadic kinds are compatible with each other
-    (e.g. ``POSITIONAL_ONLY`` and ``KEYWORD_ONLY``), while
+    Type is compatible if any member of ``a.type`` is structurally
+    compatible with any member of ``b.type`` (see ``_single_type_compatible``).
+    Kind must be compatible: any two non-variadic kinds are compatible with
+    each other (e.g. ``POSITIONAL_ONLY`` and ``KEYWORD_ONLY``), while
     ``VAR_POSITIONAL``/``VAR_KEYWORD`` are only compatible with the exact
     same variadic kind. Name equality is the caller's responsibility — this
     checks compatibility of a pair already known to share a name (see
     ``parameter_overlap``/``parameter_collisions``).
     """
-    type_compatible = a.type == b.type or a.type == "Any" or b.type == "Any"
+    type_compatible = any(
+        _single_type_compatible(ta, tb) for ta in a.type for tb in b.type
+    )
 
     variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
     a_variadic = a.kind in variadic_kinds

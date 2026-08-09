@@ -227,13 +227,11 @@ class TestGraphFlowConstruction:
         flow = make_graph_flow(result_mode=GraphFlow.SCALAR, return_keys=["never_declared"])
         assert flow.return_type == "Any"
 
-    def test_scalar_return_type_any_when_any_suppressed_a_real_type_conflict(self) -> None:
-        # "y" declared as int by one node, str by another, Any by a third --
-        # the Any presence suppresses the construction-time collision (by
-        # design), but the SCALAR return_type must not then arbitrarily pick
-        # one of the two genuinely conflicting concrete types as if it were
-        # unambiguous; it must fall back to "Any" the same way the collision
-        # check itself treats this as "opted out of strict typing."
+    def test_construction_raises_when_any_reader_coexists_with_a_real_type_conflict(self) -> None:
+        # "y" declared as int by one node and str by another -- a genuine
+        # conflict that has nothing to do with any_reader's presence. The
+        # all-pairs collision check catches this directly: int-vs-str is
+        # incompatible regardless of what a third, unrelated node declares.
         def start_fn(x: int) -> dict:
             return {"x": x, "y": 0}
 
@@ -246,17 +244,98 @@ class TestGraphFlowConstruction:
         def any_reader(y) -> dict:  # noqa: ANN001 -- deliberately untyped -> "Any"
             return {"y": y}
 
+        with pytest.raises(WorkflowError, match="conflicts across nodes"):
+            make_graph_flow(
+                nodes={
+                    "start": T(start_fn, "start"),
+                    "int_reader": T(int_reader, "int_reader"),
+                    "str_reader": T(str_reader, "str_reader"),
+                    "any_reader": T(any_reader, "any_reader"),
+                },
+                result_mode=GraphFlow.SCALAR,
+                return_keys=["y"],
+            )
+
+    def test_scalar_return_type_drops_any_and_keeps_the_one_concrete_type(self) -> None:
+        # "y" declared as Any by one node, int by another -- both pass the
+        # collision check (Any is a universal wildcard); the SCALAR
+        # return_type should be the one real, informative type, not diluted
+        # by the wildcard that contributes no actual constraint.
+        def start_fn(x: int) -> dict:
+            return {"x": x, "y": 0}
+
+        def int_reader(y: int) -> dict:
+            return {"y": y}
+
+        def any_reader(y) -> dict:  # noqa: ANN001 -- deliberately untyped -> "Any"
+            return {"y": y}
+
         flow = make_graph_flow(
             nodes={
                 "start": T(start_fn, "start"),
                 "int_reader": T(int_reader, "int_reader"),
-                "str_reader": T(str_reader, "str_reader"),
                 "any_reader": T(any_reader, "any_reader"),
             },
             result_mode=GraphFlow.SCALAR,
             return_keys=["y"],
         )
-        assert flow.return_type == "Any"
+        assert flow.return_type == "int"
+
+    def test_scalar_return_type_unions_genuinely_distinct_compatible_declarations(self) -> None:
+        # "y" declared as dict[str, Any] by one node, dict[str, int] by
+        # another -- same origin, compatible via the value-position Any
+        # wildcard, but neither is a bare origin so neither gets simplified
+        # away. Both are real, non-redundant information -- the return type
+        # should union them, not collapse to "Any".
+        def start_fn(x: int) -> dict:
+            return {"x": x, "y": {}}
+
+        def any_value_reader(y: dict[str, Any]) -> dict:
+            return {"y": y}
+
+        def int_value_reader(y: dict[str, int]) -> dict:
+            return {"y": y}
+
+        flow = make_graph_flow(
+            nodes={
+                "start": T(start_fn, "start"),
+                "any_value_reader": T(any_value_reader, "any_value_reader"),
+                "int_value_reader": T(int_value_reader, "int_value_reader"),
+            },
+            result_mode=GraphFlow.SCALAR,
+            return_keys=["y"],
+        )
+        assert flow.return_type == "dict[str, Any] | dict[str, int]"
+
+    def test_scalar_return_type_simplifies_bare_origin_redundancy(self) -> None:
+        # "y" declared as bare dict by one node, dict[str, int] by another,
+        # dict[str, Any] by a third -- all mutually compatible (bare dict is
+        # a wildcard for its own origin; int-vs-Any at the value position is
+        # wildcard-compatible too). The parameterized siblings add no
+        # information beyond the bare form, so they get simplified away.
+        def start_fn(x: int) -> dict:
+            return {"x": x, "y": {}}
+
+        def bare_reader(y: dict) -> dict:
+            return {"y": y}
+
+        def int_value_reader(y: dict[str, int]) -> dict:
+            return {"y": y}
+
+        def any_value_reader(y: dict[str, Any]) -> dict:
+            return {"y": y}
+
+        flow = make_graph_flow(
+            nodes={
+                "start": T(start_fn, "start"),
+                "bare_reader": T(bare_reader, "bare_reader"),
+                "int_value_reader": T(int_value_reader, "int_value_reader"),
+                "any_value_reader": T(any_value_reader, "any_value_reader"),
+            },
+            result_mode=GraphFlow.SCALAR,
+            return_keys=["y"],
+        )
+        assert flow.return_type == "dict"
 
     def test_scalar_return_type_none_when_no_return_keys(self) -> None:
         flow = make_graph_flow(result_mode=GraphFlow.SCALAR, return_keys=None)

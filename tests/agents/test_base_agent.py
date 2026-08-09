@@ -136,7 +136,7 @@ class _ExtraReservedAgent(_MinimalAgent):
 
     EXTRA_RESERVED = ParamSpec(
         name="trace_id", index=0, kind=ParamSpec.KEYWORD_ONLY,
-        type="str | None", default=None,
+        type=("None", "str"), default=None,
         description="Subclass-reserved trace identifier.",
     )
 
@@ -1075,7 +1075,7 @@ class TestReservedNameReconciliation:
         assert [p.name for p in agent.parameters].count("run_id") == 1
 
     def test_pre_invoke_compatible_run_id_warns_distinct_message(self) -> None:
-        # type="Any" is compatible with RUN_ID_PARAM's "str | None" (either
+        # type="Any" is compatible with RUN_ID_PARAM's ("None", "str") (either
         # side being "Any" satisfies semantically_compatible); default/
         # description differ, so it's compatible but not identical.
         def pre_with_compatible_run_id(prompt: str, *, run_id: Any = "unset") -> str:

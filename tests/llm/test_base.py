@@ -21,7 +21,7 @@ class TestLLMEngineConstruction:
         assert engine.description == "LLM Engine"
         assert engine.return_type == "str"
         assert [(param.name, param.kind, param.type) for param in engine.parameters] == [
-            ("messages", "POSITIONAL_OR_KEYWORD", "List[Dict[str, str]]")
+            ("messages", "POSITIONAL_OR_KEYWORD", ("list[dict[str, str]]",))
         ]
 
     def test_custom_construction_values_are_stored(self) -> None:

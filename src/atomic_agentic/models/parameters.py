@@ -69,7 +69,7 @@ class ParamSpec:
     name: str
     index: int
     kind: str
-    type: str
+    type: tuple[str, ...]
     default: Any = NO_VAL
     description: str | None = None
 
@@ -98,9 +98,9 @@ class ParamSpec:
         name: str,
         index: int,
         kind: str,
-        type: str,
+        type: str | tuple[str, ...] | list[str],
         description: str | None = None,
-    ) -> tuple[str, int, str, str, str | None]:
+    ) -> tuple[str, int, str, tuple[str, ...], str | None]:
         """Validate and normalize constructor fields before state is finalized."""
         if not isinstance(name, str):
             raise TypeError(
@@ -135,14 +135,31 @@ class ParamSpec:
                 f"{', '.join(cls._VALID_KINDS)}; got {kind!r}"
             )
 
-        if not isinstance(type, str):
+        if isinstance(type, str):
+            type_items: tuple[Any, ...] = (type,)
+        elif isinstance(type, (tuple, list)):
+            type_items = tuple(type)
+        else:
             raise TypeError(
-                f"ParamSpec.type must be a str, got {type.__class__.__name__}"
+                f"ParamSpec.type must be a str, tuple[str, ...], or list[str], "
+                f"got {type.__class__.__name__}"
             )
 
-        cleaned_type = type.strip()
-        if not cleaned_type:
-            raise ValueError("ParamSpec.type must be a non-empty string")
+        if not type_items:
+            raise ValueError("ParamSpec.type must be non-empty")
+
+        cleaned_items: list[str] = []
+        for item in type_items:
+            if not isinstance(item, str):
+                raise TypeError(
+                    f"ParamSpec.type members must be str, got {item.__class__.__name__}"
+                )
+            stripped_item = item.strip()
+            if not stripped_item:
+                raise ValueError("ParamSpec.type members must be non-empty strings")
+            cleaned_items.append(stripped_item)
+
+        cleaned_type = tuple(sorted(set(cleaned_items)))
 
         if description is not None and not isinstance(description, str):
             raise TypeError(
@@ -159,7 +176,7 @@ class ParamSpec:
             "name": self.name,
             "index": self.index,
             "kind": self.kind,
-            "type": self.type,
+            "type": list(self.type),
         }
         if self.default is not NO_VAL:
             d["default"] = self.default
@@ -172,8 +189,8 @@ class ParamSpec:
         """Create a ParamSpec from a serialized mapping.
 
         The mapping must contain ``name`` (str), ``index`` (int), ``kind`` (str),
-        and ``type`` (str). ``default`` is optional and treated as an explicit
-        default only when present.
+        and ``type`` (str, list[str], or tuple[str, ...]). ``default`` is
+        optional and treated as an explicit default only when present.
         """
         if not isinstance(d, Mapping):
             raise TypeError("ParamSpec.from_dict expects a mapping")
@@ -181,7 +198,7 @@ class ParamSpec:
         name = d.get("name")
         idx = d.get("index")
         kind = d.get("kind")
-        type_str = d.get("type")
+        type_val = d.get("type")
         default = d.get("default", NO_VAL)
         description = d.get("description", None)
 
@@ -191,15 +208,14 @@ class ParamSpec:
                 (name, str),
                 (idx, int),
                 (kind, str),
-                (type_str, str),
             ]
-        ):
+        ) or not isinstance(type_val, (str, list, tuple)):
             raise TypeError(
                 "ParamSpec.from_dict expects 'name' (str), 'index' (int), "
-                "'kind' (str), and 'type' (str)"
+                "'kind' (str), and 'type' (str, list[str], or tuple[str, ...])"
             )
 
-        return cls(name=name, index=idx, kind=kind, type=type_str, default=default, description=description)
+        return cls(name=name, index=idx, kind=kind, type=type_val, default=default, description=description)
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,7 +235,7 @@ class ParamNameReport:
     source_count:
         Number of distinct sources (by index) that declared this name.
     types:
-        Distinct ``ParamSpec.type`` strings observed for this name.
+        Distinct ``ParamSpec.type`` tuples observed for this name.
     kinds:
         Distinct ``ParamSpec.kind`` strings observed for this name.
     unique_default_count:
@@ -240,7 +256,7 @@ class ParamNameReport:
 
     name: str
     source_count: int
-    types: set[str]
+    types: set[tuple[str, ...]]
     kinds: set[str]
     unique_default_count: int
     unique_description_count: int

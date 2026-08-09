@@ -14,7 +14,7 @@ from typing import Any, Callable, get_type_hints
 
 from ..constants.core import NO_VAL
 from ..models.parameters import ParamSpec
-from ..utils.parameters import _format_annotation, _unwrap_annotated
+from ..utils.parameters import _format_annotation_tuple, _unwrap_annotated
 from .Invokable import AtomicInvokable
 
 __all__ = ["extract_io"]
@@ -35,7 +35,7 @@ def extract_io(
     ``Annotated`` handling: ``_unwrap_annotated`` separates the base type from
     metadata. The first ``str`` item in the metadata becomes
     ``ParamSpec.description`` (stripped; empty-after-strip -> ``None``).
-    ``_format_annotation`` always receives the unwrapped base type.
+    ``_format_annotation_tuple`` always receives the unwrapped base type.
 
     Type resolution priority per parameter:
     1. Unwrapped annotation base type if present.
@@ -91,21 +91,23 @@ def extract_io(
         else:
             raw_type = inspect._empty
 
-        type_str    = _format_annotation(raw_type)
+        type_tuple  = _format_annotation_tuple(raw_type)
         default_val = default if default is not inspect._empty else NO_VAL
 
         parameters.append(ParamSpec(
             name=name,
             index=index,
             kind=kind_name,
-            type=type_str,
+            type=type_tuple,
             default=default_val,
             description=description,
         ))
 
     # Return type: resolved hint > raw sig annotation; Annotated unwrapped.
+    # Stays a single joined string, not a tuple -- nothing compares it
+    # structurally the way parameter types get merged/reconciled.
     ret_ann = hints.get("return", sig.return_annotation)
     base_ret, _ = _unwrap_annotated(ret_ann)
-    return_type = _format_annotation(base_ret)
+    return_type = " | ".join(_format_annotation_tuple(base_ret))
 
     return parameters, return_type

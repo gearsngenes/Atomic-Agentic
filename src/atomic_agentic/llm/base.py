@@ -131,7 +131,7 @@ class LLMEngine(AtomicInvokable, ABC):
             parameters=[ParamSpec(name ="messages",
                                   index = 0,
                                   kind = "POSITIONAL_OR_KEYWORD",
-                                  type="List[Dict[str, str]]",
+                                  type="list[dict[str, str]]",
                                   default = NO_VAL)],
             return_type="str",
         )

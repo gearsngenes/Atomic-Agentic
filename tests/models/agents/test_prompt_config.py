@@ -50,7 +50,7 @@ class TestPromptConfigConstruction:
     def test_discovered_params_have_any_type_and_none_description_by_default(self) -> None:
         cfg = PromptConfig(template="Hello {name}.", description="d")
 
-        assert cfg.parameters[0].type == "Any"
+        assert cfg.parameters[0].type == ("Any",)
         assert cfg.parameters[0].description is None
 
     def test_field_specs_sets_default_on_matching_param(self) -> None:
@@ -69,7 +69,7 @@ class TestPromptConfigConstruction:
             field_specs={"role": {"type": "str", "description": "the persona to adopt"}},
         )
 
-        assert cfg.parameters[0].type == "str"
+        assert cfg.parameters[0].type == ("str",)
         assert cfg.parameters[0].description == "the persona to adopt"
         assert cfg.parameters[0].default is NO_VAL
 
