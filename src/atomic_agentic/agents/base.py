@@ -14,7 +14,6 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import asyncio
 import logging
-import warnings
 
 from ..exceptions import (
     AgentError,
@@ -22,7 +21,7 @@ from ..exceptions import (
     ToolInvocationError,
 )
 from ..core.Invokable import AtomicInvokable
-from ..models.parameters import ParameterReport, ParamSpec
+from ..models.parameters import ParamSpec
 from ..llm.base import LLMEngine
 from ..models.results import AgentResult
 from ..tools import toolify
@@ -39,6 +38,7 @@ from ..utils.parameters import (
     insert_by_category,
     to_paramspec_list,
     build_parameter_reports,
+    apply_parameter_reports,
 )
 
 # Priority-ordered labels for Agent.__init__'s three peer parameter sources,
@@ -250,7 +250,9 @@ class Agent(AtomicInvokable, ABC):
 
         # 10. Apply reports: raises on the first genuine conflict; emits at
         # most one grouped UserWarning for compatible-but-not-identical names.
-        constructed = self._apply_parameter_reports(reports, _PARAM_SOURCE_LABELS)
+        constructed = apply_parameter_reports(
+            reports, _PARAM_SOURCE_LABELS, error_cls=AgentError, stacklevel=4
+        )
 
         # 11. Category-normalize the reconciled peer schema.
         combined = insert_by_category([], constructed)
@@ -344,61 +346,6 @@ class Agent(AtomicInvokable, ABC):
                 )
 
         return [p for p in params if p.name not in stripped_names]
-
-    @staticmethod
-    def _apply_parameter_reports(
-        reports: list[ParameterReport],
-        source_labels: tuple[str, ...],
-    ) -> list[ParamSpec]:
-        """Apply the N-way peer reconciliation reports, in first-seen order.
-
-        Raises ``AgentError`` immediately on the first name with no shared
-        compatible type (empty ``witness_types``) or an incompatible kind.
-        Otherwise builds one reconciled ``ParamSpec`` per name from its
-        winning (highest-priority) observation, using the full witness-type
-        set rather than just the winner's own declared type. Every
-        compatible-but-not-identical name is batched into exactly one
-        grouped ``UserWarning`` per call, not one warning per name.
-        """
-        constructed: list[ParamSpec] = []
-        overlapped: list[str] = []
-
-        for report in reports:
-            if not report.witness_types or not report.kind_compatible:
-                conflicts = ", ".join(
-                    f"{label} declares type={spec.type!r} kind={spec.kind!r}"
-                    for label, spec in zip(source_labels, report.observations)
-                    if spec is not None
-                )
-                raise AgentError(
-                    f"Parameter {report.parameter_name!r} has no compatible "
-                    f"reconciliation across its declaring sources: {conflicts}."
-                )
-
-            winner = report.observations[report.winner_source]
-            constructed.append(
-                ParamSpec(
-                    name=report.parameter_name,
-                    index=0,
-                    kind=winner.kind,
-                    type=tuple(sorted(report.witness_types)),
-                    default=winner.default,
-                    description=winner.description,
-                )
-            )
-            if not report.is_identical:
-                overlapped.append(report.parameter_name)
-
-        if overlapped:
-            warnings.warn(
-                f"Parameter(s) {overlapped!r} are compatible across "
-                f"{'/'.join(source_labels)} but not identical; each uses its "
-                "highest-priority declaring source's kind/default/description.",
-                UserWarning,
-                stacklevel=4,
-            )
-
-        return constructed
 
     # ------------------------------------------------------------------ #
     # Agent Properties

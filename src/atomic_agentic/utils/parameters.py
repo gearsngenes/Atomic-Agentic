@@ -39,6 +39,10 @@ Public surface
   identity) for one already-assembled dense observation list, or group N
   priority-ordered ``list[ParamSpec]`` sources by name and do so for every
   distinct name.
+- ``apply_parameter_reports`` — traverse a list of ``ParameterReport``
+  (raise on any conflict, construct the reconciled ``ParamSpec`` list,
+  batch-warn on compatible-but-not-identical names). Shared by every
+  composite class doing true N-way peer reconciliation.
 
 Private helpers
 ---------------
@@ -64,6 +68,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import warnings
 from types import UnionType
 from typing import (
     Annotated,
@@ -97,6 +102,7 @@ __all__ = [
     "n_way_kind_compatible",
     "build_parameter_report",
     "build_parameter_reports",
+    "apply_parameter_reports",
 ]
 
 
@@ -1159,3 +1165,95 @@ def build_parameter_reports(
             by_name[spec.name][source_index] = spec
 
     return [build_parameter_report(name, by_name[name]) for name in names]
+
+
+def apply_parameter_reports(
+    reports: Sequence[ParameterReport],
+    source_labels: tuple[str, ...],
+    error_cls: type[Exception],
+    stacklevel: int,
+) -> list[ParamSpec]:
+    """Apply N-way peer reconciliation reports: raise, construct, or warn.
+
+    Promoted from Agent's own private reconciliation traversal -- the logic
+    is caller-agnostic (neither message below names a specific class), so
+    every composite class doing true N-way peer reconciliation (as opposed
+    to RoutingFlow's router-anchored shape, or GraphFlow's validation-only
+    one) can share this single traversal.
+
+    Traverses ``reports`` once, in order (the order ``build_parameter_reports``
+    produced -- first-seen name order across sources):
+
+    1. If ``report.witness_types`` is empty or ``report.kind_compatible``
+       is ``False``: raise ``error_cls`` immediately (first hit), naming
+       ``report.parameter_name`` and, for every non-``None`` entry in
+       ``report.observations`` zipped positionally with ``source_labels``,
+       that source's declared ``type``/``kind``.
+    2. Otherwise: build one ``ParamSpec`` from
+       ``report.observations[report.winner_source]``'s ``kind``/``default``/
+       ``description``, with ``type=tuple(sorted(report.witness_types))``
+       (the full reconciled witness set, not just the winner's own declared
+       type) and ``index=0`` (the caller re-indexes downstream, typically
+       via ``insert_by_category``); append to the result list.
+    3. If ``report.is_identical`` is ``False``, add ``report.parameter_name``
+       to a warning collector. Construction happens identically either way
+       -- only whether this name contributes to the warning differs.
+
+    After a full, non-raising traversal: if the warning collector is
+    non-empty, emit exactly one grouped ``UserWarning`` (not one per name)
+    naming every reconciled-but-not-identical parameter from this call,
+    using the caller-supplied ``stacklevel``.
+
+    ``stacklevel`` has no default -- it must be supplied explicitly by
+    every call site, tuned to that call site's own frame depth from this
+    function's ``warnings.warn`` call up to the actual user-facing
+    construction call (e.g. ``Agent(...)``, ``ParallelFlow(...)``). This
+    differs across callers depending on whether the calling class is
+    normally reached directly or through a subclass's own ``__init__`` --
+    confirmed empirically for the two call sites in this pass (see
+    proposal addendum): ``4`` for `Agent` (always reached via one layer of
+    subclass indirection), ``3`` for `ParallelFlow` (instantiated directly,
+    no intermediate layer).
+
+    Never mutates ``reports``. Returns the constructed list in ``reports``'
+    order.
+    """
+    constructed: list[ParamSpec] = []
+    overlapped: list[str] = []
+
+    for report in reports:
+        if not report.witness_types or not report.kind_compatible:
+            conflicts = ", ".join(
+                f"{label} declares type={spec.type!r} kind={spec.kind!r}"
+                for label, spec in zip(source_labels, report.observations)
+                if spec is not None
+            )
+            raise error_cls(
+                f"Parameter {report.parameter_name!r} has no compatible "
+                f"reconciliation across its declaring sources: {conflicts}."
+            )
+
+        winner = report.observations[report.winner_source]
+        constructed.append(
+            ParamSpec(
+                name=report.parameter_name,
+                index=0,
+                kind=winner.kind,
+                type=tuple(sorted(report.witness_types)),
+                default=winner.default,
+                description=winner.description,
+            )
+        )
+        if not report.is_identical:
+            overlapped.append(report.parameter_name)
+
+    if overlapped:
+        warnings.warn(
+            f"Parameter(s) {overlapped!r} are compatible across "
+            f"{'/'.join(source_labels)} but not identical; each uses its "
+            "highest-priority declaring source's kind/default/description.",
+            UserWarning,
+            stacklevel=stacklevel,
+        )
+
+    return constructed

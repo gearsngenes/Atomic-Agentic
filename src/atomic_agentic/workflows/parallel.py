@@ -2,20 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import warnings
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
 from ..exceptions import WorkflowError
 from ..core.Invokable import AtomicInvokable
-from ..models.parameters import ParamSpec
 from ..utils.core import run_coro_sync
 from ..utils.parameters import (
-    parameter_collisions,
-    parameter_overlap,
-    variadic_compatible,
-    semantically_identical,
+    build_parameter_reports,
+    apply_parameter_reports,
     insert_by_category,
 )
 from ..constants.core import IDENTIFIER_PATTERN
@@ -35,13 +31,24 @@ class ParallelFlow(Workflow):
     ----------------------
     - ``branches`` is a non-empty ``list[AtomicInvokable]``. No wrapping,
       no dict-input option — branches are always positional.
-    - ``parameters`` is not a constructor option. The outer schema is fully
-      derived by folding every branch's own parameters together in
-      declaration order: same-name collisions (incompatible type/kind)
-      raise ``WorkflowError``; two branches independently declaring a
-      same-kind variadic under different names raise ``WorkflowError``;
-      compatible-but-not-identical overlaps keep the earlier branch's
-      declaration (warns).
+    - ``parameters`` is not a constructor option. The outer schema is derived
+      by reconciling every branch's own parameters as true N-way peers, not a
+      left-to-right fold: a name with no type compatible across every branch
+      that declares it, or an incompatible kind, raises ``WorkflowError``
+      immediately. A name declared identically everywhere it appears is used
+      as-is. A name that's compatible but not identical across branches is
+      reconciled into one parameter using the full compatible-type witness set
+      (which may be broader than any single branch's own declared type) with
+      kind/default/description taken from the earliest-declaring branch that
+      has it; every such name across one construction call is reported in
+      exactly one grouped warning, not one per name. Two branches
+      independently declaring a same-kind variadic under different names still
+      cannot both survive into the final schema, but this is now caught by the
+      shared parameter-order validator every ``AtomicInvokable`` already goes
+      through (raises ``SchemaError``, a ``WorkflowError`` subclass) rather
+      than a bespoke pre-check naming the specific branches involved -- a
+      minor message-quality regression accepted here, matching the same
+      trade-off `Agent`'s own Pass 2 rework already made.
     - ``selected_branches`` is a ``list[int]`` of branch positions (each
       ``0 <= index < len(branches)``, no negative wraparound, no
       duplicates) choosing which branches feed the projected result, and
@@ -130,7 +137,19 @@ class ParallelFlow(Workflow):
         branch_count = len(branch_items)
 
         # 2. Outer schema is fully derived from branches — no override.
-        declared_parameters = self._reconcile_branch_parameters(branch_items)
+        # True N-way peer reconciliation (not a left-to-right fold):
+        # every branch's parameters are judged against every other
+        # branch simultaneously.
+        sources = [list(branch.parameters) for branch in branch_items]
+        source_labels = tuple(
+            f"branch {i} ({branch.full_name})"
+            for i, branch in enumerate(branch_items)
+        )
+        reports = build_parameter_reports(sources)
+        constructed = apply_parameter_reports(
+            reports, source_labels, error_cls=WorkflowError, stacklevel=3
+        )
+        declared_parameters = insert_by_category([], constructed)
 
         # 3. result_mode must be one of the known projection shapes.
         normalized_mode = str(result_mode).strip().lower()
@@ -282,63 +301,6 @@ class ParallelFlow(Workflow):
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _reconcile_branch_parameters(branches: tuple[AtomicInvokable, ...]) -> list[ParamSpec]:
-        """Fold every branch's parameters into one combined schema.
-
-        N-way left-fold over branches in declaration order, generalizing
-        the pairwise pattern ``Agent`` uses to reconcile pre/post/extra
-        parameters (``agents/base.py``): for each branch, collisions with
-        the accumulated schema raise, independently-named same-kind
-        variadics raise, compatible-but-not-identical overlaps keep the
-        accumulated (earlier) declaration and warn, and the remainder is
-        merged in via ``insert_by_category``.
-        """
-        combined: list[ParamSpec] = []
-
-        for index, branch in enumerate(branches):
-            branch_params = list(branch.parameters)
-
-            # Same-name, incompatible-type/kind overlap with everything
-            # accumulated so far is a hard error.
-            collisions = parameter_collisions(combined, branch_params)
-            if collisions:
-                raise WorkflowError(
-                    f"ParallelFlow branch {index} ({branch.full_name}) parameter(s) "
-                    f"{collisions!r} conflict with an earlier branch's declaration "
-                    "(same name, incompatible type/kind)."
-                )
-
-            # Two independently-named *args/**kwargs of the same kind can't
-            # both survive into one combined signature.
-            overlap = parameter_overlap(combined, branch_params)
-            if not variadic_compatible(combined, branch_params, set(overlap)):
-                raise WorkflowError(
-                    f"ParallelFlow branch {index} ({branch.full_name}) declares an "
-                    "independent variadic parameter of the same kind as an earlier "
-                    "branch under a different name; rename one."
-                )
-
-            # Same-name, compatible-but-not-identical overlap: the earlier
-            # (accumulated) branch's declaration wins, later one is dropped.
-            combined_by_name = {p.name: p for p in combined}
-            branch_by_name = {p.name: p for p in branch_params}
-            for shared_name in overlap:
-                if not semantically_identical(combined_by_name[shared_name], branch_by_name[shared_name]):
-                    warnings.warn(
-                        f"Parameter {shared_name!r} in branch {index} ({branch.full_name}) "
-                        "is compatible with an earlier branch's declaration but not "
-                        "identical; the earlier branch's declaration wins.",
-                        UserWarning,
-                        stacklevel=3,
-                    )
-
-            # Merge in whatever this branch adds that wasn't already covered.
-            remainder = [p for p in branch_params if p.name not in overlap]
-            combined = insert_by_category(combined, remainder)
-
-        return combined
-
     def _project_result(self, branch_results: list[AtomicResult]) -> Any:
         """Project executed branch results into the configured outer result."""
         payloads = [branch_results[index].result for index in self._selected_indices]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import replace
 from typing import Annotated, Any, Literal, Optional, TypedDict
 
@@ -13,6 +14,7 @@ from atomic_agentic.utils.parameters import (
     _normalize_prompt_template,
     _try_parse_clean_field,
     _validate_parameter_order,
+    apply_parameter_reports,
     build_parameter_report,
     build_parameter_reports,
     insert_by_category,
@@ -1351,3 +1353,94 @@ class TestBuildParameterReports:
     def test_report_entries_are_parameterreport_instances(self) -> None:
         reports = build_parameter_reports([[make_param("x", 0)]])
         assert isinstance(reports[0], ParameterReport)
+
+
+class _DummyReconciliationError(Exception):
+    """Distinct exception class, deliberately not Agent/Workflow-shaped --
+    proves error_cls is actually threaded through apply_parameter_reports
+    rather than hardcoded to one caller's exception type."""
+
+
+class TestApplyParameterReports:
+    def test_empty_witness_raises_error_cls(self) -> None:
+        spec_a = make_param("x", 0, type_="int")
+        spec_b = make_param("x", 0, type_="str")
+        report = build_parameter_report("x", [spec_a, spec_b])
+        assert report.witness_types == frozenset()
+
+        with pytest.raises(_DummyReconciliationError, match="no compatible reconciliation"):
+            apply_parameter_reports(
+                [report], ("a", "b"), error_cls=_DummyReconciliationError, stacklevel=1
+            )
+
+    def test_kind_incompatible_raises_error_cls(self) -> None:
+        spec_a = make_param("x", 0, ParamSpec.VAR_POSITIONAL, type_="Any")
+        spec_b = make_param("x", 0, ParamSpec.VAR_KEYWORD, type_="Any")
+        report = build_parameter_report("x", [spec_a, spec_b])
+        assert report.kind_compatible is False
+
+        with pytest.raises(_DummyReconciliationError, match="no compatible reconciliation"):
+            apply_parameter_reports(
+                [report], ("a", "b"), error_cls=_DummyReconciliationError, stacklevel=1
+            )
+
+    def test_all_identical_reports_construct_without_warning(self) -> None:
+        spec_a = make_param("x", 0, type_="int", default=1)
+        spec_b = make_param("x", 0, type_="int", default=1)
+        report = build_parameter_report("x", [spec_a, spec_b])
+        assert report.is_identical is True
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            constructed = apply_parameter_reports(
+                [report], ("a", "b"), error_cls=_DummyReconciliationError, stacklevel=1
+            )
+
+        assert caught == []
+        assert len(constructed) == 1
+        assert constructed[0].name == "x"
+        assert constructed[0].type == ("int",)
+        assert constructed[0].default == 1
+
+    def test_mixed_identical_and_non_identical_reports_single_grouped_warning(self) -> None:
+        source_a = [
+            make_param("a", 0, type_="int", default=1),
+            make_param("b", 1, type_="int", default=1),
+            make_param("c", 2, type_="int"),
+        ]
+        source_b = [
+            make_param("a", 0, type_="int", default=2),
+            make_param("b", 1, type_="int", default=2),
+            make_param("c", 2, type_="int"),
+        ]
+        reports = build_parameter_reports([source_a, source_b])
+
+        with pytest.warns(UserWarning) as record:
+            constructed = apply_parameter_reports(
+                reports, ("source_a", "source_b"), error_cls=_DummyReconciliationError, stacklevel=1
+            )
+
+        # Exactly one grouped warning, not one per non-identical name.
+        assert len(record) == 1
+        assert "['a', 'b']" in str(record[0].message)
+        assert len(constructed) == 3
+
+    def test_stacklevel_attributes_warning_to_the_supplied_frame_depth(self) -> None:
+        spec_a = make_param("x", 0, type_="int", default=1)
+        spec_b = make_param("x", 0, type_="int", default=2)
+        report = build_parameter_report("x", [spec_a, spec_b])
+
+        def call_site() -> None:
+            apply_parameter_reports([report], ("a", "b"), error_cls=_DummyReconciliationError, stacklevel=2)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            call_site()
+
+        assert len(caught) == 1
+        # stacklevel=2 walks one frame up from apply_parameter_reports' own
+        # warnings.warn call, landing on call_site's own invocation line --
+        # not this test method's frame, and not apply_parameter_reports'
+        # own module.
+        assert caught[0].filename == __file__
+        assert caught[0].lineno == call_site.__code__.co_firstlineno + 1
