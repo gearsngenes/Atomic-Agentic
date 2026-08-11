@@ -120,7 +120,7 @@ def main() -> None:
         print(f"{'=' * 64}\n")
 
         result = agent(prompt=TASK, domain=DOMAIN)
-        pprint.pp(result.result)
+        pprint.pp(result)
 
 
 if __name__ == "__main__":

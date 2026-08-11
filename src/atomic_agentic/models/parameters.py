@@ -19,7 +19,7 @@ from typing import Any, ClassVar, Mapping
 
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
 
-__all__ = ["ParamSpec", "ParamNameReport"]
+__all__ = ["ParamSpec", "ParamNameReport", "ParameterReport"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,3 +261,49 @@ class ParamNameReport:
     unique_default_count: int
     unique_description_count: int
     observations: tuple[tuple[int, ParamSpec], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ParameterReport:
+    """One parameter name's cross-source reconciliation outcome.
+
+    Produced by ``utils.parameters.build_parameter_report``/
+    ``build_parameter_reports``. Unlike ``ParamNameReport`` (pure
+    aggregation, no computation), this carries the actual computed
+    reconciliation result -- the caller still owns the raise/warn policy
+    decision, but doesn't need to recompute witness-set/kind compatibility
+    itself.
+
+    Fields
+    ------
+    parameter_name:
+        The parameter name this report covers.
+    witness_types:
+        The full set of type tokens compatible with every opinionated
+        source's declared type (see ``utils.parameters.n_way_type_witness``).
+        Empty means no compatible witness exists -- a genuine type conflict.
+    winner_source:
+        Index into ``observations`` of the highest-priority source that
+        actually declares this name (first non-``None`` entry). Supplies
+        kind/default/description for the reconciled parameter.
+    kind_compatible:
+        Whether every declaring source's ``kind`` is jointly compatible
+        (see ``utils.parameters.n_way_kind_compatible``).
+    observations:
+        Dense, one slot per source in the same priority order the caller
+        assembled -- ``None`` where that source doesn't declare this name.
+        Positionally aligned with whatever priority-ordered source list
+        produced this report; the caller (not this dataclass) knows what
+        each index means.
+    is_identical:
+        Whether every present observation is ``semantically_identical`` to
+        the winner (vacuously ``True`` when only one source declares the
+        name).
+    """
+
+    parameter_name: str
+    witness_types: frozenset[str]
+    winner_source: int
+    kind_compatible: bool
+    observations: tuple[ParamSpec | None, ...]
+    is_identical: bool

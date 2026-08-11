@@ -7,15 +7,19 @@ import pytest
 
 from atomic_agentic.exceptions import SchemaError
 from atomic_agentic.core.Invokable import AtomicInvokable
-from atomic_agentic.models.parameters import ParamNameReport, ParamSpec
+from atomic_agentic.models.parameters import ParameterReport, ParamNameReport, ParamSpec
 from atomic_agentic.utils.parameters import (
     _insertion_category,
     _normalize_prompt_template,
     _try_parse_clean_field,
     _validate_parameter_order,
+    build_parameter_report,
+    build_parameter_reports,
     insert_by_category,
     is_valid_parameter_order,
+    n_way_kind_compatible,
     n_way_parameter_report,
+    n_way_type_witness,
     parameter_collisions,
     parameter_overlap,
     semantically_compatible,
@@ -1190,3 +1194,160 @@ class TestParamSpecTypeConstruction:
     def test_to_dict_emits_a_list_for_type(self) -> None:
         spec = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=("int", "str"))
         assert spec.to_dict()["type"] == ["int", "str"]
+
+
+class TestNWayTypeWitness:
+    def test_empty_input_returns_empty_frozenset(self) -> None:
+        assert n_way_type_witness([]) == frozenset()
+
+    def test_all_abstain_returns_any_fallback(self) -> None:
+        assert n_way_type_witness([("Any",), ("Any",), ("Any",)]) == frozenset({"Any"})
+
+    def test_single_tuple_is_its_own_witness(self) -> None:
+        assert n_way_type_witness([("int",)]) == frozenset({"int"})
+
+    def test_mixed_any_tuple_leak_regression_still_excludes_any_from_candidacy(self) -> None:
+        # The bug this algorithm was designed to close: "Any" must never be a
+        # CANDIDATE, even sitting inside a mixed opinionated tuple like
+        # ("Any", "int") -- it must not manufacture a false witness that
+        # papers over ("int",) vs ("str",)'s genuine, flat conflict. "Any"
+        # still works as a receiving-side wildcard (it satisfies its own
+        # tuple's membership test trivially), but "int" fails against the
+        # ("str",) tuple, and "str" fails against the ("int",) tuple, so the
+        # witness set must come back empty.
+        witness = n_way_type_witness([("Any", "int"), ("int",), ("str",)])
+        assert witness == frozenset()
+
+    def test_triangle_pairwise_compatible_but_no_universal_witness_is_empty(self) -> None:
+        # Helly-property counterexample, N=3: every pair shares a token
+        # (A-B: str, B-C: bool, A-C: int) but no single token is common to
+        # all three -- the witness standard (unlike a weaker pairwise-all-
+        # pairs check) correctly reports no shared type.
+        a = ("int", "str")
+        b = ("str", "bool")
+        c = ("bool", "int")
+        assert n_way_type_witness([a, b, c]) == frozenset()
+
+    def test_genuine_three_way_witness_is_found_and_full_set_is_returned(self) -> None:
+        # Every opinionated tuple actually shares "int"; "str" only appears
+        # in one tuple and must not leak into the witness set.
+        witness = n_way_type_witness([("int", "str"), ("int",), ("int",)])
+        assert witness == frozenset({"int"})
+
+    def test_abstaining_source_alongside_opinionated_sources_is_never_consulted(self) -> None:
+        # A pure-Any source neither contributes to nor rescues the witness
+        # search once at least one opinionated source exists.
+        assert n_way_type_witness([("Any",), ("int",), ("int",)]) == frozenset({"int"})
+
+    def test_abstaining_source_does_not_rescue_a_genuine_opinionated_conflict(self) -> None:
+        assert n_way_type_witness([("Any",), ("int",), ("str",)]) == frozenset()
+
+    def test_generator_input_is_materialized_and_consumed_safely(self) -> None:
+        witness = n_way_type_witness((t for t in [("int",), ("int",)]))
+        assert witness == frozenset({"int"})
+
+
+class TestNWayKindCompatible:
+    def test_no_variadic_present_is_always_compatible_regardless_of_mix(self) -> None:
+        assert n_way_kind_compatible([
+            ParamSpec.POSITIONAL_ONLY,
+            ParamSpec.POSITIONAL_OR_KEYWORD,
+            ParamSpec.KEYWORD_ONLY,
+        ]) is True
+
+    def test_single_kind_repeated_is_compatible(self) -> None:
+        assert n_way_kind_compatible([ParamSpec.KEYWORD_ONLY, ParamSpec.KEYWORD_ONLY]) is True
+
+    def test_single_shared_variadic_kind_is_compatible(self) -> None:
+        assert n_way_kind_compatible([ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_POSITIONAL]) is True
+
+    def test_two_distinct_variadic_kinds_are_incompatible(self) -> None:
+        assert n_way_kind_compatible([ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD]) is False
+
+    def test_one_variadic_plus_one_non_variadic_is_incompatible(self) -> None:
+        assert n_way_kind_compatible([ParamSpec.VAR_POSITIONAL, ParamSpec.POSITIONAL_OR_KEYWORD]) is False
+
+    def test_empty_input_has_no_variadic_and_is_compatible(self) -> None:
+        assert n_way_kind_compatible([]) is True
+
+
+class TestBuildParameterReport:
+    def test_single_observation_is_a_trivial_pass_through(self) -> None:
+        spec = make_param("x", 0, type_="int")
+        report = build_parameter_report("x", [spec])
+
+        assert report.parameter_name == "x"
+        assert report.witness_types == frozenset({"int"})
+        assert report.winner_source == 0
+        assert report.kind_compatible is True
+        assert report.observations == (spec,)
+        assert report.is_identical is True
+
+    def test_dense_none_gaps_are_skipped_for_witness_and_kind_computation(self) -> None:
+        spec_b = make_param("x", 0, type_="int")
+        report = build_parameter_report("x", [None, spec_b, None])
+
+        assert report.witness_types == frozenset({"int"})
+        assert report.observations == (None, spec_b, None)
+
+    def test_winner_source_is_the_first_present_index_not_the_first_list_index(self) -> None:
+        spec_b = make_param("x", 0, type_="int", default=1)
+        spec_c = make_param("x", 0, type_="int", default=2)
+        report = build_parameter_report("x", [None, spec_b, spec_c])
+
+        assert report.winner_source == 1
+
+    def test_is_identical_false_when_present_observations_differ(self) -> None:
+        spec_a = make_param("x", 0, type_="int", default=1)
+        spec_b = make_param("x", 0, type_="int", default=2)
+        report = build_parameter_report("x", [spec_a, spec_b])
+
+        # Compatible (same type/kind) but not identical (different default).
+        assert report.witness_types == frozenset({"int"})
+        assert report.is_identical is False
+
+    def test_is_identical_true_when_present_observations_all_match_winner(self) -> None:
+        spec_a = make_param("x", 0, type_="int", default=1)
+        spec_b = make_param("x", 0, type_="int", default=1)
+        report = build_parameter_report("x", [spec_a, spec_b])
+
+        assert report.is_identical is True
+
+    def test_kind_compatible_reflects_n_way_kind_compatible(self) -> None:
+        spec_a = make_param("x", 0, ParamSpec.VAR_POSITIONAL, type_="Any")
+        spec_b = make_param("x", 0, ParamSpec.VAR_KEYWORD, type_="Any")
+        report = build_parameter_report("x", [spec_a, spec_b])
+
+        assert report.kind_compatible is False
+
+
+class TestBuildParameterReports:
+    def test_first_seen_order_preserved_across_sources(self) -> None:
+        source_a = [make_param("second", 0), make_param("first", 1)]
+        source_b = [make_param("third", 0)]
+
+        reports = build_parameter_reports([source_a, source_b])
+
+        assert [r.parameter_name for r in reports] == ["second", "first", "third"]
+
+    def test_multi_name_grouping_across_disjoint_source_subsets(self) -> None:
+        source_a = [make_param("x", 0, type_="int"), make_param("shared", 1, type_="int")]
+        source_b = [make_param("y", 0, type_="str")]
+        source_c = [make_param("shared", 0, type_="int")]
+
+        reports = build_parameter_reports([source_a, source_b, source_c])
+        by_name = {r.parameter_name: r for r in reports}
+
+        assert set(by_name) == {"x", "shared", "y"}
+        assert by_name["x"].observations == (source_a[0], None, None)
+        assert by_name["y"].observations == (None, source_b[0], None)
+        assert by_name["shared"].observations == (source_a[1], None, source_c[0])
+        assert by_name["shared"].is_identical is True
+
+    def test_empty_sources_yields_empty_reports(self) -> None:
+        assert build_parameter_reports([]) == []
+        assert build_parameter_reports([[], []]) == []
+
+    def test_report_entries_are_parameterreport_instances(self) -> None:
+        reports = build_parameter_reports([[make_param("x", 0)]])
+        assert isinstance(reports[0], ParameterReport)

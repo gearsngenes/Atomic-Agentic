@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Annotated, Any, Mapping, Optional
 import warnings
 
 import pytest
@@ -8,7 +8,7 @@ import asyncio
 
 from atomic_agentic.tools import Tool
 from atomic_agentic.agents.base import Agent
-from atomic_agentic.exceptions import AgentError, AgentInvocationError
+from atomic_agentic.exceptions import AgentError, AgentInvocationError, SchemaError
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.constants.agents import RUN_ID_PARAM
 from atomic_agentic.models.agents.records import AgentRecord, LLMRecord
@@ -452,10 +452,9 @@ class TestAgentSchemaComposition:
 
     def test_overlapping_param_with_type_mismatch_raises_at_construction(self) -> None:
         # "tone" overlaps pre_invoke's own "tone: str" param but is declared
-        # "int" here -- an incompatible collision, caught at construction by
-        # parameter_collisions (was previously undetected: pre/post overlap
-        # shapes were only checked for variadic-kind mismatches).
-        with pytest.raises(AgentError, match="collision"):
+        # "int" here -- an incompatible collision, caught by the N-way
+        # peer-report traversal (empty witness_types for "tone").
+        with pytest.raises(AgentError, match="no compatible reconciliation"):
             make_agent(post_invoke=post_with_type_mismatch)
 
     def test_truly_post_only_param_with_any_type_routes_correctly(self) -> None:
@@ -526,17 +525,26 @@ class TestAgentPostInvokeRouting:
         assert agent.post_result_key == "items"
 
     def test_post_result_key_run_id_raises(self) -> None:
-        # "run_id" is never a legal post_result_key: it's not among
-        # post_invoke's own declared (reserved-popped) names.
+        # "run_id" is never a legal post_result_key here: it's simply not
+        # among post_invoke's own declared parameter names at all (resolved
+        # against post_tool.parameters directly, unstripped).
         with pytest.raises(AgentError, match="post_result_key"):
             make_agent(post_result_key="run_id")
 
-    def test_post_result_key_colliding_with_pre_invoke_name_raises(self) -> None:
+    def test_post_result_key_matching_pre_invoke_name_no_longer_raises(self) -> None:
+        # Spec-mandated behavior change: the old pairwise "post_result_key
+        # collides with a pre_invoke/extra_parameters name" check is dropped
+        # in the __init__ rebuild -- post_only_raw excludes the result key
+        # BEFORE peer reconciliation ever runs, so there is no longer a
+        # schema-level name for it to collide with. pre_invoke's "topic" and
+        # the internal result-routing slot stay independently sliced at
+        # invoke time (pre_inputs/post_inputs), so no runtime ambiguity
+        # results either.
         def post_with_topic_key(topic: str) -> str:
             return topic
 
-        with pytest.raises(AgentError, match="post_result_key"):
-            make_agent(post_invoke=post_with_topic_key, post_result_key="topic")
+        agent = make_agent(post_invoke=post_with_topic_key, post_result_key="topic")
+        assert agent.post_result_key == "topic"
 
 
 class TestAgentContext:
@@ -1058,12 +1066,23 @@ class TestExtraParametersNormalization:
 
 
 class TestReservedNameReconciliation:
-    """Per-source reserved-name reconciliation: identical / compatible / incompatible."""
+    """Per-source reserved-name reconciliation: the new two-outcome model.
 
-    def test_identical_reserved_param_in_extra_parameters_warns_and_is_popped(self) -> None:
+    ``_strip_reserved_overlaps`` (replacing the old three-tier
+    ``_reconcile_reserved_names``) only has two outcomes: a declaration
+    ``semantically_identical`` to the reserved spec is silently stripped (no
+    warning at all -- a real behavior change from the old three-tier
+    identical/compatible/incompatible scheme), and anything else raises
+    ``AgentError`` immediately. There is deliberately no "compatible but not
+    identical" warning tier on this axis anymore.
+    """
+
+    def test_identical_reserved_param_in_extra_parameters_is_silently_stripped(self) -> None:
         # RUN_ID_PARAM itself, declared verbatim -- guaranteed field-for-field
-        # identical (name/type/kind/default/description all match).
-        with pytest.warns(UserWarning, match="redundant"):
+        # identical (name/type/kind/default/description all match). Silent
+        # strip, no warning at all (dropped this pass).
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             agent = _MinimalAgent(
                 name="a",
                 namespace="tests",
@@ -1071,17 +1090,18 @@ class TestReservedNameReconciliation:
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 extra_parameters=[RUN_ID_PARAM],
             )
+        assert caught == []
         # Only one run_id entry survives in the final schema (the framework's).
         assert [p.name for p in agent.parameters].count("run_id") == 1
 
-    def test_pre_invoke_compatible_run_id_warns_distinct_message(self) -> None:
-        # type="Any" is compatible with RUN_ID_PARAM's ("None", "str") (either
-        # side being "Any" satisfies semantically_compatible); default/
-        # description differ, so it's compatible but not identical.
+    def test_pre_invoke_compatible_but_not_identical_run_id_now_raises(self) -> None:
+        # Under the old three-tier scheme this warned ("compatible but not
+        # identical"); under the new two-outcome model, anything short of
+        # exact semantic identity raises -- there is no middle tier anymore.
         def pre_with_compatible_run_id(prompt: str, *, run_id: Any = "unset") -> str:
             return prompt
 
-        with pytest.warns(UserWarning, match="not identical"):
+        with pytest.raises(AgentError, match="not identical"):
             _MinimalAgent(
                 name="a",
                 namespace="tests",
@@ -1094,7 +1114,7 @@ class TestReservedNameReconciliation:
         def pre_with_bad_run_id(prompt: str, run_id: int) -> str:
             return prompt
 
-        with pytest.raises(AgentError, match="conflicts"):
+        with pytest.raises(AgentError, match="not identical"):
             _MinimalAgent(
                 name="a",
                 namespace="tests",
@@ -1104,15 +1124,16 @@ class TestReservedNameReconciliation:
             )
 
     def test_post_invoke_incompatible_run_id_raises_independently_of_clean_pre(self) -> None:
-        # A clean, warning-free pre_invoke must not mask an incompatible
-        # reserved-name collision detected independently in post_invoke --
-        # each of the three sources (pre/post/extra) is reconciled on its own.
+        # A clean pre_invoke (no reserved-name overlap at all) must not mask
+        # a non-identical reserved-name collision detected independently in
+        # post_invoke -- each of the three sources (pre/post/extra) is
+        # checked entirely on its own, never against each other.
         def post_with_bad_run_id(result: str, run_id: int) -> str:
             return result
 
         with warnings.catch_warnings(record=True):
             warnings.simplefilter("always")
-            with pytest.raises(AgentError, match="conflicts"):
+            with pytest.raises(AgentError, match="not identical"):
                 _MinimalAgent(
                     name="a",
                     namespace="tests",
@@ -1124,13 +1145,83 @@ class TestReservedNameReconciliation:
 
     def test_extra_parameters_incompatible_run_id_raises(self) -> None:
         bad = ParamSpec(name="run_id", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int", default=NO_VAL)
-        with pytest.raises(AgentError, match="conflicts"):
+        with pytest.raises(AgentError, match="not identical"):
             _MinimalAgent(
                 name="a",
                 namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
                 extra_parameters=[bad],
+            )
+
+    def test_variadic_param_named_like_reserved_is_exempt_from_the_reserved_check(self) -> None:
+        # A VAR_KEYWORD catch-all happens to be named "run_id" -- exempt from
+        # the reserved-overlap check entirely: never checked, never stripped,
+        # regardless of the name collision (a catch-all's bucket name is a
+        # naming coincidence, not the same declared slot). The final
+        # signature still can't legally contain two params both literally
+        # named "run_id" (this VAR_KEYWORD bucket and the framework's own
+        # KEYWORD_ONLY graft), so construction still fails overall -- but via
+        # the pre-existing structural duplicate-name invariant every
+        # AtomicInvokable already enforces (SchemaError from
+        # insert_by_category's final _validate_parameter_order call), never
+        # via the reserved-overlap policy's own AgentError. That distinction
+        # is the point of the exemption.
+        def pre_with_run_id_kwargs(prompt: str, **run_id: Any) -> str:
+            return prompt
+
+        with pytest.raises(SchemaError, match="Duplicate"):
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                pre_invoke=pre_with_run_id_kwargs,
+            )
+
+    def test_multiple_compatible_but_not_identical_overlaps_emit_exactly_one_grouped_warning(self) -> None:
+        # Two independently compatible-but-not-identical peer overlaps
+        # (topic, tone -- both shared between pre_invoke and post_invoke)
+        # must batch into exactly ONE UserWarning event for the whole
+        # construction call, not one per name.
+        def post_with_two_overlaps(
+            result: str, topic: str = "default-topic", tone: str = "default-tone"
+        ) -> str:
+            return result
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            make_agent(post_invoke=post_with_two_overlaps)
+
+        user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+        assert len(user_warnings) == 1
+        assert "topic" in str(user_warnings[0].message)
+        assert "tone" in str(user_warnings[0].message)
+
+    def test_same_named_variadic_with_conflicting_kind_across_sources_raises(self) -> None:
+        # A same-named variadic declared under different kinds by two peer
+        # sources (pre_invoke's *extra vs post_invoke's **extra) is caught by
+        # n_way_kind_compatible inside the peer report -- not by the old,
+        # now-removed variadic_compatible primitive. variadic_compatible's
+        # only remaining real job -- differently-NAMED independent variadics
+        # -- is now caught structurally by insert_by_category's own
+        # duplicate/order validation instead (see the spec's "Removed"
+        # section); this is the same-name case, which the peer report
+        # itself must catch.
+        def pre_with_var_positional(*extra: Any) -> str:
+            return str(extra)
+
+        def post_with_var_keyword(result: str, **extra: Any) -> str:
+            return result
+
+        with pytest.raises(AgentError, match="no compatible reconciliation"):
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                pre_invoke=pre_with_var_positional,
+                post_invoke=post_with_var_keyword,
             )
 
 
@@ -1147,35 +1238,60 @@ class TestPostResultKeyResolution:
         with pytest.raises(AgentError, match="post_result_key"):
             make_agent(post_invoke=post_with_custom_key, post_result_key="nope")
 
-    def test_collision_with_pre_invoke_name_raises(self) -> None:
-        with pytest.raises(AgentError, match="post_result_key"):
-            make_agent(
-                post_invoke=lambda topic: topic,
-                post_result_key="topic",
-            )
+    def test_collision_with_pre_invoke_name_no_longer_raises(self) -> None:
+        # See TestAgentPostInvokeRouting.
+        # test_post_result_key_matching_pre_invoke_name_no_longer_raises for
+        # the full rationale -- this pairwise collision check was dropped in
+        # the __init__ rebuild.
+        agent = make_agent(
+            post_invoke=lambda topic: topic,
+            post_result_key="topic",
+        )
+        assert agent.post_result_key == "topic"
 
-    def test_collision_with_extra_parameters_name_raises(self) -> None:
+    def test_collision_with_extra_parameters_name_no_longer_raises(self) -> None:
         def post_with_flag(result: str, flag: str = "x") -> str:
             return result
 
-        with pytest.raises(AgentError, match="post_result_key"):
-            _MinimalAgent(
-                name="a",
-                namespace="tests",
-                description="d",
-                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-                post_invoke=post_with_flag,
-                post_result_key="flag",
-                extra_parameters=["flag"],
-            )
+        agent = _MinimalAgent(
+            name="a",
+            namespace="tests",
+            description="d",
+            llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+            post_invoke=post_with_flag,
+            post_result_key="flag",
+            extra_parameters=["flag"],
+        )
+        assert agent.post_result_key == "flag"
+
+    def test_explicit_post_result_key_naming_a_reserved_parameter_raises(self) -> None:
+        # post_result_key is resolved against post_tool.parameters directly,
+        # unstripped of reserved-name overlaps (step 5) -- so an explicit
+        # post_result_key naming a real post_invoke parameter that also
+        # happens to be a reserved name is caught by the dedicated new guard
+        # (step 6), with a message identifying the actual problem (not the
+        # old generic "not a declared parameter" message this would
+        # otherwise surface as, since "run_id" IS a real declared parameter
+        # of post_with_run_id_param below).
+        def post_with_run_id_param(result: str, run_id: str = "x") -> str:
+            return result
+
+        with pytest.raises(AgentError, match="framework-reserved"):
+            make_agent(post_invoke=post_with_run_id_param, post_result_key="run_id")
 
 
 class TestPreVsPostReconciliation:
+    """Named for the overlap it exercises (pre_invoke vs. post_invoke); the
+    underlying mechanism is now the single unified N-way peer report over
+    all three sources, not a distinct pairwise fold stage -- these tests
+    stay valid because a 2-source-only overlap is a degenerate case of the
+    N-way report."""
+
     def test_incompatible_overlap_raises(self) -> None:
         def post_with_int_topic(result: str, topic: int) -> str:
             return result
 
-        with pytest.raises(AgentError, match="collision"):
+        with pytest.raises(AgentError, match="no compatible reconciliation"):
             make_agent(post_invoke=post_with_int_topic)
 
     def test_compatible_but_not_identical_overlap_warns(self) -> None:
@@ -1219,8 +1335,13 @@ class TestPreVsPostReconciliation:
 
 
 class TestCombinedVsExtraReconciliation:
+    """Named for the overlap it exercises (pre_invoke/post_invoke's combined
+    schema vs. extra_parameters); the underlying mechanism is now the same
+    single unified N-way peer report described in TestPreVsPostReconciliation,
+    not a distinct second fold stage."""
+
     def test_incompatible_overlap_raises(self) -> None:
-        with pytest.raises(AgentError, match="collision"):
+        with pytest.raises(AgentError, match="no compatible reconciliation"):
             _MinimalAgent(
                 name="a",
                 namespace="tests",
@@ -1277,6 +1398,108 @@ class TestCombinedVsExtraReconciliation:
         )
         names = [p.name for p in agent.parameters]
         assert names == ["subject", "style", "flag", "run_id"]
+
+
+def pre_with_dict_shared(shared: dict[str, int]) -> str:
+    return str(shared)
+
+
+def post_with_bare_dict_shared(result: str, shared: dict) -> str:
+    return result
+
+
+class TestNWayWitnessOrderIndependence:
+    """The N-way type-witness search (utils.parameters.n_way_type_witness)
+    replaces Agent's old two-step accumulator fold (pre-vs-post, then
+    combined-vs-extra), which always kept pre_invoke's own declaration
+    unmodified as the fold "winner" and discarded post_invoke's full type
+    declaration for any overlapping name -- meaning the old fold's final
+    verdict for a name shared by all three sources reduced to a bare
+    pre_invoke-vs-extra_parameters pairwise check, silently blind to
+    whatever bridging information only post_invoke held.
+
+    NOTE ON THE BRAINSTORM DOC'S OWN WORKED EXAMPLE: the brainstorm doc's
+    illustrative "concrete break" example (pre=(int,), post=(int,str),
+    extra=(str,)) is NOT reproduced verbatim here. Verified directly against
+    both the shipped n_way_type_witness algorithm and a hand-simulation of
+    the old fold: that specific example is a genuine "triangle" conflict
+    (see the spec's own Helly-counterexample discussion) -- pre requires
+    strictly int, extra requires strictly str, and no token can satisfy both
+    regardless of what post additionally accepts. It legitimately raises
+    under BOTH the old fold and the new witness search (same final verdict,
+    for different, more principled reasons under the new one). Reproduced
+    below instead: a corrected, hand-verified example using generic/
+    parameterized types, where the old fold provably raises (a real false
+    collision, order-dependent-masking bug) and the new witness search
+    provably finds a genuine bridging witness and succeeds.
+    """
+
+    def test_generic_bridging_witness_construction_succeeds_where_the_old_fold_would_raise(self) -> None:
+        # pre declares "shared: dict[str, int]", post declares "shared: dict"
+        # (bare origin -- a generic supertype of both siblings), extra
+        # declares "shared: dict[str, str]" via an explicit ParamSpec.
+        # pre and extra do NOT share a directly compatible token
+        # (dict[str, int] vs dict[str, str] disagree on the value-type
+        # argument) -- a pairwise pre-vs-extra check, which is what the old
+        # fold reduces to once pre "wins" against post (discarding post's
+        # bare "dict" declaration), would raise. The N-way witness search
+        # instead finds "dict" -- contributed uniquely by post's own bare
+        # declaration -- structurally compatible with all three tuples at
+        # once, and construction succeeds.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            agent = _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                pre_invoke=pre_with_dict_shared,
+                post_invoke=post_with_bare_dict_shared,
+                extra_parameters=[
+                    ParamSpec(
+                        name="shared", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                        type="dict[str, str]", default=NO_VAL,
+                    ),
+                ],
+            )
+
+        shared_param = next(p for p in agent.parameters if p.name == "shared")
+        assert shared_param.type == ("dict",)
+        # All three observations differ (dict[str, int] vs dict vs
+        # dict[str, str]) -- compatible-not-identical, so exactly one
+        # grouped warning is expected.
+        user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+        assert len(user_warnings) == 1
+        assert "shared" in str(user_warnings[0].message)
+
+    def test_pairwise_compatible_triangle_with_no_universal_witness_still_raises(self) -> None:
+        # The brainstorm doc's own literal numeric example (pre=(int,),
+        # post=(int,str), extra=(str,)) -- verified (see class docstring) to
+        # be a genuine "triangle" conflict, not a false collision: pre and
+        # extra are flatly, directly incompatible (int vs str, neither
+        # "Any"), and no token in the pool can satisfy both regardless of
+        # what post additionally accepts. The witness-set standard correctly
+        # raises here -- unlike a weaker pairwise-all-pairs check, which
+        # would wrongly call this compatible (pre-post share int, post-extra
+        # share str) despite there being no principled merged type.
+        def pre_int_shared(shared: int) -> str:
+            return str(shared)
+
+        def post_int_or_str_shared(result: str, shared: int | str) -> str:
+            return result
+
+        with pytest.raises(AgentError, match="no compatible reconciliation"):
+            _MinimalAgent(
+                name="a",
+                namespace="tests",
+                description="d",
+                llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
+                pre_invoke=pre_int_shared,
+                post_invoke=post_int_or_str_shared,
+                extra_parameters=[
+                    ParamSpec(name="shared", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str", default=NO_VAL),
+                ],
+            )
 
 
 class TestFinalReservedGraftOrdering:
@@ -1432,28 +1655,48 @@ class TestInvocationLifecycle:
 
         assert captured == {"prompt": "hi", "lang": "French", "run_id": None}
 
-    def test_reserved_name_excluded_from_pre_invoke_slice_even_if_declared_compatible(self) -> None:
-        """A tool declaring a compatible same-named reserved param (warned, not
-        raised, at construction) must not have the framework's reserved value
-        silently slotted into it -- the exclusion applies at every invoke()."""
-        seen: dict[str, Any] = {}
+    def test_reserved_name_excluded_from_pre_invoke_slice_even_if_declared_identically(self) -> None:
+        """A source declaring a reserved param byte-for-byte identical to the
+        framework's own spec survives construction (silently stripped, no
+        warning -- under the old three-tier scheme this was merely
+        "compatible," which is no longer a survivable outcome on its own;
+        exact identity is required now). But surviving construction must not
+        mean the framework's real run_id value gets slotted into that
+        source's own declaration at invoke time -- the exclusion applies at
+        every invoke() regardless. This is invoke-time routing behavior,
+        distinct from what TestReservedNameReconciliation covers
+        (construction-time strip/raise only)."""
+        seen: list[Any] = []
 
-        def pre_with_compatible_run_id(prompt: str, *, run_id: Any = "unset") -> str:
-            seen["run_id_seen_by_pre"] = run_id
+        def pre_with_identical_run_id(
+            prompt: str, *, run_id: Annotated[Optional[str], RUN_ID_PARAM.description] = None
+        ) -> str:
+            seen.append(run_id)
             return prompt
 
-        with pytest.warns(UserWarning):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             agent = _MinimalAgent(
                 name="a",
                 namespace="tests",
                 description="d",
                 llm_engine=FakeLLMEngine(response_fn=echo_latest_user()),
-                pre_invoke=pre_with_compatible_run_id,
+                pre_invoke=pre_with_identical_run_id,
+                context_enabled=True,
             )
-        agent.invoke({"prompt": "hi"})
-        # pre_invoke's own declared default is used -- the framework's run_id
-        # value is never routed into it.
-        assert seen["run_id_seen_by_pre"] == "unset"
+        assert caught == []
+
+        first = agent.invoke({"prompt": "hi"})
+        real_run_id = first.run_id
+        agent.invoke({"prompt": "again", "run_id": real_run_id})
+
+        # Even on the second call, where the caller explicitly supplies a
+        # real, non-default run_id string to fork from, pre_invoke's own
+        # declaration never receives it -- both calls see only pre_invoke's
+        # own default (None), confirming the exclusion holds at invoke time
+        # and isn't just an artifact of the value happening to be None on a
+        # single, default-only call.
+        assert seen == [None, None]
 
     def test_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
         agent = _MinimalAgent(

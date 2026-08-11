@@ -27,6 +27,18 @@ Public surface
   sources into one ``ParamNameReport`` per distinct name observed across
   them. Pure aggregation, no raising -- the caller decides what counts as
   a genuine collision.
+- ``n_way_type_witness`` — for a group of type-tuples, returns the set of
+  type tokens compatible with every opinionated (non-``("Any",)``) tuple;
+  the literal ``"Any"`` token is excluded from candidacy even inside a
+  mixed tuple, though it still works as a receiving-side wildcard.
+- ``n_way_kind_compatible`` — whether a group of ``ParamSpec.kind`` values
+  is jointly compatible: any mix of non-variadic kinds is fine; a variadic
+  kind requires every source to agree on that exact kind.
+- ``build_parameter_report``/``build_parameter_reports`` — compute a
+  ``ParameterReport`` (witness types, kind compatibility, winning source,
+  identity) for one already-assembled dense observation list, or group N
+  priority-ordered ``list[ParamSpec]`` sources by name and do so for every
+  distinct name.
 
 Private helpers
 ---------------
@@ -53,11 +65,22 @@ from __future__ import annotations
 import inspect
 import re
 from types import UnionType
-from typing import Annotated, Any, Literal, Optional, Union, get_args, get_origin, get_type_hints
+from typing import (
+    Annotated,
+    Any,
+    Iterable,
+    Literal,
+    Optional,
+    Sequence,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from ..constants.core import IDENTIFIER_PATTERN, IDENTIFIER_PATTERN_TEXT, NO_VAL
 from ..exceptions import SchemaError
-from ..models.parameters import ParamNameReport, ParamSpec
+from ..models.parameters import ParameterReport, ParamNameReport, ParamSpec
 
 __all__ = [
     "extract_io",
@@ -70,6 +93,10 @@ __all__ = [
     "variadic_compatible",
     "insert_by_category",
     "n_way_parameter_report",
+    "n_way_type_witness",
+    "n_way_kind_compatible",
+    "build_parameter_report",
+    "build_parameter_reports",
 ]
 
 
@@ -1024,3 +1051,111 @@ def n_way_parameter_report(sources: list[list[ParamSpec]]) -> list[ParamNameRepo
         )
         for name, entry in accumulator.items()
     ]
+
+
+def n_way_type_witness(type_tuples: Iterable[tuple[str, ...]]) -> frozenset[str]:
+    """Witness set of type tokens compatible with every opinionated source.
+
+    A source is "abstaining" if its type tuple is exactly ``("Any",)``, and
+    "opinionated" otherwise (including mixed tuples like ``("Any", "int")``).
+    All-abstain returns ``{"Any"}``. Otherwise the candidate pool is the
+    union of every opinionated tuple's tokens with the literal ``"Any"``
+    token permanently excluded from candidacy -- even inside a mixed
+    opinionated tuple -- so a single ``Any``-containing source can never
+    mask a genuine conflict between two concrete-typed sources. ``"Any"``
+    still works as a receiving-side wildcard: an opinionated tuple that
+    itself contains ``"Any"`` as one of its members still accepts any
+    candidate trivially via that member. Never raises.
+    """
+    tuples = list(type_tuples)
+    if not tuples:
+        return frozenset()
+
+    abstaining = [t for t in tuples if t == ("Any",)]
+    opinionated = [t for t in tuples if t != ("Any",)]
+
+    if not opinionated:
+        return frozenset({"Any"})
+
+    candidate_pool = {token for t in opinionated for token in t if token != "Any"}
+
+    witnesses = {
+        candidate
+        for candidate in candidate_pool
+        if all(
+            any(_single_type_compatible(candidate, member) for member in t)
+            for t in opinionated
+        )
+    }
+    return frozenset(witnesses)
+
+
+def n_way_kind_compatible(kinds: Iterable[str]) -> bool:
+    """Whether a group of ``ParamSpec.kind`` values is jointly compatible.
+
+    Any mix of non-variadic kinds is compatible. A variadic kind
+    (``VAR_POSITIONAL``/``VAR_KEYWORD``) is compatible only if every
+    declaring source agrees on that exact kind -- i.e. the observed kind
+    set has exactly one distinct member. Never raises.
+    """
+    kind_set = set(kinds)
+    variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
+    if not kind_set & variadic_kinds:
+        return True
+    return len(kind_set) == 1
+
+
+def build_parameter_report(
+    name: str, observations: Sequence[Optional[ParamSpec]]
+) -> ParameterReport:
+    """Compute one parameter name's cross-source reconciliation report.
+
+    ``observations`` is a dense, one-slot-per-source list in priority
+    order (index 0 = highest priority), ``None`` where a source doesn't
+    declare this name. The caller is expected to only invoke this for a
+    name observed in at least one source -- an all-``None`` observations
+    list is an internal-contract violation and is allowed to raise
+    ``IndexError`` naturally rather than being defensively guarded
+    against.
+    """
+    present = [(i, spec) for i, spec in enumerate(observations) if spec is not None]
+
+    witness = n_way_type_witness(spec.type for _, spec in present)
+    winner_index, winner_spec = present[0]
+    kind_ok = n_way_kind_compatible(spec.kind for _, spec in present)
+    identical = all(
+        semantically_identical(winner_spec, spec) for _, spec in present[1:]
+    )
+
+    return ParameterReport(
+        parameter_name=name,
+        witness_types=witness,
+        winner_source=winner_index,
+        kind_compatible=kind_ok,
+        observations=tuple(observations),
+        is_identical=identical,
+    )
+
+
+def build_parameter_reports(
+    sources: Sequence[Sequence[ParamSpec]],
+) -> list[ParameterReport]:
+    """Group N priority-ordered sources by name and report on each.
+
+    ``sources`` index 0 is the highest-priority source. Every distinct
+    name across all sources is collected in first-seen order (scanning
+    ``sources`` in order, then each source's own params in order), then
+    ``build_parameter_report`` is called once per name against a dense
+    observation list assembled from every source.
+    """
+    names: list[str] = []
+    by_name: dict[str, list[Optional[ParamSpec]]] = {}
+
+    for source_index, source in enumerate(sources):
+        for spec in source:
+            if spec.name not in by_name:
+                names.append(spec.name)
+                by_name[spec.name] = [None] * len(sources)
+            by_name[spec.name][source_index] = spec
+
+    return [build_parameter_report(name, by_name[name]) for name in names]
