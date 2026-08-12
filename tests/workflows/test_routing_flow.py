@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
 import pytest
 
+from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.exceptions import ExecutionError, ValidationError, WorkflowError
 from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.parameters import ParamSpec
@@ -61,8 +63,8 @@ class OtherParamWorkflow(Workflow):
 
     Declares only ``other`` when ``with_overlap=False`` (zero overlap with a
     router whose sole param is ``value``); when ``with_overlap=True`` it also
-    declares ``value``, satisfying PARTIAL's "at least one overlapping
-    parameter" requirement while still introducing the new ``other`` param.
+    declares ``value``, letting a branch share a router param while also
+    introducing a new one the router doesn't have.
     """
 
     def __init__(self, *, tag: str = "other", with_overlap: bool = False) -> None:
@@ -84,6 +86,31 @@ class OtherParamWorkflow(Workflow):
         self._tag = tag
 
     def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        return {"branch": self._tag}, {}
+
+
+class ParamsWorkflow(Workflow):
+    """A router or branch with an arbitrary caller-specified parameter list.
+
+    ``is_router=True`` makes ``_run`` return a constant selector (``0``)
+    instead of a dict payload, so this can stand in as either a router or a
+    branch depending on the reconciliation scenario under test.
+    """
+
+    def __init__(self, *, tag: str, parameters: list[ParamSpec], is_router: bool = False) -> None:
+        super().__init__(
+            name=f"params_{tag}",
+            namespace="tests",
+            description=f"Workflow {tag} with a configurable parameter list.",
+            parameters=parameters,
+            return_type="Any" if is_router else "dict[str, Any]",
+        )
+        self._tag = tag
+        self._is_router = is_router
+
+    def _run(self, inputs: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
+        if self._is_router:
+            return 0, {}
         return {"branch": self._tag}, {}
 
 
@@ -240,28 +267,7 @@ class TestRoutingFlowConstruction:
                 router=make_router(0),
             )
 
-    def test_schema_mode_defaults_to_strict(self) -> None:
-        flow = RoutingFlow(
-            name="routing_flow",
-            namespace="tests",
-            description="Routing test flow.",
-            branches=[make_branch("a"), make_branch("b")],
-            router=make_router(0),
-        )
-        assert flow.schema_mode == RoutingFlow.STRICT
-
-    def test_schema_mode_rejects_unknown_value(self) -> None:
-        with pytest.raises(ValueError, match="schema_mode"):
-            RoutingFlow(
-                name="routing_flow",
-                namespace="tests",
-                description="Routing test flow.",
-                branches=[make_branch("a"), make_branch("b")],
-                router=make_router(0),
-                schema_mode="weird",
-            )
-
-    def test_strict_parameters_equal_router_parameters(self) -> None:
+    def test_identical_branch_declarations_leave_router_parameters_unchanged(self) -> None:
         router = make_router(0)
         flow = RoutingFlow(
             name="routing_flow",
@@ -273,18 +279,7 @@ class TestRoutingFlowConstruction:
 
         assert list(flow.parameters) == list(router.parameters)
 
-    def test_strict_rejects_branch_param_not_in_router_schema(self) -> None:
-        with pytest.raises(WorkflowError, match="not present in the router"):
-            RoutingFlow(
-                name="routing_flow",
-                namespace="tests",
-                description="Routing test flow.",
-                branches=[OtherParamWorkflow(), make_branch("b")],
-                router=make_router(0),
-                schema_mode=RoutingFlow.STRICT,
-            )
-
-    def test_strict_compatible_but_not_identical_overlap_warns(self) -> None:
+    def test_router_shared_compatible_but_not_identical_overlap_warns(self) -> None:
         with pytest.warns(UserWarning, match="compatible with the router's declaration"):
             RoutingFlow(
                 name="routing_flow",
@@ -294,45 +289,219 @@ class TestRoutingFlowConstruction:
                 router=make_router(0),
             )
 
-    def test_partial_requires_overlap_with_router(self) -> None:
-        with pytest.raises(WorkflowError, match="shares no parameters with the router"):
-            RoutingFlow(
-                name="routing_flow",
-                namespace="tests",
-                description="Routing test flow.",
-                branches=[OtherParamWorkflow(with_overlap=False)],
-                router=make_router(0),
-                schema_mode=RoutingFlow.PARTIAL,
-            )
-
-    def test_partial_folds_new_branch_param_as_optional(self) -> None:
+    def test_single_branch_non_router_param_defaults_to_none(self) -> None:
         flow = RoutingFlow(
             name="routing_flow",
             namespace="tests",
             description="Routing test flow.",
             branches=[make_branch("a"), OtherParamWorkflow(with_overlap=True)],
             router=make_router(0),
-            schema_mode=RoutingFlow.PARTIAL,
         )
 
         by_name = {p.name: p for p in flow.parameters}
         assert "other" in by_name
         assert by_name["other"].default is None
+        assert "None" in by_name["other"].type
 
-    def test_open_allows_branch_with_zero_overlap(self) -> None:
+    def test_branch_with_zero_overlap_is_allowed(self) -> None:
         flow = RoutingFlow(
             name="routing_flow",
             namespace="tests",
             description="Routing test flow.",
             branches=[OtherParamWorkflow()],
             router=make_router(0),
-            schema_mode=RoutingFlow.OPEN,
         )
 
         by_name = {p.name: p for p in flow.parameters}
         assert "value" in by_name
         assert "other" in by_name
         assert by_name["other"].default is None
+        assert "None" in by_name["other"].type
+
+    def test_router_shared_type_widens_via_witness(self) -> None:
+        router = ParamsWorkflow(
+            tag="router",
+            parameters=[ParamSpec(name="value", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="dict[str, int]")],
+            is_router=True,
+        )
+        branch = ParamsWorkflow(
+            tag="a",
+            parameters=[ParamSpec(name="value", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="dict")],
+        )
+        flow = RoutingFlow(
+            name="routing_flow",
+            namespace="tests",
+            description="Routing test flow.",
+            branches=[branch],
+            router=router,
+        )
+
+        by_name = {p.name: p for p in flow.parameters}
+        assert by_name["value"].type == ("dict", "dict[str, int]")
+
+    def test_router_shared_incompatible_type_raises(self) -> None:
+        router = ParamsWorkflow(
+            tag="router",
+            parameters=[ParamSpec(name="value", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int")],
+            is_router=True,
+        )
+        branch = ParamsWorkflow(
+            tag="a",
+            parameters=[ParamSpec(name="value", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="str")],
+        )
+        with pytest.raises(WorkflowError, match="incompatible with router"):
+            RoutingFlow(
+                name="routing_flow",
+                namespace="tests",
+                description="Routing test flow.",
+                branches=[branch],
+                router=router,
+            )
+
+    def test_router_shared_kind_conflict_raises(self) -> None:
+        router = ParamsWorkflow(
+            tag="router",
+            parameters=[ParamSpec(name="value", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any")],
+            is_router=True,
+        )
+        branch = ParamsWorkflow(
+            tag="a",
+            parameters=[ParamSpec(name="value", index=0, kind=ParamSpec.VAR_KEYWORD, type="Any")],
+        )
+        with pytest.raises(WorkflowError, match="incompatible with router"):
+            RoutingFlow(
+                name="routing_flow",
+                namespace="tests",
+                description="Routing test flow.",
+                branches=[branch],
+                router=router,
+            )
+
+    def test_non_router_multi_branch_agreeing_default_used_without_none(self) -> None:
+        router = make_router(0)
+        branch1 = ParamsWorkflow(
+            tag="p1",
+            parameters=[ParamSpec(
+                name="extra", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                type="dict", default=5, description="first",
+            )],
+        )
+        branch2 = ParamsWorkflow(
+            tag="p2",
+            parameters=[ParamSpec(
+                name="extra", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                type="dict[str, int]", default=5, description="second",
+            )],
+        )
+        flow = RoutingFlow(
+            name="routing_flow",
+            namespace="tests",
+            description="Routing test flow.",
+            branches=[branch1, branch2],
+            router=router,
+        )
+
+        extra = {p.name: p for p in flow.parameters}["extra"]
+        assert extra.type == ("dict", "dict[str, int]")
+        assert extra.description == "first"
+        assert extra.default == 5
+
+    def test_non_router_multi_branch_disagreeing_default_falls_back_to_none(self) -> None:
+        router = make_router(0)
+        branch1 = ParamsWorkflow(
+            tag="p1",
+            parameters=[ParamSpec(
+                name="extra", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="dict", default=5,
+            )],
+        )
+        branch2 = ParamsWorkflow(
+            tag="p2",
+            parameters=[ParamSpec(
+                name="extra", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="dict", default=6,
+            )],
+        )
+        flow = RoutingFlow(
+            name="routing_flow",
+            namespace="tests",
+            description="Routing test flow.",
+            branches=[branch1, branch2],
+            router=router,
+        )
+
+        extra = {p.name: p for p in flow.parameters}["extra"]
+        assert extra.default is None
+        assert "None" in extra.type
+
+    def test_non_router_multi_branch_kind_conflict_raises(self) -> None:
+        router = make_router(0)
+        branch1 = ParamsWorkflow(
+            tag="p1",
+            parameters=[ParamSpec(name="extra2", index=0, kind=ParamSpec.VAR_POSITIONAL, type="Any")],
+        )
+        branch2 = ParamsWorkflow(
+            tag="p2",
+            parameters=[ParamSpec(name="extra2", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any")],
+        )
+        with pytest.raises(WorkflowError, match="incompatible kind"):
+            RoutingFlow(
+                name="routing_flow",
+                namespace="tests",
+                description="Routing test flow.",
+                branches=[branch1, branch2],
+                router=router,
+            )
+
+    def test_non_router_variadic_keeps_no_val_default_and_no_none_type(self) -> None:
+        router = make_router(0)
+        branch = ParamsWorkflow(
+            tag="p1",
+            parameters=[ParamSpec(name="extra_kwargs", index=0, kind=ParamSpec.VAR_KEYWORD, type="Any")],
+        )
+        flow = RoutingFlow(
+            name="routing_flow",
+            namespace="tests",
+            description="Routing test flow.",
+            branches=[branch],
+            router=router,
+        )
+
+        extra_kwargs = {p.name: p for p in flow.parameters}["extra_kwargs"]
+        assert extra_kwargs.default is NO_VAL
+        assert extra_kwargs.type == ("Any",)
+        assert extra_kwargs.kind == ParamSpec.VAR_KEYWORD
+
+    def test_grouped_warning_covers_multiple_names_in_one_call(self) -> None:
+        router = ParamsWorkflow(
+            tag="router",
+            parameters=[
+                ParamSpec(name="value", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int"),
+                ParamSpec(name="shared", index=1, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int"),
+            ],
+            is_router=True,
+        )
+        branch = ParamsWorkflow(
+            tag="a",
+            parameters=[
+                ParamSpec(name="value", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int", description="value desc"),
+                ParamSpec(name="shared", index=1, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int", description="shared desc"),
+            ],
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            RoutingFlow(
+                name="routing_flow",
+                namespace="tests",
+                description="Routing test flow.",
+                branches=[branch],
+                router=router,
+            )
+
+        user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+        assert len(user_warnings) == 1
+        message = str(user_warnings[0].message)
+        assert "value" in message
+        assert "shared" in message
 
     def test_return_type_is_shared_or_union_of_branch_return_types(self) -> None:
         flow = RoutingFlow(
@@ -413,7 +582,6 @@ class TestRoutingFlowExtraDescription:
                 make_structured_branch("b", ["value"]),
             ],
             router=make_structured_router(0),
-            schema_mode=RoutingFlow.OPEN,
         )
 
         assert flow._extra_description() == (
@@ -430,7 +598,6 @@ class TestRoutingFlowExtraDescription:
                 make_branch("b"),
             ],
             router=make_structured_router(0),
-            schema_mode=RoutingFlow.OPEN,
         )
 
         assert flow._extra_description() == "Selects 1 of 2 branches at runtime."
@@ -442,7 +609,6 @@ class TestRoutingFlowExtraDescription:
             description="Routing test flow.",
             branches=[make_branch("a"), make_branch("b")],
             router=make_structured_router(0),
-            schema_mode=RoutingFlow.OPEN,
         )
 
         assert flow._extra_description() == "Selects 1 of 2 branches at runtime."
@@ -587,7 +753,7 @@ class TestRoutingFlowValidationAndErrors:
 
 
 class TestRoutingFlowSerialization:
-    def test_to_dict_includes_router_branches_list_and_schema_mode(self) -> None:
+    def test_to_dict_includes_router_and_branches_list(self) -> None:
         flow = make_list_routing_flow(1)
 
         flow.invoke({"value": 5})
@@ -596,7 +762,6 @@ class TestRoutingFlowSerialization:
         assert data["router"] == flow.router.to_dict()
         assert isinstance(data["branches"], list)
         assert len(data["branches"]) == 3
-        assert data["schema_mode"] == RoutingFlow.STRICT
         assert "checkpoints" not in data
 
     def test_to_dict_includes_branches_dict_for_dict_branches(self) -> None:

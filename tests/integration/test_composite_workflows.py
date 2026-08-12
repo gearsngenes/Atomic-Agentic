@@ -263,7 +263,6 @@ def make_routing_between_sequences_flow() -> RoutingFlow:
             make_text_sequence_branch(),
             make_number_sequence_branch(),
         ],
-        schema_mode=RoutingFlow.PARTIAL,
     )
 
 
@@ -434,7 +433,6 @@ class TestCompositeWorkflows:
                 make_text_branch(),
                 make_number_branch(),
             ],
-            schema_mode=RoutingFlow.PARTIAL,
         )
         flow = SequentialFlow(
             name="sequential_routing_finalizer",
