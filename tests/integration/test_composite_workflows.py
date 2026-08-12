@@ -7,7 +7,6 @@ import pytest
 
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.models.workflows import CheckerSpec
 from atomic_agentic.models.results.workflows import (
     IterativeFlowResult,
     ParallelFlowResult,
@@ -395,7 +394,7 @@ def make_iterative_score_flow() -> IterativeFlow:
             )
         ],
         max_iterations=5,
-        checkers=[CheckerSpec(index=0, judge=judge, approval_value=True)],
+        checkers=[(judge, True)],
         result_setting_indices=[0],
         handoff_index=0,
     )

@@ -286,7 +286,7 @@ class TestParamNameReport:
     def test_no_construction_time_validation(self) -> None:
         # Internal-construction-only -- n_way_parameter_report is the real
         # producer; the dataclass itself trusts its inputs, same posture
-        # as GraphFlowNode's un-validated AtomicInvokable fields.
+        # as GraphFlow.Node's un-validated AtomicInvokable fields.
         report = ParamNameReport(
             name=123,  # type: ignore[arg-type]
             source_count=-1,

@@ -3,13 +3,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from datetime import datetime
-from types import MappingProxyType
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..constants.core import NO_VAL
 from ..exceptions import ValidationError
 from ..core.Invokable import AtomicInvokable
-from ..models.workflows.checkers import CheckerSpec
 from ..models.results.workflows import IterativeFlowResult
 from .base import Workflow
 
@@ -27,14 +25,20 @@ class IterativeFlow(Workflow):
     - ``body_steps`` must be a non-empty ``list[AtomicInvokable]``.
       ``IterativeFlow`` owns step-by-step execution directly -- there is no
       nested ``SequentialFlow`` loop body.
-    - ``checkers`` is an optional bulk list of ``CheckerSpec`` for
-      construction-time convenience; each is fed through :meth:`add_checker`
-      (the single validated entry point -- no duplicated validation logic).
+    - ``checkers`` is an optional bulk list of plain ``(judge,
+      approval_value) | None`` tuples (list position = body-step index) for
+      construction-time convenience; each non-``None`` entry is unpacked and
+      fed through :meth:`add_checker` (the single validated entry point --
+      no duplicated validation logic). A list shorter than ``body_steps``
+      has its missing tail positions implicitly treated as ``None``; a
+      longer one raises. ``Checker`` (a ``NamedTuple``) is this class's own
+      internal storage shape only -- external configuration never
+      constructs or names it, keeping the public surface plain-tuple-based.
       Checkers are the one fixed-topology exception on this class:
-      :meth:`add_checker`/:meth:`remove_checker` remain callable
-      post-construction, since checkers never affect declared
-      ``parameters``/``return_type`` (see ``01-overview.md`` SS4's "Fixed
-      topology" carve-out).
+      :meth:`add_checker`/:meth:`remove_checker`/:meth:`update_checker`
+      remain callable post-construction, since checkers never affect
+      declared ``parameters``/``return_type`` (see ``01-overview.md`` SS4's
+      "Fixed topology" carve-out).
     - ``result_setting_indices`` is a ``list[int]``, defaulting to ``[]``.
       Each element is resolved via ``_resolve_body_step_index`` (negative
       wraparound + range check). Fixed at construction -- it feeds
@@ -73,6 +77,19 @@ class IterativeFlow(Workflow):
     ``handoff_index``, ``max_iterations``).
     """
 
+    class Checker(NamedTuple):
+        """One early-exit gate: a judge invokable plus the approval value
+        that stops the loop when matched.
+
+        Never constructed by anything outside ``IterativeFlow`` -- position
+        in the ``checkers`` list/``self._checkers`` (list index) is the
+        body-step index this gate fires at, so there is no separate index
+        field to carry.
+        """
+
+        judge: AtomicInvokable
+        approval_value: Any
+
     def __init__(
         self,
         name: str,
@@ -81,7 +98,7 @@ class IterativeFlow(Workflow):
         body_steps: list[AtomicInvokable],
         max_iterations: int = 1,
         *,
-        checkers: list[CheckerSpec] | None = None,
+        checkers: list[tuple[AtomicInvokable, Any] | None] | None = None,
         result_setting_indices: list[int] | None = None,
         handoff_index: int | None = None,
         fallback_value: Any = NO_VAL,
@@ -100,8 +117,11 @@ class IterativeFlow(Workflow):
         max_iterations:
             Maximum number of body iterations to execute per run. Must be > 0.
         checkers:
-            Optional bulk-construction list of ``CheckerSpec``. Each is
-            registered via :meth:`add_checker`.
+            Optional bulk-construction list of plain ``(judge,
+            approval_value) | None`` tuples, one slot per body-step
+            position. Shorter-than-``body_steps`` lists implicitly pad
+            their missing tail with ``None``; longer ones raise. Each
+            non-``None`` entry is registered via :meth:`add_checker`.
         result_setting_indices:
             Body-step positions whose results update the running "current
             answer". Defaults to ``[]``.
@@ -139,9 +159,20 @@ class IterativeFlow(Workflow):
 
         # Checkers are validated and stored entirely through add_checker --
         # bulk construction just replays the same single validated path.
-        self._checkers: dict[int, CheckerSpec] = {}
-        for spec in checkers or []:
-            self.add_checker(spec.index, spec.judge, spec.approval_value)
+        # Position in the list is the body-step index; the list is always
+        # pre-sized to len(body_steps), with unfilled tail positions
+        # implicitly None.
+        self._checkers: list[IterativeFlow.Checker | None] = [None] * len(self._body_steps)
+        resolved_checkers = checkers if checkers is not None else []
+        if len(resolved_checkers) > len(self._body_steps):
+            raise IndexError(
+                f"checkers has {len(resolved_checkers)} entries but only "
+                f"{len(self._body_steps)} body step(s) are configured"
+            )
+        for index, entry in enumerate(resolved_checkers):
+            if entry is not None:
+                judge, approval_value = entry
+                self.add_checker(index, judge, approval_value)
 
         num_steps = len(self._body_steps)
         resolved_result_setting_indices = []
@@ -196,9 +227,14 @@ class IterativeFlow(Workflow):
         return self._body_steps
 
     @property
-    def checkers(self) -> MappingProxyType[int, CheckerSpec]:
-        """Read-only live view of currently configured checkers, keyed by index."""
-        return MappingProxyType(self._checkers)
+    def checkers(self) -> list[tuple[AtomicInvokable, Any] | None]:
+        """Snapshot of currently configured checkers, one slot per
+        body-step position (``None`` where nothing is registered), each
+        occupied slot a plain ``(judge, approval_value)`` tuple -- not
+        ``IterativeFlow.Checker`` itself, which is internal storage shape
+        only. A fresh copy -- mutating the returned list does not affect
+        the flow's own state."""
+        return [None if checker is None else tuple(checker) for checker in self._checkers]
 
     @property
     def result_setting_indices(self) -> tuple[int, ...]:
@@ -278,18 +314,49 @@ class IterativeFlow(Workflow):
             )
         if not isinstance(judge, AtomicInvokable):
             raise TypeError(f"checker judge must be AtomicInvokable, got {type(judge)!r}")
-        if index in self._checkers:
+        if self._checkers[index] is not None:
             raise ValueError(f"a checker is already registered at index {index}")
-        self._checkers[index] = CheckerSpec(index=index, judge=judge, approval_value=approval_value)
+        self._checkers[index] = IterativeFlow.Checker(judge=judge, approval_value=approval_value)
 
     def remove_checker(self, index: int) -> None:
         """Remove the checker registered at ``index``.
 
-        Raises ``ValueError`` if no checker is registered there.
+        Raises ``TypeError`` if ``index`` isn't an int, ``IndexError`` if
+        out of range (no negative-index wraparound), and ``ValueError`` if
+        no checker is registered there.
         """
-        if index not in self._checkers:
+        if not isinstance(index, int):
+            raise TypeError(f"checker index must be an int, got {type(index)!r}")
+        if not (0 <= index < len(self._body_steps)):
+            raise IndexError(
+                f"checker index {index} out of range for "
+                f"{len(self._body_steps)} configured body step(s)"
+            )
+        if self._checkers[index] is None:
             raise ValueError(f"no checker is registered at index {index}")
-        del self._checkers[index]
+        self._checkers[index] = None
+
+    def update_checker(self, index: int, approval_value: Any) -> None:
+        """Replace the ``approval_value`` of the checker registered at
+        ``index`` in place; ``judge`` is left untouched.
+
+        Raises ``TypeError`` if ``index`` isn't an int, ``IndexError`` if
+        out of range (no negative-index wraparound), and ``ValueError`` if
+        no checker is registered there.
+        """
+        if not isinstance(index, int):
+            raise TypeError(f"checker index must be an int, got {type(index)!r}")
+        if not (0 <= index < len(self._body_steps)):
+            raise IndexError(
+                f"checker index {index} out of range for "
+                f"{len(self._body_steps)} configured body step(s)"
+            )
+        current = self._checkers[index]
+        if current is None:
+            raise ValueError(f"no checker is registered at index {index}")
+        self._checkers[index] = IterativeFlow.Checker(
+            judge=current.judge, approval_value=approval_value
+        )
 
     # ------------------------------------------------------------------ #
     # Result construction
@@ -340,7 +407,7 @@ class IterativeFlow(Workflow):
                 if step_index == self._handoff_index:
                     handoff_candidate = result.result
 
-                checker = self._checkers.get(step_index)
+                checker = self._checkers[step_index]
                 if checker is not None:
                     if not isinstance(result.result, Mapping):
                         raise ValidationError(
@@ -416,7 +483,7 @@ class IterativeFlow(Workflow):
                 if step_index == self._handoff_index:
                     handoff_candidate = result.result
 
-                checker = self._checkers.get(step_index)
+                checker = self._checkers[step_index]
                 if checker is not None:
                     if not isinstance(result.result, Mapping):
                         raise ValidationError(
@@ -482,11 +549,12 @@ class IterativeFlow(Workflow):
                 "step_count": len(self._body_steps),
                 "checkers": [
                     {
-                        "index": c.index,
-                        "judge": c.judge.to_dict(),
-                        "approval_value": c.approval_value,
+                        "index": index,
+                        "judge": checker.judge.to_dict(),
+                        "approval_value": checker.approval_value,
                     }
-                    for c in sorted(self._checkers.values(), key=lambda c: c.index)
+                    for index, checker in enumerate(self._checkers)
+                    if checker is not None
                 ],
                 "result_setting_indices": list(self._result_setting_indices),
                 "handoff_index": self._handoff_index,

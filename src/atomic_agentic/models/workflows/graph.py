@@ -1,47 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from ...core.Invokable import AtomicInvokable
-
-__all__ = ["GraphFlowNode", "StatePolicySpec"]
-
-
-@dataclass(frozen=True, slots=True)
-class GraphFlowNode:
-    """One node's fixed topology plus its current priority, within a GraphFlow.
-
-    No ``__post_init__`` type validation of ``invokable``/``routers`` --
-    same as ``CheckerSpec.judge`` -- that validation is owned entirely by
-    ``GraphFlow.__init__``, which legitimately imports ``AtomicInvokable``
-    already.
-
-    Fields
-    ------
-    invokable:
-        The node's own AtomicInvokable.
-    incoming:
-        Source node names with a *fixed* edge pointing at this node (real
-        names only -- a router's dynamic target can't be known statically,
-        so router-attached edges never populate any node's incoming).
-    outgoing:
-        Fixed-edge target node names declared for this node.
-    routers:
-        Router invokables attached to this node (zero or more).
-    priority:
-        Current priority used to resolve same-superstep state-write
-        collisions when this node is one of several writers. Mutated via
-        ``GraphFlow.set_priority``, which replaces the whole frozen
-        instance (``dataclasses.replace``) rather than mutating in place.
-    """
-
-    invokable: AtomicInvokable
-    incoming: tuple[str, ...]
-    outgoing: tuple[str, ...]
-    routers: tuple[AtomicInvokable, ...]
-    priority: int
+__all__ = ["StatePolicySpec"]
 
 
 @dataclass(frozen=True, slots=True)

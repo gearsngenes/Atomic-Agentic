@@ -1,74 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError
 
 import pytest
 
-from atomic_agentic.models.workflows.graph import GraphFlowNode, StatePolicySpec
-from atomic_agentic.tools.base import Tool
-
-
-def make_tool(name: str = "node_tool") -> Tool:
-    return Tool(
-        function=lambda x: x,
-        name=name,
-        namespace="tests",
-        description="A trivial tool.",
-    )
-
-
-class TestGraphFlowNode:
-    def test_construction_stores_all_fields(self) -> None:
-        invokable = make_tool()
-        router = make_tool("router_tool")
-        node = GraphFlowNode(
-            invokable=invokable,
-            incoming=("a", "b"),
-            outgoing=("c",),
-            routers=(router,),
-            priority=2,
-        )
-
-        assert node.invokable is invokable
-        assert node.incoming == ("a", "b")
-        assert node.outgoing == ("c",)
-        assert node.routers == (router,)
-        assert node.priority == 2
-
-    def test_is_frozen(self) -> None:
-        node = GraphFlowNode(
-            invokable=make_tool(), incoming=(), outgoing=(), routers=(), priority=1
-        )
-
-        with pytest.raises(FrozenInstanceError):
-            node.priority = 5  # type: ignore[misc]
-
-    def test_replace_produces_new_instance_with_updated_priority(self) -> None:
-        node = GraphFlowNode(
-            invokable=make_tool(), incoming=(), outgoing=(), routers=(), priority=1
-        )
-
-        updated = replace(node, priority=9)
-
-        assert updated is not node
-        assert updated.priority == 9
-        assert node.priority == 1
-        assert updated.invokable is node.invokable
-        assert updated.incoming == node.incoming
-
-    def test_no_type_validation_of_invokable_or_routers(self) -> None:
-        # Deliberate, matching CheckerSpec.judge precedent -- construction
-        # accepts anything here; validation is GraphFlow.__init__'s job,
-        # since this module can't import AtomicInvokable at runtime.
-        node = GraphFlowNode(
-            invokable="not an invokable",  # type: ignore[arg-type]
-            incoming=(),
-            outgoing=(),
-            routers=("also not an invokable",),  # type: ignore[list-item]
-            priority=1,
-        )
-        assert node.invokable == "not an invokable"
-        assert node.routers == ("also not an invokable",)
+from atomic_agentic.models.workflows.graph import StatePolicySpec
 
 
 class TestStatePolicySpec:

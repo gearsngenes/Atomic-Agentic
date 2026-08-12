@@ -7,7 +7,7 @@ import pytest
 
 from atomic_agentic.exceptions import ExecutionError, ValidationError, WorkflowError
 from atomic_agentic.models.results.workflows import GraphFlowResult
-from atomic_agentic.models.workflows import GraphFlowNode, StatePolicySpec
+from atomic_agentic.models.workflows import StatePolicySpec
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.workflows.graph import GraphFlow
 
@@ -442,11 +442,11 @@ class TestGraphFlowNodeDataAssembly:
 
     def test_priority_defaults_to_one(self) -> None:
         flow = make_graph_flow()
-        assert flow.nodes["start"].priority == 1
+        assert flow.nodes["start"].priority[0] == 1
 
     def test_priority_from_priorities_dict(self) -> None:
         flow = make_graph_flow(priorities={"start": 5})
-        assert flow.nodes["start"].priority == 5
+        assert flow.nodes["start"].priority[0] == 5
 
     def test_self_loop_permitted(self) -> None:
         flow = make_graph_flow(edges=[("start", "start")])
@@ -463,6 +463,11 @@ class TestGraphFlowNodeDataAssembly:
         flow = make_graph_flow()
         with pytest.raises(TypeError):
             flow.nodes["start"] = None  # type: ignore[index]
+
+    def test_node_fields_cannot_be_reassigned(self) -> None:
+        flow = make_graph_flow()
+        with pytest.raises(AttributeError):
+            flow.nodes["start"].priority = [5]  # type: ignore[misc]
 
 
 class TestGraphFlowMutators:
@@ -503,7 +508,15 @@ class TestGraphFlowMutators:
     def test_set_priority_updates_node_data(self) -> None:
         flow = make_graph_flow()
         flow.set_priority("start", 9)
-        assert flow.nodes["start"].priority == 9
+        assert flow.nodes["start"].priority[0] == 9
+
+    def test_set_priority_mutates_same_node_object_in_place(self) -> None:
+        flow = make_graph_flow()
+        node_before = flow.nodes["start"]
+        flow.set_priority("start", 9)
+        node_after = flow.nodes["start"]
+        assert node_after is node_before
+        assert node_after.priority[0] == 9
 
     def test_set_priority_rejects_unknown_node(self) -> None:
         flow = make_graph_flow()

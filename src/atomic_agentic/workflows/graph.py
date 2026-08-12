@@ -6,12 +6,12 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 from ..exceptions import ValidationError, WorkflowError
 from ..core.Invokable import AtomicInvokable
 from ..models.parameters import ParamSpec, ParameterReport
-from ..models.workflows.graph import GraphFlowNode, StatePolicySpec
+from ..models.workflows.graph import StatePolicySpec
 from ..models.results import AtomicResult
 from ..models.results.workflows import GraphFlowResult
 from ..utils.core import run_coro_sync
@@ -84,6 +84,25 @@ class GraphFlow(Workflow):
     DICT: ClassVar[str] = "dict"
 
     _RESULT_MODES: ClassVar[frozenset[str]] = frozenset({SCALAR, LIST, TUPLE, SET, DICT})
+
+    class Node(NamedTuple):
+        """One node's fixed topology plus its current priority.
+
+        ``invokable``/``incoming``/``outgoing``/``routers`` are fixed after
+        construction and never reassigned. ``priority`` is deliberately a
+        single-item list -- a mutable box inside an otherwise-immutable
+        tuple -- so :meth:`GraphFlow.set_priority` can mutate it in place
+        (``entry.priority[0] = value``) without ever replacing the ``Node``
+        instance itself. No ``__post_init__``/runtime type validation of
+        ``invokable``/``routers`` exists here; validation is
+        ``GraphFlow.__init__``'s job.
+        """
+
+        invokable: AtomicInvokable
+        incoming: tuple[str, ...]
+        outgoing: tuple[str, ...]
+        routers: tuple[AtomicInvokable, ...]
+        priority: list[int]
 
     def __init__(
         self,
@@ -203,13 +222,13 @@ class GraphFlow(Workflow):
                 incoming[target].append(source)
 
         resolved_priorities = priorities or {}
-        self._node_data: dict[str, GraphFlowNode] = {
-            node_name: GraphFlowNode(
+        self._node_data: dict[str, GraphFlow.Node] = {
+            node_name: GraphFlow.Node(
                 invokable=invokable,
                 incoming=tuple(incoming[node_name]),
                 outgoing=tuple(fixed_targets[node_name]),
                 routers=tuple(routers_by_source[node_name]),
-                priority=resolved_priorities.get(node_name, 1),
+                priority=[resolved_priorities.get(node_name, 1)],
             )
             for node_name, invokable in nodes.items()
         }
@@ -325,10 +344,11 @@ class GraphFlow(Workflow):
     # Properties
     # ------------------------------------------------------------------ #
     @property
-    def nodes(self) -> MappingProxyType[str, GraphFlowNode]:
+    def nodes(self) -> MappingProxyType[str, "GraphFlow.Node"]:
         """Read-only live view of node topology/priority. Entries are
-        frozen GraphFlowNode instances -- safe against mutation even
-        through this view."""
+        ``GraphFlow.Node`` instances -- every field except ``priority`` is
+        fixed; ``priority`` is a single-item list, mutated in place by
+        :meth:`set_priority` rather than replaced."""
         return MappingProxyType(self._node_data)
 
     @property
@@ -404,14 +424,15 @@ class GraphFlow(Workflow):
         """Set ``node_name``'s priority.
 
         Raises ``KeyError`` if ``node_name`` isn't configured, ``TypeError``
-        if ``priority`` isn't an int. ``GraphFlowNode`` is frozen, so this
-        replaces the whole entry rather than mutating it in place.
+        if ``priority`` isn't an int. ``priority`` is a single-item list on
+        the node's ``Node`` entry, mutated in place -- the entry itself is
+        never replaced.
         """
         if node_name not in self._node_data:
             raise KeyError(f"{node_name!r} is not a configured node")
         if not isinstance(priority, int):
             raise TypeError(f"priority must be an int, got {type(priority)!r}")
-        self._node_data[node_name] = replace(self._node_data[node_name], priority=priority)
+        self._node_data[node_name].priority[0] = priority
 
     def _extra_description(self) -> str:
         """Fixed note on the graph's entry point and superstep cap."""
@@ -583,11 +604,11 @@ class GraphFlow(Workflow):
                     )
 
                 tiebreak = policy.tiebreak if policy is not None else "last"
-                max_priority = max(self._node_data[writer_name].priority for writer_name, _ in writers)
+                max_priority = max(self._node_data[writer_name].priority[0] for writer_name, _ in writers)
                 tied = [
                     (writer_name, value)
                     for writer_name, value in writers
-                    if self._node_data[writer_name].priority == max_priority
+                    if self._node_data[writer_name].priority[0] == max_priority
                 ]
                 state[key] = tied[0][1] if tiebreak == "first" else tied[-1][1]
 
@@ -659,7 +680,7 @@ class GraphFlow(Workflow):
                     {"key": k, "raise_on_collision": v.raise_on_collision, "tiebreak": v.tiebreak}
                     for k, v in sorted(self._state_policies.items())
                 ],
-                "priorities": {name: entry.priority for name, entry in self._node_data.items()},
+                "priorities": {name: entry.priority[0] for name, entry in self._node_data.items()},
                 "max_edge_traversals": self._max_edge_traversals,
                 "stop_early": self._stop_early,
                 "result_mode": self._result_mode,
