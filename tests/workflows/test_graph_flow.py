@@ -209,6 +209,67 @@ class TestGraphFlowConstruction:
         )
         assert flow is not None
 
+    def test_shared_type_widens_across_nodes(self) -> None:
+        def start_fn(x: dict) -> dict:
+            return {"x": x}
+
+        def other_fn(x: dict[str, int]) -> dict:
+            return {"x": x}
+
+        flow = make_graph_flow(
+            nodes={"start": T(start_fn, "start"), "other": T(other_fn, "other")}
+        )
+
+        x_param = next(p for p in flow.parameters if p.name == "x")
+        assert set(x_param.type) == {"dict", "dict[str, int]"}
+
+    def test_kind_default_description_always_come_from_start(self) -> None:
+        def start_fn(x: dict = None) -> dict:
+            return {"x": x}
+
+        def other_fn(x: dict[str, int] = {"k": 1}) -> dict:  # noqa: B006 -- deliberately distinct default for the test
+            return {"x": x}
+
+        flow = make_graph_flow(
+            nodes={"start": T(start_fn, "start"), "other": T(other_fn, "other")}
+        )
+
+        x_param = next(p for p in flow.parameters if p.name == "x")
+        assert x_param.default is None
+        assert set(x_param.type) == {"dict", "dict[str, int]"}
+
+    def test_widening_is_reachability_blind(self) -> None:
+        # "other" is never connected to "start" by any edge, but its type
+        # still widens start's own declared type for the shared name --
+        # mirrors test_whole_graph_collision_check_is_not_reachability_aware.
+        def start_fn(x: dict) -> dict:
+            return {"x": x}
+
+        def other_fn(x: dict[str, int]) -> dict:
+            return {"x": x}
+
+        flow = make_graph_flow(
+            nodes={"start": T(start_fn, "start"), "other": T(other_fn, "other")}, edges=[]
+        )
+
+        x_param = next(p for p in flow.parameters if p.name == "x")
+        assert set(x_param.type) == {"dict", "dict[str, int]"}
+
+    def test_widening_does_not_mutate_node_invokables(self) -> None:
+        def start_fn(x: dict) -> dict:
+            return {"x": x}
+
+        def other_fn(x: dict[str, int]) -> dict:
+            return {"x": x}
+
+        start_node = T(start_fn, "start")
+        other_node = T(other_fn, "other")
+        flow = make_graph_flow(nodes={"start": start_node, "other": other_node})
+
+        assert flow is not None
+        assert [p.type for p in start_node.parameters] == [("dict",)]
+        assert [p.type for p in other_node.parameters] == [("dict[str, int]",)]
+
     def test_scalar_return_type_reconciled_from_declaring_nodes(self) -> None:
         def start_fn(x: int) -> dict:
             return {"x": x, "y": 0}

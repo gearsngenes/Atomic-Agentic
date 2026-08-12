@@ -10,12 +10,12 @@ from typing import Any, ClassVar
 
 from ..exceptions import ValidationError, WorkflowError
 from ..core.Invokable import AtomicInvokable
-from ..models.parameters import ParamSpec
+from ..models.parameters import ParamSpec, ParameterReport
 from ..models.workflows.graph import GraphFlowNode, StatePolicySpec
 from ..models.results import AtomicResult
 from ..models.results.workflows import GraphFlowResult
 from ..utils.core import run_coro_sync
-from ..utils.parameters import _simplify_type_set, n_way_parameter_report, semantically_compatible
+from ..utils.parameters import _simplify_type_set, build_parameter_reports
 from .base import Workflow
 
 logger = logging.getLogger(__name__)
@@ -36,8 +36,12 @@ class GraphFlow(Workflow):
       edge/router sharing that ``source``); ``(source, router_invokable)``
       attaches a router to ``source`` (multiple such tuples for the same
       ``source`` attach multiple routers).
-    - ``start``: single entry node name; ``GraphFlow.parameters`` =
-      ``nodes[start].parameters``.
+    - ``start``: single entry node name; ``GraphFlow.parameters`` has
+      exactly ``nodes[start].parameters``'s own names, in the same order.
+      Any name ``start`` shares with another configured node has its
+      ``type`` widened to the full cross-node compatible witness set;
+      ``kind``/``default``/``description`` always come from ``start``'s
+      own declaration, never any other node's.
     - ``state_policies`` / ``priorities``: mutable post-construction via
       :meth:`set_state_policy`/:meth:`remove_state_policy`/
       :meth:`set_priority` (same shape-vs-behavior justification
@@ -46,9 +50,12 @@ class GraphFlow(Workflow):
     - ``max_edge_traversals`` / ``stop_early``: mutable behavioral knobs.
     - ``result_mode`` / ``return_keys``: fixed at construction -- feed
       ``return_type``.
-    - Construction also runs a whole-graph parameter-collision check
-      (:func:`n_way_parameter_report`) across every node's declared
-      parameters, independent of reachability from ``start``.
+    - Construction runs a whole-graph parameter reconciliation
+      (:func:`build_parameter_reports`) across every node's declared
+      parameters, independent of reachability from ``start`` -- this both
+      raises ``WorkflowError`` on a genuine type/kind conflict between any
+      two nodes sharing a name, and supplies the type-widening described
+      above.
 
     Runtime contract
     -----------------
@@ -241,50 +248,61 @@ class GraphFlow(Workflow):
             raise ValueError("result_mode='scalar' allows at most one requested key")
         self._return_keys: tuple[str, ...] = normalized_return_keys
 
-        # Whole-graph parameter-collision check -- every node, regardless
-        # of whether it's actually reachable from start on any real path.
-        node_names_in_order = list(self._node_data.keys())
-        report = n_way_parameter_report(
+        # Whole-graph parameter reconciliation -- every node, regardless of
+        # whether it's actually reachable from start on any real path.
+        # start is forced to source index 0 so its own observation is
+        # always the reconciliation anchor: the winning source whenever it
+        # declares a name, and therefore the source of kind/default/
+        # description on GraphFlow's own advertised parameters.
+        node_names_in_order = [start, *(n for n in self._node_data if n != start)]
+        reports: list[ParameterReport] = build_parameter_reports(
             [list(self._node_data[n].invokable.parameters) for n in node_names_in_order]
         )
-        for entry in report:
-            type_collision = any(
-                not semantically_compatible(a, b)
-                for i, (_, a) in enumerate(entry.observations)
-                for _, b in entry.observations[i + 1:]
-            )
-            kind_collision = (
-                any(k in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD) for k in entry.kinds)
-                and len(entry.kinds) > 1
-            )
-            if type_collision or kind_collision:
+
+        parameters: list[ParamSpec] = []
+        for report in reports:
+            if not report.witness_types or not report.kind_compatible:
                 conflicting = ", ".join(
                     f"{node_names_in_order[index]!r} ({' | '.join(spec.type)}/{spec.kind})"
-                    for index, spec in entry.observations
+                    for index, spec in enumerate(report.observations)
+                    if spec is not None
                 )
                 raise WorkflowError(
-                    f"GraphFlow parameter {entry.name!r} conflicts across nodes: "
+                    f"GraphFlow parameter {report.parameter_name!r} conflicts across nodes: "
                     f"{conflicting} (same name, incompatible type/kind)."
+                )
+
+            start_spec = report.observations[0]
+            if start_spec is not None:
+                parameters.append(
+                    replace(start_spec, type=tuple(sorted(report.witness_types)))
                 )
 
         if self._result_mode == self.SCALAR:
             if self._return_keys:
-                key_report = next((r for r in report if r.name == self._return_keys[0]), None)
+                key_report = next(
+                    (r for r in reports if r.parameter_name == self._return_keys[0]), None
+                )
                 if key_report is not None:
-                    # Flatten every surviving observation's members (each
-                    # itself already a proven-mutually-compatible tuple, per
-                    # the collision check above) into one set, drop the
-                    # wildcard "Any" (adds no real information), collapse
-                    # any bare-origin/parameterized-sibling redundancy
-                    # (dict + dict[str, int] -> dict), then join what's left
-                    # as a union -- same representation convention as every
-                    # other return_type in this pass. Empty after dropping
-                    # "Any" (every node typed this key Any, or key_report
-                    # doesn't exist) -> "Any" is the honest answer, not an
-                    # arbitrary pick among genuine candidates.
+                    # Flatten every declaring node's own raw type tuple
+                    # (each itself already a proven-mutually-compatible
+                    # tuple, per the collision check above) into one set,
+                    # drop the wildcard "Any" (adds no real information),
+                    # collapse any bare-origin/parameterized-sibling
+                    # redundancy (dict + dict[str, int] -> dict), then join
+                    # what's left as a union -- same representation
+                    # convention as every other return_type in this pass.
+                    # Deliberately the full raw union, not narrowed to
+                    # key_report.witness_types -- an output question needing
+                    # every possibility, not an input question needing
+                    # common ground. Empty after dropping "Any" (every node
+                    # typed this key Any, or key_report doesn't exist) ->
+                    # "Any" is the honest answer, not an arbitrary pick
+                    # among genuine candidates.
                     flat_types: set[str] = set()
-                    for type_tuple in key_report.types:
-                        flat_types.update(type_tuple)
+                    for spec in key_report.observations:
+                        if spec is not None:
+                            flat_types.update(spec.type)
                     concrete_types = _simplify_type_set(flat_types - {"Any"})
                     return_type = " | ".join(sorted(concrete_types)) if concrete_types else "Any"
                 else:
@@ -293,8 +311,6 @@ class GraphFlow(Workflow):
                 return_type = "None"
         else:
             return_type = self._result_mode
-
-        parameters = list(self._node_data[start].invokable.parameters)
 
         super().__init__(
             name=name,
