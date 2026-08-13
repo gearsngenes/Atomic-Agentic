@@ -14,7 +14,6 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import asyncio
 import logging
-import warnings
 
 from ..exceptions import (
     AgentError,
@@ -35,15 +34,12 @@ logger = logging.getLogger(__name__)
 from .tools import identity_pre_tool, identity_post_tool
 from ..constants.agents import RUN_ID_PARAM
 from ..utils.parameters import (
-    semantically_compatible,
     semantically_identical,
-    parameter_overlap,
-    parameter_collisions,
-    variadic_compatible,
     insert_by_category,
     to_paramspec_list,
+    build_parameter_reports,
+    apply_parameter_reports,
 )
-
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent
@@ -83,25 +79,41 @@ class Agent(AtomicInvokable, ABC):
     Schema composition
     -------------------
     The agent's parameter schema is composed at construction time from four
-    flat sources, reconciled in order:
+    flat sources:
 
     - All ``pre_invoke`` parameters.
-    - Post-only non-result parameters, grafted while preserving their
-      original declared kind (no forced ``KEYWORD_ONLY`` coercion).
+    - Post-only non-result parameters, preserving their original declared
+      kind (no forced ``KEYWORD_ONLY`` coercion).
     - ``extra_parameters`` — a flat, subclass-computed source (e.g.
       ``BasicAgent`` passes its role-prompt placeholders as this agent's
       sole ``extra_parameters`` source).
     - This (sub)class's reserved parameters (``get_reserved_parameters()``;
       ``run_id`` by default), grafted last.
 
-    Name collisions between sources are resolved via
-    ``semantically_compatible`` / ``semantically_identical``
-    (``utils/parameters.py``): an incompatible collision raises
-    ``AgentError``; a compatible-but-not-identical overlap warns (the
-    earlier-reconciled source wins); an identical overlap is silent.
-    Grafting uses ``insert_by_category`` so every new parameter lands at the
-    position that preserves a valid Python-style signature ordering,
-    regardless of its declared kind.
+    Reserved-name overlaps in pre_invoke/post_invoke/extra_parameters are
+    resolved first, independently per source (never against each other): a
+    declaration matching a reserved name exactly (``semantically_identical``)
+    is silently stripped — it is never forwarded to that source at invocation
+    time regardless of the match. Any other overlap raises ``AgentError``;
+    there is no warning tier on this axis, since a reserved declaration is
+    never negotiable. ``VAR_POSITIONAL``/``VAR_KEYWORD`` parameters are exempt
+    from this check entirely — a catch-all's bucket name colliding with a
+    reserved name is a naming coincidence, not the same slot.
+
+    The remaining pre_invoke/post-only/extra_parameters sources are then
+    reconciled together via one N-way compatibility report
+    (``utils.parameters.build_parameter_reports``) rather than a pairwise
+    fold: a name with no shared compatible type, or an incompatible kind,
+    across the sources that declare it raises ``AgentError``; a
+    compatible-but-not-identical overlap warns once per construction call,
+    grouped across every such name — not one warning per name. The
+    highest-priority declaring source (``pre_invoke`` > ``post_invoke`` >
+    ``extra_parameters``) supplies ``kind``/``default``/``description``
+    together; the constructed ``type`` is the full witness set of compatible
+    type tokens, not just the winning source's own declared type. An
+    identical overlap is silent. Grafting uses ``insert_by_category`` so every
+    new parameter lands at the position that preserves a valid Python-style
+    signature ordering, regardless of its declared kind.
 
     ``context_enabled``
     -------------------
@@ -178,106 +190,69 @@ class Agent(AtomicInvokable, ABC):
         if len(post_tool.parameters) == 0:
             raise AgentError("Agent.post_invoke must expect at least 1 argument")
 
-        # 2. Reserved parameters for this (sub)class.
-        reserved_params = self.get_reserved_parameters()
+        # 3. Reserved parameters for this (sub)class, computed once.
+        reserved = self.get_reserved_parameters()
+        reserved_names = {p.name for p in reserved}
 
-        # 3. Normalize extra_parameters; reject variadic entries.
-        extra_params = to_paramspec_list(extra_parameters)
+        # 4. Normalize extra_parameters; reject variadic entries.
+        extra_raw = to_paramspec_list(extra_parameters)
         variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
-        for p in extra_params:
+        for p in extra_raw:
             if p.kind in variadic_kinds:
                 raise AgentError(
                     f"extra_parameters entry {p.name!r} must not be variadic; "
                     f"got kind {p.kind!r}."
                 )
 
-        # 4-5. Reserved-name reconciliation — three independent passes, each
-        # popped of its own reserved-name entries once reconciled.
-        pre_params = self._reconcile_reserved_names(
-            list(pre_tool.parameters), reserved_params, "pre_invoke"
-        )
-        post_params_full = self._reconcile_reserved_names(
-            list(post_tool.parameters), reserved_params, "post_invoke"
-        )
-        extra_params = self._reconcile_reserved_names(
-            extra_params, reserved_params, "extra_parameters"
-        )
-
-        # 6. Resolve post_result_key against the reserved-popped post pool.
+        # 5. Resolve post_result_key against post_tool.parameters directly
+        # (unstripped of any reserved-name overlaps).
         if post_result_key is None:
-            if not post_params_full:
-                raise AgentError("Agent.post_invoke must expect at least 1 argument")
-            resolved_post_result_key = post_params_full[0].name
+            resolved_post_result_key = post_tool.parameters[0].name
         else:
             if not isinstance(post_result_key, str) or not post_result_key.strip():
                 raise AgentError("post_result_key must be None or a non-empty string.")
             resolved_post_result_key = post_result_key.strip()
-            if resolved_post_result_key not in {p.name for p in post_params_full}:
+            if resolved_post_result_key not in {p.name for p in post_tool.parameters}:
                 raise AgentError(
                     "post_result_key must name one of post_invoke's declared parameters; "
                     f"got {resolved_post_result_key!r}."
                 )
-        if resolved_post_result_key in {p.name for p in pre_params} or (
-            resolved_post_result_key in {p.name for p in extra_params}
-        ):
+
+        # 6. The result-routing slot can never itself be a reserved name.
+        if resolved_post_result_key in reserved_names:
             raise AgentError(
-                f"post_result_key {resolved_post_result_key!r} collides with a "
-                "pre_invoke or extra_parameters name; a name cannot mean both a "
-                "caller-supplied input and the internal result-routing slot."
+                f"post_result_key {resolved_post_result_key!r} is a framework-reserved "
+                "parameter name; it cannot also serve as the internal "
+                "result-routing slot."
             )
 
-        # 7. Pre-vs-post reconciliation.
-        post_only = [p for p in post_params_full if p.name != resolved_post_result_key]
-        pre_post_collisions = parameter_collisions(pre_params, post_only)
-        if pre_post_collisions:
-            raise AgentError(
-                f"pre_invoke/post_invoke parameter collision(s): {pre_post_collisions!r} "
-                "(same name, incompatible type/kind)."
-            )
-        pre_post_overlap = parameter_overlap(pre_params, post_only)
-        if not variadic_compatible(pre_params, post_only, set(pre_post_overlap)):
-            raise AgentError(
-                "pre_invoke and post_invoke each declare an independent variadic "
-                "parameter of the same kind under different names; rename one."
-            )
-        pre_by_name = {p.name: p for p in pre_params}
-        post_by_name = {p.name: p for p in post_only}
-        for overlap_name in pre_post_overlap:
-            if not semantically_identical(pre_by_name[overlap_name], post_by_name[overlap_name]):
-                warnings.warn(
-                    f"Parameter {overlap_name!r} is declared by both pre_invoke and "
-                    "post_invoke and is compatible but not identical; pre_invoke's "
-                    "declaration wins.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-        post_only_remainder = [p for p in post_only if p.name not in pre_post_overlap]
-        combined = insert_by_category(pre_params, post_only_remainder)
+        # 7. Post-only parameters: post_tool's declared params minus the result key.
+        post_only_raw = [
+            p for p in post_tool.parameters if p.name != resolved_post_result_key
+        ]
 
-        # 8. Combined-vs-extra reconciliation.
-        combined_extra_collisions = parameter_collisions(combined, extra_params)
-        if combined_extra_collisions:
-            raise AgentError(
-                "pre_invoke/post_invoke schema vs. extra_parameters collision(s): "
-                f"{combined_extra_collisions!r} (same name, incompatible type/kind)."
-            )
-        combined_extra_overlap = parameter_overlap(combined, extra_params)
-        combined_by_name = {p.name: p for p in combined}
-        extra_by_name = {p.name: p for p in extra_params}
-        for overlap_name in combined_extra_overlap:
-            if not semantically_identical(combined_by_name[overlap_name], extra_by_name[overlap_name]):
-                warnings.warn(
-                    f"extra_parameters entry {overlap_name!r} is compatible with an "
-                    "existing pre_invoke/post_invoke parameter but not identical; "
-                    "the pre_invoke/post_invoke declaration wins.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-        extra_remainder = [p for p in extra_params if p.name not in combined_extra_overlap]
-        combined = insert_by_category(combined, extra_remainder)
+        # 8. Reserved-overlap pass, fully independent per source (never
+        # compared against each other for a reserved name).
+        pre_params = self._strip_reserved_overlaps(
+            list(pre_tool.parameters), reserved, "pre_invoke"
+        )
+        post_only = self._strip_reserved_overlaps(post_only_raw, reserved, "post_invoke")
+        extra_params = self._strip_reserved_overlaps(extra_raw, reserved, "extra_parameters")
 
-        # 9. Final reserved-parameter graft — produces the schema directly.
-        agent_parameters = insert_by_category(combined, reserved_params)
+        # 9. N-way peer reconciliation: pre_invoke > post_invoke > extra_parameters.
+        reports = build_parameter_reports([pre_params, post_only, extra_params])
+
+        # 10. Apply reports: raises on the first genuine conflict; emits at
+        # most one grouped UserWarning for compatible-but-not-identical names.
+        constructed = apply_parameter_reports(
+            reports, ("pre_invoke", "post_invoke", "extra_parameters"), error_cls=AgentError, stacklevel=4
+        )
+
+        # 11. Category-normalize the reconciled peer schema.
+        combined = insert_by_category([], constructed)
+
+        # 12. Final reserved-parameter graft — produces the schema directly.
+        agent_parameters = insert_by_category(combined, reserved)
 
         # Store lifecycle components.
         self._pre_invoke = pre_tool
@@ -320,48 +295,51 @@ class Agent(AtomicInvokable, ABC):
     # Agent lifecycle configuration and validation
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _reconcile_reserved_names(
+    def _strip_reserved_overlaps(
         params: list[ParamSpec],
-        reserved_params: list[ParamSpec],
+        reserved: list[ParamSpec],
         source_label: str,
     ) -> list[ParamSpec]:
-        """Warn or raise on reserved-name collisions, then pop reserved names.
+        """Strip reserved-name overlaps from one source, independently.
 
-        For each param whose name matches a ``reserved_params`` entry:
-        ``semantically_identical`` → warn (redundant declaration);
-        ``semantically_compatible`` (but not identical) → warn (distinct
-        message); otherwise → raise ``AgentError`` (true collision). Returns
-        ``params`` with every reserved-name entry removed — only the
-        warned/compatible ones can still be present, since true collisions
-        already raised.
+        Never compares this source's declarations to any other source's --
+        each of ``pre_invoke``/``post_invoke``/``extra_parameters`` is
+        checked only against the fixed reserved spec. ``VAR_POSITIONAL``/
+        ``VAR_KEYWORD`` params are exempt entirely, regardless of name -- a
+        catch-all's bucket name colliding with a reserved name is a naming
+        coincidence, not the same slot. For every other param whose name
+        matches a reserved name: ``semantically_identical`` -> stripped
+        silently (redundant, harmless declaration -- no warning); otherwise
+        -> raises ``AgentError`` immediately. There is no warning tier on
+        this axis -- a reserved declaration is never negotiable, it must
+        match exactly or be omitted.
         """
-        reserved_by_name = {p.name: p for p in reserved_params}
+        reserved_by_name = {p.name: p for p in reserved}
+        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
+        stripped_names: set[str] = set()
+
         for param in params:
-            reserved = reserved_by_name.get(param.name)
-            if reserved is None:
+            if param.kind in variadic_kinds:
                 continue
-            if semantically_identical(param, reserved):
-                warnings.warn(
-                    f"{param.name!r} declared in {source_label} is redundant; "
-                    "the framework grafts it automatically.",
-                    UserWarning,
-                    stacklevel=4,
-                )
-            elif semantically_compatible(param, reserved):
-                warnings.warn(
-                    f"{param.name!r} declared in {source_label} is compatible with "
-                    "the framework-reserved parameter of the same name but not "
-                    "identical; the framework's version will be used.",
-                    UserWarning,
-                    stacklevel=4,
-                )
+            reserved_spec = reserved_by_name.get(param.name)
+            if reserved_spec is None:
+                continue
+            if semantically_identical(param, reserved_spec):
+                stripped_names.add(param.name)
             else:
                 raise AgentError(
-                    f"{param.name!r} declared in {source_label} conflicts with the "
-                    "framework-reserved parameter of the same name "
-                    "(kind, type, or default mismatch)."
+                    f"{source_label} declares {param.name!r} "
+                    f"(type={param.type!r}, kind={param.kind!r}, "
+                    f"default={param.default!r}, description={param.description!r}), "
+                    "which is not identical to the framework-reserved parameter of "
+                    f"the same name (type={reserved_spec.type!r}, "
+                    f"kind={reserved_spec.kind!r}, default={reserved_spec.default!r}, "
+                    f"description={reserved_spec.description!r}); reserved declarations "
+                    f"must match exactly or be omitted -- they are never forwarded to "
+                    f"{source_label} regardless of compatibility."
                 )
-        return [p for p in params if p.name not in reserved_by_name]
+
+        return [p for p in params if p.name not in stripped_names]
 
     # ------------------------------------------------------------------ #
     # Agent Properties

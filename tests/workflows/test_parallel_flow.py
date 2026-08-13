@@ -163,7 +163,7 @@ class TestParallelFlowConstruction:
         assert list(flow.parameters) == list(b0.parameters)
 
     def test_colliding_incompatible_parameter_raises_workflow_error(self) -> None:
-        with pytest.raises(WorkflowError, match="conflict with an earlier branch"):
+        with pytest.raises(WorkflowError, match="no compatible reconciliation"):
             ParallelFlow(
                 name="bad_flow",
                 namespace="tests",
@@ -175,7 +175,11 @@ class TestParallelFlowConstruction:
             )
 
     def test_independently_named_variadic_conflict_raises_workflow_error(self) -> None:
-        with pytest.raises(WorkflowError, match="independent variadic parameter"):
+        # Caught by the shared parameter-order validator (SchemaError, a
+        # WorkflowError subclass) -- two independently-named same-kind
+        # variadics survive N-way reconciliation as two distinct names, then
+        # collide structurally on re-validation in insert_by_category.
+        with pytest.raises(WorkflowError, match="Only one VAR_POSITIONAL parameter is allowed"):
             ParallelFlow(
                 name="bad_flow",
                 namespace="tests",
@@ -190,7 +194,7 @@ class TestParallelFlowConstruction:
         earlier = make_branch("a", param_description="earlier description")
         later = make_branch("b", param_description="later description")
 
-        with pytest.warns(UserWarning, match="compatible with an earlier branch"):
+        with pytest.warns(UserWarning, match="compatible across"):
             flow = ParallelFlow(
                 name="parallel_flow",
                 namespace="tests",
@@ -199,6 +203,29 @@ class TestParallelFlowConstruction:
             )
 
         assert flow.parameters[0].description == "earlier description"
+
+    def test_type_witness_set_broader_than_any_single_branch_declaration(self) -> None:
+        # Old left-to-right fold: branch 0's own "dict[str, int]"
+        # declaration would win and be kept verbatim once branch 1's bare
+        # "dict" is judged compatible-and-discarded, silently masking
+        # branch 1's own bridging contribution. True N-way reconciliation
+        # instead computes the full compatible-type witness set across all
+        # three branches at once -- broader than any single branch's own
+        # declared type.
+        with pytest.warns(UserWarning, match="compatible across"):
+            flow = ParallelFlow(
+                name="parallel_flow",
+                namespace="tests",
+                description="Parallel test flow.",
+                branches=[
+                    TypedParamWorkflow(param_type="dict[str, int]", tag="a"),
+                    TypedParamWorkflow(param_type="dict", tag="b"),
+                    TypedParamWorkflow(param_type="dict[str, int]", tag="c"),
+                ],
+            )
+
+        shared_param = next(p for p in flow.parameters if p.name == "x")
+        assert shared_param.type == ("dict", "dict[str, int]")
 
     def test_result_mode_defaults_to_list(self) -> None:
         flow = make_three_branch_flow()

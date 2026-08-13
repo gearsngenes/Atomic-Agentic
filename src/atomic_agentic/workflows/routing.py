@@ -6,17 +6,15 @@ from dataclasses import replace
 from collections.abc import Hashable, Iterable, Mapping
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, ClassVar
+from typing import Any
 
 from ..exceptions import ValidationError, WorkflowError
 from ..core.Invokable import AtomicInvokable
 from ..constants.core import NO_VAL
 from ..models.parameters import ParamSpec
 from ..utils.parameters import (
-    parameter_collisions,
-    parameter_overlap,
-    variadic_compatible,
-    semantically_identical,
+    build_parameter_reports,
+    n_way_kind_compatible,
     insert_by_category,
 )
 from ..models.results.workflows import RoutingFlowResult
@@ -25,6 +23,20 @@ from .base import Workflow
 logger = logging.getLogger(__name__)
 
 __all__ = ["RoutingFlow"]
+
+
+def _group_by_equality(values: Iterable[Any]) -> list[Any]:
+    """Partition an iterable into equality groups, preserving first-seen order.
+
+    Used for grouping declared ``default`` values across branches -- a
+    plain ``set()`` isn't safe here since a default may be unhashable
+    (e.g. a list).
+    """
+    groups: list[Any] = []
+    for value in values:
+        if not any(value == existing for existing in groups):
+            groups.append(value)
+    return groups
 
 
 class RoutingFlow(Workflow):
@@ -50,22 +62,32 @@ class RoutingFlow(Workflow):
       no wrapping. The normalized router is exposed read-only via
       :attr:`router`.
     - ``parameters`` is not a constructor option. The outer schema is always
-      derived from ``router`` + ``branches`` per ``schema_mode``:
-        - ``STRICT`` (default) -- outer schema equals the router's own
-          parameters, verbatim. Every branch's parameter names must already
-          exist in the router's schema (raises ``WorkflowError`` otherwise);
-          overlapping names are checked for collisions/identity, but nothing
-          new is ever introduced.
-        - ``PARTIAL`` -- a router-seeded union-fold across router + all
-          branches (same reconciliation primitives ``ParallelFlow`` uses),
-          gated by requiring each branch to share at least one non-colliding
-          parameter name with the router (raises ``WorkflowError``
-          otherwise).
-        - ``OPEN`` -- identical fold to ``PARTIAL``, without the overlap
-          requirement -- a branch may share nothing with the router.
-      For ``PARTIAL``/``OPEN``, a parameter a branch introduces that the
-      router doesn't already declare becomes optional (``default=None``)
-      when it doesn't already carry a default of its own.
+      derived from ``router`` + ``branches``, per-name:
+        - A name the router declares is reconciled against each declaring
+          branch independently (a 2-source witness check per branch,
+          router vs. that branch); the final type is the union of every
+          declaring branch's own passing witness -- not one shared check
+          across all branches at once, since only one branch ever runs.
+          An incompatible branch raises ``WorkflowError`` immediately,
+          naming that branch. ``kind``/``default``/``description`` are
+          always the router's own, unconditionally.
+        - A name the router doesn't declare is never rejected -- branches
+          may always introduce parameters the router doesn't have. It's
+          kind-gated across its declaring branches (raise on conflict --
+          the only remaining raise condition for these names), with
+          ``description`` from the first-declaring branch. A
+          ``VAR_POSITIONAL``/``VAR_KEYWORD`` name keeps ``default=NO_VAL``
+          (required -- a default there would raise downstream) with a
+          plain type union across declaring branches. A scalar name's type
+          is that same union plus ``"None"``, with ``default=None`` --
+          unless every declaring branch shares the exact same real
+          (non-``NO_VAL``) default, in which case that shared value is used
+          instead and ``"None"`` is not added, since there's no fallback
+          gap to cover.
+      Every construction call emits at most one grouped ``UserWarning``
+      naming every router-shared name that reconciled but wasn't identical
+      to the router's own declaration (not one warning per name or per
+      branch).
     - ``return_type`` is the shared branch return type if all branches agree,
       otherwise a ``" | "``-joined union of each unique branch return type,
       in branch order.
@@ -73,8 +95,8 @@ class RoutingFlow(Workflow):
       ``trace`` with the router's and selected branch's own ``AtomicResult``
       objects. Defaults to ``True``; mutable post-construction via the
       inherited ``include_trace`` property.
-    - Branch, router, and schema-mode topology are all fixed at
-      construction. No mutation API is provided.
+    - Branch and router topology are fixed at construction. No mutation
+      API is provided.
 
     Routing contract
     -----------------
@@ -94,11 +116,6 @@ class RoutingFlow(Workflow):
     - Exactly one branch is invoked per run.
     """
 
-    OPEN: ClassVar[str] = "open"
-    PARTIAL: ClassVar[str] = "partial"
-    STRICT: ClassVar[str] = "strict"
-    _SCHEMA_MODES: ClassVar[frozenset[str]] = frozenset({OPEN, PARTIAL, STRICT})
-
     def __init__(
         self,
         name: str,
@@ -107,7 +124,6 @@ class RoutingFlow(Workflow):
         branches: tuple[AtomicInvokable, ...] | list[AtomicInvokable] | dict[Hashable, AtomicInvokable],
         router: AtomicInvokable,
         *,
-        schema_mode: str = STRICT,
         include_trace: bool = True,
     ) -> None:
         # 1. Topology is fixed at construction: list/tuple branches are selected
@@ -139,24 +155,16 @@ class RoutingFlow(Workflow):
             raise TypeError(f"RoutingFlow router must be AtomicInvokable, got {type(router)!r}")
         normalized_router = router
 
-        # 3. schema_mode picks how far branches may diverge from the
-        #    router's own declared parameters -- resolved once, immutable
-        #    thereafter.
-        if schema_mode not in self._SCHEMA_MODES:
-            raise ValueError(
-                f"schema_mode must be one of {sorted(self._SCHEMA_MODES)!r}, got {schema_mode!r}"
-            )
-
         branch_values = (
             normalized_branches.values()
             if isinstance(normalized_branches, dict)
             else normalized_branches
         )
 
-        # 4. Outer schema is fully derived -- no manual override.
-        declared_parameters = self._reconcile_parameters(normalized_router, branch_values, schema_mode)
+        # 3. Outer schema is fully derived -- no manual override.
+        declared_parameters = self._reconcile_parameters(normalized_router, branch_values)
 
-        # 5. return_type reflects every branch that could be selected at runtime:
+        # 4. return_type reflects every branch that could be selected at runtime:
         #    the shared type if all branches agree, otherwise a "|"-joined union
         #    of each unique branch return type, in branch order.
         unique_return_types = list(dict.fromkeys(branch.return_type for branch in branch_values))
@@ -177,7 +185,6 @@ class RoutingFlow(Workflow):
 
         self._branches: tuple[AtomicInvokable, ...] | dict[Hashable, AtomicInvokable] = normalized_branches
         self._router: AtomicInvokable = normalized_router
-        self._schema_mode: str = schema_mode
 
     # ------------------------------------------------------------------ #
     # Read-only properties
@@ -198,11 +205,6 @@ class RoutingFlow(Workflow):
     def router(self) -> AtomicInvokable:
         """Return the fixed normalized router."""
         return self._router
-
-    @property
-    def schema_mode(self) -> str:
-        """Return the fixed parameter-reconciliation mode: OPEN, PARTIAL, or STRICT."""
-        return self._schema_mode
 
     def _extra_description(self) -> str:
         """State the fixed branch count; inline shared branch content when unanimous.
@@ -231,112 +233,113 @@ class RoutingFlow(Workflow):
     def _reconcile_parameters(
         router: AtomicInvokable,
         branches: Iterable[AtomicInvokable],
-        schema_mode: str,
     ) -> list[ParamSpec]:
         """Derive the outer parameter schema from the router and branches.
 
-        STRICT: the router's own parameters are the fixed ceiling. Each
-        branch's parameter names must already exist in that schema (raise
-        otherwise); overlapping names are checked for collisions, then for
-        exact identity (warn if merely compatible). Nothing is ever added.
+        Every router-declared name is reconciled against each declaring
+        branch independently via a 2-source ``build_parameter_reports``
+        call (router always source 0, so it's the ``winner_source`` --
+        and therefore supplies kind/default/description -- whenever it
+        declares the name). A branch's own passing witness is unioned into
+        that name's running type across all branches; an empty witness or
+        incompatible kind raises immediately, naming the offending branch.
 
-        PARTIAL / OPEN: a router-seeded left-fold across every branch, same
-        primitives/order ParallelFlow._reconcile_branch_parameters uses.
-        PARTIAL additionally requires each branch to share at least one
-        non-colliding parameter with the router before folding it in.
-        Parameters a branch introduces that the router didn't already have
-        become optional (default=None) if they lack their own default --
-        not every branch runs on a given invocation.
+        A name the router doesn't declare is never rejected -- branches may
+        always introduce parameters the router doesn't have. Every such
+        name is kind-gated across its declaring branches (raise on
+        conflict) and takes its ``description`` from the first-declaring
+        branch. A ``VAR_POSITIONAL``/``VAR_KEYWORD`` name keeps
+        ``default=NO_VAL`` (structurally required) with a plain flat type
+        union. A scalar name uses the flat type union plus ``"None"``, with
+        ``default=None`` -- unless every declaring branch shares the exact
+        same non-``NO_VAL`` default, in which case that shared value is
+        used as-is and ``"None"`` is not appended. A lone ``NO_VAL`` never
+        counts as an agreed default on its own, so a name only one branch
+        declares, with no default of its own, still resolves to
+        ``default=None``.
         """
-        combined: list[ParamSpec] = list(router.parameters)
-        router_names = {p.name for p in combined}
+        router_params = list(router.parameters)
+        router_by_name = {p.name: p for p in router_params}
 
-        if schema_mode == RoutingFlow.STRICT:
-            for branch in branches:
-                branch_params = list(branch.parameters)
+        resolved: dict[str, ParamSpec] = dict(router_by_name)
+        overlapped: list[str] = []
+        non_router_declarations: dict[str, list[tuple[AtomicInvokable, ParamSpec]]] = {}
 
-                unknown = {p.name for p in branch_params} - router_names
-                if unknown:
-                    raise WorkflowError(
-                        f"RoutingFlow branch {branch.full_name} declares parameter(s) "
-                        f"{sorted(unknown)!r} not present in the router's "
-                        f"({router.full_name}) schema; schema_mode='strict' requires "
-                        "every branch to be a subset of the router's parameters."
-                    )
-
-                collisions = parameter_collisions(combined, branch_params)
-                if collisions:
-                    raise WorkflowError(
-                        f"RoutingFlow branch {branch.full_name} parameter(s) "
-                        f"{collisions!r} conflict with the router's declaration "
-                        "(same name, incompatible type/kind)."
-                    )
-
-                overlap = parameter_overlap(combined, branch_params)
-                combined_by_name = {p.name: p for p in combined}
-                branch_by_name = {p.name: p for p in branch_params}
-                for shared_name in overlap:
-                    if not semantically_identical(combined_by_name[shared_name], branch_by_name[shared_name]):
-                        warnings.warn(
-                            f"Parameter {shared_name!r} in branch {branch.full_name} is "
-                            "compatible with the router's declaration but not identical; "
-                            "the router's declaration wins.",
-                            UserWarning,
-                            stacklevel=3,
-                        )
-
-            return combined
-
-        # PARTIAL / OPEN share the same union-fold.
         for branch in branches:
-            branch_params = list(branch.parameters)
+            reports = build_parameter_reports([router_params, list(branch.parameters)])
 
-            if schema_mode == RoutingFlow.PARTIAL:
-                if not parameter_overlap(combined, branch_params):
+            for report in reports:
+                router_slot, branch_slot = report.observations
+
+                if router_slot is None:
+                    non_router_declarations.setdefault(report.parameter_name, []).append(
+                        (branch, branch_slot)
+                    )
+                    continue
+
+                if branch_slot is None:
+                    continue
+
+                if not report.witness_types or not report.kind_compatible:
                     raise WorkflowError(
-                        f"RoutingFlow branch {branch.full_name} shares no parameters "
-                        f"with the router ({router.full_name}); schema_mode='partial' "
-                        "requires at least one overlapping parameter."
+                        f"RoutingFlow branch {branch.full_name} is incompatible "
+                        f"with router {router.full_name} on parameter "
+                        f"{report.parameter_name!r}."
                     )
 
-            collisions = parameter_collisions(combined, branch_params)
-            if collisions:
+                current = resolved[report.parameter_name]
+                resolved[report.parameter_name] = replace(
+                    current,
+                    type=tuple(sorted(set(current.type) | report.witness_types)),
+                )
+                if not report.is_identical and report.parameter_name not in overlapped:
+                    overlapped.append(report.parameter_name)
+
+        if overlapped:
+            warnings.warn(
+                f"Parameter(s) {overlapped!r} are compatible with the router's "
+                "declaration but not identical across branches; the router's "
+                "declaration wins kind/default/description (type is reconciled "
+                "to the full compatible witness set).",
+                UserWarning,
+                stacklevel=3,
+            )
+
+        variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
+
+        for name, declaring in non_router_declarations.items():
+            if not n_way_kind_compatible(spec.kind for _, spec in declaring):
                 raise WorkflowError(
-                    f"RoutingFlow branch {branch.full_name} parameter(s) "
-                    f"{collisions!r} conflict with an earlier declaration "
-                    "(same name, incompatible type/kind)."
+                    f"RoutingFlow parameter {name!r} has an incompatible kind "
+                    f"across branches {[b.full_name for b, _ in declaring]!r} "
+                    "that don't share it with the router."
                 )
 
-            overlap = parameter_overlap(combined, branch_params)
-            if not variadic_compatible(combined, branch_params, set(overlap)):
-                raise WorkflowError(
-                    f"RoutingFlow branch {branch.full_name} declares an independent "
-                    "variadic parameter of the same kind as an earlier declaration "
-                    "under a different name; rename one."
-                )
+            _, first_spec = declaring[0]
+            union_type = tuple(sorted({t for _, spec in declaring for t in spec.type}))
 
-            combined_by_name = {p.name: p for p in combined}
-            branch_by_name = {p.name: p for p in branch_params}
-            for shared_name in overlap:
-                if not semantically_identical(combined_by_name[shared_name], branch_by_name[shared_name]):
-                    warnings.warn(
-                        f"Parameter {shared_name!r} in branch {branch.full_name} is "
-                        "compatible with an earlier declaration but not identical; "
-                        "the earlier declaration wins.",
-                        UserWarning,
-                        stacklevel=3,
-                    )
+            if first_spec.kind in variadic_kinds:
+                final_type, final_default = union_type, NO_VAL
+            else:
+                default_groups = _group_by_equality(spec.default for _, spec in declaring)
+                if len(default_groups) == 1 and default_groups[0] is not NO_VAL:
+                    final_type, final_default = union_type, default_groups[0]
+                else:
+                    final_type = tuple(sorted(set(union_type) | {"None"}))
+                    final_default = None
 
-            remainder = [p for p in branch_params if p.name not in overlap]
-            combined = insert_by_category(combined, remainder)
+            resolved[name] = ParamSpec(
+                name=name,
+                index=0,
+                kind=first_spec.kind,
+                type=final_type,
+                default=final_default,
+                description=first_spec.description,
+            )
 
-        # Anything not originally from the router is optional unless it
-        # already carries its own default -- not every branch runs.
-        return [
-            p if (p.name in router_names or p.default is not NO_VAL)
-            else replace(p, default=None)
-            for p in combined
-        ]
+        router_ordered = [resolved[p.name] for p in router_params]
+        new_names = [resolved[name] for name in resolved if name not in router_by_name]
+        return insert_by_category(router_ordered, new_names)
 
     def _extract_selector(self, selector: Any) -> Hashable:
         """Validate and return the router-provided selector for the configured branches."""
@@ -456,7 +459,7 @@ class RoutingFlow(Workflow):
     # Serialization
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the fixed router, branch topology, and schema_mode."""
+        """Serialize the fixed router and branch topology."""
         data = super().to_dict()
         if isinstance(self._branches, dict):
             branches_data: Any = {key: branch.to_dict() for key, branch in self._branches.items()}
@@ -466,7 +469,6 @@ class RoutingFlow(Workflow):
             {
                 "router": self._router.to_dict(),
                 "branches": branches_data,
-                "schema_mode": self._schema_mode,
             }
         )
         return data

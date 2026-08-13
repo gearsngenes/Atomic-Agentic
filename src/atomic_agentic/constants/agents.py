@@ -13,7 +13,7 @@ from ..models.parameters import ParamSpec
 
 RUN_ID_PARAM: ParamSpec = ParamSpec(
     name="run_id", index=0, kind=ParamSpec.KEYWORD_ONLY,
-    type="str | None", default=None,
+    type=("None", "str"), default=None,
     description="Optional UUID hexstring used to point to a specific historical run of this agent. Do NOT provide natural-language instructions here; this is a reserved parameter to programatically select where in an agent's history to resume execution."
 )
 

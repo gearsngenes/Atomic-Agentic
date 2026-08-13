@@ -14,31 +14,50 @@ from ..constants.core import NO_VAL
 MCPExtractionMode = Literal["extract_result", "structured_content", "content_blocks"]
 
 
-def _json_schema_type_to_str(schema: Mapping[str, Any]) -> str:
+def _json_schema_type_to_tuple(schema: Mapping[str, Any]) -> tuple[str, ...]:
     """
-    Best-effort conversion from a JSON Schema fragment to a Python-ish type string.
+    Best-effort conversion from a JSON Schema fragment to AA's canonical
+    ParamSpec.type tuple shape, vocabulary-aligned (PEP 585 lowercase) with
+    the Python-native extraction path so a Python-native and an MCP-sourced
+    ParamSpec for "the same" type actually compare equal.
     """
     if not isinstance(schema, Mapping):
-        return "Any"
+        return ("Any",)
 
     primitive_map: Dict[str, str] = {
         "string": "str",
         "number": "float",
         "integer": "int",
         "boolean": "bool",
-        "object": "Dict[str, Any]",
-        "array": "List[Any]",
+        "object": "dict[str, Any]",
+        "array": "list[Any]",
         "null": "None",
     }
+
+    # JSON Schema's general union mechanism -- a list of full sub-schemas,
+    # distinct from the "type": [...] array-of-primitive-names shorthand
+    # below. Checked first, since a schema using anyOf/oneOf typically
+    # carries its type information inside each alternative, not at the top
+    # level. "allOf" is a different, unrelated keyword (intersection of
+    # constraints, not a union of alternatives) and is deliberately not
+    # treated as a union source here.
+    for union_key in ("anyOf", "oneOf"):
+        alternatives = schema.get(union_key)
+        if isinstance(alternatives, (list, tuple)) and alternatives:
+            collected: list[str] = []
+            for alt in alternatives:
+                if isinstance(alt, Mapping):
+                    collected.extend(_json_schema_type_to_tuple(alt))
+            return tuple(sorted(set(collected))) if collected else ("Any",)
 
     raw_type = schema.get("type")
 
     if isinstance(raw_type, str):
         if raw_type == "array":
             items = schema.get("items")
-            inner = _json_schema_type_to_str(items) if isinstance(items, Mapping) else "Any"
-            return f"List[{inner}]"
-        return primitive_map.get(raw_type, "Any")
+            inner = " | ".join(_json_schema_type_to_tuple(items)) if isinstance(items, Mapping) else "Any"
+            return (f"list[{inner}]",)
+        return (primitive_map.get(raw_type, "Any"),)
 
     if isinstance(raw_type, (list, tuple)):
         parts: list[str] = []
@@ -47,13 +66,13 @@ def _json_schema_type_to_str(schema: Mapping[str, Any]) -> str:
                 continue
             if item == "array":
                 items = schema.get("items")
-                inner = _json_schema_type_to_str(items) if isinstance(items, Mapping) else "Any"
-                parts.append(f"List[{inner}]")
+                inner = " | ".join(_json_schema_type_to_tuple(items)) if isinstance(items, Mapping) else "Any"
+                parts.append(f"list[{inner}]")
             else:
                 parts.append(primitive_map.get(item, "Any"))
-        return " | ".join(dict.fromkeys(parts)) if parts else "Any"
+        return tuple(sorted(set(parts))) if parts else ("Any",)
 
-    return "Any"
+    return ("Any",)
 
 
 def _plain_mcp_value(value: Any) -> Any:
@@ -137,26 +156,26 @@ def _infer_mcp_return_type(output_schema: Any) -> str:
         if isinstance(properties, Mapping):
             result_schema = properties.get("result")
             if isinstance(result_schema, Mapping):
-                return _json_schema_type_to_str(result_schema)
+                return " | ".join(_json_schema_type_to_tuple(result_schema))
         return "Any"
 
     output_type = output_schema.get("type")
 
     if isinstance(output_type, str):
         if output_type == "object":
-            return "Dict[str, Any]"
-        return _json_schema_type_to_str(output_schema)
+            return "dict[str, Any]"
+        return " | ".join(_json_schema_type_to_tuple(output_schema))
 
     if isinstance(output_type, (list, tuple)):
         if "object" in output_type:
-            return "Dict[str, Any]"
-        return _json_schema_type_to_str(output_schema)
+            return "dict[str, Any]"
+        return " | ".join(_json_schema_type_to_tuple(output_schema))
 
     properties = output_schema.get("properties")
     if isinstance(properties, Mapping):
-        return "Dict[str, Any]"
+        return "dict[str, Any]"
 
-    return _json_schema_type_to_str(output_schema)
+    return " | ".join(_json_schema_type_to_tuple(output_schema))
 
 
 def _build_mcp_tool_metadata(raw_tool: mcp_types.Tool) -> Dict[str, Any]:
@@ -197,7 +216,7 @@ def _build_mcp_tool_metadata(raw_tool: mcp_types.Tool) -> Dict[str, Any]:
                     name=name,
                     index=index,
                     kind="KEYWORD_ONLY",
-                    type=_json_schema_type_to_str(meta_schema),
+                    type=_json_schema_type_to_tuple(meta_schema),
                     default=default,
                     description=description,
                 )

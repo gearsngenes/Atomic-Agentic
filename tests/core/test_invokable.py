@@ -552,7 +552,7 @@ class TestAtomicInvokableSerialization:
                 "name": "x",
                 "index": 0,
                 "kind": ParamSpec.POSITIONAL_OR_KEYWORD,
-                "type": "int",
+                "type": ["int"],
             }
         ]
 

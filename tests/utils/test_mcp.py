@@ -9,7 +9,7 @@ from atomic_agentic.utils.mcp import (
     _build_mcp_tool_metadata,
     _infer_mcp_extraction_mode,
     _infer_mcp_return_type,
-    _json_schema_type_to_str,
+    _json_schema_type_to_tuple,
     _normalize_mcp_call_result,
     _plain_mcp_value,
 )
@@ -20,30 +20,53 @@ class DumpableObject:
         return {"mode": mode, "value": 123}
 
 
-class TestJsonSchemaTypeToStr:
+class TestJsonSchemaTypeToTuple:
     def test_non_mapping_schema_returns_any(self) -> None:
-        assert _json_schema_type_to_str("not-a-schema") == "Any"  # type: ignore[arg-type]
+        assert _json_schema_type_to_tuple("not-a-schema") == ("Any",)  # type: ignore[arg-type]
 
     def test_primitive_schema_types(self) -> None:
-        assert _json_schema_type_to_str({"type": "string"}) == "str"
-        assert _json_schema_type_to_str({"type": "integer"}) == "int"
-        assert _json_schema_type_to_str({"type": "number"}) == "float"
-        assert _json_schema_type_to_str({"type": "boolean"}) == "bool"
-        assert _json_schema_type_to_str({"type": "object"}) == "Dict[str, Any]"
-        assert _json_schema_type_to_str({"type": "null"}) == "None"
+        assert _json_schema_type_to_tuple({"type": "string"}) == ("str",)
+        assert _json_schema_type_to_tuple({"type": "integer"}) == ("int",)
+        assert _json_schema_type_to_tuple({"type": "number"}) == ("float",)
+        assert _json_schema_type_to_tuple({"type": "boolean"}) == ("bool",)
+        assert _json_schema_type_to_tuple({"type": "object"}) == ("dict[str, Any]",)
+        assert _json_schema_type_to_tuple({"type": "null"}) == ("None",)
 
     def test_array_schema_type_infers_inner_type(self) -> None:
-        assert _json_schema_type_to_str(
+        assert _json_schema_type_to_tuple(
             {"type": "array", "items": {"type": "string"}}
-        ) == "List[str]"
+        ) == ("list[str]",)
 
     def test_union_schema_type_deduplicates_parts(self) -> None:
-        assert _json_schema_type_to_str(
+        assert _json_schema_type_to_tuple(
             {"type": ["string", "null", "string"]}
-        ) == "str | None"
+        ) == ("None", "str")
 
     def test_unknown_schema_type_returns_any(self) -> None:
-        assert _json_schema_type_to_str({"type": "unknown"}) == "Any"
+        assert _json_schema_type_to_tuple({"type": "unknown"}) == ("Any",)
+
+    def test_any_of_union_of_primitives(self) -> None:
+        assert _json_schema_type_to_tuple(
+            {"anyOf": [{"type": "string"}, {"type": "integer"}]}
+        ) == ("int", "str")
+
+    def test_one_of_with_null_is_optional_shape(self) -> None:
+        assert _json_schema_type_to_tuple(
+            {"oneOf": [{"type": "object"}, {"type": "null"}]}
+        ) == ("None", "dict[str, Any]")
+
+    def test_any_of_alternative_with_nested_type_array_flattens(self) -> None:
+        assert _json_schema_type_to_tuple(
+            {"anyOf": [{"type": ["string", "integer"]}, {"type": "null"}]}
+        ) == ("None", "int", "str")
+
+    def test_no_type_and_no_union_key_returns_any(self) -> None:
+        assert _json_schema_type_to_tuple({"description": "no type info"}) == ("Any",)
+
+    def test_all_of_alone_is_not_treated_as_a_union(self) -> None:
+        assert _json_schema_type_to_tuple(
+            {"allOf": [{"type": "string"}, {"type": "integer"}]}
+        ) == ("Any",)
 
 
 class TestPlainMcpValue:
@@ -100,13 +123,13 @@ class TestMcpExtractionAndReturnType:
         }
 
         assert _infer_mcp_extraction_mode(schema) == "structured_content"
-        assert _infer_mcp_return_type(schema) == "Dict[str, Any]"
+        assert _infer_mcp_return_type(schema) == "dict[str, Any]"
 
     def test_non_object_schema_returns_inferred_type(self) -> None:
         schema = {"type": "array", "items": {"type": "boolean"}}
 
         assert _infer_mcp_extraction_mode(schema) == "structured_content"
-        assert _infer_mcp_return_type(schema) == "List[bool]"
+        assert _infer_mcp_return_type(schema) == "list[bool]"
 
 
 class TestBuildMcpToolMetadata:
@@ -146,9 +169,9 @@ class TestBuildMcpToolMetadata:
 
         params = metadata["parameters"]
         assert [(p.name, p.kind, p.type, p.default, p.description) for p in params] == [
-            ("query", ParamSpec.KEYWORD_ONLY, "str", NO_VAL, "The search query."),
-            ("top_k", ParamSpec.KEYWORD_ONLY, "int", 5, None),
-            ("debug", ParamSpec.KEYWORD_ONLY, "bool", None, None),
+            ("query", ParamSpec.KEYWORD_ONLY, ("str",), NO_VAL, "The search query."),
+            ("top_k", ParamSpec.KEYWORD_ONLY, ("int",), 5, None),
+            ("debug", ParamSpec.KEYWORD_ONLY, ("bool",), None, None),
         ]
 
 

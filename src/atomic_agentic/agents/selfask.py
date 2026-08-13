@@ -12,7 +12,6 @@ using whatever thoughts exist, never a raise.
 
 from __future__ import annotations
 
-import warnings
 from datetime import datetime
 from typing import Any, Callable, Literal, Optional
 
@@ -34,10 +33,9 @@ from ..models.results.agents import ThinkingAgentResult
 from ..utils.agents import normalize_role_prompt, normalize_thinking_instructions
 from ..utils.agents import parse_thoughts
 from ..utils.parameters import (
+    apply_parameter_reports,
+    build_parameter_reports,
     insert_by_category,
-    parameter_collisions,
-    parameter_overlap,
-    semantically_identical,
 )
 
 
@@ -121,28 +119,13 @@ class SelfAskAgent(BasicAgent):
         thinking_params = list(thinking_config.parameters)
 
         # Reconcile role_prompt vs thinking_instructions BEFORE combining --
-        # role_prompt is the priority source, same idiom Agent.__init__ uses
-        # for its own pre/post/extra reconciliation.
-        collisions = parameter_collisions(role_params, thinking_params)
-        if collisions:
-            raise AgentError(
-                f"role_prompt/thinking_instructions parameter collision(s): "
-                f"{collisions!r} (same name, incompatible type/kind)."
-            )
-        overlap = parameter_overlap(role_params, thinking_params)
-        role_by_name = {p.name: p for p in role_params}
-        thinking_by_name = {p.name: p for p in thinking_params}
-        for overlap_name in overlap:
-            if not semantically_identical(role_by_name[overlap_name], thinking_by_name[overlap_name]):
-                warnings.warn(
-                    f"Parameter {overlap_name!r} is declared by both role_prompt and "
-                    "thinking_instructions and is compatible but not identical; "
-                    "role_prompt's declaration wins.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-        thinking_remainder = [p for p in thinking_params if p.name not in overlap]
-        combined_extra_params = insert_by_category(role_params, thinking_remainder)
+        # role_prompt is the priority source (source index 0), same idiom
+        # Agent.__init__ uses for its own pre/post/extra reconciliation.
+        reports = build_parameter_reports([role_params, thinking_params])
+        constructed = apply_parameter_reports(
+            reports, ("role_prompt", "thinking_instructions"), error_cls=AgentError, stacklevel=3
+        )
+        combined_extra_params = insert_by_category([], constructed)
 
         Agent.__init__(
             self,

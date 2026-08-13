@@ -1,4 +1,4 @@
-﻿# 05_Auto_Graft_Test.py
+﻿# 05_Passthrough_Test.py
 """
 Demonstrates post-invoke parameter auto-grafting (v2.0.0a14+).
 
@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.llm import OpenAIEngine
+from atomic_agentic.constants.core import NO_VAL
 
 
 load_dotenv()
@@ -91,7 +92,7 @@ def main() -> None:
     # Show the composed schema so the auto-grafting is visible.
     print("\n=== Agent schema (auto-grafted parameters shown) ===\n")
     for param in agent.parameters:
-        default = "(required)" if param.default.__class__.__name__ == "_NO_VAL" else repr(param.default)
+        default = "(required)" if param.default is NO_VAL else repr(param.default)
         print(f"  {param.name:<20} {param.kind:<25} default={default}")
 
     # Invoke with a custom output_label — passed as a regular input.

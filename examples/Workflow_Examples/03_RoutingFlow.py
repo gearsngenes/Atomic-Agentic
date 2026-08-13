@@ -4,11 +4,12 @@
 Beginner-friendly RoutingFlow example.
 Demonstrates routing support requests to different branches based on topic
 and urgency: int-indexed and dict-keyed branch topologies, trace-based run
-inspection, and the schema_mode construction contract. STRICT (the default)
-requires every branch's parameters to already be covered by the router's own
-schema; PARTIAL/OPEN allow a branch to need more than the router does, at
-the cost of a runtime error if a caller doesn't supply what the selected
-branch actually needs.
+inspection, and how RoutingFlow reconciles branch parameters the router
+doesn't declare. A name only one branch needs is never required on the
+outer schema -- it becomes optional with default=None (and "None" is added
+to its declared type, so the signature is honest about it), *unless* every
+branch that needs it happens to agree on the same real default, in which
+case that shared value is used instead.
 """
 
 from __future__ import annotations
@@ -39,8 +40,7 @@ def choose_branch_key(topic: str, urgency: int = 0) -> str:
 
 # ──────────────────────────────────────────────────────────────
 # Branch functions: each declares the SAME (topic, urgency) shape as
-# the router -- required for schema_mode="strict" (the default), since
-# STRICT pins the outer schema to the router's own parameters verbatim.
+# the router.
 # ──────────────────────────────────────────────────────────────
 def handle_billing(topic: str, urgency: int = 0) -> str:
     return (
@@ -66,16 +66,16 @@ def handle_escalation(topic: str, urgency: int = 0) -> str:
         f"Action: prioritize immediate human follow-up and incident review."
     )
 
-# A branch that needs MORE than the router does -- only legal under
-# schema_mode="partial"/"open". `notes` isn't part of the router's own
-# schema, so RoutingFlow's reconciliation makes it optional (default=None)
-# on the OUTER schema. That's not just a schema-level nicety: filter_inputs
+# A branch that needs MORE than the router does. `notes` isn't part of the
+# router's own schema and no other branch declares it either, so it
+# becomes optional on the OUTER schema: default=None, and "None" is added
+# to its declared type (unlike the type-signature lie a plain
+# default=None-with-untouched-type would be). filter_inputs
 # (core/Invokable.py) injects declared defaults for absent params at EVERY
-# layer, so an omitted `notes` is backfilled to None by the outer flow and
-# arrives at this branch as a real notes=None value, not a missing
-# argument -- no error, just a silently degraded value. Branches meant to
-# be used under PARTIAL/OPEN should handle None defensively for anything
-# the router doesn't guarantee.
+# layer, so an omitted `notes` arrives at this branch as a real notes=None
+# value, not a missing argument. Branches meant to receive a
+# router-absent parameter should handle None defensively for anything the
+# router doesn't guarantee.
 def handle_escalation_with_notes(topic: str, notes: str, urgency: int = 0) -> str:
     return (
         f"Escalation team selected.\n"
@@ -131,8 +131,7 @@ escalation_notes_tool = Tool(
 )
 
 # ──────────────────────────────────────────────────────────────
-# Build the RoutingFlows -- schema_mode defaults to STRICT, so it's
-# not passed explicitly for these two.
+# Build the RoutingFlows.
 # ──────────────────────────────────────────────────────────────
 # List-configured branches: router returns an int index into branches.
 flow = RoutingFlow(
@@ -190,29 +189,27 @@ for i, payload in enumerate(examples, start=1):
         print(f"  trace[{j}]: run_id={node_result.run_id}, result={node_result.result!r}")
 
 # ──────────────────────────────────────────────────────────────
-# schema_mode="partial": escalation_notes_tool needs `notes`, which the
-# router never looks at. PARTIAL still requires SOME overlap with the
-# router (topic/urgency here) -- OPEN would allow a branch with zero
-# overlap at all, same fold, no overlap check.
+# escalation_notes_tool needs `notes`, which the router never looks at and
+# no other branch declares either. It becomes optional on the outer
+# schema -- default=None, "None" added to its declared type.
 # ──────────────────────────────────────────────────────────────
-print("\n########## schema_mode=PARTIAL: a branch needing more than the router ##########")
-partial_flow = RoutingFlow(
-    name="support_router_partial",
+print("\n########## A branch needing more than the router ##########")
+open_flow = RoutingFlow(
+    name="support_router_open",
     namespace="examples",
     description="Escalation branch needs handoff notes the router doesn't use.",
     router=router_tool,
     branches=[billing_tool, general_tool, escalation_notes_tool],
-    schema_mode=RoutingFlow.PARTIAL,
 )
-print("Reconciled outer parameters:", [p.name for p in partial_flow.parameters])
-notes_param = next(p for p in partial_flow.parameters if p.name == "notes")
-print(f"'notes' param: default={notes_param.default!r} (synthesized -- not in the router's own schema)")
+print("Reconciled outer parameters:", [p.name for p in open_flow.parameters])
+notes_param = next(p for p in open_flow.parameters if p.name == "notes")
+print(f"'notes' param: type={notes_param.type!r}, default={notes_param.default!r} (optional -- synthesized, not carried through as required)")
 
 urgent_payload = {"topic": "Production outage affecting all customers", "urgency": 10, "notes": "Customer X escalated via phone"}
-result = partial_flow.invoke(urgent_payload)
+result = open_flow.invoke(urgent_payload)
 print("\nWith notes supplied:", result.result)
 
-result_no_notes = partial_flow.invoke({"topic": "Production outage affecting all customers", "urgency": 10})
+result_no_notes = open_flow.invoke({"topic": "Production outage affecting all customers", "urgency": 10})
 print("\nWithout notes supplied:", result_no_notes.result)
 print("(no error -- the synthesized default=None was injected and passed straight through)")
 

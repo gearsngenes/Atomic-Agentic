@@ -11,7 +11,6 @@ from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.exceptions import ExecutionError, ValidationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.workflows import IterativeFlowResult
-from atomic_agentic.models.workflows import CheckerSpec
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.workflows.base import Workflow
 from atomic_agentic.workflows.iterative import IterativeFlow
@@ -88,7 +87,7 @@ def make_iterative_flow(
     *,
     body_steps: list[Any] | None = None,
     max_iterations: int = 3,
-    checkers: list[CheckerSpec] | None = None,
+    checkers: list[tuple[Any, Any] | None] | None = None,
     result_setting_indices: list[int] | None = None,
     handoff_index: int | None = None,
     fallback_value: Any = NO_VAL,
@@ -287,12 +286,11 @@ class TestIterativeFlowConstruction:
 
     def test_checkers_bulk_construction_replays_add_checker(self) -> None:
         judge = make_threshold_judge(3)
-        flow = make_iterative_flow(checkers=[CheckerSpec(index=0, judge=judge, approval_value=True)])
+        flow = make_iterative_flow(checkers=[(judge, True)])
 
         checker = flow.checkers[0]
-        assert checker.judge is judge
-        assert checker.approval_value is True
-        assert checker.index == 0
+        assert checker[0] is judge
+        assert checker[1] is True
 
     def test_max_iterations_setter_validates_positive_int(self) -> None:
         flow = make_iterative_flow()
@@ -321,9 +319,9 @@ class TestIterativeFlowCheckerMutation:
 
         flow.add_checker(0, judge, True)
 
-        assert 0 in flow.checkers
-        assert flow.checkers[0].judge is judge
-        assert flow.checkers[0].approval_value is True
+        assert flow.checkers[0] is not None
+        assert flow.checkers[0][0] is judge
+        assert flow.checkers[0][1] is True
 
     def test_add_checker_rejects_non_int_index(self) -> None:
         flow = make_iterative_flow()
@@ -347,17 +345,17 @@ class TestIterativeFlowCheckerMutation:
             flow.add_checker(0, object(), True)  # type: ignore[arg-type]
 
     def test_add_checker_rejects_duplicate_index(self) -> None:
-        flow = make_iterative_flow(checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)])
+        flow = make_iterative_flow(checkers=[(make_threshold_judge(3), True)])
 
         with pytest.raises(ValueError, match="already registered"):
             flow.add_checker(0, make_threshold_judge(1), True)
 
     def test_remove_checker_removes_registered_checker(self) -> None:
-        flow = make_iterative_flow(checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)])
+        flow = make_iterative_flow(checkers=[(make_threshold_judge(3), True)])
 
         flow.remove_checker(0)
 
-        assert 0 not in flow.checkers
+        assert flow.checkers[0] is None
 
     def test_remove_checker_rejects_unregistered_index(self) -> None:
         flow = make_iterative_flow()
@@ -403,7 +401,7 @@ class TestIterativeFlowSyncInvoke:
     def test_loop_runs_until_checker_approves(self) -> None:
         flow = make_iterative_flow(
             max_iterations=5,
-            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)],
+            checkers=[(make_threshold_judge(3), True)],
         )
 
         result = flow.invoke({"count": 0})
@@ -423,7 +421,7 @@ class TestIterativeFlowSyncInvoke:
     def test_loop_stops_at_max_iterations_if_never_approved(self) -> None:
         flow = make_iterative_flow(
             max_iterations=2,
-            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(100), approval_value=True)],
+            checkers=[(make_threshold_judge(100), True)],
         )
 
         result = flow.invoke({"count": 0})
@@ -455,7 +453,7 @@ class TestIterativeFlowSyncInvoke:
     def test_iterative_flow_result_policy_fields(self) -> None:
         flow = make_iterative_flow(
             max_iterations=3,
-            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)],
+            checkers=[(make_threshold_judge(3), True)],
         )
 
         result = flow.invoke({"count": 0})
@@ -469,7 +467,7 @@ class TestIterativeFlowAsyncInvoke:
     def test_async_invoke_runs_until_checker_approves(self) -> None:
         flow = make_iterative_flow(
             max_iterations=5,
-            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)],
+            checkers=[(make_threshold_judge(3), True)],
         )
 
         result = asyncio.run(flow.async_invoke({"count": 0}))
@@ -489,7 +487,7 @@ class TestIterativeFlowValidationAndErrors:
             description="Iterative test flow.",
             body_steps=[ScalarStepWorkflow()],
             max_iterations=1,
-            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)],
+            checkers=[(make_threshold_judge(3), True)],
             result_setting_indices=[0],
             handoff_index=0,
         )
@@ -537,7 +535,7 @@ class TestIterativeFlowValidationAndErrors:
 
     def test_judge_invoke_failure_wrapped_as_execution_error(self) -> None:
         flow = make_iterative_flow(
-            checkers=[CheckerSpec(index=0, judge=make_raising_judge(), approval_value=True)],
+            checkers=[(make_raising_judge(), True)],
         )
 
         with pytest.raises(ExecutionError, match="_run failed"):
@@ -548,7 +546,7 @@ class TestIterativeFlowSerialization:
     def test_to_dict_includes_body_steps_checkers_and_policy_fields(self) -> None:
         flow = make_iterative_flow(
             max_iterations=3,
-            checkers=[CheckerSpec(index=0, judge=make_threshold_judge(3), approval_value=True)],
+            checkers=[(make_threshold_judge(3), True)],
         )
 
         flow.invoke({"count": 0})
@@ -558,7 +556,7 @@ class TestIterativeFlowSerialization:
         assert data["checkers"] == [
             {
                 "index": 0,
-                "judge": flow.checkers[0].judge.to_dict(),
+                "judge": flow.checkers[0][0].to_dict(),
                 "approval_value": True,
             }
         ]

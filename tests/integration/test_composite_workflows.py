@@ -7,7 +7,6 @@ import pytest
 
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.core.Invokable import StructuredInvokable
-from atomic_agentic.models.workflows import CheckerSpec
 from atomic_agentic.models.results.workflows import (
     IterativeFlowResult,
     ParallelFlowResult,
@@ -263,7 +262,6 @@ def make_routing_between_sequences_flow() -> RoutingFlow:
             make_text_sequence_branch(),
             make_number_sequence_branch(),
         ],
-        schema_mode=RoutingFlow.PARTIAL,
     )
 
 
@@ -396,7 +394,7 @@ def make_iterative_score_flow() -> IterativeFlow:
             )
         ],
         max_iterations=5,
-        checkers=[CheckerSpec(index=0, judge=judge, approval_value=True)],
+        checkers=[(judge, True)],
         result_setting_indices=[0],
         handoff_index=0,
     )
@@ -434,7 +432,6 @@ class TestCompositeWorkflows:
                 make_text_branch(),
                 make_number_branch(),
             ],
-            schema_mode=RoutingFlow.PARTIAL,
         )
         flow = SequentialFlow(
             name="sequential_routing_finalizer",

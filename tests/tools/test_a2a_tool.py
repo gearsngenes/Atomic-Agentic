@@ -225,8 +225,8 @@ class TestPyA2AtomicToolSignatureAndMetadata:
         tool = make_tool()
 
         assert [(p.name, p.kind, p.type, p.default) for p in tool.parameters] == [
-            ("value", ParamSpec.POSITIONAL_OR_KEYWORD, "Any", NO_VAL),
-            ("tag", ParamSpec.POSITIONAL_OR_KEYWORD, "str", "default"),
+            ("value", ParamSpec.POSITIONAL_OR_KEYWORD, ("Any",), NO_VAL),
+            ("tag", ParamSpec.POSITIONAL_OR_KEYWORD, ("str",), "default"),
         ]
         assert tool.return_type == "dict[str, Any]"
 

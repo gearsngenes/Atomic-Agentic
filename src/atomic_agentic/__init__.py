@@ -7,13 +7,18 @@ except PackageNotFoundError:  # pragma: no cover
 
 from .constants.core import NO_VAL
 from .models.parameters import ParamSpec
-from .utils.parameters import to_paramspec_list, is_valid_parameter_order
+from .utils.parameters import (
+    to_paramspec_list,
+    is_valid_parameter_order,
+    semantically_compatible,
+    semantically_identical,
+)
 from .core.Invokable import (
     AtomicInvokable,
     Command,
     StructuredInvokable,
 )
-from .core.core_api import extract_io
+from .core.core_api import extract_io, parameter_overlap, parameter_collisions
 
 __all__ = [
     # Sentinels
@@ -23,6 +28,10 @@ __all__ = [
     "to_paramspec_list",
     "extract_io",
     "is_valid_parameter_order",
+    "semantically_compatible",
+    "semantically_identical",
+    "parameter_overlap",
+    "parameter_collisions",
     # Invokable core types
     "AtomicInvokable",
     # Command invokable type

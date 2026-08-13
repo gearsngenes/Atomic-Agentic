@@ -16,6 +16,7 @@ from atomic_agentic.tools import Tool
 from atomic_agentic.exceptions import ToolInvocationError, AgentInvocationError
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.llm import OpenAIEngine
+from atomic_agentic.constants.core import NO_VAL
 import logging
 
 load_dotenv()  # take environment variables from .env file (if exists)
@@ -68,7 +69,7 @@ def show_plan(tool: Tool) -> None:
     for param in tool.parameters:
         default_str = (
             "(no default)"
-            if param.default.__class__.__name__ == "NO_VAL"
+            if param.default is NO_VAL
             else f"default={param.default}"
         )
         print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}")

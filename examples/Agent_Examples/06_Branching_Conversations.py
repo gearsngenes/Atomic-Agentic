@@ -151,6 +151,7 @@ def main() -> None:
     r0 = agent(
         message="Hi, I'm Sam. Nice to meet you.",
         style="friendly",
+        return_atomic_result_object = True
     )
     run_0 = r0.run_id
     print(f"  run  : {run_0[:8]}...   parent: None")
@@ -166,6 +167,7 @@ def main() -> None:
     r_a1 = agent(
         message="I have a golden retriever named Biscuit. She loves fetch.",
         style="friendly",
+        return_atomic_result_object = True
     )
     run_a1 = r_a1.run_id
     print(f"  run  : {run_a1[:8]}...   parent: {run_0[:8]}...")
@@ -181,6 +183,7 @@ def main() -> None:
     r_a2 = agent(
         message="What do you know about my dog?",
         style="friendly",
+        return_atomic_result_object = True
     )
     run_a2 = r_a2.run_id
     print(f"  run  : {run_a2[:8]}...   parent: {run_a1[:8]}...")
@@ -201,6 +204,7 @@ def main() -> None:
         message="What's my dog's name?",
         style="friendly",
         run_id=run_0,
+        return_atomic_result_object = True
     )
     run_b1 = r_b1.run_id
     print(f"  run  : {run_b1[:8]}...   parent: {run_0[:8]}...")

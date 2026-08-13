@@ -6,16 +6,16 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 from ..exceptions import ValidationError, WorkflowError
 from ..core.Invokable import AtomicInvokable
-from ..models.parameters import ParamSpec
-from ..models.workflows.graph import GraphFlowNode, StatePolicySpec
+from ..models.parameters import ParamSpec, ParameterReport
+from ..models.workflows.graph import StatePolicySpec
 from ..models.results import AtomicResult
 from ..models.results.workflows import GraphFlowResult
 from ..utils.core import run_coro_sync
-from ..utils.parameters import n_way_parameter_report
+from ..utils.parameters import _simplify_type_set, build_parameter_reports
 from .base import Workflow
 
 logger = logging.getLogger(__name__)
@@ -36,8 +36,12 @@ class GraphFlow(Workflow):
       edge/router sharing that ``source``); ``(source, router_invokable)``
       attaches a router to ``source`` (multiple such tuples for the same
       ``source`` attach multiple routers).
-    - ``start``: single entry node name; ``GraphFlow.parameters`` =
-      ``nodes[start].parameters``.
+    - ``start``: single entry node name; ``GraphFlow.parameters`` has
+      exactly ``nodes[start].parameters``'s own names, in the same order.
+      Any name ``start`` shares with another configured node has its
+      ``type`` widened to the full cross-node compatible witness set;
+      ``kind``/``default``/``description`` always come from ``start``'s
+      own declaration, never any other node's.
     - ``state_policies`` / ``priorities``: mutable post-construction via
       :meth:`set_state_policy`/:meth:`remove_state_policy`/
       :meth:`set_priority` (same shape-vs-behavior justification
@@ -46,9 +50,12 @@ class GraphFlow(Workflow):
     - ``max_edge_traversals`` / ``stop_early``: mutable behavioral knobs.
     - ``result_mode`` / ``return_keys``: fixed at construction -- feed
       ``return_type``.
-    - Construction also runs a whole-graph parameter-collision check
-      (:func:`n_way_parameter_report`) across every node's declared
-      parameters, independent of reachability from ``start``.
+    - Construction runs a whole-graph parameter reconciliation
+      (:func:`build_parameter_reports`) across every node's declared
+      parameters, independent of reachability from ``start`` -- this both
+      raises ``WorkflowError`` on a genuine type/kind conflict between any
+      two nodes sharing a name, and supplies the type-widening described
+      above.
 
     Runtime contract
     -----------------
@@ -77,6 +84,27 @@ class GraphFlow(Workflow):
     DICT: ClassVar[str] = "dict"
 
     _RESULT_MODES: ClassVar[frozenset[str]] = frozenset({SCALAR, LIST, TUPLE, SET, DICT})
+
+    class Node(NamedTuple):
+        """One node's fixed topology plus its current priority.
+
+        Every field, including ``priority``, is a plain immutable
+        ``NamedTuple`` field. :meth:`GraphFlow.set_priority` therefore
+        rebuilds the entry via ``_replace(priority=...)`` rather than
+        mutating anything in place -- a validated update always produces a
+        new ``Node`` instance, so the public ``nodes`` view (a
+        ``MappingProxyType`` around the entry dict) can't be used to bypass
+        ``set_priority``'s own type check the way a nested mutable
+        container could. No ``__post_init__``/runtime type validation of
+        ``invokable``/``routers`` exists here; validation is
+        ``GraphFlow.__init__``'s job.
+        """
+
+        invokable: AtomicInvokable
+        incoming: tuple[str, ...]
+        outgoing: tuple[str, ...]
+        routers: tuple[AtomicInvokable, ...]
+        priority: int
 
     def __init__(
         self,
@@ -196,8 +224,8 @@ class GraphFlow(Workflow):
                 incoming[target].append(source)
 
         resolved_priorities = priorities or {}
-        self._node_data: dict[str, GraphFlowNode] = {
-            node_name: GraphFlowNode(
+        self._node_data: dict[str, GraphFlow.Node] = {
+            node_name: GraphFlow.Node(
                 invokable=invokable,
                 incoming=tuple(incoming[node_name]),
                 outgoing=tuple(fixed_targets[node_name]),
@@ -241,49 +269,69 @@ class GraphFlow(Workflow):
             raise ValueError("result_mode='scalar' allows at most one requested key")
         self._return_keys: tuple[str, ...] = normalized_return_keys
 
-        # Whole-graph parameter-collision check -- every node, regardless
-        # of whether it's actually reachable from start on any real path.
-        node_names_in_order = list(self._node_data.keys())
-        report = n_way_parameter_report(
+        # Whole-graph parameter reconciliation -- every node, regardless of
+        # whether it's actually reachable from start on any real path.
+        # start is forced to source index 0 so its own observation is
+        # always the reconciliation anchor: the winning source whenever it
+        # declares a name, and therefore the source of kind/default/
+        # description on GraphFlow's own advertised parameters.
+        node_names_in_order = [start, *(n for n in self._node_data if n != start)]
+        reports: list[ParameterReport] = build_parameter_reports(
             [list(self._node_data[n].invokable.parameters) for n in node_names_in_order]
         )
-        for entry in report:
-            type_collision = "Any" not in entry.types and len(entry.types) > 1
-            kind_collision = (
-                any(k in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD) for k in entry.kinds)
-                and len(entry.kinds) > 1
-            )
-            if type_collision or kind_collision:
+
+        parameters: list[ParamSpec] = []
+        for report in reports:
+            if not report.witness_types or not report.kind_compatible:
                 conflicting = ", ".join(
-                    f"{node_names_in_order[index]!r} ({spec.type}/{spec.kind})"
-                    for index, spec in entry.observations
+                    f"{node_names_in_order[index]!r} ({' | '.join(spec.type)}/{spec.kind})"
+                    for index, spec in enumerate(report.observations)
+                    if spec is not None
                 )
                 raise WorkflowError(
-                    f"GraphFlow parameter {entry.name!r} conflicts across nodes: "
+                    f"GraphFlow parameter {report.parameter_name!r} conflicts across nodes: "
                     f"{conflicting} (same name, incompatible type/kind)."
+                )
+
+            start_spec = report.observations[0]
+            if start_spec is not None:
+                parameters.append(
+                    replace(start_spec, type=tuple(sorted(report.witness_types)))
                 )
 
         if self._result_mode == self.SCALAR:
             if self._return_keys:
-                key_report = next((r for r in report if r.name == self._return_keys[0]), None)
+                key_report = next(
+                    (r for r in reports if r.parameter_name == self._return_keys[0]), None
+                )
                 if key_report is not None:
-                    # Exactly one concrete type -> unambiguous. Zero, or two-
-                    # plus (only reachable when "Any" suppressed a real
-                    # collision at the check above), both collapse to "Any" --
-                    # same permissive-Any philosophy as the collision check
-                    # itself, not an arbitrary pick among genuine candidates.
-                    concrete_types = key_report.types - {"Any"}
-                    return_type = (
-                        next(iter(concrete_types)) if len(concrete_types) == 1 else "Any"
-                    )
+                    # Flatten every declaring node's own raw type tuple
+                    # (each itself already a proven-mutually-compatible
+                    # tuple, per the collision check above) into one set,
+                    # drop the wildcard "Any" (adds no real information),
+                    # collapse any bare-origin/parameterized-sibling
+                    # redundancy (dict + dict[str, int] -> dict), then join
+                    # what's left as a union -- same representation
+                    # convention as every other return_type in this pass.
+                    # Deliberately the full raw union, not narrowed to
+                    # key_report.witness_types -- an output question needing
+                    # every possibility, not an input question needing
+                    # common ground. Empty after dropping "Any" (every node
+                    # typed this key Any, or key_report doesn't exist) ->
+                    # "Any" is the honest answer, not an arbitrary pick
+                    # among genuine candidates.
+                    flat_types: set[str] = set()
+                    for spec in key_report.observations:
+                        if spec is not None:
+                            flat_types.update(spec.type)
+                    concrete_types = _simplify_type_set(flat_types - {"Any"})
+                    return_type = " | ".join(sorted(concrete_types)) if concrete_types else "Any"
                 else:
                     return_type = "Any"
             else:
                 return_type = "None"
         else:
             return_type = self._result_mode
-
-        parameters = list(self._node_data[start].invokable.parameters)
 
         super().__init__(
             name=name,
@@ -298,9 +346,11 @@ class GraphFlow(Workflow):
     # Properties
     # ------------------------------------------------------------------ #
     @property
-    def nodes(self) -> MappingProxyType[str, GraphFlowNode]:
+    def nodes(self) -> MappingProxyType[str, "GraphFlow.Node"]:
         """Read-only live view of node topology/priority. Entries are
-        frozen GraphFlowNode instances -- safe against mutation even
+        ``GraphFlow.Node`` instances -- every field, including ``priority``,
+        is a plain immutable ``NamedTuple`` field; :meth:`set_priority`
+        replaces the whole entry rather than mutating anything reachable
         through this view."""
         return MappingProxyType(self._node_data)
 
@@ -377,14 +427,16 @@ class GraphFlow(Workflow):
         """Set ``node_name``'s priority.
 
         Raises ``KeyError`` if ``node_name`` isn't configured, ``TypeError``
-        if ``priority`` isn't an int. ``GraphFlowNode`` is frozen, so this
-        replaces the whole entry rather than mutating it in place.
+        if ``priority`` isn't an int. ``priority`` is a plain field on the
+        node's ``Node`` entry, so a validated update rebuilds the entry via
+        ``_replace(priority=...)`` -- every other field is carried through
+        unchanged, but the ``Node`` instance itself is a new object.
         """
         if node_name not in self._node_data:
             raise KeyError(f"{node_name!r} is not a configured node")
         if not isinstance(priority, int):
             raise TypeError(f"priority must be an int, got {type(priority)!r}")
-        self._node_data[node_name] = replace(self._node_data[node_name], priority=priority)
+        self._node_data[node_name] = self._node_data[node_name]._replace(priority=priority)
 
     def _extra_description(self) -> str:
         """Fixed note on the graph's entry point and superstep cap."""

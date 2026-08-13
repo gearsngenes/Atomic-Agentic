@@ -87,8 +87,8 @@ class IterativeFlowResult(WorkflowResult):
     triggering_step:
         The body-step index whose checker matched its ``approval_value`` and
         stopped the loop. ``None`` if ``exited_early`` is False. A plain
-        ``int`` rather than the ``CheckerSpec`` itself -- a result should not
-        carry a callable (``CheckerSpec.judge``); look the checker up on the
+        ``int`` rather than the ``Checker`` itself -- a result should not
+        carry a callable (``Checker.judge``); look the checker up on the
         live flow via this index if the full spec is needed.
     result_setting_indices:
         Fixed body-step positions whose results update the running

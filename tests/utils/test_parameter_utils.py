@@ -1,29 +1,31 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import replace
-from typing import Annotated, Any, Optional, TypedDict
+from typing import Annotated, Any, Literal, Optional, TypedDict
 
 import pytest
 
 from atomic_agentic.exceptions import SchemaError
 from atomic_agentic.core.Invokable import AtomicInvokable
-from atomic_agentic.models.parameters import ParamNameReport, ParamSpec
+from atomic_agentic.models.parameters import ParameterReport, ParamSpec
 from atomic_agentic.utils.parameters import (
     _insertion_category,
     _normalize_prompt_template,
     _try_parse_clean_field,
     _validate_parameter_order,
+    apply_parameter_reports,
+    build_parameter_report,
+    build_parameter_reports,
     insert_by_category,
     is_valid_parameter_order,
-    n_way_parameter_report,
-    parameter_collisions,
-    parameter_overlap,
+    n_way_kind_compatible,
+    n_way_type_witness,
     semantically_compatible,
     semantically_identical,
     to_paramspec_list,
-    variadic_compatible,
 )
-from atomic_agentic.core.core_api import extract_io
+from atomic_agentic.core.core_api import extract_io, parameter_overlap, parameter_collisions
 from atomic_agentic.constants.core import NO_VAL
 
 
@@ -90,7 +92,7 @@ class TestExtractIO:
             ParamSpec.POSITIONAL_OR_KEYWORD,
             ParamSpec.POSITIONAL_OR_KEYWORD,
         ]
-        assert [param.type for param in parameters] == ["int", "str"]
+        assert [param.type for param in parameters] == [("int",), ("str",)]
         assert parameters[0].default is NO_VAL
         assert parameters[1].default == "default"
 
@@ -102,7 +104,7 @@ class TestExtractIO:
 
         assert return_type == "Any"
         assert parameters[0].name == "limit"
-        assert parameters[0].type == "int"
+        assert parameters[0].type == ("int",)
         assert parameters[0].default == 10
 
     def test_extract_io_handles_varargs_keyword_only_and_varkwargs(self) -> None:
@@ -113,10 +115,10 @@ class TestExtractIO:
 
         assert return_type == "None"
         assert [(param.name, param.kind, param.type) for param in parameters] == [
-            ("x", ParamSpec.POSITIONAL_OR_KEYWORD, "int"),
-            ("args", ParamSpec.VAR_POSITIONAL, "str"),
-            ("debug", ParamSpec.KEYWORD_ONLY, "bool"),
-            ("extras", ParamSpec.VAR_KEYWORD, "float"),
+            ("x", ParamSpec.POSITIONAL_OR_KEYWORD, ("int",)),
+            ("args", ParamSpec.VAR_POSITIONAL, ("str",)),
+            ("debug", ParamSpec.KEYWORD_ONLY, ("bool",)),
+            ("extras", ParamSpec.VAR_KEYWORD, ("float",)),
         ]
 
     def test_extract_io_handles_positional_only_parameters(self) -> None:
@@ -137,7 +139,7 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert [param.type for param in parameters] == ["list[int]", "dict[str, Any]"]
+        assert [param.type for param in parameters] == [("list[int]",), ("dict[str, Any]",)]
         assert return_type == "list[str]"
 
     def test_extract_io_preserves_string_annotations(self) -> None:
@@ -146,7 +148,7 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert parameters[0].type in {"CustomType", "'CustomType'"}
+        assert parameters[0].type in {("CustomType",), ("'CustomType'",)}
         assert return_type in {"OtherType", "'OtherType'"}
 
     def test_extract_io_formats_optional_annotation(self) -> None:
@@ -155,8 +157,25 @@ class TestExtractIO:
 
         parameters, return_type = extract_io(sample)
 
-        assert parameters[0].type in {"Union[int, NoneType]", "Union[int, None]", "Optional[int]", "int | None"}
-        assert return_type in {"Union[str, NoneType]", "Union[str, None]", "Optional[str]", "str | None"}
+        assert parameters[0].type == ("None", "int")
+        assert return_type == "None | str"
+
+    def test_extract_io_pep604_union_matches_typing_union(self) -> None:
+        def sample(value: int | None) -> str | None:
+            return str(value) if value is not None else None
+
+        parameters, return_type = extract_io(sample)
+
+        assert parameters[0].type == ("None", "int")
+        assert return_type == "None | str"
+
+    def test_extract_io_literal_none_is_not_corrupted_to_any(self) -> None:
+        def sample(value: Literal[None]) -> None:
+            return None
+
+        parameters, _ = extract_io(sample)
+
+        assert parameters[0].type == ("Literal[None]",)
 
 
 class TestParameterOrderValidation:
@@ -280,8 +299,8 @@ class TestToParamSpecList:
         parameters = to_paramspec_list(Config)
 
         assert [(param.name, param.index, param.kind, param.type) for param in parameters] == [
-            ("query", 0, ParamSpec.POSITIONAL_OR_KEYWORD, "str"),
-            ("top_k", 1, ParamSpec.POSITIONAL_OR_KEYWORD, "int"),
+            ("query", 0, ParamSpec.POSITIONAL_OR_KEYWORD, ("str",)),
+            ("top_k", 1, ParamSpec.POSITIONAL_OR_KEYWORD, ("int",)),
         ]
 
     def test_list_of_paramspecs_is_reindexed_into_fresh_specs(self) -> None:
@@ -294,8 +313,8 @@ class TestToParamSpecList:
 
         assert parameters is not original
         assert [(param.name, param.index, param.type, param.default) for param in parameters] == [
-            ("x", 0, "int", NO_VAL),
-            ("y", 1, "str", "hello"),
+            ("x", 0, ("int",), NO_VAL),
+            ("y", 1, ("str",), "hello"),
         ]
         assert parameters[0] is not original[0]
         assert parameters[1] is not original[1]
@@ -318,8 +337,8 @@ class TestToParamSpecListStringGrammar:
         parameters = to_paramspec_list(["x", "y"])
 
         assert [(param.name, param.index, param.kind, param.type) for param in parameters] == [
-            ("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, "Any"),
-            ("y", 1, ParamSpec.POSITIONAL_OR_KEYWORD, "Any"),
+            ("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, ("Any",)),
+            ("y", 1, ParamSpec.POSITIONAL_OR_KEYWORD, ("Any",)),
         ]
 
     def test_slash_marker_converts_previous_plain_names_to_positional_only(self) -> None:
@@ -421,7 +440,7 @@ class TestExtractIOAnnotated:
 
         parameters, _ = extract_io(sample)
 
-        assert parameters[0].type == "str"
+        assert parameters[0].type == ("str",)
         assert parameters[0].description == "the x value"
 
     def test_plain_param_has_none_description(self) -> None:
@@ -446,7 +465,7 @@ class TestExtractIOAnnotated:
 
         parameters, _ = extract_io(sample)
 
-        assert parameters[0].type == "float"
+        assert parameters[0].type == ("float",)
         assert parameters[0].description == "valid"
 
     def test_annotated_whitespace_only_description_coerced_to_none(self) -> None:
@@ -472,7 +491,7 @@ class TestExtractIOAnnotated:
         parameters, _ = extract_io(sample)
 
         assert parameters[0].kind == ParamSpec.VAR_POSITIONAL
-        assert parameters[0].type == "int"
+        assert parameters[0].type == ("int",)
         assert parameters[0].description == "positional items"
 
     def test_annotated_varkwargs_description_extracted(self) -> None:
@@ -518,7 +537,7 @@ class TestToParamSpecListTypedDictAnnotated:
 
         query_param = next(p for p in parameters if p.name == "query")
         limit_param = next(p for p in parameters if p.name == "limit")
-        assert query_param.type == "str"
+        assert query_param.type == ("str",)
         assert query_param.description == "the search string"
         assert limit_param.description is None
 
@@ -698,6 +717,38 @@ class TestSemanticallyCompatible:
         b = make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int")
         assert semantically_compatible(a, b) is False
 
+    def test_bare_generic_origin_is_compatible_with_any_parameterization(self) -> None:
+        a = make_param("x", 0, type_="dict")
+        b = make_param("x", 0, type_="dict[str, Any]")
+        assert semantically_compatible(a, b) is True
+        assert semantically_compatible(b, a) is True
+
+    def test_same_origin_incompatible_args_are_incompatible(self) -> None:
+        a = make_param("x", 0, type_="dict[str, int]")
+        b = make_param("x", 0, type_="dict[str, str]")
+        assert semantically_compatible(a, b) is False
+
+    def test_same_origin_any_wildcarded_arg_is_compatible(self) -> None:
+        a = make_param("x", 0, type_="dict[str, int]")
+        b = make_param("x", 0, type_="dict[str, Any]")
+        assert semantically_compatible(a, b) is True
+
+    def test_literal_reordered_values_are_compatible(self) -> None:
+        def sample_ab(x: Literal["a", "b"]) -> None:
+            pass
+
+        def sample_ba(x: Literal["b", "a"]) -> None:
+            pass
+
+        a = extract_io(sample_ab)[0][0]
+        b = extract_io(sample_ba)[0][0]
+        assert semantically_compatible(a, b) is True
+
+    def test_union_member_overlap_is_compatible(self) -> None:
+        a = make_param("x", 0, type_=("int", "str"))
+        b = make_param("x", 0, type_="str")
+        assert semantically_compatible(a, b) is True
+
 
 class TestSemanticallyIdentical:
     def _base(self) -> ParamSpec:
@@ -746,107 +797,89 @@ class TestSemanticallyIdentical:
         b = replace(self._base(), name="y")
         assert semantically_identical(a, b) is False
 
+    def test_literal_reordered_values_are_identical(self) -> None:
+        def sample_ab(x: Literal["a", "b"]) -> None:
+            pass
+
+        def sample_ba(x: Literal["b", "a"]) -> None:
+            pass
+
+        a = extract_io(sample_ab)[0][0]
+        b = extract_io(sample_ba)[0][0]
+        assert semantically_identical(a, b) is True
+
 
 class TestParameterOverlapAndCollisions:
-    def test_empty_lists_produce_no_overlap_or_collisions(self) -> None:
-        assert parameter_overlap([], []) == []
-        assert parameter_collisions([], []) == []
+    def test_empty_sources_produce_no_overlap_or_collisions(self) -> None:
+        assert parameter_overlap([]) == []
+        assert parameter_collisions([]) == []
 
     def test_disjoint_names_produce_no_overlap_or_collisions(self) -> None:
-        source_a = [make_param("x", 0, type_="int")]
-        source_b = [make_param("y", 0, type_="int")]
-        assert parameter_overlap(source_a, source_b) == []
-        assert parameter_collisions(source_a, source_b) == []
+        def source_a(x: int) -> None: ...
+        def source_b(y: int) -> None: ...
+        assert parameter_overlap([source_a, source_b]) == []
+        assert parameter_collisions([source_a, source_b]) == []
 
     def test_compatible_shared_name_is_overlap_not_collision(self) -> None:
-        source_a = [make_param("x", 0, type_="int")]
-        source_b = [make_param("x", 0, type_="Any")]
-        assert parameter_overlap(source_a, source_b) == ["x"]
-        assert parameter_collisions(source_a, source_b) == []
+        def source_a(x: int) -> None: ...
+        def source_b(x) -> None: ...  # noqa: ANN001 -- deliberately untyped -> "Any"
+        assert parameter_overlap([source_a, source_b]) == ["x"]
+        assert parameter_collisions([source_a, source_b]) == []
 
     def test_incompatible_shared_name_is_collision_not_overlap(self) -> None:
-        source_a = [make_param("x", 0, type_="int")]
-        source_b = [make_param("x", 0, type_="str")]
-        assert parameter_overlap(source_a, source_b) == []
-        assert parameter_collisions(source_a, source_b) == ["x"]
+        def source_a(x: int) -> None: ...
+        def source_b(x: str) -> None: ...
+        assert parameter_overlap([source_a, source_b]) == []
+        assert parameter_collisions([source_a, source_b]) == ["x"]
 
     def test_mixed_overlap_and_collisions_partition_cleanly(self) -> None:
-        source_a = [
-            make_param("compatible", 0, type_="int"),
-            make_param("colliding", 1, type_="int"),
-            make_param("only_in_a", 2, type_="int"),
-        ]
-        source_b = [
-            make_param("compatible", 0, type_="Any"),
-            make_param("colliding", 1, type_="str"),
-            make_param("only_in_b", 2, type_="int"),
-        ]
+        def source_a(compatible: int, colliding: int, only_in_a: int) -> None: ...
+        def source_b(compatible, colliding: str, only_in_b: int) -> None: ...  # noqa: ANN001
 
-        overlap = parameter_overlap(source_a, source_b)
-        collisions = parameter_collisions(source_a, source_b)
+        overlap = parameter_overlap([source_a, source_b])
+        collisions = parameter_collisions([source_a, source_b])
 
         assert overlap == ["compatible"]
         assert collisions == ["colliding"]
         assert set(overlap) & set(collisions) == set()
-        shared_names = {p.name for p in source_a} & {p.name for p in source_b}
-        assert set(overlap) | set(collisions) == shared_names
 
-    def test_results_follow_source_a_order(self) -> None:
-        source_a = [
-            make_param("second", 0, type_="int"),
-            make_param("first", 1, type_="int"),
-        ]
-        source_b = [
-            make_param("first", 0, type_="int"),
-            make_param("second", 1, type_="int"),
-        ]
-        assert parameter_overlap(source_a, source_b) == ["second", "first"]
+    def test_results_follow_first_source_order(self) -> None:
+        def source_a(second: int, first: int) -> None: ...
+        def source_b(first: int, second: int) -> None: ...
+        assert parameter_overlap([source_a, source_b]) == ["second", "first"]
 
+    def test_name_shared_by_two_of_three_is_overlap_by_default(self) -> None:
+        def source_a(x: int) -> None: ...
+        def source_b(x: int) -> None: ...
+        def source_c(y: int) -> None: ...
+        assert parameter_overlap([source_a, source_b, source_c]) == ["x"]
 
-class TestVariadicCompatible:
-    def test_neither_side_has_variadics(self) -> None:
-        source_a = [make_param("x", 0)]
-        source_b = [make_param("y", 0)]
-        assert variadic_compatible(source_a, source_b, set()) is True
+    def test_unanimous_only_excludes_names_not_shared_by_every_source(self) -> None:
+        def source_a(x: int) -> None: ...
+        def source_b(x: int) -> None: ...
+        def source_c(y: int) -> None: ...
+        assert parameter_overlap([source_a, source_b, source_c], unanimous_only=True) == []
 
-    def test_only_one_side_has_a_variadic(self) -> None:
-        source_a = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
-        source_b = [make_param("y", 0)]
-        assert variadic_compatible(source_a, source_b, set()) is True
+    def test_unanimous_only_includes_names_shared_by_every_source(self) -> None:
+        def source_a(x: int) -> None: ...
+        def source_b(x: int) -> None: ...
+        def source_c(x: int) -> None: ...
+        assert parameter_overlap([source_a, source_b, source_c], unanimous_only=True) == ["x"]
 
-    def test_same_kind_same_name_already_in_shared_names_is_safe(self) -> None:
-        source_a = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
-        source_b = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
-        assert variadic_compatible(source_a, source_b, {"args"}) is True
+    def test_parameter_collisions_has_no_unanimous_only_parameter(self) -> None:
+        import inspect
+        assert "unanimous_only" not in inspect.signature(parameter_collisions).parameters
 
-    def test_same_kind_different_names_not_in_shared_names_conflicts(self) -> None:
-        source_a = [make_param("extra_args", 0, ParamSpec.VAR_POSITIONAL)]
-        source_b = [make_param("things", 0, ParamSpec.VAR_POSITIONAL)]
-        assert variadic_compatible(source_a, source_b, set()) is False
+    def test_parameter_collisions_flags_two_source_disagreement_with_more_sources_present(self) -> None:
+        def source_a(x: int) -> None: ...
+        def source_b(x: str) -> None: ...
+        def source_c(y: int) -> None: ...
+        assert parameter_collisions([source_a, source_b, source_c]) == ["x"]
 
-    def test_same_kind_same_name_not_yet_in_shared_names_still_conflicts(self) -> None:
-        # This function trusts the shared_names set given to it -- it does not
-        # independently recognize a shared name as "already resolved" unless
-        # the caller included it in shared_names.
-        source_a = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
-        source_b = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
-        assert variadic_compatible(source_a, source_b, set()) is False
-
-    def test_different_variadic_kinds_do_not_conflict(self) -> None:
-        source_a = [make_param("args", 0, ParamSpec.VAR_POSITIONAL)]
-        source_b = [make_param("extras", 0, ParamSpec.VAR_KEYWORD)]
-        assert variadic_compatible(source_a, source_b, set()) is True
-
-    def test_both_kinds_conflicting_independently_still_reports_conflict(self) -> None:
-        source_a = [
-            make_param("args_a", 0, ParamSpec.VAR_POSITIONAL),
-            make_param("extras_a", 1, ParamSpec.VAR_KEYWORD),
-        ]
-        source_b = [
-            make_param("args_b", 0, ParamSpec.VAR_POSITIONAL),
-            make_param("extras_b", 1, ParamSpec.VAR_KEYWORD),
-        ]
-        assert variadic_compatible(source_a, source_b, set()) is False
+    def test_accepts_atomic_invokable_sources(self) -> None:
+        invokable = _AddInvokable()
+        def source_b(a: int) -> None: ...
+        assert parameter_overlap([invokable, source_b]) == ["a"]
 
 
 class TestInsertionCategory:
@@ -890,7 +923,7 @@ class TestInsertByCategory:
 
         assert result is not composed
         assert result[0] is not composed[0]
-        assert [(p.name, p.index, p.type) for p in result] == [("a", 0, "int")]
+        assert [(p.name, p.index, p.type) for p in result] == [("a", 0, ("int",))]
 
     def test_simple_keyword_only_append(self) -> None:
         composed = [make_param("x", 0, ParamSpec.POSITIONAL_OR_KEYWORD)]
@@ -943,152 +976,287 @@ class TestInsertByCategory:
             insert_by_category(composed, items)
 
 
-class TestNWayParameterReport:
-    def test_empty_sources_yields_empty_report(self) -> None:
-        assert n_way_parameter_report([]) == []
+class TestParamSpecTypeConstruction:
+    def test_bare_string_type_is_wrapped_into_a_one_tuple(self) -> None:
+        spec = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int")
+        assert spec.type == ("int",)
 
-    def test_sources_with_no_params_yield_empty_report(self) -> None:
-        assert n_way_parameter_report([[], []]) == []
+    def test_list_type_is_normalized_into_a_sorted_tuple(self) -> None:
+        spec = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=["str", "int"])
+        assert spec.type == ("int", "str")
 
-    def test_single_source_single_param(self) -> None:
+    def test_tuple_type_is_deduplicated(self) -> None:
+        spec = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=("int", "int", "str"))
+        assert spec.type == ("int", "str")
+
+    def test_non_str_non_sequence_type_raises_type_error(self) -> None:
+        with pytest.raises(TypeError):
+            ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=123)  # type: ignore[arg-type]
+
+    def test_empty_tuple_type_raises_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=())
+
+    def test_non_str_member_raises_type_error(self) -> None:
+        with pytest.raises(TypeError):
+            ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=("int", 5))  # type: ignore[arg-type]
+
+    def test_to_dict_from_dict_round_trips_multi_member_type(self) -> None:
+        spec = ParamSpec(
+            name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=("int", "str"), default=1,
+        )
+        rebuilt = ParamSpec.from_dict(spec.to_dict())
+        assert rebuilt.type == ("int", "str")
+        assert rebuilt == spec
+
+    def test_to_dict_emits_a_list_for_type(self) -> None:
+        spec = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type=("int", "str"))
+        assert spec.to_dict()["type"] == ["int", "str"]
+
+
+class TestNWayTypeWitness:
+    def test_empty_input_returns_empty_frozenset(self) -> None:
+        assert n_way_type_witness([]) == frozenset()
+
+    def test_all_abstain_returns_any_fallback(self) -> None:
+        assert n_way_type_witness([("Any",), ("Any",), ("Any",)]) == frozenset({"Any"})
+
+    def test_single_tuple_is_its_own_witness(self) -> None:
+        assert n_way_type_witness([("int",)]) == frozenset({"int"})
+
+    def test_mixed_any_tuple_leak_regression_still_excludes_any_from_candidacy(self) -> None:
+        # The bug this algorithm was designed to close: "Any" must never be a
+        # CANDIDATE, even sitting inside a mixed opinionated tuple like
+        # ("Any", "int") -- it must not manufacture a false witness that
+        # papers over ("int",) vs ("str",)'s genuine, flat conflict. "Any"
+        # still works as a receiving-side wildcard (it satisfies its own
+        # tuple's membership test trivially), but "int" fails against the
+        # ("str",) tuple, and "str" fails against the ("int",) tuple, so the
+        # witness set must come back empty.
+        witness = n_way_type_witness([("Any", "int"), ("int",), ("str",)])
+        assert witness == frozenset()
+
+    def test_triangle_pairwise_compatible_but_no_universal_witness_is_empty(self) -> None:
+        # Helly-property counterexample, N=3: every pair shares a token
+        # (A-B: str, B-C: bool, A-C: int) but no single token is common to
+        # all three -- the witness standard (unlike a weaker pairwise-all-
+        # pairs check) correctly reports no shared type.
+        a = ("int", "str")
+        b = ("str", "bool")
+        c = ("bool", "int")
+        assert n_way_type_witness([a, b, c]) == frozenset()
+
+    def test_genuine_three_way_witness_is_found_and_full_set_is_returned(self) -> None:
+        # Every opinionated tuple actually shares "int"; "str" only appears
+        # in one tuple and must not leak into the witness set.
+        witness = n_way_type_witness([("int", "str"), ("int",), ("int",)])
+        assert witness == frozenset({"int"})
+
+    def test_abstaining_source_alongside_opinionated_sources_is_never_consulted(self) -> None:
+        # A pure-Any source neither contributes to nor rescues the witness
+        # search once at least one opinionated source exists.
+        assert n_way_type_witness([("Any",), ("int",), ("int",)]) == frozenset({"int"})
+
+    def test_abstaining_source_does_not_rescue_a_genuine_opinionated_conflict(self) -> None:
+        assert n_way_type_witness([("Any",), ("int",), ("str",)]) == frozenset()
+
+    def test_generator_input_is_materialized_and_consumed_safely(self) -> None:
+        witness = n_way_type_witness((t for t in [("int",), ("int",)]))
+        assert witness == frozenset({"int"})
+
+
+class TestNWayKindCompatible:
+    def test_no_variadic_present_is_always_compatible_regardless_of_mix(self) -> None:
+        assert n_way_kind_compatible([
+            ParamSpec.POSITIONAL_ONLY,
+            ParamSpec.POSITIONAL_OR_KEYWORD,
+            ParamSpec.KEYWORD_ONLY,
+        ]) is True
+
+    def test_single_kind_repeated_is_compatible(self) -> None:
+        assert n_way_kind_compatible([ParamSpec.KEYWORD_ONLY, ParamSpec.KEYWORD_ONLY]) is True
+
+    def test_single_shared_variadic_kind_is_compatible(self) -> None:
+        assert n_way_kind_compatible([ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_POSITIONAL]) is True
+
+    def test_two_distinct_variadic_kinds_are_incompatible(self) -> None:
+        assert n_way_kind_compatible([ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD]) is False
+
+    def test_one_variadic_plus_one_non_variadic_is_incompatible(self) -> None:
+        assert n_way_kind_compatible([ParamSpec.VAR_POSITIONAL, ParamSpec.POSITIONAL_OR_KEYWORD]) is False
+
+    def test_empty_input_has_no_variadic_and_is_compatible(self) -> None:
+        assert n_way_kind_compatible([]) is True
+
+
+class TestBuildParameterReport:
+    def test_single_observation_is_a_trivial_pass_through(self) -> None:
         spec = make_param("x", 0, type_="int")
-        report = n_way_parameter_report([[spec]])
+        report = build_parameter_report("x", [spec])
 
-        assert len(report) == 1
-        entry = report[0]
-        assert entry.name == "x"
-        assert entry.source_count == 1
-        assert entry.types == {"int"}
-        assert entry.kinds == {ParamSpec.POSITIONAL_OR_KEYWORD}
-        assert entry.unique_default_count == 1
-        assert entry.unique_description_count == 1
-        assert entry.observations == ((0, spec),)
+        assert report.parameter_name == "x"
+        assert report.witness_types == frozenset({"int"})
+        assert report.winner_source == 0
+        assert report.kind_compatible is True
+        assert report.observations == (spec,)
+        assert report.is_identical is True
 
-    def test_name_only_in_some_sources_gets_partial_source_count(self) -> None:
-        a = make_param("shared", 0, type_="int")
-        b = make_param("shared", 0, type_="int")
-        report = n_way_parameter_report([[a], [b], []])
+    def test_dense_none_gaps_are_skipped_for_witness_and_kind_computation(self) -> None:
+        spec_b = make_param("x", 0, type_="int")
+        report = build_parameter_report("x", [None, spec_b, None])
 
-        entry = next(r for r in report if r.name == "shared")
-        assert entry.source_count == 2
+        assert report.witness_types == frozenset({"int"})
+        assert report.observations == (None, spec_b, None)
 
-    def test_distinct_names_produce_separate_reports(self) -> None:
-        report = n_way_parameter_report([
-            [make_param("x", 0, type_="int")],
-            [make_param("y", 0, type_="str")],
-        ])
+    def test_winner_source_is_the_first_present_index_not_the_first_list_index(self) -> None:
+        spec_b = make_param("x", 0, type_="int", default=1)
+        spec_c = make_param("x", 0, type_="int", default=2)
+        report = build_parameter_report("x", [None, spec_b, spec_c])
 
-        names = {r.name for r in report}
-        assert names == {"x", "y"}
+        assert report.winner_source == 1
 
-    def test_names_reported_in_first_seen_order(self) -> None:
-        report = n_way_parameter_report([
-            [make_param("second", 0), make_param("first", 1)],
-            [make_param("third", 0)],
-        ])
+    def test_is_identical_false_when_present_observations_differ(self) -> None:
+        spec_a = make_param("x", 0, type_="int", default=1)
+        spec_b = make_param("x", 0, type_="int", default=2)
+        report = build_parameter_report("x", [spec_a, spec_b])
 
-        assert [r.name for r in report] == ["second", "first", "third"]
+        # Compatible (same type/kind) but not identical (different default).
+        assert report.witness_types == frozenset({"int"})
+        assert report.is_identical is False
 
-    def test_observations_preserve_first_seen_order_across_sources(self) -> None:
-        a = make_param("x", 0, type_="int")
-        b = make_param("x", 0, type_="Any")
-        c = make_param("x", 0, type_="Any")
+    def test_is_identical_true_when_present_observations_all_match_winner(self) -> None:
+        spec_a = make_param("x", 0, type_="int", default=1)
+        spec_b = make_param("x", 0, type_="int", default=1)
+        report = build_parameter_report("x", [spec_a, spec_b])
 
-        entry = n_way_parameter_report([[a], [b], [c]])[0]
+        assert report.is_identical is True
 
-        assert entry.observations == ((0, a), (1, b), (2, c))
+    def test_kind_compatible_reflects_n_way_kind_compatible(self) -> None:
+        spec_a = make_param("x", 0, ParamSpec.VAR_POSITIONAL, type_="Any")
+        spec_b = make_param("x", 0, ParamSpec.VAR_KEYWORD, type_="Any")
+        report = build_parameter_report("x", [spec_a, spec_b])
 
-    def test_types_aggregate_into_a_set(self) -> None:
-        report = n_way_parameter_report([
-            [make_param("x", 0, type_="int")],
-            [make_param("x", 0, type_="int")],
-            [make_param("x", 0, type_="str")],
-        ])
+        assert report.kind_compatible is False
 
-        assert report[0].types == {"int", "str"}
 
-    def test_kinds_aggregate_into_a_set(self) -> None:
-        report = n_way_parameter_report([
-            [make_param("x", 0, ParamSpec.POSITIONAL_ONLY)],
-            [make_param("x", 0, ParamSpec.KEYWORD_ONLY)],
-        ])
+class TestBuildParameterReports:
+    def test_first_seen_order_preserved_across_sources(self) -> None:
+        source_a = [make_param("second", 0), make_param("first", 1)]
+        source_b = [make_param("third", 0)]
 
-        assert report[0].kinds == {ParamSpec.POSITIONAL_ONLY, ParamSpec.KEYWORD_ONLY}
+        reports = build_parameter_reports([source_a, source_b])
 
-    def test_unique_default_count_one_when_all_defaults_match(self) -> None:
-        report = n_way_parameter_report([
-            [make_param("x", 0, default=5)],
-            [make_param("x", 0, default=5)],
-        ])
-        assert report[0].unique_default_count == 1
+        assert [r.parameter_name for r in reports] == ["second", "first", "third"]
 
-    def test_unique_default_count_counts_distinct_values(self) -> None:
-        report = n_way_parameter_report([
-            [make_param("x", 0, default=5)],
-            [make_param("x", 0, default=6)],
-        ])
-        assert report[0].unique_default_count == 2
+    def test_multi_name_grouping_across_disjoint_source_subsets(self) -> None:
+        source_a = [make_param("x", 0, type_="int"), make_param("shared", 1, type_="int")]
+        source_b = [make_param("y", 0, type_="str")]
+        source_c = [make_param("shared", 0, type_="int")]
 
-    def test_no_val_is_an_ordinary_default_member_not_excluded(self) -> None:
-        # A mix of NO_VAL and a real default must count as 2 distinct
-        # values -- NO_VAL is never special-cased out of the grouping.
-        report = n_way_parameter_report([
-            [make_param("x", 0, default=NO_VAL)],
-            [make_param("x", 0, default=5)],
-        ])
-        assert report[0].unique_default_count == 2
+        reports = build_parameter_reports([source_a, source_b, source_c])
+        by_name = {r.parameter_name: r for r in reports}
 
-    def test_shared_no_val_default_counts_as_one_unique_value(self) -> None:
-        report = n_way_parameter_report([
-            [make_param("x", 0, default=NO_VAL)],
-            [make_param("x", 0, default=NO_VAL)],
-        ])
-        assert report[0].unique_default_count == 1
+        assert set(by_name) == {"x", "shared", "y"}
+        assert by_name["x"].observations == (source_a[0], None, None)
+        assert by_name["y"].observations == (None, source_b[0], None)
+        assert by_name["shared"].observations == (source_a[1], None, source_c[0])
+        assert by_name["shared"].is_identical is True
 
-    def test_unhashable_defaults_grouped_by_equality_not_identity(self) -> None:
-        # Two separately-constructed but equal lists must count as one
-        # unique default -- equality grouping, not a literal set() (which
-        # would crash on unhashable values) and not identity comparison.
-        report = n_way_parameter_report([
-            [make_param("x", 0, default=[1, 2])],
-            [make_param("x", 0, default=[1, 2])],
-        ])
-        assert report[0].unique_default_count == 1
+    def test_empty_sources_yields_empty_reports(self) -> None:
+        assert build_parameter_reports([]) == []
+        assert build_parameter_reports([[], []]) == []
 
-    def test_unhashable_defaults_distinguish_unequal_values(self) -> None:
-        report = n_way_parameter_report([
-            [make_param("x", 0, default=[1, 2])],
-            [make_param("x", 0, default=[3, 4])],
-        ])
-        assert report[0].unique_default_count == 2
+    def test_report_entries_are_parameterreport_instances(self) -> None:
+        reports = build_parameter_reports([[make_param("x", 0)]])
+        assert isinstance(reports[0], ParameterReport)
 
-    def test_unique_description_count_via_real_set(self) -> None:
-        a = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", description="first")
-        b = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", description="second")
-        c = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", description="first")
 
-        report = n_way_parameter_report([[a], [b], [c]])
+class _DummyReconciliationError(Exception):
+    """Distinct exception class, deliberately not Agent/Workflow-shaped --
+    proves error_cls is actually threaded through apply_parameter_reports
+    rather than hardcoded to one caller's exception type."""
 
-        assert report[0].unique_description_count == 2
 
-    def test_none_description_counts_as_its_own_value(self) -> None:
-        a = make_param("x", 0)  # description=None by default
-        b = ParamSpec(name="x", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="Any", description="set")
+class TestApplyParameterReports:
+    def test_empty_witness_raises_error_cls(self) -> None:
+        spec_a = make_param("x", 0, type_="int")
+        spec_b = make_param("x", 0, type_="str")
+        report = build_parameter_report("x", [spec_a, spec_b])
+        assert report.witness_types == frozenset()
 
-        report = n_way_parameter_report([[a], [b]])
+        with pytest.raises(_DummyReconciliationError, match="no compatible reconciliation"):
+            apply_parameter_reports(
+                [report], ("a", "b"), error_cls=_DummyReconciliationError, stacklevel=1
+            )
 
-        assert report[0].unique_description_count == 2
+    def test_kind_incompatible_raises_error_cls(self) -> None:
+        spec_a = make_param("x", 0, ParamSpec.VAR_POSITIONAL, type_="Any")
+        spec_b = make_param("x", 0, ParamSpec.VAR_KEYWORD, type_="Any")
+        report = build_parameter_report("x", [spec_a, spec_b])
+        assert report.kind_compatible is False
 
-    def test_report_entries_are_paramnamereport_instances(self) -> None:
-        report = n_way_parameter_report([[make_param("x", 0)]])
-        assert isinstance(report[0], ParamNameReport)
+        with pytest.raises(_DummyReconciliationError, match="no compatible reconciliation"):
+            apply_parameter_reports(
+                [report], ("a", "b"), error_cls=_DummyReconciliationError, stacklevel=1
+            )
 
-    def test_no_raising_on_type_or_kind_conflicts_pure_aggregation(self) -> None:
-        # Detection is separate from any raise/warn policy decision -- this
-        # utility never raises regardless of how divergent the inputs are.
-        report = n_way_parameter_report([
-            [make_param("x", 0, ParamSpec.VAR_POSITIONAL, type_="int")],
-            [make_param("x", 0, ParamSpec.VAR_KEYWORD, type_="str")],
-        ])
-        assert report[0].types == {"int", "str"}
-        assert report[0].kinds == {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
+    def test_all_identical_reports_construct_without_warning(self) -> None:
+        spec_a = make_param("x", 0, type_="int", default=1)
+        spec_b = make_param("x", 0, type_="int", default=1)
+        report = build_parameter_report("x", [spec_a, spec_b])
+        assert report.is_identical is True
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            constructed = apply_parameter_reports(
+                [report], ("a", "b"), error_cls=_DummyReconciliationError, stacklevel=1
+            )
+
+        assert caught == []
+        assert len(constructed) == 1
+        assert constructed[0].name == "x"
+        assert constructed[0].type == ("int",)
+        assert constructed[0].default == 1
+
+    def test_mixed_identical_and_non_identical_reports_single_grouped_warning(self) -> None:
+        source_a = [
+            make_param("a", 0, type_="int", default=1),
+            make_param("b", 1, type_="int", default=1),
+            make_param("c", 2, type_="int"),
+        ]
+        source_b = [
+            make_param("a", 0, type_="int", default=2),
+            make_param("b", 1, type_="int", default=2),
+            make_param("c", 2, type_="int"),
+        ]
+        reports = build_parameter_reports([source_a, source_b])
+
+        with pytest.warns(UserWarning) as record:
+            constructed = apply_parameter_reports(
+                reports, ("source_a", "source_b"), error_cls=_DummyReconciliationError, stacklevel=1
+            )
+
+        # Exactly one grouped warning, not one per non-identical name.
+        assert len(record) == 1
+        assert "['a', 'b']" in str(record[0].message)
+        assert len(constructed) == 3
+
+    def test_stacklevel_attributes_warning_to_the_supplied_frame_depth(self) -> None:
+        spec_a = make_param("x", 0, type_="int", default=1)
+        spec_b = make_param("x", 0, type_="int", default=2)
+        report = build_parameter_report("x", [spec_a, spec_b])
+
+        def call_site() -> None:
+            apply_parameter_reports([report], ("a", "b"), error_cls=_DummyReconciliationError, stacklevel=2)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            call_site()
+
+        assert len(caught) == 1
+        # stacklevel=2 walks one frame up from apply_parameter_reports' own
+        # warnings.warn call, landing on call_site's own invocation line --
+        # not this test method's frame, and not apply_parameter_reports'
+        # own module.
+        assert caught[0].filename == __file__
+        assert caught[0].lineno == call_site.__code__.co_firstlineno + 1

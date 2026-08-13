@@ -16,7 +16,7 @@ from __future__ import annotations
 from researcher_agents import writer, critic
 from researcher_tools import research_tool, judge
 from atomic_agentic.workflows import SequentialFlow
-from atomic_agentic.workflows import IterativeFlow, CheckerSpec
+from atomic_agentic.workflows import IterativeFlow
 
 MAX_REVISIONS = 3
 
@@ -29,13 +29,10 @@ maker_checker = IterativeFlow(
     description="Iteratively refine an APA report with early-stop approval.",
     body_steps=[writer, critic],
     max_iterations=MAX_REVISIONS,
+    checkers=[None, (judge, {"approved": True})],
     result_setting_indices=[0],
     # handoff_index defaults to the last body step (critic) -- unchanged.
 )
-# judge_approved (researcher_tools.py) returns {"approved": bool}, not a
-# bare bool -- approval_value must match that mapping shape exactly.
-maker_checker.add_checker(index=1, judge=judge, approval_value={"approved": True}) 
-
 # ------------------------------------------------------
 # SequentialFlow to chain research -> makerchecker
 # ------------------------------------------------------

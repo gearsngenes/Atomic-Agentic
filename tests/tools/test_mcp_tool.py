@@ -220,8 +220,8 @@ class TestMCPProxyToolSignatureAndMetadata:
         tool = make_tool()
 
         assert [(p.name, p.kind, p.type, p.default) for p in tool.parameters] == [
-            ("query", ParamSpec.KEYWORD_ONLY, "str", NO_VAL),
-            ("top_k", ParamSpec.KEYWORD_ONLY, "int", 5),
+            ("query", ParamSpec.KEYWORD_ONLY, ("str",), NO_VAL),
+            ("top_k", ParamSpec.KEYWORD_ONLY, ("int",), 5),
         ]
         assert tool.return_type == "str"
 

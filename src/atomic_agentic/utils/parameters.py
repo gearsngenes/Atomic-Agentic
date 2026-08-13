@@ -5,6 +5,12 @@ It sits one tier above ``models/parameters.py`` in the dependency topology
 (``utils/`` depends on ``models/``) and is the canonical home for all logic that
 *uses* ``ParamSpec`` shapes rather than defining them.
 
+``parameter_overlap``/``parameter_collisions`` moved to ``core/core_api.py``
+-- their public shape takes ``AtomicInvokable``/``Callable`` sources
+directly, which needs ``extract_io``, which this module can't import
+without a cycle (same reasoning that put ``extract_io`` there in the first
+place).
+
 Public surface
 --------------
 - ``to_paramspec_list`` — normalize any supported schema input (``None``,
@@ -15,18 +21,27 @@ Public surface
   ``TypeError``.
 - ``semantically_compatible``, ``semantically_identical`` — same-name
   compatibility/identity checks between two ``ParamSpec`` instances.
-- ``parameter_overlap``, ``parameter_collisions`` — partition the names shared
-  between two ``ParamSpec`` lists into compatible-overlap vs. true-collision.
-- ``variadic_compatible`` — detects a same-kind variadic (``*args``/``**kwargs``)
-  declared independently by two sources under different names, a case
-  name-based overlap/collision checking can't see.
+  Curated into the root ``atomic_agentic`` public export surface --
+  developers may import either directly from there.
 - ``insert_by_category`` — batch-inserts new ``ParamSpec`` items into an
   already-valid composed list at the position that preserves a valid
   Python-style ordering.
-- ``n_way_parameter_report`` — folds N independent ``list[ParamSpec]``
-  sources into one ``ParamNameReport`` per distinct name observed across
-  them. Pure aggregation, no raising -- the caller decides what counts as
-  a genuine collision.
+- ``n_way_type_witness`` — for a group of type-tuples, returns the set of
+  type tokens compatible with every opinionated (non-``("Any",)``) tuple;
+  the literal ``"Any"`` token is excluded from candidacy even inside a
+  mixed tuple, though it still works as a receiving-side wildcard.
+- ``n_way_kind_compatible`` — whether a group of ``ParamSpec.kind`` values
+  is jointly compatible: any mix of non-variadic kinds is fine; a variadic
+  kind requires every source to agree on that exact kind.
+- ``build_parameter_report``/``build_parameter_reports`` — compute a
+  ``ParameterReport`` (witness types, kind compatibility, winning source,
+  identity) for one already-assembled dense observation list, or group N
+  priority-ordered ``list[ParamSpec]`` sources by name and do so for every
+  distinct name.
+- ``apply_parameter_reports`` — traverse a list of ``ParameterReport``
+  (raise on any conflict, construct the reconciled ``ParamSpec`` list,
+  batch-warn on compatible-but-not-identical names). Shared by every
+  composite class doing true N-way peer reconciliation.
 
 Private helpers
 ---------------
@@ -52,23 +67,37 @@ from __future__ import annotations
 
 import inspect
 import re
-from typing import Annotated, Any, Optional, get_args, get_origin, get_type_hints
+import warnings
+from types import UnionType
+from typing import (
+    Annotated,
+    Any,
+    Iterable,
+    Literal,
+    Optional,
+    Sequence,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from ..constants.core import IDENTIFIER_PATTERN, IDENTIFIER_PATTERN_TEXT, NO_VAL
+from ..constants.parameters import KIND_PRIORITY as _KIND_PRIORITY
 from ..exceptions import SchemaError
-from ..models.parameters import ParamNameReport, ParamSpec
+from ..models.parameters import ParameterReport, ParamSpec
 
 __all__ = [
-    "extract_io",
     "to_paramspec_list",
     "is_valid_parameter_order",
     "semantically_compatible",
     "semantically_identical",
-    "parameter_overlap",
-    "parameter_collisions",
-    "variadic_compatible",
     "insert_by_category",
-    "n_way_parameter_report",
+    "n_way_type_witness",
+    "n_way_kind_compatible",
+    "build_parameter_report",
+    "build_parameter_reports",
+    "apply_parameter_reports",
 ]
 
 
@@ -87,16 +116,26 @@ def _format_annotation(ann: Any) -> str:
     generic types (e.g. ``dict[str, int]``), and ``typing`` module types
     (e.g. ``List[Dict[str, int]]``).
 
-    Returns ``'Any'`` for missing/empty annotations, the string as-is for
-    forward references, a nested ``origin[args]`` form for parameterized types,
-    the class name for plain types, and ``str(ann)`` as a fallback.
+    Returns ``'Any'`` for missing/empty annotations, ``'None'`` for the
+    ``NoneType``/``None`` value, the string as-is for forward references, a
+    nested ``origin[args]`` form for parameterized types (union origins
+    rendered as ``"a | b"`` rather than bracketed; ``Literal`` args sorted
+    since their order carries no meaning), the class name for plain types,
+    and ``str(ann)`` as a fallback.
     """
-    # Missing / unknown annotation
-    if ann is inspect._empty or ann is None:
+    # Missing / unknown annotation. Only reachable from a genuine top-level
+    # "nothing was annotated" call -- get_args() of any real Union/Literal/
+    # generic never produces this sentinel, so this branch is inert during
+    # recursion, not a source of the bug fixed by the next branch.
+    if ann is inspect._empty:
         return "Any"
 
-    # NoneType -> "None" to match Python -> None annotation convention
-    if ann is type(None):
+    # NoneType, or the literal value None -- the latter only reachable when
+    # recursing into a Literal arg (e.g. Literal[None]); Union/Optional
+    # never hit this since typing auto-converts None to NoneType at Union
+    # construction time. Previously grouped with the missing-annotation
+    # case above, which silently corrupted Literal[None] into "Any".
+    if ann is type(None) or ann is None:
         return "None"
 
     # Forward reference or explicit string annotation
@@ -106,12 +145,23 @@ def _format_annotation(ann: Any) -> str:
     # typing / generic / PEP 585 parameterized types
     origin = get_origin(ann)
     if origin is not None:
+        args = get_args(ann)
+        # Nested union (the top-level case is intercepted before this
+        # function is ever called, by _format_annotation_tuple).
+        if origin is Union or origin is UnionType:
+            return " | ".join(sorted(_format_annotation(a) for a in args))
         # Recursively format origin and args.
         origin_str = _format_annotation(origin)
-        args = get_args(ann)
         if not args:
             return origin_str
-        args_str = ", ".join(_format_annotation(a) for a in args)
+        # Literal's args are a value SET, not a positional structure (unlike
+        # e.g. dict[K, V]) -- sort so declaration order doesn't affect the
+        # rendered string, letting exact-match comparisons recognize
+        # differently-ordered-but-equivalent Literals as identical.
+        if origin is Literal:
+            args_str = ", ".join(sorted(_format_annotation(a) for a in args))
+        else:
+            args_str = ", ".join(_format_annotation(a) for a in args)
         return f"{origin_str}[{args_str}]"
 
     # Plain classes / types
@@ -126,6 +176,25 @@ def _format_annotation(ann: Any) -> str:
 
     # Fallback: best-effort string representation.
     return str(ann)
+
+
+def _format_annotation_tuple(ann: Any) -> tuple[str, ...]:
+    """Format an annotation as a canonical ``ParamSpec.type`` tuple.
+
+    Top-level, tuple-producing entry point -- the only place a top-level
+    ``Union``/``Optional``/``X | Y`` gets split into multiple members.
+    Called once per parameter and once for a return type; recursion (union
+    members, generic args, ``Literal`` args) always goes through
+    ``_format_annotation`` above, never back through here, so nested unions
+    stay a single joined string rather than nesting tuples.
+
+    Returns a sorted, deduplicated tuple of member strings -- more than one
+    only for a top-level union, exactly one otherwise.
+    """
+    origin = get_origin(ann)
+    if origin is Union or origin is UnionType:
+        return tuple(sorted({_format_annotation(a) for a in get_args(ann)}))
+    return (_format_annotation(ann),)
 
 
 def _is_typed_dict_class(obj: Any) -> bool:
@@ -318,15 +387,12 @@ def _paramspec_list_from_strings(items: list[str]) -> list[ParamSpec]:
     return normalized
 
 
-# Shared kind-priority table, derived from ParamSpec._VALID_KINDS (already in
-# priority order) rather than a second hardcoded literal list -- ParamSpec
-# stays the single source of truth for the kind vocabulary and its ordering.
-# ``_validate_parameter_order`` uses this directly for the non-decreasing-kind
-# check; ``_insertion_category`` builds a finer (kind, default-tier) key on
-# top of it for ``insert_by_category``.
-_KIND_PRIORITY: dict[str, int] = {
-    kind: priority for priority, kind in enumerate(ParamSpec._VALID_KINDS)
-}
+# Shared kind-priority table -- lives in constants/parameters.py now (the
+# real source of truth for the kind vocabulary and its ordering; ParamSpec's
+# own POSITIONAL_ONLY etc. are shims onto the same values). Imported under
+# its established private local name; ``_validate_parameter_order`` uses it
+# directly for the non-decreasing-kind check, ``_insertion_category`` builds
+# a finer (kind, default-tier) key on top of it for ``insert_by_category``.
 
 
 def _validate_parameter_order(parameters: list[ParamSpec]) -> None:
@@ -611,7 +677,7 @@ def to_paramspec_list(
                 name=name,
                 index=index,
                 kind=ParamSpec.POSITIONAL_OR_KEYWORD,
-                type=_format_annotation(base_ann),
+                type=_format_annotation_tuple(base_ann),
                 default=NO_VAL,
                 description=description,
             ))
@@ -683,18 +749,129 @@ def is_valid_parameter_order(parameters: list[ParamSpec]) -> bool:
         return False
 
 
+def _parse_generic(type_str: str) -> tuple[str, tuple[str, ...]] | None:
+    """Recover ``(origin, args)`` structure from an already-formatted type string.
+
+    Operates on stored strings only, never live ``typing`` objects, since a
+    ``ParamSpec.type`` string may have come from MCP or a deserialized
+    record and never had one. Scoped to this system's own canonical
+    ``"origin[arg, arg, ...]"`` dialect -- the shape ``_format_annotation``
+    itself produces -- not general Python type-string parsing.
+
+    Returns ``None`` for anything that doesn't have that bracket shape at
+    all, letting the caller fall back to plain string equality.
+    """
+    stripped = type_str.strip()
+    if "[" not in stripped or not stripped.endswith("]"):
+        return None
+
+    depth = 0
+    bracket_start = None
+    for i, ch in enumerate(stripped):
+        if ch == "[":
+            if depth == 0:
+                bracket_start = i
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+
+    if bracket_start is None:
+        return None
+
+    origin = stripped[:bracket_start].strip()
+    inner = stripped[bracket_start + 1 : -1]
+
+    args: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in inner:
+        if ch == "[":
+            depth += 1
+            current.append(ch)
+        elif ch == "]":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            args.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        args.append("".join(current).strip())
+
+    if not origin or not args:
+        return None
+
+    return origin, tuple(args)
+
+
+def _single_type_compatible(a: str, b: str) -> bool:
+    """Structural compatibility between two individual type strings.
+
+    The pairwise judgment ``semantically_compatible`` delegates to once
+    it's picked which pair of a (possibly multi-member) type to compare.
+    Exact match or either side ``"Any"`` are compatible; otherwise a bare
+    origin (e.g. ``"dict"``) is compatible with any parameterization of
+    that same origin, and two parameterized instances of the same origin
+    are compatible when every argument position is, recursively. Anything
+    that doesn't parse as this system's own canonical dialect falls back to
+    the plain-equality check already covered above -- never raises.
+    """
+    if a == b or a == "Any" or b == "Any":
+        return True
+
+    parsed_a = _parse_generic(a)
+    parsed_b = _parse_generic(b)
+
+    if parsed_a is None and parsed_b is not None:
+        return a == parsed_b[0]
+    if parsed_b is None and parsed_a is not None:
+        return b == parsed_a[0]
+    if parsed_a is not None and parsed_b is not None:
+        origin_a, args_a = parsed_a
+        origin_b, args_b = parsed_b
+        if origin_a != origin_b or len(args_a) != len(args_b):
+            return False
+        return all(_single_type_compatible(x, y) for x, y in zip(args_a, args_b))
+
+    return False
+
+
+def _simplify_type_set(types: set[str]) -> set[str]:
+    """Drop parameterized entries whose bare origin is also present.
+
+    ``{"dict", "dict[str, int]"}`` -> ``{"dict"}`` -- a bare origin already
+    accepts any parameterization of itself (the same fact
+    ``_single_type_compatible`` relies on for compatibility), so keeping a
+    more specific sibling alongside it is pure redundancy, not real
+    ambiguity. Deliberately non-recursive: ``dict[str, Any]`` alongside
+    ``dict[str, int]`` (no bare ``dict`` present) is a related but distinct
+    redundancy -- catching it would mean reasoning about "Any" absorbing a
+    concrete type at a specific argument position, not just a flat
+    bare-vs-parameterized check -- and is intentionally left alone here.
+    """
+    bare_origins = {t for t in types if _parse_generic(t) is None}
+    return {
+        t for t in types
+        if (parsed := _parse_generic(t)) is None or parsed[0] not in bare_origins
+    }
+
+
 def semantically_compatible(a: ParamSpec, b: ParamSpec) -> bool:
     """Whether two same-named ``ParamSpec``s are compatible enough to merge.
 
-    Type must match exactly, or either side may be ``"Any"``. Kind must be
-    compatible: any two non-variadic kinds are compatible with each other
-    (e.g. ``POSITIONAL_ONLY`` and ``KEYWORD_ONLY``), while
+    Type is compatible if any member of ``a.type`` is structurally
+    compatible with any member of ``b.type`` (see ``_single_type_compatible``).
+    Kind must be compatible: any two non-variadic kinds are compatible with
+    each other (e.g. ``POSITIONAL_ONLY`` and ``KEYWORD_ONLY``), while
     ``VAR_POSITIONAL``/``VAR_KEYWORD`` are only compatible with the exact
     same variadic kind. Name equality is the caller's responsibility — this
     checks compatibility of a pair already known to share a name (see
     ``parameter_overlap``/``parameter_collisions``).
     """
-    type_compatible = a.type == b.type or a.type == "Any" or b.type == "Any"
+    type_compatible = any(
+        _single_type_compatible(ta, tb) for ta in a.type for tb in b.type
+    )
 
     variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
     a_variadic = a.kind in variadic_kinds
@@ -720,60 +897,6 @@ def semantically_identical(a: ParamSpec, b: ParamSpec) -> bool:
         and a.default == b.default
         and a.description == b.description
     )
-
-
-def parameter_overlap(
-    source_a: list[ParamSpec], source_b: list[ParamSpec]
-) -> list[str]:
-    """Names present in both lists that are ``semantically_compatible``.
-
-    Returns names in ``source_a``'s order. Together with
-    ``parameter_collisions``, partitions every name shared between the two
-    lists — no name appears in both outputs, none are left unclassified.
-    """
-    b_by_name = {p.name: p for p in source_b}
-    return [
-        spec.name
-        for spec in source_a
-        if spec.name in b_by_name and semantically_compatible(spec, b_by_name[spec.name])
-    ]
-
-
-def parameter_collisions(
-    source_a: list[ParamSpec], source_b: list[ParamSpec]
-) -> list[str]:
-    """Names present in both lists that are NOT ``semantically_compatible``.
-
-    Returns names in ``source_a``'s order. See ``parameter_overlap`` for the
-    partition property the two functions satisfy together.
-    """
-    b_by_name = {p.name: p for p in source_b}
-    return [
-        spec.name
-        for spec in source_a
-        if spec.name in b_by_name and not semantically_compatible(spec, b_by_name[spec.name])
-    ]
-
-
-def variadic_compatible(
-    source_a: list[ParamSpec],
-    source_b: list[ParamSpec],
-    shared_names: set[str],
-) -> bool:
-    """Whether ``source_a``/``source_b``'s variadic declarations can merge safely.
-
-    Catches what name-based overlap/collision checking can't see: both
-    sources independently declaring a same-kind variadic parameter under
-    different names. A name already in ``shared_names`` is assumed already
-    accounted for by the ordinary overlap/collision path, so it is excluded
-    here regardless of kind.
-    """
-    for kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD):
-        a_has = any(p.kind == kind and p.name not in shared_names for p in source_a)
-        b_has = any(p.kind == kind and p.name not in shared_names for p in source_b)
-        if a_has and b_has:
-            return False
-    return True
 
 
 def _insertion_category(spec: ParamSpec) -> tuple[int, int]:
@@ -826,49 +949,201 @@ def insert_by_category(
     return result
 
 
-def n_way_parameter_report(sources: list[list[ParamSpec]]) -> list[ParamNameReport]:
-    """Aggregate N parameter-list sources into one report per distinct name.
+def n_way_type_witness(type_tuples: Iterable[tuple[str, ...]]) -> frozenset[str]:
+    """Witness set of type tokens compatible with every opinionated source.
 
-    Pure aggregation, no raising -- mirrors how ``parameter_collisions``/
-    ``parameter_overlap`` already separate detection from the caller's
-    raise/warn policy decision. The caller inspects the returned reports
-    and decides what counts as a genuine collision for its own purposes.
+    A source is "abstaining" if its type tuple is exactly ``("Any",)``, and
+    "opinionated" otherwise (including mixed tuples like ``("Any", "int")``).
+    All-abstain returns ``{"Any"}``. Otherwise the candidate pool is the
+    union of every opinionated tuple's tokens with the literal ``"Any"``
+    token permanently excluded from candidacy -- even inside a mixed
+    opinionated tuple -- so a single ``Any``-containing source can never
+    mask a genuine conflict between two concrete-typed sources. ``"Any"``
+    still works as a receiving-side wildcard: an opinionated tuple that
+    itself contains ``"Any"`` as one of its members still accepts any
+    candidate trivially via that member. Never raises.
     """
-    accumulator: dict[str, dict[str, Any]] = {}
+    tuples = list(type_tuples)
+    if not tuples:
+        return frozenset()
 
-    for source_index, param_list in enumerate(sources):
-        for spec in param_list:
-            entry = accumulator.setdefault(
-                spec.name,
-                {
-                    "observations": [],
-                    "types": set(),
-                    "kinds": set(),
-                    "default_groups": [],
-                    "description_values": set(),
-                    "source_indices": set(),
-                },
-            )
-            entry["observations"].append((source_index, spec))
-            entry["types"].add(spec.type)
-            entry["kinds"].add(spec.kind)
-            entry["source_indices"].add(source_index)
-            entry["description_values"].add(spec.description)
-            # Default may be unhashable (e.g. a list), so group by equality
-            # rather than a literal set(). NO_VAL is an ordinary member of
-            # this grouping, not special-cased.
-            if not any(spec.default == existing for existing in entry["default_groups"]):
-                entry["default_groups"].append(spec.default)
+    abstaining = [t for t in tuples if t == ("Any",)]
+    opinionated = [t for t in tuples if t != ("Any",)]
 
-    return [
-        ParamNameReport(
-            name=name,
-            source_count=len(entry["source_indices"]),
-            types=entry["types"],
-            kinds=entry["kinds"],
-            unique_default_count=len(entry["default_groups"]),
-            unique_description_count=len(entry["description_values"]),
-            observations=tuple(entry["observations"]),
+    if not opinionated:
+        return frozenset({"Any"})
+
+    candidate_pool = {token for t in opinionated for token in t if token != "Any"}
+
+    witnesses = {
+        candidate
+        for candidate in candidate_pool
+        if all(
+            any(_single_type_compatible(candidate, member) for member in t)
+            for t in opinionated
         )
-        for name, entry in accumulator.items()
-    ]
+    }
+    return frozenset(witnesses)
+
+
+def n_way_kind_compatible(kinds: Iterable[str]) -> bool:
+    """Whether a group of ``ParamSpec.kind`` values is jointly compatible.
+
+    Any mix of non-variadic kinds is compatible. A variadic kind
+    (``VAR_POSITIONAL``/``VAR_KEYWORD``) is compatible only if every
+    declaring source agrees on that exact kind -- i.e. the observed kind
+    set has exactly one distinct member. Never raises.
+    """
+    kind_set = set(kinds)
+    variadic_kinds = {ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD}
+    if not kind_set & variadic_kinds:
+        return True
+    return len(kind_set) == 1
+
+
+def build_parameter_report(
+    name: str, observations: Sequence[Optional[ParamSpec]]
+) -> ParameterReport:
+    """Compute one parameter name's cross-source reconciliation report.
+
+    ``observations`` is a dense, one-slot-per-source list in priority
+    order (index 0 = highest priority), ``None`` where a source doesn't
+    declare this name. The caller is expected to only invoke this for a
+    name observed in at least one source -- an all-``None`` observations
+    list is an internal-contract violation and is allowed to raise
+    ``IndexError`` naturally rather than being defensively guarded
+    against.
+    """
+    present = [(i, spec) for i, spec in enumerate(observations) if spec is not None]
+
+    witness = n_way_type_witness(spec.type for _, spec in present)
+    winner_index, winner_spec = present[0]
+    kind_ok = n_way_kind_compatible(spec.kind for _, spec in present)
+    identical = all(
+        semantically_identical(winner_spec, spec) for _, spec in present[1:]
+    )
+
+    return ParameterReport(
+        parameter_name=name,
+        witness_types=witness,
+        winner_source=winner_index,
+        kind_compatible=kind_ok,
+        observations=tuple(observations),
+        is_identical=identical,
+    )
+
+
+def build_parameter_reports(
+    sources: Sequence[Sequence[ParamSpec]],
+) -> list[ParameterReport]:
+    """Group N priority-ordered sources by name and report on each.
+
+    ``sources`` index 0 is the highest-priority source. Every distinct
+    name across all sources is collected in first-seen order (scanning
+    ``sources`` in order, then each source's own params in order), then
+    ``build_parameter_report`` is called once per name against a dense
+    observation list assembled from every source.
+    """
+    names: list[str] = []
+    by_name: dict[str, list[Optional[ParamSpec]]] = {}
+
+    for source_index, source in enumerate(sources):
+        for spec in source:
+            if spec.name not in by_name:
+                names.append(spec.name)
+                by_name[spec.name] = [None] * len(sources)
+            by_name[spec.name][source_index] = spec
+
+    return [build_parameter_report(name, by_name[name]) for name in names]
+
+
+def apply_parameter_reports(
+    reports: Sequence[ParameterReport],
+    source_labels: tuple[str, ...],
+    error_cls: type[Exception],
+    stacklevel: int,
+) -> list[ParamSpec]:
+    """Apply N-way peer reconciliation reports: raise, construct, or warn.
+
+    Promoted from Agent's own private reconciliation traversal -- the logic
+    is caller-agnostic (neither message below names a specific class), so
+    every composite class doing true N-way peer reconciliation (as opposed
+    to RoutingFlow's router-anchored shape, or GraphFlow's validation-only
+    one) can share this single traversal.
+
+    Traverses ``reports`` once, in order (the order ``build_parameter_reports``
+    produced -- first-seen name order across sources):
+
+    1. If ``report.witness_types`` is empty or ``report.kind_compatible``
+       is ``False``: raise ``error_cls`` immediately (first hit), naming
+       ``report.parameter_name`` and, for every non-``None`` entry in
+       ``report.observations`` zipped positionally with ``source_labels``,
+       that source's declared ``type``/``kind``.
+    2. Otherwise: build one ``ParamSpec`` from
+       ``report.observations[report.winner_source]``'s ``kind``/``default``/
+       ``description``, with ``type=tuple(sorted(report.witness_types))``
+       (the full reconciled witness set, not just the winner's own declared
+       type) and ``index=0`` (the caller re-indexes downstream, typically
+       via ``insert_by_category``); append to the result list.
+    3. If ``report.is_identical`` is ``False``, add ``report.parameter_name``
+       to a warning collector. Construction happens identically either way
+       -- only whether this name contributes to the warning differs.
+
+    After a full, non-raising traversal: if the warning collector is
+    non-empty, emit exactly one grouped ``UserWarning`` (not one per name)
+    naming every reconciled-but-not-identical parameter from this call,
+    using the caller-supplied ``stacklevel``.
+
+    ``stacklevel`` has no default -- it must be supplied explicitly by
+    every call site, tuned to that call site's own frame depth from this
+    function's ``warnings.warn`` call up to the actual user-facing
+    construction call (e.g. ``Agent(...)``, ``ParallelFlow(...)``). This
+    differs across callers depending on whether the calling class is
+    normally reached directly or through a subclass's own ``__init__`` --
+    confirmed empirically for the two call sites in this pass (see
+    proposal addendum): ``4`` for `Agent` (always reached via one layer of
+    subclass indirection), ``3`` for `ParallelFlow` (instantiated directly,
+    no intermediate layer).
+
+    Never mutates ``reports``. Returns the constructed list in ``reports``'
+    order.
+    """
+    constructed: list[ParamSpec] = []
+    overlapped: list[str] = []
+
+    for report in reports:
+        if not report.witness_types or not report.kind_compatible:
+            conflicts = ", ".join(
+                f"{label} declares type={spec.type!r} kind={spec.kind!r}"
+                for label, spec in zip(source_labels, report.observations)
+                if spec is not None
+            )
+            raise error_cls(
+                f"Parameter {report.parameter_name!r} has no compatible "
+                f"reconciliation across its declaring sources: {conflicts}."
+            )
+
+        winner = report.observations[report.winner_source]
+        constructed.append(
+            ParamSpec(
+                name=report.parameter_name,
+                index=0,
+                kind=winner.kind,
+                type=tuple(sorted(report.witness_types)),
+                default=winner.default,
+                description=winner.description,
+            )
+        )
+        if not report.is_identical:
+            overlapped.append(report.parameter_name)
+
+    if overlapped:
+        warnings.warn(
+            f"Parameter(s) {overlapped!r} are compatible across "
+            f"{'/'.join(source_labels)} but not identical; each uses its "
+            "highest-priority declaring source's kind/default/description.",
+            UserWarning,
+            stacklevel=stacklevel,
+        )
+
+    return constructed

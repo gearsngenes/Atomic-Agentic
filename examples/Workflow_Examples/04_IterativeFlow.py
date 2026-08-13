@@ -17,7 +17,7 @@ from atomic_agentic.agents import BasicAgent
 from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.tools import toolify
 from atomic_agentic import StructuredInvokable
-from atomic_agentic.workflows import IterativeFlow, CheckerSpec
+from atomic_agentic.workflows import IterativeFlow
 
 load_dotenv()
 
@@ -151,7 +151,7 @@ flow = IterativeFlow(
     description="Iterative writer/critic loop with a checker-gated approval judge.",
     body_steps=[writer, critic],
     max_iterations=5,
-    checkers=[CheckerSpec(index=1, judge=judge, approval_value=True)],  # critic's notes checked for approval
+    checkers=[None, (judge, True)],  # critic's notes checked for approval
     result_setting_indices=[0],  # outer result is the writer's draft
     handoff_index=1,             # critic notes become next writer input
 )
@@ -168,6 +168,7 @@ if __name__ == "__main__":
     final = flow.invoke(inputs)
 
     output_dir = Path("examples/output_markdowns")
+    output_dir.mkdir(exist_ok=True)
     draft_path = output_dir / "iterflow_final_draft.md"
     checkpoints_path = output_dir / "iterflow_checkpoints.txt"
 
@@ -180,13 +181,16 @@ if __name__ == "__main__":
 
         # The checker sits at the body's last step (critic, index 1), so no
         # step is ever skipped by an early exit here -- every completed
-        # iteration contributes exactly len(body_steps) + len(checkers)
-        # trace entries (writer, critic, judge), in order. approval_value
+        # iteration contributes exactly len(body_steps) + (1 per registered
+        # checker) trace entries (writer, critic, judge), in order.
+        # flow.checkers is a fixed-length, position-indexed list (one slot
+        # per body step, None where nothing's registered) -- the registered
+        # count is a sum over non-None slots, not a bare len(). approval_value
         # is read from the live flow (checkers are mutable post-construction),
         # not the result -- the result only records which step index, if
         # any, actually triggered the early exit.
-        stride = len(flow.body_steps) + len(flow.checkers)
-        approval_value = flow.checkers[1].approval_value
+        stride = len(flow.body_steps) + sum(1 for c in flow.checkers if c is not None)
+        approval_value = flow.checkers[1][1]
 
         f.write("\n=== ITERATION-BY-ITERATION RESULTS ===\n")
         for i in range(final.iterations_completed):

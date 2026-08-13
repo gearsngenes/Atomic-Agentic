@@ -294,6 +294,7 @@ if __name__ == "__main__":
     final = flow.invoke(inputs)
 
     output_dir = Path("examples/output_markdowns")
+    output_dir.mkdir(exist_ok=True)
     story_path = output_dir / "graphflow_final_story.md"
     trace_path = output_dir / "graphflow_trace.txt"
 

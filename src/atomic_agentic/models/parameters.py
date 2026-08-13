@@ -18,8 +18,16 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Mapping
 
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
+from ..constants.parameters import (
+    POSITIONAL_ONLY,
+    POSITIONAL_OR_KEYWORD,
+    VAR_POSITIONAL,
+    KEYWORD_ONLY,
+    VAR_KEYWORD,
+    VALID_KINDS,
+)
 
-__all__ = ["ParamSpec", "ParamNameReport"]
+__all__ = ["ParamSpec", "ParameterReport"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,24 +60,23 @@ class ParamSpec:
     ``ParamSpec`` from serialized metadata.
     """
 
-    POSITIONAL_ONLY: ClassVar[str] = "POSITIONAL_ONLY"
-    POSITIONAL_OR_KEYWORD: ClassVar[str] = "POSITIONAL_OR_KEYWORD"
-    VAR_POSITIONAL: ClassVar[str] = "VAR_POSITIONAL"
-    KEYWORD_ONLY: ClassVar[str] = "KEYWORD_ONLY"
-    VAR_KEYWORD: ClassVar[str] = "VAR_KEYWORD"
+    # Shims onto constants/parameters.py -- that module is the real source of
+    # truth (constants/ sits below models/ in the dependency topology, so
+    # utils/parameters.py's kind-priority table can share it directly); these
+    # class attributes exist only to keep ParamSpec.POSITIONAL_ONLY (etc.)
+    # working unchanged for every existing caller.
+    POSITIONAL_ONLY: ClassVar[str] = POSITIONAL_ONLY
+    POSITIONAL_OR_KEYWORD: ClassVar[str] = POSITIONAL_OR_KEYWORD
+    VAR_POSITIONAL: ClassVar[str] = VAR_POSITIONAL
+    KEYWORD_ONLY: ClassVar[str] = KEYWORD_ONLY
+    VAR_KEYWORD: ClassVar[str] = VAR_KEYWORD
 
-    _VALID_KINDS: ClassVar[tuple[str, ...]] = (
-        POSITIONAL_ONLY,
-        POSITIONAL_OR_KEYWORD,
-        VAR_POSITIONAL,
-        KEYWORD_ONLY,
-        VAR_KEYWORD,
-    )
+    _VALID_KINDS: ClassVar[tuple[str, ...]] = VALID_KINDS
 
     name: str
     index: int
     kind: str
-    type: str
+    type: tuple[str, ...]
     default: Any = NO_VAL
     description: str | None = None
 
@@ -98,9 +105,9 @@ class ParamSpec:
         name: str,
         index: int,
         kind: str,
-        type: str,
+        type: str | tuple[str, ...] | list[str],
         description: str | None = None,
-    ) -> tuple[str, int, str, str, str | None]:
+    ) -> tuple[str, int, str, tuple[str, ...], str | None]:
         """Validate and normalize constructor fields before state is finalized."""
         if not isinstance(name, str):
             raise TypeError(
@@ -135,14 +142,31 @@ class ParamSpec:
                 f"{', '.join(cls._VALID_KINDS)}; got {kind!r}"
             )
 
-        if not isinstance(type, str):
+        if isinstance(type, str):
+            type_items: tuple[Any, ...] = (type,)
+        elif isinstance(type, (tuple, list)):
+            type_items = tuple(type)
+        else:
             raise TypeError(
-                f"ParamSpec.type must be a str, got {type.__class__.__name__}"
+                f"ParamSpec.type must be a str, tuple[str, ...], or list[str], "
+                f"got {type.__class__.__name__}"
             )
 
-        cleaned_type = type.strip()
-        if not cleaned_type:
-            raise ValueError("ParamSpec.type must be a non-empty string")
+        if not type_items:
+            raise ValueError("ParamSpec.type must be non-empty")
+
+        cleaned_items: list[str] = []
+        for item in type_items:
+            if not isinstance(item, str):
+                raise TypeError(
+                    f"ParamSpec.type members must be str, got {item.__class__.__name__}"
+                )
+            stripped_item = item.strip()
+            if not stripped_item:
+                raise ValueError("ParamSpec.type members must be non-empty strings")
+            cleaned_items.append(stripped_item)
+
+        cleaned_type = tuple(sorted(set(cleaned_items)))
 
         if description is not None and not isinstance(description, str):
             raise TypeError(
@@ -159,7 +183,7 @@ class ParamSpec:
             "name": self.name,
             "index": self.index,
             "kind": self.kind,
-            "type": self.type,
+            "type": list(self.type),
         }
         if self.default is not NO_VAL:
             d["default"] = self.default
@@ -172,8 +196,8 @@ class ParamSpec:
         """Create a ParamSpec from a serialized mapping.
 
         The mapping must contain ``name`` (str), ``index`` (int), ``kind`` (str),
-        and ``type`` (str). ``default`` is optional and treated as an explicit
-        default only when present.
+        and ``type`` (str, list[str], or tuple[str, ...]). ``default`` is
+        optional and treated as an explicit default only when present.
         """
         if not isinstance(d, Mapping):
             raise TypeError("ParamSpec.from_dict expects a mapping")
@@ -181,7 +205,7 @@ class ParamSpec:
         name = d.get("name")
         idx = d.get("index")
         kind = d.get("kind")
-        type_str = d.get("type")
+        type_val = d.get("type")
         default = d.get("default", NO_VAL)
         description = d.get("description", None)
 
@@ -191,57 +215,57 @@ class ParamSpec:
                 (name, str),
                 (idx, int),
                 (kind, str),
-                (type_str, str),
             ]
-        ):
+        ) or not isinstance(type_val, (str, list, tuple)):
             raise TypeError(
                 "ParamSpec.from_dict expects 'name' (str), 'index' (int), "
-                "'kind' (str), and 'type' (str)"
+                "'kind' (str), and 'type' (str, list[str], or tuple[str, ...])"
             )
 
-        return cls(name=name, index=idx, kind=kind, type=type_str, default=default, description=description)
+        return cls(name=name, index=idx, kind=kind, type=type_val, default=default, description=description)
 
 
 @dataclass(frozen=True, slots=True)
-class ParamNameReport:
-    """One parameter name's cross-source aggregation.
+class ParameterReport:
+    """One parameter name's cross-source reconciliation outcome.
 
-    Produced by ``utils.parameters.n_way_parameter_report``, which folds
-    N independent ``list[ParamSpec]`` sources into one report per distinct
-    name observed across them. Internal-construction-only -- no
-    ``__post_init__`` validation, since values are already known-good by
-    the time the aggregator builds one.
+    Produced by ``utils.parameters.build_parameter_report``/
+    ``build_parameter_reports`` -- carries the actual computed
+    reconciliation result (witness types, kind compatibility, winning
+    source, identity), not just raw aggregated observations. The caller
+    still owns the raise/warn policy decision, but doesn't need to
+    recompute witness-set/kind compatibility itself.
 
     Fields
     ------
-    name:
+    parameter_name:
         The parameter name this report covers.
-    source_count:
-        Number of distinct sources (by index) that declared this name.
-    types:
-        Distinct ``ParamSpec.type`` strings observed for this name.
-    kinds:
-        Distinct ``ParamSpec.kind`` strings observed for this name.
-    unique_default_count:
-        Count of distinct default values observed (equality-grouped, not a
-        literal ``set()`` -- a default may be unhashable, e.g. a list;
-        ``NO_VAL`` is an ordinary member of this grouping, not
-        special-cased).
-    unique_description_count:
-        Count of distinct description values observed (a real ``set()``
-        is safe here -- description is always ``None`` or ``str``, both
-        hashable).
+    witness_types:
+        The full set of type tokens compatible with every opinionated
+        source's declared type (see ``utils.parameters.n_way_type_witness``).
+        Empty means no compatible witness exists -- a genuine type conflict.
+    winner_source:
+        Index into ``observations`` of the highest-priority source that
+        actually declares this name (first non-``None`` entry). Supplies
+        kind/default/description for the reconciled parameter.
+    kind_compatible:
+        Whether every declaring source's ``kind`` is jointly compatible
+        (see ``utils.parameters.n_way_kind_compatible``).
     observations:
-        Raw ``(source_index, ParamSpec)`` pairs for this name, in
-        first-seen order -- lets a caller build an actionable error
-        message naming the actual conflicting sources, not just an
-        aggregate count.
+        Dense, one slot per source in the same priority order the caller
+        assembled -- ``None`` where that source doesn't declare this name.
+        Positionally aligned with whatever priority-ordered source list
+        produced this report; the caller (not this dataclass) knows what
+        each index means.
+    is_identical:
+        Whether every present observation is ``semantically_identical`` to
+        the winner (vacuously ``True`` when only one source declares the
+        name).
     """
 
-    name: str
-    source_count: int
-    types: set[str]
-    kinds: set[str]
-    unique_default_count: int
-    unique_description_count: int
-    observations: tuple[tuple[int, ParamSpec], ...]
+    parameter_name: str
+    witness_types: frozenset[str]
+    winner_source: int
+    kind_compatible: bool
+    observations: tuple[ParamSpec | None, ...]
+    is_identical: bool

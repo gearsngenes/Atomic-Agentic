@@ -296,7 +296,7 @@ class AtomicInvokable(ABC):
         """
         params = []
         for spec in self._parameters:
-            ptype = spec.type or "Any"
+            ptype = " | ".join(spec.type)
             default_marker = ""
             if spec.default is not NO_VAL:
                 default_marker = f" = {spec.default!r}"
