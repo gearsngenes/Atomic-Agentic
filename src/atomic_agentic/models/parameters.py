@@ -18,8 +18,16 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Mapping
 
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
+from ..constants.parameters import (
+    POSITIONAL_ONLY,
+    POSITIONAL_OR_KEYWORD,
+    VAR_POSITIONAL,
+    KEYWORD_ONLY,
+    VAR_KEYWORD,
+    VALID_KINDS,
+)
 
-__all__ = ["ParamSpec", "ParamNameReport", "ParameterReport"]
+__all__ = ["ParamSpec", "ParameterReport"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,19 +60,18 @@ class ParamSpec:
     ``ParamSpec`` from serialized metadata.
     """
 
-    POSITIONAL_ONLY: ClassVar[str] = "POSITIONAL_ONLY"
-    POSITIONAL_OR_KEYWORD: ClassVar[str] = "POSITIONAL_OR_KEYWORD"
-    VAR_POSITIONAL: ClassVar[str] = "VAR_POSITIONAL"
-    KEYWORD_ONLY: ClassVar[str] = "KEYWORD_ONLY"
-    VAR_KEYWORD: ClassVar[str] = "VAR_KEYWORD"
+    # Shims onto constants/parameters.py -- that module is the real source of
+    # truth (constants/ sits below models/ in the dependency topology, so
+    # utils/parameters.py's kind-priority table can share it directly); these
+    # class attributes exist only to keep ParamSpec.POSITIONAL_ONLY (etc.)
+    # working unchanged for every existing caller.
+    POSITIONAL_ONLY: ClassVar[str] = POSITIONAL_ONLY
+    POSITIONAL_OR_KEYWORD: ClassVar[str] = POSITIONAL_OR_KEYWORD
+    VAR_POSITIONAL: ClassVar[str] = VAR_POSITIONAL
+    KEYWORD_ONLY: ClassVar[str] = KEYWORD_ONLY
+    VAR_KEYWORD: ClassVar[str] = VAR_KEYWORD
 
-    _VALID_KINDS: ClassVar[tuple[str, ...]] = (
-        POSITIONAL_ONLY,
-        POSITIONAL_OR_KEYWORD,
-        VAR_POSITIONAL,
-        KEYWORD_ONLY,
-        VAR_KEYWORD,
-    )
+    _VALID_KINDS: ClassVar[tuple[str, ...]] = VALID_KINDS
 
     name: str
     index: int
@@ -219,60 +226,15 @@ class ParamSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class ParamNameReport:
-    """One parameter name's cross-source aggregation.
-
-    Produced by ``utils.parameters.n_way_parameter_report``, which folds
-    N independent ``list[ParamSpec]`` sources into one report per distinct
-    name observed across them. Internal-construction-only -- no
-    ``__post_init__`` validation, since values are already known-good by
-    the time the aggregator builds one.
-
-    Fields
-    ------
-    name:
-        The parameter name this report covers.
-    source_count:
-        Number of distinct sources (by index) that declared this name.
-    types:
-        Distinct ``ParamSpec.type`` tuples observed for this name.
-    kinds:
-        Distinct ``ParamSpec.kind`` strings observed for this name.
-    unique_default_count:
-        Count of distinct default values observed (equality-grouped, not a
-        literal ``set()`` -- a default may be unhashable, e.g. a list;
-        ``NO_VAL`` is an ordinary member of this grouping, not
-        special-cased).
-    unique_description_count:
-        Count of distinct description values observed (a real ``set()``
-        is safe here -- description is always ``None`` or ``str``, both
-        hashable).
-    observations:
-        Raw ``(source_index, ParamSpec)`` pairs for this name, in
-        first-seen order -- lets a caller build an actionable error
-        message naming the actual conflicting sources, not just an
-        aggregate count.
-    """
-
-    name: str
-    source_count: int
-    types: set[tuple[str, ...]]
-    kinds: set[str]
-    unique_default_count: int
-    unique_description_count: int
-    observations: tuple[tuple[int, ParamSpec], ...]
-
-
-@dataclass(frozen=True, slots=True)
 class ParameterReport:
     """One parameter name's cross-source reconciliation outcome.
 
     Produced by ``utils.parameters.build_parameter_report``/
-    ``build_parameter_reports``. Unlike ``ParamNameReport`` (pure
-    aggregation, no computation), this carries the actual computed
-    reconciliation result -- the caller still owns the raise/warn policy
-    decision, but doesn't need to recompute witness-set/kind compatibility
-    itself.
+    ``build_parameter_reports`` -- carries the actual computed
+    reconciliation result (witness types, kind compatibility, winning
+    source, identity), not just raw aggregated observations. The caller
+    still owns the raise/warn policy decision, but doesn't need to
+    recompute witness-set/kind compatibility itself.
 
     Fields
     ------

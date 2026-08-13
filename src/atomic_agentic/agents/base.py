@@ -41,12 +41,6 @@ from ..utils.parameters import (
     apply_parameter_reports,
 )
 
-# Priority-ordered labels for Agent.__init__'s three peer parameter sources,
-# positionally aligned with the source lists passed to build_parameter_reports
-# and therefore with each ParameterReport.observations tuple.
-_PARAM_SOURCE_LABELS: tuple[str, ...] = ("pre_invoke", "post_invoke", "extra_parameters")
-
-
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent
 # ───────────────────────────────────────────────────────────────────────────────
@@ -251,7 +245,7 @@ class Agent(AtomicInvokable, ABC):
         # 10. Apply reports: raises on the first genuine conflict; emits at
         # most one grouped UserWarning for compatible-but-not-identical names.
         constructed = apply_parameter_reports(
-            reports, _PARAM_SOURCE_LABELS, error_cls=AgentError, stacklevel=4
+            reports, ("pre_invoke", "post_invoke", "extra_parameters"), error_cls=AgentError, stacklevel=4
         )
 
         # 11. Category-normalize the reconciled peer schema.

@@ -80,7 +80,7 @@ class TestConstruction:
             description="d",
             field_specs={"topic": {"type": "str"}},
         )
-        with pytest.raises(AgentError, match="collision"):
+        with pytest.raises(AgentError, match="no compatible reconciliation"):
             make_agent(role_prompt=role, thinking_instructions=thinking)
 
     def test_role_prompt_and_thinking_instructions_compatible_overlap_warns_role_wins(self) -> None:
@@ -98,6 +98,21 @@ class TestConstruction:
             agent = make_agent(role_prompt=role, thinking_instructions=thinking)
         topic_param = next(p for p in agent.parameters if p.name == "topic")
         assert topic_param.default == "role-default"
+
+    def test_role_prompt_and_thinking_instructions_overlap_widens_type(self) -> None:
+        role = PromptConfig(
+            template="Persona for {count}.",
+            description="d",
+            field_specs={"count": {"type": "int"}},
+        )
+        thinking = PromptConfig(
+            template="Think about {count}.",
+            description="d",
+            field_specs={"count": {"type": "Any"}},
+        )
+        agent = make_agent(role_prompt=role, thinking_instructions=thinking)
+        count_param = next(p for p in agent.parameters if p.name == "count")
+        assert count_param.type == ("int",)
 
     def test_role_prompt_and_thinking_instructions_own_params_both_land_in_schema(self) -> None:
         role = PromptConfig(

@@ -5,6 +5,12 @@ It sits one tier above ``models/parameters.py`` in the dependency topology
 (``utils/`` depends on ``models/``) and is the canonical home for all logic that
 *uses* ``ParamSpec`` shapes rather than defining them.
 
+``parameter_overlap``/``parameter_collisions`` moved to ``core/core_api.py``
+-- their public shape takes ``AtomicInvokable``/``Callable`` sources
+directly, which needs ``extract_io``, which this module can't import
+without a cycle (same reasoning that put ``extract_io`` there in the first
+place).
+
 Public surface
 --------------
 - ``to_paramspec_list`` — normalize any supported schema input (``None``,
@@ -15,18 +21,11 @@ Public surface
   ``TypeError``.
 - ``semantically_compatible``, ``semantically_identical`` — same-name
   compatibility/identity checks between two ``ParamSpec`` instances.
-- ``parameter_overlap``, ``parameter_collisions`` — partition the names shared
-  between two ``ParamSpec`` lists into compatible-overlap vs. true-collision.
-- ``variadic_compatible`` — detects a same-kind variadic (``*args``/``**kwargs``)
-  declared independently by two sources under different names, a case
-  name-based overlap/collision checking can't see.
+  Curated into the root ``atomic_agentic`` public export surface --
+  developers may import either directly from there.
 - ``insert_by_category`` — batch-inserts new ``ParamSpec`` items into an
   already-valid composed list at the position that preserves a valid
   Python-style ordering.
-- ``n_way_parameter_report`` — folds N independent ``list[ParamSpec]``
-  sources into one ``ParamNameReport`` per distinct name observed across
-  them. Pure aggregation, no raising -- the caller decides what counts as
-  a genuine collision.
 - ``n_way_type_witness`` — for a group of type-tuples, returns the set of
   type tokens compatible with every opinionated (non-``("Any",)``) tuple;
   the literal ``"Any"`` token is excluded from candidacy even inside a
@@ -84,20 +83,16 @@ from typing import (
 )
 
 from ..constants.core import IDENTIFIER_PATTERN, IDENTIFIER_PATTERN_TEXT, NO_VAL
+from ..constants.parameters import KIND_PRIORITY as _KIND_PRIORITY
 from ..exceptions import SchemaError
-from ..models.parameters import ParameterReport, ParamNameReport, ParamSpec
+from ..models.parameters import ParameterReport, ParamSpec
 
 __all__ = [
-    "extract_io",
     "to_paramspec_list",
     "is_valid_parameter_order",
     "semantically_compatible",
     "semantically_identical",
-    "parameter_overlap",
-    "parameter_collisions",
-    "variadic_compatible",
     "insert_by_category",
-    "n_way_parameter_report",
     "n_way_type_witness",
     "n_way_kind_compatible",
     "build_parameter_report",
@@ -392,15 +387,12 @@ def _paramspec_list_from_strings(items: list[str]) -> list[ParamSpec]:
     return normalized
 
 
-# Shared kind-priority table, derived from ParamSpec._VALID_KINDS (already in
-# priority order) rather than a second hardcoded literal list -- ParamSpec
-# stays the single source of truth for the kind vocabulary and its ordering.
-# ``_validate_parameter_order`` uses this directly for the non-decreasing-kind
-# check; ``_insertion_category`` builds a finer (kind, default-tier) key on
-# top of it for ``insert_by_category``.
-_KIND_PRIORITY: dict[str, int] = {
-    kind: priority for priority, kind in enumerate(ParamSpec._VALID_KINDS)
-}
+# Shared kind-priority table -- lives in constants/parameters.py now (the
+# real source of truth for the kind vocabulary and its ordering; ParamSpec's
+# own POSITIONAL_ONLY etc. are shims onto the same values). Imported under
+# its established private local name; ``_validate_parameter_order`` uses it
+# directly for the non-decreasing-kind check, ``_insertion_category`` builds
+# a finer (kind, default-tier) key on top of it for ``insert_by_category``.
 
 
 def _validate_parameter_order(parameters: list[ParamSpec]) -> None:
@@ -907,60 +899,6 @@ def semantically_identical(a: ParamSpec, b: ParamSpec) -> bool:
     )
 
 
-def parameter_overlap(
-    source_a: list[ParamSpec], source_b: list[ParamSpec]
-) -> list[str]:
-    """Names present in both lists that are ``semantically_compatible``.
-
-    Returns names in ``source_a``'s order. Together with
-    ``parameter_collisions``, partitions every name shared between the two
-    lists — no name appears in both outputs, none are left unclassified.
-    """
-    b_by_name = {p.name: p for p in source_b}
-    return [
-        spec.name
-        for spec in source_a
-        if spec.name in b_by_name and semantically_compatible(spec, b_by_name[spec.name])
-    ]
-
-
-def parameter_collisions(
-    source_a: list[ParamSpec], source_b: list[ParamSpec]
-) -> list[str]:
-    """Names present in both lists that are NOT ``semantically_compatible``.
-
-    Returns names in ``source_a``'s order. See ``parameter_overlap`` for the
-    partition property the two functions satisfy together.
-    """
-    b_by_name = {p.name: p for p in source_b}
-    return [
-        spec.name
-        for spec in source_a
-        if spec.name in b_by_name and not semantically_compatible(spec, b_by_name[spec.name])
-    ]
-
-
-def variadic_compatible(
-    source_a: list[ParamSpec],
-    source_b: list[ParamSpec],
-    shared_names: set[str],
-) -> bool:
-    """Whether ``source_a``/``source_b``'s variadic declarations can merge safely.
-
-    Catches what name-based overlap/collision checking can't see: both
-    sources independently declaring a same-kind variadic parameter under
-    different names. A name already in ``shared_names`` is assumed already
-    accounted for by the ordinary overlap/collision path, so it is excluded
-    here regardless of kind.
-    """
-    for kind in (ParamSpec.VAR_POSITIONAL, ParamSpec.VAR_KEYWORD):
-        a_has = any(p.kind == kind and p.name not in shared_names for p in source_a)
-        b_has = any(p.kind == kind and p.name not in shared_names for p in source_b)
-        if a_has and b_has:
-            return False
-    return True
-
-
 def _insertion_category(spec: ParamSpec) -> tuple[int, int]:
     """Sort key for ``insert_by_category``: ``(kind priority, default tier)``.
 
@@ -1009,54 +947,6 @@ def insert_by_category(
     ]
     _validate_parameter_order(result)
     return result
-
-
-def n_way_parameter_report(sources: list[list[ParamSpec]]) -> list[ParamNameReport]:
-    """Aggregate N parameter-list sources into one report per distinct name.
-
-    Pure aggregation, no raising -- mirrors how ``parameter_collisions``/
-    ``parameter_overlap`` already separate detection from the caller's
-    raise/warn policy decision. The caller inspects the returned reports
-    and decides what counts as a genuine collision for its own purposes.
-    """
-    accumulator: dict[str, dict[str, Any]] = {}
-
-    for source_index, param_list in enumerate(sources):
-        for spec in param_list:
-            entry = accumulator.setdefault(
-                spec.name,
-                {
-                    "observations": [],
-                    "types": set(),
-                    "kinds": set(),
-                    "default_groups": [],
-                    "description_values": set(),
-                    "source_indices": set(),
-                },
-            )
-            entry["observations"].append((source_index, spec))
-            entry["types"].add(spec.type)
-            entry["kinds"].add(spec.kind)
-            entry["source_indices"].add(source_index)
-            entry["description_values"].add(spec.description)
-            # Default may be unhashable (e.g. a list), so group by equality
-            # rather than a literal set(). NO_VAL is an ordinary member of
-            # this grouping, not special-cased.
-            if not any(spec.default == existing for existing in entry["default_groups"]):
-                entry["default_groups"].append(spec.default)
-
-    return [
-        ParamNameReport(
-            name=name,
-            source_count=len(entry["source_indices"]),
-            types=entry["types"],
-            kinds=entry["kinds"],
-            unique_default_count=len(entry["default_groups"]),
-            unique_description_count=len(entry["description_values"]),
-            observations=tuple(entry["observations"]),
-        )
-        for name, entry in accumulator.items()
-    ]
 
 
 def n_way_type_witness(type_tuples: Iterable[tuple[str, ...]]) -> frozenset[str]:

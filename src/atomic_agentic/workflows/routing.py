@@ -28,9 +28,9 @@ __all__ = ["RoutingFlow"]
 def _group_by_equality(values: Iterable[Any]) -> list[Any]:
     """Partition an iterable into equality groups, preserving first-seen order.
 
-    Mirrors the grouping ``n_way_parameter_report`` already does internally
-    for ``default`` values -- a plain ``set()`` isn't safe here since a
-    default may be unhashable (e.g. a list).
+    Used for grouping declared ``default`` values across branches -- a
+    plain ``set()`` isn't safe here since a default may be unhashable
+    (e.g. a list).
     """
     groups: list[Any] = []
     for value in values:
