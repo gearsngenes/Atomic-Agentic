@@ -5,6 +5,144 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a27] - 2026-08-13
+
+Parameter-reconciliation release: `ParamSpec.type` becomes a structural
+`tuple[str, ...]`, and every family that composes multiple `AtomicInvokable`
+declarations into one schema — `Agent`, `SelfAskAgent`, `ParallelFlow`,
+`RoutingFlow`, `GraphFlow` — is rebuilt around one shared N-way
+reconciliation primitive instead of five independent pairwise folds.
+`IterativeFlow`/`GraphFlow`'s per-item topology records move out of
+`models/` into `NamedTuple`s nested inside their owning workflow class. A
+closing cleanup sweep promotes several reconciliation primitives to public
+API and relocates the parameter-kind vocabulary into `constants/`; a
+handful of example scripts also get fixed along the way.
+
+### Added
+
+- `ParameterReport` (`models/parameters.py`) + `build_parameter_reports`/
+  `apply_parameter_reports` (`utils/parameters.py`) — the new canonical
+  N-way parameter reconciliation layer. Groups declarations by name across
+  any number of priority-ordered sources; computes a compatible type
+  witness set, joint kind compatibility, and a winning source per name;
+  `apply_parameter_reports` then does raise-or-construct-or-warn in one
+  traversal, emitting at most one grouped `UserWarning` per construction
+  call (not one per name) for compatible-but-not-identical overlaps.
+- `n_way_type_witness`/`n_way_kind_compatible` (`utils/parameters.py`) —
+  the pure N-way compatibility primitives `build_parameter_reports` is
+  built on.
+- `constants/parameters.py` — new module: canonical parameter-kind
+  vocabulary (`POSITIONAL_ONLY`, `POSITIONAL_OR_KEYWORD`, `VAR_POSITIONAL`,
+  `KEYWORD_ONLY`, `VAR_KEYWORD`), `VALID_KINDS`, `KIND_PRIORITY`.
+  `ParamSpec`'s own class-level kind constants become read-only shims onto
+  these values — public surface (`ParamSpec.POSITIONAL_ONLY`, etc.)
+  unchanged for every existing caller.
+- `core/core_api.py`: `parameter_overlap(sources: Sequence[Callable], *,
+  unanimous_only: bool = False)` and `parameter_collisions(sources:
+  Sequence[Callable])` — public, N-way-generalized replacements for the old
+  pairwise versions, relocated alongside `extract_io` (same
+  `AtomicInvokable`-awareness/circular-import justification). Curated into
+  `core/__init__.py` and the root package's public exports alongside
+  `semantically_compatible`/`semantically_identical` (unchanged,
+  `utils/parameters.py`).
+- `GraphFlow.Node` — new `NamedTuple` nested inside `GraphFlow`
+  (`invokable`, `incoming`, `outgoing`, `routers`, `priority: int`),
+  replacing the `models/workflows/graph.py`-owned `GraphFlowNode` dataclass.
+- `IterativeFlow.Checker` — new `NamedTuple` nested inside `IterativeFlow`
+  (`judge`, `approval_value`), used internally only; external
+  constructor/property surface stays plain `tuple[AtomicInvokable, Any] |
+  None` per body-step position (position *is* the index — no separate
+  `index` field, unlike the deleted `CheckerSpec`).
+  `IterativeFlow.update_checker(index, approval_value)` added alongside
+  `add_checker`/`remove_checker`.
+- `GraphFlow.parameters` — no longer validation-only: now exactly `start`'s
+  own parameter names, each name shared with another node widened to the
+  whole-graph compatible type witness set (`kind`/`default`/`description`
+  always stay `start`'s own).
+- `RoutingFlow`: branches may now introduce parameters the router doesn't
+  declare, unconditionally. Every such name gets `default=None` with
+  `"None"` unioned into its type, unless every declaring branch shares the
+  exact same real (non-`NO_VAL`) default, in which case that shared value
+  wins instead.
+
+### Changed
+
+- breaking: `ParamSpec.type` is now `tuple[str, ...]` (was `str`) — sorted,
+  deduplicated at construction. Every call site across `src/`,
+  `AtomicInvokable.signature` (now `" | ".join(spec.type)`), `to_dict()`/
+  `from_dict()`, and every type-comparison utility updated accordingly.
+- breaking: `Agent.__init__`'s `pre_invoke`/`post_invoke`/`extra_parameters`
+  reconciliation rebuilt around `build_parameter_reports`/
+  `apply_parameter_reports`, replacing the old asymmetric 2-tier scheme —
+  `extra_parameters` can now raise on a genuine conflict, not just
+  warn-and-drop.
+- breaking: `SelfAskAgent.__init__`'s hand-rolled `role_prompt`/
+  `thinking_instructions` reconciliation reworked onto the same primitives
+  (matching `Agent.__init__`'s own idiom), fixing a per-name-vs-grouped
+  warning inconsistency and a missing type-widening gap in the process.
+- breaking: `ParallelFlow`'s branch-parameter reconciliation rebuilt from an
+  order-dependent left-fold into true N-way peer reconciliation.
+- breaking: `RoutingFlow.schema_mode` (`STRICT`/`PARTIAL`/`OPEN`) removed
+  entirely — two design iterations within this release: first collapsed to
+  a binary `strict_schema: bool`, then dropped altogether once a
+  branch-specific required parameter forcing itself onto unrelated routing
+  calls was judged unintuitive (only one branch ever runs per invocation).
+  Router-shared reconciliation (the old STRICT case) is unaffected:
+  per-branch witness union against the router, still raises on genuine
+  conflict.
+- breaking: `CheckerSpec`/`GraphFlowNode` (`models/workflows/`) removed —
+  replaced by `IterativeFlow.Checker`/`GraphFlow.Node`, the first nested
+  classes in this codebase, so neither needs a `TYPE_CHECKING`-only
+  `AtomicInvokable` import workaround.
+- `GraphFlow.Node.priority` is a plain `int` field (`set_priority` rebuilds
+  the entry via `_replace()`). Originally shipped this release as a
+  single-item mutable `list[int]` "box," mutated in place; found before
+  release to leak mutability straight through the documented-read-only
+  `nodes` property (`MappingProxyType` only guards the outer dict, not a
+  mutable list nested inside each entry), letting a caller bypass
+  `set_priority`'s own type check entirely and corrupt state that then
+  failed later, confusingly, deep inside the collision-tiebreak path.
+  Corrected before release: plain `int`, whole-entry replacement — trades
+  node-identity-preservation across a `set_priority` call for closing the
+  leak.
+
+### Fixed
+
+- `examples/Tool_Examples/01_Tool.py`/`03_Tool_wrapping_test.py`/
+  `Agent_Examples/05_Passthrough_Test.py`: the same recurring sentinel-check
+  defect previously fixed in `04_MCPProxyTool.py` (a21) and
+  `07_Prompt_Parameters.py` (a22) — `param.default.__class__.__name__ ==
+  "NO_VAL"`/`"_NO_VAL"`, always `False` — reintroduced in a further-widened
+  set of files. Required-parameter display never showed "(no default)" for
+  any parameter, required or not. Restored to `param.default is NO_VAL`.
+- `examples/Workflow_Examples/04_IterativeFlow.py`/`05_GraphFlow.py`:
+  missing `output_dir.mkdir(exist_ok=True)` before writing generated
+  output, unlike the sibling `PlanAct_Examples`/`ReAct_Examples` scripts
+  that write to the same (`.gitignore`d) directory — a fresh checkout would
+  have hit `FileNotFoundError` running either script first.
+- `examples/Agent_Examples/05_Passthrough_Test.py`: stale `#
+  05_Auto_Graft_Test.py` header comment corrected to match the file's
+  actual name.
+- Stray `"extract_io"` leftover `__all__` entry in `utils/parameters.py`,
+  dead since `extract_io`'s a25 relocation to `core/core_api.py`.
+- Stale docstring/comment references to symbols deleted this release
+  (`models/parameters.py`'s `ParameterReport` docstring referenced the
+  deleted `ParamNameReport`; `workflows/routing.py`'s `_group_by_equality`
+  docstring referenced the deleted `n_way_parameter_report`).
+
+### Removed
+
+- breaking: `n_way_parameter_report`/`ParamNameReport`
+  (`utils/parameters.py`/`models/parameters.py`) — this release's own
+  earlier primitives, fully superseded by
+  `build_parameter_reports`/`ParameterReport`; zero remaining `src/`
+  callers confirmed before deletion.
+- breaking: `variadic_compatible` (`utils/parameters.py`) — superseded,
+  zero remaining callers; the resulting trade-off is documented directly in
+  `workflows/parallel.py`.
+- `agents/base.py`'s `_PARAM_SOURCE_LABELS` module constant — inlined at
+  its one call site.
+
 ## [2.0.0a26] - 2026-08-07
 
 Workflow revision: removes `Workflow`'s checkpoint/run-history mechanism in
