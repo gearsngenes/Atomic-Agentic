@@ -168,6 +168,7 @@ if __name__ == "__main__":
     final = flow.invoke(inputs)
 
     output_dir = Path("examples/output_markdowns")
+    output_dir.mkdir(exist_ok=True)
     draft_path = output_dir / "iterflow_final_draft.md"
     checkpoints_path = output_dir / "iterflow_checkpoints.txt"
 

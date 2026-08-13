@@ -4,6 +4,7 @@ Beginner-friendly demo: using Tool to wrap simple Python functions.
 from typing import Annotated
 from atomic_agentic.tools import Tool
 from atomic_agentic.exceptions import ToolInvocationError
+from atomic_agentic.constants.core import NO_VAL
 import logging
 
 logging.basicConfig(level = logging.INFO)
@@ -67,7 +68,7 @@ def show_plan(tool: Tool) -> None:
     print("signature:", tool.signature)
     print("parameters:")
     for param in tool.parameters:
-        default_str = "(no default)" if param.default.__class__.__name__ == "NO_VAL" else f"default={param.default}"
+        default_str = "(no default)" if param.default is NO_VAL else f"default={param.default}"
         desc_str = f"  # {param.description}" if param.description else ""
         print(f"  {param.name}: {param.kind}, type={param.type}, {default_str}{desc_str}")
 
