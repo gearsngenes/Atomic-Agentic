@@ -1,4 +1,5 @@
 from .core import (
+    A2AProxyError,
     AgentError,
     AgentInvocationError,
     ExecutionError,
@@ -22,6 +23,7 @@ from .core import (
 )
 
 __all__ = [
+    "A2AProxyError",
     "AgentError",
     "AgentInvocationError",
     "ExecutionError",

@@ -5,7 +5,7 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
-from atomic_agentic.constants.a2a import PYA2A_RESULT_KEY
+from atomic_agentic.constants.python_a2a import PYA2A_RESULT_KEY
 from atomic_agentic.exceptions import ToolDefinitionError
 from atomic_agentic.core.Invokable import AtomicInvokable
 from atomic_agentic.models.parameters import ParamSpec

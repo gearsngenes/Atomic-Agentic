@@ -9,7 +9,7 @@ from atomic_agentic.core.Invokable import AtomicInvokable
 from ..exceptions import ToolDefinitionError, ToolInvocationError, RemoteInvocationError
 from ..models.parameters import ParamSpec
 from ..constants.core import HeaderValue
-from ..constants.a2a import PYA2A_RESULT_KEY
+from ..constants.python_a2a import PYA2A_RESULT_KEY
 from ..models.results.tools import PyA2AtomicToolResult
 from .base import Tool
 from ..a2a.PyA2AtomicClient import PyA2AtomicClient

@@ -12,7 +12,10 @@ from ..constants.core import HeaderValue, T
 __all__ = [
     "dataclass_record_to_dict",
     "normalize_headers",
+    "run_coro_async",
     "run_coro_sync",
+    "start_background_loop",
+    "stop_background_loop",
 ]
 
 
@@ -34,16 +37,24 @@ async def _await_value(awaitable: Awaitable[T]) -> T:
     return await awaitable
 
 
-def run_coro_sync(awaitable: Awaitable[T]) -> T:
+def run_coro_sync(awaitable: Awaitable[T], loop: asyncio.AbstractEventLoop | None = None) -> T:
     """
     Run an awaitable to completion from synchronous code.
 
     Contract
     --------
-    - If no event loop is running in the current thread, run the awaitable with
-      ``asyncio.run(...)``.
-    - If an event loop is already running in the current thread, run the awaitable
-      inside a temporary event loop on a worker thread.
+    - If ``loop`` is given, dispatch the awaitable onto it via
+      ``asyncio.run_coroutine_threadsafe`` and block the calling thread
+      until it completes. Intended for a loop started by
+      ``start_background_loop`` and kept alive across multiple calls (e.g.
+      A2AClientHub's persistent mode) -- some asyncio-native resources
+      (a grpc.aio.Channel in particular) break when reused across
+      independently-created event loops, so anything meant to outlive one
+      call must always dispatch onto the *same* loop.
+    - If ``loop`` is ``None`` (default): if no event loop is running in the
+      current thread, run the awaitable with ``asyncio.run(...)``. If one
+      is already running, run it inside a temporary event loop on a worker
+      thread.
     - Propagate exceptions raised by the awaitable.
     - Return the awaitable's result.
 
@@ -56,6 +67,9 @@ def run_coro_sync(awaitable: Awaitable[T]) -> T:
     bound to another running event loop. Passing raw coroutine objects is the
     expected use case.
     """
+    if loop is not None:
+        return asyncio.run_coroutine_threadsafe(_await_value(awaitable), loop).result()
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -65,15 +79,15 @@ def run_coro_sync(awaitable: Awaitable[T]) -> T:
     error_box: list[BaseException] = []
 
     def runner() -> None:
-        loop = asyncio.new_event_loop()
+        worker_loop = asyncio.new_event_loop()
         try:
-            asyncio.set_event_loop(loop)
-            result_box.append(loop.run_until_complete(_await_value(awaitable)))
+            asyncio.set_event_loop(worker_loop)
+            result_box.append(worker_loop.run_until_complete(_await_value(awaitable)))
         except BaseException as exc:  # noqa: BLE001
             error_box.append(exc)
         finally:
             asyncio.set_event_loop(None)
-            loop.close()
+            worker_loop.close()
 
     thread = threading.Thread(target=runner, daemon=True)
     thread.start()
@@ -86,6 +100,26 @@ def run_coro_sync(awaitable: Awaitable[T]) -> T:
         raise RuntimeError("Awaitable completed without producing a result.")
 
     return result_box[0]
+
+
+async def run_coro_async(awaitable: Awaitable[T], loop: asyncio.AbstractEventLoop) -> T:
+    """
+    Dispatch a coroutine onto a specific other loop from async code, without
+    blocking the caller's own currently-running loop.
+
+    ``loop`` is required, not optional: this exists specifically to target a
+    *different* loop than the one the caller is currently running on (e.g.
+    A2AClientHub persistent mode's dedicated background loop). A caller with
+    no other loop to target should just await the awaitable directly --
+    there is nothing to bridge cross-thread in that case.
+
+    ``asyncio.wrap_future`` integrates the cross-thread
+    ``concurrent.futures.Future`` into the caller's own running event loop;
+    the real work still runs on ``loop``, a different loop entirely.
+    """
+    return await asyncio.wrap_future(
+        asyncio.run_coroutine_threadsafe(_await_value(awaitable), loop)
+    )
 
 
 def normalize_headers(
@@ -190,3 +224,32 @@ def _normalize_header_value(value: Any, *, key: str) -> str:
 def _contains_forbidden_header_char(value: str) -> bool:
     """Return whether a header name/value contains CR, LF, or NUL."""
     return "\r" in value or "\n" in value or "\x00" in value
+
+
+def start_background_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thread]:
+    """
+    Start a fresh asyncio event loop on its own daemon thread.
+
+    The loop is running and ready to accept coroutines dispatched via
+    run_coro_sync/run_coro_async's ``loop`` param by the time this returns.
+    Daemon so a caller that never calls stop_background_loop doesn't hang
+    process exit -- it only leaks the thread/loop/whatever was dispatched
+    onto it for the rest of the process's life. Needed by anything holding
+    an asyncio-native resource that must stay bound to the same loop for
+    its whole lifetime -- confirmed necessary because grpc.aio.Channel
+    breaks when reused across independently-created event loops (a channel
+    built and used inside one asyncio.run() call raises "attached to a
+    different loop" on the very next call from a separate asyncio.run() --
+    reproduced directly).
+    """
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    return loop, thread
+
+
+def stop_background_loop(loop: asyncio.AbstractEventLoop, thread: threading.Thread) -> None:
+    """Stop a loop started by start_background_loop and join its thread."""
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join()
+    loop.close()
