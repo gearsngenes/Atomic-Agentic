@@ -108,7 +108,11 @@ class TestToAgentCard:
     def test_builds_one_skill_per_invokable_from_shared_metadata(self) -> None:
         executor = A2AtomicExecutor([make_add_invokable("add")])
         card = executor.to_agent_card(
-            "http://127.0.0.1:9", name="TestAgent", description="Test.", version="0.1.0"
+            "http://127.0.0.1:9",
+            name="TestAgent",
+            description="Test.",
+            version="0.1.0",
+            transport_mode=TRANSPORT_JSON_RPC,
         )
         assert card.name == "TestAgent"
         assert card.version == "0.1.0"
@@ -117,10 +121,10 @@ class TestToAgentCard:
         assert card.skills[0].name == "add"
         assert card.skills[0].description == "Adds two numbers."
 
-    def test_supported_interfaces_match_transport_modes(self) -> None:
+    def test_supported_interface_matches_transport_mode(self) -> None:
         executor = A2AtomicExecutor([make_add_invokable()])
         card = executor.to_agent_card(
-            "http://127.0.0.1:9", name="A", description="D", transport_modes=[TRANSPORT_JSON_RPC]
+            "http://127.0.0.1:9", name="A", description="D", transport_mode=TRANSPORT_JSON_RPC
         )
         assert len(card.supported_interfaces) == 1
         assert card.supported_interfaces[0].protocol_binding == TRANSPORT_JSON_RPC
@@ -128,7 +132,9 @@ class TestToAgentCard:
 
     def test_publishes_param_schema_extension_with_full_metadata(self) -> None:
         executor = A2AtomicExecutor([make_add_invokable("add")])
-        card = executor.to_agent_card("http://127.0.0.1:9", name="A", description="D")
+        card = executor.to_agent_card(
+            "http://127.0.0.1:9", name="A", description="D", transport_mode=TRANSPORT_JSON_RPC
+        )
 
         extensions = list(card.capabilities.extensions)
         assert len(extensions) == 1
@@ -145,8 +151,12 @@ class TestToAgentCard:
 
     def test_builds_fresh_card_every_call_no_stale_caching(self) -> None:
         executor = A2AtomicExecutor([make_add_invokable()])
-        card1 = executor.to_agent_card("http://127.0.0.1:9", name="First", description="D")
-        card2 = executor.to_agent_card("http://127.0.0.1:9", name="Second", description="D")
+        card1 = executor.to_agent_card(
+            "http://127.0.0.1:9", name="First", description="D", transport_mode=TRANSPORT_JSON_RPC
+        )
+        card2 = executor.to_agent_card(
+            "http://127.0.0.1:9", name="Second", description="D", transport_mode=TRANSPORT_JSON_RPC
+        )
         assert card1.name == "First"
         assert card2.name == "Second"
 
@@ -154,13 +164,13 @@ class TestToAgentCard:
         executor = A2AtomicExecutor([make_add_invokable()])
         with pytest.raises(ValueError):
             executor.to_agent_card(
-                "http://127.0.0.1:9", name="A", description="D", transport_modes=["bogus"]
+                "http://127.0.0.1:9", name="A", description="D", transport_mode="bogus"
             )
 
     def test_empty_base_url_raises(self) -> None:
         executor = A2AtomicExecutor([make_add_invokable()])
         with pytest.raises(ValueError):
-            executor.to_agent_card("", name="A", description="D")
+            executor.to_agent_card("", name="A", description="D", transport_mode=TRANSPORT_JSON_RPC)
 
 
 # --------------------------------------------------------------------------- #
@@ -221,7 +231,7 @@ def fixture_server():
         {"add": make_add_invokable("add"), "boom": make_failing_invokable("boom")}
     )
     card = executor.to_agent_card(
-        http_url, name="AtomicFixtureAgent", description="Fixture.", transport_modes=[TRANSPORT_JSON_RPC]
+        http_url, name="AtomicFixtureAgent", description="Fixture.", transport_mode=TRANSPORT_JSON_RPC
     )
 
     request_handler = DefaultRequestHandler(

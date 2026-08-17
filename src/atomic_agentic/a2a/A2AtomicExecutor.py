@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from a2a.helpers import get_data_parts, new_data_part, new_task_from_user_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -114,14 +114,25 @@ class A2AtomicExecutor(AgentExecutor):
         name: str,
         description: str,
         version: str = "1.0.0",
-        transport_modes: Sequence[str] = VALID_TRANSPORT_MODES,
+        transport_mode: str,
     ) -> AgentCard:
         """
         Builds a fresh AgentCard on every call -- name/description/version/
-        transport_modes are call-time, not fixed executor identity, so
+        transport_mode are call-time, not fixed executor identity, so
         caching by base_url alone would risk serving a stale card. Building
         one is pure local protobuf construction (no I/O; self._skill_metadata
         is already resolved), so there's nothing expensive to cache anyway.
+
+        Single transport_mode, not a sequence: base_url is one shared URL
+        for whatever's advertised, and only REST/gRPC are safely reachable
+        at a shared base_url in practice -- JSON-RPC's own mount path
+        (create_jsonrpc_routes' rpc_url) is a separate, caller-chosen
+        deployment detail with no fixed default, so a card advertising
+        JSON-RPC off-root at the same base_url as another transport
+        silently 404s (confirmed directly running test_code/a2atomic/).
+        Multi-transport-off-one-card was never exercised or validated by
+        anything in this pass; if it's ever a real need, the actual fix is
+        per-transport URL overrides, not re-widening this back to a sequence.
         """
         if not isinstance(base_url, str) or not base_url.strip():
             raise ValueError("base_url must be a non-empty string.")
@@ -131,10 +142,9 @@ class A2AtomicExecutor(AgentExecutor):
             raise ValueError("description must be a non-empty string.")
         if not isinstance(version, str) or not version.strip():
             raise ValueError("version must be a non-empty string.")
-        if not transport_modes or any(mode not in VALID_TRANSPORT_MODES for mode in transport_modes):
+        if transport_mode not in VALID_TRANSPORT_MODES:
             raise ValueError(
-                f"transport_modes must be a non-empty sequence drawn from {VALID_TRANSPORT_MODES!r}; "
-                f"got {transport_modes!r}."
+                f"transport_mode must be one of {VALID_TRANSPORT_MODES!r}; got {transport_mode!r}."
             )
 
         skills = [
@@ -146,10 +156,7 @@ class A2AtomicExecutor(AgentExecutor):
             for remote_name, metadata in self._skill_metadata.items()
         ]
 
-        interfaces = [
-            AgentInterface(url=base_url.strip(), protocol_binding=mode)
-            for mode in transport_modes
-        ]
+        interfaces = [AgentInterface(url=base_url.strip(), protocol_binding=transport_mode)]
 
         # required=False so a non-AA client that doesn't understand this
         # extension can still interact with the card's other advertised
