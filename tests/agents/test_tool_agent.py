@@ -40,6 +40,59 @@ from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.tools import Tool
 from atomic_agentic.core.Invokable import AtomicInvokable
+from atomic_agentic.a2a import A2AClientHub
+from atomic_agentic.tools import A2AProxyTool
+from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
+from atomic_agentic.models.parameters import ParamSpec
+
+
+def _a2a_sdk_skill_metadata(*, remote_name: str) -> A2AtomicSkillMetadata:
+    return A2AtomicSkillMetadata(
+        remote_name=remote_name,
+        description=f"Remote skill {remote_name}.",
+        extra_description="",
+        params=(
+            ParamSpec(name="a", index=0, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int"),
+            ParamSpec(name="b", index=1, kind=ParamSpec.POSITIONAL_OR_KEYWORD, type="int"),
+        ),
+        return_type="int",
+    )
+
+
+class FakeA2AClientHub(A2AClientHub):
+    """Minimal A2AClientHub subclass for batch_register tests -- skips real
+    network construction, matching the FakeMCPClientHub/FakePyA2AtomicClient
+    precedent in tests/tools/test_toolify.py."""
+
+    def __init__(self, *, skills: dict[str, A2AtomicSkillMetadata] | None = None) -> None:
+        self._skills = (
+            {"add": _a2a_sdk_skill_metadata(remote_name="add")} if skills is None else skills
+        )
+        self._card = type("FakeCard", (), {"name": "FakeA2AAgent", "description": ""})()
+        self.skill_calls: list[tuple[str, dict[str, Any]]] = []
+
+    @property
+    def agent_card(self) -> Any:
+        return self._card
+
+    @property
+    def transport_mode(self) -> str:
+        return "JSONRPC"
+
+    @property
+    def base_url(self) -> str:
+        return "http://example.test/a2a-sdk"
+
+    @property
+    def persistent(self) -> bool:
+        return False
+
+    def get_atomic_skills(self) -> dict[str, A2AtomicSkillMetadata]:
+        return dict(self._skills)
+
+    def call_atomic_skill(self, skill_id: str, inputs: dict) -> Any:
+        self.skill_calls.append((skill_id, dict(inputs)))
+        return 17
 
 
 class TestToolAgentConstruction:
@@ -508,6 +561,67 @@ class TestToolRegistration:
         agent.register(add)
         keys = agent.batch_register(tools=[add], name_collision_mode="replace")
         assert f"Tool.{agent.name}.add" in keys
+
+    def test_batch_register_a2a_client_hub_registers_skills_plus_generic(self) -> None:
+        """An A2AClientHub registers every discovered skill plus one generic tool."""
+        agent = make_agent()
+        hub = FakeA2AClientHub(
+            skills={
+                "add": _a2a_sdk_skill_metadata(remote_name="add"),
+                "multiply": _a2a_sdk_skill_metadata(remote_name="multiply"),
+            }
+        )
+
+        keys = agent.batch_register(client=hub)
+
+        assert f"A2AProxyTool.{agent.name}.add" in keys
+        assert f"A2AProxyTool.{agent.name}.multiply" in keys
+        assert f"A2AProxyTool.{agent.name}.send_parts" in keys
+        assert len(keys) == 3
+
+    def test_batch_register_a2a_client_hub_remote_names_filters_skills_only(self) -> None:
+        """remote_names whitelists skill ids only -- the generic tool is unaffected."""
+        agent = make_agent()
+        hub = FakeA2AClientHub(
+            skills={
+                "add": _a2a_sdk_skill_metadata(remote_name="add"),
+                "multiply": _a2a_sdk_skill_metadata(remote_name="multiply"),
+            }
+        )
+
+        keys = agent.batch_register(client=hub, remote_names=["add"])
+
+        assert f"A2AProxyTool.{agent.name}.add" in keys
+        assert f"A2AProxyTool.{agent.name}.multiply" not in keys
+        assert f"A2AProxyTool.{agent.name}.send_parts" in keys
+        assert len(keys) == 2
+
+    def test_batch_register_a2a_client_hub_zero_skills_still_registers_generic(self) -> None:
+        """A hub with no discovered skills still contributes its generic tool."""
+        agent = make_agent()
+        hub = FakeA2AClientHub(skills={})
+
+        keys = agent.batch_register(client=hub)
+
+        assert keys == [f"A2AProxyTool.{agent.name}.send_parts"]
+
+    def test_batch_register_a2a_client_hub_remote_names_empty_list_raises(self) -> None:
+        """Existing remote_names=[] guard fires unchanged for an A2AClientHub."""
+        agent = make_agent()
+        hub = FakeA2AClientHub()
+        with pytest.raises(ValueError):
+            agent.batch_register(client=hub, remote_names=[])
+
+    def test_batch_register_a2a_client_hub_registered_tool_invokes_fake_hub(self) -> None:
+        """The registered skill-mode tool actually dispatches to the hub."""
+        agent = make_agent()
+        hub = FakeA2AClientHub()
+
+        agent.batch_register(client=hub)
+        tool = agent.get_tool(f"A2AProxyTool.{agent.name}.add")
+
+        assert tool.invoke({"a": 3, "b": 4}).result == 17
+        assert hub.skill_calls == [("add", {"a": 3, "b": 4})]
 
 
 class TestConstantRegistration:

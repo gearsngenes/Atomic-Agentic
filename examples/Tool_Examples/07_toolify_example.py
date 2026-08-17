@@ -5,9 +5,10 @@ from typing import Any, Mapping
 
 from dotenv import load_dotenv
 
-from atomic_agentic.a2a import PyA2AtomicClient
+from atomic_agentic.a2a import A2AClientHub, PyA2AtomicClient
 from atomic_agentic.agents import BasicAgent
 from atomic_agentic.exceptions import ToolInvocationError
+from atomic_agentic.constants.a2a_sdk import TRANSPORT_JSON_RPC
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.mcp import MCPClientHub
@@ -64,6 +65,12 @@ MCP_HEADERS: Mapping[str, str] | None = None
 A2A_MATH_URL = "http://localhost:7000"
 A2A_MATH_REMOTE_NAME = "MathPlannerAgent"
 A2A_HEADERS: Mapping[str, str] | None = None
+
+# a2a-sdk-backed targets -- see a2a_sdk_atomic_host_server.py (invokable,
+# publishes Atomic skills) and a2a_sdk_foreign_host_server.py (plain a2a-sdk
+# agent, no skills -- generic mode only) in this same directory.
+A2A_SDK_ATOMIC_URL = "http://127.0.0.1:9000"
+A2A_SDK_FOREIGN_URL = "http://127.0.0.1:9001"
 
 
 def _jsonable(value: Any) -> Any:
@@ -228,6 +235,57 @@ def main() -> None:
 
     except Exception as exc:
         print("[A2A] Skipping batch A2A demo due to error:", exc)
+
+    print("\n[7] A2AClientHub + remote_name -> A2AProxyTool (skill mode) via toolify(hub, remote_name=...)")
+    print("[A2A-sdk] Connecting to:", A2A_SDK_ATOMIC_URL)
+    try:
+        atomic_hub = A2AClientHub(A2A_SDK_ATOMIC_URL, TRANSPORT_JSON_RPC, persistent=False)
+        skills = atomic_hub.get_atomic_skills()
+        print(f"[A2A-sdk] Discovered {len(skills)} Atomic skill(s): {sorted(skills.keys())}")
+
+        if skills:
+            skill_id = "add" if "add" in skills else next(iter(skills))
+            skill_tool = toolify(atomic_hub, remote_name=skill_id, namespace="demo_a2a_sdk")
+            show_plan(skill_tool)
+            invoke_with_inputs(skill_tool, {"a": 12, "b": 5})
+
+    except Exception as exc:
+        print("[A2A-sdk] Skipping skill-mode demo due to error:", exc)
+
+    print("\n[8] A2AClientHub, remote_name omitted -> A2AProxyTool (generic mode) via toolify(hub)")
+    print("[A2A-sdk] Connecting to:", A2A_SDK_FOREIGN_URL)
+    try:
+        foreign_hub = A2AClientHub(A2A_SDK_FOREIGN_URL, TRANSPORT_JSON_RPC, persistent=False)
+        print(f"[A2A-sdk] {foreign_hub.agent_card.name!r} publishes "
+              f"{len(foreign_hub.get_atomic_skills())} Atomic skill(s) -- not invokable, generic mode only")
+
+        generic_tool = toolify(foreign_hub, namespace="demo_a2a_sdk")
+        show_plan(generic_tool)
+        invoke_with_inputs(
+            generic_tool,
+            {
+                "parts": [
+                    {"text": "hello there", "data": None, "raw_b64": None, "url": None, "filename": None, "media_type": None},
+                ],
+            },
+        )
+
+    except Exception as exc:
+        print("[A2A-sdk] Skipping generic-mode demo due to error:", exc)
+
+    print("\n[9] batch_toolify([A2AClientHub]) -> one proxy per Atomic skill + one trailing generic proxy")
+    try:
+        atomic_hub = A2AClientHub(A2A_SDK_ATOMIC_URL, TRANSPORT_JSON_RPC, persistent=False)
+        a2a_sdk_tools = batch_toolify(
+            [atomic_hub],
+            batch_namespace="demo_a2a_sdk_batch",
+        )
+        print(f"[A2A-sdk] batch_toolify produced {len(a2a_sdk_tools)} tool(s):")
+        for t in a2a_sdk_tools:
+            print(f"  - {t.full_name} (skill_id={t.skill_id!r})")
+
+    except Exception as exc:
+        print("[A2A-sdk] Skipping batch A2A-sdk demo due to error:", exc)
 
 
 if __name__ == "__main__":

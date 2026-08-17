@@ -5,10 +5,11 @@ from typing import Any, Callable
 from ..exceptions import ToolDefinitionError
 from ..core.Invokable import AtomicInvokable
 from ..mcp import MCPClientHub
-from ..a2a import PyA2AtomicClient
+from ..a2a import A2AClientHub, PyA2AtomicClient
 from .base import Tool
 from .python_a2a import PyA2AtomicTool
 from .mcp import MCPProxyTool
+from .a2a_sdk import A2AProxyTool
 
 __all__ = ["toolify", "batch_toolify"]
 
@@ -17,7 +18,7 @@ __all__ = ["toolify", "batch_toolify"]
 # toolify
 # ───────────────────────────────────────────────────────────────────────────────
 def toolify(
-    component: AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient,
+    component: AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient | A2AClientHub,
     *,
     name: str | None = None,
     namespace: str | None = None,
@@ -36,7 +37,7 @@ def toolify(
          its real ``invoke``/``async_invoke`` under the hood) under the
          requested identity — the original is never mutated. Works
          uniformly for plain ``Tool`` and ``Tool`` subclasses
-         (``MCPProxyTool``, ``PyA2AtomicTool``) alike.
+         (``MCPProxyTool``, ``PyA2AtomicTool``, ``A2AProxyTool``) alike.
 
     2) If ``component`` is a non-tool ``AtomicInvokable``:
        - wrap it the same way — a new ``Tool`` delegating to ``component``
@@ -50,7 +51,14 @@ def toolify(
        - ``remote_name`` is required;
        - construct and return ``PyA2AtomicTool``.
 
-    5) If ``component`` is a plain callable:
+    5) If ``component`` is an ``A2AClientHub``:
+       - ``remote_name`` is OPTIONAL here — the one deliberate asymmetry vs.
+         routes 3/4. Present & non-blank selects skill mode (bound to that
+         skill id); absent/blank selects generic mode (``skill_id=None``);
+       - construct and return ``A2AProxyTool``. Its own ``ToolDefinitionError``
+         (unknown ``skill_id``) propagates unwrapped.
+
+    6) If ``component`` is a plain callable:
        - construct and return a plain ``Tool``.
 
     ``remote_name`` is only valid for remote-client routes.
@@ -87,8 +95,9 @@ def toolify(
     if isinstance(component, Tool):
         if remote_name_provided:
             raise ToolDefinitionError(
-                "toolify: `remote_name` is only valid for MCPClientHub or "
-                "PyA2AtomicClient components; got `remote_name` for an existing Tool."
+                "toolify: `remote_name` is only valid for MCPClientHub, "
+                "PyA2AtomicClient, or A2AClientHub components; got `remote_name` "
+                "for an existing Tool."
             )
 
         if not local_tool_override_requested:
@@ -108,8 +117,9 @@ def toolify(
     if isinstance(component, AtomicInvokable):
         if remote_name_provided:
             raise ToolDefinitionError(
-                "toolify: `remote_name` is only valid for MCPClientHub or "
-                "PyA2AtomicClient components; got `remote_name` for a local AtomicInvokable."
+                "toolify: `remote_name` is only valid for MCPClientHub, "
+                "PyA2AtomicClient, or A2AClientHub components; got `remote_name` "
+                "for a local AtomicInvokable."
             )
 
         return Tool(
@@ -151,12 +161,28 @@ def toolify(
             client=component,
         )
 
-    # 5) Raw callable -> Tool.
+    # 5) A2AClientHub -> A2AProxyTool. Unlike routes 3/4, remote_name is
+    # optional here: present selects skill mode (skill_id=remote_name),
+    # absent/blank selects generic mode (skill_id=None) -- both are valid,
+    # deliberate outcomes, not a missing-required-arg error.
+    if isinstance(component, A2AClientHub):
+        resolved_skill_id = str(remote_name).strip() if remote_name_provided else None
+
+        return A2AProxyTool(
+            client_hub=component,
+            skill_id=resolved_skill_id,
+            name=name,
+            namespace=namespace,
+            description=description,
+        )
+
+    # 6) Raw callable -> Tool.
     if callable(component):
         if remote_name_provided:
             raise ToolDefinitionError(
-                "toolify: `remote_name` is only valid for MCPClientHub or "
-                "PyA2AtomicClient components; got `remote_name` for a plain callable."
+                "toolify: `remote_name` is only valid for MCPClientHub, "
+                "PyA2AtomicClient, or A2AClientHub components; got `remote_name` "
+                "for a plain callable."
             )
 
         resolved_name = name
@@ -192,12 +218,12 @@ def toolify(
 
     raise ToolDefinitionError(
         "toolify: unsupported `component` type. Expected Tool | AtomicInvokable | "
-        "Callable | MCPClientHub | PyA2AtomicClient."
+        "Callable | MCPClientHub | PyA2AtomicClient | A2AClientHub."
     )
 
 
 def batch_toolify(
-    sources: list[AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient] | None = None,
+    sources: list[AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient | A2AClientHub] | None = None,
     *,
     batch_namespace: str | None = None,
 ) -> list[Tool]:
@@ -214,10 +240,14 @@ def batch_toolify(
       each one into its own MCPProxyTool.
     - Each PyA2AtomicClient is expanded by listing all remote invokables and
       toolifying each one into its own PyA2AtomicTool.
+    - Each A2AClientHub is expanded into one skill-mode A2AProxyTool per
+      discovered Atomic skill, plus exactly one trailing generic-mode
+      A2AProxyTool -- skills first, generic last, unconditionally (a
+      zero-skill hub still contributes its one generic tool).
 
     Parameters
     ----------
-    sources : list[AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient]
+    sources : list[AtomicInvokable | Callable[..., Any] | MCPClientHub | PyA2AtomicClient | A2AClientHub]
         Mixed list of local invokables, callables, Tools, and/or remote
         client hubs.
     batch_namespace : str | None
@@ -227,8 +257,10 @@ def batch_toolify(
     -------
     list[Tool]
         Flat list of all produced tools, in source order, with MCP hubs expanded
-        in the order returned by each hub's list_tools() and PyA2Atomic clients
-        expanded in the order returned by each client's list_invokables().
+        in the order returned by each hub's list_tools(), PyA2Atomic clients
+        expanded in the order returned by each client's list_invokables(), and
+        A2A client hubs expanded in get_atomic_skills() order followed by the
+        one generic tool.
     """
     tools: list[Tool] = []
 
@@ -262,6 +294,16 @@ def batch_toolify(
                 )
 
             tools.extend(client_tools)
+            continue
+
+        if isinstance(source, A2AClientHub):
+            skill_tools = [
+                toolify(source, remote_name=skill_id, namespace=batch_namespace)
+                for skill_id in source.get_atomic_skills()
+            ]
+            generic_tool = toolify(source, namespace=batch_namespace)
+
+            tools.extend([*skill_tools, generic_tool])
             continue
 
         tools.append(

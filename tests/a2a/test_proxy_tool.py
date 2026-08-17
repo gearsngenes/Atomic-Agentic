@@ -303,7 +303,9 @@ class TestSkillMode:
         try:
             tool = A2AProxyTool(hub, skill_id="add")
             assert tool.name == "add"
-            assert tool.namespace == "a2a"
+            # Card-derived default (Pass 4 amendment) -- the fixture's card
+            # name is already a valid identifier, so it wins over "a2a".
+            assert tool.namespace == "ProxyToolAtomicFixture"
             assert tool.skill_id == "add"
             assert [p.name for p in tool.parameters] == ["a", "b"]
             assert tool.return_type == "int"
@@ -368,7 +370,9 @@ class TestGenericMode:
         try:
             tool = A2AProxyTool(hub)
             assert tool.name == "send_parts"
-            assert tool.namespace == "a2a"
+            # Card-derived default (Pass 4 amendment) -- the fixture's card
+            # name is already a valid identifier, so it wins over "a2a".
+            assert tool.namespace == "ProxyToolEchoFixture"
             assert tool.skill_id is None
             assert {p.name for p in tool.parameters} == {"parts", "metadata"}
             assert tool.return_type == "list"
@@ -442,5 +446,90 @@ class TestGenericMode:
             tool = A2AProxyTool(hub, name="custom_send", namespace="custom_ns")
             assert tool.name == "custom_send"
             assert tool.namespace == "custom_ns"
+        finally:
+            hub.close()
+
+
+# --------------------------------------------------------------------------- #
+# Namespace resolution -- explicit > card-derived identifier > "a2a"
+# --------------------------------------------------------------------------- #
+
+
+class _FakeCardHub(A2AClientHub):
+    """Minimal A2AClientHub subclass carrying only a fake agent_card.name,
+    for namespace-resolution unit tests that don't need a live server."""
+
+    def __init__(self, *, card_name: str) -> None:
+        self._card_name = card_name
+
+    @property
+    def agent_card(self) -> Any:
+        return type("FakeCard", (), {"name": self._card_name, "description": ""})()
+
+    @property
+    def transport_mode(self) -> str:
+        return "JSONRPC"
+
+    @property
+    def base_url(self) -> str:
+        return "http://example.test/a2a-sdk"
+
+    @property
+    def persistent(self) -> bool:
+        return False
+
+    def get_atomic_skills(self) -> dict:
+        return {}
+
+
+class TestSanitizeNamespaceCandidate:
+    def test_collapses_separator_runs(self) -> None:
+        assert A2AProxyTool._sanitize_namespace_candidate("My  Cool---Agent") == "My_Cool_Agent"
+
+    def test_preserves_case(self) -> None:
+        assert A2AProxyTool._sanitize_namespace_candidate("MathAgent") == "MathAgent"
+
+    def test_rejects_digit_start(self) -> None:
+        assert A2AProxyTool._sanitize_namespace_candidate("123-agent") is None
+
+    def test_rejects_empty_input(self) -> None:
+        assert A2AProxyTool._sanitize_namespace_candidate("") is None
+
+    def test_rejects_disallowed_characters(self) -> None:
+        assert A2AProxyTool._sanitize_namespace_candidate("agent@prod") is None
+
+    def test_all_separator_input_collapses_to_single_underscore(self) -> None:
+        # A lone "_" is itself a valid Python identifier -- not a rejection
+        # case, unlike an all-separator MCP/PyA2Atomic-style name might
+        # suggest at a glance.
+        assert A2AProxyTool._sanitize_namespace_candidate("---") == "_"
+
+    def test_accepts_leading_and_trailing_underscore(self) -> None:
+        assert A2AProxyTool._sanitize_namespace_candidate("-my-agent-") == "_my_agent_"
+
+
+class TestNamespaceResolution:
+    def test_card_derived_namespace_used_when_no_explicit_given(self) -> None:
+        tool = A2AProxyTool(_FakeCardHub(card_name="My Cool Agent"))
+        assert tool.namespace == "My_Cool_Agent"
+
+    def test_falls_back_to_a2a_when_card_name_unusable(self) -> None:
+        # "123 Agent" sanitizes to "123_Agent" -- starts with a digit, so it
+        # never becomes a valid identifier no matter what the separator
+        # collapsing does.
+        tool = A2AProxyTool(_FakeCardHub(card_name="123 Agent"))
+        assert tool.namespace == "a2a"
+
+    def test_explicit_namespace_wins_over_card_name(self) -> None:
+        tool = A2AProxyTool(_FakeCardHub(card_name="My Cool Agent"), namespace="explicit_ns")
+        assert tool.namespace == "explicit_ns"
+
+    def test_against_real_fixture_uses_sanitized_card_name(
+        self, atomic_fixture_server: FixtureServer
+    ) -> None:
+        hub = A2AClientHub(atomic_fixture_server.http_url, TRANSPORT_JSON_RPC, False)
+        try:
+            tool = A2AProxyTool(hub, skill_id="add")
+            assert tool.namespace == "ProxyToolAtomicFixture"
         finally:
             hub.close()

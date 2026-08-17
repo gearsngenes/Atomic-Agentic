@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import functools
+import re
 from typing import Any, Dict, Mapping, Optional
 
 from ..a2a.A2AClientHub import A2AClientHub
 from ..constants.a2a_sdk import GENERIC_METADATA_DESCRIPTION, GENERIC_PARTS_DESCRIPTION
-from ..constants.core import NO_VAL
+from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
 from ..exceptions import ToolDefinitionError, ToolInvocationError
 from ..models.parameters import ParamSpec
 from ..models.results.tools import A2AProxyToolResult
@@ -13,6 +14,11 @@ from ..utils.a2a import _dict_to_part, _part_to_dict
 from .base import Tool
 
 __all__ = ["A2AProxyTool"]
+
+# Collapses runs of '-', '.', or whitespace into one '_' before the
+# IDENTIFIER_PATTERN check -- "My  Agent" / "my--agent" / "my.agent" all
+# normalize to one clean candidate, not one underscore per separator char.
+_NAMESPACE_SEPARATOR_PATTERN = re.compile(r"[-.\s]+")
 
 
 class A2AProxyTool(Tool):
@@ -75,7 +81,13 @@ class A2AProxyTool(Tool):
         if not resolved_name:
             resolved_name = self._skill_id if is_skill_mode else "send_parts"
 
-        resolved_namespace = str(namespace or "").strip() or "a2a"
+        explicit_namespace = str(namespace or "").strip()
+        if explicit_namespace:
+            resolved_namespace = explicit_namespace
+        else:
+            card_name = str(getattr(client_hub.agent_card, "name", "") or "")
+            candidate = self._sanitize_namespace_candidate(card_name)
+            resolved_namespace = candidate if candidate is not None else "a2a"
 
         explicit_description = str(description or "").strip()
         card_description = str(getattr(client_hub.agent_card, "description", "") or "").strip()
@@ -108,6 +120,18 @@ class A2AProxyTool(Tool):
             namespace=resolved_namespace,
             description=resolved_description,
         )
+
+    @staticmethod
+    def _sanitize_namespace_candidate(card_name: str) -> Optional[str]:
+        """
+        Turn a remote AgentCard's ``name`` into a usable namespace, or
+        ``None`` if it doesn't sanitize into one. Case is preserved verbatim
+        -- no AA convention forces lowercase namespaces (``tools/prebuilt.py``
+        already ships ``"Math"``/``"Console"``). A ``None`` return means the
+        caller falls back to ``"a2a"``, never to an empty-string namespace.
+        """
+        candidate = _NAMESPACE_SEPARATOR_PATTERN.sub("_", card_name.strip())
+        return candidate if IDENTIFIER_PATTERN.fullmatch(candidate) else None
 
     # ------------------------------------------------------------------ #
     # Proxy properties
