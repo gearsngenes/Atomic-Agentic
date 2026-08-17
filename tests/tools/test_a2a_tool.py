@@ -12,7 +12,7 @@ from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.exceptions import RemoteInvocationError, ToolDefinitionError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.tools import PyA2AtomicToolResult
-from atomic_agentic.tools.a2a import PyA2AtomicTool
+from atomic_agentic.tools.python_a2a import PyA2AtomicTool
 
 def param_dict(
     name: str,

@@ -78,6 +78,70 @@ ATOMIC_RESULT_KEY = "__atomic_result__"
 
 
 # =============================================================================
+# A2AProxyTool generic-mode Part<->dict key vocabulary
+# =============================================================================
+# Used by:
+# - utils/a2a.py: _dict_to_part/_part_to_dict conversion
+# - tools/a2a_sdk.py: A2AProxyTool generic-mode signature description
+#
+# Each generic-mode `parts` item is a plain dict describing exactly one
+# a2a-sdk Part. PART_CONTENT_KEYS names the four mutually-exclusive content
+# keys -- exactly one must be non-None per dict.
+
+PART_TEXT_KEY = "text"
+PART_DATA_KEY = "data"
+PART_RAW_B64_KEY = "raw_b64"
+PART_URL_KEY = "url"
+PART_FILENAME_KEY = "filename"
+PART_MEDIA_TYPE_KEY = "media_type"
+
+PART_CONTENT_KEYS: tuple[str, ...] = (
+    PART_TEXT_KEY,
+    PART_DATA_KEY,
+    PART_RAW_B64_KEY,
+    PART_URL_KEY,
+)
+
+
+# =============================================================================
+# A2AProxyTool generic-mode ParamSpec descriptions
+# =============================================================================
+# Used by:
+# - tools/a2a_sdk.py: A2AProxyTool._build_tool_signature's generic-mode
+#   "parts"/"metadata" ParamSpecs
+#
+# Spelled out in full (every key, its type, when to set it) rather than a
+# terse one-liner -- this text is the only schema documentation an LLM
+# tool-agent sees before constructing a call, since generic mode's dict
+# shape isn't enforced by any structured JSON-schema layer of its own.
+
+GENERIC_PARTS_DESCRIPTION = (
+    "Sequence of dicts; each dict describes exactly one A2A message part and "
+    "should include all six keys: 'text', 'data', 'raw_b64', 'url', "
+    "'filename', 'media_type'. Set exactly ONE of 'text'/'data'/'raw_b64'/"
+    "'url' to a non-null value -- that is the part's content, and picks its "
+    "kind -- and leave the other three of those four null. "
+    "'text' (str): plain prose. "
+    "'data' (any JSON value): a dict/list/str/number/bool/null payload. "
+    "'raw_b64' (str): base64-encoded binary content. "
+    "'url' (str): a URL reference to external content. "
+    "'filename' (str, optional, null unless set): only meaningful alongside "
+    "'raw_b64' or 'url'. "
+    "'media_type' (str, optional, null unless set): a MIME type describing "
+    "the content, e.g. 'text/plain', 'application/json', 'image/png', "
+    "'application/pdf'; valid alongside any content kind. "
+    "The call's result is a list of dicts in this exact same shape."
+)
+
+GENERIC_METADATA_DESCRIPTION = (
+    "Optional dict of string keys/values, passed through unchanged as "
+    "message-level metadata to the remote agent -- not part of any Part's "
+    "content. Used only if the remote agent defines its own routing/session "
+    "metadata convention; leave null (the default) otherwise."
+)
+
+
+# =============================================================================
 # Explicit public export list
 # =============================================================================
 # Keep this explicit so adding local helper names or imports cannot accidentally
@@ -93,4 +157,13 @@ __all__ = [
     "PARAM_SCHEMA_EXT_URI",
     "SKILL_ROUTING_KEY",
     "ATOMIC_RESULT_KEY",
+    "PART_TEXT_KEY",
+    "PART_DATA_KEY",
+    "PART_RAW_B64_KEY",
+    "PART_URL_KEY",
+    "PART_FILENAME_KEY",
+    "PART_MEDIA_TYPE_KEY",
+    "PART_CONTENT_KEYS",
+    "GENERIC_PARTS_DESCRIPTION",
+    "GENERIC_METADATA_DESCRIPTION",
 ]

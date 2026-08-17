@@ -7,7 +7,7 @@ from ..core.Invokable import AtomicInvokable
 from ..mcp import MCPClientHub
 from ..a2a import PyA2AtomicClient
 from .base import Tool
-from .a2a import PyA2AtomicTool
+from .python_a2a import PyA2AtomicTool
 from .mcp import MCPProxyTool
 
 __all__ = ["toolify", "batch_toolify"]

@@ -12,7 +12,7 @@ from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.mcp.MCPClientHub import MCPClientHub
 from atomic_agentic.tools.Toolify import batch_toolify, toolify
-from atomic_agentic.tools.a2a import PyA2AtomicTool
+from atomic_agentic.tools.python_a2a import PyA2AtomicTool
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.tools.mcp import MCPProxyTool
 from atomic_agentic.agents.tools import return_tool
