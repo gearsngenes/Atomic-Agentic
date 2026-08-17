@@ -12,7 +12,7 @@ from atomic_agentic.core.Invokable import StructuredInvokable
 from atomic_agentic.models.results.structured import StructuredResult
 from atomic_agentic.models.results.workflows import SequentialFlowResult
 from atomic_agentic.workflows.sequential import SequentialFlow
-from fake_engines import FakeLLMEngine, echo_latest_user
+from ..fake_engines import FakeLLMEngine, echo_latest_user
 
 
 pytestmark = [pytest.mark.integration]

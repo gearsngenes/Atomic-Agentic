@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
@@ -8,12 +9,22 @@ import grpc
 import httpx
 from a2a.client import Client, ClientConfig, create_client
 from a2a.client.errors import A2AClientError, A2AClientTimeoutError, AgentCardResolutionError
-from a2a.helpers import new_message
-from a2a.types import AgentCard, Part, Role, SendMessageRequest, StreamResponse, TaskState
+from a2a.extensions.common import find_extension_by_uri
+from a2a.helpers import get_data_parts, new_data_part
+from a2a.types import AgentCard, Message, Part, Role, SendMessageRequest, StreamResponse, TaskState
+from google.protobuf.json_format import MessageToDict
 
-from ..constants.a2a_sdk import TERMINAL_FAILURE_STATES, TRANSPORT_GRPC, VALID_TRANSPORT_MODES
+from ..constants.a2a_sdk import (
+    ATOMIC_RESULT_KEY,
+    PARAM_SCHEMA_EXT_URI,
+    SKILL_ROUTING_KEY,
+    TERMINAL_FAILURE_STATES,
+    TRANSPORT_GRPC,
+    VALID_TRANSPORT_MODES,
+)
 from ..constants.core import HeaderValue
 from ..exceptions import A2AProxyError
+from ..models.a2a_sdk import A2AtomicSkillMetadata
 from ..utils.core import normalize_headers, run_coro_async, run_coro_sync, start_background_loop, stop_background_loop
 
 __all__ = ["A2AClientHub"]
@@ -106,6 +117,7 @@ class A2AClientHub:
                 self._client, self._agent_card = run_coro_sync(
                     self._connect(self._headers, self._timeout), loop=self._bg_loop
                 )
+                self._atomic_skills = self._build_atomic_skills(self._agent_card)
             except Exception:
                 stop_background_loop(self._bg_loop, self._bg_thread)
                 raise
@@ -114,6 +126,7 @@ class A2AClientHub:
             self._bg_thread = None
             self._client = None
             self._agent_card = run_coro_sync(self._resolve_card(self._headers, self._timeout))
+            self._atomic_skills = self._build_atomic_skills(self._agent_card)
 
     @classmethod
     async def async_create(
@@ -210,6 +223,27 @@ class A2AClientHub:
         await client.close()
         return card
 
+    @staticmethod
+    def _build_atomic_skills(card: AgentCard) -> dict[str, A2AtomicSkillMetadata]:
+        """
+        Detection only -- no Tool-building here (that's a later track's job).
+        Empty dict, not an error, when the extension is absent: a plain
+        spec-compliant A2A server that never published AA's extension is a
+        legitimate, expected case, not a malformed one. A malformed *present*
+        entry (bad shape once the extension IS there) raises naturally out of
+        A2AtomicSkillMetadata.from_dict/ParamSpec.from_dict and propagates to
+        the caller (constructor or _do_refresh), per doc1's "let natural
+        exceptions surface" discipline.
+        """
+        extension = find_extension_by_uri(card, PARAM_SCHEMA_EXT_URI)
+        if extension is None:
+            return {}
+        raw = MessageToDict(extension.params)
+        return {
+            remote_name: A2AtomicSkillMetadata.from_dict(payload)
+            for remote_name, payload in raw.items()
+        }
+
     def _build_grpc_channel_factory(self) -> Callable[[str], "grpc.aio.Channel"]:
         """
         Build this hub's gRPC channel factory (a2a-sdk ships none).
@@ -257,6 +291,57 @@ class A2AClientHub:
     def agent_card(self) -> AgentCard:
         return self._agent_card
 
+    def get_atomic_skills(self) -> Mapping[str, A2AtomicSkillMetadata]:
+        """
+        Detection-only view of whatever Atomic skills the remote server's
+        card publishes, resolved at construction and rebuilt on refresh().
+        Pure local read -- no network call. Returns a shallow copy so a
+        caller can't mutate the hub's own internal collection through it
+        (the A2AtomicSkillMetadata values are already frozen).
+        """
+        return dict(self._atomic_skills)
+
+    def call_atomic_skill(self, skill_id: str, inputs: Mapping[str, Any]) -> Any:
+        """
+        Invoke one remote Atomic skill by name with a plain input dict,
+        returning the raw result value. Thin wrapper over send_parts: builds
+        one DataPart from inputs, routes via
+        Message.metadata[SKILL_ROUTING_KEY], and unwraps the single-key
+        result DataPart the remote A2AtomicExecutor wraps its result in.
+        """
+        part, metadata = self._prepare_atomic_call(skill_id, inputs)
+        parts = self.send_parts([part], metadata=metadata)
+        return self._unwrap_atomic_result(parts)
+
+    async def async_call_atomic_skill(self, skill_id: str, inputs: Mapping[str, Any]) -> Any:
+        """Async counterpart to call_atomic_skill."""
+        part, metadata = self._prepare_atomic_call(skill_id, inputs)
+        parts = await self.async_send_parts([part], metadata=metadata)
+        return self._unwrap_atomic_result(parts)
+
+    @staticmethod
+    def _prepare_atomic_call(skill_id: str, inputs: Mapping[str, Any]) -> tuple[Part, dict[str, str]]:
+        """Shared validation + Part/metadata construction for both call_atomic_skill entry points."""
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise ValueError("skill_id must be a non-empty string.")
+        if not isinstance(inputs, Mapping):
+            raise TypeError("inputs must be a Mapping.")
+
+        return new_data_part(dict(inputs)), {SKILL_ROUTING_KEY: skill_id}
+
+    @staticmethod
+    def _unwrap_atomic_result(parts: tuple[Part, ...]) -> Any:
+        if len(parts) != 1 or not parts[0].HasField("data"):
+            raise A2AProxyError(
+                f"A2AClientHub: call_atomic_skill expected exactly one data Part back, got {parts!r}."
+            )
+        payload = get_data_parts(parts)[0]
+        if not isinstance(payload, dict) or set(payload.keys()) != {ATOMIC_RESULT_KEY}:
+            raise A2AProxyError(
+                f"A2AClientHub: call_atomic_skill response missing/malformed {ATOMIC_RESULT_KEY!r} key: {payload!r}."
+            )
+        return payload[ATOMIC_RESULT_KEY]
+
     def refresh(
         self,
         headers: Mapping[str, HeaderValue] | None = None,
@@ -294,6 +379,12 @@ class A2AClientHub:
             resolved_timeout = float(timeout) if timeout is not None else self._timeout
 
             new_client, new_card = await self._connect(resolved_headers, resolved_timeout)
+            # Built before any commit -- a malformed extension payload on
+            # the refreshed card raises here and the whole refresh rolls
+            # back, leaving self._atomic_skills (and everything else)
+            # untouched, same guarantee _connect's own failure already gives
+            # self._agent_card.
+            new_atomic_skills = self._build_atomic_skills(new_card)
 
             if self._bg_loop is not None:
                 old_client = self._client
@@ -309,6 +400,7 @@ class A2AClientHub:
                 await new_client.close()
 
             self._agent_card, self._headers, self._timeout = new_card, resolved_headers, resolved_timeout
+            self._atomic_skills = new_atomic_skills
 
     def close(self) -> None:
         """
@@ -325,21 +417,34 @@ class A2AClientHub:
         self._bg_thread = None
         self._client = None
 
-    def send_parts(self, parts: Sequence[Part]) -> tuple[Part, ...]:
+    def send_parts(
+        self,
+        parts: Sequence[Part],
+        metadata: Mapping[str, Any] | None = None,
+    ) -> tuple[Part, ...]:
         """
         Dispatches onto the background loop if one is currently held
         (persistent mode, not yet closed); else runs a fresh open/send/close
         cycle -- safe because nothing outlives that one call.
         """
-        return run_coro_sync(self._do_send_parts(parts, self._client), loop=self._bg_loop)
+        return run_coro_sync(self._do_send_parts(parts, self._client, metadata), loop=self._bg_loop)
 
-    async def async_send_parts(self, parts: Sequence[Part]) -> tuple[Part, ...]:
+    async def async_send_parts(
+        self,
+        parts: Sequence[Part],
+        metadata: Mapping[str, Any] | None = None,
+    ) -> tuple[Part, ...]:
         """Async counterpart to send_parts."""
         if self._bg_loop is not None:
-            return await run_coro_async(self._do_send_parts(parts, self._client), loop=self._bg_loop)
-        return await self._do_send_parts(parts, None)
+            return await run_coro_async(self._do_send_parts(parts, self._client, metadata), loop=self._bg_loop)
+        return await self._do_send_parts(parts, None, metadata)
 
-    async def _do_send_parts(self, parts: Sequence[Part], client: Client | None) -> tuple[Part, ...]:
+    async def _do_send_parts(
+        self,
+        parts: Sequence[Part],
+        client: Client | None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> tuple[Part, ...]:
         """
         Core send/receive logic. client=None (always true for non-persistent
         mode, and true for a persistent mode already torn down by close())
@@ -364,11 +469,29 @@ class A2AClientHub:
             client, _ = await self._connect(self._headers, self._timeout)
 
         try:
-            # new_message()'s own default role is ROLE_AGENT (a
-            # server-reply-oriented default); ROLE_USER must be passed
-            # explicitly here since this is the client's outbound message.
-            message = new_message(list(parts), role=Role.ROLE_USER)
-            request = SendMessageRequest(message=message)
+            # Built directly rather than via the a2a-sdk's new_message()
+            # helper -- that helper has no metadata parameter at all (it's
+            # third-party code, not something AA can extend). role=ROLE_USER
+            # is passed explicitly since new_message()'s equivalent default
+            # is ROLE_AGENT (a server-reply-oriented default) and this is
+            # the client's outbound message.
+            message = Message(
+                role=Role.ROLE_USER,
+                parts=list(parts),
+                message_id=str(uuid.uuid4()),
+            )
+            # metadata rides on the *request* wrapper, not the Message --
+            # RequestContext.metadata (what A2AtomicExecutor.execute() reads
+            # for SKILL_ROUTING_KEY) is sourced from SendMessageRequest.metadata,
+            # a distinct sibling field to Message.metadata, confirmed against
+            # a2a_pb2.pyi (SendMessageRequest has its own top-level
+            # `metadata: Struct` field) and RequestContext.metadata's own
+            # implementation (`MessageToDict(self._params.metadata)` where
+            # self._params is the SendMessageRequest, not the Message).
+            request = SendMessageRequest(
+                message=message,
+                metadata=dict(metadata) if metadata is not None else None,
+            )
 
             try:
                 stream_response: StreamResponse | None = None

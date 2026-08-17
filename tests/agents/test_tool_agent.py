@@ -6,7 +6,7 @@ import json
 import unittest.mock
 from typing import Any
 
-from conftest import (
+from .conftest import (
     ROLE_TEMPLATE,
     FakeLLMEngine,
     ScriptedToolAgent,

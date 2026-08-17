@@ -55,6 +55,29 @@ TERMINAL_FAILURE_STATES: frozenset[TaskState] = frozenset(
 
 
 # =============================================================================
+# A2AtomicExecutor / A2AClientHub Shared Conventions
+# =============================================================================
+# Used by:
+# - a2a/A2AtomicExecutor.py: card extension publication (PARAM_SCHEMA_EXT_URI),
+#   Message.metadata routing (SKILL_ROUTING_KEY), result wrapping (ATOMIC_RESULT_KEY)
+# - a2a/A2AClientHub.py: extension detection, call_atomic_skill/
+#   async_call_atomic_skill routing and result unwrapping
+#
+# PARAM_SCHEMA_EXT_URI identifies AA's own AgentExtension on a published
+# AgentCard; its Struct payload is a skill_id -> A2AtomicSkillMetadata.to_dict()
+# map. SKILL_ROUTING_KEY is the Message.metadata key naming which registered
+# skill a call targets -- lives in metadata, not inside the DataPart's own
+# content, since no skill-selection field exists anywhere on Message itself
+# (confirmed against the full field list in a2a_pb2.pyi). ATOMIC_RESULT_KEY
+# wraps the single returned value, the direct a2a-sdk-track analog of
+# constants/python_a2a.py's PYA2A_RESULT_KEY.
+
+PARAM_SCHEMA_EXT_URI = "atomic-agentic.dev/ext/param-schema/v1"
+SKILL_ROUTING_KEY = "skill_id"
+ATOMIC_RESULT_KEY = "__atomic_result__"
+
+
+# =============================================================================
 # Explicit public export list
 # =============================================================================
 # Keep this explicit so adding local helper names or imports cannot accidentally
@@ -67,4 +90,7 @@ __all__ = [
     "TRANSPORT_GRPC",
     "VALID_TRANSPORT_MODES",
     "TERMINAL_FAILURE_STATES",
+    "PARAM_SCHEMA_EXT_URI",
+    "SKILL_ROUTING_KEY",
+    "ATOMIC_RESULT_KEY",
 ]

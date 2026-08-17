@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import socket
 import threading
 import time
@@ -37,8 +38,15 @@ from a2a.types import (
 from google.protobuf.json_format import MessageToDict
 from starlette.applications import Starlette
 
-import atomic_agentic.a2a.A2AClientHub as a2a_client_hub_module
 from atomic_agentic.a2a.A2AClientHub import A2AClientHub
+
+# a2a/__init__.py's own `from .A2AClientHub import A2AClientHub` shadows the
+# package's A2AClientHub *submodule* attribute with the *class* -- so a plain
+# `import atomic_agentic.a2a.A2AClientHub as X` resolves X to the class, not
+# the module, and `X.create_client` (below) doesn't exist. importlib.import_module
+# bypasses that shadowing by going straight through sys.modules -- same fix
+# already applied in tests/llm/test_base.py for the identical scenario.
+a2a_client_hub_module = importlib.import_module("atomic_agentic.a2a.A2AClientHub")
 from atomic_agentic.constants.a2a_sdk import TRANSPORT_GRPC, TRANSPORT_JSON_RPC, TRANSPORT_REST
 from atomic_agentic.exceptions import A2AProxyError
 from atomic_agentic.utils.core import run_coro_sync, start_background_loop, stop_background_loop
@@ -60,6 +68,11 @@ class _EchoAgentExecutor(AgentExecutor):
             and MessageToDict(part.data) == {"trigger": "fail"}
             for part in parts
         )
+        should_be_slow = any(
+            part.WhichOneof("content") == "data"
+            and MessageToDict(part.data) == {"trigger": "slow"}
+            for part in parts
+        )
 
         if should_fail:
             task = new_task_from_user_message(context.message)
@@ -67,6 +80,12 @@ class _EchoAgentExecutor(AgentExecutor):
             updater = TaskUpdater(event_queue, task.id, task.context_id)
             await updater.failed()
             return
+
+        if should_be_slow:
+            # Deterministically exceeds any sane client timeout, unlike
+            # racing a real (fast, in-process, loopback) round-trip against
+            # a millisecond-scale clock -- see test_timeout_raises_a2a_proxy_error.
+            await asyncio.sleep(2)
 
         reply = new_message(parts, role=Role.ROLE_AGENT)
         await event_queue.enqueue_event(reply)
@@ -174,6 +193,15 @@ def fixture_server():
     yield FixtureServer(http_url=http_url, grpc_target=grpc_target, rpc_url=rpc_url)
 
     async def _shutdown() -> None:
+        # request_handler.aclose() drains DefaultRequestHandler's
+        # ActiveTaskRegistry -- the SDK-sanctioned shutdown hook (its own
+        # docstring: "so a server shutdown leaves no pending asyncio.Task",
+        # "intended to be wired into an ASGI lifespan/on_shutdown hook").
+        # Without it, every request's ActiveTask (producer+consumer tasks)
+        # is left orphaned; with ~50+ requests across this fixture's full
+        # parametrized test matrix, that accumulation is what hung the whole
+        # pytest session at final teardown -- confirmed directly this pass.
+        await request_handler.aclose()
         uvicorn_server.should_exit = True
         await asyncio.sleep(0.3)
         await grpc_server.stop(grace=1)
@@ -466,6 +494,45 @@ class TestToDict:
             hub.close()
 
 
+class TestAtomicSkillDetection:
+    """The fixture server here is a plain, non-AA-aware AgentExecutor that
+    never publishes PARAM_SCHEMA_EXT_URI -- exactly the "extension absent"
+    case get_atomic_skills() is scoped to degrade gracefully on. Detection
+    against a real A2AtomicExecutor-backed server (extension present, real
+    skills) is covered end-to-end in test_atomic_executor.py, which owns its
+    own atomic-aware fixture server."""
+
+    def test_get_atomic_skills_is_empty_when_extension_absent(
+        self, fixture_server: FixtureServer, persistent: bool
+    ) -> None:
+        hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
+        try:
+            assert hub.get_atomic_skills() == {}
+        finally:
+            hub.close()
+
+    def test_refresh_rebuilds_atomic_skills_without_error(
+        self, fixture_server: FixtureServer, persistent: bool
+    ) -> None:
+        hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
+        try:
+            hub.refresh(timeout=123.0)
+            assert hub.get_atomic_skills() == {}
+        finally:
+            hub.close()
+
+    def test_get_atomic_skills_returns_a_copy(
+        self, fixture_server: FixtureServer, persistent: bool
+    ) -> None:
+        hub = _make_hub(fixture_server, TRANSPORT_JSON_RPC, persistent)
+        try:
+            skills = hub.get_atomic_skills()
+            skills["injected"] = None  # type: ignore[assignment]
+            assert hub.get_atomic_skills() == {}
+        finally:
+            hub.close()
+
+
 class TestFailureModes:
     def test_server_side_task_failure_raises_a2a_proxy_error(
         self, fixture_server: FixtureServer, persistent: bool
@@ -478,15 +545,18 @@ class TestFailureModes:
             hub.close()
 
     def test_timeout_raises_a2a_proxy_error(self, fixture_server: FixtureServer) -> None:
-        # Construct with a reasonable timeout (agent-card resolution must
-        # succeed), then shrink it directly so only the send_parts call
-        # itself races the clock -- a construction-time timeout this tight
-        # would be flaky depending on system load.
+        # Deterministic, not a clock race: the server sleeps 2s on this
+        # trigger (see _EchoAgentExecutor), so a 0.5s client timeout is
+        # guaranteed to be exceeded regardless of machine speed/load --
+        # unlike the previous hub._timeout = 0.001 approach, which raced a
+        # real (fast, in-process, loopback) round-trip against a
+        # millisecond-scale clock and was genuinely flaky (confirmed: failed
+        # ~1/3 of runs).
         hub = A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, False)
         try:
-            hub._timeout = 0.001
+            hub._timeout = 0.5
             with pytest.raises(A2AProxyError):
-                hub.send_parts([new_text_part("too slow")])
+                hub.send_parts([new_data_part({"trigger": "slow"})])
         finally:
             hub._timeout = 600
             hub.close()
