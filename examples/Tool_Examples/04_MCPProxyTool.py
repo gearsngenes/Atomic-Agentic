@@ -28,9 +28,14 @@ HEADERS     = None  # e.g., {"Authorization": "Bearer ..."} if your server needs
 # One planned MCPClientHub configuration per transport -- edit these directly
 # to try out read_timeout_seconds/client_kwargs/session_kwargs. Only
 # CLIENT_CONFIGS[TRANSPORT_MODE] is actually used to build `client` below.
+# persistent=False below matches this example's original one-shot-per-call
+# behavior. Set it to True (and use `with MCPClientHub(...) as client:` or
+# call client.close() when done) to hold one connection open across every
+# tool call this script makes instead of reopening per call.
 CLIENT_CONFIGS: dict[str, dict[str, Any]] = {
     "stdio": dict(
         transport_mode="stdio",
+        persistent=False,
         command=sys.executable,
         args=[str(Path(__file__).parent / "sample_mcp_server.py")],
         client_kwargs={"cwd": str(Path(__file__).parent)},
@@ -38,6 +43,7 @@ CLIENT_CONFIGS: dict[str, dict[str, Any]] = {
     ),
     "sse": dict(
         transport_mode="sse",
+        persistent=False,
         endpoint="http://127.0.0.1:8000/sse",
         headers=HEADERS,
         client_kwargs={"timeout": 5, "sse_read_timeout": 300},
@@ -45,6 +51,7 @@ CLIENT_CONFIGS: dict[str, dict[str, Any]] = {
     ),
     "streamable_http": dict(
         transport_mode="streamable_http",
+        persistent=False,
         endpoint="http://127.0.0.1:8000/mcp",
         headers=HEADERS,
         client_kwargs={"terminate_on_close": True},

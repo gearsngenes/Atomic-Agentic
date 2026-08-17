@@ -156,6 +156,7 @@ def main() -> None:
     try:
         mcp_hub = MCPClientHub(
             transport_mode="streamable_http",
+            persistent=False,
             endpoint=MCP_ENDPOINT,
             headers=MCP_HEADERS,
         )

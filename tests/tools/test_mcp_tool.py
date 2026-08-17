@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from typing import Any, Mapping
 
 import pytest
@@ -11,6 +12,8 @@ from atomic_agentic.models.results.tools import MCPToolResult
 from atomic_agentic.mcp.MCPClientHub import MCPClientHub
 from atomic_agentic.tools.mcp import MCPProxyTool
 from atomic_agentic.constants.core import NO_VAL
+
+mcp_tool_module = importlib.import_module("atomic_agentic.tools.mcp")
 
 def param(
     name: str,
@@ -213,6 +216,67 @@ class TestMCPProxyToolConstruction:
     def test_raw_transport_requires_transport_mode(self) -> None:
         with pytest.raises(ValueError, match="transport_mode"):
             MCPProxyTool(remote_name="search")
+
+
+class TestMCPProxyToolPersistent:
+    def test_persistent_defaults_to_false(self) -> None:
+        hub = FakeMCPClientHub()
+        tool = make_tool(hub=hub)
+
+        # FakeMCPClientHub never calls MCPClientHub.__init__, so the real
+        # default lives on MCPProxyTool.__init__'s own signature -- assert
+        # against that directly rather than the (unset) hub attribute.
+        import inspect
+
+        assert (
+            inspect.signature(MCPProxyTool.__init__).parameters["persistent"].default
+            is False
+        )
+        assert tool.client_hub is hub
+
+    def test_persistent_true_with_client_hub_raises(self) -> None:
+        with pytest.raises(ValueError, match="only valid when constructing"):
+            MCPProxyTool(
+                remote_name="search",
+                client_hub=FakeMCPClientHub(),
+                persistent=True,
+            )
+
+    def test_persistent_false_with_client_hub_does_not_raise(self) -> None:
+        tool = MCPProxyTool(
+            remote_name="search",
+            client_hub=FakeMCPClientHub(),
+            persistent=False,
+        )
+
+        assert tool.remote_name == "search"
+
+    def test_persistent_passes_through_to_raw_transport_construction(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Confirms the plumbing without opening a real transport: monkeypatch
+        the MCPClientHub symbol MCPProxyTool actually constructs against with
+        a recording fake, matching test_client_hub.py's own monkeypatch style."""
+        captured: dict[str, Any] = {}
+
+        class RecordingHub(FakeMCPClientHub):
+            def __init__(self, **kwargs: Any) -> None:
+                captured.update(kwargs)
+                super().__init__()
+
+        monkeypatch.setattr(mcp_tool_module, "MCPClientHub", RecordingHub)
+
+        MCPProxyTool(
+            remote_name="search",
+            transport_mode="stdio",
+            command="python",
+            persistent=True,
+        )
+
+        assert captured["persistent"] is True
+        assert captured["transport_mode"] == "stdio"
+        assert captured["command"] == "python"
 
 
 class TestMCPProxyToolSignatureAndMetadata:

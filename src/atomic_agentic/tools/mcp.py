@@ -41,6 +41,7 @@ class MCPProxyTool(Tool):
         command: str | None = None,
         args: list[str] | None = None,
         headers: Mapping[str, HeaderValue] | None = None,
+        persistent: bool = False,
     ) -> None:
         resolved_remote_name = str(remote_name).strip()
         if not resolved_remote_name:
@@ -58,6 +59,11 @@ class MCPProxyTool(Tool):
                 raise ValueError(
                     "Pass either client_hub or raw transport settings, not both."
                 )
+            if persistent:
+                raise ValueError(
+                    "persistent is only valid when constructing a new MCPClientHub "
+                    "from raw transport settings, not alongside client_hub."
+                )
             client = client_hub
         else:
             if transport_mode is None:
@@ -66,6 +72,7 @@ class MCPProxyTool(Tool):
                 )
             client = MCPClientHub(
                 transport_mode=transport_mode,
+                persistent=persistent,
                 endpoint=endpoint,
                 command=command,
                 args=args,

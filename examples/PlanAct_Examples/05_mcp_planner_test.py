@@ -25,7 +25,9 @@ planner = PlanActAgent(
 )
 
 # Register all tools from MCP server (bulk discover via client= param).
-planner.batch_register(client=MCPClientHub("streamable_http", endpoint="http://localhost:8000/mcp"))
+planner.batch_register(
+    client=MCPClientHub("streamable_http", persistent=False, endpoint="http://localhost:8000/mcp")
+)
 
 result = planner.invoke(
     {
