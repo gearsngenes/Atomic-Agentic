@@ -493,6 +493,88 @@ class TestToolifyExistingTool:
             toolify(original, remote_name="remote_add")
 
 
+class TestToolifyExistingProxyTool:
+    """`toolify()`'s route 1 ("already a Tool") must work uniformly across
+    plain `Tool` and every proxy-tool subtype (`MCPProxyTool`,
+    `PyA2AtomicTool`, `A2AProxyTool` in both skill and generic mode) --
+    an explicit Pass 4 checklist item that was previously unverified."""
+
+    def test_mcp_proxy_tool_without_overrides_returned_unchanged(self) -> None:
+        original = MCPProxyTool(remote_name="search", client_hub=FakeMCPClientHub())
+
+        result = toolify(original)
+
+        assert result is original
+
+    def test_mcp_proxy_tool_with_overrides_wraps_by_reference(self) -> None:
+        original = MCPProxyTool(remote_name="search", client_hub=FakeMCPClientHub())
+
+        result = toolify(original, name="local_search", namespace="wrapped")
+
+        assert result is not original
+        assert type(result) is Tool
+        assert result.function is original
+        assert result.name == "local_search"
+        assert result.namespace == "wrapped"
+        assert result.invoke({"query": "hello"}).result == "mcp result"
+
+    def test_pya2atomic_tool_without_overrides_returned_unchanged(self) -> None:
+        original = PyA2AtomicTool(remote_name="echo", client=FakePyA2AtomicClient())
+
+        result = toolify(original)
+
+        assert result is original
+
+    def test_pya2atomic_tool_with_overrides_wraps_by_reference(self) -> None:
+        original = PyA2AtomicTool(remote_name="echo", client=FakePyA2AtomicClient())
+
+        result = toolify(original, name="local_echo", namespace="wrapped")
+
+        assert result is not original
+        assert type(result) is Tool
+        assert result.function is original
+        assert result.name == "local_echo"
+        assert result.namespace == "wrapped"
+        assert result.invoke({"value": "hi"}).result == {"a2a": True}
+
+    def test_a2a_proxy_tool_skill_mode_without_overrides_returned_unchanged(self) -> None:
+        original = A2AProxyTool(FakeA2AClientHub(), skill_id="add")
+
+        result = toolify(original)
+
+        assert result is original
+
+    def test_a2a_proxy_tool_skill_mode_with_overrides_wraps_by_reference(self) -> None:
+        original = A2AProxyTool(FakeA2AClientHub(), skill_id="add")
+
+        result = toolify(original, name="local_add", namespace="wrapped")
+
+        assert result is not original
+        assert type(result) is Tool
+        assert result.function is original
+        assert result.name == "local_add"
+        assert result.namespace == "wrapped"
+        assert result.invoke({"a": 1, "b": 2}).result == 42
+
+    def test_a2a_proxy_tool_generic_mode_without_overrides_returned_unchanged(self) -> None:
+        original = A2AProxyTool(FakeA2AClientHub())
+
+        result = toolify(original)
+
+        assert result is original
+
+    def test_a2a_proxy_tool_generic_mode_with_overrides_wraps_by_reference(self) -> None:
+        original = A2AProxyTool(FakeA2AClientHub())
+
+        result = toolify(original, name="local_send", namespace="wrapped")
+
+        assert result is not original
+        assert type(result) is Tool
+        assert result.function is original
+        assert result.name == "local_send"
+        assert result.namespace == "wrapped"
+
+
 class TestToolifyAtomicInvokableWrapping:
     def test_non_tool_atomic_invokable_wraps_by_reference(self) -> None:
         invokable = EchoInvokable()

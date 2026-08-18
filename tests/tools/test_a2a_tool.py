@@ -207,19 +207,6 @@ class TestPyA2AtomicToolConstruction:
         with pytest.raises(TypeError, match="PyA2AtomicClient"):
             PyA2AtomicTool(remote_name="echo", client=object())  # type: ignore[arg-type]
 
-    def test_client_plus_raw_transport_settings_raises(self) -> None:
-        with pytest.raises(ValueError, match="either client or raw transport"):
-            PyA2AtomicTool(
-                remote_name="echo",
-                client=FakePyA2AtomicClient(),
-                url="http://example.test",
-            )
-
-    def test_url_required_when_client_not_provided(self) -> None:
-        with pytest.raises(ValueError, match="url is required"):
-            PyA2AtomicTool(remote_name="echo")
-
-
 class TestPyA2AtomicToolSignatureAndMetadata:
     def test_parameters_and_return_type_come_from_remote_metadata(self) -> None:
         tool = make_tool()

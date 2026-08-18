@@ -8,7 +8,6 @@ from atomic_agentic.core.Invokable import AtomicInvokable
 
 from ..exceptions import ToolDefinitionError, ToolInvocationError, RemoteInvocationError
 from ..models.parameters import ParamSpec
-from ..constants.core import HeaderValue
 from ..constants.python_a2a import PYA2A_RESULT_KEY
 from ..models.results.tools import PyA2AtomicToolResult
 from .base import Tool
@@ -22,10 +21,9 @@ class PyA2AtomicTool(Tool):
     """
     Proxy one remote PyA2AtomicHost invokable as a normal AA Tool.
 
-    Construction paths
-    ------------------
-    1) Pass an existing PyA2AtomicClient plus a required remote_name.
-    2) Pass raw transport config (url, optional headers) plus a required remote_name.
+    Only `client`-based construction is supported (no raw-transport-param
+    alternative) -- matches `A2AProxyTool`'s convention; construct a
+    `PyA2AtomicClient` explicitly and pass it in.
 
     Local AA-facing identity
     ------------------------
@@ -50,32 +48,18 @@ class PyA2AtomicTool(Tool):
         namespace: str | None = None,
         description: str | None = None,
         *,
-        client: PyA2AtomicClient | None = None,
-        url: str | None = None,
-        headers: Mapping[str, HeaderValue] | None = None,
+        client: PyA2AtomicClient,
     ) -> None:
+        if not isinstance(client, PyA2AtomicClient):
+            raise TypeError(
+                f"client must be a PyA2AtomicClient, got {type(client)!r}."
+            )
+
         resolved_remote_name = str(remote_name).strip()
         if not resolved_remote_name:
             raise ToolDefinitionError("remote_name must be a non-empty string.")
 
-        if client is not None:
-            if not isinstance(client, PyA2AtomicClient):
-                raise TypeError(
-                    f"client must be a PyA2AtomicClient, got {type(client)!r}."
-                )
-            if url is not None or headers is not None:
-                raise ValueError(
-                    "Pass either client or raw transport settings (url/headers), not both."
-                )
-            resolved_client = client
-        else:
-            if not isinstance(url, str) or not url.strip():
-                raise ValueError(
-                    "url is required when client is not provided and must be a non-empty string."
-                )
-            resolved_client = PyA2AtomicClient(url=url, headers=headers)
-
-        self._client: PyA2AtomicClient = resolved_client
+        self._client: PyA2AtomicClient = client
         self._remote_name: str = resolved_remote_name
         self._remote_metadata: dict[str, Any] = self._client.get_invokable_metadata(
             self._remote_name
