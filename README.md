@@ -56,7 +56,7 @@ cd Atomic-Agentic
 
 pip install --upgrade build
 python -m build
-pip install ./dist/atomic-agentic-*.whl
+pip install ./dist/atomic_agentic-*.whl
 ```
 
 Once installed, explore the `examples/` directory for complete
@@ -159,6 +159,7 @@ engine = OpenAIEngine(model="gpt-4o-mini")
 
 advisor = BasicAgent(
     name="finance_advisor",
+    namespace="finance",
     description="Investment advisor.",
     llm_engine=engine,
     role_prompt="""You are an expert financial advisor at a bank. 
@@ -189,6 +190,7 @@ engine = OpenAIEngine(model="gpt-4.1-mini")
 
 agent = PlanActAgent(
     name="planner",
+    namespace="planning",
     description="Plans and solves tasks using tools.",
     llm_engine=engine,
 )
