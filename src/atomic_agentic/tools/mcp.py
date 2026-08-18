@@ -14,7 +14,6 @@ from typing import (
 from ..core.Invokable import AtomicInvokable
 from ..exceptions import ToolDefinitionError, ToolInvocationError
 from ..models.parameters import ParamSpec
-from ..constants.core import HeaderValue
 from ..mcp.MCPClientHub import MCPClientHub
 from ..models.results.tools import MCPToolResult
 from .base import Tool
@@ -27,6 +26,9 @@ class MCPProxyTool(Tool):
 
     The proxy owns the AA-facing identity (`name`, `namespace`, `description`)
     and a remote MCP binding (`remote_name`) backed by one `MCPClientHub`.
+    Only `client_hub`-based construction is supported (no raw-transport-param
+    alternative) -- matches `A2AProxyTool`'s convention; construct an
+    `MCPClientHub` explicitly and pass it in.
     """
 
     def __init__(
@@ -35,44 +37,19 @@ class MCPProxyTool(Tool):
         name: str | None = None,
         namespace: str | None = None,
         description: str = "",
-        client_hub: MCPClientHub | None = None,
-        transport_mode: Literal["stdio", "sse", "streamable_http"] | None = None,
-        endpoint: str | None = None,
-        command: str | None = None,
-        args: list[str] | None = None,
-        headers: Mapping[str, HeaderValue] | None = None,
+        *,
+        client_hub: MCPClientHub,
     ) -> None:
+        if not isinstance(client_hub, MCPClientHub):
+            raise TypeError(
+                f"client_hub must be an MCPClientHub, got {type(client_hub)!r}."
+            )
+
         resolved_remote_name = str(remote_name).strip()
         if not resolved_remote_name:
             raise ToolDefinitionError("remote_name must be a non-empty string.")
 
-        if client_hub is not None:
-            if not isinstance(client_hub, MCPClientHub):
-                raise TypeError(
-                    f"client_hub must be an MCPClientHub, got {type(client_hub)!r}."
-                )
-            if any(
-                value is not None
-                for value in (transport_mode, endpoint, command, args, headers)
-            ):
-                raise ValueError(
-                    "Pass either client_hub or raw transport settings, not both."
-                )
-            client = client_hub
-        else:
-            if transport_mode is None:
-                raise ValueError(
-                    "transport_mode is required when client_hub is not provided."
-                )
-            client = MCPClientHub(
-                transport_mode=transport_mode,
-                endpoint=endpoint,
-                command=command,
-                args=args,
-                headers=headers,
-            )
-
-        self._client_hub: MCPClientHub = client
+        self._client_hub: MCPClientHub = client_hub
         self._remote_name: str = resolved_remote_name
 
         all_tools = self.client_hub.list_tools()

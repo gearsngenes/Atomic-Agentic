@@ -8,7 +8,7 @@ import asyncio
 from atomic_agentic.agents.basic import BasicAgent
 from atomic_agentic.exceptions import AgentError
 from atomic_agentic.models.agents.prompts import PromptConfig
-from fake_engines import FakeLLMEngine, echo_latest_user
+from ..fake_engines import FakeLLMEngine, echo_latest_user
 
 
 def make_basic_agent(

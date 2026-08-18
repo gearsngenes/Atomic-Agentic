@@ -16,7 +16,7 @@ from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.models.agents.tasks import AgentTask
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.utils.parameters import to_paramspec_list
-from fake_engines import FakeLLMEngine, echo_latest_user
+from ..fake_engines import FakeLLMEngine, echo_latest_user
 
 
 ROLE_PROMPT = "You are a deterministic test writer."

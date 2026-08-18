@@ -5,6 +5,68 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a28] - 2026-08-17
+
+New, additive `a2a-sdk`-backed A2A integration (`A2AClientHub`,
+`A2AtomicExecutor`, `A2AProxyTool`) alongside the existing
+`python_a2a`-backed host/client/tool. `python_a2a`'s host and client are
+behaviorally untouched; `PyA2AtomicTool`'s constructor is not — see
+"Changed" below. `MCPClientHub` gains a real persistent-connection
+option, fixing per-call subprocess/session-reopen overhead. Every
+remote-proxy tool (new and existing) now lands on one consistent,
+client/hub-only construction convention.
+
+### Added
+
+- `A2AClientHub` (`a2a/A2AClientHub.py`) — connectivity to any
+  spec-compliant A2A server over JSON-RPC/REST/gRPC. Required
+  `persistent: bool` selects a dedicated background-loop-owned
+  persistent connection or a per-call open/use/close cycle (mirrors
+  `MCPClientHub`). Detects any remote's published Atomic skills and can
+  call them directly (`get_atomic_skills()`, `call_atomic_skill(...)`).
+- `A2AtomicExecutor` (`a2a/A2AtomicExecutor.py`) — hosts a registry of
+  local `AtomicInvokable`s over `a2a-sdk`, publishing each one's full
+  parameter schema so `A2AClientHub` can discover and call it with a
+  typed signature, not just free-form messages.
+- `A2AProxyTool` (`tools/a2a_sdk.py`) — proxies an `A2AClientHub` as a
+  normal `Tool`. Skill mode (bound to one discovered Atomic skill, typed
+  signature) or generic mode (`parts`/`metadata`, for talking to
+  arbitrary/foreign A2A agents). `toolify(hub, remote_name=...)` and
+  `batch_toolify([hub])` both support it; `ToolAgent.batch_register(
+  client=...)` now accepts an `A2AClientHub` too.
+- `MCPClientHub` gains a required `persistent: bool` connection option
+  — holding the transport/session open across calls instead of
+  reopening it on every single tool call. Measured payoff: ~14.7s →
+  0.03s for 6 repeated `stdio` calls in internal testing.
+- New example pair `a2a_sdk_atomic_host_server.py`/
+  `a2a_sdk_foreign_host_server.py`, plus `06_A2AProxyTool.py` and new
+  sections in `07_toolify_example.py` (renamed from
+  `06_toolify_example.py`) demonstrating the new routes end to end.
+
+### Changed
+
+- breaking: `MCPProxyTool`/`PyA2AtomicTool` constructors no longer
+  accept raw transport parameters (`transport_mode`/`endpoint`/
+  `command`/`args`/`headers`/`persistent` for MCP; `url`/`headers` for
+  A2A) — construct the client/hub explicitly and pass it as
+  `client_hub=`/`client=` instead. Matches `A2AProxyTool`'s convention
+  from the start; no capability loss, just one construction path
+  instead of two. (`MCPProxyTool` briefly gained a `persistent`
+  passthrough alongside `MCPClientHub`'s new option above, then lost it
+  again here — it never shipped as part of this release's actual public
+  surface.)
+- `A2AProxyTool`'s default namespace, when not explicitly provided, is
+  now derived from the remote agent's own card name (sanitized into a
+  valid identifier) where possible, falling back to `"a2a"` only when
+  that isn't usable — was previously always `"a2a"`.
+
+### Fixed
+
+- README: `BasicAgent`/`PlanActAgent` quickstart examples were missing
+  the required `namespace` argument and would raise `TypeError` on
+  construction; the "install from source" instructions referenced a
+  wheel filename pattern that never matched a real build.
+
 ## [2.0.0a27] - 2026-08-13
 
 Parameter-reconciliation release: `ParamSpec.type` becomes a structural

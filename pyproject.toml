@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
   "mcp>=1.25,<2",
   "python-a2a>=0.5.10,<0.6",
+  "a2a-sdk[grpc]>=1.1.2,<2",
   "httpx>=0.28.1,<0.29",
   "openai>=2.15,<3",
   "google-genai>=2.10.0,<3",
@@ -42,6 +43,7 @@ llama = [
 dev = [
   "pytest>=9,<10",
   "pytest-cov>=7,<8",
+  "a2a-sdk[http-server]>=1.1.2,<2",
 ]
 
 [project.urls]

@@ -195,24 +195,11 @@ class TestMCPProxyToolConstruction:
         with pytest.raises(TypeError, match="client_hub"):
             MCPProxyTool(remote_name="search", client_hub=object())  # type: ignore[arg-type]
 
-    def test_client_hub_plus_raw_transport_settings_raises(self) -> None:
-        with pytest.raises(ValueError, match="either client_hub or raw transport settings"):
-            MCPProxyTool(
-                remote_name="search",
-                client_hub=FakeMCPClientHub(),
-                transport_mode="stdio",
-                command="python",
-            )
-
     def test_missing_remote_tool_raises(self) -> None:
         hub = FakeMCPClientHub(tools={})
 
         with pytest.raises(ToolDefinitionError, match="not found"):
             make_tool(hub=hub)
-
-    def test_raw_transport_requires_transport_mode(self) -> None:
-        with pytest.raises(ValueError, match="transport_mode"):
-            MCPProxyTool(remote_name="search")
 
 
 class TestMCPProxyToolSignatureAndMetadata:

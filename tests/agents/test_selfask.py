@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 
-from conftest import FakeLLMEngine
+from .conftest import FakeLLMEngine
 
 from atomic_agentic.agents.selfask import SelfAskAgent
 from atomic_agentic.exceptions import AgentError, AgentInvocationError, ThinkingAgentError

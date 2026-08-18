@@ -26,7 +26,7 @@ from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage, ToolResult
 from atomic_agentic.tools import Tool
 from atomic_agentic.core.Invokable import AtomicInvokable
-from fake_engines import FakeLLMEngine
+from ..fake_engines import FakeLLMEngine
 
 
 ROLE_TEMPLATE = "Tools:\n{TOOLS}\nLimit: {TOOL_CALLS_LIMIT}\nConstants:\n{CONSTANTS}"

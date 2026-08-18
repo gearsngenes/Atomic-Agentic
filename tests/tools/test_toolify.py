@@ -4,15 +4,18 @@ from typing import Any, Mapping
 
 import pytest
 
+from atomic_agentic.a2a.A2AClientHub import A2AClientHub
 from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
-from atomic_agentic.constants.a2a import PYA2A_RESULT_KEY
+from atomic_agentic.constants.python_a2a import PYA2A_RESULT_KEY
 from atomic_agentic.exceptions import ToolDefinitionError
 from atomic_agentic.core.Invokable import AtomicInvokable
+from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.mcp.MCPClientHub import MCPClientHub
 from atomic_agentic.tools.Toolify import batch_toolify, toolify
-from atomic_agentic.tools.a2a import PyA2AtomicTool
+from atomic_agentic.tools.a2a_sdk import A2AProxyTool
+from atomic_agentic.tools.python_a2a import PyA2AtomicTool
 from atomic_agentic.tools.base import Tool
 from atomic_agentic.tools.mcp import MCPProxyTool
 from atomic_agentic.agents.tools import return_tool
@@ -276,6 +279,72 @@ class FakePyA2AtomicClient(PyA2AtomicClient):
         }
 
 
+def a2a_sdk_skill_metadata(
+    *,
+    remote_name: str = "add",
+    description: str = "Remote A2A-sdk skill.",
+) -> A2AtomicSkillMetadata:
+    return A2AtomicSkillMetadata(
+        remote_name=remote_name,
+        description=description,
+        extra_description="",
+        params=(
+            make_param("a", 0, type_="int"),
+            make_param("b", 1, type_="int"),
+        ),
+        return_type="int",
+    )
+
+
+class FakeA2AClientHub(A2AClientHub):
+    def __init__(
+        self,
+        *,
+        skills: dict[str, A2AtomicSkillMetadata] | None = None,
+        card_name: str = "Fake A2A-sdk Agent",
+        card_description: str = "Fake A2A-sdk agent.",
+        result: Any | None = None,
+    ) -> None:
+        self._skills = (
+            {"add": a2a_sdk_skill_metadata(remote_name="add")}
+            if skills is None
+            else skills
+        )
+        self._card = type(
+            "FakeAgentCard",
+            (),
+            {"name": card_name, "description": card_description},
+        )()
+        self.result = result if result is not None else 42
+        self.skill_calls: list[tuple[str, dict[str, Any]]] = []
+
+    @property
+    def agent_card(self) -> Any:
+        return self._card
+
+    @property
+    def transport_mode(self) -> str:
+        return "JSONRPC"
+
+    @property
+    def base_url(self) -> str:
+        return "http://example.test/a2a-sdk"
+
+    @property
+    def persistent(self) -> bool:
+        return False
+
+    def get_atomic_skills(self) -> dict[str, A2AtomicSkillMetadata]:
+        return dict(self._skills)
+
+    def call_atomic_skill(self, skill_id: str, inputs: Mapping[str, Any]) -> Any:
+        self.skill_calls.append((skill_id, dict(inputs)))
+        return self.result
+
+    async def async_call_atomic_skill(self, skill_id: str, inputs: Mapping[str, Any]) -> Any:
+        return self.call_atomic_skill(skill_id, inputs)
+
+
 class TestToolifyCallable:
     def test_toolify_callable_returns_tool(self) -> None:
         tool = toolify(add, namespace="tests", description="Add values.")
@@ -424,6 +493,88 @@ class TestToolifyExistingTool:
             toolify(original, remote_name="remote_add")
 
 
+class TestToolifyExistingProxyTool:
+    """`toolify()`'s route 1 ("already a Tool") must work uniformly across
+    plain `Tool` and every proxy-tool subtype (`MCPProxyTool`,
+    `PyA2AtomicTool`, `A2AProxyTool` in both skill and generic mode) --
+    an explicit Pass 4 checklist item that was previously unverified."""
+
+    def test_mcp_proxy_tool_without_overrides_returned_unchanged(self) -> None:
+        original = MCPProxyTool(remote_name="search", client_hub=FakeMCPClientHub())
+
+        result = toolify(original)
+
+        assert result is original
+
+    def test_mcp_proxy_tool_with_overrides_wraps_by_reference(self) -> None:
+        original = MCPProxyTool(remote_name="search", client_hub=FakeMCPClientHub())
+
+        result = toolify(original, name="local_search", namespace="wrapped")
+
+        assert result is not original
+        assert type(result) is Tool
+        assert result.function is original
+        assert result.name == "local_search"
+        assert result.namespace == "wrapped"
+        assert result.invoke({"query": "hello"}).result == "mcp result"
+
+    def test_pya2atomic_tool_without_overrides_returned_unchanged(self) -> None:
+        original = PyA2AtomicTool(remote_name="echo", client=FakePyA2AtomicClient())
+
+        result = toolify(original)
+
+        assert result is original
+
+    def test_pya2atomic_tool_with_overrides_wraps_by_reference(self) -> None:
+        original = PyA2AtomicTool(remote_name="echo", client=FakePyA2AtomicClient())
+
+        result = toolify(original, name="local_echo", namespace="wrapped")
+
+        assert result is not original
+        assert type(result) is Tool
+        assert result.function is original
+        assert result.name == "local_echo"
+        assert result.namespace == "wrapped"
+        assert result.invoke({"value": "hi"}).result == {"a2a": True}
+
+    def test_a2a_proxy_tool_skill_mode_without_overrides_returned_unchanged(self) -> None:
+        original = A2AProxyTool(FakeA2AClientHub(), skill_id="add")
+
+        result = toolify(original)
+
+        assert result is original
+
+    def test_a2a_proxy_tool_skill_mode_with_overrides_wraps_by_reference(self) -> None:
+        original = A2AProxyTool(FakeA2AClientHub(), skill_id="add")
+
+        result = toolify(original, name="local_add", namespace="wrapped")
+
+        assert result is not original
+        assert type(result) is Tool
+        assert result.function is original
+        assert result.name == "local_add"
+        assert result.namespace == "wrapped"
+        assert result.invoke({"a": 1, "b": 2}).result == 42
+
+    def test_a2a_proxy_tool_generic_mode_without_overrides_returned_unchanged(self) -> None:
+        original = A2AProxyTool(FakeA2AClientHub())
+
+        result = toolify(original)
+
+        assert result is original
+
+    def test_a2a_proxy_tool_generic_mode_with_overrides_wraps_by_reference(self) -> None:
+        original = A2AProxyTool(FakeA2AClientHub())
+
+        result = toolify(original, name="local_send", namespace="wrapped")
+
+        assert result is not original
+        assert type(result) is Tool
+        assert result.function is original
+        assert result.name == "local_send"
+        assert result.namespace == "wrapped"
+
+
 class TestToolifyAtomicInvokableWrapping:
     def test_non_tool_atomic_invokable_wraps_by_reference(self) -> None:
         invokable = EchoInvokable()
@@ -529,6 +680,85 @@ class TestToolifyPyA2AtomicClient:
 
         assert tool.invoke({"value": 123}).result == {"ok": True}
         assert client.calls == [("echo", {"value": 123})]
+
+
+class TestToolifyA2AClientHub:
+    def test_remote_name_present_selects_skill_mode(self) -> None:
+        hub = FakeA2AClientHub()
+
+        tool = toolify(hub, remote_name="add")
+
+        assert isinstance(tool, A2AProxyTool)
+        assert tool.skill_id == "add"
+        assert tool.name == "add"
+
+    def test_remote_name_absent_selects_generic_mode_not_an_error(self) -> None:
+        hub = FakeA2AClientHub()
+
+        tool = toolify(hub)
+
+        assert isinstance(tool, A2AProxyTool)
+        assert tool.skill_id is None
+        assert tool.name == "send_parts"
+
+    def test_remote_name_blank_selects_generic_mode(self) -> None:
+        hub = FakeA2AClientHub()
+
+        tool = toolify(hub, remote_name="   ")
+
+        assert tool.skill_id is None
+
+    def test_unknown_skill_id_raises_tool_definition_error(self) -> None:
+        hub = FakeA2AClientHub()
+
+        with pytest.raises(ToolDefinitionError, match="skill_id"):
+            toolify(hub, remote_name="does_not_exist")
+
+    def test_applies_overrides(self) -> None:
+        hub = FakeA2AClientHub()
+
+        tool = toolify(
+            hub,
+            remote_name="add",
+            name="local_add",
+            namespace="a2a_tools",
+            description="Local add.",
+        )
+
+        assert isinstance(tool, A2AProxyTool)
+        assert tool.name == "local_add"
+        assert tool.namespace == "a2a_tools"
+        assert tool.description == "Local add."
+
+    def test_namespace_falls_back_to_sanitized_card_name(self) -> None:
+        hub = FakeA2AClientHub(card_name="My Cool Agent")
+
+        tool = toolify(hub, remote_name="add")
+
+        assert tool.namespace == "My_Cool_Agent"
+
+    def test_namespace_falls_back_to_a2a_when_card_name_unusable(self) -> None:
+        # "123 Agent" sanitizes to "123_Agent" -- starts with a digit, so it
+        # never becomes a valid identifier.
+        hub = FakeA2AClientHub(card_name="123 Agent")
+
+        tool = toolify(hub, remote_name="add")
+
+        assert tool.namespace == "a2a"
+
+    def test_explicit_namespace_wins_over_card_name(self) -> None:
+        hub = FakeA2AClientHub(card_name="My Cool Agent")
+
+        tool = toolify(hub, remote_name="add", namespace="explicit_ns")
+
+        assert tool.namespace == "explicit_ns"
+
+    def test_skill_mode_invokes_fake_hub(self) -> None:
+        hub = FakeA2AClientHub(result=17)
+        tool = toolify(hub, remote_name="add")
+
+        assert tool.invoke({"a": 12, "b": 5}).result == 17
+        assert hub.skill_calls == [("add", {"a": 12, "b": 5})]
 
 
 class TestToolifyInvalidInputs:
@@ -654,3 +884,47 @@ class TestBatchToolifyRemoteExpansion:
 
         assert hub.calls == [("search", {"query": "hello"})]
         assert client.calls == [("echo", {"value": 123})]
+
+
+class TestBatchToolifyA2AClientHub:
+    def test_expands_skills_plus_one_trailing_generic_tool(self) -> None:
+        hub = FakeA2AClientHub(
+            skills={
+                "add": a2a_sdk_skill_metadata(remote_name="add"),
+                "multiply": a2a_sdk_skill_metadata(remote_name="multiply"),
+            }
+        )
+
+        tools = batch_toolify([hub])
+
+        assert len(tools) == 3
+        assert all(isinstance(tool, A2AProxyTool) for tool in tools)
+        assert [tool.skill_id for tool in tools] == ["add", "multiply", None]
+        assert tools[-1].name == "send_parts"
+
+    def test_zero_skill_hub_still_yields_one_generic_tool(self) -> None:
+        hub = FakeA2AClientHub(skills={})
+
+        tools = batch_toolify([hub])
+
+        assert len(tools) == 1
+        assert tools[0].skill_id is None
+
+    def test_applies_batch_namespace_to_all_produced_tools(self) -> None:
+        hub = FakeA2AClientHub(
+            skills={"add": a2a_sdk_skill_metadata(remote_name="add")}
+        )
+
+        tools = batch_toolify([hub], batch_namespace="batch_ns")
+
+        assert [tool.namespace for tool in tools] == ["batch_ns", "batch_ns"]
+
+    def test_mixed_sources_preserves_expanded_order(self) -> None:
+        hub = FakeA2AClientHub(
+            skills={"add": a2a_sdk_skill_metadata(remote_name="add")}
+        )
+
+        tools = batch_toolify([add, hub], batch_namespace="batch")
+
+        assert [type(tool) for tool in tools] == [Tool, A2AProxyTool, A2AProxyTool]
+        assert [tool.name for tool in tools] == ["add", "add", "send_parts"]

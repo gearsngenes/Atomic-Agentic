@@ -7,12 +7,12 @@ from typing import Any, Mapping
 import pytest
 
 from atomic_agentic.a2a.PyA2AtomicClient import PyA2AtomicClient
-from atomic_agentic.constants.a2a import PYA2A_RESULT_KEY
+from atomic_agentic.constants.python_a2a import PYA2A_RESULT_KEY
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.exceptions import RemoteInvocationError, ToolDefinitionError, ToolInvocationError
 from atomic_agentic.models.parameters import ParamSpec
 from atomic_agentic.models.results.tools import PyA2AtomicToolResult
-from atomic_agentic.tools.a2a import PyA2AtomicTool
+from atomic_agentic.tools.python_a2a import PyA2AtomicTool
 
 def param_dict(
     name: str,
@@ -206,19 +206,6 @@ class TestPyA2AtomicToolConstruction:
     def test_non_client_raises(self) -> None:
         with pytest.raises(TypeError, match="PyA2AtomicClient"):
             PyA2AtomicTool(remote_name="echo", client=object())  # type: ignore[arg-type]
-
-    def test_client_plus_raw_transport_settings_raises(self) -> None:
-        with pytest.raises(ValueError, match="either client or raw transport"):
-            PyA2AtomicTool(
-                remote_name="echo",
-                client=FakePyA2AtomicClient(),
-                url="http://example.test",
-            )
-
-    def test_url_required_when_client_not_provided(self) -> None:
-        with pytest.raises(ValueError, match="url is required"):
-            PyA2AtomicTool(remote_name="echo")
-
 
 class TestPyA2AtomicToolSignatureAndMetadata:
     def test_parameters_and_return_type_come_from_remote_metadata(self) -> None:

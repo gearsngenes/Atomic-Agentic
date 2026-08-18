@@ -14,7 +14,7 @@ from python_a2a import (
 )
 
 from ..core.Invokable import AtomicInvokable
-from ..constants.a2a import (
+from ..constants.python_a2a import (
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,
     PYA2A_RESULT_KEY,

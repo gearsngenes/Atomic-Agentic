@@ -119,6 +119,20 @@ class PyA2AtomicConnectionError(PyA2AtomicError):
     fails, or a remote response doesn't match the expected protocol shape."""
 
 
+class A2AProxyError(RuntimeError):
+    """Base exception for A2AClientHub transport/protocol errors (the new,
+    additive a2a-sdk-backed track -- see PyA2AtomicError's own docstring for
+    the parallel: named A2A*, not PyA2Atomic*, and unrelated to a2a-sdk's
+    own A2AError/A2AClientError hierarchy despite similar naming, for the
+    same tracebacks-would-be-ambiguous reason. That hierarchy is wrapped,
+    not reused. Subclasses RuntimeError to match this codebase's existing
+    convention for domain error types (see LLMEngineError, MCPError,
+    PyA2AtomicError). Single, pragmatic exception for this pass, not a
+    hierarchy -- deep exception cleanup across the whole package is
+    explicitly deferred to a separate future release.
+    """
+
+
 __all__ = [
     "LLMEngineError",
     "ToolError",
@@ -140,4 +154,5 @@ __all__ = [
     "MCPToolError",
     "PyA2AtomicError",
     "PyA2AtomicConnectionError",
+    "A2AProxyError",
 ]

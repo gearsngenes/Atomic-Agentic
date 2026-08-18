@@ -18,7 +18,7 @@ from .llm import (
     RemoteLLMModelData,
     TokenUsage,
 )
-from .tools import ToolResult, MCPToolResult, PyA2AtomicToolResult
+from .tools import ToolResult, MCPToolResult, PyA2AtomicToolResult, A2AProxyToolResult
 from .workflows import (
     WorkflowResult,
     SequentialFlowResult,
@@ -35,6 +35,7 @@ __all__ = [
     "ToolResult",
     "MCPToolResult",
     "PyA2AtomicToolResult",
+    "A2AProxyToolResult",
     "CommandResult",
     "StructuredResult",
     "TokenUsage",

@@ -152,7 +152,7 @@ from ..constants.core import NO_VAL
 from ..llm.base import LLMEngine
 from ..tools import toolify
 from ..mcp import MCPClientHub
-from ..a2a import PyA2AtomicClient
+from ..a2a import A2AClientHub, PyA2AtomicClient
 from ..utils.agents import extract_dependencies, extract_json_object
 from ..utils.core import run_coro_sync
 from .tools import return_tool
@@ -879,7 +879,7 @@ class ToolAgent(Agent, ABC):
     def batch_register(
         self,
         tools: list[AtomicInvokable | Callable] | None = None,
-        client: PyA2AtomicClient | MCPClientHub | None = None,
+        client: PyA2AtomicClient | MCPClientHub | A2AClientHub | None = None,
         *,
         remote_names: list[str] | None = None,
         name_collision_mode: str = "raise",
@@ -896,12 +896,18 @@ class ToolAgent(Agent, ABC):
         tools : list[AtomicInvokable | Callable] | None
             Local items to register. AtomicInvokables are stored as-is;
             callables are normalized via ``toolify(namespace=self.name)``.
-        client : PyA2AtomicClient | MCPClientHub | None
+        client : PyA2AtomicClient | MCPClientHub | A2AClientHub | None
             Remote client to enumerate and register tools from. Combined with
-            ``tools`` in one registration pass when both are provided.
+            ``tools`` in one registration pass when both are provided. For an
+            ``A2AClientHub``, every discovered Atomic skill is registered in
+            skill mode, plus one generic-mode tool registered unconditionally
+            (not filtered by ``remote_names`` -- it isn't a discoverable
+            skill, it's the hub's baseline reachability path).
         remote_names : list[str] | None
             Whitelist of remote tool names to register from ``client``.
             ``None`` registers all available remote tools. Requires ``client``.
+            For an ``A2AClientHub``, filters among skill ids only -- has no
+            effect on the always-registered generic tool.
         name_collision_mode : str
             Per-item collision policy for toolbox conflicts. One of
             ``"raise"`` (default), ``"skip"``, or ``"replace"``. Does not
@@ -982,6 +988,8 @@ class ToolAgent(Agent, ABC):
         if client is not None:
             if isinstance(client, MCPClientHub):
                 available = client.list_tools()
+            elif isinstance(client, A2AClientHub):
+                available = list(client.get_atomic_skills())
             else:
                 available = client.list_invokables()
 
@@ -1010,6 +1018,21 @@ class ToolAgent(Agent, ABC):
                         f"{remote_name!r}: {exc}"
                     ) from exc
                 combined.append((proxy.full_name, proxy))
+
+            # A2A generic tool: always registered when client is an
+            # A2AClientHub, unconditionally -- not filtered by remote_names,
+            # since it isn't a discoverable skill. A same-named skill
+            # colliding with it on full_name is caught by the intra-batch
+            # dedup check below, same as any other collision.
+            if isinstance(client, A2AClientHub):
+                try:
+                    generic_proxy = toolify(component=client, namespace=self.name)
+                except Exception as exc:
+                    raise ToolRegistrationError(
+                        f"{type(self).__name__}.{self.name}: failed to toolify "
+                        f"generic A2A tool: {exc}"
+                    ) from exc
+                combined.append((generic_proxy.full_name, generic_proxy))
 
         # Intra-set dedup — always raise regardless of name_collision_mode
         seen: set[str] = set()

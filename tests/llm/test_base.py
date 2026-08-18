@@ -10,7 +10,7 @@ base_module = importlib.import_module("atomic_agentic.llm.base")
 from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
-from fake_engines import FakeLLMEngine
+from ..fake_engines import FakeLLMEngine
 
 
 class TestLLMEngineConstruction:
