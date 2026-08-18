@@ -9,11 +9,12 @@ Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
 New, additive `a2a-sdk`-backed A2A integration (`A2AClientHub`,
 `A2AtomicExecutor`, `A2AProxyTool`) alongside the existing
-`python_a2a`-backed host/client/tool, which stay fully untouched.
-`MCPClientHub` gains a real persistent-connection option, fixing
-per-call subprocess/session-reopen overhead. Both new and existing
-remote-proxy tools land on one consistent, client/hub-only construction
-convention.
+`python_a2a`-backed host/client/tool. `python_a2a`'s host and client are
+behaviorally untouched; `PyA2AtomicTool`'s constructor is not — see
+"Changed" below. `MCPClientHub` gains a real persistent-connection
+option, fixing per-call subprocess/session-reopen overhead. Every
+remote-proxy tool (new and existing) now lands on one consistent,
+client/hub-only construction convention.
 
 ### Added
 
@@ -33,8 +34,8 @@ convention.
   arbitrary/foreign A2A agents). `toolify(hub, remote_name=...)` and
   `batch_toolify([hub])` both support it; `ToolAgent.batch_register(
   client=...)` now accepts an `A2AClientHub` too.
-- `MCPClientHub`/`MCPProxyTool` gain a `persistent: bool` connection
-  option — holding the transport/session open across calls instead of
+- `MCPClientHub` gains a required `persistent: bool` connection option
+  — holding the transport/session open across calls instead of
   reopening it on every single tool call. Measured payoff: ~14.7s →
   0.03s for 6 repeated `stdio` calls in internal testing.
 - New example pair `a2a_sdk_atomic_host_server.py`/
@@ -46,10 +47,14 @@ convention.
 
 - breaking: `MCPProxyTool`/`PyA2AtomicTool` constructors no longer
   accept raw transport parameters (`transport_mode`/`endpoint`/
-  `command`/`args`/`headers` for MCP; `url`/`headers` for A2A) —
-  construct the client/hub explicitly and pass it as `client_hub=`/
-  `client=` instead. Matches `A2AProxyTool`'s convention from the
-  start; no capability loss, just one construction path instead of two.
+  `command`/`args`/`headers`/`persistent` for MCP; `url`/`headers` for
+  A2A) — construct the client/hub explicitly and pass it as
+  `client_hub=`/`client=` instead. Matches `A2AProxyTool`'s convention
+  from the start; no capability loss, just one construction path
+  instead of two. (`MCPProxyTool` briefly gained a `persistent`
+  passthrough alongside `MCPClientHub`'s new option above, then lost it
+  again here — it never shipped as part of this release's actual public
+  surface.)
 - `A2AProxyTool`'s default namespace, when not explicitly provided, is
   now derived from the remote agent's own card name (sanitized into a
   valid identifier) where possible, falling back to `"a2a"` only when
