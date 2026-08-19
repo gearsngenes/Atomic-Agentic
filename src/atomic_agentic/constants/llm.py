@@ -130,3 +130,11 @@ NAME_KEYED_LAYER: str = "name_keyed_layer"      # value's keys are user-defined 
 SCHEMA_LIST_LAYER: str = "schema_list_layer"    # value is a list of schema objects
 SINGLE_SCHEMA_LAYER: str = "single_schema_layer"  # value is one schema object
 OPAQUE_VALUE: str = "opaque_value"              # not schema-recursable; deep-copy only
+
+# ── OpenAI structured-output schema policy ─────────────────────────────────
+# Consumed by OpenAIEngine.structure_omitted_keys. OpenAI's strict JSON-Schema
+# mode rejects `default` outright; every other JSON-Schema keyword this
+# codebase's clean_structure_template understands is accepted by the API
+# (even when not actually enforced at generation time), so nothing else needs
+# stripping.
+OPENAI_STRUCTURE_OMITTED_KEYS: frozenset[str] = frozenset({"default"})

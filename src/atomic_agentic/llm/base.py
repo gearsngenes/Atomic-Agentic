@@ -14,6 +14,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    ClassVar,
 )
 
 # ~~~Local Imports~~~
@@ -103,8 +104,8 @@ class LLMEngine(AtomicInvokable, ABC):
     # pattern above. Base defaults are a full no-op (unrestricted, nothing
     # dropped); each provider's own pass overrides these directly as class
     # attributes on its own LLMEngine subclass.
-    structure_permitted_keys: Optional[frozenset[str]] = None
-    structure_omitted_keys: frozenset[str] = frozenset()
+    structure_permitted_keys:ClassVar[Optional[frozenset[str]]] = None
+    structure_omitted_keys:ClassVar[frozenset[str]] = frozenset()
 
     def __init__(
         self,
