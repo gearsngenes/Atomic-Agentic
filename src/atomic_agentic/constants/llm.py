@@ -1,4 +1,5 @@
-"""Attachment policy constants for LLM engine adapters."""
+"""Attachment policy and structured-output-schema constants for LLM engine
+adapters."""
 
 # ── Shared blacklist (all current providers use this identical set) ──────────
 
@@ -94,3 +95,38 @@ LITELLM_ALLOWED_EXTS: frozenset[str] = (
     | frozenset(LITELLM_DOCUMENT_EXTS)
     | frozenset(LITELLM_TEXT_EXTS)
 )
+
+# ── JSON-Schema recursion vocabulary (structured-output cleaning) ─────────────
+# Consumed by utils/llm.py's clean_structure_template. A key belongs to at
+# most one of these three sets. Any key in none of them is treated as a plain
+# keyword: checked against a caller's permitted/omitted sets, its value
+# deep-copied but not walked further.
+
+# This key's own value-dict's keys are user-defined names, never keywords --
+# never checked against permitted/omitted. Recurse into each entry's value
+# only (itself a nested schema object).
+NAME_KEYED_CONTAINER_KEYS: frozenset[str] = frozenset({
+    "properties", "$defs", "definitions", "patternProperties",
+})
+
+# This key's value is a list of schema objects -- recurse into each element.
+LIST_OF_SCHEMAS_KEYS: frozenset[str] = frozenset({
+    "anyOf", "oneOf", "allOf", "prefixItems",
+})
+
+# This key's value is one schema object (when it's a Mapping) -- recurse
+# directly into it. `items`/`additionalProperties` can also be a list/bool
+# respectively (older draft / boolean form); see utils/llm.py's
+# _schema_value_kind.
+SINGLE_SCHEMA_KEYS: frozenset[str] = frozenset({
+    "items", "additionalProperties", "not", "contains", "propertyNames",
+})
+
+# Sentinel return values for utils/llm.py's _schema_value_kind -- name the
+# four possible answers to "what kind of layer does this keyword's value
+# route into?" instead of leaving that decision spread across inline
+# isinstance branches.
+NAME_KEYED_LAYER: str = "name_keyed_layer"      # value's keys are user-defined names
+SCHEMA_LIST_LAYER: str = "schema_list_layer"    # value is a list of schema objects
+SINGLE_SCHEMA_LAYER: str = "single_schema_layer"  # value is one schema object
+OPAQUE_VALUE: str = "opaque_value"              # not schema-recursable; deep-copy only

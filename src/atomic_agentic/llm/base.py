@@ -29,6 +29,7 @@ from ..models.results import (
 from ..constants.llm import (
     ILLEGAL_ATTACHMENT_EXTS
 )
+from ..utils.llm import clean_structure_template
 
 __all__ = ["LLMEngine"]
 
@@ -50,16 +51,21 @@ class LLMEngine(AtomicInvokable, ABC):
     ``LLMEngine`` is an ``AtomicInvokable``, so its canonical public invocation
     entrypoint is dict-first:
 
-        invoke({"messages": list[{"role": str, "content": str}]}) -> LLMResult
+        invoke({"messages": list[{"role": str, "content": str}],
+                "output_structure": dict[str, Any] | None}) -> LLMResult
 
-    ``LLMResult.result`` is the generated assistant text string. The declared
-    invokable ``return_type`` remains ``"str"`` because ``return_type`` describes
-    the caller-facing payload stored inside ``AtomicResult.result``, not the
-    result envelope class.
+    ``LLMResult.result`` is the generated assistant reply: a plain string for
+    ordinary calls, or a ``list``/``dict`` when ``output_structure`` requested
+    provider-native structured output. The declared invokable ``return_type``
+    is ``"str | list[Any] | dict[str, Any]"`` to reflect this.
 
-    The declared invokable schema exposes one input parameter named
-    ``messages``. The value must be a non-empty list of chat-message mappings
-    containing string ``role`` and ``content`` fields.
+    The declared invokable schema exposes two input parameters:
+
+    - ``messages`` — a non-empty list of chat-message mappings containing
+      string ``role`` and ``content`` fields.
+    - ``output_structure`` — optional JSON-Schema-shaped mapping requesting
+      schema-constrained structured output for this call; ``None`` (default)
+      requests plain text and leaves every existing call path unchanged.
 
     Engine lifecycle
     ----------------
@@ -78,7 +84,7 @@ class LLMEngine(AtomicInvokable, ABC):
 
     - ``_build_provider_payload``
     - ``_call_provider``
-    - ``_extract_text``
+    - ``_extract_result``
     - ``_extract_token_usage``
     - ``_get_model_data``
     - ``_prepare_attachment``
@@ -92,6 +98,13 @@ class LLMEngine(AtomicInvokable, ABC):
     # provider-specific checks. Sourced from constants.engines.
     illegal_attachment_exts: set[str] = ILLEGAL_ATTACHMENT_EXTS
     allowed_attachment_exts: Optional[set[str]] = None
+
+    # Structured-output schema policy — mirrors the attachment allow/deny-list
+    # pattern above. Base defaults are a full no-op (unrestricted, nothing
+    # dropped); each provider's own pass overrides these directly as class
+    # attributes on its own LLMEngine subclass.
+    structure_permitted_keys: Optional[frozenset[str]] = None
+    structure_omitted_keys: frozenset[str] = frozenset()
 
     def __init__(
         self,
@@ -128,12 +141,25 @@ class LLMEngine(AtomicInvokable, ABC):
             name=name or type(self).__name__,
             namespace=namespace,
             description=description or "LLM Engine",
-            parameters=[ParamSpec(name ="messages",
-                                  index = 0,
-                                  kind = "POSITIONAL_OR_KEYWORD",
-                                  type="list[dict[str, str]]",
-                                  default = NO_VAL)],
-            return_type="str",
+            parameters=[
+                ParamSpec(name="messages",
+                          index=0,
+                          kind=ParamSpec.POSITIONAL_OR_KEYWORD,
+                          type="list[dict[str, str]]",
+                          default=NO_VAL),
+                ParamSpec(name="output_structure",
+                          index=1,
+                          kind=ParamSpec.KEYWORD_ONLY,
+                          type=("None", "dict[str, Any]"),
+                          default=None,
+                          description=(
+                              "Optional JSON-Schema-shaped mapping requesting "
+                              "provider-native, schema-constrained structured "
+                              "output for this call. None (default) requests "
+                              "plain text."
+                          )),
+            ],
+            return_type="str | list[Any] | dict[str, Any]",
         )
 
         self._timeout_seconds = float(timeout_seconds)
@@ -243,8 +269,9 @@ class LLMEngine(AtomicInvokable, ABC):
                     raise LLMEngineError(
                         "LLMEngine.invoke: 'messages' input must be a list"
                     )
+                output_structure = filtered_inputs.get("output_structure")
 
-                response = self._call_model(messages)
+                response = self._call_model(messages, output_structure)
                 text, token_usage, model_data = self.extract(response)
                 ended_at = datetime.now(timezone.utc)
 
@@ -279,8 +306,9 @@ class LLMEngine(AtomicInvokable, ABC):
                 raise LLMEngineError(
                     "LLMEngine.async_invoke: 'messages' input must be a list"
                 )
+            output_structure = filtered_inputs.get("output_structure")
 
-            response = await self._call_model_async(messages)
+            response = await self._call_model_async(messages, output_structure)
             text, token_usage, model_data = self.extract(response)
             ended_at = datetime.now(timezone.utc)
 
@@ -303,10 +331,20 @@ class LLMEngine(AtomicInvokable, ABC):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
-    def _call_model(self, messages: List[Dict[str, Any]]) -> Any:
+    def _call_model(
+        self,
+        messages: List[Dict[str, Any]],
+        output_structure: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
         """
         Normalize messages, snapshot current attachments, build the provider
         payload, and return the raw provider response.
+
+        When ``output_structure`` is ``None`` this calls ``_build_provider_payload``
+        exactly as before (2-arg call) — plain-text behavior is untouched. When
+        given, it is pruned via ``clean_structure_template`` (using this engine's
+        ``structure_permitted_keys``/``structure_omitted_keys``) and passed as a
+        third positional arg.
 
         This helper owns only the shared provider-call sequence. It does not
         extract text, extract token usage, construct results, capture timing, or
@@ -314,29 +352,45 @@ class LLMEngine(AtomicInvokable, ABC):
         """
         normalized = self._normalize_messages(messages)
         attachments = dict(self._attachments)
-        payload = self._build_provider_payload(normalized, attachments)
+        if output_structure is None:
+            payload = self._build_provider_payload(normalized, attachments)
+        else:
+            cleaned = clean_structure_template(
+                output_structure, self.structure_permitted_keys, self.structure_omitted_keys
+            )
+            payload = self._build_provider_payload(normalized, attachments, cleaned)
         return self._call_with_retries(payload)
 
-    async def _call_model_async(self, messages: List[Dict[str, Any]]) -> Any:
+    async def _call_model_async(
+        self,
+        messages: List[Dict[str, Any]],
+        output_structure: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
         """Async analog of ``_call_model``; calls ``_call_with_retries_async``."""
         normalized = self._normalize_messages(messages)
         attachments = dict(self._attachments)
-        payload = self._build_provider_payload(normalized, attachments)
+        if output_structure is None:
+            payload = self._build_provider_payload(normalized, attachments)
+        else:
+            cleaned = clean_structure_template(
+                output_structure, self.structure_permitted_keys, self.structure_omitted_keys
+            )
+            payload = self._build_provider_payload(normalized, attachments, cleaned)
         return await self._call_with_retries_async(payload)
 
-    def extract(self, response: Any) -> tuple[str, TokenUsage, LLMModelData]:
+    def extract(self, response: Any) -> tuple[str | list[Any] | dict[str, Any], TokenUsage, LLMModelData]:
         """
-        Extract normalized generated text, token usage, and configured model
-        data from one provider response.
+        Extract the normalized generated result (text, or structured list/dict),
+        token usage, and configured model data from one provider response.
 
         This method coordinates result-path extraction only. It does not call
         the provider, capture timestamps, or construct ``LLMResult``.
         """
-        text = self._extract_text(response)
-        if not isinstance(text, str):
+        result = self._extract_result(response)
+        if not isinstance(result, (str, list, dict)):
             raise LLMEngineError(
-                f"{type(self).__name__}._extract_text must return str; "
-                f"got {type(text)!r}"
+                f"{type(self).__name__}._extract_result must return str, list, "
+                f"or dict; got {type(result)!r}"
             )
 
         token_usage = self._extract_token_usage(response)
@@ -353,7 +407,7 @@ class LLMEngine(AtomicInvokable, ABC):
                 f"LLMModelData, got {type(model_data)!r}."
             )
 
-        return text.strip(), token_usage, model_data
+        return (result.strip() if isinstance(result, str) else result), token_usage, model_data
 
     def make_result(
         self,
@@ -530,10 +584,21 @@ class LLMEngine(AtomicInvokable, ABC):
         """
         raise NotImplementedError
     @abstractmethod
-    def _build_provider_payload(self, messages: List[Dict[str, str]], attachments: Mapping[str, Mapping[str, Any]]) -> Any:
+    def _build_provider_payload(
+        self,
+        messages: List[Dict[str, str]],
+        attachments: Mapping[str, Mapping[str, Any]],
+        output_structure: Optional[Dict[str, Any]] = None,
+    ) -> Any:
         """
-        Convert normalized messages and attachments into the provider-specific
-        request payload.
+        Convert normalized messages, attachments, and (optionally) a cleaned
+        structured-output template into the provider-specific request payload.
+
+        ``output_structure`` is ``None`` for plain-text calls; a cleaned dict
+        (already pruned by ``clean_structure_template``) when the caller
+        requested structured output. Engines that only implement the 2-arg
+        form will ``TypeError`` on the structured path until their own pass
+        adds support — expected mid-migration, not a defensive concern here.
         """
         raise NotImplementedError
 
@@ -555,9 +620,15 @@ class LLMEngine(AtomicInvokable, ABC):
         return await asyncio.to_thread(self._call_provider, payload)
 
     @abstractmethod
-    def _extract_text(self, response: Any) -> str:
+    def _extract_result(self, response: Any) -> str | list[Any] | dict[str, Any]:
         """
-        Extract the assistant's textual reply from a provider response object.
+        Extract the assistant's textual OR structured reply from a provider
+        response object.
+
+        Renamed from ``_extract_text`` (Pass 1, ``structured-generation``).
+        Every engine's override must be renamed to match, or that engine has
+        an unimplemented abstract method and is non-instantiable until its
+        own pass catches up.
         """
         raise NotImplementedError
 
