@@ -60,6 +60,19 @@ class LLMEngine(AtomicInvokable, ABC):
     provider-native structured output. The declared invokable ``return_type``
     is ``"str | list[Any] | dict[str, Any]"`` to reflect this.
 
+    Structured-output result contract
+    ----------------------------------
+    ``extract()`` computes, once, whether a call requested structured output
+    (``output_structure is not None`` at ``invoke``/``async_invoke`` time) and
+    passes that as ``requested_structured`` into ``_extract_result``. Every
+    engine's ``_extract_result`` override must honor the same contract: when
+    ``requested_structured`` is ``False``, return plain text unchanged; when
+    ``True``, best-effort coerce the provider's raw output into structured
+    data and, on a parse failure, fall back to returning the raw text rather
+    than raising uncaught. This keeps detection response-shape-agnostic — no
+    engine needs to introspect its own response object to figure out what it
+    was asked for; the caller's own request already answers that.
+
     The declared invokable schema exposes two input parameters:
 
     - ``messages`` — a non-empty list of chat-message mappings containing
@@ -271,9 +284,10 @@ class LLMEngine(AtomicInvokable, ABC):
                         "LLMEngine.invoke: 'messages' input must be a list"
                     )
                 output_structure = filtered_inputs.get("output_structure")
+                requested_structured = output_structure is not None
 
                 response = self._call_model(messages, output_structure)
-                text, token_usage, model_data = self.extract(response)
+                text, token_usage, model_data = self.extract(response, requested_structured)
                 ended_at = datetime.now(timezone.utc)
 
                 result = self.make_result(
@@ -308,9 +322,10 @@ class LLMEngine(AtomicInvokable, ABC):
                     "LLMEngine.async_invoke: 'messages' input must be a list"
                 )
             output_structure = filtered_inputs.get("output_structure")
+            requested_structured = output_structure is not None
 
             response = await self._call_model_async(messages, output_structure)
-            text, token_usage, model_data = self.extract(response)
+            text, token_usage, model_data = self.extract(response, requested_structured)
             ended_at = datetime.now(timezone.utc)
 
             result = self.make_result(
@@ -379,15 +394,22 @@ class LLMEngine(AtomicInvokable, ABC):
             payload = self._build_provider_payload(normalized, attachments, cleaned)
         return await self._call_with_retries_async(payload)
 
-    def extract(self, response: Any) -> tuple[str | list[Any] | dict[str, Any], TokenUsage, LLMModelData]:
+    def extract(
+        self, response: Any, requested_structured: bool
+    ) -> tuple[str | list[Any] | dict[str, Any], TokenUsage, LLMModelData]:
         """
         Extract the normalized generated result (text, or structured list/dict),
         token usage, and configured model data from one provider response.
 
+        ``requested_structured`` reflects whether the originating call passed
+        a real ``output_structure`` (computed once by ``invoke``/
+        ``async_invoke``); forwarded to ``_extract_result`` so each engine can
+        honor the structured-output result contract without re-deriving it.
+
         This method coordinates result-path extraction only. It does not call
         the provider, capture timestamps, or construct ``LLMResult``.
         """
-        result = self._extract_result(response)
+        result = self._extract_result(response, requested_structured)
         if not isinstance(result, (str, list, dict)):
             raise LLMEngineError(
                 f"{type(self).__name__}._extract_result must return str, list, "
@@ -621,15 +643,31 @@ class LLMEngine(AtomicInvokable, ABC):
         return await asyncio.to_thread(self._call_provider, payload)
 
     @abstractmethod
-    def _extract_result(self, response: Any) -> str | list[Any] | dict[str, Any]:
+    def _extract_result(
+        self, response: Any, requested_structured: bool
+    ) -> str | list[Any] | dict[str, Any]:
         """
         Extract the assistant's textual OR structured reply from a provider
         response object.
 
-        Renamed from ``_extract_text`` (Pass 1, ``structured-generation``).
-        Every engine's override must be renamed to match, or that engine has
-        an unimplemented abstract method and is non-instantiable until its
-        own pass catches up.
+        ``requested_structured`` reflects the caller's own request
+        (``output_structure is not None``), computed once by ``invoke``/
+        ``async_invoke`` — never re-derived from the response object itself.
+        Contract:
+
+        - ``requested_structured=False``: return plain text unchanged, same
+          as pre-structured-generation behavior.
+        - ``requested_structured=True``: attempt to coerce the provider's raw
+          text output into structured (list/dict) data; on any parse
+          failure, fall back to returning the raw text string rather than
+          raising uncaught. A caller that requested structure and receives a
+          ``str`` back is expected to detect and handle that itself.
+
+        Renamed from ``_extract_text`` (Pass 1, ``structured-generation``);
+        gained ``requested_structured`` (Pass 3). Every engine's override
+        must match this 2-arg signature, or that engine has an unimplemented
+        abstract method and is non-instantiable until its own pass catches
+        up.
         """
         raise NotImplementedError
 

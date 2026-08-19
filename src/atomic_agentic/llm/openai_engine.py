@@ -86,12 +86,15 @@ class OpenAIEngine(LLMEngine):
     Result extraction
     -----------------
     ``_extract_result`` reads the generated assistant reply from the Responses
-    API response. For a plain-text call it returns ``response.output_text``
-    unchanged. For a structured call — detected by inspecting
-    ``response.text.format.type`` on the response object itself, not by
-    tracking request-time state — it returns
-    ``json.loads(response.output_text)``. Renamed from ``_extract_text``
-    (structured-generation Pass 1 base contract widening).
+    API response. For a plain-text call (``requested_structured=False``) it
+    returns ``response.output_text`` unchanged. For a structured call, it
+    attempts ``json.loads(response.output_text)`` and falls back to
+    ``response.output_text`` on a parse failure rather than raising —
+    detection is the base-supplied ``requested_structured`` flag, not
+    response introspection (Pass 3 revision; previously inspected
+    ``response.text.format.type`` and raised uncaught on parse failure).
+    Renamed from ``_extract_text`` (structured-generation Pass 1 base
+    contract widening).
     ``_extract_token_usage`` maps Responses API usage fields into an
     ``OpenAITokenUsage`` record. ``_get_model_data`` returns configured model
     identity from ``self.model``.
@@ -449,26 +452,30 @@ class OpenAIEngine(LLMEngine):
             return exc.status_code in {429, 500, 502, 503, 504}
         return False
 
-    def _extract_result(self, response: Any) -> str | list[Any] | dict[str, Any]:
+    def _extract_result(
+        self, response: Any, requested_structured: bool
+    ) -> str | list[Any] | dict[str, Any]:
         """
         Extract the assistant's textual or structured reply from a Responses
         API response object.
 
-        Detects a structured call by inspecting the response itself
-        (``response.text.format.type``), not by tracking request-time state —
-        required for correctness under concurrent ``async_invoke`` calls,
-        which don't take ``self._invoke_lock``. When structured, parses
-        ``response.output_text`` as JSON; a parse failure (shouldn't happen
-        under ``strict: True``, but possible under e.g. output-token
-        truncation) raises uncaught, surfaced by the base class's existing
-        catch-all as ``LLMEngineError``. Otherwise returns the plain text
-        unchanged (empty string when no text is present; does not raise).
+        ``requested_structured`` is the base-supplied signal (was
+        ``output_structure`` given for this call) — authoritative, since it's
+        the same condition that decided whether ``_build_call_kwargs`` set
+        ``text.format`` in the first place; no response introspection needed.
+        When not requested, returns ``response.output_text`` unchanged (empty
+        string when no text is present; does not raise). When requested,
+        attempts ``json.loads(response.output_text)``; a parse failure
+        (shouldn't happen under ``strict: True``, but possible under e.g.
+        output-token truncation) falls back to returning the raw text instead
+        of raising.
         """
-        text_cfg = response.text
-        fmt = text_cfg.format if text_cfg is not None else None
-        if fmt is not None and fmt.type == "json_schema":
+        if not requested_structured:
+            return response.output_text
+        try:
             return json.loads(response.output_text)
-        return response.output_text
+        except json.JSONDecodeError:
+            return response.output_text
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """

@@ -138,3 +138,17 @@ OPAQUE_VALUE: str = "opaque_value"              # not schema-recursable; deep-co
 # (even when not actually enforced at generation time), so nothing else needs
 # stripping.
 OPENAI_STRUCTURE_OMITTED_KEYS: frozenset[str] = frozenset({"default"})
+
+# ── Gemini structured-output schema policy ─────────────────────────────────
+# Consumed by GeminiEngine.structure_permitted_keys. Confirmed directly
+# against the installed google-genai SDK's GenerateContentConfig.response_json_schema
+# field docstring (v1.75.0) -- Gemini's supported JSON-Schema keyword set is
+# narrower than AA's canonical (OpenAI-shaped) dialect, so this is a positive
+# allow-list rather than an omit-list.
+GEMINI_STRUCTURE_PERMITTED_KEYS: frozenset[str] = frozenset({
+    "$id", "$defs", "$ref", "$anchor",
+    "type", "format", "title", "description", "enum",
+    "items", "prefixItems", "minItems", "maxItems",
+    "minimum", "maximum", "anyOf", "oneOf",
+    "properties", "additionalProperties", "required",
+})
