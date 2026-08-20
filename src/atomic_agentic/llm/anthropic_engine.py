@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
-from typing import Any, Dict, List, Mapping
+from typing import Any, ClassVar, Dict, List, Mapping, Optional
 
 try:
     from anthropic import Anthropic, AsyncAnthropic, APIConnectionError, APIStatusError
@@ -20,6 +21,7 @@ from ..constants.llm import (
     ANTHROPIC_IMAGE_EXTS,
     ANTHROPIC_DOCUMENT_EXTS,
     ANTHROPIC_ALLOWED_EXTS,
+    ANTHROPIC_STRUCTURE_OMITTED_KEYS,
 )
 from ..exceptions import LLMEngineError
 from ..models.results.llm import AnthropicTokenUsage, RemoteLLMModelData
@@ -82,7 +84,24 @@ class AnthropicEngine(LLMEngine):
     no inserted separator, matching Anthropic's own text-reconstruction
     convention (the streaming SDK's ``text_stream`` concatenates raw text
     deltas across content-block boundaries with nothing inserted).
+
+    Result extraction
+    ------------------
+    ``_extract_result`` reuses the same ``TextBlock``-joining logic as
+    before (``block_separator``-joined; empty string on refusal or no text
+    blocks). When the base class signals ``requested_structured=True``, the
+    joined text is parsed via ``json.loads``; a parse failure (including the
+    empty-string refusal case) falls back to returning the raw text rather
+    than raising, matching the base ``LLMEngine`` fallback contract
+    (``structured-generation`` Pass 3). No Anthropic-specific detection is
+    needed — the response shape is identical whether or not structured
+    output was requested.
     """
+
+    # Structured-output schema policy — see ANTHROPIC_STRUCTURE_OMITTED_KEYS
+    # for what's stripped and why; structure_permitted_keys stays the
+    # inherited base default (None, unrestricted).
+    structure_omitted_keys: ClassVar[frozenset[str]] = ANTHROPIC_STRUCTURE_OMITTED_KEYS
 
     def __init__(
         self,
@@ -236,6 +255,7 @@ class AnthropicEngine(LLMEngine):
         self,
         messages: List[Dict[str, Any]],
         attachments: Dict[str, Any],
+        output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Build the ``messages.create`` payload from normalized messages and the
@@ -244,7 +264,9 @@ class AnthropicEngine(LLMEngine):
         Lifecycle: (1) partition system vs. conversation; (2) convert to
         Anthropic content-list format; (3) append attachment blocks to the
         last user turn; (4) assemble final payload dict with optional
-        generation params.
+        generation params; (5) if ``output_structure`` is given, wire it into
+        ``output_config.format`` (already pruned by ``clean_structure_template``
+        before this method is called).
         """
         # 1. Partition system vs. conversation messages
         system_parts = [
@@ -291,17 +313,39 @@ class AnthropicEngine(LLMEngine):
             payload["stop_sequences"] = self.stop_sequences
         if self.thinking_config is not None:
             payload["thinking"] = self.thinking_config
+        if output_structure is not None:
+            payload["output_config"] = {
+                "format": {"type": "json_schema", "schema": output_structure}
+            }
         return payload
 
     # ------------------------------------------------------------------ #
     # Response extraction
     # ------------------------------------------------------------------ #
 
-    def _extract_text(self, response: Any) -> str:
-        """Return generated text by joining all ``TextBlock`` parts with ``block_separator``; empty string on refusal."""
-        return self.block_separator.join(
+    def _extract_result(
+        self, response: Any, requested_structured: bool
+    ) -> str | list[Any] | dict[str, Any]:
+        """
+        Extract the assistant's textual or structured reply from a Messages
+        API response object.
+
+        Joins all ``TextBlock`` parts with ``block_separator`` (empty string
+        on refusal or no text blocks) -- unchanged regardless of
+        ``requested_structured``. When not requested, returns that text
+        as-is. When requested, attempts ``json.loads`` on the joined text; a
+        parse failure (including the empty-string refusal case) falls back
+        to returning the raw text instead of raising.
+        """
+        text = self.block_separator.join(
             block.text for block in response.content if block.type == "text"
         )
+        if not requested_structured:
+            return text
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     def _extract_token_usage(self, response: Any) -> AnthropicTokenUsage:
         """

@@ -152,3 +152,21 @@ GEMINI_STRUCTURE_PERMITTED_KEYS: frozenset[str] = frozenset({
     "minimum", "maximum", "anyOf", "oneOf",
     "properties", "additionalProperties", "required",
 })
+
+# ── Anthropic structured-output schema policy ──────────────────────────────
+# Consumed by AnthropicEngine.structure_omitted_keys. Confirmed via direct
+# live API calls (client.messages.create(..., output_config={"format": {...}}))
+# against claude-haiku-4-5, 2026-08-19 -- these four keywords are rejected
+# unconditionally by Anthropic's JSON-Schema mode regardless of value, and
+# removing each leaves a structurally valid (just less tightly bounded)
+# schema behind, mirroring OPENAI_STRUCTURE_OMITTED_KEYS's deny-list shape
+# rather than Gemini's allow-list. oneOf, minItems > 1, and a missing/wrong
+# additionalProperties are also real Anthropic incompatibilities but are
+# deliberately NOT included here -- stripping oneOf can collapse a field to
+# an unconstrained {} rather than just loosen a bound; minItems's
+# restriction is value-conditional, outside what keyword-presence pruning
+# can fix; additionalProperties is the caller's own responsibility to set.
+# See the structured-generation-pass4 proposal's Non-goals.
+ANTHROPIC_STRUCTURE_OMITTED_KEYS: frozenset[str] = frozenset({
+    "minimum", "maximum", "multipleOf", "maxItems",
+})
