@@ -73,6 +73,19 @@ class LLMEngine(AtomicInvokable, ABC):
     engine needs to introspect its own response object to figure out what it
     was asked for; the caller's own request already answers that.
 
+    Structured-output cleaning contract
+    -------------------------------------
+    Before ``output_structure`` reaches ``_build_provider_payload``, it is
+    pruned by ``self._clean_structure_template(output_structure)``. The
+    default implementation delegates to ``clean_structure_template`` using
+    this engine's ``structure_permitted_keys``/``structure_omitted_keys``
+    class attributes — correct for any engine whose omission policy is
+    fixed per class. Override ``_clean_structure_template`` itself (not the
+    two class attributes) when an engine's policy depends on instance state
+    instead — e.g. ``MistralEngine``'s omission set is conditional on its
+    mutable ``strict`` property (structured-generation Pass 5); a fixed
+    ``ClassVar`` cannot express that, but this hook can.
+
     The declared invokable schema exposes two input parameters:
 
     - ``messages`` — a non-empty list of chat-message mappings containing
@@ -96,6 +109,7 @@ class LLMEngine(AtomicInvokable, ABC):
     Provider-specific behavior should normally be implemented through the
     protected template hooks:
 
+    - ``_clean_structure_template``
     - ``_build_provider_payload``
     - ``_call_provider``
     - ``_extract_result``
@@ -358,9 +372,10 @@ class LLMEngine(AtomicInvokable, ABC):
 
         When ``output_structure`` is ``None`` this calls ``_build_provider_payload``
         exactly as before (2-arg call) — plain-text behavior is untouched. When
-        given, it is pruned via ``clean_structure_template`` (using this engine's
-        ``structure_permitted_keys``/``structure_omitted_keys``) and passed as a
-        third positional arg.
+        given, it is pruned via ``self._clean_structure_template`` (default:
+        prunes using this engine's ``structure_permitted_keys``/
+        ``structure_omitted_keys``; overridable per-engine — see that method's
+        own docstring) and passed as a third positional arg.
 
         This helper owns only the shared provider-call sequence. It does not
         extract text, extract token usage, construct results, capture timing, or
@@ -371,9 +386,7 @@ class LLMEngine(AtomicInvokable, ABC):
         if output_structure is None:
             payload = self._build_provider_payload(normalized, attachments)
         else:
-            cleaned = clean_structure_template(
-                output_structure, self.structure_permitted_keys, self.structure_omitted_keys
-            )
+            cleaned = self._clean_structure_template(output_structure)
             payload = self._build_provider_payload(normalized, attachments, cleaned)
         return self._call_with_retries(payload)
 
@@ -388,11 +401,28 @@ class LLMEngine(AtomicInvokable, ABC):
         if output_structure is None:
             payload = self._build_provider_payload(normalized, attachments)
         else:
-            cleaned = clean_structure_template(
-                output_structure, self.structure_permitted_keys, self.structure_omitted_keys
-            )
+            cleaned = self._clean_structure_template(output_structure)
             payload = self._build_provider_payload(normalized, attachments, cleaned)
         return await self._call_with_retries_async(payload)
+
+    def _clean_structure_template(
+        self, output_structure: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Prune a caller-supplied ``output_structure`` template down to the
+        JSON-Schema keywords this engine actually supports, before it
+        reaches ``_build_provider_payload``.
+
+        Default hook body — delegates to ``clean_structure_template`` using
+        this engine's ``structure_permitted_keys``/``structure_omitted_keys``
+        class attributes. Every engine that doesn't override this method
+        gets behavior byte-identical to the pre-Pass-5 inlined call. See the
+        class docstring's "Structured-output cleaning contract" for the
+        override contract.
+        """
+        return clean_structure_template(
+            output_structure, self.structure_permitted_keys, self.structure_omitted_keys
+        )
 
     def extract(
         self, response: Any, requested_structured: bool

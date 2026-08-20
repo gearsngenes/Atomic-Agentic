@@ -170,3 +170,24 @@ GEMINI_STRUCTURE_PERMITTED_KEYS: frozenset[str] = frozenset({
 ANTHROPIC_STRUCTURE_OMITTED_KEYS: frozenset[str] = frozenset({
     "minimum", "maximum", "multipleOf", "maxItems",
 })
+
+# ── Mistral structured-output schema policy ────────────────────────────────
+# Consumed by MistralEngine._clean_structure_template, not by a plain
+# structure_omitted_keys class attribute -- Mistral's unsupported-keyword
+# set is conditional on the engine's mutable `strict` property (confirmed
+# live, 2026-08-19/20): under strict=True these three are hard-rejected
+# (400, "Invalid structured output syntax", code 3051) and silently
+# stripped here; under strict=False they're accepted without error (though
+# enforcement generally is weaker there -- see MistralEngine's own
+# docstring). All three are safe to drop under strict=True: uniqueItems and
+# contains are content-level refinements (dedup / must-include) better
+# enforced via prompt text for a *generation* task than a schema-level
+# guarantee; propertyNames has a practical substitute already permitted
+# (patternProperties, confirmed live to work). `not` is deliberately NOT
+# included -- removing it can collapse a property to an unconstrained {}
+# (same risk class as ANTHROPIC_STRUCTURE_OMITTED_KEYS's exclusion of
+# oneOf); it raises under strict=True and is left as a documented
+# limitation. See the structured-generation-pass5 proposal's Non-goals.
+MISTRAL_STRUCTURE_OMITTED_KEYS: frozenset[str] = frozenset({
+    "uniqueItems", "contains", "propertyNames",
+})
