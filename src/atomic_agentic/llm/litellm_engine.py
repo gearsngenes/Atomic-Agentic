@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Optional
 
 try:
     import litellm
@@ -104,6 +105,79 @@ class LiteLLMEngine(LLMEngine):
     ``_build_provider_payload``. ``_on_detach`` is a no-op. Provider
     translation of these generic blocks into each provider's native request
     shape is litellm's own responsibility, not this engine's.
+
+    Structured-output schema policy
+    --------------------------------
+    Structured output is requested via ``response_format = {"type":
+    "json_schema", "json_schema": {"schema": ..., "name":
+    "output_structure", "strict": True}}`` -- litellm's own OpenAI
+    Chat-Completions dialect. A plain dict passed this way is used by
+    litellm near-verbatim internally, so this engine supplies that envelope
+    itself rather than relying on litellm to build it from a bare schema.
+
+    Unlike every other engine in this package, this engine does not clean
+    or prune the caller's schema at all. litellm itself performs the real
+    per-destination-provider schema cleaning/transformation, confirmed by
+    reading its installed source (not just its docs). Two examples,
+    verified directly:
+
+    - Anthropic: model-capability-gated between real native structured
+      output (the same mechanism ``AnthropicEngine`` uses directly) and a
+      tool-call-emulation fallback for older models without native
+      support. It resolves ``$defs``/``$ref``, strips a specific set of
+      numeric/length/array keywords (appending a human-readable constraint
+      note to each affected field's ``description`` rather than silently
+      dropping it), and auto-injects ``additionalProperties: false`` on
+      object schemas that omit it.
+    - Gemini/Vertex: model-capability-gated between the modern
+      JSON-Schema-native dialect (the same one ``GeminiEngine`` targets)
+      and a legacy OpenAPI-style fallback for older model generations.
+
+    Notably, litellm's own Anthropic strip-list does **not** match this
+    package's own ``AnthropicEngine.structure_omitted_keys``
+    (``ANTHROPIC_STRUCTURE_OMITTED_KEYS``, structured-generation Pass 4):
+    litellm additionally strips ``minLength``/``maxLength`` -- which AA's
+    own live testing found the real Anthropic API actually supports -- and
+    does not strip ``multipleOf`` at all -- which AA's own testing found
+    needs stripping. Routing an Anthropic model through this engine
+    therefore behaves measurably differently than AA's own dedicated
+    ``AnthropicEngine`` for the identical schema. This is litellm's own
+    implementation detail, not a bug in either engine, and this pass makes
+    no attempt to reconcile the two.
+
+    Because litellm already owns this work, ``structure_permitted_keys``/
+    ``structure_omitted_keys`` stay the inherited base ``LLMEngine`` no-op
+    defaults -- there is nothing left for AA to add.
+
+    ``"strict": True`` is a fixed literal in the ``response_format``
+    envelope this engine builds -- there is no per-instance toggle (unlike
+    ``OpenAIEngine``'s/``MistralEngine``'s mutable ``strict`` property).
+    Confirmed live: both OpenAI and Anthropic reject an object schema whose
+    ``additionalProperties`` is explicitly ``true`` (not merely omitted)
+    under strict mode -- OpenAI requires it be exactly ``false``; litellm's
+    own Anthropic auto-injection (see above) only fills the key in when it
+    is *absent*, and deliberately does not override an explicit caller
+    value, so an explicit ``true`` reaches Anthropic's API unmodified and
+    is rejected there too. A schema that merely *omits*
+    ``additionalProperties`` fares differently per destination (Anthropic
+    gets it auto-set to ``false``; OpenAI still requires the caller to set
+    it themselves). Gemini has no such requirement at all -- no
+    strict-mode split exists for that dialect, matching ``GeminiEngine``'s
+    own Pass 3 finding.
+
+    ``_clean_structure_template`` **is** overridden on this class, but for
+    a different reason than ``MistralEngine`` overrides the same hook.
+    Mistral's override prunes specific keywords because its omission
+    policy depends on instance state (its mutable ``strict`` property).
+    This engine's override prunes nothing at all -- it calls
+    ``litellm.supports_response_schema(model=self.model,
+    custom_llm_provider=self.provider)`` and raises outright when the
+    target model/provider combination has no structured-output path,
+    rather than silently degrading to plain text. That raise is
+    unconditional and does not consult ``drop_params``: ``drop_params``
+    governs individual generation knobs being dropped for cross-provider
+    convenience, not an entire feature the caller explicitly requested
+    being silently unavailable.
     """
 
     def __init__(
@@ -243,6 +317,36 @@ class LiteLLMEngine(LLMEngine):
         ))
 
     # ------------------------------------------------------------------ #
+    # Structured-output capability gating
+    # ------------------------------------------------------------------ #
+
+    def _clean_structure_template(
+        self, output_structure: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Override the base cleaning hook for capability-gating, not
+        keyword-level pruning (contrast `MistralEngine`'s own override of
+        this same hook -- see class docstring's "Structured-output schema
+        policy").
+
+        Raises `LLMEngineError` naming `self.model`/`self.provider` when
+        litellm reports no structured-output support for this combination
+        -- unconditionally, regardless of `self.drop_params`. Otherwise
+        returns `output_structure` unchanged; litellm's own
+        per-destination-provider transformation does all real cleaning
+        downstream.
+        """
+        if not litellm.supports_response_schema(
+            model=self.model, custom_llm_provider=self.provider
+        ):
+            raise LLMEngineError(
+                f"LiteLLMEngine: structured output ('output_structure') is "
+                f"not supported for model={self.model!r}, "
+                f"provider={self.provider!r}."
+            )
+        return dict(output_structure)
+
+    # ------------------------------------------------------------------ #
     # Payload construction
     # ------------------------------------------------------------------ #
 
@@ -250,16 +354,22 @@ class LiteLLMEngine(LLMEngine):
         self,
         messages: List[Dict[str, Any]],
         attachments: Dict[str, Any],
+        output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Build the ``completion``/``acompletion`` payload from normalized
-        messages and the current attachments snapshot.
+        messages, the current attachments snapshot, and (optionally) a
+        structured-output schema.
 
         Lifecycle: (1) convert messages to litellm/OpenAI-shaped list, string
         content passed through unchanged where no attachments apply; (2)
         append attachment blocks to the last user turn's content (converting
         its content to a list first); (3) assemble the final payload dict
-        with the composed ``model=`` string and all conditional fields.
+        with the composed ``model=`` string and all conditional fields,
+        including ``response_format`` when ``output_structure`` is given
+        (already capability-checked and passed through unchanged by
+        ``_clean_structure_template`` -- see class docstring's
+        "Structured-output schema policy").
         """
         # 1. Convert messages — content stays a plain string unless it is the
         #    last user turn and attachments exist below.
@@ -314,6 +424,15 @@ class LiteLLMEngine(LLMEngine):
             payload["base_url"] = self.base_url
         if self.api_version is not None:
             payload["api_version"] = self.api_version
+        if output_structure is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "schema": output_structure,
+                    "name": "output_structure",
+                    "strict": True,
+                },
+            }
 
         # 4. Escape hatch — applied last; a key colliding with an explicit
         #    field above overrides it (caller error, not guarded against).
@@ -324,9 +443,27 @@ class LiteLLMEngine(LLMEngine):
     # Response extraction
     # ------------------------------------------------------------------ #
 
-    def _extract_text(self, response: Any) -> str:
-        """Return the first choice's message content, or ``""`` if empty."""
-        return response.choices[0].message.content or ""
+    def _extract_result(
+        self, response: Any, requested_structured: bool
+    ) -> str | list[Any] | dict[str, Any]:
+        """
+        Return the first choice's message content, or ``""`` if empty. When
+        `requested_structured` is True, the text is parsed via `json.loads`;
+        a parse failure falls back to returning the raw text rather than
+        raising, matching the base `LLMEngine` fallback contract
+        (structured-generation Pass 3).
+
+        Renamed from `_extract_text` (structured-generation Pass 1
+        convention); gains `requested_structured` per the Pass 3 base
+        contract.
+        """
+        text = response.choices[0].message.content or ""
+        if not requested_structured:
+            return text
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     def _extract_token_usage(self, response: Any) -> LiteLLMTokenUsage:
         """
