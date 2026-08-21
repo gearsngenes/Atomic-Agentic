@@ -14,7 +14,6 @@ from typing import (
     List,
     Mapping,
     Optional,
-    ClassVar,
 )
 
 # ~~~Local Imports~~~
@@ -30,7 +29,6 @@ from ..models.results import (
 from ..constants.llm import (
     ILLEGAL_ATTACHMENT_EXTS
 )
-from ..utils.llm import clean_structure_template
 
 __all__ = ["LLMEngine"]
 
@@ -73,18 +71,33 @@ class LLMEngine(AtomicInvokable, ABC):
     engine needs to introspect its own response object to figure out what it
     was asked for; the caller's own request already answers that.
 
-    Structured-output cleaning contract
+    Structured-output request contract
     -------------------------------------
-    Before ``output_structure`` reaches ``_build_provider_payload``, it is
-    pruned by ``self._clean_structure_template(output_structure)``. The
-    default implementation delegates to ``clean_structure_template`` using
-    this engine's ``structure_permitted_keys``/``structure_omitted_keys``
-    class attributes — correct for any engine whose omission policy is
-    fixed per class. Override ``_clean_structure_template`` itself (not the
-    two class attributes) when an engine's policy depends on instance state
-    instead — e.g. ``MistralEngine``'s omission set is conditional on its
-    mutable ``strict`` property (structured-generation Pass 5); a fixed
-    ``ClassVar`` cannot express that, but this hook can.
+    ``output_structure`` is forwarded to ``_build_provider_payload``
+    completely unmodified from what the caller supplied — this base class
+    performs no JSON-Schema key pruning, allow-listing, or validation of any
+    kind (removed, structured-generation Pass 8: the prior
+    ``clean_structure_template``/``structure_permitted_keys``/
+    ``structure_omitted_keys`` mechanism silently traded away
+    caller-declared schema constraints even in cases where every omitted
+    keyword would otherwise have produced an immediate, diagnosable
+    provider error — in tension with this codebase's explicit-or-raise
+    discipline). A schema keyword a given provider rejects fails as that
+    provider's own native error, wrapped in ``LLMEngineError`` by
+    ``invoke``/``async_invoke`` — the same failure shape already used for
+    any other illegal per-provider configuration (e.g. an unsupported
+    ``temperature`` value). Engines that need to gate on capability rather
+    than content (e.g. ``LiteLLMEngine`` raising when a model/provider
+    combination has no structured-output path at all) do so from within
+    their own ``_build_provider_payload`` override, not a separate hook.
+
+    Note: ``_normalize_messages`` still requires every message's ``content``
+    to be a plain ``str`` — a structured ``LLMResult.result`` (``list``/
+    ``dict``) cannot currently be fed back into a later call's ``messages``
+    unmodified. No ``src/`` code does this today; whichever future pass
+    wires ``output_structure`` through the ``Agent`` layer will need to make
+    an explicit choice here (``str(...)``, ``json.dumps(...)``, or a richer
+    message-content shape).
 
     The declared invokable schema exposes two input parameters:
 
@@ -109,7 +122,6 @@ class LLMEngine(AtomicInvokable, ABC):
     Provider-specific behavior should normally be implemented through the
     protected template hooks:
 
-    - ``_clean_structure_template``
     - ``_build_provider_payload``
     - ``_call_provider``
     - ``_extract_result``
@@ -126,13 +138,6 @@ class LLMEngine(AtomicInvokable, ABC):
     # provider-specific checks. Sourced from constants.engines.
     illegal_attachment_exts: set[str] = ILLEGAL_ATTACHMENT_EXTS
     allowed_attachment_exts: Optional[set[str]] = None
-
-    # Structured-output schema policy — mirrors the attachment allow/deny-list
-    # pattern above. Base defaults are a full no-op (unrestricted, nothing
-    # dropped); each provider's own pass overrides these directly as class
-    # attributes on its own LLMEngine subclass.
-    structure_permitted_keys:ClassVar[Optional[frozenset[str]]] = None
-    structure_omitted_keys:ClassVar[frozenset[str]] = frozenset()
 
     def __init__(
         self,
@@ -174,7 +179,13 @@ class LLMEngine(AtomicInvokable, ABC):
                           index=0,
                           kind=ParamSpec.POSITIONAL_OR_KEYWORD,
                           type="list[dict[str, str]]",
-                          default=NO_VAL),
+                          default=NO_VAL,
+                          description=(
+                              "A non-empty list of chat-message mappings. "
+                              "Each mapping must have a string 'role' key "
+                              "(one of 'system', 'user', 'assistant') and a "
+                              "string 'content' key (free-form text)."
+                          )),
                 ParamSpec(name="output_structure",
                           index=1,
                           kind=ParamSpec.KEYWORD_ONLY,
@@ -370,12 +381,10 @@ class LLMEngine(AtomicInvokable, ABC):
         Normalize messages, snapshot current attachments, build the provider
         payload, and return the raw provider response.
 
-        When ``output_structure`` is ``None`` this calls ``_build_provider_payload``
-        exactly as before (2-arg call) — plain-text behavior is untouched. When
-        given, it is pruned via ``self._clean_structure_template`` (default:
-        prunes using this engine's ``structure_permitted_keys``/
-        ``structure_omitted_keys``; overridable per-engine — see that method's
-        own docstring) and passed as a third positional arg.
+        ``_build_provider_payload`` is called unconditionally as a 3-arg call
+        — every concrete engine implements the 3-arg signature with
+        ``output_structure`` defaulting to ``None``, so plain-text calls are
+        unaffected by always passing it through.
 
         This helper owns only the shared provider-call sequence. It does not
         extract text, extract token usage, construct results, capture timing, or
@@ -383,11 +392,7 @@ class LLMEngine(AtomicInvokable, ABC):
         """
         normalized = self._normalize_messages(messages)
         attachments = dict(self._attachments)
-        if output_structure is None:
-            payload = self._build_provider_payload(normalized, attachments)
-        else:
-            cleaned = self._clean_structure_template(output_structure)
-            payload = self._build_provider_payload(normalized, attachments, cleaned)
+        payload = self._build_provider_payload(normalized, attachments, output_structure)
         return self._call_with_retries(payload)
 
     async def _call_model_async(
@@ -398,31 +403,8 @@ class LLMEngine(AtomicInvokable, ABC):
         """Async analog of ``_call_model``; calls ``_call_with_retries_async``."""
         normalized = self._normalize_messages(messages)
         attachments = dict(self._attachments)
-        if output_structure is None:
-            payload = self._build_provider_payload(normalized, attachments)
-        else:
-            cleaned = self._clean_structure_template(output_structure)
-            payload = self._build_provider_payload(normalized, attachments, cleaned)
+        payload = self._build_provider_payload(normalized, attachments, output_structure)
         return await self._call_with_retries_async(payload)
-
-    def _clean_structure_template(
-        self, output_structure: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        """
-        Prune a caller-supplied ``output_structure`` template down to the
-        JSON-Schema keywords this engine actually supports, before it
-        reaches ``_build_provider_payload``.
-
-        Default hook body — delegates to ``clean_structure_template`` using
-        this engine's ``structure_permitted_keys``/``structure_omitted_keys``
-        class attributes. Every engine that doesn't override this method
-        gets behavior byte-identical to the pre-Pass-5 inlined call. See the
-        class docstring's "Structured-output cleaning contract" for the
-        override contract.
-        """
-        return clean_structure_template(
-            output_structure, self.structure_permitted_keys, self.structure_omitted_keys
-        )
 
     def extract(
         self, response: Any, requested_structured: bool
@@ -644,14 +626,17 @@ class LLMEngine(AtomicInvokable, ABC):
         output_structure: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
-        Convert normalized messages, attachments, and (optionally) a cleaned
-        structured-output template into the provider-specific request payload.
+        Convert normalized messages, attachments, and (optionally) a caller-
+        supplied structured-output template into the provider-specific
+        request payload.
 
-        ``output_structure`` is ``None`` for plain-text calls; a cleaned dict
-        (already pruned by ``clean_structure_template``) when the caller
-        requested structured output. Engines that only implement the 2-arg
-        form will ``TypeError`` on the structured path until their own pass
-        adds support — expected mid-migration, not a defensive concern here.
+        ``output_structure`` is ``None`` for plain-text calls; the caller's
+        raw JSON-Schema-shaped mapping, completely unmodified, when the
+        caller requested structured output (structured-generation Pass 8:
+        this base class no longer prunes or validates it — see the class
+        docstring's "Structured-output request contract"). Called
+        unconditionally as a 3-arg call by ``_call_model``/``_call_model_async``
+        — every concrete engine implements this 3-arg signature.
         """
         raise NotImplementedError
 

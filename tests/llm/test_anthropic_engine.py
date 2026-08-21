@@ -333,7 +333,7 @@ class TestAnthropicEngine:
             content=[SimpleNamespace(type="text", text="Hello world")],
             usage=_fake_usage(),
         )
-        assert engine._extract_text(response) == "Hello world"
+        assert engine._extract_result(response, requested_structured=False) == "Hello world"
 
     def test_extract_text_skips_thinking_blocks(
         self, monkeypatch: pytest.MonkeyPatch
@@ -347,7 +347,7 @@ class TestAnthropicEngine:
             ],
             usage=_fake_usage(),
         )
-        assert engine._extract_text(response) == "Answer here"
+        assert engine._extract_result(response, requested_structured=False) == "Answer here"
 
     def test_extract_text_joins_multiple_blocks_with_default_empty_separator(
         self, monkeypatch: pytest.MonkeyPatch
@@ -361,7 +361,7 @@ class TestAnthropicEngine:
             ],
             usage=_fake_usage(),
         )
-        assert engine._extract_text(response) == "HelloWorld"
+        assert engine._extract_result(response, requested_structured=False) == "HelloWorld"
 
     def test_extract_text_uses_custom_block_separator(
         self, monkeypatch: pytest.MonkeyPatch
@@ -375,7 +375,7 @@ class TestAnthropicEngine:
             ],
             usage=_fake_usage(),
         )
-        assert engine._extract_text(response) == "Hello---World"
+        assert engine._extract_result(response, requested_structured=False) == "Hello---World"
 
     def test_extract_text_empty_content_returns_empty_string(
         self, monkeypatch: pytest.MonkeyPatch
@@ -383,7 +383,65 @@ class TestAnthropicEngine:
         monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
         engine = AnthropicEngine(model="claude-opus-4-8")
         response = SimpleNamespace(content=[], usage=_fake_usage())
-        assert engine._extract_text(response) == ""
+        assert engine._extract_result(response, requested_structured=False) == ""
+
+    # -- structured-output payload/extraction -----------------------------------
+
+    def test_build_payload_includes_output_config_when_structured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+
+        payload = engine._build_provider_payload(
+            [{"role": "user", "content": "hi"}], {}, schema
+        )
+
+        assert payload["output_config"] == {
+            "format": {"type": "json_schema", "schema": schema}
+        }
+
+    def test_build_payload_omits_output_config_when_not_structured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}], {})
+
+        assert "output_config" not in payload
+
+    def test_extract_result_requested_parses_json_from_joined_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text='{"a": 1}')]
+        )
+
+        assert engine._extract_result(response, requested_structured=True) == {"a": 1}
+
+    def test_extract_result_requested_parse_failure_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="not json")]
+        )
+
+        assert engine._extract_result(response, requested_structured=True) == "not json"
+
+    def test_extract_result_requested_empty_content_falls_back_to_empty_string(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "Anthropic", FakeAnthropicClient)
+        engine = AnthropicEngine(model="claude-opus-4-8")
+        response = SimpleNamespace(content=[])
+
+        assert engine._extract_result(response, requested_structured=True) == ""
 
     # -- _extract_token_usage --------------------------------------------------
 

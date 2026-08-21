@@ -133,21 +133,24 @@ class LiteLLMEngine(LLMEngine):
       JSON-Schema-native dialect (the same one ``GeminiEngine`` targets)
       and a legacy OpenAPI-style fallback for older model generations.
 
-    Notably, litellm's own Anthropic strip-list does **not** match this
-    package's own ``AnthropicEngine.structure_omitted_keys``
-    (``ANTHROPIC_STRUCTURE_OMITTED_KEYS``, structured-generation Pass 4):
-    litellm additionally strips ``minLength``/``maxLength`` -- which AA's
-    own live testing found the real Anthropic API actually supports -- and
-    does not strip ``multipleOf`` at all -- which AA's own testing found
-    needs stripping. Routing an Anthropic model through this engine
-    therefore behaves measurably differently than AA's own dedicated
+    Notably, litellm's own Anthropic strip-list does **not** match the
+    unsupported-keyword set AA's own dedicated ``AnthropicEngine`` found
+    live (structured-generation Pass 4: ``minimum``, ``maximum``,
+    ``multipleOf``, ``maxItems``): litellm additionally strips
+    ``minLength``/``maxLength`` -- which AA's own live testing found the
+    real Anthropic API actually supports -- and does not strip
+    ``multipleOf`` at all -- which AA's own testing found needs stripping
+    (as of Pass 8, neither engine prunes anything AA-side any more, but
+    litellm's own downstream transformation still diverges from what the
+    real Anthropic API needs). Routing an Anthropic model through this
+    engine therefore behaves measurably differently than AA's own dedicated
     ``AnthropicEngine`` for the identical schema. This is litellm's own
     implementation detail, not a bug in either engine, and this pass makes
     no attempt to reconcile the two.
 
-    Because litellm already owns this work, ``structure_permitted_keys``/
-    ``structure_omitted_keys`` stay the inherited base ``LLMEngine`` no-op
-    defaults -- there is nothing left for AA to add.
+    Because litellm already owns this work, this engine adds no
+    schema-level cleaning of its own -- there is nothing left for AA to
+    add.
 
     ``"strict": True`` is a fixed literal in the ``response_format``
     envelope this engine builds -- there is no per-instance toggle (unlike
@@ -165,19 +168,21 @@ class LiteLLMEngine(LLMEngine):
     strict-mode split exists for that dialect, matching ``GeminiEngine``'s
     own Pass 3 finding.
 
-    ``_clean_structure_template`` **is** overridden on this class, but for
-    a different reason than ``MistralEngine`` overrides the same hook.
-    Mistral's override prunes specific keywords because its omission
-    policy depends on instance state (its mutable ``strict`` property).
-    This engine's override prunes nothing at all -- it calls
-    ``litellm.supports_response_schema(model=self.model,
-    custom_llm_provider=self.provider)`` and raises outright when the
-    target model/provider combination has no structured-output path,
-    rather than silently degrading to plain text. That raise is
-    unconditional and does not consult ``drop_params``: ``drop_params``
-    governs individual generation knobs being dropped for cross-provider
-    convenience, not an entire feature the caller explicitly requested
-    being silently unavailable.
+    The capability check (``litellm.supports_response_schema(...)``) lives
+    inline at the top of ``_build_provider_payload``'s
+    ``output_structure is not None`` branch, not a separate hook override
+    (structured-generation Pass 8 removed the base
+    ``_clean_structure_template`` hook entirely -- ``MistralEngine``'s own
+    pruning override is gone too, since it was the only other consumer).
+    It raises ``LLMEngineError`` naming ``self.model``/``self.provider``
+    when litellm reports no structured-output support for this
+    combination -- unconditionally, regardless of ``self.drop_params``
+    (``drop_params`` governs individual generation knobs being dropped for
+    cross-provider convenience, not an entire feature the caller explicitly
+    requested being silently unavailable). Otherwise ``output_structure``
+    is forwarded completely unmodified; litellm's own
+    per-destination-provider transformation does all real cleaning
+    downstream.
     """
 
     def __init__(
@@ -317,36 +322,6 @@ class LiteLLMEngine(LLMEngine):
         ))
 
     # ------------------------------------------------------------------ #
-    # Structured-output capability gating
-    # ------------------------------------------------------------------ #
-
-    def _clean_structure_template(
-        self, output_structure: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        """
-        Override the base cleaning hook for capability-gating, not
-        keyword-level pruning (contrast `MistralEngine`'s own override of
-        this same hook -- see class docstring's "Structured-output schema
-        policy").
-
-        Raises `LLMEngineError` naming `self.model`/`self.provider` when
-        litellm reports no structured-output support for this combination
-        -- unconditionally, regardless of `self.drop_params`. Otherwise
-        returns `output_structure` unchanged; litellm's own
-        per-destination-provider transformation does all real cleaning
-        downstream.
-        """
-        if not litellm.supports_response_schema(
-            model=self.model, custom_llm_provider=self.provider
-        ):
-            raise LLMEngineError(
-                f"LiteLLMEngine: structured output ('output_structure') is "
-                f"not supported for model={self.model!r}, "
-                f"provider={self.provider!r}."
-            )
-        return dict(output_structure)
-
-    # ------------------------------------------------------------------ #
     # Payload construction
     # ------------------------------------------------------------------ #
 
@@ -365,11 +340,12 @@ class LiteLLMEngine(LLMEngine):
         content passed through unchanged where no attachments apply; (2)
         append attachment blocks to the last user turn's content (converting
         its content to a list first); (3) assemble the final payload dict
-        with the composed ``model=`` string and all conditional fields,
-        including ``response_format`` when ``output_structure`` is given
-        (already capability-checked and passed through unchanged by
-        ``_clean_structure_template`` -- see class docstring's
-        "Structured-output schema policy").
+        with the composed ``model=`` string and all conditional fields;
+        (4) when ``output_structure`` is given, check
+        ``litellm.supports_response_schema(...)`` inline (raises
+        ``LLMEngineError`` if unsupported -- see class docstring's
+        "Structured-output schema policy") and set ``response_format`` from
+        the caller's schema, forwarded unmodified.
         """
         # 1. Convert messages — content stays a plain string unless it is the
         #    last user turn and attachments exist below.
@@ -425,6 +401,14 @@ class LiteLLMEngine(LLMEngine):
         if self.api_version is not None:
             payload["api_version"] = self.api_version
         if output_structure is not None:
+            if not litellm.supports_response_schema(
+                model=self.model, custom_llm_provider=self.provider
+            ):
+                raise LLMEngineError(
+                    f"LiteLLMEngine: structured output ('output_structure') is "
+                    f"not supported for model={self.model!r}, "
+                    f"provider={self.provider!r}."
+                )
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {

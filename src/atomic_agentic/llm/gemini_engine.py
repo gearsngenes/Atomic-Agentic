@@ -11,7 +11,6 @@ except ImportError:
 import os
 from typing import (
     Any,
-    ClassVar,
     Dict,
     List,
     Mapping,
@@ -22,7 +21,6 @@ from .base import LLMEngine
 from ..constants.llm import (
     ILLEGAL_ATTACHMENT_EXTS,
     ENGINE_ILLEGAL_MIME_PREFIXES,
-    GEMINI_STRUCTURE_PERMITTED_KEYS,
 )
 from ..exceptions import LLMEngineError
 from ..models.results.llm import (
@@ -93,9 +91,15 @@ class GeminiEngine(LLMEngine):
     Model data
     ----------
     ``_get_model_data`` returns configured model identity from ``self.model``.
-    """
 
-    structure_permitted_keys: ClassVar[Optional[frozenset[str]]] = GEMINI_STRUCTURE_PERMITTED_KEYS
+    Structured-output schema policy
+    ---------------------------------
+    ``output_structure``, when given, is forwarded to
+    ``response_json_schema`` completely unmodified — this engine performs
+    no schema filtering (structured-generation Pass 8). A keyword Gemini's
+    JSON-Schema dialect doesn't support surfaces as Gemini's own API
+    behavior (accept, ignore, or reject — unconfirmed by this pass).
+    """
 
     def __init__(
             self,
@@ -341,14 +345,13 @@ class GeminiEngine(LLMEngine):
     ) -> Dict[str, Any]:
         """
         Build the payload for ``generate_content`` from normalized messages, the
-        current attachments snapshot, and (optionally) an already-cleaned
-        structured-output template.
+        current attachments snapshot, and (optionally) the caller's raw
+        structured-output template, unmodified.
 
         System messages are extracted into ``system_instruction`` for
         ``GenerateContentConfig``; all other turns are returned as
-        ``list[Content]`` via ``_build_content_list``. ``output_structure`` is
-        already pruned by ``clean_structure_template`` upstream (base
-        ``LLMEngine._call_model``/``_call_model_async``); stashed as-is.
+        ``list[Content]`` via ``_build_content_list``. ``output_structure``
+        is the caller's raw schema, forwarded unmodified; stashed as-is.
         """
         system_instruction = self._collect_system(messages)
         contents = self._build_content_list(messages, attachments)
@@ -365,9 +368,9 @@ class GeminiEngine(LLMEngine):
     ) -> genai.types.GenerateContentConfig:
         """
         Build a ``GenerateContentConfig`` from stored engine params, the per-call
-        ``system_instruction``, and (optionally) an already-cleaned
-        structured-output template. Fields are omitted when their stored value
-        is ``None``.
+        ``system_instruction``, and (optionally) the caller's raw
+        structured-output template, unmodified. Fields are omitted when their
+        stored value is ``None``.
 
         When ``output_structure`` is given, ``response_mime_type`` and
         ``response_json_schema`` are set together — mime type alone is only a

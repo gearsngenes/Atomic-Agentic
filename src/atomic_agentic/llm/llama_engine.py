@@ -107,13 +107,9 @@ class LlamaCppEngine(LLMEngine):
     caller who relies on a numeric bound being enforced gets no error
     telling them it wasn't.
 
-    Because none of these decorative keywords are ever rejected by the
-    installed converter (unlike, say, ``AnthropicEngine``'s or
-    ``MistralEngine``'s real deny-lists, which reject specific keywords
-    outright), this engine needs no ``_clean_structure_template`` override
-    and no ``structure_permitted_keys``/``structure_omitted_keys`` class
-    attributes -- the inherited base ``LLMEngine`` no-op defaults are
-    already correct.
+    This engine needs no override of any kind -- every engine now forwards
+    ``output_structure`` unmodified by default (structured-generation
+    Pass 8 removed AA's own schema-pruning mechanism entirely).
 
     The compiled grammar constrains sampling only; it is never woven into
     the prompt or message content the model actually reads. A caller who
@@ -314,15 +310,14 @@ class LlamaCppEngine(LLMEngine):
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Map normalized messages (+ optionally a cleaned structured-output
-        template) to llama.cpp's chat completion schema.
+        Map normalized messages (+ optionally the caller's raw
+        structured-output template) to llama.cpp's chat completion schema.
 
         - `messages` are already validated (role/content strings).
         - `attachments` are ignored; this engine does not support attachments.
-        - `output_structure`, when given, is already cleaned by
-          `_clean_structure_template` (the inherited base no-op body -- see
-          the class docstring's "Structured-output schema policy") and is
-          wired into `response_format={"type": "json_object", "schema":
+        - `output_structure`, when given, is the caller's raw schema,
+          forwarded unmodified, and is wired into
+          `response_format={"type": "json_object", "schema":
           output_structure}`.
         """
         # llama-cpp-python exposes an OpenAI-compatible chat API, so we

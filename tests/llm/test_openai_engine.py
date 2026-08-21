@@ -150,7 +150,7 @@ class TestOpenAIEngine:
         response = engine._call_provider({"blocks": [], "instructions": None})
 
         assert injected.response_calls
-        assert engine._extract_text(response) == " openai async text "
+        assert engine._extract_result(response, requested_structured=False) == " openai async text "
 
     def test_openai_payload_helpers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
@@ -190,7 +190,7 @@ class TestOpenAIEngine:
         )
 
         fake = FakeOpenAIClient.instances[-1]
-        assert engine._extract_text(response) == " openai text "
+        assert engine._extract_result(response, requested_structured=False) == " openai text "
         assert fake.response_calls[-1]["model"] == "gpt-4o-mini"
         assert fake.response_calls[-1]["instructions"] == "system"
         assert fake.response_calls[-1]["temperature"] == 0.25
@@ -302,7 +302,7 @@ class TestOpenAIEngine:
         response = run_coro_sync(engine._call_provider_async({"blocks": [], "instructions": None}))
 
         assert injected.response_calls
-        assert engine._extract_text(response) == " openai async text "
+        assert engine._extract_result(response, requested_structured=False) == " openai async text "
 
     def test_call_provider_async_with_sync_client(
         self, monkeypatch: pytest.MonkeyPatch
@@ -314,7 +314,70 @@ class TestOpenAIEngine:
         engine = OpenAIEngine(model="gpt-4o-mini")
         response = run_coro_sync(engine._call_provider_async({"blocks": [], "instructions": None}))
 
-        assert engine._extract_text(response) == " openai text "
+        assert engine._extract_result(response, requested_structured=False) == " openai text "
+
+    def test_call_provider_kwargs_include_structured_output_format(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+
+        engine = OpenAIEngine(model="gpt-4o-mini", strict=True)
+        schema = {
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "required": ["a"],
+            "additionalProperties": False,
+        }
+        engine._call_provider({"blocks": [], "instructions": None, "output_structure": schema})
+
+        call = FakeOpenAIClient.instances[-1].response_calls[-1]
+        assert call["text"] == {
+            "format": {
+                "type": "json_schema",
+                "name": "output_structure",
+                "schema": schema,
+                "strict": True,
+            }
+        }
+
+    def test_call_provider_kwargs_omit_text_format_when_not_structured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        FakeOpenAIClient.instances.clear()
+        monkeypatch.setattr(openai_module, "OpenAI", FakeOpenAIClient)
+        monkeypatch.setattr(openai_module, "AsyncOpenAI", FakeAsyncOpenAIClient)
+
+        engine = OpenAIEngine(model="gpt-4o-mini")
+        engine._call_provider({"blocks": [], "instructions": None})
+
+        call = FakeOpenAIClient.instances[-1].response_calls[-1]
+        assert "text" not in call
+
+    def test_extract_result_not_requested_returns_output_text_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(output_text=" openai text ")
+
+        assert engine._extract_result(response, requested_structured=False) == " openai text "
+
+    def test_extract_result_requested_parses_json_object(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(output_text='{"a": 1}')
+
+        assert engine._extract_result(response, requested_structured=True) == {"a": 1}
+
+    def test_extract_result_requested_parse_failure_falls_back_to_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(output_text="not json")
+
+        assert engine._extract_result(response, requested_structured=True) == "not json"
 
 
 class TestOpenAIExtractTokenUsage:

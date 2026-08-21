@@ -110,7 +110,7 @@ class TestMistralEngine:
         call = fake.aio_complete_calls[-1]
         assert call["model"] == "mistral-small-latest"
         assert call["temperature"] == 0.3
-        assert engine._extract_text(result) == "mistral async text"
+        assert engine._extract_result(result, requested_structured=False) == "mistral async text"
 
     def test_temperature_none_omits_from_call(
         self, monkeypatch: pytest.MonkeyPatch
@@ -176,7 +176,7 @@ class TestMistralEngine:
         response = engine._call_provider(payload)
         fake = FakeMistralClient.instances[-1]
 
-        assert engine._extract_text(response) == "mistral text"
+        assert engine._extract_result(response, requested_structured=False) == "mistral text"
         assert fake.complete_calls[-1]["model"] == "mistral-small-latest"
 
     def test_mistral_extract_text_from_chunk_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,7 +194,83 @@ class TestMistralEngine:
             ]
         )
 
-        assert engine._extract_text(response) == "hello world"
+        assert engine._extract_result(response, requested_structured=False) == "hello world"
+
+    def test_build_payload_response_format_uses_live_strict_property_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch, strict=True)
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+
+        payload = engine._build_provider_payload(
+            [{"role": "user", "content": "hi"}], {}, schema
+        )
+
+        assert payload["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "output_structure", "schema": schema, "strict": True},
+        }
+
+    def test_build_payload_response_format_reflects_strict_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch, strict=True)
+        engine.strict = False
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+
+        payload = engine._build_provider_payload(
+            [{"role": "user", "content": "hi"}], {}, schema
+        )
+
+        # Proves `strict` is read fresh at call time, not baked at construction.
+        assert payload["response_format"]["json_schema"]["strict"] is False
+
+    def test_build_payload_omits_response_format_when_not_structured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}], {})
+
+        assert "response_format" not in payload
+
+    def test_call_provider_forwards_response_format_when_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "output_structure", "schema": {}, "strict": True},
+        }
+        payload = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": response_format,
+        }
+
+        engine._call_provider(payload)
+
+        fake = FakeMistralClient.instances[-1]
+        assert fake.complete_calls[-1]["response_format"] == response_format
+
+    def test_extract_result_requested_parses_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"a": 1}'))]
+        )
+
+        assert engine._extract_result(response, requested_structured=True) == {"a": 1}
+
+    def test_extract_result_requested_parse_failure_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="not json"))]
+        )
+
+        assert engine._extract_result(response, requested_structured=True) == "not json"
 
     def test_mistral_to_dict_includes_non_secret_config(
         self,

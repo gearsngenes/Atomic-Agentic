@@ -22,7 +22,6 @@ from ..constants.llm import (
     ILLEGAL_ATTACHMENT_EXTS,
     ENGINE_ILLEGAL_MIME_PREFIXES,
     MISTRAL_IMAGE_EXTS,
-    MISTRAL_STRUCTURE_OMITTED_KEYS,
 )
 from ..exceptions import LLMEngineError
 from ..models.results.llm import (
@@ -31,7 +30,7 @@ from ..models.results.llm import (
     LLMModelData,
     RemoteLLMModelData
 )
-from ..utils.llm import validate_attachment_path, clean_structure_template
+from ..utils.llm import validate_attachment_path
 
 __all__ = ["MistralEngine"]
 
@@ -70,22 +69,21 @@ class MistralEngine(LLMEngine):
 
     Structured-output schema policy
     ---------------------------------
-    Structured output is requested via `response_format={"type":
-    "json_schema", "json_schema": {"name": "output_structure", "schema":
-    ..., "strict": self.strict}}`. Mistral's unsupported-keyword set is
-    conditional on `strict` (confirmed live): `uniqueItems`, `contains`,
-    and `propertyNames` are silently stripped only while `strict` is
-    `True` (see `_clean_structure_template` override, consuming
-    `MISTRAL_STRUCTURE_OMITTED_KEYS`); `not` and a `required` entry naming
-    an undeclared property both raise a real error under `strict=True` and
-    are never auto-corrected. Under `strict=False` none of those raise, but
-    enforcement is materially weaker overall -- e.g. `additionalProperties:
-    false` itself goes unenforced too, confirmed live. Because this policy
-    depends on instance state, `structure_omitted_keys`/
-    `structure_permitted_keys` stay the inherited base defaults
-    (`frozenset()`/`None`) and do **not** reflect Mistral's real,
-    `strict`-conditional policy -- `_clean_structure_template` is the
-    source of truth for this engine, not those two attributes.
+    `output_structure`, when given, is forwarded to
+    `response_format={"type": "json_schema", "json_schema": {"name":
+    "output_structure", "schema": ..., "strict": self.strict}}` completely
+    unmodified -- this engine performs no schema pruning
+    (structured-generation Pass 8). Mistral's own rejection behavior for
+    `uniqueItems`, `contains`, `propertyNames` under `strict=True`
+    (confirmed live: 400, "Invalid structured output syntax", code 3051)
+    now surfaces directly rather than being silently stripped. `not` and a
+    `required` entry naming an undeclared property raise unconditionally
+    under `strict=True` and are never auto-corrected. Under `strict=False`
+    none of those raise, but enforcement is materially weaker overall --
+    e.g. `additionalProperties: false` itself goes unenforced too,
+    confirmed live. Notable asymmetry, still worth stating: unlike
+    OpenAI/Anthropic, Mistral has no `additionalProperties: false`
+    requirement at all.
 
     Mutable configuration
     -----------------------
@@ -135,11 +133,10 @@ class MistralEngine(LLMEngine):
             Whether structured-output requests (`output_structure`) use
             Mistral's strict JSON-Schema conformance mode. `True` (default)
             matches Mistral's own documented recommendation for reliable
-            structured output, and gates `_clean_structure_template`'s
-            omission policy (see class docstring) -- confirmed live that
-            `strict=False` accepts a wider range of schema keywords without
-            error, but also drops real enforcement elsewhere (e.g.
-            `additionalProperties: false` goes unenforced too), so
+            structured output -- confirmed live that `strict=False` accepts
+            a wider range of schema keywords without error, but also drops
+            real enforcement elsewhere (e.g. `additionalProperties: false`
+            goes unenforced too), so
             disabling it trades a wider keyword allow-list for materially
             weaker guarantees generally, not just looser syntax.
         inline_cutoff_chars:
@@ -315,23 +312,6 @@ class MistralEngine(LLMEngine):
     # Template hooks for invocation
     # ------------------------------------------------------------------ #
 
-    def _clean_structure_template(
-        self, output_structure: Mapping[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Override the base cleaning hook: Mistral's unsupported-keyword set
-        is conditional on `strict` (confirmed live -- `uniqueItems`/
-        `contains`/`propertyNames` are silently accepted without error
-        under `strict=False`, hard-rejected under `strict=True`), so a
-        fixed class-level `structure_omitted_keys` can't express the
-        policy. `structure_permitted_keys` stays the inherited base
-        default (`None`) regardless of `strict`.
-        """
-        omitted = MISTRAL_STRUCTURE_OMITTED_KEYS if self.strict else frozenset()
-        return clean_structure_template(
-            output_structure, self.structure_permitted_keys, omitted
-        )
-
     def _build_provider_payload(
             self,
             messages: List[Dict[str, str]],
@@ -339,17 +319,16 @@ class MistralEngine(LLMEngine):
             output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Map normalized messages + prepared attachments (+ optionally a
-        cleaned structured-output template) to Mistral chat schema.
+        Map normalized messages + prepared attachments (+ optionally the
+        caller's raw structured-output template) to Mistral chat schema.
 
         - `messages` are already validated and have lowercase `role` and
           string `content`.
         - `attachments` is a snapshot of `self._attachments` at invoke time.
-        - `output_structure`, when given, is already cleaned by
-          `_clean_structure_template` and wired into
-          `response_format={"type": "json_schema", "json_schema": {"name":
-          "output_structure", "schema": output_structure, "strict":
-          self.strict}}`.
+        - `output_structure`, when given, is the caller's raw schema,
+          forwarded unmodified and wired into `response_format={"type":
+          "json_schema", "json_schema": {"name": "output_structure",
+          "schema": output_structure, "strict": self.strict}}`.
 
         Inline text from attachments and signed URLs are appended as parts to
         the **last user message** so they are clearly associated with the most

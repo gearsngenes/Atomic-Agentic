@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 import os
-from typing import Any, ClassVar, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 try:
     from anthropic import Anthropic, AsyncAnthropic, APIConnectionError, APIStatusError
@@ -21,7 +21,6 @@ from ..constants.llm import (
     ANTHROPIC_IMAGE_EXTS,
     ANTHROPIC_DOCUMENT_EXTS,
     ANTHROPIC_ALLOWED_EXTS,
-    ANTHROPIC_STRUCTURE_OMITTED_KEYS,
 )
 from ..exceptions import LLMEngineError
 from ..models.results.llm import AnthropicTokenUsage, RemoteLLMModelData
@@ -96,12 +95,21 @@ class AnthropicEngine(LLMEngine):
     (``structured-generation`` Pass 3). No Anthropic-specific detection is
     needed — the response shape is identical whether or not structured
     output was requested.
-    """
 
-    # Structured-output schema policy — see ANTHROPIC_STRUCTURE_OMITTED_KEYS
-    # for what's stripped and why; structure_permitted_keys stays the
-    # inherited base default (None, unrestricted).
-    structure_omitted_keys: ClassVar[frozenset[str]] = ANTHROPIC_STRUCTURE_OMITTED_KEYS
+    Structured-output schema policy
+    ---------------------------------
+    ``output_structure``, when given, is forwarded to
+    ``output_config.format.schema`` completely unmodified — this engine
+    performs no schema pruning (structured-generation Pass 8). Keywords
+    Anthropic's JSON-Schema mode rejects unconditionally (confirmed live,
+    2026-08-19: ``minimum``, ``maximum``, ``multipleOf``, ``maxItems``) now
+    surface as Anthropic's own API error rather than being silently
+    stripped. ``oneOf`` and an over-constrained ``minItems`` are
+    structurally risky (can collapse a field to an unconstrained ``{}``)
+    and are not validated here; ``additionalProperties`` must be set to
+    exactly ``false`` on every object schema, the caller's own
+    responsibility.
+    """
 
     def __init__(
         self,
@@ -265,8 +273,8 @@ class AnthropicEngine(LLMEngine):
         Anthropic content-list format; (3) append attachment blocks to the
         last user turn; (4) assemble final payload dict with optional
         generation params; (5) if ``output_structure`` is given, wire it into
-        ``output_config.format`` (already pruned by ``clean_structure_template``
-        before this method is called).
+        ``output_config.format`` (the caller's raw schema, forwarded
+        unmodified).
         """
         # 1. Partition system vs. conversation messages
         system_parts = [

@@ -336,7 +336,7 @@ class TestLiteLLMEngine:
         monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
         engine = LiteLLMEngine(model="gpt-4o-mini")
         response = _fake_response(text="Hello world")
-        assert engine._extract_text(response) == "Hello world"
+        assert engine._extract_result(response, requested_structured=False) == "Hello world"
 
     def test_extract_text_none_content_returns_empty_string(
         self, monkeypatch: pytest.MonkeyPatch
@@ -347,7 +347,69 @@ class TestLiteLLMEngine:
             choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
             usage=_fake_usage(),
         )
-        assert engine._extract_text(response) == ""
+        assert engine._extract_result(response, requested_structured=False) == ""
+
+    # ── structured-output payload/extraction ────────────────────────────────
+
+    def test_build_provider_payload_raises_when_structured_output_unsupported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeLiteLLM()
+        fake.supports_response_schema = lambda **kwargs: False
+        monkeypatch.setattr(engine_module, "litellm", fake)
+        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
+
+        with pytest.raises(LLMEngineError, match="structured output"):
+            engine._build_provider_payload(
+                [{"role": "user", "content": "hi"}], {}, {"type": "object"}
+            )
+
+    def test_build_provider_payload_sets_response_format_when_supported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeLiteLLM()
+        fake.supports_response_schema = lambda **kwargs: True
+        monkeypatch.setattr(engine_module, "litellm", fake)
+        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+
+        payload = engine._build_provider_payload(
+            [{"role": "user", "content": "hi"}], {}, schema
+        )
+
+        assert payload["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"schema": schema, "name": "output_structure", "strict": True},
+        }
+
+    def test_build_provider_payload_omits_response_format_when_not_structured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = FakeLiteLLM()
+        monkeypatch.setattr(engine_module, "litellm", fake)
+        engine = LiteLLMEngine(model="gpt-4o-mini", provider="openai")
+
+        payload = engine._build_provider_payload([{"role": "user", "content": "hi"}], {})
+
+        assert "response_format" not in payload
+
+    def test_extract_result_requested_parses_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        response = _fake_response(text='{"a": 1}')
+
+        assert engine._extract_result(response, requested_structured=True) == {"a": 1}
+
+    def test_extract_result_requested_parse_failure_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(engine_module, "litellm", FakeLiteLLM())
+        engine = LiteLLMEngine(model="gpt-4o-mini")
+        response = _fake_response(text="not json")
+
+        assert engine._extract_result(response, requested_structured=True) == "not json"
 
     # ── _extract_token_usage ─────────────────────────────────────────────────
 

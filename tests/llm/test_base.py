@@ -10,6 +10,7 @@ base_module = importlib.import_module("atomic_agentic.llm.base")
 from atomic_agentic.exceptions import LLMEngineError
 from atomic_agentic.llm import LLMEngine
 from atomic_agentic.models.results import LLMModelData, LLMResult, TokenUsage
+from atomic_agentic.utils.core import run_coro_sync
 from ..fake_engines import FakeLLMEngine
 
 
@@ -18,10 +19,21 @@ class TestLLMEngineConstruction:
         engine = FakeLLMEngine()
 
         assert engine.name == "FakeLLMEngine"
-        assert engine.description == "LLM Engine"
-        assert engine.return_type == "str"
+        assert engine.to_dict()["description"] == "LLM Engine"
+        assert engine.description == (
+            "LLM Engine\n\n"
+            "- messages: A non-empty list of chat-message mappings. Each "
+            "mapping must have a string 'role' key (one of 'system', "
+            "'user', 'assistant') and a string 'content' key (free-form "
+            "text).\n"
+            "- output_structure: Optional JSON-Schema-shaped mapping "
+            "requesting provider-native, schema-constrained structured "
+            "output for this call. None (default) requests plain text."
+        )
+        assert engine.return_type == "str | list[Any] | dict[str, Any]"
         assert [(param.name, param.kind, param.type) for param in engine.parameters] == [
-            ("messages", "POSITIONAL_OR_KEYWORD", ("list[dict[str, str]]",))
+            ("messages", "POSITIONAL_OR_KEYWORD", ("list[dict[str, str]]",)),
+            ("output_structure", "KEYWORD_ONLY", ("None", "dict[str, Any]")),
         ]
 
     def test_custom_construction_values_are_stored(self) -> None:
@@ -37,7 +49,17 @@ class TestLLMEngineConstruction:
         data = engine.to_dict()
 
         assert engine.name == "fake_engine"
-        assert engine.description == "Fake test engine."
+        assert data["description"] == "Fake test engine."
+        assert engine.description == (
+            "Fake test engine.\n\n"
+            "- messages: A non-empty list of chat-message mappings. Each "
+            "mapping must have a string 'role' key (one of 'system', "
+            "'user', 'assistant') and a string 'content' key (free-form "
+            "text).\n"
+            "- output_structure: Optional JSON-Schema-shaped mapping "
+            "requesting provider-native, schema-constrained structured "
+            "output for this call. None (default) requests plain text."
+        )
         assert data["timeout_seconds"] == 12.5
         assert data["max_retries"] == 3
         assert data["retry_backoff_base"] == 0.25
@@ -80,6 +102,7 @@ class TestLLMEngineMessagesAndInvoke:
             {
                 "messages": [{"role": "user", "content": "Hello"}],
                 "attachments": {},
+                "output_structure": None,
             }
         ]
 
@@ -293,13 +316,13 @@ class TestLLMEngineAttachments:
 class TestLLMEngineAbstractShouldRetry:
     def test_missing_should_retry_override_raises_type_error(self) -> None:
         class IncompleteEngine(LLMEngine):
-            def _build_provider_payload(self, messages, attachments):
+            def _build_provider_payload(self, messages, attachments, output_structure=None):
                 return {}
 
             def _call_provider(self, payload):
                 return {"text": ""}
 
-            def _extract_text(self, response):
+            def _extract_result(self, response, requested_structured):
                 return ""
 
             def _extract_token_usage(self, response):
@@ -312,6 +335,76 @@ class TestLLMEngineAbstractShouldRetry:
 
         with pytest.raises(TypeError):
             IncompleteEngine()
+
+
+class TestLLMEngineOutputStructure:
+    """Coverage for the output_structure/requested_structured contract."""
+
+    def test_output_structure_none_threads_through_as_none(self) -> None:
+        engine = FakeLLMEngine()
+
+        engine.invoke({"messages": [{"role": "user", "content": "hi"}]})
+
+        assert engine.payloads[-1]["output_structure"] is None
+        assert engine.requested_structured_calls == [False]
+
+    def test_output_structure_dict_threads_through_unmodified(self) -> None:
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        engine = FakeLLMEngine(responses=['{"a": "x"}'])
+
+        engine.invoke(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "output_structure": schema,
+            }
+        )
+
+        # Identity, not just equality -- proves it was forwarded completely
+        # unmodified, not copied or rebuilt.
+        assert engine.payloads[-1]["output_structure"] is schema
+        assert engine.requested_structured_calls == [True]
+
+    def test_async_invoke_threads_output_structure_the_same_way(self) -> None:
+        schema = {"type": "object"}
+        engine = FakeLLMEngine(responses=[" hello ", '{"a": 1}'])
+
+        run_coro_sync(
+            engine.async_invoke({"messages": [{"role": "user", "content": "hi"}]})
+        )
+        run_coro_sync(
+            engine.async_invoke(
+                {
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "output_structure": schema,
+                }
+            )
+        )
+
+        assert engine.payloads[0]["output_structure"] is None
+        assert engine.payloads[1]["output_structure"] is schema
+        assert engine.requested_structured_calls == [False, True]
+
+    def test_extract_accepts_dict_result(self) -> None:
+        engine = FakeLLMEngine(responses=[{"a": 1}])
+
+        result = engine.invoke(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "output_structure": {"type": "object"},
+            }
+        )
+
+        # A dict result must not be passed through .strip() (which would
+        # raise AttributeError on a dict) -- confirms extract() no longer
+        # str-only-validates.
+        assert result.result == {"a": 1}
+        assert isinstance(result.result, dict)
+
+    def test_extract_still_rejects_non_str_list_dict_result(self) -> None:
+        engine = FakeLLMEngine(responses=[123])
+
+        with pytest.raises(LLMEngineError, match="must return str"):
+            engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
 
 
 class TestLLMEngineImmutability:

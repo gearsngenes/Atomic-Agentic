@@ -17,7 +17,6 @@ from typing import (
     List,
     Mapping,
     Optional,
-    ClassVar,
 )
 
 from .base import LLMEngine
@@ -26,7 +25,6 @@ from ..constants.llm import (
     ENGINE_ILLEGAL_MIME_PREFIXES,
     OPENAI_IMAGE_EXTS,
     OPENAI_ALLOWED_EXTS,
-    OPENAI_STRUCTURE_OMITTED_KEYS,
 )
 from ..exceptions import LLMEngineError
 from ..models.results.llm import (
@@ -99,6 +97,17 @@ class OpenAIEngine(LLMEngine):
     ``OpenAITokenUsage`` record. ``_get_model_data`` returns configured model
     identity from ``self.model``.
 
+    Structured-output schema policy
+    ---------------------------------
+    ``output_structure``, when given, is forwarded to the Responses API's
+    ``text.format`` field completely unmodified — this engine performs no
+    schema pruning (structured-generation Pass 8). A schema keyword OpenAI's
+    strict mode rejects (e.g. ``default``) surfaces as OpenAI's own API
+    error rather than being silently stripped. OpenAI's strict mode also
+    requires ``additionalProperties`` be set to exactly ``false`` on every
+    object schema — the caller's own responsibility, not validated or
+    corrected here.
+
     Mutable configuration
     ----------------------
     ``temperature``, ``max_output_tokens``, ``reasoning``, ``truncation``, and
@@ -109,8 +118,6 @@ class OpenAIEngine(LLMEngine):
     (attachment metadata / the SDK client's own timeout option respectively)
     at the moment they're used, so mutating them later wouldn't propagate.
     """
-
-    structure_omitted_keys:ClassVar[frozenset[str]] = OPENAI_STRUCTURE_OMITTED_KEYS
 
     def __init__(
             self,
@@ -163,10 +170,10 @@ class OpenAIEngine(LLMEngine):
         strict:
             Whether structured-output requests (``output_structure``) use
             OpenAI's strict schema-conformance mode. ``True`` (default) is
-            OpenAI's own recommended setting and matches this pass's original
-            behavior; also governs ``structure_omitted_keys`` (``default`` is
-            only stripped from schemas while ``strict`` is ``True`` — OpenAI's
-            own docs tie that restriction specifically to strict mode).
+            OpenAI's own recommended setting. Controls only OpenAI's own
+            strict schema-conformance request mode; it has no effect on what
+            AA sends, since AA no longer prunes or filters
+            ``output_structure`` at all (structured-generation Pass 8).
         inline_cutoff_chars:
             Maximum characters to inline from text/code attachments.
         timeout_seconds:
@@ -324,8 +331,8 @@ class OpenAIEngine(LLMEngine):
     ) -> Dict[str, Any]:
         """
         Build the payload for the OpenAI Responses API from normalized messages,
-        the current attachments snapshot, and (optionally) an already-cleaned
-        structured-output template.
+        the current attachments snapshot, and (optionally) the caller's raw
+        structured-output template, unmodified.
         """
         instructions = self._collect_instructions(messages)
         blocks = self._build_role_blocks(messages)
@@ -334,8 +341,8 @@ class OpenAIEngine(LLMEngine):
         if instructions:
             payload["instructions"] = instructions
         if output_structure is not None:
-            # Already pruned by clean_structure_template upstream (base
-            # LLMEngine._call_model/_call_model_async); stash as-is.
+            # output_structure is the caller's raw schema, forwarded
+            # unmodified; stash as-is.
             payload["output_structure"] = output_structure
 
         # No attachments: avoid creating an artificial empty user turn.
