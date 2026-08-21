@@ -624,6 +624,7 @@ class MistralEngine(LLMEngine):
         base.update({
             "model": self.model,
             "temperature": self.temperature,
+            "strict": self.strict,
             "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return base

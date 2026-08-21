@@ -276,12 +276,15 @@ class TestMistralEngine:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        engine = _make_engine(monkeypatch, temperature=0.7, inline_cutoff_chars=321)
+        engine = _make_engine(
+            monkeypatch, temperature=0.7, inline_cutoff_chars=321, strict=False
+        )
         data = engine.to_dict()
 
         assert data["type"] == "MistralEngine"
         assert data["model"] == "mistral-small-latest"
         assert data["temperature"] == 0.7
+        assert data["strict"] is False
         assert data["inline_cutoff_chars"] == 321
 
     def test_get_model_data(self, monkeypatch: pytest.MonkeyPatch) -> None:
