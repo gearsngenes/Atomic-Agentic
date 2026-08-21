@@ -1,4 +1,4 @@
-"""Attachment validation helper for LLM engine adapters."""
+"""Attachment validation helpers for LLM engine adapters."""
 
 import mimetypes
 import os

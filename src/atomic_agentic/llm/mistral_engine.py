@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 try:
     from mistralai.client import Mistral
@@ -13,6 +14,7 @@ from typing import (
     Dict,
     List,
     Mapping,
+    Optional,
 )
 
 from .base import LLMEngine
@@ -51,9 +53,43 @@ class MistralEngine(LLMEngine):
          * ensure the last user message has a `content` parts array
          * append inline text and signed URL parts to that last user turn
        - call `_call_with_retries` → `_call_provider`
-       - call `_extract_text` to normalize the response.
+       - call `_extract_result` to normalize the response.
     3) `detach(path)` triggers best-effort deletion of uploaded files via
        `_on_detach`, which calls `client.files.delete(file_id=...)`.
+
+    Result extraction
+    ------------------
+    `_extract_result` reuses the same content-join logic as before
+    (`response.choices[0].message.content` may be a plain string or a list
+    of chunk dicts/strings; joined and stripped either way). When the base
+    class signals `requested_structured=True`, the joined text is parsed
+    via `json.loads`; a parse failure falls back to returning the raw text
+    rather than raising, matching the base `LLMEngine` fallback contract
+    (structured-generation Pass 3).
+
+    Structured-output schema policy
+    ---------------------------------
+    `output_structure`, when given, is forwarded to
+    `response_format={"type": "json_schema", "json_schema": {"name":
+    "output_structure", "schema": ..., "strict": self.strict}}` completely
+    unmodified -- this engine performs no schema pruning
+    (structured-generation Pass 8). Mistral's own rejection behavior for
+    `uniqueItems`, `contains`, `propertyNames` under `strict=True`
+    (confirmed live: 400, "Invalid structured output syntax", code 3051)
+    now surfaces directly rather than being silently stripped. `not` and a
+    `required` entry naming an undeclared property raise unconditionally
+    under `strict=True` and are never auto-corrected. Under `strict=False`
+    none of those raise, but enforcement is materially weaker overall --
+    e.g. `additionalProperties: false` itself goes unenforced too,
+    confirmed live. Notable asymmetry, still worth stating: unlike
+    OpenAI/Anthropic, Mistral has no `additionalProperties: false`
+    requirement at all.
+
+    Mutable configuration
+    -----------------------
+    `strict` is a call-time knob, re-read fresh on every structured-output
+    call -- a `@property` with a validating setter, freely settable after
+    construction, mirroring `OpenAIEngine.strict`.
     """
 
     def __init__(
@@ -64,6 +100,7 @@ class MistralEngine(LLMEngine):
             description: str = "Mistral LLM Engine",
             client: Mistral | None = None,
             temperature: float | None = 0.1,
+            strict: bool = True,
             inline_cutoff_chars: int = 200_000,
             *,
             timeout_seconds: float = 600.0,
@@ -92,6 +129,16 @@ class MistralEngine(LLMEngine):
         temperature:
             Sampling temperature for text generation. ``None`` omits the kwarg
             entirely, letting the SDK apply its own default sentinel.
+        strict:
+            Whether structured-output requests (`output_structure`) use
+            Mistral's strict JSON-Schema conformance mode. `True` (default)
+            matches Mistral's own documented recommendation for reliable
+            structured output -- confirmed live that `strict=False` accepts
+            a wider range of schema keywords without error, but also drops
+            real enforcement elsewhere (e.g. `additionalProperties: false`
+            goes unenforced too), so
+            disabling it trades a wider keyword allow-list for materially
+            weaker guarantees generally, not just looser syntax.
         inline_cutoff_chars:
             Maximum characters to inline from text/code attachments.
         timeout_seconds, max_retries,
@@ -136,6 +183,7 @@ class MistralEngine(LLMEngine):
         # 5. Store model and generation config.
         self.model = model
         self.temperature = temperature
+        self.strict = strict
         self._inline_cutoff_chars = int(inline_cutoff_chars)
 
     # ------------------------------------------------------------------ #
@@ -145,6 +193,19 @@ class MistralEngine(LLMEngine):
     def inline_cutoff_chars(self) -> int:
         """Max characters inlined from text attachments; fixed at construction."""
         return self._inline_cutoff_chars
+
+    @property
+    def strict(self) -> bool:
+        """Whether structured-output requests use strict schema conformance."""
+        return self._strict
+
+    @strict.setter
+    def strict(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise LLMEngineError(
+                f"MistralEngine.strict must be a bool, got {type(value).__name__}."
+            )
+        self._strict = value
 
     # ------------------------------------------------------------------ #
     # Attachment validation & preparation
@@ -255,13 +316,19 @@ class MistralEngine(LLMEngine):
             self,
             messages: List[Dict[str, str]],
             attachments: Mapping[str, Mapping[str, Any]],
+            output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Map normalized messages + prepared attachments to Mistral chat schema.
+        Map normalized messages + prepared attachments (+ optionally the
+        caller's raw structured-output template) to Mistral chat schema.
 
         - `messages` are already validated and have lowercase `role` and
           string `content`.
         - `attachments` is a snapshot of `self._attachments` at invoke time.
+        - `output_structure`, when given, is the caller's raw schema,
+          forwarded unmodified and wired into `response_format={"type":
+          "json_schema", "json_schema": {"name": "output_structure",
+          "schema": output_structure, "strict": self.strict}}`.
 
         Inline text from attachments and signed URLs are appended as parts to
         the **last user message** so they are clearly associated with the most
@@ -308,7 +375,17 @@ class MistralEngine(LLMEngine):
             elif kind == "image" and signed_url:
                 parts.append({"type": "image_url", "image_url": signed_url})
 
-        return {"messages": chat_messages}
+        payload: Dict[str, Any] = {"messages": chat_messages}
+        if output_structure is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "output_structure",
+                    "schema": output_structure,
+                    "strict": self.strict,
+                },
+            }
+        return payload
 
     def _call_provider(self, payload: Any) -> Any:
         """
@@ -316,6 +393,7 @@ class MistralEngine(LLMEngine):
 
         Retries and error-wrapping are handled by the shared ``LLMEngine`` template.
         Temperature is omitted when ``None`` so the SDK applies its own default.
+        ``response_format`` is forwarded when present (structured-output requests).
         """
         kwargs: Dict[str, Any] = {
             "model": self.model,
@@ -323,6 +401,8 @@ class MistralEngine(LLMEngine):
         }
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
+        if "response_format" in payload:
+            kwargs["response_format"] = payload["response_format"]
         return self._client.chat.complete(**kwargs)
 
     async def _call_provider_async(self, payload: Any) -> Any:
@@ -332,6 +412,7 @@ class MistralEngine(LLMEngine):
         ``Mistral`` (v2.6.0+) exposes both sync and async paths on the same
         object — no thread offload or isinstance routing needed. Temperature is
         omitted when ``None`` so the SDK applies its own default.
+        ``response_format`` is forwarded when present (structured-output requests).
         """
         kwargs: Dict[str, Any] = {
             "model": self.model,
@@ -339,6 +420,8 @@ class MistralEngine(LLMEngine):
         }
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
+        if "response_format" in payload:
+            kwargs["response_format"] = payload["response_format"]
         return await self._client.chat.complete_async(**kwargs)
 
     def _should_retry(self, exc: Exception, attempt: int) -> bool:
@@ -356,18 +439,36 @@ class MistralEngine(LLMEngine):
             return status in {429, 500, 502, 503, 504}
         return False
 
-    def _extract_text(self, response: Any) -> str:
+    def _extract_result(
+        self, response: Any, requested_structured: bool
+    ) -> str | list[Any] | dict[str, Any]:
         """
-        Extract assistant text from a Mistral chat completion response.
+        Extract the assistant's textual or structured reply from a Mistral
+        chat completion response.
 
-        `response.choices[0].message.content` may be a string or a list of chunks.
+        `response.choices[0].message.content` may be a string or a list of
+        chunks (unchanged from the prior `_extract_text` body). When
+        `requested_structured` is `True`, attempts `json.loads` on the
+        joined text; a parse failure falls back to returning the raw text
+        rather than raising, matching the base `LLMEngine` fallback
+        contract (structured-generation Pass 3).
+
+        Renamed from `_extract_text` (structured-generation Pass 1
+        convention); gains `requested_structured` per the Pass 3 base
+        contract.
         """
         msg = getattr(response.choices[0].message, "content", "")
         if isinstance(msg, list):
             msg = "".join(
                 c.get("text", "") if isinstance(c, dict) else str(c) for c in msg
             )
-        return (msg or "").strip()
+        text = (msg or "").strip()
+        if not requested_structured:
+            return text
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """
@@ -523,6 +624,7 @@ class MistralEngine(LLMEngine):
         base.update({
             "model": self.model,
             "temperature": self.temperature,
+            "strict": self.strict,
             "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return base

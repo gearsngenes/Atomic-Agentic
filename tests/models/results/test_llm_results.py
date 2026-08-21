@@ -214,3 +214,8 @@ class TestLLMResult:
     def test_rejects_wrong_model_data_type(self) -> None:
         with pytest.raises(TypeError, match="model_data"):
             self._make(model_data="not-a-model-data")
+
+    def test_accepts_dict_result(self) -> None:
+        result = self._make(result={"a": 1})
+        assert result.result == {"a": 1}
+        assert result.to_dict()["result"] == {"a": 1}

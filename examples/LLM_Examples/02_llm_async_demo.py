@@ -51,6 +51,7 @@ anthropic_engine = AnthropicEngine(
 # async_invoke dispatches to a thread pool so it participates in gather
 # without blocking the event loop, but gains no I/O concurrency benefit.
 llama_engine = LlamaCppEngine(
+    model_path=os.getenv("LLAMA_MODEL_PATH"),
     repo_id="unsloth/phi-4-GGUF",
     filename="phi-4-Q4_K_M.gguf",
     n_ctx=512,

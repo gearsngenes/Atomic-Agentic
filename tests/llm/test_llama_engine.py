@@ -114,12 +114,58 @@ class TestLlamaCppEngine:
 
         assert payload == {"messages": messages}
         assert fake.chat_completion_calls[-1] == {"messages": messages}
-        assert engine._extract_text(response) == "llama text"
+        assert engine._extract_result(response, requested_structured=False) == "llama text"
 
-    def test_llama_extract_text_rejects_bad_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_llama_extract_result_rejects_bad_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)
         with pytest.raises(LLMEngineError, match="unexpected response shape"):
-            engine._extract_text({"bad": "shape"})
+            engine._extract_result({"bad": "shape"}, requested_structured=False)
+
+    def test_llama_payload_and_call_include_response_format_when_structured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        messages = [{"role": "user", "content": "Hello"}]
+
+        payload = engine._build_provider_payload(messages, {}, schema)
+        assert payload == {
+            "messages": messages,
+            "response_format": {"type": "json_object", "schema": schema},
+        }
+
+        engine._call_provider(payload)
+        fake = FakeLlama.instances[-1]
+        assert fake.chat_completion_calls[-1]["response_format"] == {
+            "type": "json_object",
+            "schema": schema,
+        }
+
+    def test_llama_payload_omits_response_format_when_not_structured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        messages = [{"role": "user", "content": "Hello"}]
+
+        payload = engine._build_provider_payload(messages, {})
+
+        assert "response_format" not in payload
+
+    def test_llama_extract_result_requested_parses_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = {"choices": [{"message": {"content": '{"a": 1}'}}]}
+
+        assert engine._extract_result(response, requested_structured=True) == {"a": 1}
+
+    def test_llama_extract_result_requested_parse_failure_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = {"choices": [{"message": {"content": "not json"}}]}
+
+        assert engine._extract_result(response, requested_structured=True) == "not json"
 
     def test_llama_attachments_are_not_supported(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = _make_engine(monkeypatch)

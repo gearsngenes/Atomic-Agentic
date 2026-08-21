@@ -41,15 +41,21 @@ class FakeLLMEngine(LLMEngine):
         self.detach_calls: list[Mapping[str, Any]] = []
         self.calls: list[list[dict[str, str]]] = []
         self.call_count = 0
+        self.requested_structured_calls: list[bool] = []
 
     def _build_provider_payload(
         self,
         messages: list[dict[str, str]],
         attachments: Mapping[str, Mapping[str, Any]],
+        output_structure: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         copied = [dict(m) for m in messages]
         self.calls.append(copied)
-        payload = {"messages": copied, "attachments": dict(attachments)}
+        payload = {
+            "messages": copied,
+            "attachments": dict(attachments),
+            "output_structure": output_structure,
+        }
         self.payloads.append(payload)
         return payload
 
@@ -75,10 +81,11 @@ class FakeLLMEngine(LLMEngine):
         self.call_count += 1
         return self._resolve_response(payload["messages"])
 
-    def _extract_text(self, response: Any) -> Any:
+    def _extract_result(self, response: Any, requested_structured: bool) -> Any:
         # Deliberately Any, not str: some tests script a non-string response
-        # to exercise the base class's own "_extract_text must return str"
-        # validation.
+        # to exercise the base class's own "_extract_result must return str,
+        # list, or dict" validation.
+        self.requested_structured_calls.append(requested_structured)
         return response
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:

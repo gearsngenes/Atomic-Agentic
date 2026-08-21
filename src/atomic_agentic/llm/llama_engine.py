@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 try:
     from huggingface_hub import hf_hub_download
 except ImportError:
@@ -72,6 +74,51 @@ class LlamaCppEngine(LLMEngine):
     ----------
     ``_get_model_data`` returns the concrete local model path loaded by
     llama.cpp.
+
+    Structured-output schema policy
+    --------------------------------
+    Structured output is requested via ``response_format = {"type":
+    "json_object", "schema": ...}`` on ``create_chat_completion``. Unlike
+    every remote engine in this package, enforcement happens entirely
+    locally: llama-cpp-python's own bundled grammar converter
+    (``llama_cpp.llama_grammar`` -- a separate Python port, not the same
+    codebase as upstream ``ggml-org/llama.cpp``'s own converter or server)
+    compiles the schema into a GBNF grammar and passes it to the underlying
+    completion call as a distinct ``grammar`` sampling parameter. That
+    grammar masks every token the model is allowed to emit at each
+    generation step, so structural conformance is a property of the
+    installed ``llama-cpp-python`` version, not of the loaded model's own
+    training -- confirmed by direct testing across unrelated GGUF models.
+
+    Enforced keywords (verified against the installed converter's source,
+    not just its docs): ``type``, ``enum``, ``const``, ``properties``,
+    ``required``, ``additionalProperties``, ``items``, ``prefixItems``,
+    ``minItems``, ``maxItems``, ``minLength``, ``maxLength``, ``pattern``,
+    ``oneOf``, ``anyOf``, ``allOf``, ``$ref`` (and ``$defs`` via ref
+    resolution), and ``format`` restricted to ``uuid``/``date``/``time``/
+    ``date-time``. Decorative-only keywords -- accepted without error but
+    never enforced -- are ``title``, ``description``, ``examples``,
+    ``default``, and, notably, ``minimum``/``maximum``/
+    ``exclusiveMinimum``/``exclusiveMaximum``. That last group is a real,
+    live-verified limitation of the installed dependency, not a
+    documentation gap: the converter's numeric-type handling carries a
+    literal ``# TODO: support minimum, maximum, exclusiveMinimum,
+    exclusiveMaximum`` and silently ignores those keywords outright. A
+    caller who relies on a numeric bound being enforced gets no error
+    telling them it wasn't.
+
+    This engine needs no override of any kind -- every engine now forwards
+    ``output_structure`` unmodified by default (structured-generation
+    Pass 8 removed AA's own schema-pruning mechanism entirely).
+
+    The compiled grammar constrains sampling only; it is never woven into
+    the prompt or message content the model actually reads. A caller who
+    wants the model to understand what a field is *for* -- not just its
+    name and type -- must still describe that intent in the prompt or
+    system message themselves. Confirmed directly: a prompt with no mention
+    of the requested schema at all still produces structurally valid output
+    against that schema, but with semantically arbitrary field values. This
+    is a known, documented limitation for this pass, not mitigated here.
     """
 
     def __init__(
@@ -260,16 +307,28 @@ class LlamaCppEngine(LLMEngine):
             self,
             messages: List[Dict[str, str]],
             attachments: Mapping[str, Mapping[str, Any]],
+            output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Map normalized messages to llama.cpp's chat completion schema.
+        Map normalized messages (+ optionally the caller's raw
+        structured-output template) to llama.cpp's chat completion schema.
 
         - `messages` are already validated (role/content strings).
         - `attachments` are ignored; this engine does not support attachments.
+        - `output_structure`, when given, is the caller's raw schema,
+          forwarded unmodified, and is wired into
+          `response_format={"type": "json_object", "schema":
+          output_structure}`.
         """
         # llama-cpp-python exposes an OpenAI-compatible chat API, so we
         # simply pass the messages through unchanged.
-        return {"messages": messages}
+        payload: Dict[str, Any] = {"messages": messages}
+        if output_structure is not None:
+            payload["response_format"] = {
+                "type": "json_object",
+                "schema": output_structure,
+            }
+        return payload
 
     def _call_provider(self, payload: Any) -> Any:
         """
@@ -294,6 +353,8 @@ class LlamaCppEngine(LLMEngine):
             chat_kwargs["seed"] = self.seed
         if self.stop is not None:
             chat_kwargs["stop"] = self.stop
+        if "response_format" in payload:
+            chat_kwargs["response_format"] = payload["response_format"]
 
         return self._llm.create_chat_completion(
             messages=payload["messages"],
@@ -309,13 +370,29 @@ class LlamaCppEngine(LLMEngine):
         """
         return attempt <= self._max_retries
 
-    def _extract_text(self, response: Any) -> str:
+    def _extract_result(
+        self, response: Any, requested_structured: bool
+    ) -> str | list[Any] | dict[str, Any]:
         """
-        Extract assistant text from a llama.cpp chat completion response.
+        Extract the assistant's textual OR structured reply from a llama.cpp
+        chat completion response.
 
         Expected structure (OpenAI-compatible):
 
             response["choices"][0]["message"]["content"] -> str
+
+        When `requested_structured` is True, the joined text is parsed via
+        `json.loads`; a parse failure falls back to returning the raw text
+        rather than raising, matching the base `LLMEngine` fallback contract
+        (structured-generation Pass 3). Grammar-constrained decoding makes a
+        genuinely invalid-JSON response effectively impossible here except
+        via `max_tokens` truncation mid-structure -- the fallback exists for
+        that case, not for provider unreliability the way it does for the
+        remote engines.
+
+        Renamed from `_extract_text` (structured-generation Pass 1
+        convention); gains `requested_structured` per the Pass 3 base
+        contract.
         """
         try:
             choices = response["choices"]
@@ -325,9 +402,15 @@ class LlamaCppEngine(LLMEngine):
             content = message.get("content", "")
         except Exception as exc:
             raise LLMEngineError(
-                "LlamaCppEngine._extract_text: unexpected response shape"
+                "LlamaCppEngine._extract_result: unexpected response shape"
             ) from exc
-        return str(content).strip()
+        text = str(content).strip()
+        if not requested_structured:
+            return text
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """

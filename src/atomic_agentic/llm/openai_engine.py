@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import mimetypes
 try:
     from openai import AsyncOpenAI, OpenAI, APIConnectionError, APIStatusError
@@ -23,7 +24,7 @@ from ..constants.llm import (
     ILLEGAL_ATTACHMENT_EXTS,
     ENGINE_ILLEGAL_MIME_PREFIXES,
     OPENAI_IMAGE_EXTS,
-    OPENAI_ALLOWED_EXTS
+    OPENAI_ALLOWED_EXTS,
 )
 from ..exceptions import LLMEngineError
 from ..models.results.llm import (
@@ -82,10 +83,40 @@ class OpenAIEngine(LLMEngine):
 
     Result extraction
     -----------------
-    ``_extract_text`` reads the generated assistant text from the Responses API
-    response. ``_extract_token_usage`` maps Responses API usage fields into an
+    ``_extract_result`` reads the generated assistant reply from the Responses
+    API response. For a plain-text call (``requested_structured=False``) it
+    returns ``response.output_text`` unchanged. For a structured call, it
+    attempts ``json.loads(response.output_text)`` and falls back to
+    ``response.output_text`` on a parse failure rather than raising —
+    detection is the base-supplied ``requested_structured`` flag, not
+    response introspection (Pass 3 revision; previously inspected
+    ``response.text.format.type`` and raised uncaught on parse failure).
+    Renamed from ``_extract_text`` (structured-generation Pass 1 base
+    contract widening).
+    ``_extract_token_usage`` maps Responses API usage fields into an
     ``OpenAITokenUsage`` record. ``_get_model_data`` returns configured model
     identity from ``self.model``.
+
+    Structured-output schema policy
+    ---------------------------------
+    ``output_structure``, when given, is forwarded to the Responses API's
+    ``text.format`` field completely unmodified — this engine performs no
+    schema pruning (structured-generation Pass 8). A schema keyword OpenAI's
+    strict mode rejects (e.g. ``default``) surfaces as OpenAI's own API
+    error rather than being silently stripped. OpenAI's strict mode also
+    requires ``additionalProperties`` be set to exactly ``false`` on every
+    object schema — the caller's own responsibility, not validated or
+    corrected here.
+
+    Mutable configuration
+    ----------------------
+    ``temperature``, ``max_output_tokens``, ``reasoning``, ``truncation``, and
+    ``strict`` are call-time Responses API knobs, re-read fresh on every call —
+    each is a ``@property`` with a validating setter, freely settable after
+    construction. ``inline_cutoff_chars`` and (base) ``timeout_seconds`` stay
+    read-only instead: both are baked into already-constructed state
+    (attachment metadata / the SDK client's own timeout option respectively)
+    at the moment they're used, so mutating them later wouldn't propagate.
     """
 
     def __init__(
@@ -99,6 +130,7 @@ class OpenAIEngine(LLMEngine):
             max_output_tokens: int | None = None,
             reasoning: dict[str, str] | None = None,
             truncation: str | None = None,
+            strict: bool = True,
             inline_cutoff_chars: int = 200_000,
             *,
             timeout_seconds: float = 600.0,
@@ -135,6 +167,13 @@ class OpenAIEngine(LLMEngine):
             When set, ``temperature`` is suppressed regardless of its value.
         truncation:
             Optional truncation strategy string (e.g. ``"auto"``).
+        strict:
+            Whether structured-output requests (``output_structure``) use
+            OpenAI's strict schema-conformance mode. ``True`` (default) is
+            OpenAI's own recommended setting. Controls only OpenAI's own
+            strict schema-conformance request mode; it has no effect on what
+            AA sends, since AA no longer prunes or filters
+            ``output_structure`` at all (structured-generation Pass 8).
         inline_cutoff_chars:
             Maximum characters to inline from text/code attachments.
         timeout_seconds:
@@ -178,12 +217,15 @@ class OpenAIEngine(LLMEngine):
             client if client is not None else OpenAI(**_ckw)
         )
 
-        # Step 5 — Store model and Responses API config.
+        # Step 5 — Store model and Responses API config. The five knobs below
+        # go through their own property setters (validation lives in one
+        # place, shared by construction and later mutation).
         self.model = model
         self.temperature = temperature
-        self._max_output_tokens = max_output_tokens
-        self._reasoning = reasoning
-        self._truncation = truncation
+        self.max_output_tokens = max_output_tokens
+        self.reasoning = reasoning
+        self.truncation = truncation
+        self.strict = strict
         self._inline_cutoff_chars = int(inline_cutoff_chars)
 
     # ------------------------------------------------------------------ #
@@ -193,6 +235,71 @@ class OpenAIEngine(LLMEngine):
     def inline_cutoff_chars(self) -> int:
         """Max characters inlined from text attachments; fixed at construction."""
         return self._inline_cutoff_chars
+
+    @property
+    def temperature(self) -> float | None:
+        """Responses API sampling temperature; ``None`` omits the parameter."""
+        return self._temperature
+
+    @temperature.setter
+    def temperature(self, value: float | None) -> None:
+        if value is not None and not isinstance(value, (int, float)):
+            raise LLMEngineError(
+                f"OpenAIEngine.temperature must be a number or None, got {type(value).__name__}."
+            )
+        self._temperature = value
+
+    @property
+    def max_output_tokens(self) -> int | None:
+        """Maximum output tokens to generate; ``None`` omits the parameter."""
+        return self._max_output_tokens
+
+    @max_output_tokens.setter
+    def max_output_tokens(self, value: int | None) -> None:
+        if value is not None and not isinstance(value, int):
+            raise LLMEngineError(
+                f"OpenAIEngine.max_output_tokens must be an int or None, got {type(value).__name__}."
+            )
+        self._max_output_tokens = value
+
+    @property
+    def reasoning(self) -> dict[str, str] | None:
+        """Reasoning configuration dict; suppresses ``temperature`` when set."""
+        return self._reasoning
+
+    @reasoning.setter
+    def reasoning(self, value: dict[str, str] | None) -> None:
+        if value is not None and not isinstance(value, dict):
+            raise LLMEngineError(
+                f"OpenAIEngine.reasoning must be a dict or None, got {type(value).__name__}."
+            )
+        self._reasoning = value
+
+    @property
+    def truncation(self) -> str | None:
+        """Truncation strategy string; ``None`` omits the parameter."""
+        return self._truncation
+
+    @truncation.setter
+    def truncation(self, value: str | None) -> None:
+        if value is not None and not isinstance(value, str):
+            raise LLMEngineError(
+                f"OpenAIEngine.truncation must be a str or None, got {type(value).__name__}."
+            )
+        self._truncation = value
+
+    @property
+    def strict(self) -> bool:
+        """Whether structured-output requests use strict schema conformance."""
+        return self._strict
+
+    @strict.setter
+    def strict(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise LLMEngineError(
+                f"OpenAIEngine.strict must be a bool, got {type(value).__name__}."
+            )
+        self._strict = value
 
     # ------------------------------------------------------------------ #
     # Overrides / template hooks
@@ -220,10 +327,12 @@ class OpenAIEngine(LLMEngine):
             self,
             messages: List[Dict[str, str]],
             attachments: Mapping[str, Mapping[str, Any]],
+            output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Build the payload for the OpenAI Responses API from normalized messages
-        and the current attachments snapshot.
+        Build the payload for the OpenAI Responses API from normalized messages,
+        the current attachments snapshot, and (optionally) the caller's raw
+        structured-output template, unmodified.
         """
         instructions = self._collect_instructions(messages)
         blocks = self._build_role_blocks(messages)
@@ -231,6 +340,10 @@ class OpenAIEngine(LLMEngine):
         payload: Dict[str, Any] = {"blocks": blocks}
         if instructions:
             payload["instructions"] = instructions
+        if output_structure is not None:
+            # output_structure is the caller's raw schema, forwarded
+            # unmodified; stash as-is.
+            payload["output_structure"] = output_structure
 
         # No attachments: avoid creating an artificial empty user turn.
         if not attachments:
@@ -291,14 +404,24 @@ class OpenAIEngine(LLMEngine):
         }
         if instructions:
             kwargs["instructions"] = instructions
-        if self.temperature is not None and self._reasoning is None:
+        if self.temperature is not None and self.reasoning is None:
             kwargs["temperature"] = self.temperature
-        if self._max_output_tokens is not None:
-            kwargs["max_output_tokens"] = self._max_output_tokens
-        if self._reasoning is not None:
-            kwargs["reasoning"] = self._reasoning
-        if self._truncation is not None:
-            kwargs["truncation"] = self._truncation
+        if self.max_output_tokens is not None:
+            kwargs["max_output_tokens"] = self.max_output_tokens
+        if self.reasoning is not None:
+            kwargs["reasoning"] = self.reasoning
+        if self.truncation is not None:
+            kwargs["truncation"] = self.truncation
+        output_structure = payload.get("output_structure")
+        if output_structure is not None:
+            kwargs["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": "output_structure",
+                    "schema": output_structure,
+                    "strict": self.strict,
+                }
+            }
         return kwargs
 
     def _call_provider(self, payload: Dict[str, Any]) -> Any:
@@ -336,13 +459,30 @@ class OpenAIEngine(LLMEngine):
             return exc.status_code in {429, 500, 502, 503, 504}
         return False
 
-    def _extract_text(self, response: Any) -> str:
+    def _extract_result(
+        self, response: Any, requested_structured: bool
+    ) -> str | list[Any] | dict[str, Any]:
         """
-        Extract the assistant's textual reply from a Responses API response object.
+        Extract the assistant's textual or structured reply from a Responses
+        API response object.
 
-        Returns the empty string when no text is present (does not raise).
+        ``requested_structured`` is the base-supplied signal (was
+        ``output_structure`` given for this call) — authoritative, since it's
+        the same condition that decided whether ``_build_call_kwargs`` set
+        ``text.format`` in the first place; no response introspection needed.
+        When not requested, returns ``response.output_text`` unchanged (empty
+        string when no text is present; does not raise). When requested,
+        attempts ``json.loads(response.output_text)``; a parse failure
+        (shouldn't happen under ``strict: True``, but possible under e.g.
+        output-token truncation) falls back to returning the raw text instead
+        of raising.
         """
-        return response.output_text
+        if not requested_structured:
+            return response.output_text
+        try:
+            return json.loads(response.output_text)
+        except json.JSONDecodeError:
+            return response.output_text
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """
@@ -602,9 +742,10 @@ class OpenAIEngine(LLMEngine):
         base.update({
             "model": self.model,
             "temperature": self.temperature,
-            "max_output_tokens": self._max_output_tokens,
-            "reasoning": self._reasoning,
-            "truncation": self._truncation,
+            "max_output_tokens": self.max_output_tokens,
+            "reasoning": self.reasoning,
+            "truncation": self.truncation,
+            "strict": self.strict,
             "inline_cutoff_chars": self._inline_cutoff_chars,
         })
         return base

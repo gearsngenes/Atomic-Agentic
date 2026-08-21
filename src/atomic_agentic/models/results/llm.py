@@ -301,21 +301,22 @@ class LlamaCppModelData(LocalLLMModelData):
 @dataclass(frozen=True, slots=True)
 class LLMResult(AtomicResult):
     """
-    Successful string-only LLM generation result.
+    Successful LLM generation result.
 
-    ``LLMResult.result`` is always the generated text string. Token accounting
+    ``LLMResult.result`` is the generated assistant reply: a plain ``str`` for
+    ordinary calls, or a ``list``/``dict`` when the engine's ``output_structure``
+    parameter requested provider-native structured output. Token accounting
     and configured model identity are stored as explicit nested result records.
-    This class does not model structured generation, parsed output, or provider
-    raw responses.
+    This class does not model provider raw responses.
     """
 
     token_usage: TokenUsage
     model_data: LLMModelData
 
     def __post_init__(self) -> None:
-        if not isinstance(self.result, str):
+        if not isinstance(self.result, (str, list, dict)):
             raise TypeError(
-                f"result must be a str, got {type(self.result).__name__}."
+                f"result must be a str, list, or dict, got {type(self.result).__name__}."
             )
 
         if not isinstance(self.token_usage, TokenUsage):

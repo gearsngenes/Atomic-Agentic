@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 try:
     from google import genai
@@ -55,17 +56,29 @@ class GeminiEngine(LLMEngine):
        - Attachment metadata stores the returned File object and its resource
          name.
 
-    2) ``invoke({"messages": messages})`` runs the shared ``LLMResult``
-       lifecycle:
+    2) ``invoke({"messages": messages, "output_structure": ...})`` runs the
+       shared ``LLMResult`` lifecycle:
        - normalize chat messages;
        - snapshot current attachments;
-       - build the Gemini provider payload;
+       - build the Gemini provider payload, threading a cleaned
+         ``output_structure`` (when given) through to ``response_mime_type``/
+         ``response_json_schema`` on ``GenerateContentConfig``;
        - call ``client.models.generate_content(...)``;
        - extract assistant text, token usage, and configured model data;
        - return ``LLMResult``.
 
     3) ``detach(path)`` calls ``_on_detach`` for best-effort file deletion via
        ``client.files.delete``.
+
+    Result extraction
+    ------------------
+    ``_extract_result`` returns ``response.text`` unchanged for a
+    non-structured call (``requested_structured=False``). For a structured
+    call, it attempts ``json.loads(response.text)`` and falls back to
+    ``response.text`` on ``json.JSONDecodeError`` or ``TypeError`` (the
+    latter covers ``response.text is None`` — no text parts in the
+    response), rather than raising. Renamed from ``_extract_text`` (Pass 1
+    base rename, applied this pass).
 
     Token usage
     -----------
@@ -78,6 +91,14 @@ class GeminiEngine(LLMEngine):
     Model data
     ----------
     ``_get_model_data`` returns configured model identity from ``self.model``.
+
+    Structured-output schema policy
+    ---------------------------------
+    ``output_structure``, when given, is forwarded to
+    ``response_json_schema`` completely unmodified — this engine performs
+    no schema filtering (structured-generation Pass 8). A keyword Gemini's
+    JSON-Schema dialect doesn't support surfaces as Gemini's own API
+    behavior (accept, ignore, or reject — unconfirmed by this pass).
     """
 
     def __init__(
@@ -320,29 +341,41 @@ class GeminiEngine(LLMEngine):
             self,
             messages: List[Dict[str, str]],
             attachments: Mapping[str, Mapping[str, Any]],
+            output_structure: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Build the payload for ``generate_content`` from normalized messages and the
-        current attachments snapshot.
+        Build the payload for ``generate_content`` from normalized messages, the
+        current attachments snapshot, and (optionally) the caller's raw
+        structured-output template, unmodified.
 
         System messages are extracted into ``system_instruction`` for
         ``GenerateContentConfig``; all other turns are returned as
-        ``list[Content]`` via ``_build_content_list``.
+        ``list[Content]`` via ``_build_content_list``. ``output_structure``
+        is the caller's raw schema, forwarded unmodified; stashed as-is.
         """
         system_instruction = self._collect_system(messages)
         contents = self._build_content_list(messages, attachments)
         return {
             "system_instruction": system_instruction,
             "contents": contents,
+            "output_structure": output_structure,
         }
 
     def _build_generate_config(
             self,
             system_instruction: str | None,
+            output_structure: Optional[Dict[str, Any]] = None,
     ) -> genai.types.GenerateContentConfig:
         """
-        Build a ``GenerateContentConfig`` from stored engine params and the per-call
-        ``system_instruction``. Fields are omitted when their stored value is ``None``.
+        Build a ``GenerateContentConfig`` from stored engine params, the per-call
+        ``system_instruction``, and (optionally) the caller's raw
+        structured-output template, unmodified. Fields are omitted when their
+        stored value is ``None``.
+
+        When ``output_structure`` is given, ``response_mime_type`` and
+        ``response_json_schema`` are set together — mime type alone is only a
+        soft hint, not a real constraint, so the two are never sent
+        independently.
         """
         cfg: Dict[str, Any] = {}
         if system_instruction:
@@ -353,11 +386,16 @@ class GeminiEngine(LLMEngine):
             cfg["max_output_tokens"] = self._max_output_tokens
         if self._thinking_config is not None:
             cfg["thinking_config"] = genai.types.ThinkingConfig(**self._thinking_config)
+        if output_structure is not None:
+            cfg["response_mime_type"] = "application/json"
+            cfg["response_json_schema"] = output_structure
         return genai.types.GenerateContentConfig(**cfg)
 
     def _call_provider(self, payload: Dict[str, Any]) -> Any:
         """Perform a single synchronous ``models.generate_content`` call."""
-        cfg = self._build_generate_config(payload.get("system_instruction"))
+        cfg = self._build_generate_config(
+            payload.get("system_instruction"), payload.get("output_structure")
+        )
         return self._client.models.generate_content(
             model=self.model,
             contents=payload["contents"],
@@ -371,7 +409,9 @@ class GeminiEngine(LLMEngine):
         No thread offload needed — ``genai.Client`` exposes both sync and async
         paths on the same object.
         """
-        cfg = self._build_generate_config(payload.get("system_instruction"))
+        cfg = self._build_generate_config(
+            payload.get("system_instruction"), payload.get("output_structure")
+        )
         return await self._client.aio.models.generate_content(
             model=self.model,
             contents=payload["contents"],
@@ -391,13 +431,31 @@ class GeminiEngine(LLMEngine):
             return exc.code == 429
         return False
 
-    def _extract_text(self, response: Any) -> str:
+    def _extract_result(
+        self, response: Any, requested_structured: bool
+    ) -> str | list[Any] | dict[str, Any]:
         """
-        Extract the assistant's textual reply from a Gen AI SDK response object.
+        Extract the assistant's textual or structured reply from a Gen AI SDK
+        response object.
 
-        The SDK exposes a `.text` convenience property for text responses.
+        ``requested_structured`` is the base-supplied signal (was
+        ``output_structure`` given for this call) — Gemini's own response
+        object doesn't echo back the requested config, so this is the only
+        reliable detection mechanism (the SDK's own ``response.parsed`` field
+        conflates "wasn't requested" and "requested but failed to parse" into
+        the same ``None``, since it swallows ``JSONDecodeError`` internally).
+        When not requested, returns ``response.text`` unchanged. When
+        requested, attempts ``json.loads(response.text)``; a parse failure —
+        or ``response.text`` being ``None`` (no text parts in the response,
+        raises ``TypeError`` from ``json.loads``) — falls back to returning
+        ``response.text`` as-is instead of raising.
         """
-        return response.text
+        if not requested_structured:
+            return response.text
+        try:
+            return json.loads(response.text)
+        except (json.JSONDecodeError, TypeError):
+            return response.text
 
     def _extract_token_usage(self, response: Any) -> TokenUsage:
         """

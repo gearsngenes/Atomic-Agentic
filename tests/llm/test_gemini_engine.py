@@ -198,7 +198,7 @@ class TestGeminiEngine:
         assert call["model"] == "gemini-2.5-flash"
         assert call["config"].temperature == 0.4
         assert call["config"].system_instruction == "Sys."
-        assert engine._extract_text(response) == " gemini text "
+        assert engine._extract_result(response, requested_structured=False) == " gemini text "
 
     def test_call_provider_async_uses_aio_path(
         self, monkeypatch: pytest.MonkeyPatch
@@ -212,7 +212,64 @@ class TestGeminiEngine:
 
         assert fake.aio_generate_calls
         assert not fake.generate_calls
-        assert engine._extract_text(response) == " gemini async text "
+        assert engine._extract_result(response, requested_structured=False) == " gemini async text "
+
+    def test_build_generate_config_pairs_mime_type_and_json_schema(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+
+        cfg = engine._build_generate_config(None, schema)
+
+        assert cfg.response_mime_type == "application/json"
+        assert cfg.response_json_schema == schema
+
+    def test_build_generate_config_omits_both_when_no_output_structure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+
+        cfg = engine._build_generate_config(None)
+
+        assert cfg.response_mime_type is None
+        assert cfg.response_json_schema is None
+
+    def test_extract_result_not_requested_returns_text_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(text=" gemini text ")
+
+        assert engine._extract_result(response, requested_structured=False) == " gemini text "
+
+    def test_extract_result_requested_parses_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(text='{"a": 1}')
+
+        assert engine._extract_result(response, requested_structured=True) == {"a": 1}
+
+    def test_extract_result_requested_json_decode_error_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(text="not json")
+
+        assert engine._extract_result(response, requested_structured=True) == "not json"
+
+    def test_extract_result_requested_none_text_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # json.loads(None) raises TypeError, caught by the same except clause
+        # as JSONDecodeError -- proves the documented (JSONDecodeError,
+        # TypeError) fallback branch, distinct from every other engine's
+        # single-exception fallback.
+        engine = _make_engine(monkeypatch)
+        response = SimpleNamespace(text=None)
+
+        assert engine._extract_result(response, requested_structured=True) is None
 
     def test_temperature_none_omits_from_config(
         self, monkeypatch: pytest.MonkeyPatch
