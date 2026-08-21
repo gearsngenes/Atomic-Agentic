@@ -5,6 +5,46 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a29] - 2026-08-21
+
+Every LLM provider adapter now supports provider-native, schema-constrained
+structured output through one consistent mechanism on the base `LLMEngine`
+class — no new engine subclasses. This is a breaking release:
+`LLMEngine.return_type` widens unconditionally for every instance, and the
+abstract text-extraction hook subclass authors must implement is renamed
+and re-signatured. An internal schema auto-pruning mechanism was built
+during development and removed again before release, in favor of
+forwarding caller schemas unmodified and letting an illegal keyword fail as
+that provider's own native error.
+
+### Added
+
+- `output_structure: dict[str, Any] | None` — new runtime parameter on
+  every `LLMEngine.invoke()`/`async_invoke()` call, requesting
+  schema-constrained structured output for that call. Supported across all
+  six engines: `OpenAIEngine`, `GeminiEngine`, `AnthropicEngine`,
+  `MistralEngine`, `LlamaCppEngine`, `LiteLLMEngine`.
+- `OpenAIEngine`/`MistralEngine` gain a mutable `strict: bool` property
+  governing structured-output schema-conformance strictness, read fresh at
+  call time (not baked in at construction).
+- New example `examples/LLM_Examples/05_structured_output_demo.py`,
+  demonstrating `output_structure` end to end across all five non-LiteLLM
+  engines.
+- `LLAMA_MODEL_PATH` environment variable, read by every example that
+  constructs `LlamaCppEngine`: when set, the local model file is used
+  directly instead of being re-resolved through Hugging Face on every run.
+
+### Changed
+
+- breaking: `LLMEngine.return_type` widens unconditionally from `"str"` to
+  `"str | list[Any] | dict[str, Any]"` for every engine instance, whether
+  or not a given caller ever uses `output_structure`.
+- breaking: the abstract `LLMEngine._extract_text(response) -> str` hook
+  subclasses must implement is renamed to `_extract_result(response,
+  requested_structured) -> str | list[Any] | dict[str, Any]`. Any direct
+  `LLMEngine` subclass outside this package must update its override.
+- `LLMResult.result` now accepts `str | list | dict` (was `str`-only).
+
 ## [2.0.0a28] - 2026-08-17
 
 New, additive `a2a-sdk`-backed A2A integration (`A2AClientHub`,
