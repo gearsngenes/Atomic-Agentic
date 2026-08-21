@@ -80,6 +80,43 @@ class TestOpenAIImmutability:
             engine.inline_cutoff_chars = 999  # type: ignore[misc]
 
 
+class TestOpenAIValidatingProperties:
+    def test_temperature_setter_rejects_non_number(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        with pytest.raises(LLMEngineError, match="temperature"):
+            engine.temperature = "not-a-number"  # type: ignore[assignment]
+
+    def test_max_output_tokens_setter_rejects_non_int(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        with pytest.raises(LLMEngineError, match="max_output_tokens"):
+            engine.max_output_tokens = "not-an-int"  # type: ignore[assignment]
+
+    def test_reasoning_setter_rejects_non_dict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        with pytest.raises(LLMEngineError, match="reasoning"):
+            engine.reasoning = "not-a-dict"  # type: ignore[assignment]
+
+    def test_truncation_setter_rejects_non_str(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        with pytest.raises(LLMEngineError, match="truncation"):
+            engine.truncation = 123  # type: ignore[assignment]
+
+    def test_strict_setter_rejects_non_bool(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        with pytest.raises(LLMEngineError, match="strict"):
+            engine.strict = "not-a-bool"  # type: ignore[assignment]
+
+
 class TestOpenAIEngine:
     def test_missing_openai_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(openai_module, "OpenAI", None)

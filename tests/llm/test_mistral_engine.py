@@ -69,6 +69,15 @@ class TestMistralImmutability:
             engine.inline_cutoff_chars = 999  # type: ignore[misc]
 
 
+class TestMistralValidatingProperties:
+    def test_strict_setter_rejects_non_bool(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        engine = _make_engine(monkeypatch)
+        with pytest.raises(LLMEngineError, match="strict"):
+            engine.strict = "not-a-bool"  # type: ignore[assignment]
+
+
 class TestMistralEngine:
     def test_missing_mistral_sdk_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(mistral_module, "Mistral", None)
