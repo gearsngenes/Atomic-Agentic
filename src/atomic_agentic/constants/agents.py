@@ -39,7 +39,7 @@ TOOL_FIELD = "tool"
 ARGS_FIELD = "args"
 AWAIT_FIELD = "await"
 DURATION_FIELD = "duration"
-DESCRIPTION_FIELD = "description"
+REASON_FIELD = "reason"
 
 RETURN_VALUE_FIELD = "val"
 
@@ -72,14 +72,14 @@ REQUIRED_PLAN_FIELDS = REQUIRED_BASE_STEP_FIELDS
 REACT_FIELDS = BASE_STEP_FIELDS | frozenset(
     {
         DURATION_FIELD,
-        DESCRIPTION_FIELD,
+        REASON_FIELD,
     }
 )
 
 REQUIRED_REACT_FIELDS = REQUIRED_BASE_STEP_FIELDS | frozenset(
     {
         DURATION_FIELD,
-        DESCRIPTION_FIELD,
+        REASON_FIELD,
     }
 )
 
@@ -151,7 +151,7 @@ __all__ = [
     "ARGS_FIELD",
     "AWAIT_FIELD",
     "DURATION_FIELD",
-    "DESCRIPTION_FIELD",
+    "REASON_FIELD",
     "RETURN_VALUE_FIELD",
     # LLM step schemas
     "BASE_STEP_FIELDS",

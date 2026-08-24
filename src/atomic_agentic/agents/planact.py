@@ -40,6 +40,7 @@ For the shared iteration loop, blackboard management, and tool registry see
 from __future__ import annotations
 from typing import Any, Callable, Literal, Mapping, Optional
 
+import json
 import logging
 
 from .toolagent import ToolAgent
@@ -57,7 +58,7 @@ from ..exceptions import ToolAgentError
 from ..models.agents.tasks import PlanActTask
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord
-from ..utils.agents import extract_dependencies
+from ..utils.agents import extract_dependencies, format_generation_issues
 
 logger = logging.getLogger(__name__)
 
@@ -247,13 +248,15 @@ class PlanActAgent(ToolAgent):
         cache_blackboard: list[BlackboardSlot],
         valid_cache_indices: frozenset[int],
         failed_cache_indices: frozenset[int],
-    ) -> str | None:
+    ) -> list[str]:
         """
         Validate a normalized PlanAct planned-slot list.
 
         Checks only properties that ``_normalize_planned_slots`` does not
         guarantee: tool existence, step dependency graph, await_step ordering,
-        tool_calls_limit, and cache reference validity.
+        tool_calls_limit, and cache reference validity. Every applicable
+        check, across every slot, is evaluated independently and
+        accumulated -- none short-circuits the rest.
 
         Parameters
         ----------
@@ -273,11 +276,9 @@ class PlanActAgent(ToolAgent):
 
         Returns
         -------
-        str
-            LLM-facing feedback string describing the first invariant violation
-            found. No class/name prefix.
-        None
-            All invariants satisfied.
+        list[str]
+            LLM-facing feedback strings, one per invariant violation found.
+            Empty when every invariant is satisfied.
 
         Raises
         ------
@@ -297,10 +298,11 @@ class PlanActAgent(ToolAgent):
 
         return_name = RETURN_TOOL_FULL_NAME
         cache_len = len(cache_blackboard)
+        issues: list[str] = []
 
         for i, slot in enumerate(planned_slots):
             if not self.has_tool(slot.tool):
-                return (
+                issues.append(
                     f"plan step {i} uses an unknown tool: {slot.tool!r}. "
                     "Use only tools from the available list."
                 )
@@ -311,20 +313,20 @@ class PlanActAgent(ToolAgent):
                 step_refs = extract_dependencies(slot.args, placeholder_pattern=self.STEP_REF_PATTERN)
                 bad_step_refs = [ref for ref in step_refs if ref < 0 or ref >= i]
                 if bad_step_refs:
-                    return (
+                    issues.append(
                         f"return step has invalid step references {sorted(set(bad_step_refs))!r} "
                         f"in args; step refs must be earlier steps in the current plan (< {i})."
                     )
             else:
                 bad_step_deps = [dep for dep in slot.step_dependencies if dep < 0 or dep >= i]
                 if bad_step_deps:
-                    return (
+                    issues.append(
                         f"plan step {i} has invalid step dependencies {sorted(set(bad_step_deps))!r}; "
                         f"all deps must be earlier steps (< {i})."
                     )
 
             if slot.await_step is not NO_VAL and slot.await_step >= i:
-                return (
+                issues.append(
                     f"plan step {i} has an invalid await_step {slot.await_step!r}; "
                     f"await_step must reference an earlier step (< {i})."
                 )
@@ -334,7 +336,7 @@ class PlanActAgent(ToolAgent):
             # Category 1: index outside the cache entirely.
             out_of_range = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
             if out_of_range:
-                return (
+                issues.append(
                     f"plan step {i} references cache indices that do not exist: "
                     f"{sorted(set(out_of_range))!r} (cache has {cache_len} entries)."
                 )
@@ -346,7 +348,7 @@ class PlanActAgent(ToolAgent):
                     f"entry {idx} ({cache_blackboard[idx].tool}): {cache_blackboard[idx].error}"
                     for idx in sorted(set(failed_in_conv))
                 )
-                return (
+                issues.append(
                     f"plan step {i} references cache entries that failed in this "
                     f"conversation and cannot be used: {details}."
                 )
@@ -359,7 +361,7 @@ class PlanActAgent(ToolAgent):
                 and idx not in failed_cache_indices
             ]
             if out_of_conv:
-                return (
+                issues.append(
                     f"plan step {i} references cache indices not part of this "
                     f"conversation: {sorted(set(out_of_conv))!r}."
                 )
@@ -368,39 +370,63 @@ class PlanActAgent(ToolAgent):
         if limit is not None:
             non_return = sum(1 for slot in planned_slots if slot.tool != return_name)
             if non_return > limit:
-                return (
+                issues.append(
                     f"plan exceeds the tool_calls_limit of {limit} "
                     f"(planned {non_return} non-return steps). Reduce the number of tool calls."
                 )
 
-        return None
+        return issues
 
     # ------------------------------------------------------------------ #
     # Private helpers
     # ------------------------------------------------------------------ #
-    def _process_plan_output(
-        self,
-        *,
-        parsed: Any,
-        cache_blackboard: list[BlackboardSlot],
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> list[BlackboardSlot] | str:
+    def _validate_generation_output(self, raw_output: str, *, task: PlanActTask) -> list[BlackboardSlot] | str:
         """
-        Parse, normalize, and validate a pre-extracted plan value into planned slots.
+        Concrete implementation of ``ToolAgent._validate_generation_output``
+        for PlanAct. Owns JSON decoding and the entire plan-validation
+        pipeline; supersedes the old ``_process_plan_output``.
 
-        Returns ``list[BlackboardSlot]`` on success.  Returns a ``str`` feedback
-        message on any structural or spec-validation failure; the string is written
-        for LLM consumption and is injected as a correction turn on retry.
+        Whole-plan comprehensive: every step's own structural/type problems
+        are collected across the *entire* plan before returning (not just
+        the first offending step), and every cross-step semantic problem
+        (``_validate_planned_slots``) is likewise collected in full.
+
+        1. Attempt ``self._extract_from_json_string(raw_output)``. On
+           ``json.JSONDecodeError``: return the single-item decode-error
+           feedback.
+        2. If ``parsed`` is not a non-empty list: return the single-item
+           plan-shape feedback.
+        3. For each step: structural/type-validate via
+           ``_validate_tool_step_dict``; accumulate every step's issues
+           across the whole plan rather than stopping at the first.
+        4. If any accumulated: return the joined feedback -- normalization
+           and cross-step validation both assume a fully structurally-valid
+           slot list, which isn't true yet.
+        5. Normalize (``_normalize_planned_slots``) -- still a single
+           fail-fast check (ambiguous multi-return-step shape blocks any
+           further validation this attempt).
+        6. Cross-step validation (``_validate_planned_slots``) -- now
+           accumulates across every slot; return the joined feedback if
+           non-empty.
+        7. Return the normalized, validated slot list.
         """
+        try:
+            parsed = self._extract_from_json_string(raw_output)
+        except json.JSONDecodeError as exc:
+            return format_generation_issues(
+                [f"Your output could not be parsed as valid JSON. Decoder error: {exc}"]
+            )
+
         if not isinstance(parsed, list) or not parsed:
-            return "The plan must be a non-empty JSON array."
+            return format_generation_issues(["The plan must be a non-empty JSON array."])
 
+        issues: list[str] = []
         planned_slots: list[BlackboardSlot] = []
 
         for i, item in enumerate(parsed):
             if not isinstance(item, Mapping):
-                return f"Step {i} must be a JSON object (dict), not {type(item).__name__!r}."
+                issues.append(f"Step {i} must be a JSON object (dict), not {type(item).__name__!r}.")
+                continue
 
             step_dict = self._validate_tool_step_dict(
                 item,
@@ -409,8 +435,9 @@ class PlanActAgent(ToolAgent):
                 required_fields=REQUIRED_PLAN_FIELDS,
                 context="plan step",
             )
-            if isinstance(step_dict, str):
-                return step_dict
+            if isinstance(step_dict, list):
+                issues.extend(step_dict)
+                continue
 
             slot = self._tool_step_dict_to_slot(
                 step_dict,
@@ -420,18 +447,21 @@ class PlanActAgent(ToolAgent):
             )
             planned_slots.append(slot)
 
+        if issues:
+            return format_generation_issues(issues)
+
         normalized = self._normalize_planned_slots(planned_slots)
         if isinstance(normalized, str):
             return normalized
 
-        feedback = self._validate_planned_slots(
+        issues = self._validate_planned_slots(
             planned_slots=normalized,
-            cache_blackboard=cache_blackboard,
-            valid_cache_indices=valid_cache_indices,
-            failed_cache_indices=failed_cache_indices,
+            cache_blackboard=self._blackboard,
+            valid_cache_indices=task.valid_cache_indices,
+            failed_cache_indices=task.failed_cache_indices,
         )
-        if feedback is not None:
-            return feedback
+        if issues:
+            return format_generation_issues(issues)
 
         return normalized
 
@@ -476,40 +506,12 @@ class PlanActAgent(ToolAgent):
             onto ``task`` — the caller (``think()``/``async_think()``)
             compiles batches and assigns them).
         """
-        return self._run_generation_retry_loop(
-            task=task,
-            validate=lambda parsed: self._process_plan_output(
-                parsed=parsed,
-                cache_blackboard=self._blackboard,
-                valid_cache_indices=task.valid_cache_indices,
-                failed_cache_indices=task.failed_cache_indices,
-            ),
-            json_error_template=(
-                "Your output could not be parsed as valid JSON.\n\n"
-                "Decoder error: {exc}\n\n"
-                "Produce a correctly formatted JSON array."
-            ),
-            spec_error_template="{feedback}",
-        )
+        return self._run_generation_retry_loop(task=task)
 
     async def _agenerate_plan(self, *, task: PlanActTask) -> list[BlackboardSlot]:
         """Async mirror of ``_generate_plan``, via
         ``ToolAgent._arun_generation_retry_loop``."""
-        return await self._arun_generation_retry_loop(
-            task=task,
-            validate=lambda parsed: self._process_plan_output(
-                parsed=parsed,
-                cache_blackboard=self._blackboard,
-                valid_cache_indices=task.valid_cache_indices,
-                failed_cache_indices=task.failed_cache_indices,
-            ),
-            json_error_template=(
-                "Your output could not be parsed as valid JSON.\n\n"
-                "Decoder error: {exc}\n\n"
-                "Produce a correctly formatted JSON array."
-            ),
-            spec_error_template="{feedback}",
-        )
+        return await self._arun_generation_retry_loop(task=task)
 
     def _initialize_task(
         self,

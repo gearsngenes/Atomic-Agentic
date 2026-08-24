@@ -6,6 +6,7 @@ from typing import Any, ClassVar, Mapping
 from ...constants.agents import (
     ARGS_FIELD,
     AWAIT_FIELD,
+    REASON_FIELD,
     STEP_FIELD,
     TOOL_FIELD,
 )
@@ -161,6 +162,12 @@ class BlackboardSlot:
     await_step : int | NO_VAL
         Optional explicit scheduling barrier from a planner ``"await"`` field.
         Defaults to ``NO_VAL`` when no await barrier is present.
+
+    reason : str | None
+        Optional human-readable intent summary for this step. Populated by
+        ``ReActAgent``'s per-round generation (LLM-authored); not yet
+        populated by ``PlanActAgent``'s json-mode generation. ``None`` means
+        no reason was ever set -- not the same as an empty string.
     """
     EMPTY: ClassVar[str] = "empty"
     PLANNED: ClassVar[str] = "planned"
@@ -183,7 +190,6 @@ class BlackboardSlot:
     ERROR_FIELD: ClassVar[str] = "error"
     STATUS_FIELD: ClassVar[str] = "status"
     STEP_DEPENDENCIES_FIELD: ClassVar[str] = "step_dependencies"
-    AWAIT_STEP_FIELD: ClassVar[str] = "await_step"
 
     FROM_DICT_FIELDS: ClassVar[frozenset[str]] = frozenset(
         {
@@ -196,7 +202,7 @@ class BlackboardSlot:
             STATUS_FIELD,
             STEP_DEPENDENCIES_FIELD,
             AWAIT_FIELD,
-            AWAIT_STEP_FIELD,
+            REASON_FIELD,
         }
     )
 
@@ -210,6 +216,7 @@ class BlackboardSlot:
     status: str = EMPTY
     step_dependencies: tuple[int, ...] = ()
     await_step: int | Any = NO_VAL
+    reason: str | None = None
 
     def __post_init__(self) -> None:
         self._validate_step(self.step)
@@ -218,6 +225,7 @@ class BlackboardSlot:
             self.step_dependencies
         )
         self._validate_await_step(self.await_step)
+        self._validate_reason(self.reason)
 
     @staticmethod
     def _validate_step(value: Any) -> None:
@@ -263,6 +271,13 @@ class BlackboardSlot:
         if type(value) is not int or value < 0:
             raise ValueError("BlackboardSlot.await_step must be NO_VAL or an int >= 0.")
 
+    @staticmethod
+    def _validate_reason(value: Any) -> None:
+        if value is None:
+            return
+        if not isinstance(value, str):
+            raise ValueError("BlackboardSlot.reason must be None or a string.")
+
     def is_empty(self) -> bool:
         return self.status == self.EMPTY
 
@@ -290,6 +305,7 @@ class BlackboardSlot:
             status=self.status,
             step_dependencies=self.step_dependencies,
             await_step=self.await_step,
+            reason=self.reason,
         )
 
     @classmethod
@@ -299,8 +315,6 @@ class BlackboardSlot:
 
         This method does not inspect ``args`` or infer dependencies. Dependency metadata
         should be passed directly through ``step_dependencies`` by the caller.
-
-        The planner-facing key ``"await"`` is accepted as an alias for ``await_step``.
         """
         if not isinstance(data, Mapping):
             raise TypeError(
@@ -318,17 +332,6 @@ class BlackboardSlot:
                 f"BlackboardSlot.from_dict missing required key: {STEP_FIELD!r}."
             )
 
-        if AWAIT_FIELD in data and cls.AWAIT_STEP_FIELD in data:
-            raise ValueError(
-                f"BlackboardSlot.from_dict received both {AWAIT_FIELD!r} and "
-                f"{cls.AWAIT_STEP_FIELD!r}; provide only one."
-            )
-
-        await_step = data.get(
-            cls.AWAIT_STEP_FIELD,
-            data.get(AWAIT_FIELD, NO_VAL),
-        )
-
         return cls(
             step=data[STEP_FIELD],
             tool=data.get(TOOL_FIELD, NO_VAL),
@@ -338,7 +341,8 @@ class BlackboardSlot:
             error=data.get(cls.ERROR_FIELD, NO_VAL),
             status=data.get(cls.STATUS_FIELD, cls.EMPTY),
             step_dependencies=data.get(cls.STEP_DEPENDENCIES_FIELD, tuple()),
-            await_step=await_step,
+            await_step=data.get(AWAIT_FIELD, NO_VAL),
+            reason=data.get(REASON_FIELD, None),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -351,5 +355,6 @@ class BlackboardSlot:
             self.ERROR_FIELD: self.error,
             self.STATUS_FIELD: self.status,
             self.STEP_DEPENDENCIES_FIELD: self.step_dependencies,
-            self.AWAIT_STEP_FIELD: self.await_step,
+            AWAIT_FIELD: self.await_step,
+            REASON_FIELD: self.reason,
         }

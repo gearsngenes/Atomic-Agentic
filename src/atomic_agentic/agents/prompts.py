@@ -156,7 +156,7 @@ You may see one fresh running-plan snapshot for this run. Use it to determine wh
 
 Each executed running step has:
 - step: run-local index
-- description: one-sentence summary of what that step did and why it was needed
+- reason: one-sentence summary of what that step did and why it was needed
 - tool: executed tool id
 - args: unresolved args originally used
 - result_ref: placeholder for that result, e.g. <<__s0__>>
@@ -164,7 +164,7 @@ Each executed running step has:
   run_id arg to continue from this step's conversation — NOT a placeholder, do not wrap in <<...>>
 - observable_result: optional preview-limited raw result text
 
-Use descriptions to understand what each prior step was intended to accomplish for the current task.
+Use reasons to understand what each prior step was intended to accomplish for the current task.
 observable_result is for OBSERVATION ONLY. Use it only to decide the next tool or branch.
 If a new arg needs that step's value, use its result_ref placeholder.
 Do not assume results not shown as cache refs, result_ref, or observable_result.
@@ -175,7 +175,7 @@ Emit exactly ONE JSON object with EXACTLY AND ONLY these keys:
 - "tool": "<Type>.<namespace>.<name>" (use a tool id verbatim)
 - "args": {{ ... }}                   (JSON object)
 - "duration": <int>                   (0 up to remaining future step-generation turns)
-- "description": <str>                (one sentence describing this step)
+- "reason": <str>                     (one sentence describing this step)
 
 Step index rule:
 - If RUNNING PLAN STEPS show steps 0..k, output step k+1.
@@ -225,8 +225,8 @@ If max non-return tool calls is M and this output step is i, duration MUST be <=
 Use duration 0 when the result only needs to be passed forward, printed, returned, or reused by placeholder.
 The return tool MUST use duration 0.
 
-# DESCRIPTION
-"description" is required.
+# REASON
+"reason" is required.
 It MUST be one sentence.
 It MUST describe what this exact tool call does and why it is needed for the user's current task.
 It may include task-relative intent, but it must NOT describe future steps, hidden reasoning, or guessed results.
@@ -241,24 +241,24 @@ Choose the next best tool call:
 4) Use observable_result only to choose what tool comes next.
 5) Do not recompute values already available by placeholder.
 6) Do not keep calling tools after the needed result/action is already available.
-7) Use running-plan descriptions to avoid repeating completed work and to decide whether the task is ready to return.
+7) Use running-plan reasons to avoid repeating completed work and to decide whether the task is ready to return.
 
 # FINALIZATION
 When complete, emit the return tool as the single object:
-{{"step": <int>, "tool": "Tool.ToolAgents.return", "args": {{"val": <literal-or-placeholder-or-null>}}, "duration": 0, "description": "<one sentence>"}}
+{{"step": <int>, "tool": "Tool.ToolAgents.return", "args": {{"val": <literal-or-placeholder-or-null>}}, "duration": 0, "reason": "<one sentence>"}}
 Return val may be <<__sN__>>, <<__cN__>>, <<__k.NAME__>>, any JSON literal, or null.
 If it depends on a prior result, use the placeholder.
-Return description should state that the running plan has completed the task and what is being returned.
+Return reason should state that the running plan has completed the task and what is being returned.
 
 # EXAMPLE
 CACHE:
 [{{"step":0,"tool":"Tool.Math.power","args":{{"a":2,"b":3}}}}]
 
 RUNNING PLAN STEPS 0-0 SO FAR:
-[{{"step":0,"description":"Multiply the cached power result by 5 for the current calculation.","tool":"Tool.Math.multiply","args":{{"a":"<<__c0__>>","b":5}},"result_ref":"<<__s0__>>","run_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}}]
+[{{"step":0,"reason":"Multiply the cached power result by 5 for the current calculation.","tool":"Tool.Math.multiply","args":{{"a":"<<__c0__>>","b":5}},"result_ref":"<<__s0__>>","run_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}}]
 
 VALID OUTPUT:
-{{"step":1,"tool":"Tool.Math.add","args":{{"a":"<<__s0__>>","b":2}},"duration":0,"description":"Add 2 to the previous multiplication result for the current calculation."}}
+{{"step":1,"tool":"Tool.Math.add","args":{{"a":"<<__s0__>>","b":2}},"duration":0,"reason":"Add 2 to the previous multiplication result for the current calculation."}}
 """,
     description="ReActAgent iterative step-orchestration prompt.",
 )

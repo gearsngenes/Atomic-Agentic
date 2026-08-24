@@ -11,9 +11,9 @@ Iteration Model
 At each step the agent builds a temporary message thread from the static base
 messages plus a compact running-plan snapshot showing completed steps (with
 placeholder references, optional raw-result previews while their observability
-window is open, and one-sentence descriptions). The LLM responds with a single
+window is open, and one-sentence reasons). The LLM responds with a single
 JSON step object specifying the next tool to call, its arguments, an
-observability duration, and a human-readable description.
+observability duration, and a human-readable reason.
 
 Observability Window
 --------------------
@@ -39,13 +39,14 @@ blackboard management, and tool registry see ``agents/toolagent.py``
 
 from __future__ import annotations
 from typing import Any, Callable, Literal, Mapping, Optional
+import json
 import pprint
 
 from .toolagent import ToolAgent
 from .prompts import ORCHESTRATOR_PROMPT
 from ..constants.agents import (
     STEP_FIELD,
-    DESCRIPTION_FIELD,
+    REASON_FIELD,
     TOOL_FIELD,
     ARGS_FIELD,
     DURATION_FIELD,
@@ -61,7 +62,7 @@ from ..exceptions import ToolAgentError
 from ..models.agents.tasks import ReActTask, ReActStepMeta
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord
-from ..utils.agents import extract_dependencies
+from ..utils.agents import extract_dependencies, format_generation_issues
 
 # --------------------------------------------------------------------------- #
 # ReAct Agent
@@ -73,7 +74,7 @@ class ReActAgent(ToolAgent):
     **Design**: ReActAgent implements dynamic iteration: one step is emitted per LLM
     turn from a compact running-plan snapshot. Result references are always visible
     by placeholder; raw result previews are shown only while their observability
-    duration remains active. Generated step descriptions preserve semantic intent
+    duration remains active. Generated step reasons preserve semantic intent
     across turns without exposing raw results.
 
     1. **Initialization** (``_initialize_task``)
@@ -81,21 +82,22 @@ class ReActAgent(ToolAgent):
          to accommodate non-return tool calls plus one return call.
        - Requires ``tool_calls_limit`` to be a concrete integer.
        - Initializes ReAct-specific per-step metadata:
-         observability counters and generated step descriptions.
+         observability counters (generated step reasons now live on
+         ``BlackboardSlot.reason`` directly, not per-step metadata).
 
     2. **Decision** (``think()`` — one step per round)
        - Builds a fresh temporary message list from static base messages.
        - Appends a compact running-plan snapshot containing executed steps,
-         descriptions, unresolved args, result_ref placeholders, and any currently
+         reasons, unresolved args, result_ref placeholders, and any currently
          observable_result values.
        - Asks the LLM for the next single step; validates it end-to-end.
-       - Stashes the validated ``(slot, duration, description)`` onto
+       - Stashes the validated ``(slot, duration)`` onto
          ``task.generated_step`` for ``prepare()`` to apply next round.
 
     3. **Preparation** (``prepare()``)
        - Cascade-checks dependencies; resolves placeholders into concrete tool args.
        - Stores the prepared slot in ``running_blackboard[step_index]``.
-       - Stores duration and description in the ReAct task's ``step_meta``.
+       - Stores the observability duration in the ReAct task's ``step_meta``.
        - Sets ``prepared_steps = [step_index]``.
 
     4. **Execution** (``act()``, base ``ToolAgent``, final)
@@ -111,7 +113,7 @@ class ReActAgent(ToolAgent):
     ~~~~~~~~~~
     - Fully adaptive: each step can react to prior tool results.
     - Context-hygienic: running-plan messages are rebuilt fresh each turn.
-    - Interpretable: descriptions, placeholders, and optional observations provide
+    - Interpretable: reasons, placeholders, and optional observations provide
       a compact execution trace.
 
     Limitations
@@ -228,72 +230,88 @@ class ReActAgent(ToolAgent):
                 f"({len(task.step_meta)} != {len(task.running_blackboard)})."
             )
 
-    def _process_next_step_output(
-        self,
-        *,
-        parsed: Any,
-        expected_step: int,
-        cache_blackboard: list[BlackboardSlot],
-        max_duration: int,
-        valid_cache_indices: frozenset[int],
-        failed_cache_indices: frozenset[int],
-    ) -> tuple[BlackboardSlot, int, str] | str:
+    def _validate_generation_output(self, raw_output: str, *, task: ReActTask) -> tuple[BlackboardSlot, int] | str:
         """
-        Validate one parsed ReAct step and return the slot, duration, and description.
+        Concrete implementation of ``ToolAgent._validate_generation_output``
+        for ReAct. Owns JSON decoding and the entire per-step validation
+        pipeline; supersedes the old ``_process_next_step_output``.
 
-        Receives the already-extracted ``parsed`` value. LLMRecord construction
-        lives in ``ToolAgent._run_generation_retry_loop`` (the shared caller,
-        via ``_generate_next_step``'s ``validate`` binding). All LLM-facing
-        validation failures return a plain feedback string (no class/name
-        prefix); engine-contract violations raise ``ToolAgentError``.
+        Two tiers, both fully accumulating (no short-circuit within a
+        tier): tier 1 (structural/type) checks everything needed to build a
+        candidate slot; if anything fails, returns immediately without
+        attempting tier 2. Tier 2 (semantic/cross-referential) checks
+        everything else. ReAct validates exactly one step per call, so this
+        two-tier accumulation is this family's complete realization of
+        "report every problem in one retry turn" — there is no separate
+        multi-step loop the way PlanAct has.
 
-        Budget enforcement (step 9 below) is a real boundary check, not a
-        dead guard: unlike ``PlanActAgent`` (whose budget is validated once
-        against the *entire* plan before anything executes), ``ReActAgent``
-        generates one step at a time, so this is the only point that can
-        catch "the model didn't terminate by the last available slot"
-        before that step is ever prepared/executed. Nothing else in the
-        lifecycle enforces it — dropping it (as an earlier pass briefly
-        did) lets an over-budget non-return tool call actually run.
+        Budget enforcement (tier 2, step 12b below) is a real boundary
+        check, not a dead guard: unlike ``PlanActAgent`` (whose budget is
+        validated once against the *entire* plan before anything
+        executes), ``ReActAgent`` generates one step at a time, so this is
+        the only point that can catch "the model didn't terminate by the
+        last available slot" before that step is ever prepared/executed.
 
         Steps
         -----
-        1. Reject non-Mapping parsed values.
-        2. Build ``raw_payload``; check for unsupported keys.
-        3. Require ``DURATION_FIELD`` and ``DESCRIPTION_FIELD`` present.
-        4. Delegate to ``_validate_tool_step_dict``; propagate string feedback.
-        5. Extract and range-validate ``duration``.
-        6. Extract, type-check, strip, and non-empty-check ``description``.
-        7. Convert to ``BlackboardSlot`` via ``_tool_step_dict_to_slot``.
-        8. Verify tool is registered; unknown tool → feedback string.
-        9. Budget enforcement: if this is the last available slot
-           (``expected_step == self._tool_calls_limit``), the tool must be
-           the return tool.
-        10. Require return-tool duration == 0.
-        11. Validate cache refs — three categories: out-of-range, failed-in-conv
-            (with tool+error detail), out-of-conv.
-        12. Validate step dependencies are prior-only.
-        13. Return ``(slot, duration, description)``.
+        1. Attempt ``self._extract_from_json_string(raw_output)``; on
+           ``json.JSONDecodeError``, return the single-item decode-error
+           feedback.
+        2. Compute ``expected_step``/``max_duration`` from ``task``/``self``.
+        3. Reject non-Mapping parsed values (single-item feedback).
+        4. Build ``raw_payload``; tier-1 issue list starts empty.
+        5. Unsupported-key check.
+        6. Delegate to ``_validate_tool_step_dict``; extend tier-1 issues on
+           a list return. Its own required-fields check (against
+           ``REQUIRED_REACT_FIELDS``, which includes ``DURATION_FIELD``/
+           ``REASON_FIELD``) is the sole source of a missing-duration/
+           missing-reason issue — no separate standalone presence check
+           here, to avoid reporting the same absence twice.
+        7. If ``step_dict`` was structurally valid and ``DURATION_FIELD``
+           was present: extract and range-validate ``duration``.
+        8. If ``step_dict`` was structurally valid and ``REASON_FIELD`` was
+           present: extract, type-check, strip, and non-empty-check
+           ``reason``.
+        9. If tier-1 issues: return the joined feedback.
+        10. Convert to ``BlackboardSlot`` via ``_tool_step_dict_to_slot``;
+            set ``slot.reason = reason``.
+        11. Tier 2 — fresh issue list, every check independent: tool
+            registered; budget (last available slot must be the return
+            tool); return-tool duration == 0; cache refs (three
+            categories); step dependencies prior-only.
+        12. If tier-2 issues: return the joined feedback.
+        13. Return ``(slot, duration)``.
         """
-        # 1. Structural check — LLM must return a JSON object, not an array or scalar.
+        # 1. JSON decode.
+        try:
+            parsed = self._extract_from_json_string(raw_output)
+        except json.JSONDecodeError as exc:
+            return format_generation_issues(
+                [f"Your output could not be parsed as valid JSON. Decoder error: {exc}"]
+            )
+
+        # 2. Round-local context.
+        expected_step = task.next_step_index
+        max_duration = max(0, self._tool_calls_limit - expected_step)
+
+        # 3. Structural check — LLM must return a JSON object, not an array or scalar.
         if not isinstance(parsed, Mapping):
-            return f"next step output must be a JSON object; got {type(parsed).__name__!r}."
+            return format_generation_issues(
+                [f"next step output must be a JSON object; got {type(parsed).__name__!r}."]
+            )
 
         raw_payload = dict(parsed)
+        issues: list[str] = []
 
-        # 2. Field-set checks.
+        # 5. Field-set check.
         extra = set(raw_payload) - REACT_FIELDS
         if extra:
-            return f"next step contains unsupported keys: {sorted(extra)!r}."
+            issues.append(f"next step contains unsupported keys: {sorted(extra)!r}.")
 
-        # 3. Presence checks for ReAct-specific required fields.
-        if DURATION_FIELD not in raw_payload:
-            return f"next step missing required key {DURATION_FIELD!r}."
-
-        if DESCRIPTION_FIELD not in raw_payload:
-            return f"next step missing required key {DESCRIPTION_FIELD!r}."
-
-        # 4. Core step-dict validation (tool name, args shape, await_step, etc.).
+        # 6. Core step-dict validation (tool name, args shape, await, etc.).
+        # Its own required-fields check already covers a missing duration/
+        # reason -- no separate standalone presence check here, to avoid
+        # reporting the same absence twice.
         step_payload = self._validate_tool_step_dict(
             raw_payload,
             expected_step=expected_step,
@@ -301,74 +319,86 @@ class ReActAgent(ToolAgent):
             required_fields=REQUIRED_REACT_FIELDS,
             context="next step",
         )
-        if isinstance(step_payload, str):
-            return step_payload
+        structurally_valid = not isinstance(step_payload, list)
+        if not structurally_valid:
+            issues.extend(step_payload)
 
-        # 5. Duration extraction and range check.
-        duration = step_payload.pop(DURATION_FIELD)
-        if type(duration) is not int or duration < 0 or duration > max_duration:
-            return (
-                f"next step {DURATION_FIELD!r} must be an int in "
-                f"[0, {max_duration}] for expected_step={expected_step}; got {duration!r}."
-            )
+        duration: int | None = None
+        reason: str | None = None
 
-        # 6. Description extraction, type check, and normalisation.
-        description = step_payload.pop(DESCRIPTION_FIELD)
-        if type(description) is not str:
-            return f"next step {DESCRIPTION_FIELD!r} must be a string; got {type(description).__name__!r}."
+        # 7. Duration extraction and range check -- only when the shape checks
+        # above didn't already fail, and the key is actually present.
+        if structurally_valid and DURATION_FIELD in raw_payload:
+            duration = step_payload.pop(DURATION_FIELD)
+            if type(duration) is not int or duration < 0 or duration > max_duration:
+                issues.append(
+                    f"next step {DURATION_FIELD!r} must be an int in "
+                    f"[0, {max_duration}] for expected_step={expected_step}; got {duration!r}."
+                )
 
-        description = description.strip()
-        if not description:
-            return f"next step {DESCRIPTION_FIELD!r} cannot be empty."
+        # 8. Reason extraction, type check, and normalisation -- same guard.
+        if structurally_valid and REASON_FIELD in raw_payload:
+            reason = step_payload.pop(REASON_FIELD)
+            if type(reason) is not str:
+                issues.append(f"next step {REASON_FIELD!r} must be a string; got {type(reason).__name__!r}.")
+            else:
+                reason = reason.strip()
+                if not reason:
+                    issues.append(f"next step {REASON_FIELD!r} cannot be empty.")
 
-        # 7. Convert to BlackboardSlot — engine contract; let ToolAgentError propagate.
+        # 9. Tier 1 stops here -- tier 2 assumes a structurally valid,
+        # fully-extracted (step_dict, duration, reason).
+        if issues:
+            return format_generation_issues(issues)
+
+        # 10. Convert to BlackboardSlot -- engine contract; let ToolAgentError propagate.
         slot = self._tool_step_dict_to_slot(
             step_payload,
             step=expected_step,
             allowed_fields=BASE_STEP_FIELDS,
             context="next step",
         )
+        slot.reason = reason
 
-        # 8. Verify tool is registered.
+        # 11. Tier 2 -- semantic/cross-referential checks, all independent.
+        issues = []
+        cache_blackboard = self._blackboard
+        valid_cache_indices = task.valid_cache_indices
+        failed_cache_indices = task.failed_cache_indices
+
         if not self.has_tool(slot.tool):
-            return f"next step references unknown tool {slot.tool!r}."
+            issues.append(f"next step references unknown tool {slot.tool!r}.")
 
-        # 9. Budget enforcement: the final available slot must be the return step.
         if expected_step == self._tool_calls_limit and slot.tool != RETURN_TOOL_FULL_NAME:
-            return (
+            issues.append(
                 f"step {expected_step} is the last available slot under "
                 f"tool_calls_limit={self._tool_calls_limit}; it must be the return tool."
             )
 
-        # 10. Return-tool must use duration 0.
         if slot.tool == RETURN_TOOL_FULL_NAME and duration != 0:
-            return f"return tool must use {DURATION_FIELD!r} 0; got {duration!r}."
+            issues.append(f"return tool must use {DURATION_FIELD!r} 0; got {duration!r}.")
 
-        # 11. Cache reference validation — three categories.
         cache_len = len(cache_blackboard)
         cache_refs = extract_dependencies(slot.args, placeholder_pattern=self.CACHE_REF_PATTERN)
 
-        # Category 1: index outside the cache entirely.
         out_of_range = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
         if out_of_range:
-            return (
+            issues.append(
                 f"next step references cache indices that do not exist: "
                 f"{sorted(set(out_of_range))!r} (cache has {cache_len} entries)."
             )
 
-        # Category 2: in-conversation slot that failed — include tool+error.
         failed_in_conv = [idx for idx in cache_refs if idx in failed_cache_indices]
         if failed_in_conv:
             details = "; ".join(
                 f"entry {idx} ({cache_blackboard[idx].tool}): {cache_blackboard[idx].error}"
                 for idx in sorted(set(failed_in_conv))
             )
-            return (
+            issues.append(
                 f"next step references cache entries that failed in this conversation "
                 f"and cannot be used: {details}."
             )
 
-        # Category 3: in range but not from this conversation.
         out_of_conv = [
             idx for idx in cache_refs
             if 0 <= idx < cache_len
@@ -376,23 +406,27 @@ class ReActAgent(ToolAgent):
             and idx not in failed_cache_indices
         ]
         if out_of_conv:
-            return (
+            issues.append(
                 f"next step references cache indices not part of this conversation: "
                 f"{sorted(set(out_of_conv))!r}."
             )
 
-        # 12. Step dependency validation.
         bad_step_deps = [
             dep for dep in slot.step_dependencies
             if dep < 0 or dep >= expected_step
         ]
         if bad_step_deps:
-            return (
+            issues.append(
                 f"next step has illegal deps "
                 f"{sorted(set(bad_step_deps))!r}; deps must be < {expected_step}."
             )
 
-        return slot, duration, description
+        # 12. Tier 2 result.
+        if issues:
+            return format_generation_issues(issues)
+
+        # 13. Success.
+        return slot, duration
 
     def prepare(self, task: ReActTask) -> ReActTask:
         """
@@ -402,8 +436,8 @@ class ReActAgent(ToolAgent):
 
         Unpacks ``task.generated_step`` (set by ``think()``/
         ``async_think()``) and resets it to ``NO_VAL``. Duration range,
-        return-duration-zero, description shape, and ``PLANNED`` status are
-        already guaranteed by ``_process_next_step_output``'s own success
+        return-duration-zero, reason shape, and ``PLANNED`` status are
+        already guaranteed by ``_validate_generation_output``'s own success
         path (not re-checked — dead code, same cleanup ``PlanActAgent``
         applied to ``_finalize_planact_task``). The running-blackboard slot
         mismatch/already-filled checks are also dropped:
@@ -424,7 +458,7 @@ class ReActAgent(ToolAgent):
         next round rebuilds fresh.
         """
         prefix_len = task.next_step_index
-        generated_slot, observe_duration, description = task.generated_step
+        generated_slot, observe_duration = task.generated_step
         task.generated_step = NO_VAL
 
         # A successful generation turn consumed any raw results that were visible.
@@ -440,12 +474,12 @@ class ReActAgent(ToolAgent):
         slot.error = NO_VAL
         slot.step_dependencies = generated_slot.step_dependencies
         slot.await_step = generated_slot.await_step
+        slot.reason = generated_slot.reason
 
         # Cascade-fail: when fail_fast=False, propagate failures through arg dependencies.
         if not self._fail_fast:
             board = task.running_blackboard
             if self._check_cascade_failure(slot, board):
-                task.step_meta[prefix_len].description = description
                 task.next_step_index = prefix_len + 1
                 task.task_messages.clear()
                 return task  # prepared_steps stays []; act() will no-op this round
@@ -456,7 +490,6 @@ class ReActAgent(ToolAgent):
 
         # Write per-slot metadata.
         task.step_meta[prefix_len].observable = observe_duration
-        task.step_meta[prefix_len].description = description
 
         task.prepared_steps = [prefix_len]
         task.next_step_index = prefix_len + 1
@@ -488,7 +521,7 @@ class ReActAgent(ToolAgent):
            matching ``ToolAgent.render_turn``'s ``CACHED STEPS`` convention.
         3. user — the per-round instruction. Deliberately omits any rule
            already owned by ``ORCHESTRATOR_PROMPT``'s ``RUNTIME STATE``
-           section (descriptions, result_ref usage, observable_result
+           section (reasons, result_ref usage, observable_result
            semantics, don't-copy-into-args); carries only what's new each
            round: the produce-next-call/return directive, an unconditional
            anti-duplication reminder, a FAILED-reference warning shown only
@@ -513,7 +546,7 @@ class ReActAgent(ToolAgent):
             if slot.is_executed():
                 record: dict[str, Any] = {
                     STEP_FIELD: slot.step,
-                    DESCRIPTION_FIELD: task.step_meta[idx].description,
+                    REASON_FIELD: slot.reason,
                     TOOL_FIELD: slot.tool,
                     ARGS_FIELD: slot.args,
                     "result_ref": f"<<__s{idx}__>>",
@@ -526,7 +559,7 @@ class ReActAgent(ToolAgent):
             elif slot.is_failed():
                 running_records.append({
                     STEP_FIELD: slot.step,
-                    DESCRIPTION_FIELD: task.step_meta[idx].description,
+                    REASON_FIELD: slot.reason,
                     TOOL_FIELD: slot.tool,
                     ARGS_FIELD: slot.args,
                     "status": "FAILED",
@@ -557,7 +590,7 @@ class ReActAgent(ToolAgent):
                         if any(r.get("status") == "FAILED" for r in running_records)
                         else ""
                     )
-                    + " Output exactly one JSON object with keys {step, tool, args, duration, description}."
+                    + " Output exactly one JSON object with keys {step, tool, args, duration, reason}."
                     + f" duration must be an int from 0 to {max_duration}."
                 ),
             },
@@ -600,7 +633,7 @@ class ReActAgent(ToolAgent):
             step_meta=[ReActStepMeta() for _ in running_blackboard],
         )
 
-    def _generate_next_step(self, *, task: ReActTask) -> tuple[BlackboardSlot, int, str]:
+    def _generate_next_step(self, *, task: ReActTask) -> tuple[BlackboardSlot, int]:
         """
         Generate and validate one ReAct tool step, via the shared
         ``ToolAgent._run_generation_retry_loop``.
@@ -610,59 +643,16 @@ class ReActAgent(ToolAgent):
 
         Returns
         -------
-        tuple[BlackboardSlot, int, str]
-            Validated slot, duration, and description.
+        tuple[BlackboardSlot, int]
+            Validated slot and duration. The step's reason is already set
+            on the slot itself.
         """
-        expected_step = task.next_step_index
-        max_duration = max(0, self._tool_calls_limit - expected_step)
-        return self._run_generation_retry_loop(
-            task=task,
-            validate=lambda parsed: self._process_next_step_output(
-                parsed=parsed,
-                expected_step=expected_step,
-                cache_blackboard=self._blackboard,
-                max_duration=max_duration,
-                valid_cache_indices=task.valid_cache_indices,
-                failed_cache_indices=task.failed_cache_indices,
-            ),
-            json_error_template=(
-                "Your output could not be parsed as valid JSON.\n\n"
-                "Decoder error: {exc}\n\n"
-                "Produce a correctly formatted JSON object."
-            ),
-            spec_error_template=(
-                "The step you produced contains an error.\n\n"
-                "Error: {feedback}\n\n"
-                "Reflect on this and produce a corrected step."
-            ),
-        )
+        return self._run_generation_retry_loop(task=task)
 
-    async def _agenerate_next_step(self, *, task: ReActTask) -> tuple[BlackboardSlot, int, str]:
+    async def _agenerate_next_step(self, *, task: ReActTask) -> tuple[BlackboardSlot, int]:
         """Async mirror of ``_generate_next_step``, via
         ``ToolAgent._arun_generation_retry_loop``."""
-        expected_step = task.next_step_index
-        max_duration = max(0, self._tool_calls_limit - expected_step)
-        return await self._arun_generation_retry_loop(
-            task=task,
-            validate=lambda parsed: self._process_next_step_output(
-                parsed=parsed,
-                expected_step=expected_step,
-                cache_blackboard=self._blackboard,
-                max_duration=max_duration,
-                valid_cache_indices=task.valid_cache_indices,
-                failed_cache_indices=task.failed_cache_indices,
-            ),
-            json_error_template=(
-                "Your output could not be parsed as valid JSON.\n\n"
-                "Decoder error: {exc}\n\n"
-                "Produce a correctly formatted JSON object."
-            ),
-            spec_error_template=(
-                "The step you produced contains an error.\n\n"
-                "Error: {feedback}\n\n"
-                "Reflect on this and produce a corrected step."
-            ),
-        )
+        return await self._arun_generation_retry_loop(task=task)
 
     def think(self, task: ReActTask) -> ReActTask:
         """
@@ -676,7 +666,7 @@ class ReActAgent(ToolAgent):
         ``act()`` always leaves ``task.prepared_steps`` empty by the time
         the next round's ``think()`` runs.
 
-        The generated ``(slot, duration, description)`` is stashed on
+        The generated ``(slot, duration)`` is stashed on
         ``task.generated_step`` for ``prepare()`` to consume next; applying
         it (resolve placeholders, cascade-check, stamp into
         ``running_blackboard``) is deliberately not done here.

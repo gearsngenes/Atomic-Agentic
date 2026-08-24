@@ -13,6 +13,7 @@ from ..constants.agents import THOUGHT_MARKER_PATTERN
 __all__ = [
     "extract_dependencies",
     "extract_json_object",
+    "format_generation_issues",
     "normalize_role_prompt",
     "normalize_thinking_instructions",
 ]
@@ -203,6 +204,29 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
 
     walk(obj)
     return deps
+
+def format_generation_issues(issues: list[str]) -> str:
+    """
+    Join one or more detected generation-output problems into a single
+    LLM-facing feedback message, ready to inject as a retry turn verbatim.
+
+    Raises ``ValueError`` if ``issues`` is empty -- callers only invoke this
+    once they have at least one real issue; a hollow success-shaped message
+    would be a caller bug, not a legitimate empty-feedback case.
+    """
+    if not issues:
+        raise ValueError("format_generation_issues requires at least one issue.")
+
+    if len(issues) == 1:
+        return issues[0]
+
+    numbered = "\n".join(f"{i}. {issue}" for i, issue in enumerate(issues, start=1))
+    return (
+        "Multiple problems were found in your output:\n"
+        f"{numbered}\n\n"
+        "Correct all of the above and resubmit."
+    )
+
 
 def parse_thoughts(text: str) -> list[AgentThought]:
     """

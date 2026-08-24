@@ -227,9 +227,6 @@ class ReActStepMeta:
     """
     Per-slot metadata for a single ReAct step.
 
-    Pairs the raw-result visibility counter with the one-sentence description
-    for the same slot.
-
     Fields
     ------
     observable : int
@@ -237,13 +234,11 @@ class ReActStepMeta:
         as ``observable_result`` in the running-plan snapshot. Decremented
         after each successful generation turn. ``0`` means not visible.
 
-    description : str
-        One-sentence intent summary rendered in the running-plan snapshot so
-        the LLM understands what the step was intended to do without needing
-        raw result visibility.
+    The one-sentence intent summary previously carried here as ``description``
+    now lives directly on ``BlackboardSlot.reason``, set once at
+    slot-construction time by generation rather than stamped separately here.
     """
     observable: int = 0
-    description: str = ""
 
 
 @dataclass(slots=True)
@@ -271,14 +266,15 @@ class ReActTask(ToolAgentTask):
         prepared.
 
     generated_step : Any
-        Holds the ``(BlackboardSlot, int, str)`` tuple ``think()``/
+        Holds the ``(BlackboardSlot, int)`` tuple ``think()``/
         ``async_think()`` produces each round (the freshly-generated,
-        not-yet-applied step, duration, and description), until
-        ``prepare()`` unpacks it and resets this back to ``NO_VAL``.
-        Needed because ``think()`` and ``prepare()`` are independent
-        top-level calls from the base loop — there's no local Python scope
-        to pass the decision through directly the way a single fused
-        method could.
+        not-yet-applied step and its observability duration), until
+        ``prepare()`` unpacks it and resets this back to ``NO_VAL``. The
+        step's reason lives on the ``BlackboardSlot`` itself (set at
+        generation time), not as a separate tuple element. Needed because
+        ``think()`` and ``prepare()`` are independent top-level calls from
+        the base loop — there's no local Python scope to pass the decision
+        through directly the way a single fused method could.
 
     ``retries_used`` is declared on ``ToolAgentTask`` (see that class) — its
     behavior originates here: incremented by ``_generate_next_step`` on each

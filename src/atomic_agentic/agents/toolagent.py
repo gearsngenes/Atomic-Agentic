@@ -153,7 +153,7 @@ from ..llm.base import LLMEngine
 from ..tools import toolify
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
-from ..utils.agents import extract_dependencies, extract_json_object
+from ..utils.agents import extract_dependencies, extract_json_object, format_generation_issues
 from ..utils.core import run_coro_sync
 from .tools import return_tool
 
@@ -1378,43 +1378,37 @@ class ToolAgent(Agent, ABC):
     # ------------------------------------------------------------------ #
     # Shared generation-retry loop (PlanActAgent/ReActAgent think() bodies)
     # ------------------------------------------------------------------ #
-    def _run_generation_retry_loop(
-        self,
-        *,
-        task: ToolAgentTask,
-        validate: Callable[[Any], Any],
-        json_error_template: str,
-        spec_error_template: str,
-    ) -> Any:
+    @abstractmethod
+    def _validate_generation_output(self, raw_output: str, *, task: ToolAgentTask) -> Any | str:
+        """
+        Re-abstracted per family (same pattern as ``think``/``prepare``).
+        Takes the raw LLM string for one generation attempt and owns the
+        entire decode-and-validate pipeline itself, including the JSON
+        extraction step -- there is no separate loop-level decode phase.
+
+        Returns
+        -------
+        Any
+            The validated, ready-to-use result on success
+            (``list[BlackboardSlot]`` for ``PlanActAgent``,
+            ``tuple[BlackboardSlot, int]`` for ``ReActAgent``).
+        str
+            A single, fully-formatted feedback message (via
+            ``format_generation_issues``) describing every problem found
+            with this attempt -- ready to inject as the next retry turn's
+            user message verbatim, no further formatting by the caller.
+
+        No async mirror -- pure computation, no I/O.
+        """
+        ...
+    def _run_generation_retry_loop(self, *, task: ToolAgentTask) -> Any:
         """
         Shared retry loop for one-shot/per-step LLM generation: render, call
-        the engine, record the attempt, decode JSON, validate, and retry
-        with injected feedback on either failure category until success or
-        the retry budget (``self._generation_retries``, tracked via
+        the engine, record the attempt, delegate to the family's own
+        ``_validate_generation_output`` hook for decoding *and* validation,
+        and retry with the hook's own feedback text until success or the
+        retry budget (``self._generation_retries``, tracked via
         ``task.retries_used``) is exhausted.
-
-        Parameters
-        ----------
-        task : ToolAgentTask
-            Supplies rendering context and accumulates ``llm_records``/
-            ``retries_used`` directly.
-        validate : Callable[[Any], Any]
-            The family-specific spec validator (``_process_plan_output`` or
-            ``_process_next_step_output``), called with only the ``parsed``
-            JSON value -- every other keyword argument is bound by the
-            caller's own closure. Returns the validated result on success,
-            or a plain feedback string on spec-validation failure.
-        json_error_template : str
-            ``.format(exc=...)`` -- the user-facing retry message when
-            ``_extract_from_json_string`` raises ``json.JSONDecodeError``.
-            Never receives ``raw_output`` -- that already goes into the
-            assistant-turn message alongside it; embedding it a second time
-            in the user text would just repeat what the model can already
-            see one turn up.
-        spec_error_template : str
-            ``.format(feedback=...)`` -- the user-facing retry message when
-            ``validate`` returns a feedback string. Never receives the
-            re-serialized ``parsed`` value, for the same reason.
 
         Steps
         -----
@@ -1424,19 +1418,19 @@ class ToolAgent(Agent, ABC):
            b. Call the LLM engine; capture ``engine_result``.
            c. Append an ``LLMRecord`` (``messages=list(task.task_messages)``)
               to ``task.llm_records``.
-           d. Try JSON extraction. On ``json.JSONDecodeError``: budget-check
-              (raise if exhausted); else inject assistant/user feedback,
-              increment ``task.retries_used``, continue.
-           e. Call ``validate(parsed)``. On a string return (spec-validation
-              feedback): budget-check (raise if exhausted); else inject
-              assistant/user feedback, increment ``task.retries_used``,
-              continue.
-           f. On success: return the validated result.
+           d. ``result = self._validate_generation_output(engine_result.result, task=task)``.
+           e. If ``result`` is a ``str`` (the hook's own fully-formatted
+              feedback, covering every problem found with this attempt):
+              budget-check (raise if exhausted); else inject
+              ``{"role": "assistant", "content": raw_output}``,
+              ``{"role": "user", "content": result}``, increment
+              ``task.retries_used``, continue.
+           f. Else: return ``result``.
 
         Raises
         ------
         ToolAgentError
-            If either failure category's retry budget is exhausted.
+            If the retry budget is exhausted.
         """
         additional_messages: list[dict[str, str]] = []
 
@@ -1451,48 +1445,26 @@ class ToolAgent(Agent, ABC):
                 system_prompt_name=task.system_prompt_name,
             ))
 
-            try:
-                parsed = self._extract_from_json_string(raw_output)
-            except json.JSONDecodeError as exc:
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": raw_output},
-                    {"role": "user", "content": json_error_template.format(exc=exc)},
-                ]
-                task.retries_used += 1
-                continue
-
-            result = validate(parsed)
+            result = self._validate_generation_output(raw_output, task=task)
             if isinstance(result, str):
                 if task.retries_used >= self._generation_retries:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error: {result}"
+                        f"after {task.retries_used + 1} attempt(s). Last error(s): {result}"
                     )
                 additional_messages = [
-                    {"role": "assistant", "content": json.dumps(parsed, indent=2)},
-                    {"role": "user", "content": spec_error_template.format(feedback=result)},
+                    {"role": "assistant", "content": raw_output},
+                    {"role": "user", "content": result},
                 ]
                 task.retries_used += 1
                 continue
 
             return result
 
-    async def _arun_generation_retry_loop(
-        self,
-        *,
-        task: ToolAgentTask,
-        validate: Callable[[Any], Any],
-        json_error_template: str,
-        spec_error_template: str,
-    ) -> Any:
+    async def _arun_generation_retry_loop(self, *, task: ToolAgentTask) -> Any:
         """Async mirror of ``_run_generation_retry_loop``: uses
-        ``async_invoke`` for the engine call; identical retry logic,
-        feedback injection, and parameters otherwise."""
+        ``async_invoke`` for the engine call; identical retry logic and
+        feedback injection otherwise."""
         additional_messages: list[dict[str, str]] = []
 
         while True:
@@ -1506,31 +1478,16 @@ class ToolAgent(Agent, ABC):
                 system_prompt_name=task.system_prompt_name,
             ))
 
-            try:
-                parsed = self._extract_from_json_string(raw_output)
-            except json.JSONDecodeError as exc:
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error is a JSONDecodeError: {exc}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": raw_output},
-                    {"role": "user", "content": json_error_template.format(exc=exc)},
-                ]
-                task.retries_used += 1
-                continue
-
-            result = validate(parsed)
+            result = self._validate_generation_output(raw_output, task=task)
             if isinstance(result, str):
                 if task.retries_used >= self._generation_retries:
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error: {result}"
+                        f"after {task.retries_used + 1} attempt(s). Last error(s): {result}"
                     )
                 additional_messages = [
-                    {"role": "assistant", "content": json.dumps(parsed, indent=2)},
-                    {"role": "user", "content": spec_error_template.format(feedback=result)},
+                    {"role": "assistant", "content": raw_output},
+                    {"role": "user", "content": result},
                 ]
                 task.retries_used += 1
                 continue
@@ -1965,7 +1922,7 @@ class ToolAgent(Agent, ABC):
         allowed_fields: Collection[str],
         required_fields: Collection[str],
         context: str,
-    ) -> dict[str, Any] | str:
+    ) -> dict[str, Any] | list[str]:
         """
         Validate and normalize one raw LLM-produced ToolAgent step mapping.
 
@@ -1979,14 +1936,18 @@ class ToolAgent(Agent, ABC):
         Runtime owns the authoritative step index. Any LLM-provided ``step`` value
         is advisory and is always overwritten with ``expected_step``.
 
+        Every applicable rule is checked independently and accumulated,
+        rather than returning at the first violation -- lets a caller
+        report every problem with this one step in a single retry turn.
+
         Returns
         -------
         dict[str, Any]
             Validated and normalized step mapping on success.
-        str
-            LLM-facing feedback string describing the schema violation. No
-            class/name prefix. Returned (not raised) so the caller decides whether
-            to retry.
+        list[str]
+            LLM-facing feedback strings, one per violation found. No
+            class/name prefix. Returned (not raised) so the caller decides
+            whether to retry.
         """
         if type(expected_step) is not int or expected_step < 0:
             raise ToolAgentError(
@@ -2018,14 +1979,15 @@ class ToolAgent(Agent, ABC):
             )
 
         data_keys = set(data)
+        issues: list[str] = []
 
         extra = data_keys - allowed
         if extra:
-            return f"plan step {expected_step} contains unsupported keys: {sorted(extra)!r}."
+            issues.append(f"plan step {expected_step} contains unsupported keys: {sorted(extra)!r}.")
 
         missing = required - data_keys
         if missing:
-            return f"plan step {expected_step} is missing required keys: {sorted(missing)!r}."
+            issues.append(f"plan step {expected_step} is missing required keys: {sorted(missing)!r}.")
 
         normalized = dict(data)
 
@@ -2035,23 +1997,28 @@ class ToolAgent(Agent, ABC):
         # Runtime order is authoritative.
         normalized[STEP_FIELD] = expected_step
 
+        # Type checks below only run when the field is actually present --
+        # a field already reported missing above is never also type-checked,
+        # which would just re-flag the same root cause a second time.
         tool = normalized.get(TOOL_FIELD, NO_VAL)
-        if TOOL_FIELD in normalized or TOOL_FIELD in required:
+        if TOOL_FIELD in normalized:
             if not isinstance(tool, str) or not tool.strip():
-                return f"plan step {expected_step} 'tool' must be a non-empty string."
+                issues.append(f"plan step {expected_step} 'tool' must be a non-empty string.")
 
         args = normalized.get(ARGS_FIELD, NO_VAL)
-        if ARGS_FIELD in normalized or ARGS_FIELD in required:
+        if ARGS_FIELD in normalized:
             if not isinstance(args, dict):
-                return f"plan step {expected_step} 'args' must be a dict; got {type(args).__name__!r}."
+                issues.append(f"plan step {expected_step} 'args' must be a dict; got {type(args).__name__!r}.")
 
         if AWAIT_FIELD in normalized:
             await_step = normalized[AWAIT_FIELD]
             if type(await_step) is not int or await_step < 0:
-                return f"plan step {expected_step} 'await' must be an int >= 0."
-
+                issues.append(f"plan step {expected_step} 'await' must be an int >= 0.")
             if tool == RETURN_TOOL_FULL_NAME:
-                return f"plan step {expected_step} is a return step and must not include 'await_step'."
+                issues.append(f"plan step {expected_step} is a return step and must not include 'await'.")
+
+        if issues:
+            return issues
 
         return normalized
 
