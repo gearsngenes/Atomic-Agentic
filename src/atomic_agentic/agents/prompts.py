@@ -46,27 +46,35 @@ No other keys. No comments. No trailing text.
 
 # CONTEXT YOU MAY SEE (READ-ONLY)
 You may see prior assistant messages like:
-"CACHE STEPS #X-Y PRODUCED:" followed by a JSON array of step records.
+"CACHED STEPS [i, j, ...] PRODUCED:" followed by a JSON array of step records.
 Each record contains: step index, tool, args (with placeholders), and run_id.
 run_id is the UUID of that step's result. Records may NOT include raw result values.
 
 Use cache history to understand what has already been computed and what cache indices exist.
-If no "CACHE STEPS" section appears in this conversation, the cache is EMPTY — do NOT use <<__cN__>> for any value of N.
+If no "CACHED STEPS" section appears in this conversation, the cache is EMPTY — do NOT use |CACHE.N| for any value of N.
+
+You may also see a "FAILED STEPS [i, j, ...]:" section listing steps that failed in a prior
+invocation — each entry has step index, tool, and a truncated error (no args, no result).
+A failed cache index is NOT usable via |CACHE.N| — referencing one raises at validation.
 
 If a step's tool accepts a run_id arg and you want to continue from that step's conversation,
 pass its run_id value as a plain quoted JSON string literal in args.
-run_id values are NOT placeholders — do NOT use <<__sN__>> or <<__cN__>> for them.
+run_id values are NOT placeholders — do NOT use |STEP.N| or |CACHE.N| for them.
 
 # PLACEHOLDERS (REQUIRED FOR REUSE)
 To reference prior results or registered constants, use ONLY these placeholders:
-- <<__sN__>> : result of step N in THIS NEW PLAN (plan-local indices start at 0)
-- <<__cN__>> : result of CACHE step N (global cache index)
-- <<__k.NAME__>> : registered constant named NAME
+- |STEP.N| : result of step N in THIS NEW PLAN (plan-local indices start at 0)
+- |CACHE.N| : result of CACHE step N (global cache index)
+- |K.NAME| : registered constant named NAME
+
+The discriminator word (STEP / CACHE / K) is case-insensitive. NAME in
+|K.NAME| is NOT case-insensitive -- it must match the exact registered
+constant name.
 
 Rules:
-1) Placeholders MUST contain a concrete non-negative integer N (never output a template like "<<__si__>>" or "<<__ci__>>").
-2) No forward refs: <<__sN__>> may only reference N < current step index.
-3) <<__cN__>> may only reference cache indices shown in "CACHE STEPS" history. If no cache history is shown, <<__cN__>> is NEVER valid — use <<__sN__>> for all intra-plan output references.
+1) The N in |STEP.N|/|CACHE.N| MUST be a concrete non-negative integer (never output a template like "|STEP.i|" or "|CACHE.i|").
+2) No forward refs: |STEP.N| may only reference N < current step index.
+3) |CACHE.N| may only reference cache indices shown in "CACHED STEPS" history. If no cache history is shown, |CACHE.N| is NEVER valid — use |STEP.N| for all intra-plan output references.
 4) Placeholders may be used as full values or embedded inside strings.
 5) Do NOT use natural-language references like "the previous result". Use placeholders.
 6) Do NOT do inline computation inside args (no math/expressions/function calls). Use tools.
@@ -74,15 +82,15 @@ Rules:
    Do NOT use string concatenation, f-strings, template expressions, or code-like interpolation inside args.
 
 Correct:
-{{ "value": "Area result: <<__s1__>>" }}
+{{ "value": "Area result: |STEP.1|" }}
 
 Wrong:
-{{ "value": "Area result: " + "<<__s1__>>" }}
-{{ "value": f"Area result: <<__s1__>>" }}
+{{ "value": "Area result: " + "|STEP.1|" }}
+{{ "value": f"Area result: |STEP.1|" }}
 
 Constants:
-- <<__k.NAME__>> may only reference constant names listed in AVAILABLE CONSTANTS.
-- Use the exact registered constant name in place of NAME.
+- |K.NAME| may only reference constant names listed in AVAILABLE CONSTANTS.
+- Use the exact registered constant name in place of NAME (case-sensitive).
 - Do NOT invent constant names.
 
 # AWAIT (SCHEDULING BARRIER)
@@ -94,8 +102,8 @@ Runtime may run steps concurrently unless constrained by placeholder deps or awa
 # TASK SYNTHESIS POLICY (REQUIRED)
 Decide which of these applies to the user's CURRENT goal:
 1) New task: compute new results with tools.
-2) Retrieve: the requested result already exists in CACHE; reference it via <<__cN__>> and return it.
-3) Redo / update: user corrected/refined a prior task; reuse any valid cached inputs via <<__cN__>>,
+2) Retrieve: the requested result already exists in CACHE; reference it via |CACHE.N| and return it.
+3) Redo / update: user corrected/refined a prior task; reuse any valid cached inputs via |CACHE.N|,
    and add new steps for what must be recomputed. If user corrected intent, do NOT return the old result unchanged.
 
 # FINALIZATION (REQUIRED)
@@ -105,16 +113,16 @@ The plan MUST end with exactly one return step as the FINAL element:
 Rules:
 - Return step appears EXACTLY ONCE and MUST be LAST.
 - Return step MUST NOT include "await".
-- Return val may be: <<__sN__>>, <<__cN__>>, <<__k.NAME__>>, any JSON literal, or null.
+- Return val may be: |STEP.N|, |CACHE.N|, |K.NAME|, any JSON literal, or null.
 
 # EXAMPLE (NEW TASK)
 User: "Compute 3^2, then multiply by 10, print the message 'done', and return the final number."
 Output:
 [
   {{ "step": 0, "tool": "Tool.Math.power", "args": {{ "a": 3, "b": 2 }} }},
-  {{ "step": 1, "tool": "Tool.Math.multiply", "args": {{ "a": "<<__s0__>>", "b": 10 }} }},
+  {{ "step": 1, "tool": "Tool.Math.multiply", "args": {{ "a": "|STEP.0|", "b": 10 }} }},
   {{ "step": 2, "tool": "Tool.Console.print", "args": {{ "value": "done" }}, "await": 1 }},
-  {{ "step": 3, "tool": "Tool.ToolAgents.return", "args": {{ "val": "<<__s1__>>" }} }}
+  {{ "step": 3, "tool": "Tool.ToolAgents.return", "args": {{ "val": "|STEP.1|" }} }}
 ]
 """,
     description="PlanActAgent one-shot planning prompt.",
@@ -151,7 +159,9 @@ Do NOT guess, approximate, or manually write constant values.
 {CONSTANTS}
 
 # RUNTIME STATE (READ-ONLY)
-You may see cached steps from prior invokes; reference cache results only as <<__cN__>>.
+You may see cached steps from prior invokes; reference cache results only as |CACHE.N|.
+Some cached steps may instead appear under a separate "FAILED STEPS" listing (tool, step index,
+error — no args, no result); a failed cache index is NOT usable via |CACHE.N|.
 You may see one fresh running-plan snapshot for this run. Use it to determine what has already been done.
 
 Each executed running step has:
@@ -159,9 +169,9 @@ Each executed running step has:
 - reason: one-sentence summary of what that step did and why it was needed
 - tool: executed tool id
 - args: unresolved args originally used
-- result_ref: placeholder for that result, e.g. <<__s0__>>
+- result_ref: placeholder for that result, e.g. |STEP.0|
 - run_id: UUID of this step's result; pass as a plain quoted JSON string to a tool's
-  run_id arg to continue from this step's conversation — NOT a placeholder, do not wrap in <<...>>
+  run_id arg to continue from this step's conversation — NOT a placeholder, do not wrap in |...|
 - observable_result: optional preview-limited raw result text
 
 Use reasons to understand what each prior step was intended to accomplish for the current task.
@@ -178,37 +188,41 @@ Emit exactly ONE JSON object with EXACTLY AND ONLY these keys:
 - "reason": <str>                     (one sentence describing this step)
 
 Step index rule:
-- If RUNNING PLAN STEPS show steps 0..k, output step k+1.
+- If STEPS ... SO FAR shows steps 0..k, output step k+1.
 - If no running steps are shown, output step 0.
 
 # PLACEHOLDERS (GREEDY REQUIRED)
 Use ONLY these placeholders for prior results and constants:
-- <<__sN__>> : executed step N in THIS run
-- <<__cN__>> : CACHE step N
-- <<__k.NAME__>> : registered constant NAME
+- |STEP.N| : executed step N in THIS run
+- |CACHE.N| : CACHE step N
+- |K.NAME| : registered constant NAME
+
+The discriminator word (STEP / CACHE / K) is case-insensitive. NAME in
+|K.NAME| is NOT case-insensitive -- it must match the exact registered
+constant name.
 
 Rules:
-1) Indices must be concrete non-negative integers, e.g. <<__s0__>>, never <<__sN__>>.
+1) Indices must be concrete non-negative integers, e.g. |STEP.0|, never |STEP.i|.
 2) In JSON output, every placeholder MUST be a quoted JSON string.
-3) No forward refs: for output step i, <<__sN__>> requires N < i.
-4) <<__cN__>> may only reference visible cache indices.
+3) No forward refs: for output step i, |STEP.N| requires N < i.
+4) |CACHE.N| may only reference visible cache indices.
 5) Use placeholders GREEDILY to preserve symbolic dataflow.
 6) If an arg depends on a running result, cache result, or constant, use its placeholder.
 7) Never copy observable_result values into args.
-8) Never manually approximate registered constants; use <<__k.NAME__>>.
+8) Never manually approximate registered constants; use |K.NAME|.
 9) Do NOT do inline computation inside args. Use tools.
 10) When embedding a placeholder inside text, put it directly inside ONE quoted JSON string.
     Do NOT use string concatenation, f-strings, template expressions, or code-like interpolation inside args.
 
 Correct:
-{{"x":"<<__s5__>>"}}
-{{"a":"<<__s0__>>","b":"<<__k.PI__>>"}}
-{{"value":"Area result: <<__s1__>>"}}
+{{"x":"|STEP.5|"}}
+{{"a":"|STEP.0|","b":"|K.PI|"}}
+{{"value":"Area result: |STEP.1|"}}
 
 Wrong:
-{{"x":<<__s5__>>}}
+{{"x":|STEP.5|}}
 {{"a":25,"b":3.14159}}
-{{"value":"Area result: " + "<<__s1__>>"}}
+{{"value":"Area result: " + "|STEP.1|"}}
 
 # DURATION
 "duration" controls how many future step-generation turns may see this step's raw result as observable_result:
@@ -246,7 +260,7 @@ Choose the next best tool call:
 # FINALIZATION
 When complete, emit the return tool as the single object:
 {{"step": <int>, "tool": "Tool.ToolAgents.return", "args": {{"val": <literal-or-placeholder-or-null>}}, "duration": 0, "reason": "<one sentence>"}}
-Return val may be <<__sN__>>, <<__cN__>>, <<__k.NAME__>>, any JSON literal, or null.
+Return val may be |STEP.N|, |CACHE.N|, |K.NAME|, any JSON literal, or null.
 If it depends on a prior result, use the placeholder.
 Return reason should state that the running plan has completed the task and what is being returned.
 
@@ -254,11 +268,11 @@ Return reason should state that the running plan has completed the task and what
 CACHE:
 [{{"step":0,"tool":"Tool.Math.power","args":{{"a":2,"b":3}}}}]
 
-RUNNING PLAN STEPS 0-0 SO FAR:
-[{{"step":0,"reason":"Multiply the cached power result by 5 for the current calculation.","tool":"Tool.Math.multiply","args":{{"a":"<<__c0__>>","b":5}},"result_ref":"<<__s0__>>","run_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}}]
+STEPS 0-0 SO FAR:
+[{{"step":0,"reason":"Multiply the cached power result by 5 for the current calculation.","tool":"Tool.Math.multiply","args":{{"a":"|CACHE.0|","b":5}},"result_ref":"|STEP.0|","run_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}}]
 
 VALID OUTPUT:
-{{"step":1,"tool":"Tool.Math.add","args":{{"a":"<<__s0__>>","b":2}},"duration":0,"reason":"Add 2 to the previous multiplication result for the current calculation."}}
+{{"step":1,"tool":"Tool.Math.add","args":{{"a":"|STEP.0|","b":2}},"duration":0,"reason":"Add 2 to the previous multiplication result for the current calculation."}}
 """,
     description="ReActAgent iterative step-orchestration prompt.",
 )

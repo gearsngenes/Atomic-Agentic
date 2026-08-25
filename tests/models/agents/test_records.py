@@ -610,7 +610,7 @@ class TestBlackboardSlot:
             {
                 "step": 3,
                 "tool": "Tool.tests.multiply",
-                "args": {"x": "<<__s0__>>", "y": 2},
+                "args": {"x": "|STEP.0|", "y": 2},
                 "resolved_args": {"x": 4, "y": 2},
                 "result": 8,
                 "error": NO_VAL,
@@ -622,7 +622,7 @@ class TestBlackboardSlot:
 
         assert slot.step == 3
         assert slot.tool == "Tool.tests.multiply"
-        assert slot.args == {"x": "<<__s0__>>", "y": 2}
+        assert slot.args == {"x": "|STEP.0|", "y": 2}
         assert slot.resolved_args == {"x": 4, "y": 2}
         assert slot.result == 8
         assert slot.error is NO_VAL
@@ -655,7 +655,10 @@ class TestBlackboardSlot:
             BlackboardSlot.from_dict({"step": 0, "extra": True})
 
     def test_from_dict_rejects_both_await_keys(self) -> None:
-        with pytest.raises(ValueError, match="both 'await' and 'await_step'"):
+        """await_step is no longer a recognized from_dict input key at all --
+        passing it (alone or alongside 'await') is rejected by the generic
+        unsupported-key check, not a dedicated dual-key conflict check."""
+        with pytest.raises(ValueError, match="unsupported keys"):
             BlackboardSlot.from_dict({"step": 0, "await": 0, "await_step": 0})
 
     def test_to_dict_shape_includes_status_and_dependency_fields(self) -> None:
@@ -680,5 +683,6 @@ class TestBlackboardSlot:
             "error": NO_VAL,
             "status": "executed",
             "step_dependencies": (0,),
-            "await_step": 0,
+            "await": 0,
+            "reason": None,
         }

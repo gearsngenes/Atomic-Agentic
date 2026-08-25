@@ -161,7 +161,7 @@ def react_step_json(
     args: Any,
     step: int | None = 0,
     duration: int = 0,
-    description: str = "Run the next tool call needed for the current test task.",
+    reason: str = "Run the next tool call needed for the current test task.",
     **extra: Any,
 ) -> str:
     payload: dict[str, Any] = {}
@@ -172,7 +172,7 @@ def react_step_json(
             "tool": tool,
             "args": args,
             "duration": duration,
-            "description": description,
+            "reason": reason,
         }
     )
     payload.update(extra)
@@ -304,6 +304,14 @@ class ScriptedToolAgent(ToolAgent):
         if not task.task_messages:
             task.task_messages = [{"role": "user", "content": task.user_prompt}]
         return task.task_messages
+
+    def _validate_generation_output(self, raw_output: str, *, task: ScriptedTask) -> Any:
+        """Minimal implementation satisfying the abstract contract; not
+        exercised on the scripted execution path since this fixture's whole
+        script is fixed upfront -- prepare() drives execution directly from
+        task.batches, never through _run_generation_retry_loop. Present only
+        so the class can be instantiated."""
+        raise NotImplementedError
 
     def prepare(self, task: ScriptedTask) -> ScriptedTask:
         if task.batch_index >= len(task.batches):

@@ -15,6 +15,7 @@ from .conftest import (
 from atomic_agentic.agents.toolagent import return_tool
 from atomic_agentic.agents.planact import PlanActAgent
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot
+from atomic_agentic.models.agents.tasks import PlanActTask
 from atomic_agentic.exceptions import (
     ToolAgentError,
     ToolInvocationError,
@@ -29,8 +30,8 @@ class TestPlanActAgent:
                 f"""
                 [
                   {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
-                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 10}}}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "|STEP.0|", "y": 10}}}},
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "|STEP.1|"}}}}
                 ]
                 """
             ]
@@ -60,7 +61,7 @@ class TestPlanActAgent:
             [
                 f"""
                 [
-                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}},
+                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "|STEP.0|"}}}},
                   {{"step": 1, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}}
                 ]
                 """
@@ -78,7 +79,7 @@ class TestPlanActAgent:
                 [
                   {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
                   {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": ["<<__s0__>>", "<<__s1__>>"]}}}}
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": ["|STEP.0|", "|STEP.1|"]}}}}
                 ]
                 """
             ]
@@ -138,7 +139,7 @@ class TestPlanActAgent:
                 [
                   {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
                   {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "|STEP.1|"}}}}
                 ]
                 """
             ],
@@ -153,7 +154,7 @@ class TestPlanActAgent:
             [
                 f"""
                 [
-                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "<<__c0__>>"}}}}
+                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "|CACHE.0|"}}}}
                 ]
                 """
             ]
@@ -167,9 +168,9 @@ class TestPlanActAgent:
             [
                 f"""
                 [
-                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": "<<__s1__>>", "y": 2}}}},
+                  {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": "|STEP.1|", "y": 2}}}},
                   {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": 3, "y": 4}}}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "|STEP.1|"}}}}
                 ]
                 """
             ]
@@ -184,12 +185,12 @@ class TestPlanActAgent:
                 f"""
                 [
                   {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
-                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
+                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": "|STEP.0|"}}}}
                 ]
                 """,
                 f"""
                 [
-                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "<<__c0__>>"}}}}
+                  {{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": "|CACHE.0|"}}}}
                 ]
                 """,
             ],
@@ -219,7 +220,7 @@ class TestPlanActAgent:
             BlackboardSlot(
                 step=2,
                 tool=return_tool.full_name,
-                args={"val": "<<__s1__>>"},
+                args={"val": "|STEP.1|"},
                 status="planned",
                 step_dependencies=(0, 1),
             ),
@@ -241,8 +242,8 @@ class TestPlanActAgent:
                 f"""
                 [
                   {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 4}}, "await": 0}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "|STEP.0|", "y": 4}}, "await": 0}},
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "|STEP.1|"}}}}
                 ]
                 """
             ]
@@ -266,7 +267,7 @@ class TestPlanActAgent:
                 f"""
                 [
                   {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
+                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": "|STEP.0|"}}}}
                 ]
                 """
             ]
@@ -287,7 +288,7 @@ class TestPlanActAgent:
                 f"""
                 [
                   {{"tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
+                  {{"tool": "{return_tool.full_name}", "args": {{"val": "|STEP.0|"}}}}
                 ]
                 """
             ]
@@ -307,7 +308,7 @@ class TestPlanActAgent:
                 f"""
                 [
                   {{"step": 99, "tool": "Tool.tests.add", "args": {{"x": 1, "y": 2}}}},
-                  {{"step": 42, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s0__>>"}}}}
+                  {{"step": 42, "tool": "{return_tool.full_name}", "args": {{"val": "|STEP.0|"}}}}
                 ]
                 """
             ]
@@ -341,8 +342,8 @@ class TestPlanActAgent:
                 f"""
                 [
                   {{"step": 0, "tool": "Tool.tests.add", "args": {{"x": 2, "y": 3}}}},
-                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "<<__s0__>>", "y": 10}}}},
-                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "<<__s1__>>"}}}}
+                  {{"step": 1, "tool": "Tool.tests.multiply", "args": {{"x": "|STEP.0|", "y": 10}}}},
+                  {{"step": 2, "tool": "{return_tool.full_name}", "args": {{"val": "|STEP.1|"}}}}
                 ]
                 """
             ]
@@ -390,7 +391,7 @@ class TestPlanActThinkPrepareHandoff:
             [
                 json.dumps([
                     {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+                    {"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}},
                 ])
             ]
         )
@@ -417,8 +418,8 @@ class TestPlanActBlackboardInvariants:
             [
                 json.dumps([
                     {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-                    {"tool": "Tool.tests.multiply", "args": {"x": "<<__s0__>>", "y": 3}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                    {"tool": "Tool.tests.multiply", "args": {"x": "|STEP.0|", "y": 3}},
+                    {"tool": return_tool.full_name, "args": {"val": "|STEP.1|"}},
                 ])
             ]
         )
@@ -438,7 +439,7 @@ class TestPlanActBlackboardInvariants:
                 json.dumps([
                     {"tool": "Tool.tests.fail_tool", "args": {}},
                     {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                    {"tool": return_tool.full_name, "args": {"val": "|STEP.1|"}},
                 ])
             ],
             fail_fast=False,
@@ -470,7 +471,7 @@ class TestPlanActBlackboardInvariants:
                 json.dumps([
                     {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
                     {"tool": "Tool.tests.multiply", "args": {"x": 3, "y": 4}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                    {"tool": return_tool.full_name, "args": {"val": "|STEP.1|"}},
                 ])
             ]
         )
@@ -492,7 +493,7 @@ class TestPlanActGenerationRetry:
 
     VALID_PLAN = json.dumps([
         {"step": 0, "tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-        {"step": 1, "tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+        {"step": 1, "tool": return_tool.full_name, "args": {"val": "|STEP.0|"}},
     ])
 
     VALID_PLAN_RETURN_ONLY = json.dumps([
@@ -635,7 +636,7 @@ class TestCascadeFailedPropagation:
     Integration tests for cascade FAILED propagation in PlanActAgent.
 
     When a tool step fails (fail_fast=False), any later step whose args
-    reference it via <<__sN__>> placeholders is cascade-marked FAILED
+    reference it via |STEP.N| placeholders is cascade-marked FAILED
     instead of raising. The return tool always raises when any of its
     arg dependencies failed.
     """
@@ -646,7 +647,7 @@ class TestCascadeFailedPropagation:
             [
                 json.dumps([
                     {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
+                    {"tool": "Tool.tests.add", "args": {"x": "|STEP.0|", "y": 2}},
                     {"tool": return_tool.full_name, "args": {"val": 99}},
                 ])
             ],
@@ -668,7 +669,7 @@ class TestCascadeFailedPropagation:
             [
                 json.dumps([
                     {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
+                    {"tool": "Tool.tests.add", "args": {"x": "|STEP.0|", "y": 2}},
                     {"tool": return_tool.full_name, "args": {"val": 99}},
                 ])
             ],
@@ -689,7 +690,7 @@ class TestCascadeFailedPropagation:
             [
                 json.dumps([
                     {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+                    {"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}},
                 ])
             ],
             fail_fast=False,
@@ -704,8 +705,8 @@ class TestCascadeFailedPropagation:
             [
                 json.dumps([
                     {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                    {"tool": "Tool.tests.add", "args": {"x": "|STEP.0|", "y": 2}},
+                    {"tool": return_tool.full_name, "args": {"val": "|STEP.1|"}},
                 ])
             ],
             fail_fast=False,
@@ -721,7 +722,7 @@ class TestCascadeFailedPropagation:
                 json.dumps([
                     {"tool": "Tool.tests.fail_tool", "args": {}},
                     {"tool": "Tool.tests.add", "args": {"x": 3, "y": 4}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                    {"tool": return_tool.full_name, "args": {"val": "|STEP.1|"}},
                 ])
             ],
             fail_fast=False,
@@ -741,7 +742,7 @@ class TestCascadeFailedPropagation:
             [
                 json.dumps([
                     {"tool": "Tool.tests.fail_tool", "args": {}},
-                    {"tool": "Tool.tests.add", "args": {"x": "<<__s0__>>", "y": 2}},
+                    {"tool": "Tool.tests.add", "args": {"x": "|STEP.0|", "y": 2}},
                     {"tool": return_tool.full_name, "args": {"val": 99}},
                 ])
             ],
@@ -757,7 +758,7 @@ class TestCascadeFailedPropagation:
 class TestFailedCacheRefValidation:
     """
     Tests for FAILED cache-ref detection in _validate_planned_slots (PlanAct)
-    and _process_next_step_output (ReAct).
+    and _validate_generation_output (ReAct).
 
     Requires two-invoke sequences: first invoke leaves a FAILED slot in the
     persisted cache (fail_fast=False, context_enabled=True), then a second
@@ -773,9 +774,9 @@ class TestFailedCacheRefValidation:
                     {"tool": "Tool.tests.fail_tool", "args": {}},
                     {"tool": return_tool.full_name, "args": {"val": 1}},
                 ]),
-                # Second invoke: plan references <<__c0__>> which is FAILED.
+                # Second invoke: plan references |CACHE.0| which is FAILED.
                 json.dumps([
-                    {"tool": return_tool.full_name, "args": {"val": "<<__c0__>>"}},
+                    {"tool": return_tool.full_name, "args": {"val": "|CACHE.0|"}},
                 ]),
             ],
             fail_fast=False,
@@ -789,32 +790,32 @@ class TestFailedCacheRefValidation:
             agent.invoke({"prompt": "second run"})
 
     def test_validate_planned_slots_rejects_stale_step_ref_in_return(self) -> None:
-        """PlanAct: return step using <<__sN__>> where N >= plan length raises at validation.
+        """PlanAct: return step using |STEP.N| where N >= plan length raises at validation.
 
         Reproduces the bug where _normalize_planned_slots overwrites return-slot
         step_dependencies to all-prior-steps, masking a stale global step index
         in the args that then blows up at _resolve_placeholders during execution.
         """
         # First invoke produces step 0 in the blackboard (global index 0).
-        # Second invoke's return step mistakenly references <<__s1__>> (index 1 in
-        # a 1-step plan -- out of range; only <<__s0__>> is valid).
+        # Second invoke's return step mistakenly references |STEP.1| (index 1 in
+        # a 1-step plan -- out of range; only |STEP.0| is valid).
         agent = make_planact_agent(
             [
                 # First invoke: one real step + return.
                 json.dumps([
                     {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+                    {"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}},
                 ]),
                 # Second invoke: single return step uses stale index 1 (out of range).
                 json.dumps([
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}},
+                    {"tool": return_tool.full_name, "args": {"val": "|STEP.1|"}},
                 ]),
             ],
             context_enabled=True,
         )
         result1 = agent.invoke({"prompt": "first run"})
         assert result1.result == 3
-        # Second invoke: return step has <<__s1__>> in a 1-slot plan (only index 0 valid).
+        # Second invoke: return step has |STEP.1| in a 1-slot plan (only index 0 valid).
         with pytest.raises(ToolAgentError, match="return step has invalid step references"):
             agent.invoke({"prompt": "second run"})
 
@@ -825,8 +826,8 @@ class TestFailedCacheRefValidation:
                 # First invoke: step 0 fails; step 1 is return with independent val.
                 react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
                 react_step_json(step=1, tool=return_tool.full_name, args={"val": 1}, duration=0),
-                # Second invoke: step references <<__c0__>> (FAILED cache slot).
-                react_step_json(step=0, tool="Tool.tests.add", args={"x": "<<__c0__>>", "y": 1}),
+                # Second invoke: step references |CACHE.0| (FAILED cache slot).
+                react_step_json(step=0, tool="Tool.tests.add", args={"x": "|CACHE.0|", "y": 1}),
             ],
             tool_calls_limit=2,
             fail_fast=False,
@@ -844,15 +845,12 @@ class TestAwaitFieldKeyInErrors:
     def test_invalid_await_type_error_uses_await_key(self) -> None:
         """_validate_tool_step_dict error for bad 'await' value names 'await', not 'await_step'."""
         agent = make_planact_agent([], context_enabled=False)
-        # _process_plan_output calls _validate_tool_step_dict; the await type error
-        # fires before tool-existence lookup so no tools need to be registered.
+        # _validate_generation_output calls _validate_tool_step_dict; the await
+        # type error fires before tool-existence lookup so no tools need to be
+        # registered.
         plan = [{"tool": return_tool.full_name, "args": {"val": None}, "await": "not_an_int"}]
-        result = agent._process_plan_output(
-            parsed=plan,
-            cache_blackboard=[],
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
-        )
+        task = PlanActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
+        result = agent._validate_generation_output(json.dumps(plan), task=task)
         assert isinstance(result, str)
         assert "'await'" in result
         assert "'await_step'" not in result

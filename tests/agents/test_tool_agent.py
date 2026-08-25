@@ -222,10 +222,10 @@ class TestToolAgentAbstractContract:
         with pytest.raises(TypeError):
             ToolAgent(name="a", namespace="tests", description="d", llm_engine=FakeLLMEngine(response_fn=lambda messages: "{}"))  # type: ignore[abstract]
 
-    def test_toolagent_reabstracts_five_hooks(self) -> None:
+    def test_toolagent_reabstracts_hooks(self) -> None:
         assert ToolAgent.__abstractmethods__ == {
             "_initialize_task", "think", "async_think", "prepare", "async_prepare",
-            "_render_task_messages",
+            "_render_task_messages", "_validate_generation_output",
         }
 
     def test_scripted_tool_agent_implements_every_required_hook(self) -> None:
@@ -315,7 +315,7 @@ class TestToolAgentPostInvokeRouting:
                     tool=return_tool.full_name,
                     args={"val": 7},
                     duration=0,
-                    description="Return the final literal value for the test task.",
+                    reason="Return the final literal value for the test task.",
                 )
             ],
             tool_calls_limit=1,
@@ -775,7 +775,7 @@ class TestConstantRegistration:
         task = make_task()
 
         resolved = agent._resolve_placeholders(
-            {"payload": "<<__k.PAYLOAD__>>"},
+            {"payload": "|K.PAYLOAD|"},
             task=task,
         )
 
@@ -788,7 +788,7 @@ class TestConstantRegistration:
         task = make_task()
 
         resolved = agent._resolve_placeholders(
-            {"message": "Value is <<__k.LONG_TEXT__>>."},
+            {"message": "Value is |K.LONG_TEXT|."},
             task=task,
         )
 
@@ -799,11 +799,21 @@ class TestConstantRegistration:
         task = make_task()
 
         with pytest.raises(ToolAgentError, match="unknown constant reference"):
-            agent._resolve_placeholders("<<__k.MISSING__>>", task=task)
+            agent._resolve_placeholders("|K.MISSING|", task=task)
+
+    def test_resolve_constant_placeholder_name_is_case_sensitive(self) -> None:
+        """|K.pi| must NOT resolve against a constant registered as "PI" --
+        the discriminator is case-insensitive but NAME is not."""
+        agent = make_agent()
+        agent.register_constant("PI", 3.14159)
+        task = make_task()
+
+        with pytest.raises(ToolAgentError, match="unknown constant reference"):
+            agent._resolve_placeholders("|K.pi|", task=task)
 
 
 class TestPlaceholderResolution:
-    """Cache-placeholder (<<__cN__>>) tests set agent._blackboard directly --
+    """Cache-placeholder (|CACHE.N|) tests set agent._blackboard directly --
     ToolAgentTask has no cache_blackboard field; cache state lives only on
     the owning agent, never on the task."""
 
@@ -811,27 +821,46 @@ class TestPlaceholderResolution:
         agent = make_agent()
         task = make_task(running=[executed_slot(0, [1, 2, 3])])
 
-        assert agent._resolve_placeholders("<<__s0__>>", task=task) == [1, 2, 3]
+        assert agent._resolve_placeholders("|STEP.0|", task=task) == [1, 2, 3]
 
     def test_full_cache_placeholder_preserves_type(self) -> None:
         agent = make_agent()
         agent._blackboard = [executed_slot(0, {"cached": 10})]
         task = make_task()
 
-        assert agent._resolve_placeholders("<<__c0__>>", task=task) == {"cached": 10}
+        assert agent._resolve_placeholders("|CACHE.0|", task=task) == {"cached": 10}
+
+    def test_placeholder_discriminator_is_case_insensitive(self) -> None:
+        """|step.0|, |Step.0|, |STEP.0| all resolve identically; same for CACHE."""
+        agent = make_agent()
+        agent._blackboard = [executed_slot(0, "cached")]
+        task = make_task(running=[executed_slot(0, [1, 2, 3])])
+
+        assert agent._resolve_placeholders("|step.0|", task=task) == [1, 2, 3]
+        assert agent._resolve_placeholders("|Step.0|", task=task) == [1, 2, 3]
+        assert agent._resolve_placeholders("|STEP.0|", task=task) == [1, 2, 3]
+        assert agent._resolve_placeholders("|cache.0|", task=task) == "cached"
+
+    def test_legacy_placeholder_syntax_passes_through_unresolved(self) -> None:
+        """Hard-cutover regression guard: an old-style token is not recognized
+        as a placeholder at all and passes through as literal text."""
+        agent = make_agent()
+        task = make_task(running=[executed_slot(0, [1, 2, 3])])
+
+        assert agent._resolve_placeholders("<<__s0__>>", task=task) == "<<__s0__>>"
 
     def test_inline_step_placeholder_uses_repr(self) -> None:
         agent = make_agent()
         task = make_task(running=[executed_slot(0, ["a", "b"])])
 
-        assert agent._resolve_placeholders("result=<<__s0__>>", task=task) == "result=['a', 'b']"
+        assert agent._resolve_placeholders("result=|STEP.0|", task=task) == "result=['a', 'b']"
 
     def test_inline_cache_placeholder_uses_repr(self) -> None:
         agent = make_agent()
         agent._blackboard = [executed_slot(0, {"cached": 10})]
         task = make_task()
 
-        assert agent._resolve_placeholders("cache=<<__c0__>>", task=task) == "cache={'cached': 10}"
+        assert agent._resolve_placeholders("cache=|CACHE.0|", task=task) == "cache={'cached': 10}"
 
     def test_nested_dict_list_tuple_set_resolution(self) -> None:
         agent = make_agent()
@@ -845,10 +874,10 @@ class TestPlaceholderResolution:
 
         resolved = agent._resolve_placeholders(
             {
-                "a": "<<__s0__>>",
-                "b": ["<<__c0__>>", "inline <<__s1__>>"],
-                "c": ("<<__s0__>>",),
-                "d": {"<<__c0__>>"},
+                "a": "|STEP.0|",
+                "b": ["|CACHE.0|", "inline |STEP.1|"],
+                "c": ("|STEP.0|",),
+                "d": {"|CACHE.0|"},
             },
             task=task,
         )
@@ -864,7 +893,7 @@ class TestPlaceholderResolution:
         agent = make_agent()
         task = make_task(running=[executed_slot(0, "dynamic_key")])
 
-        resolved = agent._resolve_placeholders({"<<__s0__>>": "value"}, task=task)
+        resolved = agent._resolve_placeholders({"|STEP.0|": "value"}, task=task)
 
         assert resolved == {"dynamic_key": "value"}
 
@@ -877,28 +906,28 @@ class TestPlaceholderResolution:
             ]
         )
 
-        assert agent._resolve_placeholders("<<__s0__>> + <<__s1__>>", task=task) == "1 + 2"
+        assert agent._resolve_placeholders("|STEP.0| + |STEP.1|", task=task) == "1 + 2"
 
     def test_out_of_range_step_placeholder_raises(self) -> None:
         agent = make_agent()
         task = make_task(running=[])
 
         with pytest.raises(ToolAgentError, match="Step reference 0 out of range"):
-            agent._resolve_placeholders("<<__s0__>>", task=task)
+            agent._resolve_placeholders("|STEP.0|", task=task)
 
     def test_out_of_range_cache_placeholder_raises(self) -> None:
         agent = make_agent()
         task = make_task()
 
         with pytest.raises(ToolAgentError, match="Cache reference 0 out of range"):
-            agent._resolve_placeholders("<<__c0__>>", task=task)
+            agent._resolve_placeholders("|CACHE.0|", task=task)
 
     def test_unexecuted_step_placeholder_raises(self) -> None:
         agent = make_agent()
         task = make_task(running=[BlackboardSlot(step=0)])
 
         with pytest.raises(ToolAgentError, match="Referenced step 0 is not executed"):
-            agent._resolve_placeholders("<<__s0__>>", task=task)
+            agent._resolve_placeholders("|STEP.0|", task=task)
 
     def test_unexecuted_cache_placeholder_raises(self) -> None:
         agent = make_agent()
@@ -906,7 +935,7 @@ class TestPlaceholderResolution:
         task = make_task()
 
         with pytest.raises(ToolAgentError, match="Referenced cache 0 is not.*executed"):
-            agent._resolve_placeholders("<<__c0__>>", task=task)
+            agent._resolve_placeholders("|CACHE.0|", task=task)
 
     def test_non_string_scalar_is_returned_unchanged(self) -> None:
         agent = make_agent()
@@ -916,7 +945,7 @@ class TestPlaceholderResolution:
         assert agent._resolve_placeholders(None, task=task) is None
 
     def test_extract_dependencies_finds_nested_placeholders(self) -> None:
-        obj = {"a": "<<__s0__>>", "b": ["prefix <<__s1__>>"], "<<__s2__>>": "key"}
+        obj = {"a": "|STEP.0|", "b": ["prefix |STEP.1|"], "|STEP.2|": "key"}
 
         assert extract_dependencies(obj, ToolAgent.STEP_REF_PATTERN) == {0, 1, 2}
         assert extract_dependencies(obj, ToolAgent.CACHE_REF_PATTERN) == set()
@@ -1219,8 +1248,8 @@ class TestScriptedInvokeLoop:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
-                [{"tool": keys["multiply"], "args": {"x": "<<__s0__>>", "y": 10}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}}],
+                [{"tool": keys["multiply"], "args": {"x": "|STEP.0|", "y": 10}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.1|"}}],
             ]
         )
 
@@ -1234,7 +1263,7 @@ class TestScriptedInvokeLoop:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -1249,7 +1278,7 @@ class TestScriptedInvokeLoop:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -1270,7 +1299,7 @@ class TestScriptedInvokeLoop:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -1291,16 +1320,16 @@ class TestScriptedInvokeLoop:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
-                [{"tool": keys["multiply"], "args": {"x": "<<__s0__>>", "y": 10}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}}],
+                [{"tool": keys["multiply"], "args": {"x": "|STEP.0|", "y": 10}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.1|"}}],
             ]
         )
 
         assert agent.invoke({"prompt": "run"}).result == 50
 
         board = agent.blackboard
-        assert board[1].args == {"x": "<<__c0__>>", "y": 10}
-        assert board[2].args == {"val": "<<__c1__>>"}
+        assert board[1].args == {"x": "|CACHE.0|", "y": 10}
+        assert board[2].args == {"val": "|CACHE.1|"}
 
     def test_clear_memory_clears_agent_history_and_blackboard(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -1308,7 +1337,7 @@ class TestScriptedInvokeLoop:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -1336,14 +1365,14 @@ class TestScriptedInvokeLoop:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
         assert agent.invoke({"prompt": "first"}).result == 5
 
         agent.set_script(
             [
-                [{"tool": return_tool.full_name, "args": {"val": "<<__c0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|CACHE.0|"}}],
             ]
         )
         assert agent.invoke({"prompt": "second"}).result == 5
@@ -1356,7 +1385,7 @@ class TestBlackboardPersistenceAndDisplay:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
         agent.invoke({"prompt": "run"})
@@ -1372,7 +1401,7 @@ class TestBlackboardPersistenceAndDisplay:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
         agent.invoke({"prompt": "run"})
@@ -1393,7 +1422,7 @@ class TestBlackboardPersistenceAndDisplay:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
         agent.invoke({"prompt": "run"})
@@ -1414,7 +1443,7 @@ class TestBlackboardPersistenceAndDisplay:
         agent.set_script(
             [
                 [{"tool": keys["join_text"], "args": {"prefix": "long", "value": "abcdefghij"}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
         agent.invoke({"prompt": "run"})
@@ -1437,7 +1466,7 @@ class TestBlackboardPersistenceAndDisplay:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
         # Script is set but agent is NOT invoked -- slots remain in planned/empty state.
@@ -1451,7 +1480,7 @@ class TestBlackboardPersistenceAndDisplay:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
         agent.invoke({"prompt": "run"})
@@ -1478,7 +1507,7 @@ class TestBlackboardPersistenceAndDisplay:
                         },
                     }
                 ],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -1497,7 +1526,7 @@ class TestBlackboardPersistenceAndDisplay:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -1526,7 +1555,7 @@ class TestBlackboardPersistenceAndDisplay:
                         },
                     }
                 ],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -1555,7 +1584,7 @@ class TestBlackboardPersistenceAndDisplay:
                         },
                     }
                 ],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -1574,7 +1603,7 @@ class TestBlackboardPersistenceAndDisplay:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -1595,7 +1624,7 @@ class TestToolAgentRecordRendering:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -1617,7 +1646,7 @@ class TestToolAgentRecordRendering:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 1, "y": 2}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
         assert agent.invoke({"prompt": "first"}).result == 3
@@ -1625,7 +1654,7 @@ class TestToolAgentRecordRendering:
         agent.set_script(
             [
                 [{"tool": keys["multiply"], "args": {"x": 4, "y": 5}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
         assert agent.invoke({"prompt": "second"}).result == 20
@@ -1680,7 +1709,7 @@ class TestRenderTurnWithFailedSlots:
                 {"tool": "Tool.tests.fail_tool", "args": {}},
                 {"tool": keys["add"], "args": {"x": 3, "y": 4}},
             ],
-            [{"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}}],
+            [{"tool": return_tool.full_name, "args": {"val": "|STEP.1|"}}],
         ])
         result = agent.invoke({"prompt": "run"})
         assert result.result == 7
@@ -1828,8 +1857,8 @@ class TestToolAgentAsyncBaseLoop:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
-                [{"tool": keys["multiply"], "args": {"x": "<<__s0__>>", "y": 10}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s1__>>"}}],
+                [{"tool": keys["multiply"], "args": {"x": "|STEP.0|", "y": 10}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.1|"}}],
             ]
         )
 
@@ -1843,7 +1872,7 @@ class TestToolAgentAsyncBaseLoop:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -2034,7 +2063,7 @@ class TestAsyncHookDispatch:
         agent.set_script(
             [
                 [{"tool": keys["add"], "args": {"x": 2, "y": 3}}],
-                [{"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}}],
+                [{"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}}],
             ]
         )
 
@@ -2049,7 +2078,7 @@ class TestAsyncHookDispatch:
             [
                 json.dumps([
                     {"tool": "Tool.tests.add", "args": {"x": 4, "y": 6}},
-                    {"tool": return_tool.full_name, "args": {"val": "<<__s0__>>"}},
+                    {"tool": return_tool.full_name, "args": {"val": "|STEP.0|"}},
                 ])
             ]
         )
@@ -2067,13 +2096,13 @@ class TestAsyncHookDispatch:
                     step=0,
                     tool="Tool.tests.add",
                     args={"x": 3, "y": 7},
-                    description="Add the two numbers for the current calculation.",
+                    reason="Add the two numbers for the current calculation.",
                 ),
                 react_step_json(
                     step=1,
                     tool=return_tool.full_name,
-                    args={"val": "<<__s0__>>"},
-                    description="Return the addition result as the final answer.",
+                    args={"val": "|STEP.0|"},
+                    reason="Return the addition result as the final answer.",
                 ),
             ],
             tool_calls_limit=1,

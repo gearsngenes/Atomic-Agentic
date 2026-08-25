@@ -146,7 +146,7 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
     """
     Recursively extract all placeholder references from an object.
 
-    Scans the object for occurrences of a given placeholder pattern (e.g., ``<<__sN__>>``)
+    Scans the object for occurrences of a given placeholder pattern (e.g., ``|STEP.N|``)
     and returns the set of all referenced indices. Used during planning to extract
     dependencies between steps.
 
@@ -157,8 +157,8 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
         (lists, tuples, dicts, sets, scalars).
     placeholder_pattern : re.Pattern[str]
         Compiled regex pattern matching placeholders. Usually:
-        - ``STEP_REF_PATTERN`` for step refs (``<<__sN__>>``)
-        - ``CACHE_REF_PATTERN`` for cache refs (``<<__cN__>>``)
+        - ``STEP_REF_PATTERN`` for step refs (``|STEP.N|``)
+        - ``CACHE_REF_PATTERN`` for cache refs (``|CACHE.N|``)
 
     Returns
     -------
@@ -176,8 +176,8 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
 
     Examples
     --------
-    >>> pattern = STEP_REF_PATTERN  # Matches <<__sN__>>
-    >>> obj = {"query": "<<__s0__>>", "context": ["<<__s1__>>", "<<__s0__>>"]}
+    >>> pattern = STEP_REF_PATTERN  # Matches |STEP.N|
+    >>> obj = {"query": "|STEP.0|", "context": ["|STEP.1|", "|STEP.0|"]}
     >>> extract_dependencies(obj, pattern)
     {0, 1}
 

@@ -43,8 +43,8 @@ The **blackboard pattern** is used internally to store and manage tool execution
 - **Cached blackboard**: Prior invocation results persisted from previous runs
 - **Placeholders**: Tool arguments can reference results from:
 
-  - ``<<__sN__>>`` – result from running step N (current invoke, 0-based index)
-  - ``<<__cN__>>`` – result from cache entry N (prior invokes, 0-based index)
+  - ``|STEP.N|`` – result from running step N (current invoke, 0-based index)
+  - ``|CACHE.N|`` – result from cache entry N (prior invokes, 0-based index)
 
 Placeholders are resolved at execution time to their concrete values, enabling dynamic
 data flow and automatic dependency management.
@@ -244,9 +244,11 @@ class ToolAgent(Agent, ABC):
     gather-based result collection.
 
     **Placeholder Resolution**: Supported syntaxes:
-        - ``<<__sN__>>`` – reference to running step N
-        - ``<<__cN__>>`` – reference to cache entry N
-        Full-string placeholders preserve types; inline placeholders render via ``repr()``.
+        - ``|STEP.N|`` – reference to running step N
+        - ``|CACHE.N|`` – reference to cache entry N
+        - ``|K.NAME|`` – reference to a registered constant (NAME is case-sensitive)
+        Discriminator word is case-insensitive. Full-string placeholders preserve
+        types; inline placeholders render via ``repr()``.
 
     **Return Semantics**: The canonical ``return_tool`` is registered automatically.
         When return executes, ``task.generated_response`` is set and ``task.complete``
@@ -266,13 +268,13 @@ class ToolAgent(Agent, ABC):
     CONSTANTS_FIELD = "CONSTANTS"
 
     STEP_REF_PATTERN: re.Pattern[str] = re.compile(
-    r"<<__s(\d+)__>>"
+        r"\|STEP\.(\d+)\|", re.IGNORECASE
     )
     CACHE_REF_PATTERN: re.Pattern[str] = re.compile(
-        r"<<__c(\d+)__>>"
+        r"\|CACHE\.(\d+)\|", re.IGNORECASE
     )
     CONST_REF_PATTERN: re.Pattern[str] = re.compile(
-        rf"<<__k\.({IDENTIFIER_PATTERN_TEXT})__>>"
+        rf"\|K\.({IDENTIFIER_PATTERN_TEXT})\|", re.IGNORECASE
     )
 
     def __init__(
@@ -327,9 +329,12 @@ class ToolAgent(Agent, ABC):
             Maximum number of non-return action calls per invoke run.
             ``None`` means unlimited. Must be ``>= 0`` if set.
         peek_at_cache : bool
-            When ``True``, the persisted blackboard is rendered with raw
-            result and resolved-args fields exposed (via
-            ``blackboard_serialized(peek=True)``). Defaults to ``False``.
+            When ``True``, ``render_turn()`` includes each executed cached
+            step's raw ``result`` value in the LLM-facing history it
+            renders. Defaults to ``False``. (Distinct from
+            ``blackboard_serialized``'s own ``peek`` parameter, which has no
+            LLM-facing caller -- its only caller is ``to_dict()``, always
+            with ``peek=False``.)
         response_preview_limit : int | None
             Character limit for assistant response previews in rendered turns.
             ``None`` means no truncation.
@@ -462,8 +467,8 @@ class ToolAgent(Agent, ABC):
 
     @property
     def peek_at_cache(self) -> bool:
-        """Whether ``blackboard_serialized(peek=True)`` is used when building
-        LLM context, exposing raw result and resolved-args fields."""
+        """Whether ``render_turn()`` includes each executed cached step's
+        raw result value in the LLM-facing history it renders."""
         return self._peek_at_cache
 
     @property
@@ -1075,25 +1080,30 @@ class ToolAgent(Agent, ABC):
 
         Supported Placeholder Formats
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        - ``<<__sN__>>`` – Result from running step N (0-based, plan-local to this invoke)
-        - ``<<__cN__>>`` – Result from cache entry N (0-based, from persisted blackboard)
-        - ``<<__k.NAME__>>`` – Registered ToolAgent constant named NAME
+        - ``|STEP.N|`` – Result from running step N (0-based, plan-local to this invoke)
+        - ``|CACHE.N|`` – Result from cache entry N (0-based, from persisted blackboard)
+        - ``|K.NAME|`` – Registered ToolAgent constant named NAME
+
+        The discriminator word (``STEP``/``CACHE``/``K``) is matched
+        case-insensitively. ``NAME`` in ``|K.NAME|`` is matched
+        case-sensitively against the registered constant name -- ``|K.pi|``
+        does NOT resolve a constant registered as ``"PI"``.
 
         Two resolution modes apply depending on placeholder position:
 
         1. **Full-String Placeholder**:
            - Returns the referenced value as-is, preserving its type.
            - Examples:
-             - ``"<<__s0__>>"`` returns step 0's result directly.
-             - ``"<<__c0__>>"`` returns cache 0's result directly.
-             - ``"<<__k.PI__>>"`` returns the registered constant value directly.
+             - ``"|STEP.0|"`` returns step 0's result directly.
+             - ``"|CACHE.0|"`` returns cache 0's result directly.
+             - ``"|K.PI|"`` returns the registered constant value directly.
 
         2. **Inline Placeholder**:
            - Replaces the placeholder with ``repr(value)``, falling back to ``str(value)``.
            - For constants only, applies ``ConstantSpec.inline_limit`` if configured.
            - Example:
-             - ``"Step returned: <<__s0__>>"`` becomes a string.
-             - ``"Use constant: <<__k.NAME__>>"`` becomes a string, possibly truncated
+             - ``"Step returned: |STEP.0|"`` becomes a string.
+             - ``"Use constant: |K.NAME|"`` becomes a string, possibly truncated
                for that constant's inline representation.
 
         Readiness Validation
@@ -1524,8 +1534,8 @@ class ToolAgent(Agent, ABC):
         ~~~~~~~~~~~~~~~~~~
         1. **Trim empty/unplanned tail**: Remove trailing empty slots from running blackboard
            (slots with no tool assigned)
-        2. **Rewrite placeholders**: All ``<<__sN__>>`` step references in appended slots'
-           args are rewritten to ``<<__c{new_global_index}__>>`` cache references.
+        2. **Rewrite placeholders**: All ``|STEP.N|`` step references in appended slots'
+           args are rewritten to ``|CACHE.{new_global_index}|`` cache references.
            Applied to both EXECUTED and FAILED slots.
         3. **Merge into cache**: Append all non-empty slots (EXECUTED and FAILED)
            preserving status. FAILED slots keep their ``error`` and no ``result``.
@@ -1538,13 +1548,13 @@ class ToolAgent(Agent, ABC):
         - running_blackboard has 3 executed entries (indices 0-2)
 
         Rewriting in appended slots:
-        - Step 0's args contain ``<<__s1__>>`` → rewritten to ``<<__c6__>>`` (5 + 1)
-        - Step 1's args contain ``<<__s0__>>`` → rewritten to ``<<__c5__>>`` (5 + 0)
-        - Step 2's args contain ``<<__s1__>>`` → rewritten to ``<<__c6__>>`` (5 + 1)
+        - Step 0's args contain ``|STEP.1|`` → rewritten to ``|CACHE.6|`` (5 + 1)
+        - Step 1's args contain ``|STEP.0|`` → rewritten to ``|CACHE.5|`` (5 + 0)
+        - Step 2's args contain ``|STEP.1|`` → rewritten to ``|CACHE.6|`` (5 + 1)
 
         After persistence:
         - self._blackboard now has 8 entries
-        - Future invokes can use ``<<__c5__>>``, ``<<__c6__>>``, ``<<__c7__>>``
+        - Future invokes can use ``|CACHE.5|``, ``|CACHE.6|``, ``|CACHE.7|``
           to reference steps 0, 1, 2 respectively
 
         Parameters
@@ -1574,15 +1584,15 @@ class ToolAgent(Agent, ABC):
 
         def rewrite_step_to_cache_placeholders(obj: Any) -> Any:
             """
-            Rewrite <<__sj__>> -> <<__c{base_len + j}__>> recursively.
-            Leaves <<__ck__>> unchanged.
+            Rewrite |STEP.j| -> |CACHE.{base_len + j}| recursively.
+            Leaves |CACHE.k| unchanged.
             """
             if isinstance(obj, str):
                 # exact placeholder: still rewrite as a string placeholder (we are rewriting args,
                 # not resolving)
                 def repl(m: re.Match[str]) -> str:
                     j = int(m.group(1))
-                    return f"<<__c{base_len + j}__>>"
+                    return f"|CACHE.{base_len + j}|"
 
                 return self.STEP_REF_PATTERN.sub(repl, obj)
 
@@ -2310,10 +2320,14 @@ class ToolAgent(Agent, ABC):
         board = task.running_blackboard
 
         async def run_batch() -> list[Any]:
+            # Resolve every tool in the batch before constructing any
+            # coroutine -- a later index naming an unregistered tool must
+            # not leave an earlier index's already-created (and now
+            # unawaited) coroutine behind.
+            tools = [self.get_tool(board[idx].tool) for idx in indices]
             coros: list[Any] = []
-            for idx in indices:
+            for idx, tool in zip(indices, tools):
                 slot = board[idx]
-                tool = self.get_tool(slot.tool)
                 logger.debug(
                     f"{type(self).__name__}.{self.name}:\nTool: {slot.tool}\nArgs: {slot.args}\n\n"
                 )
@@ -2335,10 +2349,14 @@ class ToolAgent(Agent, ABC):
         indices = list(task.prepared_steps)
         board = task.running_blackboard
 
+        # Resolve every tool in the batch before constructing any coroutine
+        # -- a later index naming an unregistered tool must not leave an
+        # earlier index's already-created (and now unawaited) coroutine
+        # behind.
+        tools = [self.get_tool(board[idx].tool) for idx in indices]
         coros: list[Any] = []
-        for idx in indices:
+        for idx, tool in zip(indices, tools):
             slot = board[idx]
-            tool = self.get_tool(slot.tool)
             logger.debug(
                 f"{type(self).__name__}.{self.name}:\nTool: {slot.tool}\nArgs: {slot.args}\n\n"
             )

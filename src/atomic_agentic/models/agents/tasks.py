@@ -109,13 +109,13 @@ class ToolAgentTask(AgentTask):
 
     Placeholder Semantics & Resolvability
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    **Cached Placeholder** (``<<__cN__>>``)
+    **Cached Placeholder** (``|CACHE.N|``)
         Resolvable iff ``0 <= N < len(self._blackboard)`` AND
         ``self._blackboard[N].is_executed() == True`` — resolved directly
         against the owning ``ToolAgent``'s live, always-persisted
         blackboard, not a task-local snapshot.
 
-    **Step Placeholder** (``<<__sN__>>``)
+    **Step Placeholder** (``|STEP.N|``)
         Resolvable iff ``0 <= N < len(running_blackboard)`` AND
         ``running_blackboard[N].is_executed() == True``.
 
@@ -256,7 +256,7 @@ class ReActTask(ToolAgentTask):
         Dual role:
         1. Allocation cursor: determines which slot index gets the next
            prepared step.
-        2. Dependency cutoff: any ``<<__sN__>>`` placeholder in newly
+        2. Dependency cutoff: any ``|STEP.N|`` placeholder in newly
            prepared args must satisfy ``N < next_step_index``.
 
     step_meta : list[ReActStepMeta]

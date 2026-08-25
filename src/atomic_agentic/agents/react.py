@@ -19,7 +19,7 @@ Observability Window
 --------------------
 Each step may declare a ``duration`` field (integer >= 0). While ``duration > 0``
 the step's raw result appears in subsequent snapshots; once exhausted the result
-is visible only as a ``<<__sN__>>`` placeholder. This limits context growth while
+is visible only as a ``|STEP.N|`` placeholder. This limits context growth while
 keeping recency-relevant results accessible.
 
 Execution
@@ -549,7 +549,7 @@ class ReActAgent(ToolAgent):
                     REASON_FIELD: slot.reason,
                     TOOL_FIELD: slot.tool,
                     ARGS_FIELD: slot.args,
-                    "result_ref": f"<<__s{idx}__>>",
+                    "result_ref": f"|STEP.{idx}|",
                     "run_id": slot.result.run_id,
                 }
                 if task.step_meta[idx].observable > 0:

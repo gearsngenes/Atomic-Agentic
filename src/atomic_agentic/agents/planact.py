@@ -10,14 +10,14 @@ Planning Model
 --------------
 A single LLM call at the start of each ``invoke()`` emits the full plan as a
 JSON array of tool-call steps. Each step specifies a tool name, argument map
-(optionally containing ``<<__sN__>>`` step-ref or ``<<__cN__>>`` cache-ref
+(optionally containing ``|STEP.N|`` step-ref or ``|CACHE.N|`` cache-ref
 placeholders), an optional ``await`` scheduling barrier, and an optional
 ``return`` terminator.
 
 Compilation
 -----------
 After the plan is normalized and validated, a dependency graph is derived from
-``<<__sN__>>`` placeholder references and explicit ``await`` fields. A topological
+``|STEP.N|`` placeholder references and explicit ``await`` fields. A topological
 level-assignment produces concurrent batches: all steps at the same dependency
 level execute together.
 
@@ -78,7 +78,7 @@ class PlanActAgent(ToolAgent):
        - Validated plan stored on ``task.generated_plan``
 
     2. **Compilation** (``prepare()``, first call only)
-       - Each step's args are scanned for ``<<__sN__>>`` placeholders to extract
+       - Each step's args are scanned for ``|STEP.N|`` placeholders to extract
          plan-local dependencies
        - Topological sort produces concurrent batches (steps with identical dependency
          level execute together)

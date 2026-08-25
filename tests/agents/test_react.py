@@ -17,7 +17,7 @@ from .conftest import (
 from atomic_agentic.agents.toolagent import return_tool
 from atomic_agentic.agents.react import ReActAgent
 from atomic_agentic.models.agents.blackboard_models import BlackboardSlot
-from atomic_agentic.models.agents.tasks import ReActStepMeta
+from atomic_agentic.models.agents.tasks import ReActStepMeta, ReActTask, PlanActTask
 from atomic_agentic.exceptions import ToolAgentError
 from atomic_agentic.constants.core import NO_VAL
 
@@ -46,19 +46,19 @@ class TestReActAgent:
                     step=0,
                     tool="Tool.tests.add",
                     args={"x": 2, "y": 3},
-                    description="Add the two input numbers for the current calculation.",
+                    reason="Add the two input numbers for the current calculation.",
                 ),
                 react_step_json(
                     step=1,
                     tool="Tool.tests.multiply",
-                    args={"x": "<<__s0__>>", "y": 10},
-                    description="Multiply the addition result by ten for the current calculation.",
+                    args={"x": "|STEP.0|", "y": 10},
+                    reason="Multiply the addition result by ten for the current calculation.",
                 ),
                 react_step_json(
                     step=2,
                     tool=return_tool.full_name,
-                    args={"val": "<<__s1__>>"},
-                    description="Return the final multiplied value because the current calculation is complete.",
+                    args={"val": "|STEP.1|"},
+                    reason="Return the final multiplied value because the current calculation is complete.",
                 ),
             ],
             tool_calls_limit=2,
@@ -76,13 +76,13 @@ class TestReActAgent:
                     tool="Tool.tests.add",
                     args={"x": 2, "y": 3},
                     duration=1,
-                    description="Add the two input numbers so the result can be returned.",
+                    reason="Add the two input numbers so the result can be returned.",
                 ),
                 react_step_json(
                     step=1,
                     tool=return_tool.full_name,
-                    args={"val": "<<__s0__>>"},
-                    description="Return the addition result because the current task is complete.",
+                    args={"val": "|STEP.0|"},
+                    reason="Return the addition result because the current task is complete.",
                 ),
             ],
             tool_calls_limit=1,
@@ -95,11 +95,11 @@ class TestReActAgent:
         assert isinstance(engine, FakeLLMEngine)
         assert len(engine.calls) == 2
         second_call_text = "\n".join(message["content"] for message in engine.calls[1])
-        assert "RUNNING PLAN STEPS 0-0 SO FAR" in second_call_text
+        assert "STEPS 0-0 SO FAR" in second_call_text
         assert "Add the two input numbers so the result can be returned." in second_call_text
         assert "Tool.tests.add" in second_call_text
         assert "result_ref" in second_call_text
-        assert "<<__s0__>>" in second_call_text
+        assert "|STEP.0|" in second_call_text
         assert "observable_result" in second_call_text
         assert "5" in second_call_text
         assert "run_id" in second_call_text
@@ -113,10 +113,10 @@ class TestReActAgent:
                         "step": 0,
                         "tool": "Tool.tests.add",
                         "args": {},
-                        "description": "Try to run a step with no duration for validation.",
+                        "reason": "Try to run a step with no duration for validation.",
                     }
                 ),
-                "missing required key 'duration'",
+                r"missing required keys: \['duration'\]",
             ),
             (
                 json.dumps(
@@ -127,7 +127,7 @@ class TestReActAgent:
                         "duration": 0,
                     }
                 ),
-                "missing required key 'description'",
+                r"missing required keys: \['reason'\]",
             ),
             (
                 json.dumps(
@@ -135,7 +135,7 @@ class TestReActAgent:
                         "step": 0,
                         "args": {},
                         "duration": 0,
-                        "description": "Try to run an incomplete step for validation.",
+                        "reason": "Try to run an incomplete step for validation.",
                     }
                 ),
                 "missing required keys",
@@ -146,7 +146,7 @@ class TestReActAgent:
                         "step": 0,
                         "tool": "Tool.tests.add",
                         "duration": 0,
-                        "description": "Try to run an incomplete step for validation.",
+                        "reason": "Try to run an incomplete step for validation.",
                     }
                 ),
                 "missing required keys",
@@ -172,7 +172,7 @@ class TestReActAgent:
                     tool="Tool.tests.add",
                     args={"x": 1, "y": 2},
                     duration=duration,
-                    description="Add the two numbers for the current calculation.",
+                    reason="Add the two numbers for the current calculation.",
                 ),
             ],
             tool_calls_limit=1,
@@ -181,8 +181,8 @@ class TestReActAgent:
         with pytest.raises(ToolAgentError, match="duration"):
             agent.invoke({"prompt": "run react"})
 
-    @pytest.mark.parametrize("description", ["", "   ", 1, None])
-    def test_rejects_invalid_description(self, description: Any) -> None:
+    @pytest.mark.parametrize("reason", ["", "   ", 1, None])
+    def test_rejects_invalid_reason(self, reason: Any) -> None:
         agent = make_react_agent(
             [
                 react_step_json(
@@ -190,13 +190,13 @@ class TestReActAgent:
                     tool="Tool.tests.add",
                     args={"x": 1, "y": 2},
                     duration=0,
-                    description=description,
+                    reason=reason,
                 ),
             ],
             tool_calls_limit=1,
         )
 
-        with pytest.raises(ToolAgentError, match="description"):
+        with pytest.raises(ToolAgentError, match="reason"):
             agent.invoke({"prompt": "run react"})
 
     def test_accepts_missing_step_key_and_uses_expected_step(self) -> None:
@@ -206,7 +206,7 @@ class TestReActAgent:
                     step=None,
                     tool="Tool.tests.add",
                     args={"x": 1, "y": 2},
-                    description="Add the two test numbers for this ReAct step.",
+                    reason="Add the two test numbers for this ReAct step.",
                 ),
             ],
             tool_calls_limit=1,
@@ -221,7 +221,7 @@ class TestReActAgent:
         assert slot.step == 0
         assert slot.tool == "Tool.tests.add"
         assert slot.resolved_args == {"x": 1, "y": 2}
-        assert updated.step_meta[0].description == "Add the two test numbers for this ReAct step."
+        assert slot.reason == "Add the two test numbers for this ReAct step."
 
     def test_rejects_extra_step_keys(self) -> None:
         agent = make_react_agent(
@@ -230,7 +230,7 @@ class TestReActAgent:
                     step=0,
                     tool="Tool.tests.add",
                     args={},
-                    description="Attempt a step with an unsupported extra key.",
+                    reason="Attempt a step with an unsupported extra key.",
                     extra=True,
                 ),
             ],
@@ -247,7 +247,7 @@ class TestReActAgent:
                     step=0,
                     tool="Tool.tests.add",
                     args=[],
-                    description="Attempt a step whose args are the wrong shape.",
+                    reason="Attempt a step whose args are the wrong shape.",
                 ),
             ],
             tool_calls_limit=1,
@@ -263,7 +263,7 @@ class TestReActAgent:
                     step=99,
                     tool="Tool.tests.add",
                     args={"x": 1, "y": 2},
-                    description="Add the two test numbers despite the advisory step mismatch.",
+                    reason="Add the two test numbers despite the advisory step mismatch.",
                 ),
             ],
             tool_calls_limit=1,
@@ -285,8 +285,8 @@ class TestReActAgent:
                 react_step_json(
                     step=0,
                     tool="Tool.tests.add",
-                    args={"x": "<<__s0__>>", "y": 2},
-                    description="Attempt to use the current step as its own input dependency.",
+                    args={"x": "|STEP.0|", "y": 2},
+                    reason="Attempt to use the current step as its own input dependency.",
                 ),
             ],
             tool_calls_limit=1,
@@ -302,7 +302,7 @@ class TestReActAgent:
                     step=0,
                     tool="Tool.tests.missing",
                     args={},
-                    description="Attempt to call an unregistered tool.",
+                    reason="Attempt to call an unregistered tool.",
                 ),
             ],
             tool_calls_limit=1,
@@ -314,8 +314,8 @@ class TestReActAgent:
     def test_rejects_when_next_step_exceeds_capacity(self) -> None:
         # Regression test for the budget-enforcement fix (this session): the
         # last available slot under tool_calls_limit must be the return
-        # tool. think()/_process_next_step_output's own budget check (step
-        # 9) is the only place left that can catch this -- act() no longer
+        # tool. think()/_validate_generation_output's own budget check
+        # is the only place left that can catch this -- act() no longer
         # re-validates budget at all (1c dropped that as a dead guard).
         agent = make_react_agent(
             [
@@ -323,13 +323,13 @@ class TestReActAgent:
                     step=0,
                     tool="Tool.tests.add",
                     args={"x": 1, "y": 2},
-                    description="Add the two numbers as the only permitted non-return call.",
+                    reason="Add the two numbers as the only permitted non-return call.",
                 ),
                 react_step_json(
                     step=1,
                     tool="Tool.tests.multiply",
-                    args={"x": "<<__s0__>>", "y": 3},
-                    description="Attempt to multiply after the non-return tool budget is exhausted.",
+                    args={"x": "|STEP.0|", "y": 3},
+                    reason="Attempt to multiply after the non-return tool budget is exhausted.",
                 ),
             ],
             tool_calls_limit=1,
@@ -346,7 +346,7 @@ class TestReActAgent:
                     tool="Tool.tests.add",
                     args={"x": 2, "y": 3},
                     duration=2,
-                    description="Add the two numbers and keep the result visible for later branching.",
+                    reason="Add the two numbers and keep the result visible for later branching.",
                 ),
             ],
             tool_calls_limit=2,
@@ -364,7 +364,7 @@ class TestReActAgent:
         assert slot.await_step is NO_VAL
         assert slot.resolved_args == {"x": 2, "y": 3}
         assert updated.step_meta[0].observable == 2
-        assert updated.step_meta[0].description == "Add the two numbers and keep the result visible for later branching."
+        assert slot.reason == "Add the two numbers and keep the result visible for later branching."
 
     def test_prepare_records_step_dependencies(self) -> None:
         agent = make_react_agent(
@@ -372,8 +372,8 @@ class TestReActAgent:
                 react_step_json(
                     step=1,
                     tool="Tool.tests.multiply",
-                    args={"x": "<<__s0__>>", "y": 10},
-                    description="Multiply the prior addition result by ten for the current calculation.",
+                    args={"x": "|STEP.0|", "y": 10},
+                    reason="Multiply the prior addition result by ten for the current calculation.",
                 ),
             ],
             tool_calls_limit=2,
@@ -381,7 +381,7 @@ class TestReActAgent:
         task = agent._initialize_task(turns=[], prompt="react", inputs={})
         task.next_step_index = 1
         task.running_blackboard[0] = executed_slot(0, 5)
-        task.step_meta[0].description = "Add the two numbers for the current calculation."
+        task.running_blackboard[0].reason = "Add the two numbers for the current calculation."
         task = agent.think(task)
 
         updated = agent.prepare(task)
@@ -391,7 +391,7 @@ class TestReActAgent:
         assert slot.step_dependencies == (0,)
         assert slot.await_step is NO_VAL
         assert slot.resolved_args == {"x": 5, "y": 10}
-        assert updated.step_meta[1].description == "Multiply the prior addition result by ten for the current calculation."
+        assert slot.reason == "Multiply the prior addition result by ten for the current calculation."
 
     def test_async_invoke_executes_step_by_step_until_return(self) -> None:
         agent = make_react_agent(
@@ -400,19 +400,19 @@ class TestReActAgent:
                     step=0,
                     tool="Tool.tests.add",
                     args={"x": 2, "y": 3},
-                    description="Add the two input numbers for the current calculation.",
+                    reason="Add the two input numbers for the current calculation.",
                 ),
                 react_step_json(
                     step=1,
                     tool="Tool.tests.multiply",
-                    args={"x": "<<__s0__>>", "y": 10},
-                    description="Multiply the addition result by ten for the current calculation.",
+                    args={"x": "|STEP.0|", "y": 10},
+                    reason="Multiply the addition result by ten for the current calculation.",
                 ),
                 react_step_json(
                     step=2,
                     tool=return_tool.full_name,
-                    args={"val": "<<__s1__>>"},
-                    description="Return the final multiplied value because the current calculation is complete.",
+                    args={"val": "|STEP.1|"},
+                    reason="Return the final multiplied value because the current calculation is complete.",
                 ),
             ],
             tool_calls_limit=2,
@@ -429,7 +429,7 @@ class TestReActAgent:
                     tool=return_tool.full_name,
                     args={"val": 42},
                     duration=0,
-                    description="Return the value for the test.",
+                    reason="Return the value for the test.",
                 )
             ],
             tool_calls_limit=1,
@@ -473,8 +473,8 @@ class TestReActBlackboardInvariants:
         agent = make_react_agent(
             [
                 react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}),
-                react_step_json(step=1, tool="Tool.tests.multiply", args={"x": "<<__s0__>>", "y": 3}),
-                react_step_json(step=2, tool=return_tool.full_name, args={"val": "<<__s1__>>"}, duration=0),
+                react_step_json(step=1, tool="Tool.tests.multiply", args={"x": "|STEP.0|", "y": 3}),
+                react_step_json(step=2, tool=return_tool.full_name, args={"val": "|STEP.1|"}, duration=0),
             ],
             tool_calls_limit=2,
         )
@@ -493,7 +493,7 @@ class TestReActBlackboardInvariants:
             [
                 react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
                 react_step_json(step=1, tool="Tool.tests.add", args={"x": 1, "y": 2}),
-                react_step_json(step=2, tool=return_tool.full_name, args={"val": "<<__s1__>>"}, duration=0),
+                react_step_json(step=2, tool=return_tool.full_name, args={"val": "|STEP.1|"}, duration=0),
             ],
             tool_calls_limit=2,
             fail_fast=False,
@@ -537,7 +537,7 @@ class TestReActCascadeFailedPropagation:
     Integration tests for cascade FAILED propagation in ReActAgent.
 
     When a tool step fails (fail_fast=False), a subsequent LLM-generated
-    step whose args reference it via <<__sN__>> is cascade-marked FAILED in
+    step whose args reference it via |STEP.N| is cascade-marked FAILED in
     prepare() without raising. The return tool always raises when its arg
     dependencies failed.
     """
@@ -547,7 +547,7 @@ class TestReActCascadeFailedPropagation:
         agent = make_react_agent(
             [
                 react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
-                react_step_json(step=1, tool="Tool.tests.add", args={"x": "<<__s0__>>", "y": 2}),
+                react_step_json(step=1, tool="Tool.tests.add", args={"x": "|STEP.0|", "y": 2}),
                 react_step_json(step=2, tool=return_tool.full_name, args={"val": 99}, duration=0),
             ],
             tool_calls_limit=2,
@@ -567,7 +567,7 @@ class TestReActCascadeFailedPropagation:
         agent = make_react_agent(
             [
                 react_step_json(step=0, tool="Tool.tests.fail_tool", args={}),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": "|STEP.0|"}, duration=0),
             ],
             tool_calls_limit=1,
             fail_fast=False,
@@ -588,7 +588,7 @@ class TestReActGenerationRetry:
     )
 
     VALID_STEP_0 = react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=1)
-    VALID_RETURN = react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0)
+    VALID_RETURN = react_step_json(step=1, tool=return_tool.full_name, args={"val": "|STEP.0|"}, duration=0)
     VALID_RETURN_LITERAL = react_step_json(step=0, tool=return_tool.full_name, args={"val": 42}, duration=0)
 
     def test_zero_retries_raises_on_first_bad_json(self) -> None:
@@ -799,7 +799,7 @@ class TestMaxDurationSingleSource:
             [
                 # Step 0: duration=2 with tool_calls_limit=3 -> max_duration=3; fine.
                 react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=2),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": "|STEP.0|"}, duration=0),
             ],
             tool_calls_limit=3,
         )
@@ -814,7 +814,7 @@ class TestMaxDurationSingleSource:
                 react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=5),
                 # Step 0 good: corrected on retry.
                 react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=1),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": "|STEP.0|"}, duration=0),
             ],
             tool_calls_limit=2,
             generation_retries=1,
@@ -839,7 +839,7 @@ class TestMaxDurationSingleSource:
             [
                 # prefix_len=0, tool_calls_limit=1 -> max_duration = max(0, 1-0) = 1; duration=1 OK.
                 react_step_json(step=0, tool="Tool.tests.add", args={"x": 2, "y": 3}, duration=1),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": "|STEP.0|"}, duration=0),
             ],
             tool_calls_limit=1,
         )
@@ -857,7 +857,7 @@ class TestCacheRefValidation:
         agent = make_planact_agent(
             [
                 json.dumps([
-                    {"tool": return_tool.full_name, "args": {"val": "<<__c5__>>"}},
+                    {"tool": return_tool.full_name, "args": {"val": "|CACHE.5|"}},
                 ]),
             ],
             context_enabled=False,
@@ -872,23 +872,16 @@ class TestCacheRefValidation:
         agent = make_planact_agent([], context_enabled=True)
         # Seed a slot in the blackboard directly (simulates a prior-session
         # entry) -- ToolAgentTask has no cache_blackboard field; cache state
-        # lives only on the agent.
+        # lives only on the agent, read directly by _validate_generation_output.
         prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
         agent._blackboard.append(prior_slot)
 
-        cache_blackboard = [prior_slot.copy()]
-
         # Parse a plan that references cache index 0.
-        plan_json = json.dumps([{"tool": return_tool.full_name, "args": {"val": "<<__c0__>>"}}])
-        parsed = json.loads(plan_json)
+        plan_json = json.dumps([{"tool": return_tool.full_name, "args": {"val": "|CACHE.0|"}}])
 
         # Both frozensets are empty -- index 0 is in-range but not from this conversation.
-        result = agent._process_plan_output(
-            parsed=parsed,
-            cache_blackboard=cache_blackboard,
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
-        )
+        task = PlanActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
+        result = agent._validate_generation_output(plan_json, task=task)
         assert isinstance(result, str)
         assert "not part of this conversation" in result
 
@@ -898,7 +891,7 @@ class TestCacheRefValidation:
         """ReAct: cache index beyond cache length raises with 'do not exist' message."""
         agent = make_react_agent(
             [
-                react_step_json(step=0, tool="Tool.tests.add", args={"x": "<<__c99__>>", "y": 1}),
+                react_step_json(step=0, tool="Tool.tests.add", args={"x": "|CACHE.99|", "y": 1}),
             ],
             tool_calls_limit=1,
             context_enabled=False,
@@ -914,17 +907,11 @@ class TestCacheRefValidation:
         prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
         agent._blackboard.append(prior_slot)
 
-        parsed = json.loads(react_step_json(step=0, tool="Tool.tests.add", args={"x": "<<__c0__>>", "y": 1}))
-        cache_blackboard = [prior_slot.copy()]
+        step_json = react_step_json(step=0, tool="Tool.tests.add", args={"x": "|CACHE.0|", "y": 1})
 
-        result = agent._process_next_step_output(
-            parsed=parsed,
-            expected_step=0,
-            cache_blackboard=cache_blackboard,
-            max_duration=1,
-            valid_cache_indices=frozenset(),
-            failed_cache_indices=frozenset(),
-        )
+        # next_step_index defaults to 0, matching expected_step=0 above.
+        task = ReActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
+        result = agent._validate_generation_output(step_json, task=task)
         assert isinstance(result, str)
         assert "not part of this conversation" in result
 
@@ -955,7 +942,7 @@ class TestCacheRefValidation:
             status=BlackboardSlot.FAILED,
         )
         task.running_blackboard[0] = failed_slot
-        task.step_meta[0] = ReActStepMeta(observable=0, description="Test fail step.")
+        task.step_meta[0] = ReActStepMeta(observable=0)
         # render_task derives prefix_len from next_step_index internally
         # (no longer a separate parameter) -- advance the cursor to match
         # the "after step 0, before step 1" snapshot this test wants.
@@ -975,7 +962,7 @@ class TestCacheRefValidation:
         agent = make_react_agent(
             [
                 react_step_json(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, duration=1),
-                react_step_json(step=1, tool=return_tool.full_name, args={"val": "<<__s0__>>"}, duration=0),
+                react_step_json(step=1, tool=return_tool.full_name, args={"val": "|STEP.0|"}, duration=0),
             ],
             tool_calls_limit=2,
         )
@@ -987,7 +974,7 @@ class TestCacheRefValidation:
         # After invoke, the blackboard is persisted; index 0 is the executed add step.
         exec_slot = agent.blackboard[0]
         task.running_blackboard[0] = exec_slot
-        task.step_meta[0] = ReActStepMeta(observable=0, description="Add two numbers.")
+        task.step_meta[0] = ReActStepMeta(observable=0)
         # render_task derives prefix_len from next_step_index internally
         # (no longer a separate parameter) -- advance the cursor to match
         # the "after step 0, before step 1" snapshot this test wants.

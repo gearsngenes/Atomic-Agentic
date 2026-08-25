@@ -133,13 +133,11 @@ class TestReActStepMeta:
         meta = ReActStepMeta()
 
         assert meta.observable == 0
-        assert meta.description == ""
 
     def test_construction_with_values(self) -> None:
-        meta = ReActStepMeta(observable=3, description="did a thing")
+        meta = ReActStepMeta(observable=3)
 
         assert meta.observable == 3
-        assert meta.description == "did a thing"
 
 
 class TestReActTask:
@@ -155,7 +153,7 @@ class TestReActTask:
         assert task.step_meta == []
 
     def test_step_meta_holds_react_step_meta_instances(self) -> None:
-        meta = ReActStepMeta(observable=1, description="d")
+        meta = ReActStepMeta(observable=1)
         task = ReActTask(
             turns=[], inputs={}, user_prompt="hi", system_prompt_name="reason_then_act", step_meta=[meta]
         )

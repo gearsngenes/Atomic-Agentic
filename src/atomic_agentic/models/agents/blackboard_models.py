@@ -131,8 +131,8 @@ class BlackboardSlot:
         registered tool or invoke will raise.
 
     args : Any (typically dict)
-        Raw, unresolved arguments. May contain placeholders (``<<__sN__>>``,
-        ``<<__cN__>>``). Immutable after prepare time.
+        Raw, unresolved arguments. May contain placeholders (``|STEP.N|``,
+        ``|CACHE.N|``). Immutable after prepare time.
 
     resolved_args : Any (typically dict) | NO_VAL
         Arguments after placeholder resolution. Created at prepare time by
