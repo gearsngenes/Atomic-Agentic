@@ -8,11 +8,14 @@ concurrent batches and executed without further LLM interaction.
 
 Planning Model
 --------------
-A single LLM call at the start of each ``invoke()`` emits the full plan as a
-JSON array of tool-call steps. Each step specifies a tool name, argument map
-(optionally containing ``|STEP.N|`` step-ref or ``|CACHE.N|`` cache-ref
-placeholders), an optional ``await`` scheduling barrier, and an optional
-``return`` terminator.
+A single LLM call at the start of each ``invoke()`` emits the full plan,
+either as a JSON array of tool-call steps (``generation_format="json"``,
+the default) or as a sequence of ``[CALL]``/``[RETURN]`` tag blocks
+(``generation_format="regex"``) -- a construction-time, fixed-topology
+choice (see ``ToolAgent.__init__``). Each step specifies a tool name,
+argument map (optionally containing ``|STEP.N|`` step-ref or ``|CACHE.N|``
+cache-ref placeholders), an optional ``await`` scheduling barrier, and an
+optional ``return`` terminator.
 
 Compilation
 -----------
@@ -44,12 +47,16 @@ import json
 import logging
 
 from .toolagent import ToolAgent
-from .prompts import PLANNER_PROMPT
+from .prompts import PLANNER_PROMPT, REGEX_PLANNER_PROMPT
 from ..constants.agents import (
     RETURN_TOOL_FULL_NAME,
     RETURN_VALUE_FIELD,
+    RETURN_TOOL_REASON_TEXT,
     PLAN_FIELDS,
     REQUIRED_PLAN_FIELDS,
+    REGEX_PLAN_FIELDS,
+    REQUIRED_REGEX_PLAN_FIELDS,
+    REASON_FIELD,
 )
 from ..core import AtomicInvokable
 from ..constants.core import NO_VAL
@@ -120,6 +127,7 @@ class PlanActAgent(ToolAgent):
         tool_calls_limit: int | None = None,
         fail_fast: bool = True,
         generation_retries: int = 0,
+        generation_format: Literal["json", "regex"] = "json",
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
         blackboard_preview_limit: Optional[int] = None,
@@ -146,6 +154,7 @@ class PlanActAgent(ToolAgent):
             tool_calls_limit=tool_calls_limit,
             fail_fast=fail_fast,
             generation_retries=generation_retries,
+            generation_format=generation_format,
             peek_at_cache=peek_at_cache,
             response_preview_limit=response_preview_limit,
             blackboard_preview_limit=blackboard_preview_limit,
@@ -156,6 +165,32 @@ class PlanActAgent(ToolAgent):
             assistant_response_source=assistant_response_source,
         )
         self._system_prompts["plan_first"] = PLANNER_PROMPT
+        self._system_prompts["plan_first_regex"] = REGEX_PLANNER_PROMPT
+
+    # ------------------------------------------------------------------ #
+    # Toolbox Helpers
+    # ------------------------------------------------------------------ #
+    def actions_context(self) -> str:
+        """
+        PlanAct-only override of ``ToolAgent.actions_context``. In
+        regex-mode, ``[RETURN]`` is dedicated bare-block sugar -- never a
+        ``[CALL]``-style invocation by name -- so the return tool is
+        excluded from the rendered tools block entirely; the model is never
+        shown a callable id for it. json-mode falls through to the base
+        implementation unchanged.
+        """
+        if self._generation_format != "regex":
+            return super().actions_context()
+
+        tools = [t for name, t in self._toolbox.items() if name != RETURN_TOOL_FULL_NAME]
+        blocks: list[str] = []
+        for t in tools:
+            indented_lines = [
+                line if not line.strip() else f"  {line}"
+                for line in t.description.splitlines()
+            ]
+            blocks.append(f"{t.signature}\n" + "\n".join(indented_lines))
+        return "\n---\n".join(blocks)
 
     # ------------------------------------------------------------------ #
     # Initialization
@@ -163,15 +198,20 @@ class PlanActAgent(ToolAgent):
     def _normalize_planned_slots(
         self,
         planned_slots: list[BlackboardSlot],
-    ) -> list[BlackboardSlot] | str:
+    ) -> list[BlackboardSlot]:
         """
         Normalize a generated PlanAct slot list into final running-blackboard order.
 
         Normalization policy
         --------------------
-        - At most one return slot may be present.
+        - At most one return slot may be present -- guaranteed by the caller
+          (``_validate_generation_output``'s tier-1 loop) before this method
+          is ever invoked; reaching more than one here is an internal-contract
+          violation, not an LLM-facing problem.
         - If a return slot is present, it is moved to the end.
-        - If no return slot is present, `return(None)` is appended.
+        - If no return slot is present, `return(None)` is appended, stamped
+          with the same synthesized ``reason`` a desugared ``[RETURN]`` block
+          gets, for consistency.
         - Final list positions become authoritative step indices.
         - The final return slot is forced to depend on all prior slots so completion
           represents the whole plan, not just the value in return args.
@@ -186,8 +226,12 @@ class PlanActAgent(ToolAgent):
         -------
         list[BlackboardSlot]
             Normalized planned slots.
-        str
-            LLM-facing feedback if the plan contains multiple return steps.
+
+        Raises
+        ------
+        ToolAgentError
+            If more than one return slot is present -- ``_validate_generation_output``
+            must catch and report this to the LLM before normalization runs.
         """
         slots: list[BlackboardSlot] = [slot.copy() for slot in planned_slots]
 
@@ -198,9 +242,12 @@ class PlanActAgent(ToolAgent):
         ]
 
         if len(return_positions) > 1:
-            return (
-                f"plan contains multiple return steps at positions {return_positions!r}. "
-                "Include at most one return step."
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: internal error: "
+                f"_normalize_planned_slots received a plan with multiple "
+                f"return steps at positions {return_positions!r}; "
+                "_validate_generation_output's tier-1 loop must reject this "
+                "before normalization runs."
             )
 
         if len(return_positions) == 1:
@@ -218,6 +265,7 @@ class PlanActAgent(ToolAgent):
                     status=BlackboardSlot.PLANNED,
                     step_dependencies=tuple(),
                     await_step=NO_VAL,
+                    reason=RETURN_TOOL_REASON_TEXT,
                 )
             )
 
@@ -383,47 +431,89 @@ class PlanActAgent(ToolAgent):
     def _validate_generation_output(self, raw_output: str, *, task: PlanActTask) -> list[BlackboardSlot] | str:
         """
         Concrete implementation of ``ToolAgent._validate_generation_output``
-        for PlanAct. Owns JSON decoding and the entire plan-validation
-        pipeline; supersedes the old ``_process_plan_output``.
+        for PlanAct. Owns decoding/extraction (mode-gated) and the entire
+        plan-validation pipeline; supersedes the old ``_process_plan_output``.
 
         Whole-plan comprehensive: every step's own structural/type problems
         are collected across the *entire* plan before returning (not just
         the first offending step), and every cross-step semantic problem
         (``_validate_planned_slots``) is likewise collected in full.
 
-        1. Attempt ``self._extract_from_json_string(raw_output)``. On
-           ``json.JSONDecodeError``: return the single-item decode-error
-           feedback.
-        2. If ``parsed`` is not a non-empty list: return the single-item
-           plan-shape feedback.
-        3. For each step: structural/type-validate via
+        1. Mode-gated extraction. ``regex``: ``self._extract_from_regex_string``;
+           non-empty ``pre_issues`` returns syntax-category feedback
+           immediately (tier-1/2 never entered this attempt); empty
+           ``candidate_dicts`` returns shape-category feedback immediately.
+           ``json``: ``self._extract_from_json_string``; ``json.JSONDecodeError``
+           or a non-list/empty result returns the existing decode/shape
+           feedback, unchanged. Selects the mode-appropriate field-set
+           constants (``REGEX_PLAN_FIELDS``/``REQUIRED_REGEX_PLAN_FIELDS`` vs
+           ``PLAN_FIELDS``/``REQUIRED_PLAN_FIELDS``).
+        2. For each step: structural/type-validate via
            ``_validate_tool_step_dict``; accumulate every step's issues
-           across the whole plan rather than stopping at the first.
-        4. If any accumulated: return the joined feedback -- normalization
-           and cross-step validation both assume a fully structurally-valid
-           slot list, which isn't true yet.
-        5. Normalize (``_normalize_planned_slots``) -- still a single
-           fail-fast check (ambiguous multi-return-step shape blocks any
-           further validation this attempt).
-        6. Cross-step validation (``_validate_planned_slots``) -- now
-           accumulates across every slot; return the joined feedback if
-           non-empty.
+           across the whole plan rather than stopping at the first. In
+           regex-mode only, pop/validate/attach ``reason`` per step (mirrors
+           ``ReActAgent``'s existing json-mode pattern) -- ``reason``'s
+           presence is already guaranteed by the required-fields check
+           above, only its type/emptiness needs a manual check here. Tally
+           every successfully-built slot whose tool is the return tool.
+        3. If more than one return-tool slot was tallied: append the
+           multi-return issue (relocated verbatim from the old
+           ``_normalize_planned_slots`` fail-fast check -- now accumulated
+           alongside any other structural issue in the same attempt instead
+           of only surfacing on a separate retry turn). Applies to both
+           modes.
+        4. If any issues accumulated: return the joined feedback --
+           normalization and cross-step validation both assume a fully
+           structurally-valid slot list, which isn't true yet. Regex-mode
+           gets a structural-category header text; json-mode's wording
+           stays byte-identical to before (bare joined issues) -- this pass
+           only changes json-mode's *timing* for the multi-return case
+           (accumulated here instead of a separate retry turn), never its
+           wording.
+        5. Normalize (``_normalize_planned_slots``) -- no longer a
+           string-returning fail-fast gate; multi-return is now impossible
+           to reach here (caught in step 3).
+        6. Cross-step validation (``_validate_planned_slots``) -- accumulates
+           across every slot; return the joined feedback if non-empty
+           (regex-mode: semantic-category header text; json-mode: bare
+           joined issues, unchanged).
         7. Return the normalized, validated slot list.
         """
-        try:
-            parsed = self._extract_from_json_string(raw_output)
-        except json.JSONDecodeError as exc:
-            return format_generation_issues(
-                [f"Your output could not be parsed as valid JSON. Decoder error: {exc}"]
-            )
+        if self._generation_format == "regex":
+            candidate_dicts, pre_issues = self._extract_from_regex_string(raw_output)
+            if pre_issues:
+                return (
+                    "Your last output contained syntax errors: address the "
+                    "following and resubmit your full plan:\n"
+                    + format_generation_issues(pre_issues)
+                )
+            if not candidate_dicts:
+                return (
+                    "Your last output failed to parse: no correctly-formatted "
+                    "[CALL] or [RETURN] blocks were found. Every plan must "
+                    "contain at least one [CALL] block, and must end with "
+                    "exactly one [RETURN] block. Re-emit your full plan using "
+                    "the exact tag format described in your instructions. "
+                    f"Your output began with: {raw_output.strip()[:200]!r}"
+                )
+            allowed_fields, required_fields = REGEX_PLAN_FIELDS, REQUIRED_REGEX_PLAN_FIELDS
+        else:
+            try:
+                candidate_dicts = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                return format_generation_issues(
+                    [f"Your output could not be parsed as valid JSON. Decoder error: {exc}"]
+                )
 
-        if not isinstance(parsed, list) or not parsed:
-            return format_generation_issues(["The plan must be a non-empty JSON array."])
+            if not isinstance(candidate_dicts, list) or not candidate_dicts:
+                return format_generation_issues(["The plan must be a non-empty JSON array."])
+            allowed_fields, required_fields = PLAN_FIELDS, REQUIRED_PLAN_FIELDS
 
         issues: list[str] = []
         planned_slots: list[BlackboardSlot] = []
+        return_step_indices: list[int] = []
 
-        for i, item in enumerate(parsed):
+        for i, item in enumerate(candidate_dicts):
             if not isinstance(item, Mapping):
                 issues.append(f"Step {i} must be a JSON object (dict), not {type(item).__name__!r}.")
                 continue
@@ -431,13 +521,22 @@ class PlanActAgent(ToolAgent):
             step_dict = self._validate_tool_step_dict(
                 item,
                 expected_step=i,
-                allowed_fields=PLAN_FIELDS,
-                required_fields=REQUIRED_PLAN_FIELDS,
+                allowed_fields=allowed_fields,
+                required_fields=required_fields,
                 context="plan step",
             )
             if isinstance(step_dict, list):
                 issues.extend(step_dict)
                 continue
+
+            reason: str | None = None
+            if self._generation_format == "regex":
+                reason = step_dict.pop(REASON_FIELD)
+                if isinstance(reason, str):
+                    reason = reason.strip() or None
+                elif reason is not None:
+                    issues.append(f"plan step {i} 'reason' must be a string; got {type(reason).__name__!r}.")
+                    continue
 
             slot = self._tool_step_dict_to_slot(
                 step_dict,
@@ -445,14 +544,30 @@ class PlanActAgent(ToolAgent):
                 allowed_fields=PLAN_FIELDS,
                 context="plan step",
             )
+            if self._generation_format == "regex":
+                slot.reason = reason
+
+            if slot.tool == RETURN_TOOL_FULL_NAME:
+                return_step_indices.append(i)
+
             planned_slots.append(slot)
 
+        if len(return_step_indices) > 1:
+            issues.append(
+                f"plan contains multiple return steps at positions {return_step_indices!r}. "
+                "Include at most one return step."
+            )
+
         if issues:
+            if self._generation_format == "regex":
+                return (
+                    "Your last output could not be validated: address the "
+                    "following structural issue(s) and resubmit your full plan:\n"
+                    + format_generation_issues(issues)
+                )
             return format_generation_issues(issues)
 
         normalized = self._normalize_planned_slots(planned_slots)
-        if isinstance(normalized, str):
-            return normalized
 
         issues = self._validate_planned_slots(
             planned_slots=normalized,
@@ -461,7 +576,13 @@ class PlanActAgent(ToolAgent):
             failed_cache_indices=task.failed_cache_indices,
         )
         if issues:
-            return format_generation_issues(issues)
+            if self._generation_format != "regex":
+                return format_generation_issues(issues)
+            return (
+                "Your plan's tags all parsed correctly, but the following "
+                "semantic issue(s) must be corrected before it can run:\n"
+                + format_generation_issues(issues)
+            )
 
         return normalized
 
@@ -478,19 +599,30 @@ class PlanActAgent(ToolAgent):
         instruction into one user message — the exact text today's
         ``render_task`` produced, now composed through the shared base
         ``Agent.render_task`` pipeline (1a) instead of a full
-        reimplementation.
+        reimplementation. The instruction sentence is mode-gated:
+        regex-mode describes constructing a tag-block sequence, json-mode
+        keeps today's "valid JSON array" wording verbatim.
         """
         if task.task_messages:
             return task.task_messages
 
         banner = self._render_task_banner(task)
+        if self._generation_format == "regex":
+            instruction = (
+                "Using the current task above and the prior chat history, "
+                "construct a sequence of [CALL]/[RETURN] tag blocks (per the "
+                "tag format described in your instructions) that decomposes "
+                "the task into a series of executable steps."
+            )
+        else:
+            instruction = (
+                "Using the current task above and the prior chat history, "
+                "construct a valid JSON array that decomposes it into "
+                "tool-call steps."
+            )
         task.task_messages = [{
             "role": "user",
-            "content": (
-                f"{banner['content']}\n\n"
-                "Using the current task above and the prior chat history, construct "
-                "a valid JSON array that decomposes it into tool-call steps."
-            ),
+            "content": f"{banner['content']}\n\n{instruction}",
         }]
         return task.task_messages
 
@@ -536,7 +668,7 @@ class PlanActAgent(ToolAgent):
             turns=turns,
             inputs=inputs,
             user_prompt=prompt,
-            system_prompt_name="plan_first",
+            system_prompt_name="plan_first" if self._generation_format == "json" else "plan_first_regex",
             valid_cache_indices=valid_cache_indices,
             failed_cache_indices=failed_cache_indices,
         )

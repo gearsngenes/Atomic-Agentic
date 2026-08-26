@@ -133,8 +133,14 @@ from ..constants.agents import (
     ARGS_FIELD,
     AWAIT_FIELD,
     RETURN_TOOL_FULL_NAME,
+    RETURN_VALUE_FIELD,
     STEP_FIELD,
     TOOL_FIELD,
+    EVENT_TAG,
+    RETURN_TAG,
+    RESULT_TAG,
+    ERROR_TAG,
+    RUN_ID_TAG,
 )
 
 from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
@@ -153,7 +159,12 @@ from ..llm.base import LLMEngine
 from ..tools import toolify
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
-from ..utils.agents import extract_dependencies, extract_json_object, format_generation_issues
+from ..utils.agents import (
+    extract_dependencies,
+    extract_json_object,
+    extract_regex_steps,
+    format_generation_issues,
+)
 from ..utils.core import run_coro_sync
 from .tools import return_tool
 
@@ -287,6 +298,7 @@ class ToolAgent(Agent, ABC):
         *,
         fail_fast: bool = True,
         generation_retries: int = 0,
+        generation_format: Literal["json", "regex"] = "json",
         tool_calls_limit: Optional[int] = None,
         peek_at_cache: bool = False,
         response_preview_limit: Optional[int] = None,
@@ -325,6 +337,11 @@ class ToolAgent(Agent, ABC):
             output cannot be parsed or fails spec validation. ``0`` (default)
             means a single attempt with no retries; ``N`` means up to ``N``
             extra attempts beyond the first. Must be a non-negative ``int``.
+        generation_format : "json" | "regex"
+            Wire format for generation output. ``"json"`` (default)
+            preserves all current behavior. ``"regex"`` selects the
+            free-form, tag-delimited format. Frozen at construction --
+            fixed-topology, no setter.
         tool_calls_limit : int | None
             Maximum number of non-return action calls per invoke run.
             ``None`` means unlimited. Must be ``>= 0`` if set.
@@ -383,6 +400,12 @@ class ToolAgent(Agent, ABC):
         if type(generation_retries) is not int or generation_retries < 0:
             raise ToolAgentError("generation_retries must be a non-negative int.")
         self._generation_retries: int = generation_retries
+
+        if generation_format not in ("json", "regex"):
+            raise ToolAgentError(
+                f"generation_format must be 'json' or 'regex'; got {generation_format!r}."
+            )
+        self._generation_format: Literal["json", "regex"] = generation_format
 
         if type(peek_at_cache) is not bool:
             raise ToolAgentError("peek_at_cache must be a boolean.")
@@ -464,6 +487,12 @@ class ToolAgent(Agent, ABC):
     def generation_retries(self) -> int:
         """Number of extra generation attempts allowed beyond the first. Read-only."""
         return self._generation_retries
+
+    @property
+    def generation_format(self) -> Literal["json", "regex"]:
+        """Wire format used for generation output ('json' or 'regex').
+        Frozen at construction -- no setter."""
+        return self._generation_format
 
     @property
     def peek_at_cache(self) -> bool:
@@ -1538,7 +1567,8 @@ class ToolAgent(Agent, ABC):
            args are rewritten to ``|CACHE.{new_global_index}|`` cache references.
            Applied to both EXECUTED and FAILED slots.
         3. **Merge into cache**: Append all non-empty slots (EXECUTED and FAILED)
-           preserving status. FAILED slots keep their ``error`` and no ``result``.
+           preserving status and ``reason``. FAILED slots keep their ``error``
+           and no ``result``.
         4. **Trim cache tail**: Remove trailing empty slots from final cache
 
         Placeholder Rewriting Example
@@ -1626,6 +1656,7 @@ class ToolAgent(Agent, ABC):
                 status=slot.status,
                 step_dependencies=slot.step_dependencies,
                 await_step=slot.await_step,
+                reason=slot.reason,
             )
             appended.append(new_slot)
 
@@ -1781,14 +1812,18 @@ class ToolAgent(Agent, ABC):
         """Render one stored ToolAgentRecord into LLM-facing user/assistant messages.
 
         The base assistant response is rendered through `Agent.render_turn(...)`, preserving
-        `assistant_response_source` and `response_preview_limit` behavior. If the turn has
-        a non-empty blackboard span and all slots executed, this method appends a
-        cached-step block (``CACHED STEPS`` section) with each produced step's unresolved args and
-        ``run_id``. When some slots are FAILED (``fail_fast=False``), the output splits into a
-        ``CACHED STEPS`` section for executed slots and a ``FAILED STEPS`` section for failed slots;
-        failed entries include step index, tool name, and truncated error string — no args.
-        Result previews are included only when `peek_at_cache=True` and are bounded by
-        `blackboard_preview_limit`.
+        `assistant_response_source` and `response_preview_limit` behavior. Everything after
+        that point branches on ``self.generation_format``:
+
+        - ``"json"`` (default): if the turn has a non-empty blackboard span and all slots
+          executed, this method appends a cached-step block (``CACHED STEPS`` section) with
+          each produced step's unresolved args and ``run_id``. When some slots are FAILED
+          (``fail_fast=False``), the output splits into a ``CACHED STEPS`` section for
+          executed slots and a ``FAILED STEPS`` section for failed slots; failed entries
+          include step index, tool name, and truncated error string — no args. Result
+          previews are included only when `peek_at_cache=True` and are bounded by
+          `blackboard_preview_limit`.
+        - ``"regex"``: see ``_render_regex_turn_body`` for the tag-formatted equivalent.
         """
         if not isinstance(turn, ToolAgentRecord):
             raise ToolAgentError(
@@ -1810,6 +1845,22 @@ class ToolAgent(Agent, ABC):
                 f"blackboard_length={len(self._blackboard)}."
             )
 
+        if self._generation_format == "json":
+            assistant_content = self._render_json_turn_body(start, end, assistant_response)
+        else:
+            assistant_content = self._render_regex_turn_body(start, end, assistant_response)
+
+        return [
+            user_message,
+            {"role": "assistant", "content": assistant_content},
+        ]
+
+    def _render_json_turn_body(self, start: int, end: int, assistant_response: str) -> str:
+        """
+        json-mode ``render_turn`` body — unchanged from the pre-regex-mode
+        implementation, extracted verbatim into its own method so
+        ``render_turn`` can branch on ``generation_format`` cleanly.
+        """
         executed: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
 
@@ -1839,30 +1890,129 @@ class ToolAgent(Agent, ABC):
         if not failed:
             # All-executed path: format unchanged.
             dump = pprint.pformat(executed, indent=2, width=160, sort_dicts=False)
-            assistant_content = (
+            return (
                 f"RESPONSE:\n{assistant_response}\n\n"
                 f"CACHED STEPS {list(range(start, end))} PRODUCED:\n\n{dump}"
             )
-        else:
-            # Mixed path: two-section output.
-            parts = [f"RESPONSE:\n{assistant_response}"]
-            if executed:
-                ex_indices = [e[STEP_FIELD] for e in executed]
-                parts.append(
-                    f"CACHED STEPS {ex_indices} PRODUCED:\n\n"
-                    + pprint.pformat(executed, indent=2, width=160, sort_dicts=False)
-                )
-            fa_indices = [f[STEP_FIELD] for f in failed]
-            parts.append(
-                f"FAILED STEPS {fa_indices}:\n\n"
-                + pprint.pformat(failed, indent=2, width=160, sort_dicts=False)
-            )
-            assistant_content = "\n\n".join(parts)
 
-        return [
-            user_message,
-            {"role": "assistant", "content": assistant_content},
-        ]
+        # Mixed path: two-section output.
+        parts = [f"RESPONSE:\n{assistant_response}"]
+        if executed:
+            ex_indices = [e[STEP_FIELD] for e in executed]
+            parts.append(
+                f"CACHED STEPS {ex_indices} PRODUCED:\n\n"
+                + pprint.pformat(executed, indent=2, width=160, sort_dicts=False)
+            )
+        fa_indices = [f[STEP_FIELD] for f in failed]
+        parts.append(
+            f"FAILED STEPS {fa_indices}:\n\n"
+            + pprint.pformat(failed, indent=2, width=160, sort_dicts=False)
+        )
+        return "\n\n".join(parts)
+
+    def _render_regex_turn_body(self, start: int, end: int, assistant_response: str) -> str:
+        """
+        regex-mode ``render_turn`` body — tag-formatted equivalent of
+        ``_render_json_turn_body``, sharing no code with it (the two
+        formats' shapes diverge too much for a shared helper to pay off).
+
+        1. ``response_section`` is ``f"POST-PROCESSED RESPONSE:\\n{assistant_response}"``
+           when ``self.assistant_response_source == "final"``; ``None`` when
+           ``"raw"`` (the default) — regex-mode never echoes the raw
+           generated text back as a "RESPONSE:" section, since that text is
+           already the same tag vocabulary the structured entries below
+           re-present.
+        2. ``args_for(slot)`` returns ``slot.resolved_args`` when
+           ``self.peek_at_cache`` is true and ``slot.resolved_args is not
+           NO_VAL``, else ``slot.args`` — ``peek_at_cache`` governs both
+           this raw-vs-resolved selection and (for ordinary slots)
+           whether ``[RESULT]`` is shown at all.
+        3. For each slot in ``self._blackboard[start:end]``:
+           - Executed, ``slot.tool == RETURN_TOOL_FULL_NAME``: block is
+             ``"** |CACHE.{slot.step}| RUN_ID={slot.result.run_id} **"``
+             then ``"[RETURN] {args_for(slot)[RETURN_VALUE_FIELD]!r}"`` —
+             the bare value only, never the wrapping dict. Appended to
+             ``executed_blocks``.
+           - Executed, otherwise: same header, then one fused
+             ``"[EVENT] {slot.tool}({kwargs_str})"`` line (``kwargs_str``
+             joins ``args_for(slot)`` as ``key=value!r`` pairs — mirrors the
+             generation-side call-expression shape, not a bare name +
+             separate dict), and, only if ``self.peek_at_cache``,
+             ``"[RESULT] {preview}"`` (via ``_preview_blackboard_result``,
+             already a possibly-truncated ``str`` — no extra ``repr()``).
+             Appended to ``executed_blocks``.
+           - Failed: ``"** FAILED |CACHE.{slot.step}| **"`` (no ``RUN_ID`` —
+             no result object exists), the same fused
+             ``"[EVENT] {slot.tool}({kwargs_str})"`` line, ``"[ERROR]
+             {err_str}"`` (``err_str`` computed identically to the json
+             body's failed entries). Never special-cased into ``[RETURN]``
+             shape even if this was the return tool. Appended to
+             ``failed_blocks``.
+           - Other statuses: silently skipped (same invariant as json-mode).
+        4. ``banner`` is ``f"** CACHE ENTRIES {start}-{end - 1} PRODUCED **"``
+           when ``executed_blocks`` is non-empty, else ``None``.
+        5. Assemble ``parts`` in order, skipping ``None``/empty entries, and
+           join with ``"\\n\\n"``:
+           - ``response_section``.
+           - ``banner + "\\n\\n" + "\\n\\n".join(executed_blocks)`` if
+             ``banner`` is not ``None``.
+           - ``"\\n\\n".join(failed_blocks)`` if non-empty — always
+             individually headered, never grouped under a shared banner.
+        6. Return the joined ``parts``.
+        """
+        def args_for(slot: BlackboardSlot) -> Any:
+            if self.peek_at_cache and slot.resolved_args is not NO_VAL:
+                return slot.resolved_args
+            return slot.args
+
+        executed_blocks: list[str] = []
+        failed_blocks: list[str] = []
+
+        for slot in self._blackboard[start:end]:
+            if slot.is_executed():
+                header = f"** |CACHE.{slot.step}| {RUN_ID_TAG}={slot.result.run_id} **"
+                if slot.tool == RETURN_TOOL_FULL_NAME:
+                    lines = [
+                        header,
+                        f"[{RETURN_TAG}] {args_for(slot)[RETURN_VALUE_FIELD]!r}",
+                    ]
+                else:
+                    kwargs_str = ", ".join(f"{k}={v!r}" for k, v in args_for(slot).items())
+                    lines = [
+                        header,
+                        f"[{EVENT_TAG}] {slot.tool}({kwargs_str})",
+                    ]
+                    if self.peek_at_cache:
+                        lines.append(
+                            f"[{RESULT_TAG}] {self._preview_blackboard_result(slot.result.result)}"
+                        )
+                executed_blocks.append("\n".join(lines))
+            elif slot.is_failed():
+                err_str = str(slot.error)
+                if self.blackboard_preview_limit is not None:
+                    err_str = err_str[:self.blackboard_preview_limit]
+                kwargs_str = ", ".join(f"{k}={v!r}" for k, v in args_for(slot).items())
+                lines = [
+                    f"** FAILED |CACHE.{slot.step}| **",
+                    f"[{EVENT_TAG}] {slot.tool}({kwargs_str})",
+                    f"[{ERROR_TAG}] {err_str}",
+                ]
+                failed_blocks.append("\n".join(lines))
+            # Other statuses (PLANNED, PREPARED, EMPTY) cannot appear in a persisted
+            # blackboard span — silently skipped if present.
+
+        parts: list[str] = []
+        if self.assistant_response_source == "final":
+            parts.append(f"POST-PROCESSED RESPONSE:\n{assistant_response}")
+
+        if executed_blocks:
+            banner = f"** CACHE ENTRIES {start}-{end - 1} PRODUCED **"
+            parts.append(banner + "\n\n" + "\n\n".join(executed_blocks))
+
+        if failed_blocks:
+            parts.append("\n\n".join(failed_blocks))
+
+        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------ #
     # String to JSON Objects helper
@@ -1887,6 +2037,19 @@ class ToolAgent(Agent, ABC):
             If ``raw_text`` is empty or contains no decodable JSON array/object.
         """
         return extract_json_object(raw_text, source_label=f"{type(self).__name__}.{self.name}")
+
+    def _extract_from_regex_string(self, raw_text: str) -> tuple[list[dict[str, Any]], list[str]]:
+        """
+        Thin delegating wrapper — see ``utils.agents.extract_regex_steps``
+        for the full contract. Mirrors ``_extract_from_json_string``'s role
+        exactly.
+
+        Raises
+        ------
+        TypeError
+            If ``raw_text`` is not a string (engine contract violation).
+        """
+        return extract_regex_steps(raw_text, source_label=f"{type(self).__name__}.{self.name}")
 
     # ------------------------------------------------------------------ #
     # Dictionary Validation & Conversion Helpers
@@ -2376,6 +2539,7 @@ class ToolAgent(Agent, ABC):
             "tool_calls_limit": self.tool_calls_limit,
             "fail_fast": self._fail_fast,
             "generation_retries": self._generation_retries,
+            "generation_format": self._generation_format,
             "peek_at_cache": self.peek_at_cache,
             "blackboard_preview_limit": self.blackboard_preview_limit,
             "tools": {

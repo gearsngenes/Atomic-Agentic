@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from typing import Any
@@ -8,15 +9,40 @@ from typing import Any
 from ..constants.core import NO_VAL
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.thought_models import AgentThought
-from ..constants.agents import THOUGHT_MARKER_PATTERN
+from ..constants.agents import (
+    THOUGHT_MARKER_PATTERN,
+    REGEX_BLOCK_TAGS,
+    REGEX_STEP_TAGS,
+    REGEX_STEP_TAG_TO_FIELD,
+    CALL_TAG,
+    RETURN_TAG,
+    TOOL_FIELD,
+    ARGS_FIELD,
+    REASON_FIELD,
+    RETURN_TOOL_FULL_NAME,
+    RETURN_TOOL_REASON_TEXT,
+    RETURN_VALUE_FIELD,
+)
 
 __all__ = [
     "extract_dependencies",
     "extract_json_object",
+    "extract_regex_steps",
     "format_generation_issues",
     "normalize_role_prompt",
     "normalize_thinking_instructions",
 ]
+
+# Mirrors THOUGHT_MARKER_PATTERN's shape (constants/agents.py) exactly:
+# line-anchored, case-insensitive, optional leading whitespace.
+_REGEX_BLOCK_PATTERN = re.compile(
+    r"^\s*\[(" + "|".join(REGEX_BLOCK_TAGS) + r")\]\s*",
+    re.MULTILINE | re.IGNORECASE,
+)
+_REGEX_STEP_TAG_PATTERN = re.compile(
+    r"^\s*\[(" + "|".join(REGEX_STEP_TAGS) + r")\]\s*",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 
 def normalize_role_prompt(
@@ -140,6 +166,196 @@ def extract_json_object(raw_text: str, *, source_label: str) -> Any:
         raise json.JSONDecodeError("no valid JSON array or object found in LLM output", text, 0)
 
     return best_val
+
+
+def extract_regex_steps(raw_text: str, *, source_label: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """
+    Parse a possibly-noisy regex-mode LLM output string into step dicts.
+
+    Peer to ``extract_json_object`` -- same "no family/class knowledge"
+    purity, same non-string-input contract, same tolerance of surrounding
+    prose. Unlike ``extract_json_object``, never raises for "nothing
+    recognizable found" -- that case returns an empty list, since a
+    tag-grammar has no equivalent of JSON's "syntactically valid empty
+    array" to distinguish from "totally unparseable."
+
+    Comprehensive, not fail-fast: a malformed per-tag literal payload drops
+    only that one key from its block's dict and adds one issue string
+    explaining why -- it does not drop the whole block, and it does not
+    stop the scan of the rest of ``raw_text``. A ``[CALL]`` block whose tool
+    line isn't a parseable call expression at all is the one exception --
+    the tool identity itself is unrecoverable, so the whole block is
+    dropped (see below).
+
+    A bare ``[RETURN] <literal>`` block desugars into a return-tool call
+    dict -- the literal itself is never a ``{"val": ...}`` dict; the model
+    writes only the bare value and this function performs the wrapping.
+
+    A ``[CALL]`` block's tool line is a keyword-only Python call expression,
+    ``tool.id(key=value, ...)`` (a zero-argument call still needs empty
+    parentheses: ``tool.id()``), parsed via a single ``ast.parse(...,
+    mode="eval")`` attempt -- no repair, no retry; a parse failure reports
+    the raw exception and drops the block. Positional arguments are
+    silently ignored (no tool schema at this layer to map position to
+    parameter name). ``**`` unpacking is accepted only when it
+    literal_evals to an actual dict -- its keys are merged in as an
+    ordinary keyword would be; anything else is an issue.
+
+    Parameters
+    ----------
+    raw_text : str
+        Raw LLM output that may contain one or more ``[CALL]``/``[RETURN]``
+        blocks surrounded by prose.
+    source_label : str
+        Identifies the caller in the ``TypeError`` message (e.g.
+        ``f"{type(self).__name__}.{self.name}"``).
+
+    Returns
+    -------
+    tuple[list[dict[str, Any]], list[str]]
+        ``(steps, issues)``. ``steps`` has one dict per recognized,
+        successfully tool-identified block, in the order encountered; each
+        dict has a key per recognized field that was actually present and
+        parsed successfully -- absence is meaningful and left for
+        downstream required-field validation to report. ``issues`` has one
+        string per detected parse problem, referencing the 0-based block
+        index it occurred in; empty when nothing went wrong.
+
+    Raises
+    ------
+    TypeError
+        If ``raw_text`` is not a ``str``.
+    """
+    if not isinstance(raw_text, str):
+        raise TypeError(f"{source_label}: LLM returned non-string output.")
+
+    block_matches = list(_REGEX_BLOCK_PATTERN.finditer(raw_text))
+    if not block_matches:
+        return [], []
+
+    steps: list[dict[str, Any]] = []
+    issues: list[str] = []
+
+    for i, match in enumerate(block_matches):
+        block_tag = match.group(1).upper()
+        content_start = match.end()
+        content_end = (
+            block_matches[i + 1].start() if i + 1 < len(block_matches) else len(raw_text)
+        )
+        content = raw_text[content_start:content_end]
+
+        if block_tag == RETURN_TAG:
+            raw = content.strip()
+            if not raw:
+                # Inferred, not taught: an empty payload becomes an explicit
+                # [RETURN] None rather than being rejected -- a silent
+                # code-level backstop, never a documented model-facing
+                # affordance.
+                value = None
+            else:
+                try:
+                    value = ast.literal_eval(raw)
+                except (SyntaxError, ValueError):
+                    # Retry against the first line only, so trailing text a
+                    # weaker model appended after the real value isn't
+                    # folded in. If that still fails, keep the first line as
+                    # plain text -- return_tool's "val: Any" and lack of any
+                    # downstream consumer make that an acceptable outcome.
+                    first_line = raw.splitlines()[0].strip()
+                    try:
+                        value = ast.literal_eval(first_line)
+                    except (SyntaxError, ValueError):
+                        value = first_line
+            steps.append({
+                TOOL_FIELD: RETURN_TOOL_FULL_NAME,
+                ARGS_FIELD: {RETURN_VALUE_FIELD: value},
+                REASON_FIELD: RETURN_TOOL_REASON_TEXT,
+            })
+            continue
+
+        assert block_tag == CALL_TAG  # only other member of REGEX_BLOCK_TAGS
+        sub_matches = list(_REGEX_STEP_TAG_PATTERN.finditer(content))
+        tool_text = (content[: sub_matches[0].start()] if sub_matches else content).strip()
+
+        try:
+            call_expr = ast.parse(tool_text, mode="eval").body
+        except SyntaxError as exc:
+            # No repair, no retry: unlike a scalar RETURN value, a call's
+            # name+args structure can't be stringified without losing it,
+            # so any parse failure here is unconditionally terminal for
+            # this block.
+            issues.append(
+                f"block {i}: [{CALL_TAG}] payload {tool_text!r} could not be parsed "
+                f"as a call expression like tool.id(key=value, ...). "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
+        if not isinstance(call_expr, ast.Call):
+            issues.append(
+                f"block {i}: [{CALL_TAG}] payload {tool_text!r} did not evaluate to "
+                f"a call expression; got {type(call_expr).__name__}."
+            )
+            continue
+
+        step_dict: dict[str, Any] = {TOOL_FIELD: ast.unparse(call_expr.func), ARGS_FIELD: {}}
+
+        # Positional arguments are silently ignored, not flagged -- no tool
+        # schema is available at this layer to map position to parameter
+        # name, so there's nothing actionable to report beyond what the
+        # prompt already teaches (keyword-only). A tool call missing a
+        # parameter it needed surfaces naturally and visibly when the tool
+        # executes.
+
+        for kw in call_expr.keywords:
+            if kw.arg is None:
+                # arg=None only means "** was used" -- it does NOT guarantee
+                # the unpacked value is dict-shaped (Python's parser accepts
+                # ** before any expression; "must be a mapping" is a
+                # runtime-only constraint). Safety net: merge only if it
+                # actually literal_evals to a dict.
+                try:
+                    unpacked = ast.literal_eval(kw.value)
+                except (SyntaxError, ValueError):
+                    unpacked = None
+                if isinstance(unpacked, dict):
+                    step_dict[ARGS_FIELD].update(unpacked)
+                else:
+                    issues.append(
+                        f"block {i}: [{CALL_TAG}] does not support ** unpacking "
+                        f"({ast.unparse(kw.value)}); pass a dict-shaped parameter as "
+                        f"an ordinary keyword argument instead (e.g. tool.id(extra={{'k': 'v'}}))."
+                    )
+                continue
+            try:
+                step_dict[ARGS_FIELD][kw.arg] = ast.literal_eval(kw.value)
+            except (SyntaxError, ValueError):
+                # Some other syntactically valid but non-literal expression
+                # (a bare name, a nested call) -- recovered as its exact
+                # source text rather than dropped.
+                segment = ast.get_source_segment(tool_text, kw.value)
+                step_dict[ARGS_FIELD][kw.arg] = segment.strip() if segment else ""
+
+        for j, sub_match in enumerate(sub_matches):
+            field_tag = sub_match.group(1).upper()
+            field = REGEX_STEP_TAG_TO_FIELD[field_tag]
+            payload_start = sub_match.end()
+            payload_end = (
+                sub_matches[j + 1].start() if j + 1 < len(sub_matches) else len(content)
+            )
+            payload = content[payload_start:payload_end].strip()
+
+            if field == REASON_FIELD:
+                step_dict[field] = payload or None
+                continue
+
+            try:
+                step_dict[field] = ast.literal_eval(payload)
+            except (SyntaxError, ValueError) as exc:
+                issues.append(f"block {i}: [{field_tag}] payload {payload!r} did not parse: {exc}")
+
+        steps.append(step_dict)
+
+    return steps, issues
 
 
 def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[int]:
