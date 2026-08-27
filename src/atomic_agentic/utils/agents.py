@@ -11,6 +11,7 @@ from ..models.agents.prompts import PromptConfig
 from ..models.agents.thought_models import AgentThought
 from ..constants.agents import (
     THOUGHT_MARKER_PATTERN,
+    PLACEHOLDER_SHAPE_PATTERN,
     REGEX_BLOCK_TAGS,
     REGEX_STEP_TAGS,
     REGEX_STEP_TAG_TO_FIELD,
@@ -43,6 +44,18 @@ _REGEX_STEP_TAG_PATTERN = re.compile(
     r"^\s*\[(" + "|".join(REGEX_STEP_TAGS) + r")\]\s*",
     re.MULTILINE | re.IGNORECASE,
 )
+
+
+def _placeholder_quoting_hint(text: str) -> str:
+    """Return an extra hint sentence when ``text`` contains an unquoted
+    placeholder-shaped token (e.g. ``|STEP.0|``), else ``""``."""
+    if PLACEHOLDER_SHAPE_PATTERN.search(text):
+        return (
+            " This looks like it contains a placeholder (e.g. |STEP.0|) "
+            "written unquoted -- placeholders must be written as, or "
+            "inside, a quoted Python string."
+        )
+    return ""
 
 
 def normalize_role_prompt(
@@ -287,7 +300,8 @@ def extract_regex_steps(raw_text: str, *, source_label: str) -> tuple[list[dict[
             issues.append(
                 f"block {i}: [{CALL_TAG}] payload {tool_text!r} could not be parsed "
                 f"as a call expression like tool.id(key=value, ...). "
-                f"{type(exc).__name__}: {exc}"
+                f"{type(exc).__name__}: {exc}."
+                + _placeholder_quoting_hint(tool_text)
             )
             continue
         if not isinstance(call_expr, ast.Call):
@@ -328,12 +342,20 @@ def extract_regex_steps(raw_text: str, *, source_label: str) -> tuple[list[dict[
                 continue
             try:
                 step_dict[ARGS_FIELD][kw.arg] = ast.literal_eval(kw.value)
-            except (SyntaxError, ValueError):
+            except (SyntaxError, ValueError) as exc:
                 # Some other syntactically valid but non-literal expression
-                # (a bare name, a nested call) -- recovered as its exact
-                # source text rather than dropped.
+                # (a bare name, a nested call). The stringified source is
+                # still recovered into step_dict for observability, but
+                # this generation attempt is rejected via `issues` either
+                # way, so the fallback value never reaches execution.
                 segment = ast.get_source_segment(tool_text, kw.value)
-                step_dict[ARGS_FIELD][kw.arg] = segment.strip() if segment else ""
+                fallback_text = segment.strip() if segment else ""
+                step_dict[ARGS_FIELD][kw.arg] = fallback_text
+                issues.append(
+                    f"block {i}: [{CALL_TAG}] argument {kw.arg!r} could not be parsed "
+                    f"as a Python literal: {type(exc).__name__}: {exc}."
+                    + _placeholder_quoting_hint(fallback_text)
+                )
 
         for j, sub_match in enumerate(sub_matches):
             field_tag = sub_match.group(1).upper()
@@ -351,7 +373,10 @@ def extract_regex_steps(raw_text: str, *, source_label: str) -> tuple[list[dict[
             try:
                 step_dict[field] = ast.literal_eval(payload)
             except (SyntaxError, ValueError) as exc:
-                issues.append(f"block {i}: [{field_tag}] payload {payload!r} did not parse: {exc}")
+                issues.append(
+                    f"block {i}: [{field_tag}] payload {payload!r} did not parse: {exc}"
+                    + _placeholder_quoting_hint(payload)
+                )
 
         steps.append(step_dict)
 
@@ -421,7 +446,7 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
     walk(obj)
     return deps
 
-def format_generation_issues(issues: list[str]) -> str:
+def format_generation_issues(issues: list[str], *, category_header: str | None = None) -> str:
     """
     Join one or more detected generation-output problems into a single
     LLM-facing feedback message, ready to inject as a retry turn verbatim.
@@ -429,19 +454,35 @@ def format_generation_issues(issues: list[str]) -> str:
     Raises ``ValueError`` if ``issues`` is empty -- callers only invoke this
     once they have at least one real issue; a hollow success-shaped message
     would be a caller bug, not a legitimate empty-feedback case.
+
+    category_header : str | None
+        When supplied, this exact text (already including any trailing
+        colon/newline the caller wants) is prepended to the formatted body
+        -- regardless of whether there are 1 or many issues, matching the
+        calling convention of a caller that always frames its category
+        message. When multiple issues are present, the built-in "Multiple
+        problems were found in your output:" line is *not* also emitted --
+        ``category_header`` replaces it rather than stacking with it. When
+        ``None`` (default), single-issue passthrough and the built-in
+        multi-issue wrapper apply exactly as before.
     """
     if not issues:
         raise ValueError("format_generation_issues requires at least one issue.")
 
     if len(issues) == 1:
-        return issues[0]
+        body = issues[0]
+    else:
+        numbered = "\n".join(f"{i}. {issue}" for i, issue in enumerate(issues, start=1))
+        if category_header is None:
+            body = (
+                "Multiple problems were found in your output:\n"
+                f"{numbered}\n\n"
+                "Correct all of the above and resubmit."
+            )
+        else:
+            body = f"{numbered}\n\nCorrect all of the above and resubmit."
 
-    numbered = "\n".join(f"{i}. {issue}" for i, issue in enumerate(issues, start=1))
-    return (
-        "Multiple problems were found in your output:\n"
-        f"{numbered}\n\n"
-        "Correct all of the above and resubmit."
-    )
+    return f"{category_header}{body}" if category_header is not None else body
 
 
 def parse_thoughts(text: str) -> list[AgentThought]:

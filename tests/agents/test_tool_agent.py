@@ -1850,6 +1850,72 @@ class TestParsingHelpers:
             agent._extract_from_json_string(123)  # type: ignore[arg-type]
 
 
+class TestValidateCacheRefs:
+    """Pass 4: shared _validate_cache_refs helper factored out of
+    PlanActAgent's and ReActAgent's previously-duplicated inline checks."""
+
+    def test_out_of_range_reference(self) -> None:
+        agent = make_agent()
+
+        issues = agent._validate_cache_refs(
+            args={"x": "|CACHE.5|"},
+            context="test step",
+            cache_blackboard=[],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
+        )
+
+        assert len(issues) == 1
+        assert "test step references cache indices that do not exist" in issues[0]
+
+    def test_failed_in_conversation_reference(self) -> None:
+        agent = make_agent()
+        failed_slot = BlackboardSlot(
+            step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.FAILED,
+            error=RuntimeError("boom"),
+        )
+
+        issues = agent._validate_cache_refs(
+            args={"x": "|CACHE.0|"},
+            context="test step",
+            cache_blackboard=[failed_slot],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset({0}),
+        )
+
+        assert len(issues) == 1
+        assert "test step references cache entries that failed in this conversation" in issues[0]
+
+    def test_out_of_conversation_reference(self) -> None:
+        agent = make_agent()
+        prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
+
+        issues = agent._validate_cache_refs(
+            args={"x": "|CACHE.0|"},
+            context="test step",
+            cache_blackboard=[prior_slot],
+            valid_cache_indices=frozenset(),
+            failed_cache_indices=frozenset(),
+        )
+
+        assert len(issues) == 1
+        assert "test step references cache indices not part of this conversation" in issues[0]
+
+    def test_valid_reference_produces_no_issues(self) -> None:
+        agent = make_agent()
+        prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
+
+        issues = agent._validate_cache_refs(
+            args={"x": "|CACHE.0|"},
+            context="test step",
+            cache_blackboard=[prior_slot],
+            valid_cache_indices=frozenset({0}),
+            failed_cache_indices=frozenset(),
+        )
+
+        assert issues == []
+
+
 class TestToolAgentAsyncBaseLoop:
     def test_async_scripted_invoke_runs_tools_placeholders_and_return(self) -> None:
         agent = make_agent()

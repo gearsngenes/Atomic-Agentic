@@ -41,7 +41,10 @@ class TestPlanActAgent:
 
         assert result.result == 50
 
-    def test_auto_appends_return_none_when_plan_has_no_return(self) -> None:
+    def test_plan_with_no_return_step_is_rejected_not_silently_defaulted(self) -> None:
+        # Pass 4: a plan with real tool steps but zero return steps used to
+        # be silently completed with a synthetic return(None). It's now a
+        # real validation issue instead.
         agent = make_planact_agent(
             [
                 """
@@ -52,9 +55,8 @@ class TestPlanActAgent:
             ]
         )
 
-        result = agent.invoke({"prompt": "run plan"})
-
-        assert result.result is None
+        with pytest.raises(ToolAgentError, match="no return step"):
+            agent.invoke({"prompt": "run plan"})
 
     def test_moves_return_step_to_end(self) -> None:
         agent = make_planact_agent(
@@ -854,3 +856,69 @@ class TestAwaitFieldKeyInErrors:
         assert isinstance(result, str)
         assert "'await'" in result
         assert "'await_step'" not in result
+
+    def test_validate_tool_step_dict_wording_uses_plan_step_context(self) -> None:
+        """PlanAct passes context='plan step' -- confirms the generalized
+        _validate_tool_step_dict wording still reproduces today's exact
+        phrasing for PlanAct once it stopped hardcoding 'plan step'."""
+        agent = make_planact_agent([], context_enabled=False)
+        plan = [{"tool": return_tool.full_name, "args": {"val": None}, "await": "not_an_int"}]
+        task = PlanActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
+        result = agent._validate_generation_output(json.dumps(plan), task=task)
+        assert "plan step 0 'await' must be an int >= 0." in result
+
+
+class TestNormalizePlannedSlotsZeroReturn:
+    def test_raises_on_zero_return_positions(self) -> None:
+        agent = make_planact_agent([], context_enabled=False)
+        slots = [
+            BlackboardSlot(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, status="planned"),
+        ]
+        with pytest.raises(ToolAgentError, match="zero return"):
+            agent._normalize_planned_slots(slots)
+
+
+class TestDoubledHeaderRegression:
+    """Pass 4: format_generation_issues' own multi-issue wrapper must not
+    stack with a category-specific header a caller supplies."""
+
+    def test_regex_syntax_category_has_single_framing_sentence(self) -> None:
+        agent = PlanActAgent(
+            name="tests",
+            namespace="tests",
+            description="PlanAct agent under test.",
+            llm_engine=FakeLLMEngine([]),
+            generation_format="regex",
+        )
+        register_math_tools(agent)  # type: ignore[arg-type]
+        raw = "[CALL] Tool.tests.add(a=)\n[CALL] Tool.tests.multiply(b=)"
+        task = PlanActTask(
+            turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions"
+        )
+        result = agent._validate_generation_output(raw, task=task)
+        assert isinstance(result, str)
+        assert "Multiple problems were found" not in result
+        assert result.count("resubmit your full plan") == 1
+
+    def test_regex_semantic_category_has_single_framing_sentence(self) -> None:
+        agent = PlanActAgent(
+            name="tests",
+            namespace="tests",
+            description="PlanAct agent under test.",
+            llm_engine=FakeLLMEngine([]),
+            generation_format="regex",
+        )
+        register_math_tools(agent)  # type: ignore[arg-type]
+        raw = (
+            "[CALL] Tool.tests.missing()\n"
+            "[REASON] r\n"
+            "[DURATION] 0\n"
+            "[RETURN] '|CACHE.0|'"
+        )
+        task = PlanActTask(
+            turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions"
+        )
+        result = agent._validate_generation_output(raw, task=task)
+        assert isinstance(result, str)
+        assert "Multiple problems were found" not in result
+        assert result.count("semantic issue(s) must be corrected") == 1

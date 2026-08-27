@@ -68,7 +68,7 @@ from ..exceptions import ToolAgentError
 from ..models.agents.tasks import ReActTask, ReActStepMeta
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord
-from ..utils.agents import extract_dependencies, format_generation_issues
+from ..utils.agents import format_generation_issues
 
 # --------------------------------------------------------------------------- #
 # ReAct Agent
@@ -326,10 +326,12 @@ class ReActAgent(ToolAgent):
         if self._generation_format == "regex":
             candidate_dicts, pre_issues = self._extract_from_regex_string(raw_output)
             if pre_issues:
-                return (
-                    "Your last output contained syntax errors: address the "
-                    "following and resubmit your next step:\n"
-                    + format_generation_issues(pre_issues)
+                return format_generation_issues(
+                    pre_issues,
+                    category_header=(
+                        "Your last output contained syntax errors: address the "
+                        "following and resubmit your next step:\n"
+                    ),
                 )
             if len(candidate_dicts) != 1:
                 return (
@@ -440,38 +442,15 @@ class ReActAgent(ToolAgent):
         if slot.tool == RETURN_TOOL_FULL_NAME and duration != 0:
             issues.append(f"return tool must use {DURATION_FIELD!r} 0; got {duration!r}.")
 
-        cache_len = len(cache_blackboard)
-        cache_refs = extract_dependencies(slot.args, placeholder_pattern=self.CACHE_REF_PATTERN)
-
-        out_of_range = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
-        if out_of_range:
-            issues.append(
-                f"next step references cache indices that do not exist: "
-                f"{sorted(set(out_of_range))!r} (cache has {cache_len} entries)."
+        issues.extend(
+            self._validate_cache_refs(
+                args=slot.args,
+                context="next step",
+                cache_blackboard=cache_blackboard,
+                valid_cache_indices=valid_cache_indices,
+                failed_cache_indices=failed_cache_indices,
             )
-
-        failed_in_conv = [idx for idx in cache_refs if idx in failed_cache_indices]
-        if failed_in_conv:
-            details = "; ".join(
-                f"entry {idx} ({cache_blackboard[idx].tool}): {cache_blackboard[idx].error}"
-                for idx in sorted(set(failed_in_conv))
-            )
-            issues.append(
-                f"next step references cache entries that failed in this conversation "
-                f"and cannot be used: {details}."
-            )
-
-        out_of_conv = [
-            idx for idx in cache_refs
-            if 0 <= idx < cache_len
-            and idx not in valid_cache_indices
-            and idx not in failed_cache_indices
-        ]
-        if out_of_conv:
-            issues.append(
-                f"next step references cache indices not part of this conversation: "
-                f"{sorted(set(out_of_conv))!r}."
-            )
+        )
 
         bad_step_deps = [
             dep for dep in slot.step_dependencies
@@ -651,15 +630,16 @@ class ReActAgent(ToolAgent):
            - "json": unchanged — ``pprint.pformat(running_records, ...)``.
            - "regex": ``self._render_regex_running_snapshot(task, prefix_len=prefix_len)``.
         3. user — the per-round instruction. Deliberately omits any rule
-           already owned by the active system prompt's ``RUNTIME STATE``
-           section (reasons, result_ref usage, observable_result
-           semantics, don't-copy-into-args); carries only what's new each
-           round: the produce-next-call/return directive, an unconditional
-           anti-duplication reminder, a FAILED-reference warning shown only
-           when this round's snapshot contains a FAILED entry (mode-agnostic
-           check against ``task.running_blackboard`` directly, not derived
-           from a json-only intermediate), and a mode-gated output-format
-           directive.
+           already owned by the active system prompt (``RUNTIME STATE``,
+           ``OUTPUT FORMAT``, and ``NEXT-STEP POLICY`` sections alike);
+           carries only what's new each round: the produce-next-call/return
+           directive, this round's max-duration bound, and a
+           FAILED-reference warning shown only when this round's snapshot
+           contains a FAILED entry (mode-agnostic check against
+           ``task.running_blackboard`` directly, not derived from a
+           json-only intermediate). No mode-gated output-format directive
+           -- block-shape/JSON-key rules are static across rounds and stay
+           solely in the system prompt.
 
         EXECUTED steps are rendered with ``result_ref``, ``run_id``, and
         optionally ``observable_result``. FAILED steps are rendered with
@@ -712,36 +692,19 @@ class ReActAgent(ToolAgent):
             else:
                 snapshot_text = "STEPS SO FAR:\nNo steps executed yet."
 
-        if self._generation_format == "regex":
-            format_directive = (
-                "Output exactly one [CALL] or [RETURN] block, using the exact "
-                "tag format described in your instructions. A [CALL] block "
-                "requires [REASON] and [DURATION] (an int from 0 to "
-                f"{max_duration}); a [RETURN] block takes only the bare "
-                "literal value -- no [REASON] or [DURATION]."
-            )
-        else:
-            format_directive = (
-                "Output exactly one JSON object with keys {step, tool, args, duration, reason}."
-                f" duration must be an int from 0 to {max_duration}."
-            )
-
         task.task_messages = [
             self._render_task_banner(task),
             {"role": "assistant", "content": snapshot_text},
             {
                 "role": "user",
                 "content": (
-                    "Produce the NEXT BEST single tool call for the current task. "
-                    "Pick the return tool if the running plan above has completed all needed work. "
-                    "Do NOT repeat a tool call or redo work already available above or in cache — "
-                    "reuse its result_ref, cache, or constant placeholder instead of recomputing or re-deriving the value."
+                    "Produce the NEXT BEST single tool call or return for the current task. "
+                    f"This round's max duration is {max_duration}."
                     + (
                         " Some steps above are marked FAILED — they have no result_ref; do not reference one."
                         if has_failed
                         else ""
                     )
-                    + " " + format_directive
                 ),
             },
         ]

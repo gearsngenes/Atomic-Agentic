@@ -50,8 +50,6 @@ from .toolagent import ToolAgent
 from .prompts import PLANNER_PROMPT, REGEX_PLANNER_PROMPT
 from ..constants.agents import (
     RETURN_TOOL_FULL_NAME,
-    RETURN_VALUE_FIELD,
-    RETURN_TOOL_REASON_TEXT,
     PLAN_FIELDS,
     REQUIRED_PLAN_FIELDS,
     REGEX_PLAN_FIELDS,
@@ -179,14 +177,11 @@ class PlanActAgent(ToolAgent):
 
         Normalization policy
         --------------------
-        - At most one return slot may be present -- guaranteed by the caller
-          (``_validate_generation_output``'s tier-1 loop) before this method
-          is ever invoked; reaching more than one here is an internal-contract
-          violation, not an LLM-facing problem.
-        - If a return slot is present, it is moved to the end.
-        - If no return slot is present, `return(None)` is appended, stamped
-          with the same synthesized ``reason`` a desugared ``[RETURN]`` block
-          gets, for consistency.
+        - Exactly one return slot must be present -- guaranteed by the
+          caller (``_validate_generation_output``'s tier-1 loop) before this
+          method is ever invoked; reaching zero or more than one here is an
+          internal-contract violation, not an LLM-facing problem.
+        - The single return slot is moved to the end.
         - Final list positions become authoritative step indices.
         - The final return slot is forced to depend on all prior slots so completion
           represents the whole plan, not just the value in return args.
@@ -205,8 +200,9 @@ class PlanActAgent(ToolAgent):
         Raises
         ------
         ToolAgentError
-            If more than one return slot is present -- ``_validate_generation_output``
-            must catch and report this to the LLM before normalization runs.
+            If the return-slot count is not exactly one --
+            ``_validate_generation_output`` must catch and report this to
+            the LLM before normalization runs.
         """
         slots: list[BlackboardSlot] = [slot.copy() for slot in planned_slots]
 
@@ -229,19 +225,11 @@ class PlanActAgent(ToolAgent):
             return_slot = slots.pop(return_positions[0])
             slots.append(return_slot)
         else:
-            slots.append(
-                BlackboardSlot(
-                    step=len(slots),
-                    tool=return_name,
-                    args={RETURN_VALUE_FIELD: None},
-                    resolved_args=NO_VAL,
-                    result=NO_VAL,
-                    error=NO_VAL,
-                    status=BlackboardSlot.PLANNED,
-                    step_dependencies=tuple(),
-                    await_step=NO_VAL,
-                    reason=RETURN_TOOL_REASON_TEXT,
-                )
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: internal error: "
+                f"_normalize_planned_slots received a plan with zero return "
+                f"steps; _validate_generation_output's tier-1 loop must "
+                "reject this before normalization runs."
             )
 
         for i, slot in enumerate(slots):
@@ -320,7 +308,6 @@ class PlanActAgent(ToolAgent):
             )
 
         return_name = RETURN_TOOL_FULL_NAME
-        cache_len = len(cache_blackboard)
         issues: list[str] = []
 
         for i, slot in enumerate(planned_slots):
@@ -354,40 +341,15 @@ class PlanActAgent(ToolAgent):
                     f"await_step must reference an earlier step (< {i})."
                 )
 
-            cache_refs = extract_dependencies(slot.args, placeholder_pattern=self.CACHE_REF_PATTERN)
-
-            # Category 1: index outside the cache entirely.
-            out_of_range = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
-            if out_of_range:
-                issues.append(
-                    f"plan step {i} references cache indices that do not exist: "
-                    f"{sorted(set(out_of_range))!r} (cache has {cache_len} entries)."
+            issues.extend(
+                self._validate_cache_refs(
+                    args=slot.args,
+                    context=f"plan step {i}",
+                    cache_blackboard=cache_blackboard,
+                    valid_cache_indices=valid_cache_indices,
+                    failed_cache_indices=failed_cache_indices,
                 )
-
-            # Category 2: in-conversation slot that failed — include tool+error.
-            failed_in_conv = [idx for idx in cache_refs if idx in failed_cache_indices]
-            if failed_in_conv:
-                details = "; ".join(
-                    f"entry {idx} ({cache_blackboard[idx].tool}): {cache_blackboard[idx].error}"
-                    for idx in sorted(set(failed_in_conv))
-                )
-                issues.append(
-                    f"plan step {i} references cache entries that failed in this "
-                    f"conversation and cannot be used: {details}."
-                )
-
-            # Category 3: in range but not from this conversation.
-            out_of_conv = [
-                idx for idx in cache_refs
-                if 0 <= idx < cache_len
-                and idx not in valid_cache_indices
-                and idx not in failed_cache_indices
-            ]
-            if out_of_conv:
-                issues.append(
-                    f"plan step {i} references cache indices not part of this "
-                    f"conversation: {sorted(set(out_of_conv))!r}."
-                )
+            )
 
         limit = self.tool_calls_limit
         if limit is not None:
@@ -457,10 +419,12 @@ class PlanActAgent(ToolAgent):
         if self._generation_format == "regex":
             candidate_dicts, pre_issues = self._extract_from_regex_string(raw_output)
             if pre_issues:
-                return (
-                    "Your last output contained syntax errors: address the "
-                    "following and resubmit your full plan:\n"
-                    + format_generation_issues(pre_issues)
+                return format_generation_issues(
+                    pre_issues,
+                    category_header=(
+                        "Your last output contained syntax errors: address the "
+                        "following and resubmit your full plan:\n"
+                    ),
                 )
             if not candidate_dicts:
                 return (
@@ -531,13 +495,20 @@ class PlanActAgent(ToolAgent):
                 f"plan contains multiple return steps at positions {return_step_indices!r}. "
                 "Include at most one return step."
             )
+        elif len(return_step_indices) == 0:
+            issues.append(
+                "plan contains no return step. Every plan must end with "
+                "exactly one return step (Tool.ToolAgents.return)."
+            )
 
         if issues:
             if self._generation_format == "regex":
-                return (
-                    "Your last output could not be validated: address the "
-                    "following structural issue(s) and resubmit your full plan:\n"
-                    + format_generation_issues(issues)
+                return format_generation_issues(
+                    issues,
+                    category_header=(
+                        "Your last output could not be validated: address the "
+                        "following structural issue(s) and resubmit your full plan:\n"
+                    ),
                 )
             return format_generation_issues(issues)
 
@@ -552,10 +523,12 @@ class PlanActAgent(ToolAgent):
         if issues:
             if self._generation_format != "regex":
                 return format_generation_issues(issues)
-            return (
-                "Your plan's tags all parsed correctly, but the following "
-                "semantic issue(s) must be corrected before it can run:\n"
-                + format_generation_issues(issues)
+            return format_generation_issues(
+                issues,
+                category_header=(
+                    "Your plan's tags all parsed correctly, but the following "
+                    "semantic issue(s) must be corrected before it can run:\n"
+                ),
             )
 
         return normalized

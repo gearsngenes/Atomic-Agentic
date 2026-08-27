@@ -2165,11 +2165,11 @@ class ToolAgent(Agent, ABC):
 
         extra = data_keys - allowed
         if extra:
-            issues.append(f"plan step {expected_step} contains unsupported keys: {sorted(extra)!r}.")
+            issues.append(f"{context} {expected_step} contains unsupported keys: {sorted(extra)!r}.")
 
         missing = required - data_keys
         if missing:
-            issues.append(f"plan step {expected_step} is missing required keys: {sorted(missing)!r}.")
+            issues.append(f"{context} {expected_step} is missing required keys: {sorted(missing)!r}.")
 
         normalized = dict(data)
 
@@ -2185,24 +2185,80 @@ class ToolAgent(Agent, ABC):
         tool = normalized.get(TOOL_FIELD, NO_VAL)
         if TOOL_FIELD in normalized:
             if not isinstance(tool, str) or not tool.strip():
-                issues.append(f"plan step {expected_step} 'tool' must be a non-empty string.")
+                issues.append(f"{context} {expected_step} 'tool' must be a non-empty string.")
 
         args = normalized.get(ARGS_FIELD, NO_VAL)
         if ARGS_FIELD in normalized:
             if not isinstance(args, dict):
-                issues.append(f"plan step {expected_step} 'args' must be a dict; got {type(args).__name__!r}.")
+                issues.append(f"{context} {expected_step} 'args' must be a dict; got {type(args).__name__!r}.")
 
         if AWAIT_FIELD in normalized:
             await_step = normalized[AWAIT_FIELD]
             if type(await_step) is not int or await_step < 0:
-                issues.append(f"plan step {expected_step} 'await' must be an int >= 0.")
+                issues.append(f"{context} {expected_step} 'await' must be an int >= 0.")
             if tool == RETURN_TOOL_FULL_NAME:
-                issues.append(f"plan step {expected_step} is a return step and must not include 'await'.")
+                issues.append(f"{context} {expected_step} is a return step and must not include 'await'.")
 
         if issues:
             return issues
 
         return normalized
+
+    def _validate_cache_refs(
+        self,
+        *,
+        args: dict[str, Any],
+        context: str,
+        cache_blackboard: list[BlackboardSlot],
+        valid_cache_indices: frozenset[int],
+        failed_cache_indices: frozenset[int],
+    ) -> list[str]:
+        """
+        Validate ``|CACHE.N|`` references in ``args`` against three
+        independent categories: out-of-range, failed-in-this-conversation,
+        and in-range-but-not-part-of-this-conversation.
+
+        ``context`` is a pre-formatted label (e.g. ``"plan step 3"`` or
+        ``"next step"``) used verbatim in every issue string -- unifies
+        ``PlanActAgent``'s per-slot and ``ReActAgent``'s per-round versions
+        of this check, which were word-for-word identical except for this
+        label.
+        """
+        issues: list[str] = []
+        cache_len = len(cache_blackboard)
+        cache_refs = extract_dependencies(args, placeholder_pattern=self.CACHE_REF_PATTERN)
+
+        out_of_range = [idx for idx in cache_refs if idx < 0 or idx >= cache_len]
+        if out_of_range:
+            issues.append(
+                f"{context} references cache indices that do not exist: "
+                f"{sorted(set(out_of_range))!r} (cache has {cache_len} entries)."
+            )
+
+        failed_in_conv = [idx for idx in cache_refs if idx in failed_cache_indices]
+        if failed_in_conv:
+            details = "; ".join(
+                f"entry {idx} ({cache_blackboard[idx].tool}): {cache_blackboard[idx].error}"
+                for idx in sorted(set(failed_in_conv))
+            )
+            issues.append(
+                f"{context} references cache entries that failed in this "
+                f"conversation and cannot be used: {details}."
+            )
+
+        out_of_conv = [
+            idx for idx in cache_refs
+            if 0 <= idx < cache_len
+            and idx not in valid_cache_indices
+            and idx not in failed_cache_indices
+        ]
+        if out_of_conv:
+            issues.append(
+                f"{context} references cache indices not part of this "
+                f"conversation: {sorted(set(out_of_conv))!r}."
+            )
+
+        return issues
 
     def _tool_step_dict_to_slot(
         self,

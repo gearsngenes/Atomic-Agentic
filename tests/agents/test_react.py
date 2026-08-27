@@ -989,3 +989,88 @@ class TestCacheRefValidation:
         assert "result_ref" in snapshot_text
         # No slot-level "status" key should appear (only FAILED slots get that field).
         assert "'status'" not in snapshot_text
+
+
+class TestValidateToolStepDictContextWording:
+    def test_wording_uses_next_step_context(self) -> None:
+        """Pass 4: _validate_tool_step_dict's issue text reflects ReAct's
+        own context="next step" instead of unconditionally saying
+        "plan step"."""
+        agent = make_react_agent([], context_enabled=False, tool_calls_limit=1)
+        payload = {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}, "duration": 0}  # missing "reason"
+        task = ReActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
+        result = agent._validate_generation_output(json.dumps(payload), task=task)
+        assert isinstance(result, str)
+        assert "next step 0 is missing required keys" in result
+
+
+class TestDoubledHeaderRegression:
+    def test_regex_syntax_category_has_single_framing_sentence(self) -> None:
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description="ReAct agent under test.",
+            llm_engine=FakeLLMEngine([]),
+            generation_format="regex",
+            tool_calls_limit=1,
+        )
+        register_math_tools(agent)  # type: ignore[arg-type]
+        raw = "[CALL] Tool.tests.add(a=)"
+        task = ReActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
+        result = agent._validate_generation_output(raw, task=task)
+        assert isinstance(result, str)
+        assert "Multiple problems were found" not in result
+        assert result.count("resubmit your next step") == 1
+
+
+class TestRenderTaskMessagesTrim:
+    """Pass 4: per-round instruction no longer restates OUTPUT FORMAT/
+    NEXT-STEP POLICY content already covered by the active system prompt."""
+
+    REMOVED_PHRASES = [
+        "Pick the return tool if the running plan above has completed",
+        "Do NOT repeat a tool call or redo work already available",
+        "Output exactly one [CALL] or [RETURN] block",
+        "Output exactly one JSON object with keys",
+    ]
+
+    def test_json_mode_per_round_message_drops_restated_rules(self) -> None:
+        agent = make_react_agent([], tool_calls_limit=2)
+        task = agent._initialize_task(turns=[], prompt="react", inputs={})
+        messages = agent.render_task(task)
+        instruction = messages[-1]["content"]
+
+        for phrase in self.REMOVED_PHRASES:
+            assert phrase not in instruction
+        assert "Produce the NEXT BEST single tool call or return." in instruction
+        assert "max duration is 2" in instruction
+
+    def test_regex_mode_per_round_message_drops_restated_rules(self) -> None:
+        agent = ReActAgent(
+            name="tests",
+            namespace="tests",
+            description="ReAct agent under test.",
+            llm_engine=FakeLLMEngine([]),
+            generation_format="regex",
+            tool_calls_limit=2,
+        )
+        register_math_tools(agent)  # type: ignore[arg-type]
+        task = agent._initialize_task(turns=[], prompt="react", inputs={})
+        messages = agent.render_task(task)
+        instruction = messages[-1]["content"]
+
+        for phrase in self.REMOVED_PHRASES:
+            assert phrase not in instruction
+        assert "Produce the NEXT BEST single tool call or return." in instruction
+        assert "max duration is 2" in instruction
+
+    def test_failed_reference_warning_still_present_when_applicable(self) -> None:
+        agent = make_react_agent([], tool_calls_limit=2, fail_fast=False)
+        failed_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.FAILED)
+        task = agent._initialize_task(turns=[], prompt="react", inputs={})
+        task.running_blackboard[0] = failed_slot
+        task.next_step_index = 1
+        messages = agent.render_task(task)
+        instruction = messages[-1]["content"]
+
+        assert "marked FAILED" in instruction

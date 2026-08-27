@@ -201,6 +201,14 @@ THOUGHT_MARKER_PATTERN = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
+# Deliberately discriminator-agnostic (matches |STEP.N|/|CACHE.N|/|K.NAME|
+# generically) rather than reusing ToolAgent.STEP_REF_PATTERN/etc. -- those
+# are compiled on ToolAgent, a layer above constants/, and importing them
+# here would be a real circular import per the module dependency topology.
+# Used by utils/agents.py's extract_regex_steps to detect a likely-unquoted
+# placeholder token inside a failed literal-eval parse.
+PLACEHOLDER_SHAPE_PATTERN = re.compile(r"\|[A-Za-z]+\.[^|]+\|")
+
 STOP_THINKING_SENTINEL = "|STOP_THINKING|"
 
 # Wraps a resolved (non-empty) thinking_instructions render into its own
