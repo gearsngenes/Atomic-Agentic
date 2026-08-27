@@ -168,31 +168,6 @@ class PlanActAgent(ToolAgent):
         self._system_prompts["plan_first_regex"] = REGEX_PLANNER_PROMPT
 
     # ------------------------------------------------------------------ #
-    # Toolbox Helpers
-    # ------------------------------------------------------------------ #
-    def actions_context(self) -> str:
-        """
-        PlanAct-only override of ``ToolAgent.actions_context``. In
-        regex-mode, ``[RETURN]`` is dedicated bare-block sugar -- never a
-        ``[CALL]``-style invocation by name -- so the return tool is
-        excluded from the rendered tools block entirely; the model is never
-        shown a callable id for it. json-mode falls through to the base
-        implementation unchanged.
-        """
-        if self._generation_format != "regex":
-            return super().actions_context()
-
-        tools = [t for name, t in self._toolbox.items() if name != RETURN_TOOL_FULL_NAME]
-        blocks: list[str] = []
-        for t in tools:
-            indented_lines = [
-                line if not line.strip() else f"  {line}"
-                for line in t.description.splitlines()
-            ]
-            blocks.append(f"{t.signature}\n" + "\n".join(indented_lines))
-        return "\n---\n".join(blocks)
-
-    # ------------------------------------------------------------------ #
     # Initialization
     # ------------------------------------------------------------------ #
     def _normalize_planned_slots(
@@ -493,8 +468,7 @@ class PlanActAgent(ToolAgent):
                     "[CALL] or [RETURN] blocks were found. Every plan must "
                     "contain at least one [CALL] block, and must end with "
                     "exactly one [RETURN] block. Re-emit your full plan using "
-                    "the exact tag format described in your instructions. "
-                    f"Your output began with: {raw_output.strip()[:200]!r}"
+                    "the exact tag format described in your instructions."
                 )
             allowed_fields, required_fields = REGEX_PLAN_FIELDS, REQUIRED_REGEX_PLAN_FIELDS
         else:

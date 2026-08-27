@@ -43,7 +43,7 @@ import json
 import pprint
 
 from .toolagent import ToolAgent
-from .prompts import ORCHESTRATOR_PROMPT
+from .prompts import ORCHESTRATOR_PROMPT, REGEX_ORCHESTRATOR_PROMPT
 from ..constants.agents import (
     STEP_FIELD,
     REASON_FIELD,
@@ -51,9 +51,15 @@ from ..constants.agents import (
     ARGS_FIELD,
     DURATION_FIELD,
     RETURN_TOOL_FULL_NAME,
+    RETURN_TOOL_REASON_TEXT,
     REACT_FIELDS,
     REQUIRED_REACT_FIELDS,
     BASE_STEP_FIELDS,
+    EVENT_TAG,
+    REASON_TAG,
+    RESULT_TAG,
+    ERROR_TAG,
+    RUN_ID_TAG,
 )
 from ..core import AtomicInvokable
 from ..constants.core import NO_VAL
@@ -180,6 +186,7 @@ class ReActAgent(ToolAgent):
             assistant_response_source=assistant_response_source,
         )
         self._system_prompts["reason_then_act"] = ORCHESTRATOR_PROMPT
+        self._system_prompts["reason_then_act_regex"] = REGEX_ORCHESTRATOR_PROMPT
 
     # ------------------------------------------------------------------ #
     # Property Overrides
@@ -235,8 +242,9 @@ class ReActAgent(ToolAgent):
     def _validate_generation_output(self, raw_output: str, *, task: ReActTask) -> tuple[BlackboardSlot, int] | str:
         """
         Concrete implementation of ``ToolAgent._validate_generation_output``
-        for ReAct. Owns JSON decoding and the entire per-step validation
-        pipeline; supersedes the old ``_process_next_step_output``.
+        for ReAct. Owns decoding/extraction (mode-gated) and the entire
+        per-step validation pipeline; supersedes the old
+        ``_process_next_step_output``.
 
         Two tiers, both fully accumulating (no short-circuit within a
         tier): tier 1 (structural/type) checks everything needed to build a
@@ -256,61 +264,113 @@ class ReActAgent(ToolAgent):
 
         Steps
         -----
-        1. Attempt ``self._extract_from_json_string(raw_output)``; on
-           ``json.JSONDecodeError``, return the single-item decode-error
-           feedback.
-        2. Compute ``expected_step``/``max_duration`` from ``task``/``self``.
-        3. Reject non-Mapping parsed values (single-item feedback).
-        4. Build ``raw_payload``; tier-1 issue list starts empty.
-        5. Unsupported-key check.
-        6. Delegate to ``_validate_tool_step_dict``; extend tier-1 issues on
-           a list return. Its own required-fields check (against
-           ``REQUIRED_REACT_FIELDS``, which includes ``DURATION_FIELD``/
-           ``REASON_FIELD``) is the sole source of a missing-duration/
-           missing-reason issue — no separate standalone presence check
-           here, to avoid reporting the same absence twice.
-        7. If ``step_dict`` was structurally valid and ``DURATION_FIELD``
+        1. Mode-gated extraction into ``raw_payload: dict``.
+           - ``regex``: ``candidate_dicts, pre_issues =
+             self._extract_from_regex_string(raw_output)``. Non-empty
+             ``pre_issues`` returns syntax-category feedback immediately
+             (tier-1/2 never entered this attempt). ``len(candidate_dicts)
+             != 1`` returns a single "exactly one block" feedback message,
+             uniformly covering both the zero-blocks and multiple-blocks
+             cases — ReAct's per-round constraint is simpler than
+             PlanAct's own "at least one, at most one return" split.
+             Otherwise ``raw_payload = dict(candidate_dicts[0])``.
+             **Return-forcing step**, regex-only, before any field
+             validation runs: if
+             ``raw_payload.get(TOOL_FIELD) == RETURN_TOOL_FULL_NAME``,
+             unconditionally overwrite ``raw_payload[REASON_FIELD] =
+             RETURN_TOOL_REASON_TEXT`` and ``raw_payload[DURATION_FIELD] =
+             0`` — regardless of what (if anything) the model wrote for
+             either, whether the return identity came from bare
+             ``[RETURN]`` sugar (which never carries those tags at all) or
+             a stray ``[CALL]`` to the return tool. Guarantees the
+             required-fields check below never fails for a legitimate
+             return block, and that the constant-reason/duration-0 policy
+             holds even in that stray-``[CALL]`` edge case.
+           - ``json``: unchanged — ``self._extract_from_json_string(raw_output)``;
+             ``json.JSONDecodeError`` returns the decode-error feedback;
+             non-``Mapping`` result returns the shape feedback; otherwise
+             ``raw_payload = dict(parsed)``.
+        2. Compute ``expected_step``/``max_duration`` from ``task``/``self``
+           (unchanged, both modes).
+        3. Tier-1 issue list starts empty.
+        4. Unsupported-key check against ``REACT_FIELDS`` (unchanged,
+           both modes — this is what rejects a stray ``[AWAIT]`` on a
+           regex-mode block for free, since ``REACT_FIELDS`` never
+           included ``AWAIT_FIELD``).
+        5. Delegate to ``_validate_tool_step_dict`` with
+           ``allowed_fields=REACT_FIELDS``/``required_fields=REQUIRED_REACT_FIELDS``
+           in both modes (no separate regex field-set constant — step 1's
+           return-forcing already guarantees a return block's required
+           fields are present before this call); extend tier-1 issues on a
+           list return. Its own required-fields check is the sole source
+           of a missing-duration/missing-reason issue for an ordinary
+           call — no separate standalone presence check here, to avoid
+           reporting the same absence twice.
+        6. If ``step_dict`` was structurally valid and ``DURATION_FIELD``
            was present: extract and range-validate ``duration``.
-        8. If ``step_dict`` was structurally valid and ``REASON_FIELD`` was
+        7. If ``step_dict`` was structurally valid and ``REASON_FIELD`` was
            present: extract, type-check, strip, and non-empty-check
            ``reason``.
-        9. If tier-1 issues: return the joined feedback.
-        10. Convert to ``BlackboardSlot`` via ``_tool_step_dict_to_slot``;
-            set ``slot.reason = reason``.
-        11. Tier 2 — fresh issue list, every check independent: tool
+        8. If tier-1 issues: return the joined feedback.
+        9. Convert to ``BlackboardSlot`` via ``_tool_step_dict_to_slot``;
+           set ``slot.reason = reason``.
+        10. Tier 2 — fresh issue list, every check independent: tool
             registered; budget (last available slot must be the return
-            tool); return-tool duration == 0; cache refs (three
+            tool); return-tool duration == 0 (structurally unreachable for
+            a regex-mode return block, already guaranteed 0 by step 1, but
+            still load-bearing for json-mode); cache refs (three
             categories); step dependencies prior-only.
-        12. If tier-2 issues: return the joined feedback.
-        13. Return ``(slot, duration)``.
+        11. If tier-2 issues: return the joined feedback.
+        12. Return ``(slot, duration)``.
         """
-        # 1. JSON decode.
-        try:
-            parsed = self._extract_from_json_string(raw_output)
-        except json.JSONDecodeError as exc:
-            return format_generation_issues(
-                [f"Your output could not be parsed as valid JSON. Decoder error: {exc}"]
-            )
+        if self._generation_format == "regex":
+            candidate_dicts, pre_issues = self._extract_from_regex_string(raw_output)
+            if pre_issues:
+                return (
+                    "Your last output contained syntax errors: address the "
+                    "following and resubmit your next step:\n"
+                    + format_generation_issues(pre_issues)
+                )
+            if len(candidate_dicts) != 1:
+                return (
+                    "Your last output must contain exactly one [CALL] or "
+                    f"[RETURN] block for this step; found {len(candidate_dicts)}. "
+                    "Produce only the single next step using the exact tag "
+                    "format described in your instructions."
+                )
+            raw_payload = dict(candidate_dicts[0])
+            if raw_payload.get(TOOL_FIELD) == RETURN_TOOL_FULL_NAME:
+                raw_payload[REASON_FIELD] = RETURN_TOOL_REASON_TEXT
+                raw_payload[DURATION_FIELD] = 0
+        else:
+            # 1. JSON decode.
+            try:
+                parsed = self._extract_from_json_string(raw_output)
+            except json.JSONDecodeError as exc:
+                return format_generation_issues(
+                    [f"Your output could not be parsed as valid JSON. Decoder error: {exc}"]
+                )
+
+            # Structural check — LLM must return a JSON object, not an array or scalar.
+            if not isinstance(parsed, Mapping):
+                return format_generation_issues(
+                    [f"next step output must be a JSON object; got {type(parsed).__name__!r}."]
+                )
+
+            raw_payload = dict(parsed)
 
         # 2. Round-local context.
         expected_step = task.next_step_index
         max_duration = max(0, self._tool_calls_limit - expected_step)
 
-        # 3. Structural check — LLM must return a JSON object, not an array or scalar.
-        if not isinstance(parsed, Mapping):
-            return format_generation_issues(
-                [f"next step output must be a JSON object; got {type(parsed).__name__!r}."]
-            )
-
-        raw_payload = dict(parsed)
         issues: list[str] = []
 
-        # 5. Field-set check.
+        # 4. Field-set check.
         extra = set(raw_payload) - REACT_FIELDS
         if extra:
             issues.append(f"next step contains unsupported keys: {sorted(extra)!r}.")
 
-        # 6. Core step-dict validation (tool name, args shape, await, etc.).
+        # 5. Core step-dict validation (tool name, args shape, await, etc.).
         # Its own required-fields check already covers a missing duration/
         # reason -- no separate standalone presence check here, to avoid
         # reporting the same absence twice.
@@ -328,7 +388,7 @@ class ReActAgent(ToolAgent):
         duration: int | None = None
         reason: str | None = None
 
-        # 7. Duration extraction and range check -- only when the shape checks
+        # 6. Duration extraction and range check -- only when the shape checks
         # above didn't already fail, and the key is actually present.
         if structurally_valid and DURATION_FIELD in raw_payload:
             duration = step_payload.pop(DURATION_FIELD)
@@ -338,7 +398,7 @@ class ReActAgent(ToolAgent):
                     f"[0, {max_duration}] for expected_step={expected_step}; got {duration!r}."
                 )
 
-        # 8. Reason extraction, type check, and normalisation -- same guard.
+        # 7. Reason extraction, type check, and normalisation -- same guard.
         if structurally_valid and REASON_FIELD in raw_payload:
             reason = step_payload.pop(REASON_FIELD)
             if type(reason) is not str:
@@ -348,12 +408,12 @@ class ReActAgent(ToolAgent):
                 if not reason:
                     issues.append(f"next step {REASON_FIELD!r} cannot be empty.")
 
-        # 9. Tier 1 stops here -- tier 2 assumes a structurally valid,
+        # 8. Tier 1 stops here -- tier 2 assumes a structurally valid,
         # fully-extracted (step_dict, duration, reason).
         if issues:
             return format_generation_issues(issues)
 
-        # 10. Convert to BlackboardSlot -- engine contract; let ToolAgentError propagate.
+        # 9. Convert to BlackboardSlot -- engine contract; let ToolAgentError propagate.
         slot = self._tool_step_dict_to_slot(
             step_payload,
             step=expected_step,
@@ -362,7 +422,7 @@ class ReActAgent(ToolAgent):
         )
         slot.reason = reason
 
-        # 11. Tier 2 -- semantic/cross-referential checks, all independent.
+        # 10. Tier 2 -- semantic/cross-referential checks, all independent.
         issues = []
         cache_blackboard = self._blackboard
         valid_cache_indices = task.valid_cache_indices
@@ -423,11 +483,11 @@ class ReActAgent(ToolAgent):
                 f"{sorted(set(bad_step_deps))!r}; deps must be < {expected_step}."
             )
 
-        # 12. Tier 2 result.
+        # 11. Tier 2 result.
         if issues:
             return format_generation_issues(issues)
 
-        # 13. Success.
+        # 12. Success.
         return slot, duration
 
     def prepare(self, task: ReActTask) -> ReActTask:
@@ -507,6 +567,73 @@ class ReActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
+    def _render_regex_running_snapshot(self, task: ReActTask, *, prefix_len: int) -> str:
+        """
+        Tag-rendered equivalent of the json-mode running-plan snapshot below
+        — shares no code with it (shapes diverge too much to unify, same
+        reasoning ``toolagent.py``'s ``_render_json_turn_body``/
+        ``_render_regex_turn_body`` split already established).
+
+        Deliberately does NOT reuse ``render_turn``'s two-bucket
+        collect-then-concatenate mechanism (``toolagent.py``'s
+        ``_render_regex_turn_body``, which groups all executed blocks under
+        one banner and all failed blocks after, regardless of true
+        chronological order) — that would misrepresent sequence for a
+        running, not-yet-persisted plan. Instead walks steps in true
+        execution order; each step's block is already self-labeled by
+        outcome via its own header.
+
+        1. For each ``idx in range(prefix_len)``: build one block for an
+           executed slot (``"** |STEP.idx| RUN_ID=<uuid> **"`` header, then
+           ``[EVENT] tool.id(key=value, ...)``, then ``[REASON] <reason>``,
+           then ``[RESULT] <preview>`` only while
+           ``task.step_meta[idx].observable > 0`` — same permission counter
+           today's ``observable_result`` inclusion already uses) or a
+           failed slot (``"** FAILED |STEP.idx| **"`` header — no
+           ``RUN_ID``, no result object exists — then ``[EVENT]``, then
+           ``[REASON]``, then ``[ERROR] <err_str>``, truncated to
+           ``blackboard_preview_limit`` if set, mirroring today's
+           json-mode failed-record handling). Any other status is
+           unreachable for ``idx < prefix_len``.
+        2. No blocks at all -> ``"RUNNING STEPS SO FAR:\\nNo steps executed
+           yet."``.
+        3. Otherwise -> one banner (``"** RUNNING STEPS 0-{prefix_len - 1}
+           SO FAR **"``) followed by the blocks, ``"\\n\\n"``-joined.
+        """
+        blocks: list[str] = []
+        for idx in range(prefix_len):
+            slot = task.running_blackboard[idx]
+            kwargs_str = ", ".join(f"{k}={v!r}" for k, v in slot.args.items())
+
+            if slot.is_executed():
+                lines = [
+                    f"** |STEP.{idx}| {RUN_ID_TAG}={slot.result.run_id} **",
+                    f"[{EVENT_TAG}] {slot.tool}({kwargs_str})",
+                    f"[{REASON_TAG}] {slot.reason}",
+                ]
+                if task.step_meta[idx].observable > 0:
+                    lines.append(f"[{RESULT_TAG}] {self._preview_blackboard_result(slot.result.result)}")
+                blocks.append("\n".join(lines))
+
+            elif slot.is_failed():
+                err_str = str(slot.error)
+                if self.blackboard_preview_limit is not None:
+                    err_str = err_str[: self.blackboard_preview_limit]
+                lines = [
+                    f"** FAILED |STEP.{idx}| **",
+                    f"[{EVENT_TAG}] {slot.tool}({kwargs_str})",
+                    f"[{REASON_TAG}] {slot.reason}",
+                    f"[{ERROR_TAG}] {err_str}",
+                ]
+                blocks.append("\n".join(lines))
+            # Other statuses cannot appear for idx < prefix_len.
+
+        if not blocks:
+            return "RUNNING STEPS SO FAR:\nNo steps executed yet."
+
+        banner = f"** RUNNING STEPS 0-{prefix_len - 1} SO FAR **"
+        return banner + "\n\n" + "\n\n".join(blocks)
+
     def _render_task_messages(self, task: ReActTask) -> list[dict[str, str]]:
         """
         Build this round's 3-message thread: banner / running-plan
@@ -521,14 +648,18 @@ class ReActAgent(ToolAgent):
         2. assistant — a thin, directive-free snapshot: a one-line header
            plus the running-plan data. Reads as state, not instruction,
            matching ``ToolAgent.render_turn``'s ``CACHED STEPS`` convention.
+           - "json": unchanged — ``pprint.pformat(running_records, ...)``.
+           - "regex": ``self._render_regex_running_snapshot(task, prefix_len=prefix_len)``.
         3. user — the per-round instruction. Deliberately omits any rule
-           already owned by ``ORCHESTRATOR_PROMPT``'s ``RUNTIME STATE``
+           already owned by the active system prompt's ``RUNTIME STATE``
            section (reasons, result_ref usage, observable_result
            semantics, don't-copy-into-args); carries only what's new each
            round: the produce-next-call/return directive, an unconditional
            anti-duplication reminder, a FAILED-reference warning shown only
-           when this round's snapshot contains a FAILED entry, the
-           output-format directive, and the duration bound.
+           when this round's snapshot contains a FAILED entry (mode-agnostic
+           check against ``task.running_blackboard`` directly, not derived
+           from a json-only intermediate), and a mode-gated output-format
+           directive.
 
         EXECUTED steps are rendered with ``result_ref``, ``run_id``, and
         optionally ``observable_result``. FAILED steps are rendered with
@@ -540,42 +671,60 @@ class ReActAgent(ToolAgent):
 
         prefix_len = task.next_step_index
         max_duration = max(0, self._tool_calls_limit - prefix_len)
+        has_failed = any(task.running_blackboard[idx].is_failed() for idx in range(prefix_len))
 
-        running_records: list[dict[str, Any]] = []
-        for idx in range(prefix_len):
-            slot = task.running_blackboard[idx]
+        if self._generation_format == "regex":
+            snapshot_text = self._render_regex_running_snapshot(task, prefix_len=prefix_len)
+        else:
+            running_records: list[dict[str, Any]] = []
+            for idx in range(prefix_len):
+                slot = task.running_blackboard[idx]
 
-            if slot.is_executed():
-                record: dict[str, Any] = {
-                    STEP_FIELD: slot.step,
-                    REASON_FIELD: slot.reason,
-                    TOOL_FIELD: slot.tool,
-                    ARGS_FIELD: slot.args,
-                    "result_ref": f"|STEP.{idx}|",
-                    "run_id": slot.result.run_id,
-                }
-                if task.step_meta[idx].observable > 0:
-                    record["observable_result"] = self._preview_blackboard_result(slot.result.result)
-                running_records.append(record)
+                if slot.is_executed():
+                    record: dict[str, Any] = {
+                        STEP_FIELD: slot.step,
+                        REASON_FIELD: slot.reason,
+                        TOOL_FIELD: slot.tool,
+                        ARGS_FIELD: slot.args,
+                        "result_ref": f"|STEP.{idx}|",
+                        "run_id": slot.result.run_id,
+                    }
+                    if task.step_meta[idx].observable > 0:
+                        record["observable_result"] = self._preview_blackboard_result(slot.result.result)
+                    running_records.append(record)
 
-            elif slot.is_failed():
-                running_records.append({
-                    STEP_FIELD: slot.step,
-                    REASON_FIELD: slot.reason,
-                    TOOL_FIELD: slot.tool,
-                    ARGS_FIELD: slot.args,
-                    "status": "FAILED",
-                    "error": str(slot.error),
-                })
-            # Empty/PLANNED slots are not yet part of the running plan; skip.
+                elif slot.is_failed():
+                    running_records.append({
+                        STEP_FIELD: slot.step,
+                        REASON_FIELD: slot.reason,
+                        TOOL_FIELD: slot.tool,
+                        ARGS_FIELD: slot.args,
+                        "status": "FAILED",
+                        "error": str(slot.error),
+                    })
+                # Empty/PLANNED slots are not yet part of the running plan; skip.
 
-        if running_records:
-            snapshot_text = (
-                f"STEPS 0-{prefix_len - 1} SO FAR:\n\n"
-                + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
+            if running_records:
+                snapshot_text = (
+                    f"STEPS 0-{prefix_len - 1} SO FAR:\n\n"
+                    + pprint.pformat(running_records, indent=2, width=160, sort_dicts=False)
+                )
+            else:
+                snapshot_text = "STEPS SO FAR:\nNo steps executed yet."
+
+        if self._generation_format == "regex":
+            format_directive = (
+                "Output exactly one [CALL] or [RETURN] block, using the exact "
+                "tag format described in your instructions. A [CALL] block "
+                "requires [REASON] and [DURATION] (an int from 0 to "
+                f"{max_duration}); a [RETURN] block takes only the bare "
+                "literal value -- no [REASON] or [DURATION]."
             )
         else:
-            snapshot_text = "STEPS SO FAR:\nNo steps executed yet."
+            format_directive = (
+                "Output exactly one JSON object with keys {step, tool, args, duration, reason}."
+                f" duration must be an int from 0 to {max_duration}."
+            )
 
         task.task_messages = [
             self._render_task_banner(task),
@@ -589,11 +738,10 @@ class ReActAgent(ToolAgent):
                     "reuse its result_ref, cache, or constant placeholder instead of recomputing or re-deriving the value."
                     + (
                         " Some steps above are marked FAILED — they have no result_ref; do not reference one."
-                        if any(r.get("status") == "FAILED" for r in running_records)
+                        if has_failed
                         else ""
                     )
-                    + " Output exactly one JSON object with keys {step, tool, args, duration, reason}."
-                    + f" duration must be an int from 0 to {max_duration}."
+                    + " " + format_directive
                 ),
             },
         ]
@@ -611,10 +759,11 @@ class ReActAgent(ToolAgent):
         Initialize a ReActTask for a single ReAct invocation.
 
         Pre-allocates the fixed-size running blackboard and stamps the
-        orchestrator system-prompt name. No LLM call here — step planning
-        is deferred to ``think()``. No async override needed: unlike
-        ``PlanActAgent``, there is no blocking I/O in this hook to bridge
-        natively.
+        mode-appropriate orchestrator system-prompt name (``"reason_then_act"``
+        for json, ``"reason_then_act_regex"`` for regex). No LLM call here —
+        step planning is deferred to ``think()``. No async override needed:
+        unlike ``PlanActAgent``, there is no blocking I/O in this hook to
+        bridge natively.
         """
         valid_cache_indices, failed_cache_indices = self._compute_cache_index_sets(turns)
 
@@ -624,7 +773,7 @@ class ReActAgent(ToolAgent):
             turns=turns,
             inputs=inputs,
             user_prompt=prompt,
-            system_prompt_name="reason_then_act",
+            system_prompt_name="reason_then_act" if self._generation_format == "json" else "reason_then_act_regex",
             running_blackboard=running_blackboard,
             executed_steps=set(),
             prepared_steps=[],

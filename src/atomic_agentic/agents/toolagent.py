@@ -537,8 +537,17 @@ class ToolAgent(Agent, ABC):
         its description with every non-blank line indented two spaces (blank
         lines are preserved as fully blank, not indent-padded). Blocks are
         separated by "\\n---\\n".
+
+        In regex-mode (``generation_format == "regex"``), the return tool is
+        excluded from this listing entirely -- it is reached via the
+        ``[RETURN]`` block, never invoked as a named tool call. Applies to
+        every ``ToolAgent`` subclass uniformly (both ``PlanActAgent`` and
+        ``ReActAgent`` use ``[RETURN]`` sugar in regex-mode).
         """
-        tools = list(self._toolbox.values())
+        tools = [
+            t for name, t in self._toolbox.items()
+            if self._generation_format != "regex" or name != RETURN_TOOL_FULL_NAME
+        ]
         blocks: list[str] = []
         for t in tools:
             indented_lines = [
