@@ -148,13 +148,15 @@ class ToolAgentTask(AgentTask):
         Referenced during generation to produce targeted LLM feedback.
 
     retries_used : int
-        Cumulative retry attempts consumed across all generation attempts in
-        this run. Both ``PlanActAgent`` (``_generate_plan``/
-        ``_agenerate_plan``) and ``ReActAgent`` (``_generate_next_step``/
-        ``_agenerate_next_step``) read and increment this field directly on
-        the task — neither keeps a separate local counter. Declared here
-        (rather than on ``ReActTask``) so it's available uniformly to every
-        subclass, including ``PlanActTask``.
+        Cumulative *forgiven failures* consumed across every generation
+        attempt in this run — not a raw attempt/engine-call counter. A
+        successful attempt is always free regardless of how many tries it
+        took; only a failure that gets forgiven-and-retried increments
+        this, via the shared ``ToolAgent._check_generation_budget`` helper
+        (called from every family's ``_generate``/``_agenerate`` before a
+        retry). Neither family keeps a separate local counter. Declared
+        here (rather than on ``ReActTask``) so it's available uniformly to
+        every subclass, including ``PlanActTask``.
     """
     running_blackboard: list[BlackboardSlot] = field(default_factory=list)
 
@@ -277,9 +279,11 @@ class ReActTask(ToolAgentTask):
         through directly the way a single fused method could.
 
     ``retries_used`` is declared on ``ToolAgentTask`` (see that class) — its
-    behavior originates here: incremented by ``_generate_next_step`` on each
-    failed attempt; checked against ``self._generation_retries`` before
-    permitting a retry.
+    behavior originates here: checked and, if forgiven, incremented by
+    ``ToolAgent._check_generation_budget`` (called from
+    ``_generate``/``_agenerate`` before a retry) against
+    ``self._generation_retries``. Only a forgiven failure consumes budget
+    — a successful attempt never does.
 
     Workflow
     ~~~~~~~~

@@ -305,12 +305,21 @@ class ScriptedToolAgent(ToolAgent):
             task.task_messages = [{"role": "user", "content": task.user_prompt}]
         return task.task_messages
 
-    def _validate_generation_output(self, raw_output: str, *, task: ScriptedTask) -> Any:
+    def _generate(self, *, task: ScriptedTask, feedback: list[str], feedback_source: Any) -> Any:
         """Minimal implementation satisfying the abstract contract; not
         exercised on the scripted execution path since this fixture's whole
         script is fixed upfront -- prepare() drives execution directly from
         task.batches, never through _run_generation_retry_loop. Present only
         so the class can be instantiated."""
+        raise NotImplementedError
+
+    async def _agenerate(self, *, task: ScriptedTask, feedback: list[str], feedback_source: Any) -> Any:
+        """Async mirror; same "never exercised" contract as _generate."""
+        raise NotImplementedError
+
+    def _validate(self, *, task: ScriptedTask, structured_output: Any) -> Any:
+        """Minimal implementation satisfying the abstract contract; same
+        "never exercised" contract as _generate."""
         raise NotImplementedError
 
     def prepare(self, task: ScriptedTask) -> ScriptedTask:

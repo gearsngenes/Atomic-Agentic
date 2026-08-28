@@ -225,7 +225,7 @@ class TestToolAgentAbstractContract:
     def test_toolagent_reabstracts_hooks(self) -> None:
         assert ToolAgent.__abstractmethods__ == {
             "_initialize_task", "think", "async_think", "prepare", "async_prepare",
-            "_render_task_messages", "_validate_generation_output",
+            "_render_task_messages", "_generate", "_agenerate", "_validate",
         }
 
     def test_scripted_tool_agent_implements_every_required_hook(self) -> None:

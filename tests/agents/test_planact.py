@@ -121,11 +121,16 @@ class TestPlanActAgent:
             agent.invoke({"prompt": "run plan"})
 
     def test_rejects_unknown_tool_in_plan(self) -> None:
+        # Needs a real return step: since Pass 4, a plan with zero return
+        # steps is itself flagged as a structural issue by _generate,
+        # which would short-circuit before this semantic (unknown-tool)
+        # check in _validate is ever reached.
         agent = make_planact_agent(
             [
-                """
+                f"""
                 [
-                  {"step": 0, "tool": "Tool.tests.missing", "args": {}}
+                  {{"step": 0, "tool": "Tool.tests.missing", "args": {{}}}},
+                  {{"step": 1, "tool": "{return_tool.full_name}", "args": {{"val": null}}}}
                 ]
                 """
             ]
@@ -760,7 +765,7 @@ class TestCascadeFailedPropagation:
 class TestFailedCacheRefValidation:
     """
     Tests for FAILED cache-ref detection in _validate_planned_slots (PlanAct)
-    and _validate_generation_output (ReAct).
+    and _validate (ReAct).
 
     Requires two-invoke sequences: first invoke leaves a FAILED slot in the
     persisted cache (fail_fast=False, context_enabled=True), then a second
@@ -845,17 +850,16 @@ class TestAwaitFieldKeyInErrors:
     """B-5: _validate_tool_step_dict uses the LLM-facing 'await' key, not internal 'await_step'."""
 
     def test_invalid_await_type_error_uses_await_key(self) -> None:
-        """_validate_tool_step_dict error for bad 'await' value names 'await', not 'await_step'."""
+        """_validate_tool_step_dict error for bad 'await' value names 'await', not 'await_step'.
+        Generate/validate split: _extract_and_validate_structure is the
+        pure-computation tail of _generate that owns this check -- no
+        engine call needed to exercise it directly."""
         agent = make_planact_agent([], context_enabled=False)
-        # _validate_generation_output calls _validate_tool_step_dict; the await
-        # type error fires before tool-existence lookup so no tools need to be
-        # registered.
         plan = [{"tool": return_tool.full_name, "args": {"val": None}, "await": "not_an_int"}]
-        task = PlanActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
-        result = agent._validate_generation_output(json.dumps(plan), task=task)
-        assert isinstance(result, str)
-        assert "'await'" in result
-        assert "'await_step'" not in result
+        _, issues = agent._extract_and_validate_structure(json.dumps(plan))
+        joined = " ".join(issues)
+        assert "'await'" in joined
+        assert "'await_step'" not in joined
 
     def test_validate_tool_step_dict_wording_uses_plan_step_context(self) -> None:
         """PlanAct passes context='plan step' -- confirms the generalized
@@ -863,9 +867,8 @@ class TestAwaitFieldKeyInErrors:
         phrasing for PlanAct once it stopped hardcoding 'plan step'."""
         agent = make_planact_agent([], context_enabled=False)
         plan = [{"tool": return_tool.full_name, "args": {"val": None}, "await": "not_an_int"}]
-        task = PlanActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
-        result = agent._validate_generation_output(json.dumps(plan), task=task)
-        assert "plan step 0 'await' must be an int >= 0." in result
+        _, issues = agent._extract_and_validate_structure(json.dumps(plan))
+        assert "plan step 0 'await' must be an int >= 0." in " ".join(issues)
 
 
 class TestNormalizePlannedSlotsZeroReturn:
@@ -874,7 +877,7 @@ class TestNormalizePlannedSlotsZeroReturn:
         slots = [
             BlackboardSlot(step=0, tool="Tool.tests.add", args={"x": 1, "y": 2}, status="planned"),
         ]
-        with pytest.raises(ToolAgentError, match="zero return"):
+        with pytest.raises(ToolAgentError, match="0 return steps"):
             agent._normalize_planned_slots(slots)
 
 
@@ -883,6 +886,11 @@ class TestDoubledHeaderRegression:
     stack with a category-specific header a caller supplies."""
 
     def test_regex_syntax_category_has_single_framing_sentence(self) -> None:
+        """Generate/validate split: the doubled-header fix now lives in
+        _render_generation_attempt_messages + _generation_category_header
+        (toolagent.py/planact.py) rather than inline per-call-site
+        wrapping -- exercise that mechanism directly rather than through
+        the old monolithic method."""
         agent = PlanActAgent(
             name="tests",
             namespace="tests",
@@ -892,13 +900,27 @@ class TestDoubledHeaderRegression:
         )
         register_math_tools(agent)  # type: ignore[arg-type]
         raw = "[CALL] Tool.tests.add(a=)\n[CALL] Tool.tests.multiply(b=)"
+        _, issues = agent._extract_and_validate_structure(raw)
+        assert len(issues) >= 2  # sanity: both malformed calls detected
+
         task = PlanActTask(
-            turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions"
+            turns=[], inputs={}, user_prompt="run", system_prompt_name="plan_first_regex"
         )
-        result = agent._validate_generation_output(raw, task=task)
-        assert isinstance(result, str)
-        assert "Multiple problems were found" not in result
-        assert result.count("resubmit your full plan") == 1
+        # Seed llm_records the way a real first attempt would: render the
+        # first-attempt (no-feedback) messages so task.task_messages is
+        # populated, then record the attempt against that.
+        agent._render_generation_attempt_messages(task=task, feedback=[], category_header=None)
+        seed_engine = FakeLLMEngine([raw])
+        agent._record_generation_attempt(
+            task=task, engine_result=seed_engine.invoke({"messages": [{"role": "user", "content": "seed"}]}),
+        )
+        header = agent._generation_category_header(feedback_source="generate")
+        messages = agent._render_generation_attempt_messages(
+            task=task, feedback=issues, category_header=header,
+        )
+        feedback_text = messages[-1]["content"]
+        assert "Multiple problems were found" not in feedback_text
+        assert feedback_text.count("resubmit your full plan") == 1
 
     def test_regex_semantic_category_has_single_framing_sentence(self) -> None:
         agent = PlanActAgent(
@@ -912,13 +934,29 @@ class TestDoubledHeaderRegression:
         raw = (
             "[CALL] Tool.tests.missing()\n"
             "[REASON] r\n"
-            "[DURATION] 0\n"
             "[RETURN] '|CACHE.0|'"
         )
+        structured_output, issues = agent._extract_and_validate_structure(raw)
+        assert not issues  # sanity: structurally clean
+
         task = PlanActTask(
-            turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions"
+            turns=[], inputs={}, user_prompt="run", system_prompt_name="plan_first_regex"
         )
-        result = agent._validate_generation_output(raw, task=task)
-        assert isinstance(result, str)
-        assert "Multiple problems were found" not in result
-        assert result.count("semantic issue(s) must be corrected") == 1
+        _, semantic_issues = agent._validate(task=task, structured_output=structured_output)
+        assert len(semantic_issues) >= 2  # unknown tool + bad cache ref
+
+        # Seed llm_records the way a real first attempt would: render the
+        # first-attempt (no-feedback) messages so task.task_messages is
+        # populated, then record the attempt against that.
+        agent._render_generation_attempt_messages(task=task, feedback=[], category_header=None)
+        seed_engine = FakeLLMEngine([raw])
+        agent._record_generation_attempt(
+            task=task, engine_result=seed_engine.invoke({"messages": [{"role": "user", "content": "seed"}]}),
+        )
+        header = agent._generation_category_header(feedback_source="validate")
+        messages = agent._render_generation_attempt_messages(
+            task=task, feedback=semantic_issues, category_header=header,
+        )
+        feedback_text = messages[-1]["content"]
+        assert "Multiple problems were found" not in feedback_text
+        assert feedback_text.count("semantic issue(s) must be corrected") == 1

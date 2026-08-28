@@ -85,6 +85,17 @@ concrete and final here. Subclasses implement:
   Make this round's real decision via the LLM: render, call the engine,
   parse/validate the output, store the decision onto ``task``.
 
+**_generate(*, task, feedback, feedback_source)** / **_agenerate(...)** → ``tuple[Any, list[str]]``
+  Own one full generation attempt end to end: budget check, message
+  rendering, the LLM engine call, and mode-gated structural validation.
+  Called by ``think``/``async_think`` via the shared
+  ``_run_generation_retry_loop``/``_arun_generation_retry_loop``.
+
+**_validate(*, task, structured_output)** → ``tuple[Any, list[str]]``
+  Sync-only, pure computation: normalization plus semantic/
+  cross-referential validation of an already-structurally-valid
+  ``_generate``/``_agenerate`` result.
+
 **prepare(task)** / **async_prepare(task)** → ``ToolAgentTask`` (or subclass)
   Turn that decision into something executable, no further LLM calls:
   validate/resolve placeholders, cascade-check dependencies, populate
@@ -141,9 +152,11 @@ from ..constants.agents import (
     RESULT_TAG,
     ERROR_TAG,
     RUN_ID_TAG,
+    EXHAUSTED_ISSUE_PREFIX,
 )
 
 from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecord
+from ..models.results.llm import LLMResult
 from ..models.results.agents import ToolAgentResult, ToolUsageRecord
 from ..models.agents.blackboard_models import BlackboardSlot, ConstantSpec
 from ..models.agents.tasks import ToolAgentTask
@@ -235,6 +248,17 @@ class ToolAgent(Agent, ABC):
         output, store the decision onto ``task``). Responsible for
         guaranteeing tool names are registered and the decision respects
         ``tool_calls_limit`` — neither is re-checked downstream.
+
+    **_generate(*, task, feedback, feedback_source)** / **_agenerate(...)** → ``tuple[Any, list[str]]``
+        Own one full generation attempt end to end: budget check, message
+        rendering, the LLM engine call, and mode-gated structural validation.
+        Called by ``think``/``async_think`` via the shared
+        ``_run_generation_retry_loop``/``_arun_generation_retry_loop``.
+
+    **_validate(*, task, structured_output)** → ``tuple[Any, list[str]]``
+        Sync-only, pure computation: normalization plus semantic/
+        cross-referential validation of an already-structurally-valid
+        ``_generate``/``_agenerate`` result.
 
     **prepare(task)** / **async_prepare(task)** → ``ToolAgentTask`` (or subclass)
         Turn that decision into something executable, no further LLM calls:
@@ -1427,120 +1451,230 @@ class ToolAgent(Agent, ABC):
     # Shared generation-retry loop (PlanActAgent/ReActAgent think() bodies)
     # ------------------------------------------------------------------ #
     @abstractmethod
-    def _validate_generation_output(self, raw_output: str, *, task: ToolAgentTask) -> Any | str:
+    def _generate(
+        self,
+        *,
+        task: ToolAgentTask,
+        feedback: list[str],
+        feedback_source: Literal["generate", "validate"] | None,
+    ) -> tuple[Any, list[str]]:
         """
         Re-abstracted per family (same pattern as ``think``/``prepare``).
-        Takes the raw LLM string for one generation attempt and owns the
-        entire decode-and-validate pipeline itself, including the JSON
-        extraction step -- there is no separate loop-level decode phase.
+        Owns one full generation attempt end to end:
+
+        1. Budget check (``_check_generation_budget``) -- a no-op on the
+           first attempt (``feedback`` empty); on a retry, raises if the
+           retry budget is already exhausted, otherwise forgives this
+           attempt (increments ``task.retries_used``) and proceeds. Only a
+           forgiven, retried *failure* ever consumes budget -- a
+           successful attempt is always free, however many attempts it
+           took to get there.
+        2. Render this attempt's messages (``_render_generation_attempt_messages``):
+           the first attempt (``feedback`` empty) via ``render_task`` alone;
+           a retry appends the prior attempt's raw output as an assistant
+           turn plus ``feedback`` -- joined via ``format_generation_issues``
+           with this family's own structural- or semantic-category header,
+           chosen by ``feedback_source`` -- as a user turn. This pair is
+           appended onto ``task.task_messages`` (not replaced), so a phase
+           with 2+ retries accumulates the full history of every prior
+           attempt's echo+feedback.
+        3. Call the LLM engine (sync here, ``async_invoke`` in
+           ``_agenerate``); record the attempt
+           (``_record_generation_attempt``): appends an ``LLMRecord``.
+        4. Parse the raw response (mode-gated json/regex) and run this
+           family's structural checks.
+
+        ``feedback``/``feedback_source`` describe the *previous* attempt's
+        outcome -- empty/``None`` on the first call. ``feedback_source``
+        disambiguates whether ``feedback`` came from this same hook's own
+        prior structural check or from ``_validate``'s prior semantic
+        check, so the correct category header can be chosen.
 
         Returns
         -------
-        Any
-            The validated, ready-to-use result on success
-            (``list[BlackboardSlot]`` for ``PlanActAgent``,
-            ``tuple[BlackboardSlot, int]`` for ``ReActAgent``).
-        str
-            A single, fully-formatted feedback message (via
-            ``format_generation_issues``) describing every problem found
-            with this attempt -- ready to inject as the next retry turn's
-            user message verbatim, no further formatting by the caller.
-
-        No async mirror -- pure computation, no I/O.
+        tuple[Any, list[str]]
+            ``(structured_output, issues)`` -- ``issues`` is a plain,
+            unformatted list; empty means structurally clean, and
+            ``structured_output`` is then the parsed-but-not-yet-normalized
+            result. Non-empty ``issues`` means ``structured_output`` is
+            meaningless.
         """
         ...
+
+    @abstractmethod
+    async def _agenerate(
+        self,
+        *,
+        task: ToolAgentTask,
+        feedback: list[str],
+        feedback_source: Literal["generate", "validate"] | None,
+    ) -> tuple[Any, list[str]]:
+        """Async mirror of ``_generate`` -- identical contract, uses
+        ``async_invoke`` for the engine call."""
+        ...
+
+    @abstractmethod
+    def _validate(self, *, task: ToolAgentTask, structured_output: Any) -> tuple[Any, list[str]]:
+        """
+        Re-abstracted per family. No LLM call, no async mirror -- pure
+        computation. Owns normalization and this family's semantic/
+        cross-referential checks against an already-structurally-valid
+        ``structured_output``.
+
+        Returns
+        -------
+        tuple[Any, list[str]]
+            ``(final_result, issues)`` -- ``final_result`` is the
+            ready-to-use result (``list[BlackboardSlot]`` for
+            ``PlanActAgent``, ``tuple[BlackboardSlot, int]`` for
+            ``ReActAgent``) when ``issues`` is empty; meaningless
+            otherwise.
+        """
+        ...
+
+    def _check_generation_budget(self, *, task: ToolAgentTask, feedback: list[str]) -> None:
+        """
+        Gate + account for one retry, preserving the pre-split budget
+        semantics exactly: only a *forgiven, retried failure* consumes
+        budget -- a successful attempt is always free, no matter how many
+        attempts it took to get there. No-op on the first attempt
+        (``feedback`` empty -- the first attempt is never budget-blocked
+        and never consumes budget). Called by each family's
+        ``_generate``/``_agenerate`` before rendering/calling for a retry.
+
+        On a retry: if ``task.retries_used`` (forgiven failures so far,
+        shared across every step this run) has already reached
+        ``self._generation_retries``, this new failure is fatal -- raise.
+        Otherwise forgive it: increment ``task.retries_used`` and let the
+        caller proceed with the attempt.
+        """
+        if not feedback:
+            return
+        if task.retries_used >= self._generation_retries:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: generation retry budget exhausted -- "
+                f"{self._generation_retries} retr{'y' if self._generation_retries == 1 else 'ies'} "
+                "already used this run. "
+                + format_generation_issues(feedback, category_header=EXHAUSTED_ISSUE_PREFIX)
+            )
+        task.retries_used += 1
+
+    def _generation_category_header(
+        self, *, feedback_source: Literal["generate", "validate"] | None,
+    ) -> str | None:
+        """
+        Choose this attempt's retry-turn framing header from this family's
+        two declared class-level constants (_STRUCTURAL_ISSUE_HEADER /
+        _SEMANTIC_ISSUE_HEADER). json-mode's feedback stays bare (None)
+        regardless of family; only regex-mode distinguishes structural vs.
+        semantic framing.
+        """
+        if self._generation_format != "regex":
+            return None
+        return self._STRUCTURAL_ISSUE_HEADER if feedback_source == "generate" else self._SEMANTIC_ISSUE_HEADER
+
+    def _render_generation_attempt_messages(
+        self, *, task: ToolAgentTask, feedback: list[str], category_header: str | None,
+    ) -> list[dict[str, str]]:
+        """
+        Shared message-building for one ``_generate``/``_agenerate``
+        attempt. The first attempt (``feedback`` empty) renders via
+        ``render_task`` with no additional messages; a retry appends the
+        prior attempt's raw output (``task.llm_records[-1].llm_result.result``)
+        as an assistant turn and ``feedback`` (joined via
+        ``format_generation_issues`` with ``category_header``) as a user
+        turn. Because ``render_task`` mutates ``task.task_messages`` in
+        place, this pair accumulates onto that persisted history across
+        every retry in a phase, not just the latest attempt.
+        """
+        if not feedback:
+            return self.render_task(task, additional_messages=[])
+        additional_messages = [
+            {"role": "assistant", "content": task.llm_records[-1].llm_result.result},
+            {"role": "user", "content": format_generation_issues(feedback, category_header=category_header)},
+        ]
+        return self.render_task(task, additional_messages=additional_messages)
+
+    def _record_generation_attempt(self, *, task: ToolAgentTask, engine_result: LLMResult) -> str:
+        """
+        Shared post-engine-call bookkeeping for ``_generate``/``_agenerate``:
+        appends an ``LLMRecord`` onto ``task.llm_records`` -- the record
+        ``_render_generation_attempt_messages`` later reads back via
+        ``task.llm_records[-1].llm_result.result``. Does **not** touch
+        ``task.retries_used`` -- that's ``_check_generation_budget``'s job,
+        and only for a forgiven retry, never for a successful attempt (see
+        that method's docstring). Returns the raw output string.
+        """
+        raw_output: str = engine_result.result
+        task.llm_records.append(LLMRecord(
+            messages=list(task.task_messages),
+            llm_result=engine_result,
+            system_prompt_name=task.system_prompt_name,
+        ))
+        return raw_output
+
     def _run_generation_retry_loop(self, *, task: ToolAgentTask) -> Any:
         """
-        Shared retry loop for one-shot/per-step LLM generation: render, call
-        the engine, record the attempt, delegate to the family's own
-        ``_validate_generation_output`` hook for decoding *and* validation,
-        and retry with the hook's own feedback text until success or the
-        retry budget (``self._generation_retries``, tracked via
-        ``task.retries_used``) is exhausted.
+        Shared retry loop: alternates the family's own ``_generate`` (LLM
+        call + structural validation) and ``_validate`` (normalization +
+        semantic validation) until both succeed.
 
-        Steps
-        -----
-        1. ``additional_messages`` starts empty.
+        1. ``feedback`` starts empty, ``feedback_source`` starts ``None``.
         2. Loop:
-           a. Render this attempt's send payload via ``render_task``.
-           b. Call the LLM engine; capture ``engine_result``.
-           c. Append an ``LLMRecord`` (``messages=list(task.task_messages)``)
-              to ``task.llm_records``.
-           d. ``result = self._validate_generation_output(engine_result.result, task=task)``.
-           e. If ``result`` is a ``str`` (the hook's own fully-formatted
-              feedback, covering every problem found with this attempt):
-              budget-check (raise if exhausted); else inject
-              ``{"role": "assistant", "content": raw_output}``,
-              ``{"role": "user", "content": result}``, increment
-              ``task.retries_used``, continue.
-           f. Else: return ``result``.
-
-        Raises
-        ------
-        ToolAgentError
-            If the retry budget is exhausted.
+           a. ``structured_output, issues = self._generate(task=task,
+              feedback=feedback, feedback_source=feedback_source)`` --
+              raises internally if the retry budget is exhausted.
+           b. If ``issues``: ``feedback = issues``;
+              ``feedback_source = "generate"``; continue.
+           c. ``final_result, issues = self._validate(task=task,
+              structured_output=structured_output)``.
+           d. If ``issues``: ``feedback = issues``;
+              ``feedback_source = "validate"``; continue.
+           e. Else: return ``final_result``.
         """
-        additional_messages: list[dict[str, str]] = []
+        feedback: list[str] = []
+        feedback_source: Literal["generate", "validate"] | None = None
 
         while True:
-            messages = self.render_task(task, additional_messages=additional_messages)
-            engine_result = self._llm_engine.invoke({"messages": messages})
-            raw_output: str = engine_result.result
-
-            task.llm_records.append(LLMRecord(
-                messages=list(task.task_messages),
-                llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
-            ))
-
-            result = self._validate_generation_output(raw_output, task=task)
-            if isinstance(result, str):
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error(s): {result}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": raw_output},
-                    {"role": "user", "content": result},
-                ]
-                task.retries_used += 1
+            structured_output, issues = self._generate(
+                task=task, feedback=feedback, feedback_source=feedback_source,
+            )
+            if issues:
+                feedback = issues
+                feedback_source = "generate"
                 continue
 
-            return result
+            final_result, issues = self._validate(task=task, structured_output=structured_output)
+            if issues:
+                feedback = issues
+                feedback_source = "validate"
+                continue
+
+            return final_result
 
     async def _arun_generation_retry_loop(self, *, task: ToolAgentTask) -> Any:
-        """Async mirror of ``_run_generation_retry_loop``: uses
-        ``async_invoke`` for the engine call; identical retry logic and
-        feedback injection otherwise."""
-        additional_messages: list[dict[str, str]] = []
+        """Async mirror of ``_run_generation_retry_loop``: calls
+        ``self._agenerate``; ``_validate`` has no async mirror (pure
+        computation) and is called identically either way."""
+        feedback: list[str] = []
+        feedback_source: Literal["generate", "validate"] | None = None
 
         while True:
-            messages = self.render_task(task, additional_messages=additional_messages)
-            engine_result = await self._llm_engine.async_invoke({"messages": messages})
-            raw_output: str = engine_result.result
-
-            task.llm_records.append(LLMRecord(
-                messages=list(task.task_messages),
-                llm_result=engine_result,
-                system_prompt_name=task.system_prompt_name,
-            ))
-
-            result = self._validate_generation_output(raw_output, task=task)
-            if isinstance(result, str):
-                if task.retries_used >= self._generation_retries:
-                    raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget exhausted "
-                        f"after {task.retries_used + 1} attempt(s). Last error(s): {result}"
-                    )
-                additional_messages = [
-                    {"role": "assistant", "content": raw_output},
-                    {"role": "user", "content": result},
-                ]
-                task.retries_used += 1
+            structured_output, issues = await self._agenerate(
+                task=task, feedback=feedback, feedback_source=feedback_source,
+            )
+            if issues:
+                feedback = issues
+                feedback_source = "generate"
                 continue
 
-            return result
+            final_result, issues = self._validate(task=task, structured_output=structured_output)
+            if issues:
+                feedback = issues
+                feedback_source = "validate"
+                continue
+
+            return final_result
 
     # ------------------------------------------------------------------ #
     # Finalization helpers

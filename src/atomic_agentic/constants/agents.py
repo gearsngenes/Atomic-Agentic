@@ -224,6 +224,27 @@ tailored thinking instructions, WHILE ABIDING by the rules above.
 """
 THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n"
 
+# Generation-retry feedback framing (generate/validate split). Multi-line
+# LLM-facing prose, same precedent as THINKING_ADDITIONAL_INSTRUCTIONS_HEADER/
+# FOOTER above -- not a short protocol literal, but still a pure constant.
+PLAN_STRUCTURAL_ISSUE_HEADER = (
+    "Your last output could not be validated: address the following "
+    "structural issue(s) and resubmit your full plan:\n"
+)
+PLAN_SEMANTIC_ISSUE_HEADER = (
+    "Your plan's tags all parsed correctly, but the following semantic "
+    "issue(s) must be corrected before it can run:\n"
+)
+REACT_STRUCTURAL_ISSUE_HEADER = (
+    "Your last output contained syntax errors: address the following "
+    "and resubmit your next step:\n"
+)
+REACT_SEMANTIC_ISSUE_HEADER = (
+    "Your step's tags all parsed correctly, but the following semantic "
+    "issue(s) must be corrected before it can run:\n"
+)
+EXHAUSTED_ISSUE_PREFIX = "The following issues were identified in the LLM's output:\n"
+
 
 __all__ = [
     # Framework-reserved parameters

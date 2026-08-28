@@ -314,9 +314,9 @@ class TestReActAgent:
     def test_rejects_when_next_step_exceeds_capacity(self) -> None:
         # Regression test for the budget-enforcement fix (this session): the
         # last available slot under tool_calls_limit must be the return
-        # tool. think()/_validate_generation_output's own budget check
-        # is the only place left that can catch this -- act() no longer
-        # re-validates budget at all (1c dropped that as a dead guard).
+        # tool. think()'s own _validate check is the only place left that
+        # can catch this -- act() no longer re-validates budget at all (1c
+        # dropped that as a dead guard).
         agent = make_react_agent(
             [
                 react_step_json(
@@ -868,22 +868,26 @@ class TestCacheRefValidation:
     # ── PlanAct out-of-conversation ──────────────────────────────────────────
 
     def test_planact_out_of_conv_cache_ref_raises(self) -> None:
-        """PlanAct: cache index in range but not in either frozenset raises."""
+        """PlanAct: cache index in range but not in either frozenset raises.
+        Generate/validate split: this is a semantic (cross-conversation)
+        check, owned by _validate -- extract structurally first via
+        _extract_and_validate_structure, then call _validate directly."""
         agent = make_planact_agent([], context_enabled=True)
         # Seed a slot in the blackboard directly (simulates a prior-session
         # entry) -- ToolAgentTask has no cache_blackboard field; cache state
-        # lives only on the agent, read directly by _validate_generation_output.
+        # lives only on the agent, read directly by _validate.
         prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
         agent._blackboard.append(prior_slot)
 
         # Parse a plan that references cache index 0.
         plan_json = json.dumps([{"tool": return_tool.full_name, "args": {"val": "|CACHE.0|"}}])
+        structured_output, structural_issues = agent._extract_and_validate_structure(plan_json)
+        assert not structural_issues
 
         # Both frozensets are empty -- index 0 is in-range but not from this conversation.
         task = PlanActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
-        result = agent._validate_generation_output(plan_json, task=task)
-        assert isinstance(result, str)
-        assert "not part of this conversation" in result
+        _, issues = agent._validate(task=task, structured_output=structured_output)
+        assert "not part of this conversation" in " ".join(issues)
 
     # ── ReAct out-of-range ───────────────────────────────────────────────────
 
@@ -902,7 +906,10 @@ class TestCacheRefValidation:
     # ── ReAct out-of-conversation ────────────────────────────────────────────
 
     def test_react_out_of_conv_cache_ref_raises(self) -> None:
-        """ReAct: in-range cache index not in either frozenset raises."""
+        """ReAct: in-range cache index not in either frozenset raises.
+        Generate/validate split: this is a semantic check, owned by
+        _validate -- extract structurally first via
+        _extract_and_validate_structure, then call _validate directly."""
         agent = make_react_agent([], context_enabled=True, tool_calls_limit=1)
         prior_slot = BlackboardSlot(step=0, tool="Tool.tests.add", args={}, status=BlackboardSlot.EXECUTED)
         agent._blackboard.append(prior_slot)
@@ -911,9 +918,11 @@ class TestCacheRefValidation:
 
         # next_step_index defaults to 0, matching expected_step=0 above.
         task = ReActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
-        result = agent._validate_generation_output(step_json, task=task)
-        assert isinstance(result, str)
-        assert "not part of this conversation" in result
+        structured_output, structural_issues = agent._extract_and_validate_structure(step_json, task=task)
+        assert not structural_issues
+
+        _, issues = agent._validate(task=task, structured_output=structured_output)
+        assert "not part of this conversation" in " ".join(issues)
 
     # ── B1: FAILED step visible in ReAct snapshot ───────────────────────────
 
@@ -999,9 +1008,8 @@ class TestValidateToolStepDictContextWording:
         agent = make_react_agent([], context_enabled=False, tool_calls_limit=1)
         payload = {"tool": "Tool.tests.add", "args": {"x": 1, "y": 2}, "duration": 0}  # missing "reason"
         task = ReActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
-        result = agent._validate_generation_output(json.dumps(payload), task=task)
-        assert isinstance(result, str)
-        assert "next step 0 is missing required keys" in result
+        _, issues = agent._extract_and_validate_structure(json.dumps(payload), task=task)
+        assert "next step 0 is missing required keys" in " ".join(issues)
 
 
 class TestDoubledHeaderRegression:
@@ -1016,11 +1024,25 @@ class TestDoubledHeaderRegression:
         )
         register_math_tools(agent)  # type: ignore[arg-type]
         raw = "[CALL] Tool.tests.add(a=)"
-        task = ReActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="tool_instructions")
-        result = agent._validate_generation_output(raw, task=task)
-        assert isinstance(result, str)
-        assert "Multiple problems were found" not in result
-        assert result.count("resubmit your next step") == 1
+        task = ReActTask(turns=[], inputs={}, user_prompt="run", system_prompt_name="reason_then_act_regex")
+        _, issues = agent._extract_and_validate_structure(raw, task=task)
+        assert issues
+
+        # Seed llm_records the way a real first attempt would: render the
+        # first-attempt (no-feedback) messages so task.task_messages is
+        # populated, then record the attempt against that.
+        agent._render_generation_attempt_messages(task=task, feedback=[], category_header=None)
+        seed_engine = FakeLLMEngine([raw])
+        agent._record_generation_attempt(
+            task=task, engine_result=seed_engine.invoke({"messages": [{"role": "user", "content": "seed"}]}),
+        )
+        header = agent._generation_category_header(feedback_source="generate")
+        messages = agent._render_generation_attempt_messages(
+            task=task, feedback=issues, category_header=header,
+        )
+        feedback_text = messages[-1]["content"]
+        assert "Multiple problems were found" not in feedback_text
+        assert feedback_text.count("resubmit your next step") == 1
 
 
 class TestRenderTaskMessagesTrim:
@@ -1042,7 +1064,7 @@ class TestRenderTaskMessagesTrim:
 
         for phrase in self.REMOVED_PHRASES:
             assert phrase not in instruction
-        assert "Produce the NEXT BEST single tool call or return." in instruction
+        assert "Produce the NEXT BEST single tool call or return" in instruction
         assert "max duration is 2" in instruction
 
     def test_regex_mode_per_round_message_drops_restated_rules(self) -> None:
@@ -1061,7 +1083,7 @@ class TestRenderTaskMessagesTrim:
 
         for phrase in self.REMOVED_PHRASES:
             assert phrase not in instruction
-        assert "Produce the NEXT BEST single tool call or return." in instruction
+        assert "Produce the NEXT BEST single tool call or return" in instruction
         assert "max duration is 2" in instruction
 
     def test_failed_reference_warning_still_present_when_applicable(self) -> None:

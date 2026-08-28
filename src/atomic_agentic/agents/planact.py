@@ -55,6 +55,8 @@ from ..constants.agents import (
     REGEX_PLAN_FIELDS,
     REQUIRED_REGEX_PLAN_FIELDS,
     REASON_FIELD,
+    PLAN_STRUCTURAL_ISSUE_HEADER,
+    PLAN_SEMANTIC_ISSUE_HEADER,
 )
 from ..core import AtomicInvokable
 from ..constants.core import NO_VAL
@@ -63,7 +65,7 @@ from ..exceptions import ToolAgentError
 from ..models.agents.tasks import PlanActTask
 from ..models.agents import BlackboardSlot
 from ..models.agents.records import AgentRecord
-from ..utils.agents import extract_dependencies, format_generation_issues
+from ..utils.agents import extract_dependencies
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +81,9 @@ class PlanActAgent(ToolAgent):
     1. **Planning** (``think()``, once — no-op on later rounds)
        - LLM generates complete plan as a JSON array of steps (one-shot)
        - Each step: ``{"tool": "<name>", "args": {...}}``, optionally with "await"
-       - Plan is normalized (return moved to end, added if missing) and validated
+       - Plan is normalized (return moved to end) and validated -- a plan
+         with zero or multiple return steps is a structural issue, not
+         auto-corrected
        - Validated plan stored on ``task.generated_plan``
 
     2. **Compilation** (``prepare()``, first call only)
@@ -114,6 +118,9 @@ class PlanActAgent(ToolAgent):
     Same as ToolAgent, with ``tool_calls_limit`` being the max non-return steps
     in any single plan.
     """
+    _STRUCTURAL_ISSUE_HEADER = PLAN_STRUCTURAL_ISSUE_HEADER
+    _SEMANTIC_ISSUE_HEADER = PLAN_SEMANTIC_ISSUE_HEADER
+
     def __init__(
         self,
         name: str,
@@ -178,9 +185,9 @@ class PlanActAgent(ToolAgent):
         Normalization policy
         --------------------
         - Exactly one return slot must be present -- guaranteed by the
-          caller (``_validate_generation_output``'s tier-1 loop) before this
-          method is ever invoked; reaching zero or more than one here is an
-          internal-contract violation, not an LLM-facing problem.
+          caller (``_generate``'s return-tool tally) before this method is
+          ever invoked via ``_validate``; reaching a different count here
+          is an internal-contract violation, not an LLM-facing problem.
         - The single return slot is moved to the end.
         - Final list positions become authoritative step indices.
         - The final return slot is forced to depend on all prior slots so completion
@@ -200,9 +207,9 @@ class PlanActAgent(ToolAgent):
         Raises
         ------
         ToolAgentError
-            If the return-slot count is not exactly one --
-            ``_validate_generation_output`` must catch and report this to
-            the LLM before normalization runs.
+            If the return-slot count is not exactly one -- ``_generate``'s
+            own tally must guarantee this before ``_validate`` ever calls
+            this method.
         """
         slots: list[BlackboardSlot] = [slot.copy() for slot in planned_slots]
 
@@ -212,25 +219,18 @@ class PlanActAgent(ToolAgent):
             if slot.tool == return_name
         ]
 
-        if len(return_positions) > 1:
+        if len(return_positions) != 1:
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: internal error: "
-                f"_normalize_planned_slots received a plan with multiple "
-                f"return steps at positions {return_positions!r}; "
-                "_validate_generation_output's tier-1 loop must reject this "
-                "before normalization runs."
+                f"_normalize_planned_slots received a plan with "
+                f"{len(return_positions)} return steps (positions "
+                f"{return_positions!r}); expected exactly one -- "
+                "_generate's return-tool tally must guarantee this before "
+                "_validate calls this method."
             )
 
-        if len(return_positions) == 1:
-            return_slot = slots.pop(return_positions[0])
-            slots.append(return_slot)
-        else:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: internal error: "
-                f"_normalize_planned_slots received a plan with zero return "
-                f"steps; _validate_generation_output's tier-1 loop must "
-                "reject this before normalization runs."
-            )
+        return_slot = slots.pop(return_positions[0])
+        slots.append(return_slot)
 
         for i, slot in enumerate(slots):
             slot.step = i
@@ -365,86 +365,96 @@ class PlanActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     # Private helpers
     # ------------------------------------------------------------------ #
-    def _validate_generation_output(self, raw_output: str, *, task: PlanActTask) -> list[BlackboardSlot] | str:
+    def _generate(
+        self,
+        *,
+        task: PlanActTask,
+        feedback: list[str],
+        feedback_source: Literal["generate", "validate"] | None,
+    ) -> tuple[list[BlackboardSlot], list[str]]:
         """
-        Concrete implementation of ``ToolAgent._validate_generation_output``
-        for PlanAct. Owns decoding/extraction (mode-gated) and the entire
-        plan-validation pipeline; supersedes the old ``_process_plan_output``.
+        Concrete implementation of ``ToolAgent._generate`` for PlanAct.
+        Owns one full generation attempt: budget check, message rendering,
+        the engine call, and mode-gated extraction + structural
+        validation. Supersedes the decode/tier-1 half of the old
+        ``_validate_generation_output``.
+        """
+        self._check_generation_budget(task=task, feedback=feedback)
+        messages = self._render_generation_attempt_messages(
+            task=task,
+            feedback=feedback,
+            category_header=self._generation_category_header(feedback_source=feedback_source),
+        )
+        engine_result = self._llm_engine.invoke({"messages": messages})
+        raw_output = self._record_generation_attempt(task=task, engine_result=engine_result)
 
-        Whole-plan comprehensive: every step's own structural/type problems
-        are collected across the *entire* plan before returning (not just
-        the first offending step), and every cross-step semantic problem
-        (``_validate_planned_slots``) is likewise collected in full.
+        return self._extract_and_validate_structure(raw_output)
+
+    async def _agenerate(
+        self,
+        *,
+        task: PlanActTask,
+        feedback: list[str],
+        feedback_source: Literal["generate", "validate"] | None,
+    ) -> tuple[list[BlackboardSlot], list[str]]:
+        """Async mirror of ``_generate``, via ``async_invoke``."""
+        self._check_generation_budget(task=task, feedback=feedback)
+        messages = self._render_generation_attempt_messages(
+            task=task,
+            feedback=feedback,
+            category_header=self._generation_category_header(feedback_source=feedback_source),
+        )
+        engine_result = await self._llm_engine.async_invoke({"messages": messages})
+        raw_output = self._record_generation_attempt(task=task, engine_result=engine_result)
+
+        return self._extract_and_validate_structure(raw_output)
+
+    def _extract_and_validate_structure(self, raw_output: str) -> tuple[list[BlackboardSlot], list[str]]:
+        """
+        Shared sync/async tail of ``_generate``/``_agenerate``: mode-gated
+        extraction plus per-item structural validation and the
+        return-count tally. Pure computation -- no I/O, no task/feedback
+        dependence -- so it's factored out once rather than duplicated
+        between the sync and async bodies.
 
         1. Mode-gated extraction. ``regex``: ``self._extract_from_regex_string``;
-           non-empty ``pre_issues`` returns syntax-category feedback
-           immediately (tier-1/2 never entered this attempt); empty
-           ``candidate_dicts`` returns shape-category feedback immediately.
-           ``json``: ``self._extract_from_json_string``; ``json.JSONDecodeError``
-           or a non-list/empty result returns the existing decode/shape
-           feedback, unchanged. Selects the mode-appropriate field-set
-           constants (``REGEX_PLAN_FIELDS``/``REQUIRED_REGEX_PLAN_FIELDS`` vs
-           ``PLAN_FIELDS``/``REQUIRED_PLAN_FIELDS``).
-        2. For each step: structural/type-validate via
+           non-empty ``pre_issues`` returns immediately. Empty
+           ``candidate_dicts`` returns a single "no blocks found" issue
+           (folded into the general issue-list mechanism rather than a
+           standalone early-return string, per this pass's redesign).
+           ``json``: ``self._extract_from_json_string``; a decode failure
+           or a non-list/empty result likewise return a single issue each.
+        2. For each candidate: structural/type-validate via
            ``_validate_tool_step_dict``; accumulate every step's issues
            across the whole plan rather than stopping at the first. In
-           regex-mode only, pop/validate/attach ``reason`` per step (mirrors
-           ``ReActAgent``'s existing json-mode pattern) -- ``reason``'s
-           presence is already guaranteed by the required-fields check
-           above, only its type/emptiness needs a manual check here. Tally
+           regex-mode only, pop/validate/attach ``reason`` per step. Tally
            every successfully-built slot whose tool is the return tool.
-        3. If more than one return-tool slot was tallied: append the
-           multi-return issue (relocated verbatim from the old
-           ``_normalize_planned_slots`` fail-fast check -- now accumulated
-           alongside any other structural issue in the same attempt instead
-           of only surfacing on a separate retry turn). Applies to both
-           modes.
-        4. If any issues accumulated: return the joined feedback --
-           normalization and cross-step validation both assume a fully
-           structurally-valid slot list, which isn't true yet. Regex-mode
-           gets a structural-category header text; json-mode's wording
-           stays byte-identical to before (bare joined issues) -- this pass
-           only changes json-mode's *timing* for the multi-return case
-           (accumulated here instead of a separate retry turn), never its
-           wording.
-        5. Normalize (``_normalize_planned_slots``) -- no longer a
-           string-returning fail-fast gate; multi-return is now impossible
-           to reach here (caught in step 3).
-        6. Cross-step validation (``_validate_planned_slots``) -- accumulates
-           across every slot; return the joined feedback if non-empty
-           (regex-mode: semantic-category header text; json-mode: bare
-           joined issues, unchanged).
-        7. Return the normalized, validated slot list.
+        3. If the return-tool tally isn't exactly one: append the
+           multi-/zero-return issue.
+        4. Return ``(planned_slots, issues)``.
         """
         if self._generation_format == "regex":
             candidate_dicts, pre_issues = self._extract_from_regex_string(raw_output)
             if pre_issues:
-                return format_generation_issues(
-                    pre_issues,
-                    category_header=(
-                        "Your last output contained syntax errors: address the "
-                        "following and resubmit your full plan:\n"
-                    ),
-                )
+                return [], pre_issues
             if not candidate_dicts:
-                return (
+                return [], [
                     "Your last output failed to parse: no correctly-formatted "
                     "[CALL] or [RETURN] blocks were found. Every plan must "
-                    "contain at least one [CALL] block, and must end with "
-                    "exactly one [RETURN] block. Re-emit your full plan using "
-                    "the exact tag format described in your instructions."
-                )
+                    "must contain and end with EXACTLY one [RETURN] block and have "
+                    "a varying number of [CALL] blocks. Revise and re-emit your "
+                    "full plan using the exact tag format described in your "
+                    "instructions."
+                ]
             allowed_fields, required_fields = REGEX_PLAN_FIELDS, REQUIRED_REGEX_PLAN_FIELDS
         else:
             try:
                 candidate_dicts = self._extract_from_json_string(raw_output)
             except json.JSONDecodeError as exc:
-                return format_generation_issues(
-                    [f"Your output could not be parsed as valid JSON. Decoder error: {exc}"]
-                )
+                return [], [f"Your output could not be parsed as valid JSON. Decoder error: {exc}"]
 
             if not isinstance(candidate_dicts, list) or not candidate_dicts:
-                return format_generation_issues(["The plan must be a non-empty JSON array."])
+                return [], ["The plan must be a non-empty JSON array."]
             allowed_fields, required_fields = PLAN_FIELDS, REQUIRED_PLAN_FIELDS
 
         issues: list[str] = []
@@ -501,18 +511,24 @@ class PlanActAgent(ToolAgent):
                 "exactly one return step (Tool.ToolAgents.return)."
             )
 
-        if issues:
-            if self._generation_format == "regex":
-                return format_generation_issues(
-                    issues,
-                    category_header=(
-                        "Your last output could not be validated: address the "
-                        "following structural issue(s) and resubmit your full plan:\n"
-                    ),
-                )
-            return format_generation_issues(issues)
+        return planned_slots, issues
 
-        normalized = self._normalize_planned_slots(planned_slots)
+    def _validate(
+        self, *, task: PlanActTask, structured_output: list[BlackboardSlot],
+    ) -> tuple[list[BlackboardSlot] | None, list[str]]:
+        """
+        Concrete implementation of ``ToolAgent._validate`` for PlanAct.
+        Owns normalization and cross-step semantic validation of an
+        already-structurally-valid planned-slot list. Supersedes the
+        normalize/tier-2 half of the old ``_validate_generation_output``.
+
+        1. Normalize (``_normalize_planned_slots``) -- return-slot count is
+           already guaranteed exactly one by ``_generate``'s own tally.
+        2. Cross-step validation (``_validate_planned_slots``) -- accumulates
+           across every slot.
+        3. Return ``(normalized, issues)``.
+        """
+        normalized = self._normalize_planned_slots(structured_output)
 
         issues = self._validate_planned_slots(
             planned_slots=normalized,
@@ -521,17 +537,9 @@ class PlanActAgent(ToolAgent):
             failed_cache_indices=task.failed_cache_indices,
         )
         if issues:
-            if self._generation_format != "regex":
-                return format_generation_issues(issues)
-            return format_generation_issues(
-                issues,
-                category_header=(
-                    "Your plan's tags all parsed correctly, but the following "
-                    "semantic issue(s) must be corrected before it can run:\n"
-                ),
-            )
+            return None, issues
 
-        return normalized
+        return normalized, []
 
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
@@ -573,25 +581,6 @@ class PlanActAgent(ToolAgent):
         }]
         return task.task_messages
 
-    def _generate_plan(self, *, task: PlanActTask) -> list[BlackboardSlot]:
-        """
-        Generate, parse, and validate a complete PlanAct running blackboard,
-        via the shared ``ToolAgent._run_generation_retry_loop``.
-
-        Returns
-        -------
-        list[BlackboardSlot]
-            Fully normalized and validated planned slots (not yet assigned
-            onto ``task`` — the caller (``think()``/``async_think()``)
-            compiles batches and assigns them).
-        """
-        return self._run_generation_retry_loop(task=task)
-
-    async def _agenerate_plan(self, *, task: PlanActTask) -> list[BlackboardSlot]:
-        """Async mirror of ``_generate_plan``, via
-        ``ToolAgent._arun_generation_retry_loop``."""
-        return await self._arun_generation_retry_loop(task=task)
-
     def _initialize_task(
         self,
         *,
@@ -626,27 +615,27 @@ class PlanActAgent(ToolAgent):
 
         No-op once ``task.generated_plan`` is set — a one-shot planner has
         nothing further to decide after its single generation call.
-        ``_generate_plan`` already retries internally on parse/validation
-        failure, so a validated plan is guaranteed by the time this
-        returns. Compilation into batches is deliberately not done here —
-        that's deterministic bookkeeping, ``prepare()``'s job (its first
-        call compiles from ``task.generated_plan``).
+        ``_run_generation_retry_loop`` already retries internally on
+        parse/validation failure, so a validated plan is guaranteed by the
+        time this returns. Compilation into batches is deliberately not
+        done here — that's deterministic bookkeeping, ``prepare()``'s job
+        (its first call compiles from ``task.generated_plan``).
         """
         if task.generated_plan is not NO_VAL:
             return task
 
-        task.generated_plan = self._generate_plan(task=task)
+        task.generated_plan = self._run_generation_retry_loop(task=task)
         task.task_messages.clear()
         return task
 
     async def async_think(self, task: PlanActTask) -> PlanActTask:
-        """Async mirror of ``think``: uses ``_agenerate_plan`` so the
-        planning LLM call goes through ``async_invoke`` rather than a
-        worker thread."""
+        """Async mirror of ``think``: uses ``_arun_generation_retry_loop``
+        so the planning LLM call goes through ``async_invoke`` rather than
+        a worker thread."""
         if task.generated_plan is not NO_VAL:
             return task
 
-        task.generated_plan = await self._agenerate_plan(task=task)
+        task.generated_plan = await self._arun_generation_retry_loop(task=task)
         task.task_messages.clear()
         return task
 
