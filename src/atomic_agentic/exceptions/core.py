@@ -40,6 +40,51 @@ class ThinkingAgentError(RuntimeError):
     """
 
 
+class BlackboardParseError(RuntimeError):
+    """Raised when parsing one raw statement into BlackboardSlotV2 object(s)
+    fails.
+
+    Subclasses RuntimeError to match this codebase's existing convention for
+    domain error types superseding a bare RuntimeError (see LLMEngineError,
+    MCPError, ThinkingAgentError) -- callers doing `except RuntimeError`
+    upstream still catch these. Deliberately not rooted in ToolAgentError:
+    ToolAgent2 is a new sibling family, not a ToolAgent subclass, so sharing
+    ToolAgentError's lineage here would imply a relationship that doesn't
+    exist (mirrors ThinkingAgentError's own "sibling, not subclass" note).
+
+    Unifies every rejection category from parse_statement_to_slots under one
+    catchable type: genuine ast.parse SyntaxErrors, illegal assignment
+    shapes (multiple targets, tuple/list-unpacking, augmented assignment, an
+    attribute/subscript/starred LHS, positional or **-unpacked call
+    arguments), a reserved hoisted-name-prefix collision on the input
+    statement's own LHS, and a dependency-free expression that raises when
+    eagerly evaluated during parsing (e.g. `1/0`). The original exception is
+    always preserved via `raise BlackboardParseError(...) from e`.
+    """
+
+
+class DependencyFailedError(Exception):
+    """Raised (by a future prepare()-phase caller, not by this release's own
+    utils) when a BlackboardSlotV2's argument depends on another slot whose
+    own resolution failed.
+
+    Does not forward the upstream exception instance verbatim -- wraps it so
+    the failure reads as "arg_name depends on dependency_identifier, which
+    failed" without losing the root cause. `cause` may itself be a
+    DependencyFailedError, so repeatedly walking `.cause` always bottoms out
+    at the real originating exception regardless of cascade depth.
+    """
+
+    def __init__(self, arg_name: str, dependency_identifier: str, cause: Exception) -> None:
+        super().__init__(
+            f"argument {arg_name!r} depends on {dependency_identifier!r}, "
+            f"which failed: {cause!r}"
+        )
+        self.arg_name = arg_name
+        self.dependency_identifier = dependency_identifier
+        self.cause = cause
+
+
 class WorkflowError(Exception):
     """Base class for workflow-related errors."""
 
@@ -143,6 +188,8 @@ __all__ = [
     "ToolAgentError",
     "ToolRegistrationError",
     "ThinkingAgentError",
+    "BlackboardParseError",
+    "DependencyFailedError",
     "WorkflowError",
     "ValidationError",
     "SchemaError",
