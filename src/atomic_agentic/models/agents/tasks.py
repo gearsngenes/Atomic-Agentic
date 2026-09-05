@@ -7,10 +7,12 @@ from ...constants.core import NO_VAL
 from .blackboard_models import BlackboardSlot
 from .records import AgentRecord, LLMRecord
 from .thought_models import AgentThought
+from .toolagent2_models import Subtask
 
 __all__ = [
     "AgentTask",
     "ToolAgentTask",
+    "ToolAgentTaskV2",
     "PlanActTask",
     "ReActTask",
     "ReActStepMeta",
@@ -167,6 +169,45 @@ class ToolAgentTask(AgentTask):
     failed_cache_indices: frozenset[int] = field(default_factory=frozenset)
 
     retries_used: int = 0
+
+
+@dataclass(slots=True)
+class ToolAgentTaskV2(AgentTask):
+    """
+    ToolAgent2-flavored task -- a sibling to ToolAgentTask, not a subclass
+    (ToolAgent2 is a new agent family, not a ToolAgent subclass, per this
+    branch's established convention).
+
+    No __post_init__ -- matches AgentTask's own family-wide convention of
+    zero constructor-time validation (an in-flight, internal-only object,
+    not a real boundary, per 01-overview.md Section 4).
+
+    Fields
+    ------
+    objective : str
+        Clarified, self-sufficient restatement of the user's ask, assigned
+        by a future decomposition-generation call (out of scope this pass).
+        Defaults to "" -- not known at _initialize_task construction time,
+        same reasoning as PlanActTask.generated_plan/ReActTask.generated_step
+        staying NO_VAL until think() populates them. Whether this deserves
+        its own NO_VAL-staged field instead of a bare default is left to a
+        future lifecycle-scoping pass, not decided here.
+
+    result_key : str
+        LLM-chosen placeholder name for a not-yet-built persistent results
+        mechanism to key on, assigned at the same synthesis step as
+        objective. Same construction-timing reasoning as objective. The
+        runtime mechanism this key addresses into (a persistent, per-
+        conversation results dict) is a separate, not-yet-started release
+        -- this field is inert plumbing until then.
+
+    subtasks : list[Subtask]
+        The decomposition checklist. Empty at construction; populated by a
+        future think()-phase.
+    """
+    objective: str = ""
+    result_key: str = ""
+    subtasks: list[Subtask] = field(default_factory=list)
 
 
 @dataclass(slots=True)

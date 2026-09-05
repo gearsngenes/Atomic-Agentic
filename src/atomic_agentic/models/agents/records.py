@@ -3,13 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict
 
+from ...constants.core import IDENTIFIER_PATTERN
 from ..results.agents import AgentResult
 from ..results.llm import LLMResult
+from .toolagent2_models import Subtask
 
 __all__ = [
     "LLMRecord",
     "AgentRecord",
     "ToolAgentRecord",
+    "ToolAgentRecordV2",
     "ThinkingAgentRecord",
 ]
 
@@ -230,6 +233,94 @@ class ToolAgentRecord(AgentRecord):
             "blackboard_start": self.blackboard_start,
             "blackboard_end": self.blackboard_end,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ToolAgentRecordV2(AgentRecord):
+    """
+    Canonical memory record for one completed ToolAgent2 invocation -- a
+    sibling to ToolAgentRecord, not a subclass (ToolAgent2 is a new agent
+    family, not a ToolAgent subclass).
+
+    Unlike the Task family, Record types in this codebase validate at
+    construction (AgentRecord.__post_init__ already checks user_prompt/
+    llm_records/prev) -- a persisted/serialized/rendered record sits closer
+    to a real boundary than an in-flight task does. This class's own
+    __post_init__ follows that precedent for its own new fields.
+
+    Fields
+    ------
+    objective : str
+        Same substantive content as ToolAgentTaskV2.objective, carried over
+        at commit time.
+
+    result_key : str
+        Same substantive content as ToolAgentTaskV2.result_key, carried over
+        at commit time. Validated here as Python-identifier-legal (reuses
+        IDENTIFIER_PATTERN, same pattern BlackboardSlotV2.identifier already
+        uses) since it is meant to double as a future dict key /
+        referenceable identifier -- ToolAgentTaskV2 itself does not validate
+        this (Task family convention), so this is this value's first real
+        validation checkpoint.
+
+    subtasks : tuple[Subtask, ...]
+        Same Subtask instances ToolAgentTaskV2.subtasks accumulated ("passed
+        back up" at commit time) -- shared by reference, not deep-copied.
+        Normalized to a tuple here (mirrors llm_records' existing
+        list-or-tuple-in, tuple-stored normalization) since a completed
+        record shouldn't still look structurally in-flight at the container
+        level. Subtask instances themselves stay unfrozen -- nothing mutates
+        one post-commit by convention, not by enforcement (same soft
+        boundary AgentRecord.inputs already relies on).
+    """
+
+    objective: str = ""
+    result_key: str = ""
+    subtasks: tuple[Subtask, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
+        # the class object to add __slots__, which invalidates the
+        # zero-arg super()'s implicit __class__ closure cell (a documented
+        # CPython gotcha for slotted-dataclass inheritance chains; confirmed
+        # live: bare super() raises "obj must be an instance or subtype of
+        # type" here).
+        super(ToolAgentRecordV2, self).__post_init__()
+
+        # 1. objective must be a non-empty string.
+        if not isinstance(self.objective, str) or not self.objective.strip():
+            raise ValueError(
+                f"ToolAgentRecordV2.objective must be a non-empty string; got {self.objective!r}."
+            )
+
+        # 2. result_key must be a non-empty, Python-identifier-legal string --
+        # it is meant to double as a future dict key / referenceable
+        # identifier.
+        if not isinstance(self.result_key, str) or not IDENTIFIER_PATTERN.fullmatch(
+            self.result_key
+        ):
+            raise ValueError(
+                "ToolAgentRecordV2.result_key must be a non-empty, "
+                f"Python-identifier-legal string; got {self.result_key!r}."
+            )
+
+        # 3. subtasks must be a list/tuple of Subtask instances.
+        if isinstance(self.subtasks, (str, bytes)) or not isinstance(self.subtasks, (list, tuple)):
+            raise TypeError(
+                "ToolAgentRecordV2.subtasks must be a list or tuple of Subtask "
+                f"instances; got {type(self.subtasks).__name__!r}."
+            )
+        for index, subtask in enumerate(self.subtasks):
+            if not isinstance(subtask, Subtask):
+                raise TypeError(
+                    f"ToolAgentRecordV2.subtasks[{index}] must be a Subtask "
+                    f"instance; got {type(subtask).__name__!r}."
+                )
+
+        # 4. normalize to a tuple -- object.__setattr__ required, the
+        # dataclass is frozen (mirrors llm_records/inputs normalization
+        # above).
+        object.__setattr__(self, "subtasks", tuple(self.subtasks))
 
 
 @dataclass(frozen=True, slots=True)

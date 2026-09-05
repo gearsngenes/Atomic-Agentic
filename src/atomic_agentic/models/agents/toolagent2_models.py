@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ...constants.core import IDENTIFIER_PATTERN
@@ -8,6 +8,7 @@ from ..results import AtomicResult
 
 __all__ = [
     "BlackboardSlotV2",
+    "Subtask",
 ]
 
 
@@ -102,3 +103,40 @@ class BlackboardSlotV2:
         # lifecycle code, not derived from external/LLM input -- not
         # defensively validated here, per 01-overview.md Section 4's
         # boundary-only-validation rule.
+
+
+@dataclass(slots=True)
+class Subtask:
+    """
+    One decomposition unit within a ToolAgentTaskV2's checklist. Plain name
+    -- no v1 counterpart to suffix against.
+
+    Lives here rather than beside ToolAgentTaskV2 in tasks.py, which it
+    conceptually belongs closest to: tasks.py already imports from
+    records.py, and ToolAgentRecordV2 (records.py) also needs Subtask for
+    its own subtasks field -- defining it in tasks.py would make records.py's
+    import circular. This module is already a leaf (only constants/core.py,
+    models/results), safe for both tasks.py and records.py to import from.
+
+    No __post_init__ -- matches ToolAgentTaskV2/the whole Task family's
+    convention of zero constructor-time validation (an in-flight,
+    internal-only object, not a real boundary, per 01-overview.md Section 4).
+    Mutable (not frozen), matching the same Task-family convention --
+    blackboard_slots grows in place during a future per-subtask orchestration
+    phase.
+
+    Fields
+    ------
+    sub_objective : str
+        This subtask's own clarified goal, distinct from the parent task's
+        overall objective.
+
+    blackboard_slots : list[BlackboardSlotV2]
+        This subtask's own local build-as-you-go orchestration workspace.
+        Empty at construction; filled by a future per-subtask orchestration
+        phase (BlackboardSlotV2's own parse_statement_to_slots/
+        resolve_slot_args utils are not wired up here).
+    """
+
+    sub_objective: str
+    blackboard_slots: list[BlackboardSlotV2] = field(default_factory=list)

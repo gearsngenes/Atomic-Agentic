@@ -1,11 +1,12 @@
 from .prompts import PromptConfig
-from .records import AgentRecord, LLMRecord, ToolAgentRecord, ThinkingAgentRecord
+from .records import AgentRecord, LLMRecord, ToolAgentRecord, ToolAgentRecordV2, ThinkingAgentRecord
 from .blackboard_models import BlackboardSlot, ConstantSpec
-from .toolagent2_models import BlackboardSlotV2
+from .toolagent2_models import BlackboardSlotV2, Subtask
 from .thought_models import AgentThought
 from .tasks import (
     AgentTask,
     ToolAgentTask,
+    ToolAgentTaskV2,
     PlanActTask,
     ReActTask,
     ReActStepMeta,
@@ -17,13 +18,16 @@ __all__ = [
     "AgentRecord",
     "LLMRecord",
     "ToolAgentRecord",
+    "ToolAgentRecordV2",
     "ThinkingAgentRecord",
     "BlackboardSlot",
     "BlackboardSlotV2",
+    "Subtask",
     "ConstantSpec",
     "AgentThought",
     "AgentTask",
     "ToolAgentTask",
+    "ToolAgentTaskV2",
     "PlanActTask",
     "ReActTask",
     "ReActStepMeta",
