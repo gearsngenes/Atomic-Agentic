@@ -838,10 +838,15 @@ class Agent(AtomicInvokable, ABC):
         ``{"default": []}`` and the active conversation resets to
         ``"default"``. ``self._branch_counter`` is deliberately NOT reset --
         an auto-generated conversation name must never be reissued, even
-        across a full clear.
+        across a full clear. Takes ``self._invoke_lock`` like every other
+        conversation-mutating method -- without it, an in-flight
+        ``invoke``/``async_invoke`` whose ``_resolve_context`` snapshot
+        predates this call could have its later ``_commit_emit`` reference a
+        conversation key this reset just removed.
         """
-        self._conversations = {DEFAULT_CONVERSATION_NAME: []}
-        self._active_conversation = DEFAULT_CONVERSATION_NAME
+        with self._invoke_lock:
+            self._conversations = {DEFAULT_CONVERSATION_NAME: []}
+            self._active_conversation = DEFAULT_CONVERSATION_NAME
 
     def get_conversation(
         self,
@@ -1050,25 +1055,27 @@ class Agent(AtomicInvokable, ABC):
     def delete_conversation(self, key: str) -> list[AgentRecord]:
         """Remove and return a conversation's full history.
 
-        Refuses to remove the currently-active conversation unless it is
-        ``"default"``, in which case it always succeeds, returns the prior
-        history, and resets ``"default"`` to ``[]`` in place -- the key
-        itself is never removed, ``"default"`` always exists.
+        ``"default"`` is never actually removed -- regardless of whether
+        it is currently active, deleting it resets its list to ``[]`` in
+        place and returns the prior history; the key itself always stays
+        present. Any other conversation is refused while it is the active
+        conversation (switch active first); otherwise it is popped and
+        its history returned.
         """
         with self._invoke_lock:
             if key not in self._conversations:
                 raise AgentInvocationError(
                     f"delete_conversation: unknown conversation {key!r}."
                 )
-            if key == self._active_conversation:
-                if key != DEFAULT_CONVERSATION_NAME:
-                    raise AgentInvocationError(
-                        f"delete_conversation: cannot delete the active "
-                        f"conversation {key!r}; switch active first."
-                    )
+            if key == DEFAULT_CONVERSATION_NAME:
                 old = self._conversations[key]
                 self._conversations[key] = []
                 return old
+            if key == self._active_conversation:
+                raise AgentInvocationError(
+                    f"delete_conversation: cannot delete the active "
+                    f"conversation {key!r}; switch active first."
+                )
             return self._conversations.pop(key)
 
     async def async_invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
