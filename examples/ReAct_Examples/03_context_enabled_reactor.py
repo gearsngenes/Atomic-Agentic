@@ -42,7 +42,7 @@ while True:
     print(f"Result: {result.result}\n")
 
     from pprint import pprint
-    record = reactor.records[-1]
+    record = reactor.get_conversation()[-1]
     llm_calls = len(record.llm_records)
     print(f"LLM calls this turn: {llm_calls}")
     print("Blackboard:")

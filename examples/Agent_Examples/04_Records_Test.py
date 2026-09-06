@@ -50,8 +50,8 @@ def main() -> None:
     print("\n=== Final invoke() result after post_invoke ===")
     pprint.pp(result.result)
 
-    print("\n=== Canonical turn history: agent.records ===")
-    for i, turn in enumerate(agent.records):
+    print("\n=== Canonical turn history: agent.get_conversation() ===")
+    for i, turn in enumerate(agent.get_conversation()):
         print(f"\nTurn {i}")
         print("prompt:")
         pprint.pp(turn.user_prompt)
@@ -61,7 +61,7 @@ def main() -> None:
         pprint.pp(turn.final_result)
 
     print("\n=== Rendered turn using raw assistant response ===")
-    pprint.pp(agent.render_turn(agent.records[0]))
+    pprint.pp(agent.render_turn(agent.get_conversation()[0]))
 
     print("\n=== Rendered turn using final assistant response ===")
     # assistant_response_source is read-only after construction; build a view agent for the alternate source
@@ -75,12 +75,12 @@ def main() -> None:
         response_preview_limit=300,
         assistant_response_source="final",
     )
-    pprint.pp(final_view.render_turn(agent.records[0]))
+    pprint.pp(final_view.render_turn(agent.get_conversation()[0]))
 
     print("\n=== Messages that would be sent on the next invoke ===")
     next_messages = agent.build_messages(
         system_prompt = agent.role_prompt,
-        turns = agent.records,
+        turns = agent.get_conversation(),
         prompt = "Now explain why turn-native memory is useful."
     )
     pprint.pp(next_messages)

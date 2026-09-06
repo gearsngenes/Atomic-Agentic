@@ -115,12 +115,15 @@ class AgentRecord:
     accounting; AgentRecord is the memory/rendering record. The completed
     record points to its AgentResult via ``final_result``.
 
-    Records form a singly-linked list via ``prev``: each committed record
-    points to the most recent record that was used as context when it was
-    created. ``prev=None`` marks a chain root (first invocation or a fresh
-    start). Walking ``prev`` backward
-    from any record reconstructs the exact conversation branch that produced
-    it.
+    Records form a doubly-linked tree via ``prev``/``children``: each
+    committed record points backward to the most recent record that was used
+    as context when it was created (``prev``), and that target record points
+    forward to every record that was ever committed on top of it
+    (``children``). ``prev=None`` marks a chain root (first invocation or a
+    fresh start). Walking ``prev`` backward from any record reconstructs the
+    exact conversation branch that produced it; a target with more than one
+    child marks a fork point where more than one conversation continued from
+    the same record.
 
     Fields
     ------
@@ -157,6 +160,17 @@ class AgentRecord:
         The most recent ``AgentRecord`` that was used as context for this
         invocation, or ``None`` if no prior context was used. Always points
         to a completed (non-draft) record on any record committed to history.
+
+    children:
+        Every ``AgentRecord`` (across every conversation) that named this
+        record as its ``prev`` — the forward-pointing counterpart to
+        ``prev``, making the overall structure a doubly-linked tree rather
+        than a singly-linked chain. Mutable-in-place despite this being a
+        frozen dataclass — ``hash=False, compare=False`` mirrors ``inputs``'s
+        existing treatment, so appending to it post-construction doesn't
+        disturb hashing/equality. Never reassigned after construction, only
+        ever mutated via ``.append(...)``; expected to always start empty at
+        construction time (a record cannot have children before it exists).
     """
 
     user_prompt: str
@@ -165,6 +179,7 @@ class AgentRecord:
     final_result: AgentResult | None = None
     llm_records: tuple[LLMRecord, ...] = ()
     prev: AgentRecord | None = None
+    children: list["AgentRecord"] = field(default_factory=list, hash=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.user_prompt, str):
@@ -200,6 +215,22 @@ class AgentRecord:
                     "(final_result is not None); cannot link to a draft."
                 )
 
+        if not isinstance(self.children, (list, tuple)) or isinstance(self.children, (str, bytes)):
+            raise TypeError(
+                "AgentRecord.children must be a list of AgentRecord instances, "
+                f"got {type(self.children).__name__}."
+            )
+        for index, child in enumerate(self.children):
+            if not isinstance(child, AgentRecord):
+                raise TypeError(
+                    "AgentRecord.children must contain only AgentRecord instances; "
+                    f"item {index} is {type(child).__name__}."
+                )
+        # Deliberately NOT normalized to tuple -- children is the one field
+        # exempt from this class's "normalize sequences to tuple" convention,
+        # exactly like the existing inputs dict exemption. It must stay a
+        # mutable list so later commits can append to it in place.
+
     def to_dict(self) -> Dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         return {
@@ -209,6 +240,7 @@ class AgentRecord:
             "final_result": self.final_result.to_dict() if self.final_result is not None else None,
             "llm_records": [r.to_dict() for r in self.llm_records],
             "prev_run_id": self.prev.final_result.run_id if self.prev is not None else None,
+            "child_ids": [c.final_result.run_id for c in self.children],
         }
 
 

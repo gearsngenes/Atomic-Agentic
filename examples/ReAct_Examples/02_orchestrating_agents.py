@@ -93,7 +93,7 @@ task = (
 )
 
 result = orchestrator.invoke({"prompt": task}).result
-record = orchestrator.records[-1].to_dict()
+record = orchestrator.get_conversation()[-1].to_dict()
 serialized_record = json.dumps(record, indent=2)
 
 from pprint import pformat

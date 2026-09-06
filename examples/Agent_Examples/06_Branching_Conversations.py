@@ -20,15 +20,24 @@ Conversation tree
 
 Key concepts shown
 ------------------
-- ``run_id=<run_id>``   fork from any prior turn, not just the tail
-- ``Agent.get_conversation()`` reconstruct any branch chain from flat history
+- ``run_id=<run_id>``   target any prior turn, not just the tail
+- Targeting a turn that already has a child forks a brand-new, separately
+  named conversation instead of appending a second, ambiguous child in
+  place -- targeting a still-childless turn (or passing ``run_id=None``)
+  just continues in place, no fork.
+- ``Agent.get_conversation(conversation_id)``   each conversation is its own
+  stored list under ``Agent.conversation_names``; reading one back is a
+  plain dict lookup, not a reconstruction walk.
 
-Breaking change (v2.0.0a14)
-----------------------------
-``run_id="new"`` has been removed.  It previously opened a fresh
-conversation root without clearing flat history.  The new design always
-appends records unconditionally; to get a fresh conversation per-invocation
-use ``context_enabled=False``, or instantiate a separate agent.
+Conversation storage (v2.0.0, conversation-storage-refactor)
+--------------------------------------------------------------
+Turns are no longer one flat, ever-growing list. ``Agent._conversations`` is
+a ``dict[str, list[AgentRecord]]`` -- the agent's active conversation
+("default" here, since ``set_active_conversation`` is never called in this
+example) keeps growing in place for T0/T_A1/T_A2, while re-targeting T0 for
+T_B1 (T0 already has a child, T_A1) implicitly forks a new, auto-named
+conversation instead -- discovered below by diffing ``conversation_names``
+before/after that call. Forking never changes which conversation is active.
 
 Post-invoke parameters are no longer declared via ``passthrough_inputs``.
 Any non-result, non-variadic post_invoke parameter (e.g. ``style`` below)
@@ -200,6 +209,13 @@ def main() -> None:
     print("  ↳ T_A1 and T_A2 are invisible — agent has no dog info")
     print(f"{'═' * _W}")
 
+    # T0 already has a child (T_A1) by this point, so re-targeting it here
+    # implicitly forks a brand-new conversation instead of appending a
+    # second child in place. The active conversation (still "default")
+    # never changes; diff conversation_names before/after to discover the
+    # new fork's auto-generated name.
+    conversations_before = set(agent.conversation_names)
+
     r_b1 = agent(
         message="What's my dog's name?",
         style="friendly",
@@ -207,30 +223,31 @@ def main() -> None:
         return_atomic_result_object = True
     )
     run_b1 = r_b1.run_id
-    print(f"  run  : {run_b1[:8]}...   parent: {run_0[:8]}...")
+    branch_b_key = next(iter(set(agent.conversation_names) - conversations_before))
+    print(f"  run  : {run_b1[:8]}...   parent: {run_0[:8]}...   conversation: {branch_b_key!r}")
     print(f"  reply: {r_b1.result['reply']}")
 
     # ------------------------------------------------------------------ #
-    # Reconstruct and display each branch chain
+    # Display each conversation's stored chain
     # ------------------------------------------------------------------ #
     print(f"\n\n{'═' * _W}")
-    print(f"  BRANCH CHAINS  ({len(agent.records)} records in flat history)")
+    print(f"  CONVERSATIONS  ({len(agent.conversation_names)} total: {agent.conversation_names})")
     print(f"{'═' * _W}")
 
     print_chain(
-        agent.get_conversation(run_id=run_a2),
-        "Branch A  ·  root → fact revealed → fact recalled",
+        agent.get_conversation(),  # active ("default"): T0 -> T_A1 -> T_A2
+        "Branch A  ·  root → fact revealed → fact recalled  (active conversation)",
     )
     print_chain(
-        agent.get_conversation(run_id=run_b1),
-        "Branch B  ·  root → same question, no prior fact  (fork at T0)",
+        agent.get_conversation(branch_b_key),
+        "Branch B  ·  root → same question, no prior fact  (forked at T0)",
     )
 
     # ------------------------------------------------------------------ #
-    # Flat history — all records stored, regardless of branch
+    # Every conversation, in full — nothing is stored in a flat list anymore
     # ------------------------------------------------------------------ #
     print(f"\n{'═' * _W}")
-    print(f"  Flat records  —  {len(agent.records)} records total")
+    print("  ALL CONVERSATIONS")
     print(f"{'═' * _W}")
     labels = {
         run_0:  "T0     root",
@@ -238,13 +255,16 @@ def main() -> None:
         run_a2: "T_A2   branch A — fact recalled",
         run_b1: "T_B1   branch B — parallel fork from T0",
     }
-    for i, record in enumerate(agent.records):
-        rid    = record.final_result.run_id
-        parent = (
-            f"{record.prev.final_result.run_id[:8]}..."
-            if record.prev else "None"
-        )
-        print(f"  [{i}]  {rid[:8]}...  parent: {parent:<18}  {labels.get(rid, '')}")
+    for name in agent.conversation_names:
+        history = agent.get_conversation(name)
+        print(f"\n  conversation {name!r}  ({len(history)} record(s))")
+        for i, record in enumerate(history):
+            rid    = record.final_result.run_id
+            parent = (
+                f"{record.prev.final_result.run_id[:8]}..."
+                if record.prev else "None"
+            )
+            print(f"    [{i}]  {rid[:8]}...  parent: {parent:<18}  {labels.get(rid, '')}")
     print(f"{'═' * _W}\n")
 
 

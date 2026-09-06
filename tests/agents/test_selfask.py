@@ -440,12 +440,12 @@ class TestClearMemory:
         agent = make_agent(engine=engine, max_thinking_rounds=3)
         agent.invoke({"prompt": "hello"})
 
-        assert agent.records
+        assert agent.get_conversation()
         assert agent.get_thoughts(None)
 
         agent.clear_memory()
 
-        assert agent.records == []
+        assert agent.get_conversation() == []
         assert agent.get_thoughts(None) == []
 
 

@@ -162,30 +162,31 @@ class SelfAskAgent(BasicAgent):
     def get_thoughts(self, run_id: str | None = None) -> list[list[AgentThought]]:
         """Return the thought rounds produced by one invocation.
 
-        Mirrors ``get_conversation``'s ``run_id`` resolution: ``None``
-        resolves to the most recently committed record; an unknown
-        ``run_id`` raises ``AgentInvocationError``. Every record in
-        ``self._records`` for this agent is always a
-        ``ThinkingAgentRecord`` (built exclusively by this class's own
-        ``_build_record_from_task``), so ``thoughts_start``/``thoughts_end``
-        are always present -- not re-checked here.
+        Routes through the shared ``Agent._find_in_conversation`` lookup
+        rather than duplicating a flat-list scan: ``None`` resolves to the
+        active conversation's most recently committed record; an unknown
+        ``run_id`` raises ``AgentInvocationError`` (this is a pure lookup,
+        not part of ``invoke()``'s narrowed fork-triggering ``run_id``
+        semantics, so it keeps this method's original unknown-lookup
+        convention rather than ``_resolve_context``'s ``ValueError``).
+        ``self._active_conversation`` is read live here -- harmless, since
+        ``get_thoughts`` (unlike ``_resolve_context``) has no earlier
+        snapshot to preserve. Every record in the active conversation for
+        this agent is always a ``ThinkingAgentRecord`` (built exclusively by
+        this class's own ``_build_record_from_task``), so
+        ``thoughts_start``/``thoughts_end`` are always present -- not
+        re-checked here.
 
         Returns a shallow copy of the relevant slice of
         ``self._thoughts`` (one inner list per round).
         """
-        if run_id is None:
-            if not self._records:
+        record = self._find_in_conversation(self._active_conversation, run_id)
+        if record is None:
+            if run_id is None:
                 return []
-            record = self._records[-1]
-        else:
-            record = next(
-                (r for r in self._records if r.final_result.run_id == run_id),
-                None,
+            raise AgentInvocationError(
+                f"get_thoughts: no record with run_id {run_id!r} found in agent history."
             )
-            if record is None:
-                raise AgentInvocationError(
-                    f"get_thoughts: no record with run_id {run_id!r} found in agent history."
-                )
         return list(self._thoughts[record.thoughts_start:record.thoughts_end])
 
     @property

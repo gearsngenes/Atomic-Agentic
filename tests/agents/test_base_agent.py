@@ -548,7 +548,7 @@ class TestAgentPostInvokeRouting:
 
 
 class TestAgentContext:
-    def test_context_disabled_does_not_resend_history_but_still_stores_records(self) -> None:
+    def test_context_disabled_does_not_resend_history_and_does_not_store_records(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(engine=engine, context_enabled=False)
 
@@ -558,8 +558,8 @@ class TestAgentContext:
         assert first.result["final"] == "ECHO: Write about pytest in a strict tone."
         assert second.result["final"] == "ECHO: Write about agents in a concise tone."
 
-        # Records are always appended regardless of context_enabled.
-        assert len(agent.records) == 2
+        # context_enabled=False means nothing is stored in any conversation.
+        assert agent.get_conversation() == []
 
         assert len(engine.calls) == 2
         assert [message["role"] for message in engine.calls[0]] == ["system", "user"]
@@ -577,7 +577,7 @@ class TestAgentContext:
         assert first.result["final"] == "ECHO: Write about pytest in a strict tone."
         assert second.result["final"] == "ECHO: Write about agents in a concise tone."
 
-        rendered = agent.render_turn(agent.records[0])
+        rendered = agent.render_turn(agent.get_conversation()[0])
         assert [m["role"] for m in rendered] == ["user", "assistant"]
         assert rendered[0]["content"] == "Write about pytest in a strict tone."
         assert rendered[1]["content"] == "ECHO: Write about pytest in a strict tone."
@@ -654,7 +654,7 @@ class TestAgentContext:
         assert "second topic" in joined_contents
         assert "third topic" in joined_contents
 
-    def test_records_window_zero_sends_no_prior_turns_but_still_stores_history(self) -> None:
+    def test_records_window_zero_sends_no_prior_turns_and_does_not_store_history(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = make_agent(
             engine=engine,
@@ -673,9 +673,9 @@ class TestAgentContext:
         ]
         assert second_call_messages[-1]["content"] == "Write about second topic in a plain tone."
 
-        assert len(agent.records) == 2
-        assert agent.records[0].user_prompt == "Write about first topic in a plain tone."
-        assert agent.records[1].user_prompt == "Write about second topic in a plain tone."
+        # records_window == 0 is one of the two disabling conditions -- like
+        # context_enabled=False, nothing is stored in any conversation.
+        assert agent.get_conversation() == []
 
     def test_clear_memory_removes_stored_history(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -683,11 +683,11 @@ class TestAgentContext:
 
         agent.invoke({"topic": "pytest", "tone": "strict"})
 
-        assert agent.records
+        assert agent.get_conversation()
 
         agent.clear_memory()
 
-        assert agent.records == []
+        assert agent.get_conversation() == []
 
 
 class TestAgentValidation:
@@ -786,7 +786,9 @@ class TestAgentSerialization:
         assert data["description"] == "Deterministic writer test agent."
         assert data["context_enabled"] is True
         assert data["records_window"] == 1
-        assert data["records"] == [turn.to_dict() for turn in agent.records]
+        assert data["conversations"][agent.active_conversation] == [
+            turn.to_dict() for turn in agent.get_conversation()
+        ]
         assert "system_prompts" in data
         assert data["pre_invoke"]["name"] == "pre_invoke"
         assert data["post_invoke"]["name"] == "post_invoke"
@@ -848,7 +850,7 @@ class TestAgentAsyncInvoke:
         assert first.result["final"] == "ECHO: Write about pytest in a strict tone."
         assert second.result["final"] == "ECHO: Write about agents in a concise tone."
 
-        rendered = agent.render_turn(agent.records[0])
+        rendered = agent.render_turn(agent.get_conversation()[0])
         assert [m["role"] for m in rendered] == ["user", "assistant"]
         assert rendered[0]["content"] == "Write about pytest in a strict tone."
         assert rendered[1]["content"] == "ECHO: Write about pytest in a strict tone."
@@ -1545,8 +1547,8 @@ class TestUpdatePrompt:
         assert "mutated" not in agent.system_prompts
 
 
-class TestAgentRecordsAlwaysAppended:
-    def test_context_disabled_records_always_appended(self) -> None:
+class TestAgentRecordsNeverStoredWhenContextDisabled:
+    def test_context_disabled_records_never_stored(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
         agent = _MinimalAgent(
             name="a",
@@ -1559,7 +1561,7 @@ class TestAgentRecordsAlwaysAppended:
         agent.invoke({"prompt": "hello"})
         agent.invoke({"prompt": "world"})
 
-        assert len(agent.records) == 2
+        assert agent.get_conversation() == []
 
     def test_context_disabled_turns_always_empty(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -1710,7 +1712,7 @@ class TestInvocationLifecycle:
         )
         agent.invoke({"prompt": "hi", "lang": "French"})
 
-        assert agent.records[0].inputs == {"prompt": "hi", "lang": "French", "run_id": None}
+        assert agent.get_conversation()[0].inputs == {"prompt": "hi", "lang": "French", "run_id": None}
 
     def test_async_committed_agent_record_inputs_equals_full_filtered_inputs(self) -> None:
         agent = _MinimalAgent(
@@ -1724,7 +1726,7 @@ class TestInvocationLifecycle:
         )
         asyncio.run(agent.async_invoke({"prompt": "hi", "lang": "French"}))
 
-        assert agent.records[0].inputs == {"prompt": "hi", "lang": "French", "run_id": None}
+        assert agent.get_conversation()[0].inputs == {"prompt": "hi", "lang": "French", "run_id": None}
 
     def test_inputs_isolated_across_invocations(self) -> None:
         agent = _MinimalAgent(
@@ -1738,4 +1740,5 @@ class TestInvocationLifecycle:
         )
         agent.invoke({"prompt": "hi"})
         agent.invoke({"prompt": "yo"})
-        assert agent.records[0].inputs is not agent.records[1].inputs
+        history = agent.get_conversation()
+        assert history[0].inputs is not history[1].inputs
