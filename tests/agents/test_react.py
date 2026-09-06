@@ -433,11 +433,12 @@ class TestReActAgent:
                 )
             ],
             tool_calls_limit=1,
+            context_enabled=True,
         )
 
         agent.invoke({"prompt": "run"})
 
-        for rec in agent.records[-1].llm_records:
+        for rec in agent.get_conversation()[-1].llm_records:
             assert rec.system_prompt_name == "reason_then_act"
 
 
@@ -629,9 +630,10 @@ class TestReActGenerationRetry:
             description=".",
             llm_engine=engine,
             generation_retries=1,
+            context_enabled=True,
         )
         agent.invoke({"prompt": "run"})
-        llm_records = agent.records[-1].llm_records
+        llm_records = agent.get_conversation()[-1].llm_records
         assert len(llm_records) == 2
         assert len(llm_records[0].messages) == 3
         # Self-contained convention: retry's messages = full task_messages so
@@ -657,10 +659,11 @@ class TestReActGenerationRetry:
             description=".",
             llm_engine=engine,
             generation_retries=1,
+            context_enabled=True,
         )
         register_math_tools(agent)  # type: ignore[arg-type]
         agent.invoke({"prompt": "run"})
-        llm_records = agent.records[-1].llm_records
+        llm_records = agent.get_conversation()[-1].llm_records
         assert len(llm_records) == 2
         assert len(llm_records[0].messages) == 3
         # Self-contained convention: retry's messages = full task_messages so
@@ -750,10 +753,11 @@ class TestReActGenerationRetry:
             llm_engine=engine,
             generation_retries=1,
             tool_calls_limit=3,
+            context_enabled=True,
         )
         register_math_tools(agent)  # type: ignore[arg-type]
         agent.invoke({"prompt": "run"})
-        assert len(agent.records[-1].llm_records) == 3
+        assert len(agent.get_conversation()[-1].llm_records) == 3
 
     def test_observable_counters_stable_during_retries(self) -> None:
         """Observable counters on prior steps do not decrement during a retry attempt."""
@@ -772,12 +776,13 @@ class TestReActGenerationRetry:
             llm_engine=engine,
             generation_retries=1,
             tool_calls_limit=3,
+            context_enabled=True,
         )
         register_math_tools(agent)  # type: ignore[arg-type]
         agent.invoke({"prompt": "run"})
         # After the run: step 0 had observable=1, which was decremented exactly once
         # (by the successful return-step generation). It should now be 0.
-        record = agent.records[-1]
+        record = agent.get_conversation()[-1]
         # The run completed; step 0's observable was decremented once (by the successful commit),
         # not twice (which would happen if the failed retry also decremented it).
         assert len(record.llm_records) == 3  # 1 (step0) + 1 (failed return) + 1 (success return)

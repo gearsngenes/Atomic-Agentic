@@ -148,8 +148,9 @@ class TestAgentStructuredBasicPipeline:
 
         assert isinstance(step_result, StructuredResult)
         assert step_result.result == result.result
-        # Records are always stored regardless of context_enabled.
-        assert len(agent.records) == 1
+        # This agent is constructed with context_enabled=False (the
+        # make_agent_sequential_flow default), so nothing is stored.
+        assert agent.get_conversation() == []
 
     def test_structured_agent_can_feed_sequential_flow_step(self) -> None:
         _engine, _agent, structured_agent = make_structured_agent()

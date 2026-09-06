@@ -1239,9 +1239,11 @@ class TestScriptedInvokeLoop:
         )
 
         assert agent.invoke({"prompt": "run"}).result == 5
-        # update_blackboard always runs; context_enabled only controls what's shown to the LLM.
+        # update_blackboard always runs regardless of context_enabled, but
+        # context_enabled=False now also means nothing is stored in any
+        # conversation.
         assert len(agent.blackboard) == 2
-        assert len(agent.records) == 1
+        assert agent.get_conversation() == []
 
     def test_context_enabled_stores_tool_agent_turn_with_blackboard_span(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -1255,8 +1257,8 @@ class TestScriptedInvokeLoop:
 
         assert agent.invoke({"prompt": "run"}).result == 5
 
-        assert len(agent.records) == 1
-        turn = agent.records[0]
+        assert len(agent.get_conversation()) == 1
+        turn = agent.get_conversation()[0]
         assert isinstance(turn, ToolAgentRecord)
         assert turn.user_prompt == "run"
         assert turn.generated_response == 5
@@ -1315,12 +1317,12 @@ class TestScriptedInvokeLoop:
         agent.invoke({"prompt": "run"})
 
         assert agent.blackboard
-        assert agent.records
+        assert agent.get_conversation()
 
         agent.clear_memory()
 
         assert agent.blackboard == []
-        assert agent.records == []
+        assert agent.get_conversation() == []
 
     def test_prepare_empty_batch_raises(self) -> None:
         agent = make_agent()
@@ -1485,7 +1487,7 @@ class TestBlackboardPersistenceAndDisplay:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == "long:abcdefghijklmnopqrstuvwxyz"
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         assert "CACHED STEPS" in content
         assert "result" in content
         assert "long:abcd" in content
@@ -1503,7 +1505,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         assert agent.invoke({"prompt": "run"}).result == 3
 
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         assert "CACHED STEPS" in content
         assert "'args'" in content
         assert "'result'" not in content
@@ -1532,7 +1534,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         assert agent.invoke({"prompt": "run"}).result == "long:abcdefghijklmnopqrstuvwxyz"
 
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         assert "abcdefghijklmnopqrstuvwxyz" in content
         assert "'long:abcd..." in content
 
@@ -1561,7 +1563,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         assert agent.invoke({"prompt": "run"}).result == "long:abcdefghijklmnopqrstuvwxyz"
 
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         response_section = content.split("CACHED STEPS", maxsplit=1)[0]
         cached_section = content.split("CACHED STEPS", maxsplit=1)[1]
         assert "RESPONSE:\nlong:abcde..." in response_section
@@ -1601,7 +1603,7 @@ class TestToolAgentRecordRendering:
 
         assert agent.invoke({"prompt": "run"}).result == 3
 
-        rendered = agent.render_turn(agent.records[0])
+        rendered = agent.render_turn(agent.get_conversation()[0])
 
         assert len(rendered) == 2
         assert [message["role"] for message in rendered] == ["user", "assistant"]
@@ -1630,8 +1632,8 @@ class TestToolAgentRecordRendering:
         )
         assert agent.invoke({"prompt": "second"}).result == 20
 
-        first_rendered = agent.render_turn(agent.records[0])[1]["content"]
-        second_rendered = agent.render_turn(agent.records[1])[1]["content"]
+        first_rendered = agent.render_turn(agent.get_conversation()[0])[1]["content"]
+        second_rendered = agent.render_turn(agent.get_conversation()[1])[1]["content"]
 
         assert "CACHED STEPS [0, 1] PRODUCED" in first_rendered
         assert "CACHED STEPS [2, 3] PRODUCED" in second_rendered
@@ -1691,14 +1693,14 @@ class TestRenderTurnWithFailedSlots:
         agent = self._make_agent_with_failed_slot(peek_at_cache=True)
         # Must not raise -- FAILED slots' slot.result = NO_VAL must never be
         # passed to _preview_blackboard_result.
-        rendered = agent.render_turn(agent.records[0])
+        rendered = agent.render_turn(agent.get_conversation()[0])
         assert rendered is not None
         assert len(rendered) == 2
 
     def test_render_turn_mixed_span_shows_cached_and_failed_sections(self) -> None:
         """Mixed span: both CACHED STEPS and FAILED STEPS sections appear."""
         agent = self._make_agent_with_failed_slot()
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         assert "CACHED STEPS" in content
         assert "FAILED STEPS" in content
         assert "RESPONSE:" in content
@@ -1709,7 +1711,7 @@ class TestRenderTurnWithFailedSlots:
     def test_render_turn_failed_entries_omit_args_include_tool_and_error(self) -> None:
         """FAILED STEPS entries contain tool + error but NOT args."""
         agent = self._make_agent_with_failed_slot()
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         failed_section = content.split("FAILED STEPS")[1]
         assert "fail_tool" in failed_section
         assert "'error'" in failed_section
@@ -1719,7 +1721,7 @@ class TestRenderTurnWithFailedSlots:
     def test_render_turn_failed_error_truncated_by_preview_limit(self) -> None:
         """Error strings in FAILED entries are truncated by blackboard_preview_limit."""
         agent = self._make_agent_with_failed_slot(blackboard_preview_limit=10)
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         failed_section = content.split("FAILED STEPS")[1]
         # The stored error is ToolInvocationError wrapping RuntimeError("intentional failure").
         # str(slot.error) = "Tool.tests.fail_tool: invocation failed: intentional failure" (57 chars).
@@ -1737,7 +1739,7 @@ class TestRenderTurnWithFailedSlots:
         ])
         result = agent.invoke({"prompt": "run"})
         assert result.result == 99
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         # Return slot executed -> CACHED section present.
         assert "CACHED STEPS" in content
         # Failed steps -> FAILED section present.
@@ -1979,15 +1981,20 @@ class TestToolAgentRecordMetadataContract:
         assert isinstance(blackboard_index, int)
         assert isinstance(error, Exception)
 
-    def test_blackboard_span_is_integer_when_context_disabled(self) -> None:
-        agent = make_agent(context_enabled=False)
+    def test_blackboard_span_is_integer_regardless_of_context_enabled(self) -> None:
+        # context_enabled no longer determines whether span metadata is
+        # computed correctly (that's internal to _build_record_from_task);
+        # it only determines whether the resulting record is stored at all.
+        # Use context_enabled=True here so the record is retained and its
+        # span fields can be inspected via the public get_conversation() API.
+        agent = make_agent(context_enabled=True)
         agent.set_script(
             [[{"tool": return_tool.full_name, "args": {"val": 1}}]]
         )
 
         agent.invoke({"prompt": "run"})
 
-        record = agent.records[0]
+        record = agent.get_conversation()[0]
         assert isinstance(record.blackboard_start, int)
         assert isinstance(record.blackboard_end, int)
 

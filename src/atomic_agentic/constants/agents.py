@@ -1,6 +1,36 @@
 from __future__ import annotations
 import re
 from ..models.parameters import ParamSpec
+from ..constants.core import IDENTIFIER_PATTERN_TEXT
+
+# =============================================================================
+# Agent conversation storage
+# =============================================================================
+# Used by:
+# - agents/base.py: Agent's per-conversation storage (_conversations dict,
+#   create_conversation, fork_conversation) and its name-shape validation.
+#
+# "default" is the always-present conversation key -- Agent seeds
+# {"default": []} at construction and delete_conversation refuses to ever
+# truly remove it, resetting its list to empty instead.
+
+DEFAULT_CONVERSATION_NAME = "default"
+"""The always-present conversation key. Never truly removable -- deleting
+it resets its list to empty instead."""
+
+CONVERSATION_NAME_PATTERN: re.Pattern[str] = re.compile(
+    rf"^(?!.*_\d+$){IDENTIFIER_PATTERN_TEXT}$"
+)
+"""Valid shape for an explicitly-given conversation name (create_conversation's
+`name`, or an explicit `fork_conversation(fork_name=...)`): alphanumeric +
+underscore (same as IDENTIFIER_PATTERN), and must NOT end in `_<digits>` --
+that suffix shape is reserved for auto-generated fork names, which
+guarantees "ends in _<digits> iff auto-generated" holds everywhere."""
+
+TRAILING_FORK_INDEX_PATTERN: re.Pattern[str] = re.compile(r"_(\d+)$")
+"""Matches an existing auto-generated numeric suffix so it can be stripped
+before a fresh one is appended (prevents suffix accumulation like
+`branch_5_7_2`)."""
 
 # =============================================================================
 # Agent framework-reserved parameters
@@ -143,6 +173,10 @@ THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n
 
 
 __all__ = [
+    # Conversation storage
+    "DEFAULT_CONVERSATION_NAME",
+    "CONVERSATION_NAME_PATTERN",
+    "TRAILING_FORK_INDEX_PATTERN",
     # Framework-reserved parameters
     "RUN_ID_PARAM",
     # LLM step fields

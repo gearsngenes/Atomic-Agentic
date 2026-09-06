@@ -267,6 +267,7 @@ class TestAgentRecord:
             "final_result": None,
             "llm_records": [],
             "prev_run_id": None,
+            "child_ids": [],
         }
 
     def test_to_dict_with_agent_result(self) -> None:
@@ -413,6 +414,7 @@ class TestToolAgentRecord:
             "final_result": None,
             "llm_records": [],
             "prev_run_id": None,
+            "child_ids": [],
             "blackboard_start": 3,
             "blackboard_end": 6,
         }
@@ -470,6 +472,7 @@ class TestThinkingAgentRecord:
             "final_result": None,
             "llm_records": [],
             "prev_run_id": None,
+            "child_ids": [],
             "thoughts_start": 2,
             "thoughts_end": 5,
         }

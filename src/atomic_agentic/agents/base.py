@@ -32,7 +32,12 @@ from ..models.agents.tasks import AgentTask
 logger = logging.getLogger(__name__)
 
 from .tools import identity_pre_tool, identity_post_tool
-from ..constants.agents import RUN_ID_PARAM
+from ..constants.agents import (
+    RUN_ID_PARAM,
+    DEFAULT_CONVERSATION_NAME,
+    CONVERSATION_NAME_PATTERN,
+    TRAILING_FORK_INDEX_PATTERN,
+)
 from ..utils.parameters import (
     semantically_identical,
     insert_by_category,
@@ -65,7 +70,10 @@ class Agent(AtomicInvokable, ABC):
        name membership against ``pre_invoke`` / ``post_invoke``'s own
        declared parameters, excluding reserved names.
     4. ``pre_invoke`` converts ``pre_inputs`` to a prompt string.
-    5. Turns are selected from history if ``context_enabled`` is True.
+    5. Turns are selected from the active conversation via
+       ``_resolve_context`` if ``context_enabled`` is True and
+       ``records_window != 0``; ``run_id`` is resolved only within that
+       conversation.
     6. ``_initialize_task(turns, prompt, inputs)`` builds a task from the
        full filtered ``inputs`` dict untouched — not a slice, not popped of
        anything; then, every round, unconditionally: ``task = think(task);
@@ -73,8 +81,10 @@ class Agent(AtomicInvokable, ABC):
     7. ``post_invoke`` transforms the raw response into the final result.
     8. ``_commit_emit`` assembles the completed ``AgentRecord`` (with
        ``inputs`` set to the exact same full dict passed to
-       ``_initialize_task``) and the final ``AgentResult`` together, and
-       appends the record to ``_records`` unconditionally.
+       ``_initialize_task``) and the final ``AgentResult`` together, then
+       either appends the record in place or forks a new conversation --
+       decided by a fresh children check at commit time -- unless context/
+       window is disabled, in which case nothing is stored at all.
 
     Schema composition
     -------------------
@@ -117,9 +127,29 @@ class Agent(AtomicInvokable, ABC):
 
     ``context_enabled``
     -------------------
-    ``True``:  ``get_conversation`` selects prior turns for each invocation.
+    ``True``:  ``_resolve_context`` selects prior turns from the active
+    conversation for each invocation, and may trigger a fork.
     ``False``: turns are always ``[]``; ``run_id`` is ignored.
-    Records are appended unconditionally regardless of this setting.
+    ``records_window == 0`` behaves the same as ``context_enabled=False``
+    for a given invocation. In either case, nothing is stored -- no record
+    is appended to any conversation -- though the invocation still returns
+    a normal ``AgentResult``.
+
+    Conversation storage
+    --------------------
+    History is stored per-conversation in ``self._conversations: dict[str,
+    list[AgentRecord]]``, seeded with a single empty ``"default"``
+    conversation at construction. Exactly one conversation is "active" at a
+    time (``self._active_conversation``); ``invoke``/``async_invoke`` always
+    read from and (when they commit) write to whichever conversation is
+    active at call time. ``run_id`` targets a specific record *within the
+    active conversation only* -- an unknown ``run_id`` raises ``ValueError``.
+    Continuing from a childless record appends in place; continuing from a
+    record that already has children forks a new conversation instead
+    (``create_conversation``/``fork_conversation``/
+    ``set_active_conversation``/``delete_conversation`` provide the explicit,
+    non-invocation-triggered counterparts to this implicit fork-on-invoke
+    behavior).
     """
 
     # ------------------------------------------------------------------ #
@@ -270,7 +300,11 @@ class Agent(AtomicInvokable, ABC):
             raise AgentError("records_window must be an int >= 0 or be 'None'.")
         self._records_window: Optional[int] = records_window
 
-        self._records: List[AgentRecord] = []
+        self._conversations: dict[str, List[AgentRecord]] = {
+            DEFAULT_CONVERSATION_NAME: []
+        }
+        self._active_conversation: str = DEFAULT_CONVERSATION_NAME
+        self._branch_counter: int = 0
 
         if response_preview_limit is None:
             self._response_preview_limit = None
@@ -364,8 +398,9 @@ class Agent(AtomicInvokable, ABC):
     def context_enabled(self) -> bool:
         """Whether the agent feeds prior turns into each invocation.
 
-        When ``False``, turns are always ``[]`` (fresh conversation) but records
-        are still appended for observability.
+        When ``False``, turns are always ``[]`` and nothing is stored in any
+        conversation for that invocation, though a normal ``AgentResult`` is
+        still returned.
         """
         return self._context_enabled
 
@@ -397,9 +432,14 @@ class Agent(AtomicInvokable, ABC):
         return self._assistant_response_source
 
     @property
-    def records(self) -> List[AgentRecord]:
-        """Shallow copy of the stored turn history."""
-        return list(self._records)
+    def active_conversation(self) -> str:
+        """Key of the currently active conversation."""
+        return self._active_conversation
+
+    @property
+    def conversation_names(self) -> list[str]:
+        """Snapshot list of every existing conversation key."""
+        return list(self._conversations.keys())
 
     @property
     def pre_invoke(self) -> AtomicInvokable:
@@ -720,20 +760,32 @@ class Agent(AtomicInvokable, ABC):
         result: Any,
         started_at: datetime,
         ended_at: datetime,
+        *,
+        active_key: str,
     ) -> AgentResult:
         """Assemble, commit, and return this invocation's final ``AgentResult``.
 
         Shared tail for both ``invoke``/``async_invoke``, called once the
         task-lifecycle loop has completed and ``post_invoke`` has produced
         ``result``. Pure computation, no I/O — one method serves both
-        lifecycle paths.
+        lifecycle paths. ``active_key`` is the active-conversation snapshot
+        taken by ``_resolve_context`` before the task-lifecycle loop ran; no
+        separate ``target`` parameter is needed here since ``record.prev``
+        already equals the resolved target (or ``None``) once step 1
+        completes -- ``turns`` was constructed by ``_resolve_context`` to
+        always end exactly at that target.
 
         1. ``record = self._build_record_from_task(task, turns)``, validated
            as an ``AgentRecord``.
         2. ``agent_result = self.build_result_from_record(record,
            result=result, started_at=started_at, ended_at=ended_at)``.
         3. ``record = replace(record, final_result=agent_result)``.
-        4. ``self._records.append(record)`` — committed unconditionally.
+        4. Under ``self._invoke_lock``: if context/window is disabled,
+           return ``agent_result`` with nothing stored. Otherwise, a fresh
+           children check on ``record.prev`` decides append-vs-fork --
+           delegating fork construction to the same ``fork_conversation``
+           primitive exposed publicly -- and the record is appended to the
+           resolved conversation, with ``target.children`` updated to match.
         5. Return ``agent_result``.
         """
         record = self._build_record_from_task(task, turns)
@@ -750,67 +802,274 @@ class Agent(AtomicInvokable, ABC):
         )
 
         record = replace(record, final_result=agent_result)
-        self._records.append(record)
+
+        with self._invoke_lock:
+            if not (self._context_enabled and self._records_window != 0):
+                return agent_result
+
+            # Fresh (not stale) children check, taken under the same lock as
+            # the mutation below -- this is what makes two concurrent
+            # commits targeting the same childless point resolve safely:
+            # whichever commits second observes the first's already-appended
+            # child and forks instead of colliding.
+            target = record.prev
+            if target is not None and target.children:
+                dest_key = self.fork_conversation(
+                    conversation_id=active_key,
+                    run_id=target.final_result.run_id,
+                    fork_name=None,
+                )
+            else:
+                dest_key = active_key
+
+            self._conversations[dest_key].append(record)
+            if target is not None:
+                target.children.append(record)
+
         return agent_result
 
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
     def clear_memory(self) -> None:
-        """Clear the stored turn history."""
-        self._records.clear()
+        """Hard-reset all conversation storage to the just-constructed state.
+
+        Every conversation is discarded; ``self._conversations`` becomes
+        ``{"default": []}`` and the active conversation resets to
+        ``"default"``. ``self._branch_counter`` is deliberately NOT reset --
+        an auto-generated conversation name must never be reissued, even
+        across a full clear.
+        """
+        self._conversations = {DEFAULT_CONVERSATION_NAME: []}
+        self._active_conversation = DEFAULT_CONVERSATION_NAME
 
     def get_conversation(
         self,
-        run_id: str | None = None,
+        conversation_id: str | None = None,
         turns: int | None = None,
     ) -> list[AgentRecord]:
-        """Walk the ``prev`` chain from a target record and return it oldest-first.
+        """Return a conversation's history (or a tail slice of it), oldest-first.
 
-        This is the canonical entry point for branch-aware turn selection.
+        A plain dict-key lookup, not a ``.prev``-walk -- each conversation's
+        stored list is already the full forward-ordered trail, so no
+        traversal is needed to reconstruct it. ``conversation_id`` is a
+        dict key, not a record identity: once forking exists, a single
+        ``AgentRecord`` can legitimately belong to more than one
+        conversation's list, so "the conversation containing run_id X" is no
+        longer an unambiguous question.
 
         Parameters
         ----------
-        run_id:
-            ``run_id`` of the target record. ``None`` starts from the most
-            recently committed record. An unknown string raises
-            ``AgentInvocationError``.
+        conversation_id:
+            Conversation key to read. ``None`` resolves to the active
+            conversation. An unknown key raises ``AgentInvocationError``.
         turns:
-            Maximum chain length to return. ``None`` means the full chain.
-            ``0`` always raises ``ValueError``.
+            Maximum number of trailing records to return. ``None`` means the
+            full history. ``0`` always raises ``ValueError``.
         """
         if turns == 0:
             raise ValueError(
                 "get_conversation: turns must be a positive integer or None; "
-                "0 is not valid (the method always returns at least the target record)."
+                "0 is not valid (the method always returns at least one record "
+                "when the conversation is non-empty)."
             )
 
-        if not self._records:
-            return []
+        key = self._active_conversation if conversation_id is None else conversation_id
+        if key not in self._conversations:
+            raise AgentInvocationError(
+                f"get_conversation: unknown conversation {key!r}."
+            )
 
+        history = self._conversations[key]
+        return list(history) if turns is None else list(history[-turns:])
+
+    def _find_in_conversation(
+        self, conversation_id: str, run_id: str | None
+    ) -> AgentRecord | None:
+        """Pure query for a record within a given conversation; never raises.
+
+        ``None`` resolves to that conversation's most recent record (or
+        ``None`` if it's empty); an explicit ``run_id`` resolves to the
+        matching record, or ``None`` if no record in that conversation has
+        it. Takes ``conversation_id`` explicitly rather than reading
+        ``self._active_conversation`` internally -- ``_resolve_context``
+        must be able to pass its own already-snapshotted key so a
+        concurrent ``set_active_conversation`` can never make this method's
+        search and its caller's own snapshot disagree. Shared by
+        ``_resolve_context`` and ``SelfAskAgent.get_thoughts``.
+        """
+        history = self._conversations[conversation_id]
         if run_id is None:
-            start = self._records[-1]
-        else:
-            start = next(
-                (r for r in self._records if r.final_result.run_id == run_id),
-                None,
+            return history[-1] if history else None
+        return next(
+            (r for r in history if r.final_result.run_id == run_id), None
+        )
+
+    def _resolve_context(self, run_id: str | None) -> tuple[str, list[AgentRecord]]:
+        """Resolve this invocation's active-conversation snapshot and context turns.
+
+        Called unlocked, early in ``invoke``/``async_invoke``, before the
+        think/prepare/act loop -- the active-conversation key is snapshotted
+        here so it travels into ``_commit_emit`` unchanged even if another
+        thread calls ``set_active_conversation`` before this invocation
+        commits.
+
+        1. Snapshot ``active_key = self._active_conversation``.
+        2. If context/window is disabled, ``run_id`` is ignored entirely and
+           nothing is selected.
+        3. Otherwise resolve ``run_id`` within ``active_key`` specifically
+           (via ``_find_in_conversation(active_key, run_id)``, never the
+           live ``self._active_conversation``) -- this is what keeps
+           ``history`` and ``target`` from a concurrent
+           ``set_active_conversation`` race ever disagreeing. An
+           unresolvable explicit ``run_id`` raises ``ValueError`` (not
+           ``AgentInvocationError`` -- deliberately distinct from
+           ``get_conversation``'s unknown-lookup convention).
+        4. The returned turns always end exactly at the resolved target
+           (or are ``[]`` when there is none), sliced to ``records_window``
+           from the end.
+        """
+        active_key = self._active_conversation
+        if not (self._context_enabled and self._records_window != 0):
+            return active_key, []
+
+        history = self._conversations[active_key]
+        target = self._find_in_conversation(active_key, run_id)
+        if run_id is not None and target is None:
+            raise ValueError(
+                f"invoke: no record with run_id {run_id!r} found in the "
+                f"active conversation {active_key!r}."
             )
-            if start is None:
+        if target is None:
+            return active_key, []
+
+        idx = history.index(target)
+        prefix = history[: idx + 1]
+        window = self._records_window
+        turns = prefix if window is None else prefix[-window:]
+        return active_key, turns
+
+    def create_conversation(self, name: str) -> bool:
+        """Create a new, empty conversation.
+
+        ``name`` must be alphanumeric-plus-underscore and must not end in
+        ``_<digits>`` (that suffix shape is reserved for auto-generated fork
+        names) -- an invalid shape raises ``ValueError``. Returns ``True`` on
+        success, ``False`` if ``name`` already exists (never auto-activates
+        either way).
+        """
+        with self._invoke_lock:
+            if not CONVERSATION_NAME_PATTERN.fullmatch(name):
+                raise ValueError(
+                    f"create_conversation: invalid name {name!r} (must be "
+                    "alphanumeric/underscore, must not end in _<digits>)."
+                )
+            if name in self._conversations:
+                return False
+            self._conversations[name] = []
+            return True
+
+    def fork_conversation(
+        self,
+        conversation_id: str,
+        run_id: str,
+        fork_name: str | None = None,
+    ) -> str:
+        """Fork a new conversation off an existing one at a specific record.
+
+        Always performs a real, unconditional fork -- unlike the implicit
+        fork-on-invoke path, this method has no "continue in place" outcome.
+        Never changes ``self._active_conversation``.
+
+        Parameters
+        ----------
+        conversation_id:
+            Source conversation key. Unknown key raises
+            ``AgentInvocationError``.
+        run_id:
+            Fork point within ``conversation_id``. Unknown run_id raises
+            ``ValueError`` (implies ``conversation_id`` is non-empty).
+        fork_name:
+            Explicit name for the new conversation, validated the same as
+            ``create_conversation``'s ``name`` -- an invalid shape or an
+            existing collision both raise ``ValueError`` (this is an
+            explicit, deliberate name the caller chose, unlike
+            ``create_conversation``'s softer boolean-return-on-collision).
+            When omitted, auto-derived from ``conversation_id`` (its own
+            existing trailing ``_<digits>`` suffix stripped first) plus the
+            next value from one shared, ever-increasing, never-reused
+            counter.
+        """
+        with self._invoke_lock:
+            if conversation_id not in self._conversations:
                 raise AgentInvocationError(
-                    f"get_conversation: no record with run_id {run_id!r} "
-                    "found in agent history."
+                    f"fork_conversation: unknown conversation {conversation_id!r}."
+                )
+            source = self._conversations[conversation_id]
+            target = next(
+                (r for r in source if r.final_result.run_id == run_id), None
+            )
+            if target is None:
+                raise ValueError(
+                    f"fork_conversation: no record with run_id {run_id!r} "
+                    f"found in conversation {conversation_id!r}."
                 )
 
-        chain: list[AgentRecord] = []
-        current: AgentRecord | None = start
-        while current is not None:
-            chain.append(current)
-            if turns is not None and len(chain) >= turns:
-                break
-            current = current.prev
+            if fork_name is not None:
+                if not CONVERSATION_NAME_PATTERN.fullmatch(fork_name):
+                    raise ValueError(
+                        f"fork_conversation: invalid fork_name {fork_name!r}."
+                    )
+                if fork_name in self._conversations:
+                    raise ValueError(
+                        f"fork_conversation: name {fork_name!r} already exists."
+                    )
+                resolved_name = fork_name
+            else:
+                base = TRAILING_FORK_INDEX_PATTERN.sub("", conversation_id)
+                candidate = f"{base}_{self._branch_counter}"
+                self._branch_counter += 1
+                while candidate in self._conversations:
+                    candidate = f"{base}_{self._branch_counter}"
+                    self._branch_counter += 1
+                resolved_name = candidate
 
-        chain.reverse()
-        return chain
+            idx = source.index(target)
+            self._conversations[resolved_name] = list(source[: idx + 1])
+            return resolved_name
+
+    def set_active_conversation(self, key: str) -> None:
+        """Switch the active conversation. Unknown key raises ``AgentInvocationError``."""
+        with self._invoke_lock:
+            if key not in self._conversations:
+                raise AgentInvocationError(
+                    f"set_active_conversation: unknown conversation {key!r}."
+                )
+            self._active_conversation = key
+
+    def delete_conversation(self, key: str) -> list[AgentRecord]:
+        """Remove and return a conversation's full history.
+
+        Refuses to remove the currently-active conversation unless it is
+        ``"default"``, in which case it always succeeds, returns the prior
+        history, and resets ``"default"`` to ``[]`` in place -- the key
+        itself is never removed, ``"default"`` always exists.
+        """
+        with self._invoke_lock:
+            if key not in self._conversations:
+                raise AgentInvocationError(
+                    f"delete_conversation: unknown conversation {key!r}."
+                )
+            if key == self._active_conversation:
+                if key != DEFAULT_CONVERSATION_NAME:
+                    raise AgentInvocationError(
+                        f"delete_conversation: cannot delete the active "
+                        f"conversation {key!r}; switch active first."
+                    )
+                old = self._conversations[key]
+                self._conversations[key] = []
+                return old
+            return self._conversations.pop(key)
 
     async def async_invoke(self, inputs: Mapping[str, Any]) -> AgentResult:
         """Async analog of ``invoke``.
@@ -864,11 +1123,9 @@ class Agent(AtomicInvokable, ABC):
             )
         prompt = raw_prompt
 
-        # 5. History.
+        # 5. History -- resolved within the active conversation only.
         logger.debug(f"Agent.{self.name} selecting turns")
-        turns: list[AgentRecord] = []
-        if self._context_enabled and self._records_window != 0:
-            turns = self.get_conversation(run_id=run_id, turns=self._records_window)
+        active_key, turns = self._resolve_context(run_id)
 
         # 6. Task lifecycle: initialize, think -> prepare -> act until complete.
         logger.debug(f"Agent.{self.name} performing async logic")
@@ -891,9 +1148,12 @@ class Agent(AtomicInvokable, ABC):
         final_response = post_result.result
         ended_at = datetime.now(timezone.utc)
 
-        # 8-9. Record + result construction, committed to history.
-        with self._invoke_lock:
-            agent_result = self._commit_emit(task, turns, final_response, started_at, ended_at)
+        # 8-9. Record + result construction, committed to the active conversation.
+        # _commit_emit acquires self._invoke_lock itself for the whole of
+        # its own work -- no outer lock needed here.
+        agent_result = self._commit_emit(
+            task, turns, final_response, started_at, ended_at, active_key=active_key
+        )
 
         logger.info(f"[Async {self.full_name} finished]")
         return agent_result
@@ -904,14 +1164,18 @@ class Agent(AtomicInvokable, ABC):
         Only the final commit runs under ``self._invoke_lock`` — everything
         before it (pre_invoke, turn selection, the full task lifecycle,
         post_invoke) is unlocked. The only shared, mutable state any of that
-        touches (``self._records``) is only ever *mutated* inside
+        touches (``self._conversations``) is only ever *mutated* inside
         ``_commit_emit``; reads elsewhere are stale-safe by construction
-        (append-only, immutable-once-persisted). Narrowing the lock this way
-        lets true concurrent execution of the actual work happen for both
-        sync and async callers sharing one instance. A deliberate, accepted
-        consequence: concurrent calls using the default ``run_id=None`` may
-        branch the conversation if they race, since nothing serializes the
-        read-tail-then-commit span as a whole anymore.
+        (append-only, immutable-once-persisted, aside from the active-key
+        snapshot ``_resolve_context`` takes up front). Narrowing the lock
+        this way lets true concurrent execution of the actual work happen
+        for both sync and async callers sharing one instance. A deliberate,
+        accepted consequence: two concurrent calls targeting the same
+        childless point may race, since nothing serializes the
+        read-tail-then-commit span as a whole anymore -- resolved not by
+        preventing the race but by ``_commit_emit``'s fresh children check
+        at commit time, which automatically upgrades whichever commits
+        second into a real fork instead of colliding.
 
         Steps
         -----
@@ -922,15 +1186,19 @@ class Agent(AtomicInvokable, ABC):
            membership against ``pre_invoke`` / ``post_invoke``'s own
            declared parameters, excluding reserved names.
         4. ``pre_invoke`` → prompt string (validated).
-        5. Select conversation turns according to ``context_enabled``.
+        5. ``_resolve_context(run_id)`` selects conversation turns from the
+           active conversation, snapshotting the active-conversation key.
         6. ``_initialize_task(turns, prompt, inputs)`` → task; loop
            ``task = think(task); task = prepare(task); task = act(task)``
            until ``task.complete``.
         7. ``post_invoke`` transforms ``task.generated_response`` into the
            final result.
-        8-9. Under ``self._invoke_lock``: ``_commit_emit(task, turns,
-           result, started_at, ended_at)`` builds the completed record and
-           ``AgentResult`` together, and commits the record unconditionally.
+        8-9. ``_commit_emit(task, turns, result, started_at, ended_at,
+           active_key=active_key)`` builds the completed record and
+           ``AgentResult`` together, then commits (append-or-fork) or skips
+           storage entirely per the context/window gate --
+           ``_commit_emit`` acquires ``self._invoke_lock`` itself for the
+           whole of this step; no outer lock is taken at this call site.
         """
         logger.info(f"[{self.full_name} started]")
         started_at = datetime.now(timezone.utc)
@@ -970,11 +1238,9 @@ class Agent(AtomicInvokable, ABC):
             )
         prompt = raw_prompt
 
-        # 5. History.
+        # 5. History -- resolved within the active conversation only.
         logger.debug(f"Agent.{self.name} selecting turns")
-        turns: list[AgentRecord] = []
-        if self._context_enabled and self._records_window != 0:
-            turns = self.get_conversation(run_id=run_id, turns=self._records_window)
+        active_key, turns = self._resolve_context(run_id)
 
         # 6. Task lifecycle: initialize, think -> prepare -> act until complete.
         logger.debug(f"Agent.{self.name} performing logic")
@@ -997,9 +1263,12 @@ class Agent(AtomicInvokable, ABC):
         final_response = post_result.result
         ended_at = datetime.now(timezone.utc)
 
-        # 8-9. Record + result construction, committed to history.
-        with self._invoke_lock:
-            agent_result = self._commit_emit(task, turns, final_response, started_at, ended_at)
+        # 8-9. Record + result construction, committed to the active conversation.
+        # _commit_emit acquires self._invoke_lock itself for the whole of
+        # its own work -- no outer lock needed here.
+        agent_result = self._commit_emit(
+            task, turns, final_response, started_at, ended_at, active_key=active_key
+        )
 
         logger.info(f"[{self.full_name} finished]")
         return agent_result
@@ -1023,6 +1292,8 @@ class Agent(AtomicInvokable, ABC):
             "records_window": self.records_window,
             "response_preview_limit": self.response_preview_limit,
             "assistant_response_source": self.assistant_response_source,
-            "records": [turn.to_dict() for turn in self._records],
+            "conversations": {
+                key: [r.to_dict() for r in records]
+                for key, records in self._conversations.items()},
         })
         return d
