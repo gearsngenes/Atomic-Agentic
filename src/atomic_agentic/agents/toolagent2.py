@@ -20,17 +20,20 @@ _COLLISION_POLICIES = ("raise", "skip", "replace")
 
 class ToolAgent2(Agent):
     """
-    Decomposition-first tool-invoking agent (sibling family to ``ToolAgent``,
-    not a subclass).
+    Adaptive, one-shot-planning tool-invoking agent (sibling family to
+    ``ToolAgent``, not a subclass). Writes native-grammar, Python-style
+    statements toward a task starting from a single generated plan, and
+    self-inserts `# CHECKPOINT` markers wherever it's genuinely uncertain the
+    remaining plan still holds; real execution failures trigger the same
+    judge/replan mechanism automatically. There is no separate decomposition,
+    orchestration, or synthesis call, and no construction-time mode knob --
+    adaptivity is emergent from how many checkpoints end up in one continuous
+    plan, not picked up front.
 
     This slice implements only the constructor plus tool/constant
-    registration and prompt-context rendering. Tools and constants live in
-    two independent keyspaces: the toolbox (``dict[str, AtomicInvokable]``,
-    keyed by an alias when supplied, else the tool's own ``full_name``) and
-    the constants list (``list[ConstantSpec]``, each stored under a
-    mandatory ``f"K_{alias}"`` name). No blackboard, checklist/subtask
-    model, or ``think``/``prepare``/``act`` override exists yet — those are
-    later passes (`.claude/context/04-current-task.md` §0).
+    registration and prompt-context rendering. No blackboard, checklist/plan
+    model, or ``think``/``prepare``/``act`` override exists yet -- those are
+    later sub-stages (`.claude/context/04-current-task.md` §0, Pass 2.2+).
     """
 
     def __init__(
@@ -41,7 +44,6 @@ class ToolAgent2(Agent):
         llm_engine: LLMEngine,
         context_enabled: bool = False,
         *,
-        mode: Literal["one_shot", "reactive"] = "one_shot",
         generation_retries: Optional[int] = 0,
         tool_calls_limit: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
@@ -52,9 +54,9 @@ class ToolAgent2(Agent):
         assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
         """
-        Validate/store ``mode``, ``generation_retries``, ``tool_calls_limit``,
-        then initialize empty toolbox/constants storage. ``extra_parameters``
-        is never forwarded to ``super().__init__`` — matches
+        Validate/store ``generation_retries``, ``tool_calls_limit``, then
+        initialize empty toolbox/constants storage. ``extra_parameters`` is
+        never forwarded to ``super().__init__`` — matches
         ``ToolAgent.__init__``'s own precedent.
         """
         super().__init__(
@@ -70,13 +72,6 @@ class ToolAgent2(Agent):
             response_preview_limit=response_preview_limit,
             assistant_response_source=assistant_response_source,
         )
-
-        if mode not in ("one_shot", "reactive"):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: mode must be 'one_shot' or "
-                f"'reactive'; got {mode!r}."
-            )
-        self._mode = mode
 
         if generation_retries is not None and (
             type(generation_retries) is not int or generation_retries < 0
@@ -96,11 +91,6 @@ class ToolAgent2(Agent):
     # ------------------------------------------------------------------ #
     # Construction-time / mutable knobs
     # ------------------------------------------------------------------ #
-    @property
-    def mode(self) -> Literal["one_shot", "reactive"]:
-        """Construction-time decomposition cadence. Fixed-topology; read-only."""
-        return self._mode
-
     @property
     def generation_retries(self) -> Optional[int]:
         """Bounded-attempts ceiling shared by structural generation retries and
@@ -500,18 +490,16 @@ class ToolAgent2(Agent):
     # ------------------------------------------------------------------ #
     # Prompt-context rendering
     # ------------------------------------------------------------------ #
-    def actions_context(self, tools_subset: Optional[list[str]]) -> str:
+    def actions_context(self) -> str:
         """
-        Render the given toolbox subset for prompt injection, one block per
+        Render every registered tool for prompt injection, one block per
         tool (signature line + indented description), joined by ``"\\n---\\n"``.
         When ``tid`` is an alias (not the tool's own ``full_name``), only the
         leading identity token of ``tool.signature`` is swapped for the alias
         — the ``(args) -> ReturnType`` portion renders unchanged.
         """
         blocks: list[str] = []
-        resolved_subset = tools_subset if tools_subset is not None else list(self._toolbox.keys())
-        for tid in resolved_subset:
-            tool = self.get_tool(tid)
+        for tid, tool in self._toolbox.items():
             if tid == tool.full_name:
                 rendered_signature = tool.signature
             else:
@@ -525,20 +513,17 @@ class ToolAgent2(Agent):
 
         return "\n---\n".join(blocks)
 
-    def constants_context(self, constants_subset: Optional[list[str]]) -> str:
+    def constants_context(self) -> str:
         """
-        Render the given constants subset for prompt injection. Names print
+        Render every registered constant for prompt injection. Names print
         exactly as stored (``K_``-prefixed) — no prefix synthesized here.
-        Empty subset renders the same "no constants" message as an empty
-        registry.
+        Empty registry renders a "no constants" message.
         """
-        resolved_subset = constants_subset if constants_subset is not None else list(self._constants.keys())
-        constants = [self.get_constant(name) for name in resolved_subset]
-        if not constants:
+        if not self._constants:
             return "No constants registered."
 
         rendered: list[str] = []
-        for spec in constants:
+        for spec in self._constants.values():
             description = (
                 spec.description if spec.description is not None else "No description provided."
             )

@@ -3,10 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict
 
-from ...constants.core import IDENTIFIER_PATTERN
 from ..results.agents import AgentResult
 from ..results.llm import LLMResult
-from .toolagent2_models import Subtask
+from .toolagent2_models import BlackboardSlotV2
 
 __all__ = [
     "LLMRecord",
@@ -280,35 +279,25 @@ class ToolAgentRecordV2(AgentRecord):
     to a real boundary than an in-flight task does. This class's own
     __post_init__ follows that precedent for its own new fields.
 
+    No more agent-level global blackboard for this family -- each record
+    owns its own slots outright. There is no blackboard_start/
+    blackboard_end span to index into, unlike ToolAgentRecord (v1).
+
     Fields
     ------
-    objective : str
-        Same substantive content as ToolAgentTaskV2.objective, carried over
-        at commit time.
+    blackboard : tuple[BlackboardSlotV2, ...]
+        Every slot ToolAgentTaskV2.completed accumulated this run, carried
+        over at commit time (normalized to a tuple here, mirroring
+        llm_records' existing list-or-tuple-in, tuple-stored normalization).
 
-    result_key : str
-        Same substantive content as ToolAgentTaskV2.result_key, carried over
-        at commit time. Validated here as Python-identifier-legal (reuses
-        IDENTIFIER_PATTERN, same pattern BlackboardSlotV2.identifier already
-        uses) since it is meant to double as a future dict key /
-        referenceable identifier -- ToolAgentTaskV2 itself does not validate
-        this (Task family convention), so this is this value's first real
-        validation checkpoint.
-
-    subtasks : tuple[Subtask, ...]
-        Same Subtask instances ToolAgentTaskV2.subtasks accumulated ("passed
-        back up" at commit time) -- shared by reference, not deep-copied.
-        Normalized to a tuple here (mirrors llm_records' existing
-        list-or-tuple-in, tuple-stored normalization) since a completed
-        record shouldn't still look structurally in-flight at the container
-        level. Subtask instances themselves stay unfrozen -- nothing mutates
-        one post-commit by convention, not by enforcement (same soft
-        boundary AgentRecord.inputs already relies on).
+    annotations : tuple[str, ...]
+        Every triple-quoted reasoning block ToolAgentTaskV2.annotations
+        accumulated this run, carried over at commit time (same
+        normalize-to-tuple treatment).
     """
 
-    objective: str = ""
-    result_key: str = ""
-    subtasks: tuple[Subtask, ...] = ()
+    blackboard: tuple[BlackboardSlotV2, ...] = ()
+    annotations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
@@ -319,40 +308,39 @@ class ToolAgentRecordV2(AgentRecord):
         # type" here).
         super(ToolAgentRecordV2, self).__post_init__()
 
-        # 1. objective must be a non-empty string.
-        if not isinstance(self.objective, str) or not self.objective.strip():
-            raise ValueError(
-                f"ToolAgentRecordV2.objective must be a non-empty string; got {self.objective!r}."
-            )
-
-        # 2. result_key must be a non-empty, Python-identifier-legal string --
-        # it is meant to double as a future dict key / referenceable
-        # identifier.
-        if not isinstance(self.result_key, str) or not IDENTIFIER_PATTERN.fullmatch(
-            self.result_key
-        ):
-            raise ValueError(
-                "ToolAgentRecordV2.result_key must be a non-empty, "
-                f"Python-identifier-legal string; got {self.result_key!r}."
-            )
-
-        # 3. subtasks must be a list/tuple of Subtask instances.
-        if isinstance(self.subtasks, (str, bytes)) or not isinstance(self.subtasks, (list, tuple)):
+        # 1. blackboard must be a list/tuple of BlackboardSlotV2 instances.
+        if isinstance(self.blackboard, (str, bytes)) or not isinstance(self.blackboard, (list, tuple)):
             raise TypeError(
-                "ToolAgentRecordV2.subtasks must be a list or tuple of Subtask "
-                f"instances; got {type(self.subtasks).__name__!r}."
+                "ToolAgentRecordV2.blackboard must be a list or tuple of "
+                f"BlackboardSlotV2 instances; got {type(self.blackboard).__name__!r}."
             )
-        for index, subtask in enumerate(self.subtasks):
-            if not isinstance(subtask, Subtask):
+        for index, slot in enumerate(self.blackboard):
+            if not isinstance(slot, BlackboardSlotV2):
                 raise TypeError(
-                    f"ToolAgentRecordV2.subtasks[{index}] must be a Subtask "
-                    f"instance; got {type(subtask).__name__!r}."
+                    f"ToolAgentRecordV2.blackboard[{index}] must be a "
+                    f"BlackboardSlotV2 instance; got {type(slot).__name__!r}."
                 )
 
-        # 4. normalize to a tuple -- object.__setattr__ required, the
+        # 2. normalize to a tuple -- object.__setattr__ required, the
         # dataclass is frozen (mirrors llm_records/inputs normalization
         # above).
-        object.__setattr__(self, "subtasks", tuple(self.subtasks))
+        object.__setattr__(self, "blackboard", tuple(self.blackboard))
+
+        # 3. annotations must be a list/tuple of str.
+        if isinstance(self.annotations, (str, bytes)) or not isinstance(self.annotations, (list, tuple)):
+            raise TypeError(
+                "ToolAgentRecordV2.annotations must be a list or tuple of "
+                f"str; got {type(self.annotations).__name__!r}."
+            )
+        for index, annotation in enumerate(self.annotations):
+            if not isinstance(annotation, str):
+                raise TypeError(
+                    f"ToolAgentRecordV2.annotations[{index}] must be a str; "
+                    f"got {type(annotation).__name__!r}."
+                )
+
+        # 4. normalize to a tuple, same reasoning as blackboard above.
+        object.__setattr__(self, "annotations", tuple(self.annotations))
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,7 +3,7 @@ import logging
 import math
 
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.tools.prebuilt import MATH_TOOLS, CONSOLE_TOOLS
+from atomic_agentic.tools.prebuilt import EXPONENT_TOOLS, MATH_TOOLS, CONSOLE_TOOLS
 from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
@@ -22,6 +22,7 @@ agent = PlanActAgent(
 )
 
 # Register tool lists
+agent.batch_register(EXPONENT_TOOLS)
 agent.batch_register(MATH_TOOLS)
 agent.batch_register(CONSOLE_TOOLS)
 

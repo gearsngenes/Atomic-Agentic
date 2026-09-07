@@ -7,7 +7,7 @@ from ...constants.core import NO_VAL
 from .blackboard_models import BlackboardSlot
 from .records import AgentRecord, LLMRecord
 from .thought_models import AgentThought
-from .toolagent2_models import Subtask
+from .toolagent2_models import BlackboardSlotV2
 
 __all__ = [
     "AgentTask",
@@ -184,30 +184,62 @@ class ToolAgentTaskV2(AgentTask):
 
     Fields
     ------
-    objective : str
-        Clarified, self-sufficient restatement of the user's ask, assigned
-        by a future decomposition-generation call (out of scope this pass).
-        Defaults to "" -- not known at _initialize_task construction time,
-        same reasoning as PlanActTask.generated_plan/ReActTask.generated_step
-        staying NO_VAL until think() populates them. Whether this deserves
-        its own NO_VAL-staged field instead of a bare default is left to a
-        future lifecycle-scoping pass, not decided here.
+    completed : list[BlackboardSlotV2]
+        Every terminal slot (executed successfully or failed) produced so
+        far this run, in commit order. Purely historical -- nothing here is
+        ever mutated once a slot lands in this list. Becomes
+        ToolAgentRecordV2.blackboard verbatim (normalized to a tuple) at
+        commit time.
 
-    result_key : str
-        LLM-chosen placeholder name for a not-yet-built persistent results
-        mechanism to key on, assigned at the same synthesis step as
-        objective. Same construction-timing reasoning as objective. The
-        runtime mechanism this key addresses into (a persistent, per-
-        conversation results dict) is a separate, not-yet-started release
-        -- this field is inert plumbing until then.
+    pending : list[list[BlackboardSlotV2]]
+        Every not-yet-executed dependency batch compiled so far for the
+        current plan -- not scoped to just the next checkpoint. The whole
+        one-shot draft (or, after a replan, the whole freshly regenerated
+        tail) is parsed and batch-compiled in a single pass, so this can
+        span multiple checkpoints' worth of batches at once. The front
+        batch (``pending[0]``) is the next one act() runs; once it fully
+        executes, its slots move into ``completed`` and it is popped from
+        this list.
 
-    subtasks : list[Subtask]
-        The decomposition checklist. Empty at construction; populated by a
-        future think()-phase.
+    checkpoints : list[int]
+        Sorted target ``len(completed)`` thresholds -- not batch indices,
+        not nested batch content. Checked after every batch drains: if the
+        new ``len(completed)`` matches ``checkpoints[0]``, that entry is
+        popped and a checkpoint has been reached (judge call next, unless
+        ``pending`` is also empty at that same moment -- the
+        trailing-checkpoint case, which skips the judge and goes straight
+        to the planner). A failed tool call synthesizes a fresh checkpoint
+        value on the spot (the ``len(completed)`` reached once the batch
+        containing the failure finishes draining), not authored by the
+        model.
+
+    cache : dict[str, Any]
+        identifier -> resolved value for every slot in ``completed``, kept
+        in sync as slots complete. Shaped to be passed directly as
+        utils/toolagent2.py's ``resolve_slot_args(args, resolved)``'s
+        ``resolved`` argument -- an O(1) lookup instead of scanning
+        ``completed``.
+
+    annotations : list[str]
+        Every triple-quoted reasoning block the model wrote this run (the
+        initial block plus one per replan round that included one). Becomes
+        ToolAgentRecordV2.annotations verbatim (normalized to a tuple) at
+        commit time.
+
+    retries_used : int
+        Cumulative generation-retry attempts consumed across every
+        generation call this run (initial plan, judge, planner repair
+        calls) -- structural/syntax failures only. Unlike tool-call budget
+        accounting, not derivable from ``completed`` (retries are
+        generation attempts, not slots), so this stays an explicit counter
+        -- same role as ToolAgentTask.retries_used.
     """
-    objective: str = ""
-    result_key: str = ""
-    subtasks: list[Subtask] = field(default_factory=list)
+    completed: list[BlackboardSlotV2] = field(default_factory=list)
+    pending: list[list[BlackboardSlotV2]] = field(default_factory=list)
+    checkpoints: list[int] = field(default_factory=list)
+    cache: dict[str, Any] = field(default_factory=dict)
+    annotations: list[str] = field(default_factory=list)
+    retries_used: int = 0
 
 
 @dataclass(slots=True)
