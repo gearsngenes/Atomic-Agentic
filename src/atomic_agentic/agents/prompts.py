@@ -265,6 +265,28 @@ VALID OUTPUT:
 
 
 # =============================================================================
+# ToolAgent2 prompts
+# =============================================================================
+# Used by:
+# - agents/toolagent2.py: ToolAgent2's one-shot planning prompt
+#
+# Placeholder content -- wording is a separate, later effort (Pass 2.2 only
+# adds the plumbing; see .claude/context/04-current-task.md's ToolAgent2
+# Pass 2.2 entry). {TOOLS}/{CONSTANTS} are filled by
+# ToolAgent2._render_system_message, mirroring how PLANNER_PROMPT's own
+# {TOOLS}/{CONSTANTS} stay off the caller-facing schema.
+
+ONESHOT_PLANNER_PROMPT = PromptConfig(
+    template=(
+        "PLACEHOLDER -- one-shot native-grammar planner prompt, content "
+        "authored in a separate pass.\n\n"
+        "TOOLS:\n{TOOLS}\n\nCONSTANTS:\n{CONSTANTS}"
+    ),
+    description="ToolAgent2 one-shot planning prompt (placeholder content).",
+)
+
+
+# =============================================================================
 # SelfAskAgent prompt
 # =============================================================================
 # Used by:

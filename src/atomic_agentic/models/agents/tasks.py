@@ -233,6 +233,13 @@ class ToolAgentTaskV2(AgentTask):
         accounting, not derivable from ``completed`` (retries are
         generation attempts, not slots), so this stays an explicit counter
         -- same role as ToolAgentTask.retries_used.
+
+    resolved_args : list[dict[str, Any]]
+        Positionally matched to ``pending[0]``'s slots -- the resolved
+        kwargs ``prepare()`` computed for the batch ``act()`` is about to
+        run. Reset to ``[]`` by ``act()`` once that batch is fully consumed
+        (or by ``prepare()``'s empty-``pending`` guard). Empty whenever
+        there is nothing currently prepared to execute.
     """
     completed: list[BlackboardSlotV2] = field(default_factory=list)
     pending: list[list[BlackboardSlotV2]] = field(default_factory=list)
@@ -240,6 +247,7 @@ class ToolAgentTaskV2(AgentTask):
     cache: dict[str, Any] = field(default_factory=dict)
     annotations: list[str] = field(default_factory=list)
     retries_used: int = 0
+    resolved_args: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

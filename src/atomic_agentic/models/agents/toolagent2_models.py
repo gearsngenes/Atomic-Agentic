@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from ...constants.core import IDENTIFIER_PATTERN
 from ..results import AtomicResult
@@ -17,8 +17,10 @@ class BlackboardSlotV2:
     One slot in a ToolAgent2 subtask's per-invocation blackboard.
 
     Every generated statement normalizes to this one call-shaped record --
-    a real tool call (``tool`` = the call's dotted name) or a bare
-    expression (``tool`` = ``RHS_ASSIGN_ALIAS``, ``args = {"val": <expr>}``).
+    a real tool call (``tool`` = the call's dotted name, optionally a bare
+    unassigned call with ``identifier=None``), a bare expression (``tool``
+    = ``RHS_ASSIGN_ALIAS``, ``args = {"val": <expr>}``), or a terminal
+    ``return`` statement (``tool`` = ``RETURN_ALIAS``, ``identifier=None``).
     ``args`` values are mixed: a dependency-free expression is evaluated
     eagerly at parse time and stored as a plain Python value; an expression
     referencing another slot's identifier is stored unresolved as the raw
@@ -28,9 +30,12 @@ class BlackboardSlotV2:
 
     Fields
     ------
-    identifier : str
+    identifier : str | None
         This slot's bound name -- the statement's LHS, or a synthesized
-        ``_HOIST_N`` name for an auto-hoisted nested call.
+        ``_HOIST_N`` name for an auto-hoisted nested call. ``None`` for a
+        bare (unassigned) call or a ``return`` statement -- never
+        resolvable by name, and never written into
+        ``ToolAgentTaskV2.cache``.
 
     tool : str
         Dotted call name (e.g. ``"Type.namespace.name"``), or
@@ -61,7 +66,7 @@ class BlackboardSlotV2:
         until a failure occurs. Not stringified.
     """
 
-    identifier: str
+    identifier: Optional[str]
     tool: str
     args: dict[str, Any]
     awaited: bool = False
@@ -69,12 +74,14 @@ class BlackboardSlotV2:
     exception: Exception | None = None
 
     def __post_init__(self) -> None:
-        # 1. identifier must be a non-empty, Python-identifier-legal string.
-        if not isinstance(self.identifier, str) or not IDENTIFIER_PATTERN.fullmatch(
-            self.identifier
+        # 1. identifier, if not None, must be a non-empty, Python-
+        # identifier-legal string. None means a bare call or return.
+        if self.identifier is not None and (
+            not isinstance(self.identifier, str)
+            or not IDENTIFIER_PATTERN.fullmatch(self.identifier)
         ):
             raise ValueError(
-                "BlackboardSlotV2.identifier must be a non-empty, "
+                "BlackboardSlotV2.identifier must be None or a non-empty, "
                 f"Python-identifier-legal string; got {self.identifier!r}."
             )
 
