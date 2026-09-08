@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from tkinter import CURRENT
 from typing import Any, Callable, Literal, Optional
 
 from ..mcp.MCPClientHub import MCPClientHub
@@ -18,10 +17,16 @@ from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecordV2
 from ..models.agents.tasks import ToolAgentTaskV2
 from ..models.agents.toolagent2_models import BlackboardSlotV2
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
-from ..constants.toolagent2 import RETURN_ALIAS, RHS_ASSIGN_ALIAS, TASK_RESULT_PREFIX
-from ..exceptions import BlackboardParseError, ToolAgentError, ToolInvocationError, ToolRegistrationError
+from ..constants.toolagent2 import RETURN_ALIAS, RHS_ASSIGN_ALIAS
+from ..exceptions import BlackboardParseError, ToolAgentError, ToolRegistrationError
 from ..utils.core import run_coro_sync
-from ..utils.toolagent2 import compile_batches, parse_generation, resolve_slot_args, validate_references
+from ..utils.toolagent2 import (
+    compile_batches,
+    parse_generation,
+    render_completed_as_python,
+    resolve_slot_args,
+    validate_references,
+)
 
 _HubClient = MCPClientHub | A2AClientHub | PyA2AtomicClient
 _COLLISION_POLICIES = ("raise", "skip", "replace")
@@ -37,20 +42,31 @@ class ToolAgent2(Agent):
     how many ``# CHECKPOINT`` markers end up in one continuous plan, not
     picked up front.
 
-    Current scope (Pass 2.2, `.claude/context/04-current-task.md` §0):
-    one-shot generation with regeneration repair only. The model's
-    ``# CHECKPOINT`` markers are detected and their thresholds tracked on
-    ``ToolAgentTaskV2.checkpoints``, but nothing acts on them yet -- no
-    judge call, no replanning. A resolution failure (``prepare()``) or a
-    real tool-execution failure (``act()``) simply raises; both become
-    real judge/planner dispatch points in a later sub-stage (Pass 2.3).
+    Checkpoint-triggered reactive continuation (Pass 2.3): a generation
+    always terminates at the first of a ``return``, an explicit
+    ``# CHECKPOINT`` (with an optional trailing triple-quoted note), or a
+    defensively-pruned ``if`` statement (the grammar still forbids
+    conditionals outright; a model that writes one anyway is handled by
+    silent truncation, not rejection, unless nothing real precedes it). A
+    resolution failure in ``prepare()`` or a real tool-execution failure in
+    ``act()`` are handled the same way -- none of these four cases raise
+    anymore. Whichever one occurs (other than ``return``) sets
+    ``task.continue_planning``, and ``think()`` re-invokes the same planner
+    for a fresh continuation, seeing a Python-source snapshot of the work
+    already done this invoke plus a reason (the model's own note, a
+    hardcoded default, or the real failure text, depending on which of the
+    four cases applies) -- no separate judge/critic model. `tool_calls_limit`
+    is a budget shared across every generation round in one invoke, not a
+    fresh allowance per round; `planning_rounds_limit` separately bounds how
+    many continuation rounds are allowed, independent of
+    `generation_retries` (which governs only per-generation malformed-draft
+    regen-repair). Exactly one of `tool_calls_limit`/`planning_rounds_limit`
+    may be `None` -- never both.
 
-    `tool_calls_limit` is enforced (a plan whose real tool-call count
-    exceeds it is a validation failure feeding regen-repair) and rendered
-    into the planner prompt's `{TOOL_CALLS_LIMIT}` field. Cross-invocation
-    result addressing is implemented: a prior turn's result is seeded into
-    `task.cache` and labeled in rendered history as `task_result_i`, a
-    fixed, read-only reference a later plan can use by name.
+    Cross-invocation result addressing is implemented: a prior turn's
+    result is seeded into `task.cache` and labeled in rendered history as
+    `task_result_i`, a fixed, read-only reference a later plan can use by
+    name.
     """
 
     def __init__(
@@ -63,6 +79,7 @@ class ToolAgent2(Agent):
         *,
         generation_retries: Optional[int] = 0,
         tool_calls_limit: Optional[int] = None,
+        planning_rounds_limit: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
@@ -71,9 +88,10 @@ class ToolAgent2(Agent):
         assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
         """
-        Validate/store ``generation_retries``, ``tool_calls_limit``, then
-        initialize empty toolbox/constants storage. ``extra_parameters`` is
-        never forwarded to ``super().__init__`` — matches
+        Validate/store ``generation_retries``, then ``tool_calls_limit``/
+        ``planning_rounds_limit`` together (at most one may be ``None``),
+        then initialize empty toolbox/constants storage. ``extra_parameters``
+        is never forwarded to ``super().__init__`` — matches
         ``ToolAgent.__init__``'s own precedent.
         """
         super().__init__(
@@ -99,8 +117,17 @@ class ToolAgent2(Agent):
             )
         self._generation_retries = generation_retries
 
+        # Cross-field validation (tool_calls_limit/planning_rounds_limit may
+        # not both be None) needs each field's other value already present
+        # before either setter's own cross-check runs below -- pre-seed the
+        # raw attribute directly (bypassing its own validation transiently)
+        # so the first setter call sees the real final value, not a
+        # placeholder. Each field still gets its own full validation via its
+        # own setter call.
+        self._planning_rounds_limit: Optional[int] = planning_rounds_limit
         self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
+        self.planning_rounds_limit = planning_rounds_limit
 
         self._toolbox: dict[str, AtomicInvokable] = {}
         self._constants: dict[str, ConstantSpec] = {}
@@ -119,20 +146,50 @@ class ToolAgent2(Agent):
 
     @property
     def tool_calls_limit(self) -> Optional[int]:
-        """Max allowed tool calls per ``invoke()`` run. ``None`` means unlimited."""
+        """Max real tool calls allowed per ``invoke()`` run, shared across
+        every generation round in that invoke (not reset per round).
+        ``None`` means unlimited."""
         return self._tool_calls_limit
 
     @tool_calls_limit.setter
     def tool_calls_limit(self, value: Optional[int]) -> None:
-        if value is None:
-            self._tool_calls_limit = None
-            return
-        if type(value) is not int or value < 0:
+        if value is not None and (type(value) is not int or value < 0):
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: tool_calls_limit must be "
                 f"None or an int >= 0; got {value!r}."
             )
+        if value is None and self._planning_rounds_limit is None:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: tool_calls_limit and "
+                "planning_rounds_limit cannot both be None -- that would "
+                "leave both the tool-call budget and the replanning-round "
+                "budget unbounded at once."
+            )
         self._tool_calls_limit = value
+
+    @property
+    def planning_rounds_limit(self) -> Optional[int]:
+        """Max continuation rounds (checkpoint/if-cutoff/failure-triggered
+        re-generations) allowed per ``invoke()`` run -- the unconditional
+        first generation never counts against this. ``None`` means
+        unlimited."""
+        return self._planning_rounds_limit
+
+    @planning_rounds_limit.setter
+    def planning_rounds_limit(self, value: Optional[int]) -> None:
+        if value is not None and (type(value) is not int or value < 0):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: planning_rounds_limit "
+                f"must be None or an int >= 0; got {value!r}."
+            )
+        if value is None and self._tool_calls_limit is None:
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: tool_calls_limit and "
+                "planning_rounds_limit cannot both be None -- that would "
+                "leave both the tool-call budget and the replanning-round "
+                "budget unbounded at once."
+            )
+        self._planning_rounds_limit = value
 
     # ------------------------------------------------------------------ #
     # Shared helpers
@@ -632,8 +689,9 @@ class ToolAgent2(Agent):
         ``turns`` contains (empty when there's nothing to seed; already
         gated upstream by conversation-resolution/``context_enabled``/
         ``records_window``). No other field needs seeding -- completed/
-        pending/checkpoints/annotations/resolved_args all start at their
-        dataclass defaults."""
+        pending/annotations/resolved_args/continue_planning/
+        planning_rounds_used/tool_calls_used/continuation_note all start at
+        their dataclass defaults."""
         task = ToolAgentTaskV2(
             turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="planner",
         )
@@ -646,8 +704,15 @@ class ToolAgent2(Agent):
         context. Mirrors ``ToolAgent._render_system_message``'s established
         shape exactly: a fresh, framework-controlled context dict, never
         merged with ``task.inputs`` (neither prompt uses an input-derived
-        placeholder)."""
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
+        placeholder). ``{TOOL_CALLS_LIMIT}`` renders the REMAINING budget
+        (the configured limit minus every real call dispatched so far this
+        invoke, across every generation round) -- on the first generation
+        this is numerically identical to the configured limit, since
+        nothing has been dispatched yet."""
+        if self._tool_calls_limit is None:
+            limit_text = "unlimited"
+        else:
+            limit_text = str(self._tool_calls_limit - task.tool_calls_used)
         context = {
             "TOOLS": self.actions_context(),
             "TOOL_CALLS_LIMIT": limit_text,
@@ -659,14 +724,38 @@ class ToolAgent2(Agent):
     def _render_task_messages(self, task: ToolAgentTaskV2) -> list[dict[str, str]]:
         """Build-once contract per base ``Agent``'s documented pattern: a
         single user message carrying the task's own prompt, unchanged
-        across generation retries within this phase."""
+        across generation retries within this phase.
+
+        ``task.completed`` empty means this is the unconditional first
+        generation -- rendered exactly as before. Non-empty means this is a
+        checkpoint/if-cutoff/failure-triggered continuation (this method is
+        only ever called when ``task.pending`` is already empty, so a
+        non-empty ``completed`` here can only mean a genuine prior round,
+        never a same-round partial drain) -- rendered instead as a snapshot
+        of the work already done plus whatever reason/note applies, asking
+        for only the remaining plan.
+        """
         if task.task_messages:
             return task.task_messages
-        current_task_framed_prompt = (
-            "Given the below latest message, translate the request into "
-            "a python-formatted plan:\n"
-            f"\nCURRENT TASK:\n{task.user_prompt}"
-        )
+
+        if not task.completed:
+            current_task_framed_prompt = (
+                "Given the below latest message, translate the request into "
+                "a python-formatted plan:\n"
+                f"\nCURRENT TASK:\n{task.user_prompt}"
+            )
+        else:
+            snapshot = render_completed_as_python(task.completed, self._response_preview_limit)
+            # `continuation_note` is `None` for a silent if-cutoff -- omit
+            # that section entirely rather than interpolating the literal
+            # text "None" into the rendered message, which would violate
+            # the if-cutoff's own "purely defensive, zero visibility" intent.
+            note_section = f"{task.continuation_note}\n\n" if task.continuation_note else ""
+            current_task_framed_prompt = (
+                f"WORK COMPLETED SO FAR:\n{snapshot}\n\n"
+                f"{note_section}"
+                "Write only the remaining plan, in one shot, from this point forward."
+            )
 
         task.task_messages = [{"role": "user", "content": current_task_framed_prompt}]
         return task.task_messages
@@ -676,35 +765,48 @@ class ToolAgent2(Agent):
     # ------------------------------------------------------------------ #
     def _process_generation_output(
         self, raw_text: str, task: ToolAgentTaskV2,
-    ) -> tuple[list[list[BlackboardSlotV2]], list[int], list[str]] | str:
+    ) -> tuple[list[list[BlackboardSlotV2]], list[str], bool, Optional[str]] | str:
         """
         Pure-computation validate callback for the planning retry loop:
-        parse, validate references + tool-call budget, and compile into
-        batches. Returns the compiled result on success, or a feedback
-        string describing every problem found on failure -- a
+        parse, validate references + remaining tool-call budget, and
+        compile into batches. Returns the compiled result on success, or a
+        feedback string describing every problem found on failure -- a
         ``BlackboardParseError`` from parsing is converted here, not
         propagated, so the retry loop can inject it as corrective feedback.
         """
+        print("[DEBUG] Raw generation output:\n", raw_text)
         try:
-            flat_slots, thresholds, annotations = parse_generation(raw_text)
+            flat_slots, annotations, continue_planning, continuation_note = parse_generation(raw_text)
         except BlackboardParseError as e:
             return str(e)
 
         known_tools = frozenset(self._toolbox.keys())
         known_constants = frozenset(f"K_{key}" for key in self._constants.keys())
-        known_history = frozenset(k for k in task.cache if k.startswith(TASK_RESULT_PREFIX))
+        # Every key already in task.cache is safe to reference by name here:
+        # cross-invocation task_result_i entries (seeded in
+        # _initialize_task) AND, on a continuation round, every identifier
+        # bound by an earlier round's own completed slots this same
+        # invoke -- the exact names the "work completed so far" snapshot
+        # (_render_task_messages) shows the model. Not scoped to the
+        # TASK_RESULT_PREFIX any more; that was only ever correct back when
+        # every generation was a fresh, single-round invocation.
+        known_history = frozenset(task.cache.keys())
+        remaining_budget = (
+            None if self._tool_calls_limit is None
+            else self._tool_calls_limit - task.tool_calls_used
+        )
         issues = validate_references(
-            flat_slots, known_tools, known_constants, known_history, self._tool_calls_limit
+            flat_slots, known_tools, known_constants, known_history, remaining_budget
         )
         if issues:
             return "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
 
-        pending = compile_batches(flat_slots, thresholds)
-        return pending, thresholds, annotations
+        pending = compile_batches(flat_slots)
+        return pending, annotations, continue_planning, continuation_note
 
     def _run_planning_retry_loop(
         self, *, task: ToolAgentTaskV2,
-    ) -> tuple[list[list[BlackboardSlotV2]], list[int], list[str]]:
+    ) -> tuple[list[list[BlackboardSlotV2]], list[str], bool, Optional[str]]:
         """
         Render, call the engine, record the attempt, validate/compile via
         ``_process_generation_output``, and retry with injected feedback on
@@ -749,7 +851,7 @@ class ToolAgent2(Agent):
 
     async def _arun_planning_retry_loop(
         self, *, task: ToolAgentTaskV2,
-    ) -> tuple[list[list[BlackboardSlotV2]], list[int], list[str]]:
+    ) -> tuple[list[list[BlackboardSlotV2]], list[str], bool, Optional[str]]:
         """Async mirror of ``_run_planning_retry_loop``: uses
         ``async_invoke`` for the engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
@@ -785,32 +887,58 @@ class ToolAgent2(Agent):
 
             return result
 
+    def _check_planning_rounds_budget(self, task: ToolAgentTaskV2) -> None:
+        """Shared by ``think``/``async_think``: raises once the continuation-
+        round budget is exhausted, else increments it. Only ever called for
+        a genuine continuation (``task.completed`` non-empty) -- the
+        unconditional first generation never consumes this budget."""
+        if (
+            self._planning_rounds_limit is not None
+            and task.planning_rounds_used >= self._planning_rounds_limit
+        ):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: planning round budget "
+                f"exhausted after {task.planning_rounds_used} continuation "
+                "round(s)."
+            )
+        task.planning_rounds_used += 1
+
     def think(self, task: ToolAgentTaskV2) -> ToolAgentTaskV2:
         """
-        Generate, validate, and compile the whole plan, once. No-op once
-        ``task.pending``/``task.completed`` are no longer both empty -- a
-        one-shot planner has nothing further to decide after its single
-        generation call (this pass has no replanning).
+        Generate, validate, and compile the next segment of the plan --
+        either the unconditional first generation, or (once a prior round
+        set ``continue_planning``) a fresh continuation. No-op whenever
+        there is still pending work to drain, or the task is already fully
+        complete -- a checkpoint/if-cutoff/failure-triggered continuation is
+        requested by re-entering this same hook, not a separate mechanism.
         """
-        if task.pending or task.completed:
+        if task.pending or task.complete:
             return task
 
-        pending, checkpoints, annotations = self._run_planning_retry_loop(task=task)
+        if task.completed:
+            self._check_planning_rounds_budget(task)
+
+        pending, annotations, continue_planning, continuation_note = self._run_planning_retry_loop(task=task)
         task.pending = pending
-        task.checkpoints = checkpoints
-        task.annotations = annotations
+        task.annotations.extend(annotations)
+        task.continue_planning = continue_planning
+        task.continuation_note = continuation_note
         task.task_messages.clear()
         return task
 
     async def async_think(self, task: ToolAgentTaskV2) -> ToolAgentTaskV2:
         """Async mirror of ``think``, using ``_arun_planning_retry_loop``."""
-        if task.pending or task.completed:
+        if task.pending or task.complete:
             return task
 
-        pending, checkpoints, annotations = await self._arun_planning_retry_loop(task=task)
+        if task.completed:
+            self._check_planning_rounds_budget(task)
+
+        pending, annotations, continue_planning, continuation_note = await self._arun_planning_retry_loop(task=task)
         task.pending = pending
-        task.checkpoints = checkpoints
-        task.annotations = annotations
+        task.annotations.extend(annotations)
+        task.continue_planning = continue_planning
+        task.continuation_note = continuation_note
         task.task_messages.clear()
         return task
 
@@ -820,23 +948,30 @@ class ToolAgent2(Agent):
     def prepare(self, task: ToolAgentTaskV2) -> ToolAgentTaskV2:
         """
         Resolve the next pending batch's args, or short-circuit completion
-        if nothing remains.
+        (or a needed continuation) if nothing remains.
 
-        If ``task.pending`` is empty: reset ``task.resolved_args``, infer an
-        implicit ``return None`` only if no executed ``return`` slot already
-        set ``task.generated_response``, mark complete -- covers both a
-        genuinely empty generation and the natural end-of-plan drain, so
-        ``act()`` needs only a bare no-op guard, not a second check.
+        If ``task.pending`` is empty: reset ``task.resolved_args``, then
+        either leave the round as-is if ``task.continue_planning`` is
+        already set (nothing to prepare -- ``think()`` will regenerate next
+        round) or, otherwise, infer an implicit ``return None`` if no
+        executed ``return`` slot already set ``task.generated_response``
+        and mark the task complete -- covers both a genuinely empty
+        generation and the natural end-of-plan drain, so ``act()`` needs
+        only a bare no-op guard, not a second check.
 
         Otherwise: resolves every slot's args in ``task.pending[0]``,
-        collecting every failure (not stopping at the first) before acting.
-        Any collected issue raises one comprehensive ``ToolAgentError`` --
-        no replanning this pass; a future pass routes this straight to the
-        planner instead, since a resolution failure is concrete/mechanical,
-        not something a judge needs to weigh.
+        collecting every failure (not stopping at the first). Any collected
+        issue no longer raises -- it abandons this batch and every batch
+        still queued after it (they may depend on bindings this batch was
+        supposed to produce), requires a continuation round, and surfaces
+        the real issue text as ``continuation_note`` for the next
+        generation to read. Nothing here was ever dispatched, so this does
+        not consume ``tool_calls_used``.
         """
         if not task.pending:
             task.resolved_args = []
+            if task.continue_planning:
+                return task
             if task.generated_response is NO_VAL:
                 task.generated_response = None
             task.complete = True
@@ -853,11 +988,11 @@ class ToolAgent2(Agent):
                 issues.append(f"{label}: {e!r}")
 
         if issues:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: failed to resolve {len(issues)} "
-                "slot(s) in the next batch:\n"
-                + "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
-            )
+            task.pending.clear()
+            task.resolved_args = []
+            task.continue_planning = True
+            task.continuation_note = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
+            return task
 
         task.resolved_args = resolved
         return task
@@ -902,22 +1037,29 @@ class ToolAgent2(Agent):
         """
         Shared post-gather bookkeeping for ``act``/``async_act``: apply
         results, update completed/cache, handle a terminal ``return`` slot,
-        pop the consumed batch, and check off any checkpoint just reached.
+        pop the consumed batch -- or, if any real call in this batch
+        failed, record whichever succeeded, abandon the rest of this round,
+        and require a continuation instead of raising.
 
-        Any real exception in ``raw_results`` raises immediately this pass
-        -- no replanning wired yet (mirrors today's fail_fast=True path).
+        Every real call in ``batch`` was actually dispatched via
+        ``asyncio.gather`` regardless of whether any of them failed, so all
+        of them count against ``tool_calls_used`` unconditionally, before
+        checking for failures.
         """
-        for idx, raw in enumerate(raw_results):
-            if isinstance(raw, BaseException):
-                slot = batch[idx]
-                if isinstance(raw, ToolInvocationError):
-                    raise raw
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: tool call failed for "
-                    f"{slot.tool!r} (identifier={slot.identifier!r}): {raw!r}"
-                ) from raw
+        real_call_count = sum(
+            1 for slot in batch if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS)
+        )
+        task.tool_calls_used += real_call_count
+
+        failures = [
+            f"{batch[idx].tool!r} (identifier={batch[idx].identifier!r}): {raw!r}"
+            for idx, raw in enumerate(raw_results)
+            if isinstance(raw, BaseException)
+        ]
 
         for slot, value in zip(batch, raw_results):
+            if isinstance(value, BaseException):
+                continue
             task.completed.append(slot)
             # A dispatched tool call's raw_results entry is a full
             # AtomicResult envelope (slot.result stores it verbatim,
@@ -932,6 +1074,13 @@ class ToolAgent2(Agent):
             if slot.identifier is not None:
                 task.cache[slot.identifier] = unwrapped
 
+        if failures:
+            task.pending.clear()
+            task.resolved_args = []
+            task.continue_planning = True
+            task.continuation_note = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(failures))
+            return task
+
         for slot, kwargs in zip(batch, resolved):
             if slot.tool == RETURN_ALIAS:
                 task.generated_response = kwargs["val"]
@@ -939,9 +1088,6 @@ class ToolAgent2(Agent):
 
         task.pending.pop(0)
         task.resolved_args = []
-
-        if task.checkpoints and len(task.completed) == task.checkpoints[0]:
-            task.checkpoints.pop(0)
 
         return task
 

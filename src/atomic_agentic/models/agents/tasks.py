@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from ...constants.core import NO_VAL
 from .blackboard_models import BlackboardSlot
@@ -201,17 +201,40 @@ class ToolAgentTaskV2(AgentTask):
         executes, its slots move into ``completed`` and it is popped from
         this list.
 
-    checkpoints : list[int]
-        Sorted target ``len(completed)`` thresholds -- not batch indices,
-        not nested batch content. Checked after every batch drains: if the
-        new ``len(completed)`` matches ``checkpoints[0]``, that entry is
-        popped and a checkpoint has been reached (judge call next, unless
-        ``pending`` is also empty at that same moment -- the
-        trailing-checkpoint case, which skips the judge and goes straight
-        to the planner). A failed tool call synthesizes a fresh checkpoint
-        value on the spot (the ``len(completed)`` reached once the batch
-        containing the failure finishes draining), not authored by the
-        model.
+    continue_planning : bool
+        Set by ``prepare()``/``_apply_batch_results()`` whenever this round
+        stopped for a reason requiring a fresh generation -- a checkpoint
+        was reached, a valid if-cutoff was hit, a batch's args failed to
+        resolve, or a real tool call failed. Read by ``think()`` to decide
+        whether to regenerate, and by ``prepare()``'s empty-``pending``
+        guard to tell "stopped, needs a continuation" apart from "genuinely
+        finished."
+
+    planning_rounds_used : int
+        Count of continuation rounds requested so far this invoke -- the
+        unconditional first generation never counts, only rounds requested
+        because ``continue_planning`` was set. Checked by ``think()``
+        against ``self._planning_rounds_limit`` before requesting another.
+
+    tool_calls_used : int
+        Cumulative count of real (non-``rhs_assign``/``return``) calls
+        actually dispatched so far this invoke, across every generation
+        round -- never decremented. Incremented only in
+        ``_apply_batch_results`` (a real dispatch happened, whether it
+        succeeded or failed); never in ``prepare()`` (a resolution failure
+        means nothing was ever dispatched). Read by ``_render_system_message``
+        to render the *remaining* ``{TOOL_CALLS_LIMIT}``, and by
+        ``_process_generation_output`` to compute the remaining budget
+        passed into ``validate_references``.
+
+    continuation_note : Optional[str]
+        The reason/guidance text for the next generation, set alongside
+        ``continue_planning=True``: the model's own trailing triple-quoted
+        note (or a hardcoded default if it wrote none) for an explicit
+        checkpoint, ``None`` for a silent if-cutoff, or the real dynamic
+        issue/failure text for a resolution or execution failure. Consumed
+        by ``_render_task_messages`` on the next generation, then reset to
+        ``None`` once a fresh generation has been requested.
 
     cache : dict[str, Any]
         identifier -> resolved value for every slot in ``completed``, kept
@@ -243,11 +266,14 @@ class ToolAgentTaskV2(AgentTask):
     """
     completed: list[BlackboardSlotV2] = field(default_factory=list)
     pending: list[list[BlackboardSlotV2]] = field(default_factory=list)
-    checkpoints: list[int] = field(default_factory=list)
     cache: dict[str, Any] = field(default_factory=dict)
     annotations: list[str] = field(default_factory=list)
     retries_used: int = 0
     resolved_args: list[dict[str, Any]] = field(default_factory=list)
+    continue_planning: bool = False
+    planning_rounds_used: int = 0
+    tool_calls_used: int = 0
+    continuation_note: Optional[str] = None
 
 
 @dataclass(slots=True)

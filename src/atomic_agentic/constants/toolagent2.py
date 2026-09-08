@@ -20,9 +20,22 @@ HOISTED_NAME_PREFIX = "_HOIST_"
 RETURN_ALIAS = "return"
 TASK_RESULT_PREFIX = "task_result_"
 
+# Fallback continuation-note text (agents/toolagent2.py's checkpoint-triggered
+# reactive continuation): used only when an explicit `# CHECKPOINT` marker is
+# not followed by a triple-quoted explanation -- never used for a
+# resolution/execution failure, which always surfaces its own real, dynamic
+# reason instead of this generic text.
+DEFAULT_CONTINUATION_NOTE = (
+    "It was deemed necessary to pause code writing and execution to "
+    "accurately determine the next steps for completing the task. Review "
+    "the work completed so far and continue writing code based on what "
+    "you can now reason."
+)
+
 __all__ = [
     "RHS_ASSIGN_ALIAS",
     "HOISTED_NAME_PREFIX",
     "RETURN_ALIAS",
     "TASK_RESULT_PREFIX",
+    "DEFAULT_CONTINUATION_NOTE",
 ]

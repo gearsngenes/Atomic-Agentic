@@ -11,7 +11,7 @@ import logging
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.tools.prebuilt import MATH_TOOLS
+from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
 from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
@@ -27,7 +27,7 @@ my_planner = PlanActAgent(
     generation_retries=3,
 )
 
-my_planner.batch_register(MATH_TOOLS)
+my_planner.batch_register(BASIC_MATH_TOOLS)
 
 while True:
     query = input("Enter a planning task (or 'q' or 'exit' to quit): ")

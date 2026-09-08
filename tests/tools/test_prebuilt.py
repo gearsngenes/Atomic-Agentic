@@ -5,11 +5,11 @@ import math
 import pytest
 
 from atomic_agentic.exceptions import ToolInvocationError
-from atomic_agentic.tools.prebuilt import CONSOLE_TOOLS, MATH_TOOLS, PARSER_TOOLS
+from atomic_agentic.tools.prebuilt import CONSOLE_TOOLS, BASIC_MATH_TOOLS, PARSER_TOOLS
 from atomic_agentic.tools.base import Tool
 
 
-ALL_PLUGIN_TOOLS = [*MATH_TOOLS, *CONSOLE_TOOLS, *PARSER_TOOLS]
+ALL_PLUGIN_TOOLS = [*BASIC_MATH_TOOLS, *CONSOLE_TOOLS, *PARSER_TOOLS]
 
 
 def tool_by_full_name(full_name: str) -> Tool:
@@ -20,11 +20,11 @@ def tool_by_full_name(full_name: str) -> Tool:
 
 class TestPluginBundles:
     def test_plugin_bundles_are_non_empty_lists(self) -> None:
-        assert isinstance(MATH_TOOLS, list)
+        assert isinstance(BASIC_MATH_TOOLS, list)
         assert isinstance(CONSOLE_TOOLS, list)
         assert isinstance(PARSER_TOOLS, list)
 
-        assert MATH_TOOLS
+        assert BASIC_MATH_TOOLS
         assert CONSOLE_TOOLS
         assert PARSER_TOOLS
 

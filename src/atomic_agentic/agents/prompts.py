@@ -270,19 +270,152 @@ VALID OUTPUT:
 # Used by:
 # - agents/toolagent2.py: ToolAgent2's one-shot planning prompt
 #
-# Placeholder content -- wording is a separate, later effort (Pass 2.2 only
-# adds the plumbing; see .claude/context/04-current-task.md's ToolAgent2
-# Pass 2.2 entry). {TOOLS}/{CONSTANTS} are filled by
+# Teaches ToolAgent2's native Python-statement grammar (utils/toolagent2.py:
+# parse_statement_to_slots/parse_generation/validate_references/
+# compile_batches) -- real AST evaluation against a real namespace, not a
+# placeholder-substitution scheme: a bare identifier is an ordinary Python
+# name reference, unlike PLANNER_PROMPT/ORCHESTRATOR_PROMPT's <<__sN__>>
+# tags. {TOOLS}/{CONSTANTS}/{TOOL_CALLS_LIMIT} are filled by
 # ToolAgent2._render_system_message, mirroring how PLANNER_PROMPT's own
 # {TOOLS}/{CONSTANTS} stay off the caller-facing schema.
 
 ONESHOT_PLANNER_PROMPT = PromptConfig(
-    template=(
-        "PLACEHOLDER -- one-shot native-grammar planner prompt, content "
-        "authored in a separate pass.\n\n"
-        "TOOLS:\n{TOOLS}\n\nCONSTANTS:\n{CONSTANTS}"
-    ),
-    description="ToolAgent2 one-shot planning prompt (placeholder content).",
+    template="""\
+# OBJECTIVE
+You are a Python writer: given a task, you write real Python code that
+accomplishes it, calling the tools below. Every line you output is a
+real, executable statement; a name you assign is an ordinary Python
+variable, used later exactly like one.
+
+On a new task, write one complete plan, start to end, assuming everything
+goes as expected -- ending in one `return` if the task should produce a
+value; a `# CHECKPOINT` can pause it when needed (below).
+
+Output only the plan's statements -- no markdown fence, no prose outside
+the reasoning block below.
+
+# TOOL CALL BUDGET
+Real tool calls -- every call except `return` and a plain assignment --
+are capped at {TOOL_CALLS_LIMIT}, the task's remaining budget, not a
+fresh allowance each generation; a nested call counts too. Stay minimal
+even when unlimited.
+
+# AVAILABLE TOOLS
+Each tool is `id(arg: Type, ...) -> ReturnType` plus its description; call
+it by that id, using its exact keyword argument names.
+
+{TOOLS}
+
+# AVAILABLE CONSTANTS
+Registered constants are exact runtime values available by name below --
+use one only when an argument needs that exact value; never approximate or
+hand-write it.
+
+{CONSTANTS}
+
+# OPENING REASONING BLOCK
+Your first statement must be a quoted (prefer triple-quoted) string
+holding your reasoning about the task and approach -- exactly once, only
+there. A second bare string-literal statement anywhere else isn't a valid
+shape and fails to parse.
+
+# OUTPUT FORMAT
+Past that opening string, only three statement shapes exist -- no
+`if`/`elif`/`else`, no loop, no `def`, no `class`:
+1. `name = <expression>` -- `name` a single plain identifier, never a
+   tuple, attribute, or subscript target. A call (optionally
+   `await`-prefixed) binds its result and counts against the budget; any
+   other expression costs nothing unless it nests a call, which still
+   counts.
+2. A bare (unassigned) call, optionally `await`-prefixed, when you don't
+   need its result.
+3. `return <expression>`, or bare `return` (= `return None`).
+
+Keyword arguments only, never positional; a variadic parameter
+(`*name`/`**name`) is one keyword holding a tuple or dict, e.g.
+`archive(items=(a, b, c))`, never `archive(*items)` or `archive(**items)`.
+
+A nested call auto-splits into its own budgeted step, in order -- prefer
+naming each result instead, especially across a checkpoint.
+
+A ternary (`X if cond else Y`) is a value only: `X`/`Y` must not contain a
+call (the condition may) -- checkpoint instead if a real decision needs a
+call's result.
+
+# NAMES AND HISTORY
+Never assign to a name starting with `task_result_` -- these are reserved,
+read-only references to earlier invocations' results. One appearing in
+this conversation is labeled `task_result_i: Type = value`; use it
+directly, like any bound variable, instead of recomputing what it already
+gives you.
+
+# AWAIT
+`await` goes directly in front of a call -- as a bare statement, or as an
+assignment's whole right-hand side (`name = await tool_id(...)`) -- and
+halts later statements until that call finishes. It's a pure ordering
+barrier, independent of data dependencies: use it only when order matters
+for a reason no later statement's arguments already show (e.g. a side
+effect that must land first) -- a data reference alone already forces
+that order. Keep each awaited call its own statement; avoid burying
+`await` inside a larger expression.
+
+# CHECKPOINTS
+This grammar forbids `if`/`elif`/`else`. `# CHECKPOINT` fills that gap:
+write what's confidently knowable, then stop when a decision needs an
+unknown value -- never `if` as a workaround. A plan can't open with
+`# CHECKPOINT` (or, for the same reason, an `if`) before real work --
+that's malformed, not a pause; most need zero.
+
+Follow it with a triple-quoted string naming what's waited on; nothing
+else is read.
+
+You're called again, shown the work as statements (each real call
+tagged `# Equals: <value>`), why it paused, and an instruction to
+finish it. Treat completed names like bound variables.
+
+# FINALIZATION
+`return` ends the plan immediately -- write at most one, as the true
+last statement that matters. Anything after it is discarded, never
+executed; a second `return` never overrides the first. Omitting `return`
+makes the result `None`.
+
+# REJECTED DRAFTS
+If a plan fails before anything runs, you'll see it again verbatim plus
+why -- write one complete plan from scratch, never a patch or diff,
+following every rule above.
+
+# EXAMPLE
+Tools:
+web_search(query: str) -> str
+write_file(path: str, content: str) -> str
+send_email(to: str, subject: str, body: str) -> str
+today() -> str
+
+Task: "Check today's security advisory and email the team a summary."
+
+Round 1:
+\"\"\"The rest depends on whether a real advisory turns up.\"\"\"
+recipient = "team@example.com"
+findings = web_search(query="advisory")
+# CHECKPOINT
+\"\"\"Confirm findings is real.\"\"\"
+
+Round 2:
+WORK COMPLETED SO FAR:
+recipient = 'team@example.com'
+findings = web_search(query='advisory')  # Equals: CVE-2026-1111
+
+Confirm findings is real.
+
+Write only the remaining plan, in one shot, from this point forward.
+
+\"\"\"findings confirms it -- save it, then email; save first though the
+email doesn't need it, so I await it unused.\"\"\"
+await write_file(path="findings.txt", content=findings)
+sent = send_email(to=recipient, subject=f"Advisory - {today()}", body=findings)
+return sent
+""",
+    description="ToolAgent2 one-shot native-grammar planning prompt.",
 )
 
 

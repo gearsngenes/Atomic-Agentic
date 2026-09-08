@@ -5,6 +5,7 @@ import re
 from typing import Any, Optional
 
 from ..constants.toolagent2 import (
+    DEFAULT_CONTINUATION_NOTE,
     HOISTED_NAME_PREFIX,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
@@ -20,6 +21,7 @@ __all__ = [
     "parse_generation",
     "validate_references",
     "compile_batches",
+    "render_completed_as_python",
 ]
 
 # Matches a `#`-comment line whose content is (case-insensitively) the word
@@ -187,6 +189,16 @@ def _hoist_calls(
     arguments via ``_process_call_args``, and any nested/hoisted call's
     keyword arguments) funnels through -- a per-call-site check would miss
     a ternary buried inside a call argument.
+
+    A nested ``ast.Await`` (anywhere ``node`` isn't itself one of the two
+    top-level await positions ``parse_statement_to_slots`` already unwraps
+    before calling here -- e.g. inside a call's own keyword argument, or a
+    bare ``return await f()``) is hoisted exactly like an ordinary nested
+    call, except the synthesized slot itself carries ``awaited=True`` --
+    the awaited-ness travels with the call to wherever it lands, rather
+    than being discarded or left dangling on a now-bare ``Name``. An
+    ``await`` wrapping anything other than a call (nested or not) still
+    raises, since there is nothing else in this grammar to await.
     """
     for candidate in ast.walk(node):
         if isinstance(candidate, ast.IfExp) and (
@@ -199,6 +211,28 @@ def _hoist_calls(
                 "restructure as separate statements or a checkpoint."
             )
 
+    def _hoist_one_call(call_node: ast.Call, *, awaited: bool) -> ast.Name:
+        """Build one hoisted slot for `call_node` (appended to `hoisted`)
+        and return a `Name` reference to it. Shared tail for both
+        `visit_Call` (awaited=False) and `visit_Await` (awaited=True) --
+        the only difference between an ordinary and an awaited hoist."""
+        index = counter[0] + start_index
+        counter[0] += 1
+        hoisted_identifier = f"{HOISTED_NAME_PREFIX}{index}"
+
+        hoisted_args = _process_call_args(
+            call_node, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        tool_name = ast.unparse(call_node.func)
+        hoisted.append(
+            BlackboardSlotV2(
+                identifier=hoisted_identifier, tool=tool_name, args=hoisted_args, awaited=awaited
+            )
+        )
+
+        replacement = ast.Name(id=hoisted_identifier, ctx=ast.Load())
+        return ast.copy_location(replacement, call_node)
+
     class _CallHoister(ast.NodeTransformer):
         def visit_Call(self, call_node: ast.Call) -> ast.Name:
             # Only recurse into keyword values, not `func` -- a call's own
@@ -206,21 +240,18 @@ def _hoist_calls(
             # never itself a nested call.
             for kw in call_node.keywords:
                 kw.value = self.visit(kw.value)
+            return _hoist_one_call(call_node, awaited=False)
 
-            index = counter[0] + start_index
-            counter[0] += 1
-            hoisted_identifier = f"{HOISTED_NAME_PREFIX}{index}"
-
-            hoisted_args = _process_call_args(
-                call_node, counter=counter, start_index=start_index, hoisted=hoisted
-            )
-            tool_name = ast.unparse(call_node.func)
-            hoisted.append(
-                BlackboardSlotV2(identifier=hoisted_identifier, tool=tool_name, args=hoisted_args)
-            )
-
-            replacement = ast.Name(id=hoisted_identifier, ctx=ast.Load())
-            return ast.copy_location(replacement, call_node)
+        def visit_Await(self, await_node: ast.Await) -> ast.Name:
+            if not isinstance(await_node.value, ast.Call):
+                raise BlackboardParseError(
+                    "`await` must directly wrap a call; got "
+                    f"{type(await_node.value).__name__}."
+                )
+            call_node = await_node.value
+            for kw in call_node.keywords:
+                kw.value = self.visit(kw.value)
+            return _hoist_one_call(call_node, awaited=True)
 
     return _CallHoister().visit(node)
 
@@ -379,76 +410,124 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[Black
     return [*hoisted, final_slot]
 
 
-def parse_generation(raw_text: str) -> tuple[list[BlackboardSlotV2], list[int], list[str]]:
+def parse_generation(
+    raw_text: str,
+) -> tuple[list[BlackboardSlotV2], list[str], bool, Optional[str]]:
     """
-    Parse one whole one-shot generation into a flat slot sequence, its
-    checkpoint thresholds, and its annotation blocks.
+    Parse one whole generation (a fresh plan, or a checkpoint-triggered
+    continuation) into a flat slot sequence, its annotation blocks, and
+    whether/why a further continuation round is needed.
 
     Checkpoint-splitting happens on raw text, before any AST parsing --
     ``# CHECKPOINT`` is a comment, and ``ast.parse`` strips comments, so a
-    marker's position can't be recovered from a parsed tree. An N-marker
-    split produces N+1 chunks; each chunk is parsed as a whole
-    (``ast.parse(chunk, mode="exec")``) and its top-level statements are
-    dispatched individually via ``parse_statement_to_slots`` -- statement
-    splitting is therefore AST-level (``tree.body``), not line-level, so
-    semicolon-joined statements and multi-line call formatting both work
-    with no special-casing.
+    marker's position can't be recovered from a parsed tree. Only the FIRST
+    marker matters: a generation has at most one meaningful checkpoint,
+    since reaching one always terminates it (mirroring how a ``return``
+    already terminates it) -- ``maxsplit=1`` produces at most two pieces,
+    ``before``/``after``.
 
-    Checkpoint thresholds are computed in the same pass as slot-building,
-    not recovered afterward: a ``BlackboardSlotV2`` carries no
-    "a checkpoint immediately followed me" marker of its own, so this is
-    the only point where that information is available at all.
+    ``before`` is parsed and dispatched statement-by-statement exactly as
+    always, with two special first-statement/any-position cases: an opening
+    reasoning block (a bare string-literal statement at position 0), and an
+    ``ast.If`` node. The latter is a defensive backstop, not a taught
+    convention -- the prompt tells the model never to write one -- so a
+    model that does anyway is handled by silently truncating there (exactly
+    like a ``return``) rather than failing the whole generation, UNLESS
+    nothing real has been produced yet (``flat_slots`` still empty), in
+    which case there is no confident partial work to fall back to and this
+    is treated as a genuine structural error instead, feeding regen-repair.
+    The identical "nothing real yet" check applies to an explicit
+    checkpoint marker found with an empty ``before`` -- both represent the
+    same waste (a whole planning round spent for zero progress).
 
-    Returns ``(flat_slots, checkpoint_thresholds, annotations)``. Raises
-    ``BlackboardParseError`` on any structural failure (propagated from
-    ``parse_statement_to_slots``, or a genuine ``ast.parse`` syntax error in
-    a chunk).
+    A ``return`` also terminates immediately (whatever follows it in
+    ``before``, if anything, is never even parsed) -- for the same reason
+    a later real call must never land in the same batch as the return and
+    execute anyway, and a second `return` must never silently overwrite the
+    first.
+
+    ``after`` (present only when a checkpoint marker was found) is read
+    only to look for its own leading bare string-literal statement, which
+    becomes the continuation note; anything else in ``after`` -- a missing
+    note, a syntax error, or genuine further statements -- is discarded
+    without complaint, and ``DEFAULT_CONTINUATION_NOTE`` is used in place
+    of a missing note.
+
+    Returns ``(flat_slots, annotations, continue_planning,
+    continuation_note)``. Raises ``BlackboardParseError`` on any structural
+    failure (propagated from ``parse_statement_to_slots``, a genuine
+    ``ast.parse`` syntax error in ``before``, or one of the two
+    "nothing real yet" cases above).
     """
-    chunks = _CHECKPOINT_PATTERN.split(_strip_code_fence(raw_text))
+    text = _strip_code_fence(raw_text)
+    parts = _CHECKPOINT_PATTERN.split(text, maxsplit=1)
+    before = parts[0]
 
     flat_slots: list[BlackboardSlotV2] = []
-    thresholds: list[int] = []
     annotations: list[str] = []
     hoist_index = 0
 
-    for i, chunk in enumerate(chunks):
-        if chunk.strip():
-            try:
-                tree = ast.parse(chunk, mode="exec")
-            except SyntaxError as e:
-                raise BlackboardParseError(str(e)) from e
+    if before.strip():
+        try:
+            tree = ast.parse(before, mode="exec")
+        except SyntaxError as e:
+            raise BlackboardParseError(str(e)) from e
 
-            for j, node in enumerate(tree.body):
-                # Opening reasoning block: a bare string-literal expression
-                # statement at position 0 of the *whole* generation only.
-                if (
-                    i == 0
-                    and j == 0
-                    and isinstance(node, ast.Expr)
-                    and isinstance(node.value, ast.Constant)
-                    and isinstance(node.value.value, str)
-                ):
-                    annotations.append(node.value.value)
-                    continue
+        for j, node in enumerate(tree.body):
+            if (
+                j == 0
+                and isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                annotations.append(node.value.value)
+                continue
 
-                stmt_source = ast.unparse(node)
-                slots = parse_statement_to_slots(stmt_source, start_index=hoist_index)
-                flat_slots.extend(slots)
-                hoist_index += len(slots)
+            if isinstance(node, ast.If):
+                if not flat_slots:
+                    raise BlackboardParseError(
+                        "a plan cannot open with a conditional statement "
+                        "and no real work done yet; compute or check "
+                        "whatever the condition depends on first, as a "
+                        "real statement."
+                    )
+                return flat_slots, annotations, True, None
 
-        # Every chunk but the last was followed by a checkpoint marker.
-        if i < len(chunks) - 1:
-            thresholds.append(len(flat_slots))
+            stmt_source = ast.unparse(node)
+            slots = parse_statement_to_slots(stmt_source, start_index=hoist_index)
+            flat_slots.extend(slots)
+            hoist_index += len(slots)
 
-    # Drop degenerate thresholds: a leading `0` (a checkpoint before any
-    # code has run -- nothing for a batch-driven compiler to ever close on)
-    # and consecutive duplicates (two markers with no content between them
-    # produce the same running count twice). Neither represents a real,
-    # reachable batch boundary; left in, they'd sit inertly in
-    # ToolAgentTaskV2.checkpoints forever, never popped.
-    thresholds = [t for idx, t in enumerate(thresholds) if t > 0 and (idx == 0 or t != thresholds[idx - 1])]
+            if slots and slots[-1].tool == RETURN_ALIAS:
+                return flat_slots, annotations, False, None
 
-    return flat_slots, thresholds, annotations
+    if len(parts) == 1:
+        # No checkpoint marker anywhere -- completes normally (or falls off
+        # the end with an inferred `None` result if no `return` ran).
+        return flat_slots, annotations, False, None
+
+    if not flat_slots:
+        raise BlackboardParseError(
+            "a checkpoint cannot appear before any real work has been "
+            "done; write at least one real statement first, then "
+            "checkpoint only if what follows still depends on something "
+            "not yet known."
+        )
+
+    continuation_note = DEFAULT_CONTINUATION_NOTE
+    try:
+        after_tree = ast.parse(parts[1], mode="exec")
+        if (
+            after_tree.body
+            and isinstance(after_tree.body[0], ast.Expr)
+            and isinstance(after_tree.body[0].value, ast.Constant)
+            and isinstance(after_tree.body[0].value.value, str)
+        ):
+            continuation_note = after_tree.body[0].value.value
+    except SyntaxError:
+        pass  # malformed trailing content -- fall back to the default note
+
+    return flat_slots, annotations, True, continuation_note
 
 
 def validate_references(
@@ -516,10 +595,7 @@ def validate_references(
     return issues
 
 
-def compile_batches(
-    slots: list[BlackboardSlotV2],
-    checkpoint_thresholds: list[int],
-) -> list[list[BlackboardSlotV2]]:
+def compile_batches(slots: list[BlackboardSlotV2]) -> list[list[BlackboardSlotV2]]:
     """
     Group ``slots`` into dependency batches for concurrent execution.
 
@@ -534,23 +610,20 @@ def compile_batches(
     a forward barrier, so nothing textually after it can share that batch
     regardless of real dependency edges (this is also why a batch can never
     hold more than one awaited call: the first one already forces closure
-    before a second could ever join). A batch also always closes once the
-    running completed-count reaches the next checkpoint threshold -- a
-    marker always ends the batch it falls after; by construction this
-    always lands exactly on a batch boundary, never mid-batch.
+    before a second could ever join). There is no longer a checkpoint-driven
+    closure case: a checkpoint (or an if-cutoff) always sits at the very end
+    of ``slots`` now, since ``parse_generation`` terminates the sequence
+    there -- nothing structurally follows it to force a boundary against.
     """
     batches: list[list[BlackboardSlotV2]] = []
     current_batch: list[BlackboardSlotV2] = []
     current_batch_identifiers: set[str] = set()
-    completed_count = 0
-    remaining_thresholds = list(checkpoint_thresholds)
 
     def close_current() -> None:
-        nonlocal current_batch, current_batch_identifiers, completed_count
+        nonlocal current_batch, current_batch_identifiers
         if not current_batch:
             return
         batches.append(current_batch)
-        completed_count += len(current_batch)
         current_batch = []
         current_batch_identifiers = set()
 
@@ -563,13 +636,57 @@ def compile_batches(
         if slot.identifier is not None:
             current_batch_identifiers.add(slot.identifier)
 
-        hit_checkpoint = bool(remaining_thresholds) and (
-            completed_count + len(current_batch) == remaining_thresholds[0]
-        )
-        if hit_checkpoint:
-            remaining_thresholds.pop(0)
-        if hit_checkpoint or slot.awaited:
+        if slot.awaited:
             close_current()
 
     close_current()
     return batches
+
+
+def render_completed_as_python(
+    completed: list[BlackboardSlotV2],
+    preview_limit: Optional[int],
+) -> str:
+    """
+    Reconstruct a Python-source-formatted snapshot of already-completed
+    slots, for a checkpoint-triggered continuation round's rendered
+    context: one line per slot, in commit order, mirroring the statement
+    that originally produced it.
+
+    A dispatched real tool call gets a trailing ``# Equals: <preview>``
+    comment showing its resolved value -- truncated the same way
+    ``Agent.render_turn`` truncates a rendered response (via
+    ``preview_limit``; that logic lives on ``Agent``, in ``agents/``, which
+    sits above ``utils/`` in this project's layering, so it's replicated
+    here rather than imported). A plain ``rhs_assign`` slot needs no such
+    comment -- its value is already the literal shown. A ``return`` slot is
+    never expected here (it always ends the invoke, so no continuation is
+    ever rendered afterward) but is handled defensively rather than
+    crashing. Returns the joined lines, or ``""`` for an empty ``completed``.
+    """
+
+    def render_value(value: Any) -> str:
+        return ast.unparse(value) if isinstance(value, ast.expr) else repr(value)
+
+    def preview(value: Any) -> str:
+        text = str(value)
+        if preview_limit is not None and len(text) > preview_limit:
+            text = text[:preview_limit] + "..."
+        return text
+
+    lines: list[str] = []
+    for slot in completed:
+        if slot.tool == RETURN_ALIAS:
+            lines.append(f"return {render_value(slot.args['val'])}")
+            continue
+
+        prefix = f"{slot.identifier} = " if slot.identifier is not None else ""
+        if slot.tool == RHS_ASSIGN_ALIAS:
+            lines.append(f"{prefix}{render_value(slot.args['val'])}")
+            continue
+
+        args_source = ", ".join(f"{k}={render_value(v)}" for k, v in slot.args.items())
+        resolved_value = slot.result.result if slot.result is not None else None
+        lines.append(f"{prefix}{slot.tool}({args_source})  # Equals: {preview(resolved_value)}")
+
+    return "\n".join(lines)
