@@ -746,6 +746,9 @@ def render_completed_as_python(
         ]
         args_source = ", ".join(positional_tokens + keyword_tokens)
         resolved_value = slot.result.result if slot.result is not None else None
-        lines.append(f"{prefix}{slot.tool}({args_source})  # Equals: {preview(resolved_value)}")
+        call_source = f"{slot.tool}({args_source})"
+        if slot.awaited:
+            call_source = f"await {call_source}"
+        lines.append(f"{prefix}{call_source}  # Equals: {preview(resolved_value)}")
 
     return "\n".join(lines)

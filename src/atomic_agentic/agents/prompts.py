@@ -294,10 +294,11 @@ budget, not reset per generation; a nested call counts too. Stay minimal
 even if unlimited.
 
 # AVAILABLE TOOLS
-Each entry is a tool: `id(arg: Type, ...) -> ReturnType` plus a docstring
-description; call with `(...)`. `id` is a bare identifier -- its own name
-or a registered alias -- used verbatim; see OUTPUT FORMAT for `/`/`*` and
-argument binding.
+Below are the available tools & their docstrings. You can call any of
+them synchronously or asynchronously, like `id(arg = val, ...)` or 
+`await id(arg = val,...)`, respectively. `id` is a bare identifier --
+its own name or a registered alias -- used verbatim; see OUTPUT FORMAT
+for `/`/`*` and argument binding.
 
 {TOOLS}
 
