@@ -43,130 +43,187 @@ __all__ = ["BASIC_MATH_TOOLS",
 
 # Basic Arithmetic
 def add(a: float, b: float) -> float:
+    """Return the sum of two numbers a and b."""
     return a + b
 def subtract(a: float, b: float) -> float:
+    """Return the difference of two numbers a and b."""
     return a - b
 def multiply(a: float, b: float) -> float:
+    """Return the product of two numbers a and b."""
     return a * b
 def divide(a: float, b: float) -> float:
+    """Return the quotient of two numbers a and b (inf if b == 0)."""
     return a / b if b != 0 else float("inf")
 
 BASIC_MATH_TOOLS: List[Tool] = [
-    Tool(function=add, name="add", namespace="Basic_Math", description="Return sum of two numbers a + b."),
-    Tool(function=subtract, name="subtract", namespace="Basic_Math", description="Return difference of two numbers a - b."),
-    Tool(function=multiply, name="multiply", namespace="Basic_Math", description="Return product of two numbers a * b."),
-    Tool(function=divide, name="divide", namespace="Basic_Math", description="Return quotient of two numbers a / b (inf if b == 0)."),
+    Tool(function=add, name="add", namespace="Basic_Math"),
+    Tool(function=subtract, name="subtract", namespace="Basic_Math"),
+    Tool(function=multiply, name="multiply", namespace="Basic_Math"),
+    Tool(function=divide, name="divide", namespace="Basic_Math"),
 ]
 
 # Exponentiation and Roots
 def power(a: float, b: float) -> float:
+    """Return a raised to the power of b."""
     return a**b
 def sqrt(x: float) -> float:
-    if x < 0:
-        raise ValueError("sqrt: x must be non-negative")
+    """Return the square root of x; x must be non-negative."""
     return math.sqrt(x)
 def log(x: float) -> float:
+    """Return the natural logarithm of x; x must be positive."""
     return math.log(x)
 
 EXPONENT_TOOLS: List[Tool] = [
-    Tool(function=power, name="power", namespace="Exponents", description="Return power of two numbers a ** b."),
-    Tool(function=log, name="log", namespace="Exponents", description="Return natural logarithm of a number x; x must be > 0."),
-    Tool(function=sqrt, name="sqrt", namespace="Exponents", description="Return square root of a number x; x must be >= 0."),
+    Tool(function=power, name="power", namespace="Exponents"),
+    Tool(function=log, name="log", namespace="Exponents"),
+    Tool(function=sqrt, name="sqrt", namespace="Exponents"),
 ]
 
 # Statistics
 def mean(nums: Sequence[float]) -> float:
+    """Return the arithmetic mean of a sequence of numbers."""
     return (sum(nums) / len(nums)) if nums else 0.0
 def max_value(nums: Sequence[float]) -> float:
+    """return the maximum value in a sequence of numbers."""
     return max(nums)
 def min_value(nums: Sequence[float]) -> float:
+    """return the minimum value in a sequence of numbers."""
     return min(nums)
 
 STAT_TOOLS: List[Tool] = [
-    Tool(function=mean, name="mean", namespace="Stats", description="Return arithmetic mean of a sequence of numbers."),
-    Tool(function=max_value, name="max_value", namespace="Stats", description="Return the maximum of a sequence of numbers."),
-    Tool(function=min_value, name="min_value", namespace="Stats", description="Return the minimum of a sequence of numbers."),
+    Tool(function=mean, name="mean", namespace="Stats"),
+    Tool(function=max_value, name="max_value", namespace="Stats"),
+    Tool(function=min_value, name="min_value", namespace="Stats"),
 ]
 
 # Trigonometry
 def sin(x: float) -> float:
+    """Return the sine of x (x in radians)."""
     return math.sin(x)
 def cos(x: float) -> float:
+    """Return the cosine of x (x in radians)."""
     return math.cos(x)
 def tan(x: float) -> float:
+    """Return the tangent of x (x in radians)."""
     return math.tan(x)
 def cot(x: float) -> float:
+    """Return the cotangent of x (x in radians; inf at tan(x)=0)."""
     t = math.tan(x)
     return (1.0 / t) if t != 0 else float("inf")
 def asin(x: float) -> float:
+    """Return the arcsine of x (x in [-1, 1])."""
     return math.asin(x)
 def acos(x: float) -> float:
+    """Return the arccosine of x (x in [-1, 1])."""
     return math.acos(x)
 def atan(x: float) -> float:
+    """Return the arctangent of x (x in [-inf, inf])."""
     return math.atan(x)
 def acot(x: float) -> float:
+    """Return the arccotangent of x (x in [-inf, inf]; inf at tan(x)=0)."""
     t = math.tan(x)
     return (1.0 / t) if t != 0 else float("inf")
 def sinh(x: float) -> float:
+    """Return the hyperbolic sine of x."""
     return math.sinh(x)
 def cosh(x: float) -> float:
+    """Return the hyperbolic cosine of x."""
     return math.cosh(x)
 def tanh(x: float) -> float:
+    """Return the hyperbolic tangent of x."""
     return math.tanh(x)
 def coth(x: float) -> float:
+    """Return the hyperbolic cotangent of x (inf at tanh(x)=0)."""
     t = math.tanh(x)
     return (1.0 / t) if t != 0 else float("inf")
 def asinh(x: float) -> float:
+    """Return the inverse hyperbolic sine of x."""
     return math.asinh(x)
 def acosh(x: float) -> float:
+    """Return the inverse hyperbolic cosine of x."""
     if x < 1:
         raise ValueError("acosh: x must be >= 1")
     return math.acosh(x)
 def atanh(x: float) -> float:
+    """Return the inverse hyperbolic tangent of x."""
     return math.atanh(x)
 def acoth(x: float) -> float:
+    """Return the inverse hyperbolic cotangent of x (inf at tanh(x)=0)."""
     t = math.tanh(x)
     return (1.0 / t) if t != 0 else float("inf")
 
 TRIG_TOOLS: List[Tool] = [
-    Tool(function=sin, name="sin", namespace="Trig", description="Return sin(x) (x in radians)."),
-    Tool(function=cos, name="cos", namespace="Trig", description="Return cos(x) (x in radians)."),
-    Tool(function=tan, name="tan", namespace="Trig", description="Return tan(x) (x in radians)."),
-    Tool(function=cot, name="cot", namespace="Trig", description="Return cot(x) (x in radians; inf at tan(x)=0)."),
-    Tool(function=asin, name="asin", namespace="Trig", description="Return arcsin(x) (result in radians)."),
-    Tool(function=acos, name="acos", namespace="Trig", description="Return arccos(x) (result in radians)."),
-    Tool(function=atan, name="atan", namespace="Trig", description="Return arctan(x) (result in radians)."),
-    Tool(function=acot, name="acot", namespace="Trig", description="Return arccot(x) (result in radians; inf at tan(x)=0)."),
-    Tool(function=sinh, name="sinh", namespace="Trig", description="Return sinh(x) (hyperbolic sine)."),
-    Tool(function=cosh, name="cosh", namespace="Trig", description="Return cosh(x) (hyperbolic cosine)."),
-    Tool(function=tanh, name="tanh", namespace="Trig", description="Return tanh(x) (hyperbolic tangent)."),
-    Tool(function=coth, name="coth", namespace="Trig", description="Return coth(x) (hyperbolic cotangent; inf at tanh(x)=0)."),
-    Tool(function=asinh, name="asinh", namespace="Trig", description="Return arcsinh(x) (inverse hyperbolic sine)."),
-    Tool(function=acosh, name="acosh", namespace="Trig", description="Return arccosh(x) (inverse hyperbolic cosine; x must be >= 1)."),
-    Tool(function=atanh, name="atanh", namespace="Trig", description="Return arctanh(x) (inverse hyperbolic tangent)."),
-    Tool(function=acoth, name="acoth", namespace="Trig", description="Return arccoth(x) (inverse hyperbolic cotangent; inf at tanh(x)=0)."),
+    Tool(function=sin, name="sin", namespace="Trig"),
+    Tool(function=cos, name="cos", namespace="Trig"),
+    Tool(function=tan, name="tan", namespace="Trig"),
+    Tool(function=cot, name="cot", namespace="Trig"),
+    Tool(function=asin, name="asin", namespace="Trig"),
+    Tool(function=acos, name="acos", namespace="Trig"),
+    Tool(function=atan, name="atan", namespace="Trig"),
+    Tool(function=acot, name="acot", namespace="Trig"),
+    Tool(function=sinh, name="sinh", namespace="Trig"),
+    Tool(function=cosh, name="cosh", namespace="Trig"),
+    Tool(function=tanh, name="tanh", namespace="Trig"),
+    Tool(function=coth, name="coth", namespace="Trig"),
+    Tool(function=asinh, name="asinh", namespace="Trig"),
+    Tool(function=acosh, name="acosh", namespace="Trig"),
+    Tool(function=atanh, name="atanh", namespace="Trig"),
+    Tool(function=acoth, name="acoth", namespace="Trig"),
 ]
 
 # ───────────────────────── Console Tools ─────────────────────────
 
 def print_tool(*objects) -> None:
+    """Print the given objects to the console."""
     print(*objects)
 
 def user_input(prompt: str) -> str:
+    """Prompt user for input text and return the entered string."""
     return input(prompt)
 
 def basic_config(level: str = "INFO") -> None:
+    """Configure root logging (level: DEBUG|INFO|WARNING|ERROR|CRITICAL)."""
     logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO))
 
-def log_message(message: str, level: str = "INFO") -> None:
+def log_message(message: str, level: str) -> None:
+    """Log a message at the specified level."""
     logging.log(getattr(logging, level.upper(), logging.INFO), message)
 
+def log_info(message: str) -> None:
+    """Log a message at INFO level."""
+    logging.info(message)
+
+def log_warning(message: str) -> None:
+    """Log a message at WARNING level."""
+    logging.warning(message)
+
+def log_error(message: str) -> None:
+    """Log a message at ERROR level."""
+    logging.error(message)
+
+def log_critical(message: str) -> None:
+    """Log a message at CRITICAL level."""
+    logging.critical(message)
+
+def log_debug(message: str) -> None:
+    """Log a message at DEBUG level."""
+    logging.debug(message)
+
+def log_trace(message: str) -> None:
+    """Log a message at TRACE level."""
+    logging.log(logging.TRACE, message)
 
 CONSOLE_TOOLS: List[Tool] = [
-    Tool(function=print_tool, name="print", namespace="Console", description="Print any value or collection of values to the console."),
-    Tool(function=user_input, name="user_input", namespace="Console", description="Prompt user for input and return the entered string."),
-    Tool(function=basic_config, name="basic_config", namespace="Console", description="Configure root logging (level: DEBUG|INFO|WARNING|ERROR|CRITICAL)."),
-    Tool(function=log_message, name="log", namespace="Console", description="Log a message at the specified level."),
+    Tool(function=print_tool, name="print", namespace="Console"),
+    Tool(function=user_input, name="user_input", namespace="Console"),
+    Tool(function=basic_config, name="basic_config", namespace="Console"),
+    Tool(function=log_message, name="log", namespace="Console"),
+    Tool(function=log_info, name="log_info", namespace="Console"),
+    Tool(function=log_warning, name="log_warning", namespace="Console"),
+    Tool(function=log_error, name="log_error", namespace="Console"),
+    Tool(function=log_critical, name="log_critical", namespace="Console"),
+    Tool(function=log_debug, name="log_debug", namespace="Console"),
+    Tool(function=log_trace, name="log_trace", namespace="Console"),
 ]
 
 # ───────────────────────── Parser Tools ─────────────────────────
@@ -200,20 +257,53 @@ PARSER_TOOLS: List[Tool] = [
 ]
 
 # ─────────────────────────  Conditional Tools  ─────────────────────────
-def contains_substring(s: str, substr: str) -> bool:
-    return substr in s
-def is_in(x: Any, lst: Sequence[Any]) -> bool:
-    return x in lst
-def has_key(d: dict, key: Any) -> bool:
-    return key in d
+def is_in(x: Any, y: Any) -> bool:
+    """returns boolean value of 'x in y'"""
+    return x in y
 def if_else_select(condition: bool, true_val: Any, false_val: Any) -> Any:
     return true_val if condition else false_val
+
+# ─────────────────────────  Collection Tools  ─────────────────────────
+def has_key(d: dict, key: Any) -> bool:
+    """returns boolean value of 'key in d'"""
+    return key in d
 def get_from_dict(d: dict, key: Any, default: Optional[Any] = None) -> Any:
+    """calls d.get(key, default)"""
     return d.get(key, default)
-def get_from_seq(seq: Sequence[Any], index: int, default: Optional[Any] = None) -> Any:
-    try:
-        return seq[index]
-    except IndexError:
-        return default
+def get_keys(d: dict) -> List[Any]:
+    """Returns list(d.keys())"""
+    return list(d.keys())
+def get_from_seq(seq: Sequence[Any], index: int) -> Any:
+    """Returns seq[index]"""
+    return seq[index]
 def len_of(seq: Sequence[Any]) -> int:
+    """Returns len(seq)"""
     return len(seq)
+def append_to_list(lst: List[Any], item: Any) -> None:
+    """calls lst.append(item)"""
+    lst.append(item)
+def update_dict(source: dict, updates: dict) -> None:
+    """Calls source.update(updates)"""
+    source.update(updates)
+def get_range(start: int, stop: int, step: int = 1) -> List[int]:
+    """Return a list of integers from start to stop-1."""
+    return list(range(start, stop, step))
+def sort_list(lst: List[Any], reverse: bool = False) -> List[Any]:
+    """Return sorted(lst, reverse=reverse)."""
+    return sorted(lst, reverse=reverse)
+def slice_seq(seq: Sequence[Any], start: Optional[int] = None, stop: Optional[int] = None, step: Optional[int] = None) -> Sequence[Any]:
+    """Return seq[start:stop:step]."""
+    return seq[start:stop:step]
+
+COLLECTION_TOOLS: List[Tool] = [
+    Tool(function=has_key, name="has_key", namespace="Collection"),
+    Tool(function=get_from_dict, name="get_from_dict", namespace="Collection"),
+    Tool(function=get_keys, name="get_keys", namespace="Collection"),
+    Tool(function=get_from_seq, name="get_from_seq", namespace="Collection"),
+    Tool(function=len_of, name="len_of", namespace="Collection"),    
+    Tool(function=append_to_list, name="append_to_list", namespace="Collection"),
+    Tool(function=update_dict, name="update_dict", namespace="Collection"),
+    Tool(function=get_range, name="get_range", namespace="Collection"),
+    Tool(function=sort_list, name="sort_list", namespace="Collection"),
+    Tool(function=slice_seq, name="slice_seq", namespace="Collection"),
+]
