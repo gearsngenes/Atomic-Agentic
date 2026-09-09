@@ -192,22 +192,25 @@ class ScriptAgentTask(AgentTask):
 
     pending : list[list[CodeStatement]]
         Every not-yet-executed dependency batch compiled so far for the
-        current plan -- not scoped to just the next checkpoint. The whole
+        current plan -- not scoped to just the next pause. The whole
         one-shot draft (or, after a replan, the whole freshly regenerated
         tail) is parsed and batch-compiled in a single pass, so this can
-        span multiple checkpoints' worth of batches at once. The front
-        batch (``pending[0]``) is the next one act() runs; once it fully
+        span multiple pauses' worth of batches at once. The front batch
+        (``pending[0]``) is the next one act() runs; once it fully
         executes, its slots move into ``completed`` and it is popped from
         this list.
 
     continue_planning : bool
-        Set by ``prepare()``/``_apply_batch_results()`` whenever this round
-        stopped for a reason requiring a fresh generation -- a checkpoint
-        was reached, a valid if-cutoff was hit, a batch's args failed to
-        resolve, or a real tool call failed. Read by ``think()`` to decide
-        whether to regenerate, and by ``prepare()``'s empty-``pending``
-        guard to tell "stopped, needs a continuation" apart from "genuinely
-        finished."
+        Set by ``parse_generation`` (via ``think()``) when the round itself
+        asked to continue (a ``# PAUSE``, or a valid if-cutoff), or by
+        ``prepare()``/``_apply_batch_results()`` when a batch's args failed
+        to resolve or a real tool call failed. Read by ``prepare()``'s and
+        ``_apply_batch_results``'s own empty-``pending`` checks -- whichever
+        one actually drains ``pending`` to empty -- to tell "stopped, needs
+        a continuation" (leave the task incomplete for ``think()`` to
+        regenerate next) apart from "genuinely finished" (finalize via
+        ``_finalize_without_continuation`` right there, before ``think()``
+        ever gets a turn to regenerate an uninvited round).
 
     planning_rounds_used : int
         Count of continuation rounds requested so far this invoke -- the
@@ -230,7 +233,7 @@ class ScriptAgentTask(AgentTask):
         The reason/guidance text for the next generation, set alongside
         ``continue_planning=True``: the model's own trailing triple-quoted
         note (or a hardcoded default if it wrote none) for an explicit
-        checkpoint, ``None`` for a silent if-cutoff, or the real dynamic
+        pause, ``None`` for a silent if-cutoff, or the real dynamic
         issue/failure text for a resolution or execution failure. Consumed
         by ``_render_task_messages`` on the next generation, then reset to
         ``None`` once a fresh generation has been requested.

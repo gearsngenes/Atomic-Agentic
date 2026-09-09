@@ -56,12 +56,12 @@ class ScriptAgent(Agent):
     statements toward a task from a single generated plan. There is no
     separate decomposition, orchestration, or synthesis call, and no
     construction-time mode knob -- adaptivity is meant to be emergent from
-    how many ``# CHECKPOINT`` markers end up in one continuous plan, not
-    picked up front.
+    how many ``# PAUSE`` markers end up in one continuous plan, not picked
+    up front.
 
     Checkpoint-triggered reactive continuation (Pass 2.3): a generation
     always terminates at the first of a ``return``, an explicit
-    ``# CHECKPOINT`` (with an optional trailing triple-quoted note), or a
+    ``# PAUSE`` (with an optional trailing triple-quoted note), or a
     defensively-pruned ``if`` statement (the grammar still forbids
     conditionals outright; a model that writes one anyway is handled by
     silent truncation, not rejection, unless nothing real precedes it). A
@@ -203,7 +203,7 @@ class ScriptAgent(Agent):
 
     @property
     def planning_rounds_limit(self) -> Optional[int]:
-        """Max continuation rounds (checkpoint/if-cutoff/failure-triggered
+        """Max continuation rounds (pause/if-cutoff/failure-triggered
         re-generations) allowed per ``invoke()`` run -- the unconditional
         first generation never counts against this. ``None`` means
         unlimited."""
@@ -869,7 +869,7 @@ class ScriptAgent(Agent):
 
         ``task.completed`` empty means this is the unconditional first
         generation -- rendered exactly as before. Non-empty means this is a
-        checkpoint/if-cutoff/failure-triggered continuation (this method is
+        pause/if-cutoff/failure-triggered continuation (this method is
         only ever called when ``task.pending`` is already empty, so a
         non-empty ``completed`` here can only mean a genuine prior round,
         never a same-round partial drain) -- rendered instead as a snapshot
@@ -1054,14 +1054,36 @@ class ScriptAgent(Agent):
             )
         task.planning_rounds_used += 1
 
+    def _finalize_without_continuation(self, task: ScriptAgentTask) -> ScriptAgentTask:
+        """A drain with no ``# PAUSE`` and no error -- the absence of a
+        ``return`` is NOT an invitation to keep planning, only an explicit
+        ``# PAUSE`` is. Infers ``None`` if nothing was ever returned
+        and marks the task complete. Called from wherever ``task.pending``
+        actually reaches empty with ``continue_planning`` still ``False``:
+        ``prepare`` (an already-empty round, or a same-round empty
+        generation) and ``_apply_batch_results`` (the last batch of a
+        multi-round plan draining) -- never from ``think``, which only ever
+        reads ``continue_planning``, never decides based on it."""
+        if task.generated_response is NO_VAL:
+            task.generated_response = None
+        task.complete = True
+        return task
+
     def think(self, task: ScriptAgentTask) -> ScriptAgentTask:
         """
         Generate, validate, and compile the next segment of the plan --
         either the unconditional first generation, or (once a prior round
         set ``continue_planning``) a fresh continuation. No-op whenever
         there is still pending work to drain, or the task is already fully
-        complete -- a checkpoint/if-cutoff/failure-triggered continuation is
+        complete -- a pause/if-cutoff/failure-triggered continuation is
         requested by re-entering this same hook, not a separate mechanism.
+
+        Never called for a drained, uninvited round: whichever of
+        ``prepare``/``_apply_batch_results`` actually empties
+        ``task.pending`` with ``continue_planning`` still ``False`` marks
+        ``task.complete`` there and then, so this hook's own top guard
+        already short-circuits before ever reaching the regeneration call
+        below -- no separate check needed here.
         """
         if task.pending or task.complete:
             return task
@@ -1123,10 +1145,7 @@ class ScriptAgent(Agent):
             task.resolved_args = []
             if task.continue_planning:
                 return task
-            if task.generated_response is NO_VAL:
-                task.generated_response = None
-            task.complete = True
-            return task
+            return self._finalize_without_continuation(task)
 
         batch = task.pending[0]
         resolved: list[dict[str, Any]] = []
@@ -1268,6 +1287,15 @@ class ScriptAgent(Agent):
 
         task.pending.pop(0)
         task.resolved_args = []
+
+        # This batch just drained the plan. If nothing asked for a
+        # continuation (no `# PAUSE`) and nothing already completed it
+        # (no `return` above), finalize right here -- the natural point
+        # `task.pending` actually reaches empty -- instead of leaving it for
+        # a future `prepare()` call that `think()` would otherwise reach
+        # first on the next loop iteration and regenerate an uninvited round.
+        if not task.pending and not task.complete and not task.continue_planning:
+            return self._finalize_without_continuation(task)
 
         return task
 

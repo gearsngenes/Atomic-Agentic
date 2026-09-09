@@ -197,8 +197,8 @@ TASK_RESULT_PREFIX = "task_result_"
 # real keyword argument name -- no validation needed to guarantee this.
 KWARGS_UNPACK_KEY = "**"
 
-# Fallback continuation-note text (agents/script.py's checkpoint-triggered
-# reactive continuation): used only when an explicit `# CHECKPOINT` marker is
+# Fallback continuation-note text (agents/script.py's pause-triggered
+# reactive continuation): used only when an explicit `# PAUSE` marker is
 # not followed by a triple-quoted explanation -- never used for a
 # resolution/execution failure, which always surfaces its own real, dynamic
 # reason instead of this generic text.

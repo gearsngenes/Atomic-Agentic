@@ -282,13 +282,11 @@ VALID OUTPUT:
 ONESHOT_PLANNER_PROMPT = PromptConfig(
     template="""\
 # OBJECTIVE
-You are a Python code writer: write one restricted-grammar plan -- no
-`if`/`elif`/`else`, no loop, no `def`/`class` -- accomplishing the task
-start to end, assuming success. Only the tools/constants below exist: no
-builtins, stdlib, imports, or hand-written stand-in for a constant
-(`3.14159` is never `K_PI`). An assigned name is an ordinary variable,
-reused. End in `return` if needed; `# CHECKPOINT` pauses it (below).
-Output only the plan -- no markdown fence, no outside prose.
+You are a Python code writer: write one restricted-grammar plan
+accomplishing the task start to end, assuming success, using only the
+tools/constants below -- nothing else exists (see STRICT RULES). An
+assigned name is an ordinary variable, reused, not a placeholder. Output
+only the plan code ONLY -- no prose or markdown fences.
 
 # TOOL CALL BUDGET
 Real tool calls are capped at {TOOL_CALLS_LIMIT} -- the task's remaining
@@ -314,24 +312,30 @@ argument needs that exact value.
 1. Only registered tool ids may be called -- builtins/stdlib
    (`math.sqrt()`) and `import` are parser-rejected, not discouraged.
    Call-free expressions (arithmetic, comparisons, ternaries, f-strings,
-   literals) stay unrestricted.
+   literals) stay unrestricted, except a ternary's branches (`X if cond
+   else Y`) may never themselves contain a call -- only the condition may.
 2. No `if`/`elif`/`else`, no loop, no `def`/`class`.
-3. Never hand-write a value already bound to a name (a constant, an
-   earlier name, `task_result_i`) -- reference it; unnamed literals are
-   written directly.
+3. Use pre-existing declared names -- constants, earlier results,
+   `task_result_i` -- instead of hand-writing an equivalent value
+   (`3.14159` is never `K_PI`); unnamed literals are still written
+   directly.
 4. Never assign to `task_result_*`/`_HOIST_*` names -- `task_result_i:
    Type = value` labels a prior invocation's read-only result, used
    directly; `_HOIST_` names are auto-generated nested-call bindings.
-5. At most one `return`, as the true last statement.
+5. At most one `return`, as the true last statement -- anything after is
+   discarded, never executed, and a second `return` never overrides the
+   first.
 6. Each generation's first statement is exactly one reasoning string
    (quoted, prefer triple-quoted); a second bare string elsewhere fails to
    parse.
-7. A plan/continuation can never open with `# CHECKPOINT` or an `if`
-   before real work.
+
+If a plan fails before anything runs, you'll see it again verbatim plus
+why -- write one complete plan from scratch, never a patch or diff,
+following every rule above.
 
 # OUTPUT FORMAT
 Shape, in order:
-    "<reasoning>"
+    \"\"\"<reasoning>\"\"\"
     name = [await] tool_id(...)
     [await] tool_id(...)
     return <expression>
@@ -340,9 +344,7 @@ After the opening string: `name = <expression>` (`name` a bare identifier
 only, never tuple/attribute/subscript -- a call binds and counts against
 the budget, anything else is free unless it nests one); a bare, optionally
 `await`-prefixed call, when no result is needed; or `return <expression>`,
-or bare `return` (= `None`) -- ends the plan immediately as the true last
-statement (at most one; anything after is discarded, never executed, and a
-second `return` never overrides the first).
+or bare `return` (= `None`).
 
 `await` sits directly before a call, halting later statements until it
 finishes -- a pure ordering barrier, since a referenced result is already
@@ -350,25 +352,20 @@ available regardless. Use only for a side effect nothing reads but that
 must happen first; never bury it in a larger expression.
 
 Arguments follow normal Python calling rules (`/`/`*` mark positional-only/
-keyword-only). A nested call auto-splits into its own budgeted step --
-name results across a checkpoint. A ternary's branches (`X if cond else
-Y`) must not contain a call, though the condition may -- checkpoint
-instead if needed.
+keyword-only); a nested call is allowed and auto-splits into its own
+hoisted step -- never pre-name it yourself (see STRICT RULES).
 
-# CHECKPOINTS
-This grammar forbids `if`/`elif`/`else`. `# CHECKPOINT` fills that gap:
-write what's confidently known, then stop when a decision needs an unknown
-value -- never `if`; most plans need zero.
+# PAUSE
+This grammar forbids `if`/`elif`/`else`; `# PAUSE` covers that gap, and
+can never open a plan/continuation -- write real work first. End your
+plan with it if you reach a branching decision point and need to reflect
+on the work and results completed so far; most plans need zero. Anything
+you'll still need afterward must already have a name -- an unnamed value
+doesn't survive the pause.
 
-Follow it with a triple-quoted string naming what's waited on. You're
-called again with the work done, each call tagged `# Equals: <value>`,
-why it paused, an instruction to finish -- treat completed names as bound
-variables.
-
-# REJECTED DRAFTS
-If a plan fails before anything runs, you'll see it again verbatim plus
-why -- write one complete plan from scratch, never a patch or diff,
-following every rule above.
+Follow it with a triple-quoted string naming what's unknown. You're
+called again once it's known (tagged `# Equals: <value>`) -- treat it as
+a bound variable and finish the plan.
 
 # EXAMPLE
 Tools:
@@ -394,7 +391,7 @@ Round 1:
 \"\"\"The rest depends on whether a real advisory turns up.\"\"\"
 recipient = "team@example.com"
 findings = search(query="advisory")
-# CHECKPOINT
+# PAUSE
 \"\"\"Confirm findings is real.\"\"\"
 
 Round 2:

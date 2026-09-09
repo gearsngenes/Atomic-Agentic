@@ -26,9 +26,9 @@ __all__ = [
 ]
 
 # Matches a `#`-comment line whose content is (case-insensitively) the word
-# CHECKPOINT -- line-anchored so a tool argument that happens to contain the
+# PAUSE -- line-anchored so a tool argument that happens to contain the
 # text is never misread as a real marker.
-_CHECKPOINT_PATTERN = re.compile(r"^\s*#\s*CHECKPOINT\b", re.IGNORECASE | re.MULTILINE)
+_PAUSE_PATTERN = re.compile(r"^\s*#\s*PAUSE\b", re.IGNORECASE | re.MULTILINE)
 
 # Matches an optional single markdown code fence wrapping the *entire*
 # generation -- any (or no) language tag on the opening fence line
@@ -252,7 +252,7 @@ def _hoist_calls(
                 "conditional expression branches must not contain tool "
                 "calls (wastes budget evaluating the untaken branch): "
                 f"{ast.unparse(candidate)!r} -- restructure as separate "
-                "statements or a checkpoint."
+                "statements or a pause."
             )
 
     def _hoist_one_call(call_node: ast.Call, *, awaited: bool) -> ast.Name:
@@ -466,16 +466,16 @@ def parse_generation(
     raw_text: str,
 ) -> tuple[list[CodeStatement], list[str], bool, Optional[str]]:
     """
-    Parse one whole generation (a fresh plan, or a checkpoint-triggered
+    Parse one whole generation (a fresh plan, or a pause-triggered
     continuation) into a flat slot sequence, its annotation blocks, and
     whether/why a further continuation round is needed.
 
-    Checkpoint-splitting happens on raw text, before any AST parsing --
-    ``# CHECKPOINT`` is a comment, and ``ast.parse`` strips comments, so a
+    Pause-splitting happens on raw text, before any AST parsing --
+    ``# PAUSE`` is a comment, and ``ast.parse`` strips comments, so a
     marker's position can't be recovered from a parsed tree. Only the FIRST
-    marker matters: a generation has at most one meaningful checkpoint,
-    since reaching one always terminates it (mirroring how a ``return``
-    already terminates it) -- ``maxsplit=1`` produces at most two pieces,
+    marker matters: a generation has at most one meaningful pause, since
+    reaching one always terminates it (mirroring how a ``return`` already
+    terminates it) -- ``maxsplit=1`` produces at most two pieces,
     ``before``/``after``.
 
     ``before`` is parsed and dispatched statement-by-statement exactly as
@@ -488,9 +488,9 @@ def parse_generation(
     nothing real has been produced yet (``flat_slots`` still empty), in
     which case there is no confident partial work to fall back to and this
     is treated as a genuine structural error instead, feeding regen-repair.
-    The identical "nothing real yet" check applies to an explicit
-    checkpoint marker found with an empty ``before`` -- both represent the
-    same waste (a whole planning round spent for zero progress).
+    The identical "nothing real yet" check applies to an explicit pause
+    marker found with an empty ``before`` -- both represent the same waste
+    (a whole planning round spent for zero progress).
 
     A ``return`` also terminates immediately (whatever follows it in
     ``before``, if anything, is never even parsed) -- for the same reason
@@ -498,12 +498,12 @@ def parse_generation(
     execute anyway, and a second `return` must never silently overwrite the
     first.
 
-    ``after`` (present only when a checkpoint marker was found) is read
-    only to look for its own leading bare string-literal statement, which
-    becomes the continuation note; anything else in ``after`` -- a missing
-    note, a syntax error, or genuine further statements -- is discarded
-    without complaint, and ``DEFAULT_CONTINUATION_NOTE`` is used in place
-    of a missing note.
+    ``after`` (present only when a pause marker was found) is read only to
+    look for its own leading bare string-literal statement, which becomes
+    the continuation note; anything else in ``after`` -- a missing note, a
+    syntax error, or genuine further statements -- is discarded without
+    complaint, and ``DEFAULT_CONTINUATION_NOTE`` is used in place of a
+    missing note.
 
     Returns ``(flat_slots, annotations, continue_planning,
     continuation_note)``. Raises ``BlackboardParseError`` on any structural
@@ -512,7 +512,7 @@ def parse_generation(
     "nothing real yet" cases above).
     """
     text = _strip_code_fence(raw_text)
-    parts = _CHECKPOINT_PATTERN.split(text, maxsplit=1)
+    parts = _PAUSE_PATTERN.split(text, maxsplit=1)
     before = parts[0]
 
     flat_slots: list[CodeStatement] = []
@@ -554,16 +554,15 @@ def parse_generation(
                 return flat_slots, annotations, False, None
 
     if len(parts) == 1:
-        # No checkpoint marker anywhere -- completes normally (or falls off
-        # the end with an inferred `None` result if no `return` ran).
+        # No pause marker anywhere -- completes normally (or falls off the
+        # end with an inferred `None` result if no `return` ran).
         return flat_slots, annotations, False, None
 
     if not flat_slots:
         raise BlackboardParseError(
-            "a checkpoint cannot appear before any real work has been "
-            "done; write at least one real statement first, then "
-            "checkpoint only if what follows still depends on something "
-            "not yet known."
+            "a pause cannot appear before any real work has been done; "
+            "write at least one real statement first, then pause only if "
+            "what follows still depends on something not yet known."
         )
 
     continuation_note = DEFAULT_CONTINUATION_NOTE
@@ -662,10 +661,10 @@ def compile_batches(slots: list[CodeStatement]) -> list[list[CodeStatement]]:
     a forward barrier, so nothing textually after it can share that batch
     regardless of real dependency edges (this is also why a batch can never
     hold more than one awaited call: the first one already forces closure
-    before a second could ever join). There is no longer a checkpoint-driven
-    closure case: a checkpoint (or an if-cutoff) always sits at the very end
-    of ``slots`` now, since ``parse_generation`` terminates the sequence
-    there -- nothing structurally follows it to force a boundary against.
+    before a second could ever join). There is no longer a pause-driven
+    closure case: a pause (or an if-cutoff) always sits at the very end of
+    ``slots`` now, since ``parse_generation`` terminates the sequence there
+    -- nothing structurally follows it to force a boundary against.
     """
     batches: list[list[CodeStatement]] = []
     current_batch: list[CodeStatement] = []
@@ -701,9 +700,9 @@ def render_completed_as_python(
 ) -> str:
     """
     Reconstruct a Python-source-formatted snapshot of already-completed
-    slots, for a checkpoint-triggered continuation round's rendered
-    context: one line per slot, in commit order, mirroring the statement
-    that originally produced it.
+    slots, for a pause-triggered continuation round's rendered context:
+    one line per slot, in commit order, mirroring the statement that
+    originally produced it.
 
     A dispatched real tool call gets a trailing ``# Equals: <preview>``
     comment showing its resolved value -- truncated the same way
