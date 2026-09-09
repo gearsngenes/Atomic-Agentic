@@ -21,7 +21,7 @@ multiply_6_by_7 = Command(
     description="Command that multiplies 6 by 7.",
 )
 
-print(multiply_6_by_7.signature)
+print(multiply_6_by_7.fullname_signature)
 # Command.multiply_6_by_7() -> int
 
 print(multiply_6_by_7.parameters)

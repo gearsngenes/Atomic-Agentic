@@ -96,7 +96,7 @@ def show_plan(t: Tool) -> None:
     print(f"Tool       : {t.full_name}")
     print(f"Namespace  : {t.namespace}")
     print(f"Description: {t.description}")
-    print(f"Signature  : {t.signature}")
+    print(f"Signature  : {t.fullname_signature}")
     print(f"Return type: {t.return_type}")
     print("Parameters :")
     print(json.dumps(_jsonable_params(t), indent=2))

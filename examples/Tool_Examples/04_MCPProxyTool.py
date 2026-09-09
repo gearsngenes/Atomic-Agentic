@@ -73,7 +73,7 @@ def _show_plan(proxy: MCPProxyTool) -> None:
     print(f"\n-- {proxy.full_name} --")
     print("from:", proxy.namespace)
     print("description:", proxy.description)
-    print("signature:", proxy.signature)
+    print("signature:", proxy.fullname_signature)
     print("parameters:")
     for param in proxy.parameters:
         default_str = "(no default)" if param.default is NO_VAL else f"default={param.default}"
