@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ..results.agents import AgentResult
 from ..results.llm import LLMResult
+from ...utils.script import render_completed_as_python
 from .blackboard_models import CodeStatement
 
 __all__ = [
@@ -341,6 +342,21 @@ class ScriptAgentRecord(AgentRecord):
 
         # 4. normalize to a tuple, same reasoning as statements above.
         object.__setattr__(self, "annotations", tuple(self.annotations))
+
+    def render_as_code(self, preview_limit: Optional[int] = None) -> str:
+        """
+        Reconstruct this run's statements as source-formatted text, one line
+        per slot in commit order -- the same rendering ``think()`` shows a
+        continuation round as its "work completed so far" snapshot, exposed
+        here standalone for inspection/debugging. Named generically
+        ("code", not "python") since the underlying grammar isn't
+        guaranteed to stay Python-syntax-specific forever. ``preview_limit``
+        defaults to ``None`` (no truncation) -- a completed record inspected
+        on its own isn't being fed back into another LLM prompt, so there's
+        no reason to truncate by default the way a live continuation round
+        does.
+        """
+        return render_completed_as_python(self.statements, preview_limit)
 
 
 @dataclass(frozen=True, slots=True)

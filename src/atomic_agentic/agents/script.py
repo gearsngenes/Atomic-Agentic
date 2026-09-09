@@ -29,6 +29,26 @@ from ..utils.script import (
 )
 
 
+def _render_docstring_block(description: str) -> str:
+    """
+    Render ``description`` as a 4-space-indented triple-quoted docstring
+    block, shared by ``ScriptAgent.actions_context``/``constants_context``
+    so a tool's and a constant's description render identically. A
+    single-line description closes on the same line
+    (``    \"\"\"text\"\"\"``); a multi-line description continues indented
+    (blank lines left bare, matching ordinary docstring convention) with
+    the closing triple-quote on its own indented line.
+    """
+    lines = description.splitlines() or [""]
+    if len(lines) == 1:
+        return f'    """{lines[0]}"""'
+
+    continuation = "\n".join(
+        f"    {line}" if line.strip() else line for line in lines[1:]
+    )
+    return f'    """{lines[0]}\n{continuation}\n    """'
+
+
 class ScriptAgent(Agent):
     """
     Adaptive, one-shot-planning tool-invoking agent (sibling family to
@@ -249,11 +269,17 @@ class ScriptAgent(Agent):
     ) -> bool:
         """
         Register one invokable under an alias (sole effective identity) or,
-        absent one, its own ``full_name``. ``AtomicInvokable`` inputs are
-        stored as-is (never re-``toolify``'d); ``description`` is a
-        documented no-op in that case — ``alias`` alone covers the
-        "cover name" use case. Callables are normalized via
+        absent one, its own bare ``name`` — never the dotted ``full_name``,
+        which only confuses an LLM asked to copy a tool id verbatim.
+        ``AtomicInvokable`` inputs are stored as-is (never re-``toolify``'d);
+        ``description`` is a documented no-op in that case — ``alias`` alone
+        covers the "cover name" use case. Callables are normalized via
         ``toolify(namespace=self.name)``.
+
+        A bare ``name`` collision across tools from different namespaces is
+        not auto-disambiguated — it's caught by the same
+        ``name_collision_policy`` as any other duplicate effective id; give
+        one of them an explicit ``alias`` to resolve it.
 
         Returns whether the tool was newly registered (``False`` only when
         ``name_collision_policy="skip"`` hits an existing effective id).
@@ -281,7 +307,7 @@ class ScriptAgent(Agent):
             )
 
         self._validate_tool_alias(alias)
-        effective_id = alias if alias is not None else invokable.full_name
+        effective_id = alias if alias is not None else invokable.name
 
         if effective_id in self._toolbox:
             if policy == "raise":
@@ -305,10 +331,14 @@ class ScriptAgent(Agent):
         Register a mixed batch of plain invokables/callables and
         hub/client objects (``MCPClientHub``/``A2AClientHub``/
         ``PyA2AtomicClient``) in one pass. A hub/client entry expands into
-        every tool it exposes, each under its own intrinsic ``full_name`` —
-        no aliasing possible for hub-expanded entries. Whole-batch validation
-        happens before any toolbox mutation; intra-batch duplicate effective
-        ids always raise regardless of ``name_collision_policy``.
+        every tool it exposes, each under its own intrinsic bare ``name`` —
+        never the dotted ``full_name`` — and no aliasing possible for
+        hub-expanded entries. A bare-name collision among expanded entries
+        (or against an already-registered tool) is caught by the usual
+        intra-batch/``name_collision_policy`` checks below, same as any other
+        duplicate effective id. Whole-batch validation happens before any
+        toolbox mutation; intra-batch duplicate effective ids always raise
+        regardless of ``name_collision_policy``.
 
         Returns ``True`` iff every item was newly registered (only ``"skip"``
         can make this ``False``; ``"raise"``/``"replace"`` are unconditionally
@@ -354,7 +384,7 @@ class ScriptAgent(Agent):
                             f"{type(self).__name__}.{self.name}: failed to toolify "
                             f"remote {remote_name!r}: {exc}"
                         ) from exc
-                    candidates.append((proxy.full_name, proxy))
+                    candidates.append((proxy.name, proxy))
 
                 if isinstance(item, A2AClientHub):
                     try:
@@ -364,11 +394,11 @@ class ScriptAgent(Agent):
                             f"{type(self).__name__}.{self.name}: failed to toolify "
                             f"generic A2A tool: {exc}"
                         ) from exc
-                    candidates.append((generic_proxy.full_name, generic_proxy))
+                    candidates.append((generic_proxy.name, generic_proxy))
 
             elif isinstance(item, AtomicInvokable):
                 self._validate_tool_alias(item_alias)
-                effective_id = item_alias if item_alias is not None else item.full_name
+                effective_id = item_alias if item_alias is not None else item.name
                 candidates.append((effective_id, item))
 
             elif callable(item):
@@ -385,7 +415,7 @@ class ScriptAgent(Agent):
                         f"{item!r}: {exc}"
                     ) from exc
                 self._validate_tool_alias(item_alias)
-                effective_id = item_alias if item_alias is not None else invokable.full_name
+                effective_id = item_alias if item_alias is not None else invokable.name
                 candidates.append((effective_id, invokable))
 
             else:
@@ -432,7 +462,7 @@ class ScriptAgent(Agent):
         return dict(self._toolbox)
 
     def has_tool(self, tool_id: str) -> bool:
-        """Return ``True`` if ``tool_id`` (an alias or ``full_name``) is registered."""
+        """Return ``True`` if ``tool_id`` (an alias or the tool's own bare ``name``) is registered."""
         return tool_id in self._toolbox
 
     def get_tool(self, tool_id: str) -> AtomicInvokable:
@@ -687,31 +717,33 @@ class ScriptAgent(Agent):
     def actions_context(self) -> str:
         """
         Render every registered tool for prompt injection, one block per
-        tool (signature line + indented description), joined by ``"\\n---\\n"``.
-        When ``tid`` is an alias (not the tool's own ``full_name``), only the
-        leading identity token of ``tool.signature`` is swapped for the alias
-        — the ``(args) -> ReturnType`` portion renders unchanged.
+        tool (signature line + a 4-space-indented triple-quoted docstring
+        description, via ``_render_docstring_block``), joined by
+        ``"\\n---\\n"``. Every rendered id is bare, never dotted: when
+        ``tid`` is the tool's own ``name`` this is just ``tool.signature``
+        verbatim; when ``tid`` is a distinct alias, only the leading
+        identity token of ``tool.signature`` is swapped for the alias — the
+        ``(args) -> ReturnType`` portion renders unchanged.
         """
         blocks: list[str] = []
         for tid, tool in self._toolbox.items():
-            if tid == tool.full_name:
+            if tid == tool.name:
                 rendered_signature = tool.signature
             else:
-                rendered_signature = tid + tool.signature[len(tool.full_name):]
+                rendered_signature = tid + tool.signature[len(tool.name):]
 
-            indented_lines = [
-                line if not line.strip() else f"  {line}"
-                for line in tool.description.splitlines()
-            ]
-            blocks.append(f"{rendered_signature}\n" + "\n".join(indented_lines))
+            blocks.append(f"{rendered_signature}\n{_render_docstring_block(tool.description)}")
 
         return "\n---\n".join(blocks)
 
     def constants_context(self) -> str:
         """
-        Render every registered constant for prompt injection. Names print
-        exactly as stored (``K_``-prefixed) — no prefix synthesized here.
-        Empty registry renders a "no constants" message.
+        Render every registered constant for prompt injection, one block
+        per constant (a ``K_NAME: type`` annotation line + a 4-space-indented
+        triple-quoted docstring description, via ``_render_docstring_block``),
+        matching ``actions_context``'s own docstring-style rendering. Names
+        print exactly as stored (``K_``-prefixed) — no prefix synthesized
+        here. Empty registry renders a "no constants" message.
         """
         if not self._constants:
             return "No constants registered."
@@ -721,11 +753,7 @@ class ScriptAgent(Agent):
             description = (
                 spec.description if spec.description is not None else "No description provided."
             )
-            rendered.append(
-                f"- {spec.name}\n"
-                f"  Type: {spec.type}\n"
-                f"  Description: {description}"
-            )
+            rendered.append(f"{spec.name}: {spec.type}\n{_render_docstring_block(description)}")
 
         return "\n\n".join(rendered)
 
@@ -891,10 +919,18 @@ class ScriptAgent(Agent):
         try:
             flat_slots, annotations, continue_planning, continuation_note = parse_generation(raw_text)
         except BlackboardParseError as e:
+            print(f"[DEBUG] Parse error: {e}")
             return str(e)
 
         known_tools = frozenset(self._toolbox.keys())
-        known_constants = frozenset(f"K_{key}" for key in self._constants.keys())
+        # Derived from each ConstantSpec's own .name (already correctly
+        # K_-prefixed exactly once for both the auto-named and aliased
+        # registration paths -- see register_constant/register_constants),
+        # never reconstructed by re-prefixing the internal dict key itself:
+        # an auto-named key is already "K_0"-shaped, so blindly prepending
+        # "K_" again would double-prefix it ("K_K_0"), silently mismatching
+        # the name actually shown to the model via constants_context().
+        known_constants = frozenset(spec.name for spec in self._constants.values())
         # Every key already in task.cache is safe to reference by name here:
         # cross-invocation task_result_i entries (seeded in
         # _initialize_task) AND, on a continuation round, every identifier
@@ -912,7 +948,9 @@ class ScriptAgent(Agent):
             flat_slots, known_tools, known_constants, known_history, remaining_budget
         )
         if issues:
-            return "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
+            issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
+            print("[DEBUG] Validation issues:\n", issues_msg)
+            return issues_msg
 
         pending = compile_batches(flat_slots)
         return pending, annotations, continue_planning, continuation_note
@@ -1093,18 +1131,45 @@ class ScriptAgent(Agent):
         batch = task.pending[0]
         resolved: list[dict[str, Any]] = []
         issues: list[str] = []
+        # Constants are validated as known references (validate_references'
+        # known_constants) and rendered to the model (constants_context()),
+        # but their actual runtime values live only on self._constants --
+        # never in task.cache, which is scoped purely to slot-execution
+        # results and cross-invocation task_result_N history. Merge them in
+        # here, once per batch, so a correct K_NAME reference actually
+        # resolves instead of raising NameError; task.cache last so a real
+        # bound/history name would win on the (never expected) collision.
+        constant_values = {spec.name: spec.value for spec in self._constants.values()}
+        resolution_namespace = {**constant_values, **task.cache}
         for slot in batch:
+            label = slot.identifier if slot.identifier is not None else "(unassigned)"
+
             try:
-                resolved.append(resolve_slot_args(slot.args, task.cache))
+                positional, keyword = resolve_slot_args(slot, resolution_namespace)
             except Exception as e:
-                label = slot.identifier if slot.identifier is not None else "(unassigned)"
-                issues.append(f"{label}: {e!r}")
+                issues.append(f"{label}: could not resolve argument value(s): {e!r}")
+                continue
+
+            if slot.tool in (RHS_ASSIGN_ALIAS, RETURN_ALIAS):
+                resolved.append({"val": keyword["val"]})
+                continue
+
+            try:
+                tool = self.get_tool(slot.tool)
+                resolved.append(tool._args_kwargs_to_dict(*positional, **keyword))
+            except Exception as e:
+                issues.append(
+                    f"{label}: argument(s) do not match {slot.tool!r}'s "
+                    f"parameter contract: {e!r}"
+                )
 
         if issues:
+            issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
+            print("[DEBUG] prepare() resolution issues:\n", issues_msg)
             task.pending.clear()
             task.resolved_args = []
             task.continue_planning = True
-            task.continuation_note = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
+            task.continuation_note = issues_msg
             return task
 
         task.resolved_args = resolved
@@ -1188,10 +1253,12 @@ class ScriptAgent(Agent):
                 task.cache[slot.identifier] = unwrapped
 
         if failures:
+            failures_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(failures))
+            print("[DEBUG] act() execution failures:\n", failures_msg)
             task.pending.clear()
             task.resolved_args = []
             task.continue_planning = True
-            task.continuation_note = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(failures))
+            task.continuation_note = failures_msg
             return task
 
         for slot, kwargs in zip(batch, resolved):

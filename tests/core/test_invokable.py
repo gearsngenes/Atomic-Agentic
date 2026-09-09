@@ -216,7 +216,7 @@ class TestAtomicInvokableParameterContract:
             make_param("extras", 2, ParamSpec.VAR_KEYWORD),
         ])
 
-        signature = invokable.signature
+        signature = invokable.fullname_signature
 
         assert "EchoInvokable.tests.echo" in signature
         assert "x: int" in signature

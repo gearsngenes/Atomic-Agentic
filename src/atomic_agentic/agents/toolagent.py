@@ -511,7 +511,7 @@ class ToolAgent(Agent, ABC):
                 line if not line.strip() else f"  {line}"
                 for line in t.description.splitlines()
             ]
-            blocks.append(f"{t.signature}\n" + "\n".join(indented_lines))
+            blocks.append(f"{t.fullname_signature}\n" + "\n".join(indented_lines))
         return "\n---\n".join(blocks)
 
     def list_tools(self) -> dict[str, AtomicInvokable]:

@@ -7,6 +7,7 @@ from typing import Any, Optional
 from ..constants.agents import (
     DEFAULT_CONTINUATION_NOTE,
     HOISTED_NAME_PREFIX,
+    KWARGS_UNPACK_KEY,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
     TASK_RESULT_PREFIX,
@@ -67,27 +68,64 @@ def _evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:
     return eval(code, {"__builtins__": {}}, namespace)
 
 
-def resolve_slot_args(args: dict[str, Any], resolved: dict[str, Any]) -> dict[str, Any]:
+def resolve_slot_args(
+    statement: CodeStatement, resolved: dict[str, Any],
+) -> tuple[list[Any], dict[str, Any]]:
     """
-    Substitute every unresolved ``ast.expr`` value in ``args`` with its
+    Resolve one statement's ``args``/``kwargs`` into a plain
+    ``(positional, keyword)`` pair ready to splat into
+    ``tool._args_kwargs_to_dict(*positional, **keyword)`` (or, for a
+    ``rhs_assign``/``return`` sentinel, to read ``keyword["val"]``
+    directly). Substitutes every unresolved ``ast.expr`` value with its
     concrete value from ``resolved`` (identifier -> value), leaving
     already-folded raw literals untouched. Purely transient -- never
     persisted back onto a ``CodeStatement``.
 
-    Assumes every dependency in ``args`` is already present in ``resolved``;
-    does not itself check readiness (a future ``prepare()``-phase caller's
-    job, combining ``extract_identifiers`` with an
-    all-dependencies-have-results check before ever calling this). A
-    missing identifier is not defensively guarded against here -- it
-    surfaces as whatever `_evaluate_expr` naturally raises.
+    Assumes every dependency is already present in ``resolved``; does not
+    itself check readiness (a ``prepare()``-phase caller's job, combining
+    ``extract_identifiers`` with an all-dependencies-have-results check
+    before ever calling this). A missing identifier is not defensively
+    guarded against here -- it surfaces as whatever ``_evaluate_expr``
+    naturally raises.
+
+    A positional entry that is an ``ast.Starred`` (a ``*expr`` unpack) has
+    its ``.value`` resolved and the result spliced into ``positional`` via
+    ``list.extend`` -- raises naturally (``TypeError``) if the resolved
+    value isn't iterable, uncaught here, same "let it surface" precedent
+    as everything else in this function. A keyword entry stored under
+    ``KWARGS_UNPACK_KEY`` (a ``**expr`` unpack) is resolved, checked for a
+    colliding key against the already-resolved named keywords -- raising
+    ``TypeError`` on overlap, matching real Python's own runtime behavior
+    for this exact collision (CPython raises rather than silently
+    favoring one side) -- then merged in.
     """
-    output: dict[str, Any] = {}
-    for name, value in args.items():
-        if isinstance(value, ast.expr):
-            output[name] = _evaluate_expr(value, resolved)
+
+    def resolve_one(value: Any) -> Any:
+        return _evaluate_expr(value, resolved) if isinstance(value, ast.expr) else value
+
+    positional: list[Any] = []
+    for entry in statement.args:
+        if isinstance(entry, ast.Starred):
+            positional.extend(resolve_one(entry.value))
         else:
-            output[name] = value
-    return output
+            positional.append(resolve_one(entry))
+
+    keyword: dict[str, Any] = {}
+    for name, value in statement.kwargs.items():
+        if name == KWARGS_UNPACK_KEY:
+            continue
+        keyword[name] = resolve_one(value)
+
+    if KWARGS_UNPACK_KEY in statement.kwargs:
+        unpacked = resolve_one(statement.kwargs[KWARGS_UNPACK_KEY])
+        overlap = set(unpacked) & set(keyword)
+        if overlap:
+            raise TypeError(
+                f"got multiple values for keyword argument(s): {sorted(overlap)!r}"
+            )
+        keyword.update(unpacked)
+
+    return positional, keyword
 
 
 def _process_call_args(
@@ -96,41 +134,75 @@ def _process_call_args(
     counter: list[int],
     start_index: int,
     hoisted: list[CodeStatement],
-) -> dict[str, Any]:
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """
-    Build one call's final args dict: hoists any nested call found in each
-    keyword value (appending synthesized slots to ``hoisted``), then
-    eagerly constant-folds each resulting dependency-free argument. Shared
-    by both the top-level call (case A) and every recursively hoisted call.
-    """
-    if call_node.args:
-        raise BlackboardParseError(
-            "positional call arguments are not supported; use keyword arguments only."
-        )
-    for kw in call_node.keywords:
-        if kw.arg is None:
-            raise BlackboardParseError(
-                "**kwargs-style double-star unpacking in a call is not supported."
-            )
+    Build one call's final ``(args, kwargs)`` pair: hoists any nested call
+    found in each positional or keyword value (appending synthesized slots
+    to ``hoisted``), then eagerly constant-folds each resulting
+    dependency-free argument. Shared by both the top-level call (case A)
+    and every recursively hoisted call.
 
-    args: dict[str, Any] = {}
+    A positional entry that is an ``ast.Starred`` (a ``*expr`` unpack) is
+    never eagerly folded, regardless of whether its own inner expr has
+    dependencies -- its Starred-ness must survive to resolve time
+    (``resolve_slot_args``), and an already-folded plain value has no way
+    to carry that tag. A keyword entry whose ``kw.arg is None`` (a
+    ``**expr`` unpack) is stored under ``KWARGS_UNPACK_KEY`` -- at most
+    one per call; a second one raises immediately.
+    """
+    args: list[Any] = []
+    for arg_node in call_node.args:
+        if isinstance(arg_node, ast.Starred):
+            inner = _hoist_calls(
+                arg_node.value, counter=counter, start_index=start_index, hoisted=hoisted
+            )
+            args.append(ast.Starred(value=inner, ctx=ast.Load()))
+            continue
+
+        processed = _hoist_calls(
+            arg_node, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        deps = extract_identifiers(processed)
+        if not deps:
+            try:
+                args.append(_evaluate_expr(processed, {}))
+            except Exception as e:
+                raise BlackboardParseError(
+                    "positional argument is a constant expression that "
+                    f"failed to evaluate: {e!r}"
+                ) from e
+        else:
+            args.append(processed)
+
+    kwargs: dict[str, Any] = {}
+    seen_unpack = False
     for kw in call_node.keywords:
         processed_value = _hoist_calls(
             kw.value, counter=counter, start_index=start_index, hoisted=hoisted
         )
+        if kw.arg is None:
+            if seen_unpack:
+                raise BlackboardParseError(
+                    "at most one ** unpack is supported per call."
+                )
+            seen_unpack = True
+            key = KWARGS_UNPACK_KEY
+        else:
+            key = kw.arg
+
         deps = extract_identifiers(processed_value)
         if not deps:
             try:
-                args[kw.arg] = _evaluate_expr(processed_value, {})
+                kwargs[key] = _evaluate_expr(processed_value, {})
             except Exception as e:
                 raise BlackboardParseError(
-                    f"argument {kw.arg!r} is a constant expression that failed "
+                    f"argument {key!r} is a constant expression that failed "
                     f"to evaluate: {e!r}"
                 ) from e
         else:
-            args[kw.arg] = processed_value
+            kwargs[key] = processed_value
 
-    return args
+    return tuple(args), kwargs
 
 
 def _hoist_calls(
@@ -178,8 +250,9 @@ def _hoist_calls(
         ):
             raise BlackboardParseError(
                 "conditional expression branches must not contain tool "
-                "calls (wastes budget evaluating the untaken branch); "
-                "restructure as separate statements or a checkpoint."
+                "calls (wastes budget evaluating the untaken branch): "
+                f"{ast.unparse(candidate)!r} -- restructure as separate "
+                "statements or a checkpoint."
             )
 
     def _hoist_one_call(call_node: ast.Call, *, awaited: bool) -> ast.Name:
@@ -191,13 +264,17 @@ def _hoist_calls(
         counter[0] += 1
         hoisted_identifier = f"{HOISTED_NAME_PREFIX}{index}"
 
-        hoisted_args = _process_call_args(
+        hoisted_positional, hoisted_keyword = _process_call_args(
             call_node, counter=counter, start_index=start_index, hoisted=hoisted
         )
         tool_name = ast.unparse(call_node.func)
         hoisted.append(
             CodeStatement(
-                identifier=hoisted_identifier, tool=tool_name, args=hoisted_args, awaited=awaited
+                identifier=hoisted_identifier,
+                tool=tool_name,
+                args=hoisted_positional,
+                kwargs=hoisted_keyword,
+                awaited=awaited,
             )
         )
 
@@ -281,7 +358,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
         else:
             val = processed
         final_slot = CodeStatement(
-            identifier=None, tool=RETURN_ALIAS, args={"val": val}, awaited=False
+            identifier=None, tool=RETURN_ALIAS, kwargs={"val": val}, awaited=False
         )
         return [*hoisted, final_slot]
 
@@ -301,11 +378,11 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
         hoisted = []
         counter = [0]
         tool = ast.unparse(bare_rhs.func)
-        args = _process_call_args(
+        args, kwargs = _process_call_args(
             bare_rhs, counter=counter, start_index=start_index, hoisted=hoisted
         )
         final_slot = CodeStatement(
-            identifier=None, tool=tool, args=args, awaited=bare_awaited
+            identifier=None, tool=tool, args=args, kwargs=kwargs, awaited=bare_awaited
         )
         return [*hoisted, final_slot]
 
@@ -354,7 +431,9 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     if isinstance(rhs, ast.Call):
         # Case A: bare top-level call -- the only shape `awaited` stays True for.
         tool = ast.unparse(rhs.func)
-        args = _process_call_args(rhs, counter=counter, start_index=start_index, hoisted=hoisted)
+        args, kwargs = _process_call_args(
+            rhs, counter=counter, start_index=start_index, hoisted=hoisted
+        )
     else:
         # Case B: rhs_assign. Also where an `await` wrapping anything other
         # than a bare call lands -- forced False regardless of the unwrap
@@ -375,9 +454,11 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
                 ) from e
         else:
             val = processed
-        args = {"val": val}
+        args, kwargs = (), {"val": val}
 
-    final_slot = CodeStatement(identifier=identifier, tool=tool, args=args, awaited=awaited)
+    final_slot = CodeStatement(
+        identifier=identifier, tool=tool, args=args, kwargs=kwargs, awaited=awaited
+    )
     return [*hoisted, final_slot]
 
 
@@ -542,7 +623,7 @@ def validate_references(
         if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS) and slot.tool not in known_tools:
             issues.append(f"statement producing {label} calls unregistered tool {slot.tool!r}.")
 
-        for name in extract_identifiers(slot.args):
+        for name in (*extract_identifiers(slot.args), *extract_identifiers(slot.kwargs)):
             if (
                 name not in bound
                 and name not in known_tools
@@ -599,7 +680,7 @@ def compile_batches(slots: list[CodeStatement]) -> list[list[CodeStatement]]:
         current_batch_identifiers = set()
 
     for slot in slots:
-        deps = extract_identifiers(slot.args)
+        deps = (*extract_identifiers(slot.args), *extract_identifiers(slot.kwargs))
         if any(name in current_batch_identifiers for name in deps):
             close_current()
 
@@ -648,15 +729,23 @@ def render_completed_as_python(
     lines: list[str] = []
     for slot in completed:
         if slot.tool == RETURN_ALIAS:
-            lines.append(f"return {render_value(slot.args['val'])}")
+            lines.append(f"return {render_value(slot.kwargs['val'])}")
             continue
 
         prefix = f"{slot.identifier} = " if slot.identifier is not None else ""
         if slot.tool == RHS_ASSIGN_ALIAS:
-            lines.append(f"{prefix}{render_value(slot.args['val'])}")
+            lines.append(f"{prefix}{render_value(slot.kwargs['val'])}")
             continue
 
-        args_source = ", ".join(f"{k}={render_value(v)}" for k, v in slot.args.items())
+        positional_tokens = [
+            f"*{render_value(entry.value)}" if isinstance(entry, ast.Starred) else render_value(entry)
+            for entry in slot.args
+        ]
+        keyword_tokens = [
+            f"**{render_value(value)}" if name == KWARGS_UNPACK_KEY else f"{name}={render_value(value)}"
+            for name, value in slot.kwargs.items()
+        ]
+        args_source = ", ".join(positional_tokens + keyword_tokens)
         resolved_value = slot.result.result if slot.result is not None else None
         lines.append(f"{prefix}{slot.tool}({args_source})  # Equals: {preview(resolved_value)}")
 

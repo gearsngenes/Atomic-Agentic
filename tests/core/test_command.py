@@ -58,7 +58,7 @@ class TestCommandConstruction:
         assert command.return_type == "int"
         assert command.name == "add_two_and_three"
         assert command.description == "Add 2 and 3."
-        assert command.signature == "Command.tests.add_two_and_three() -> int"
+        assert command.fullname_signature == "Command.tests.add_two_and_three() -> int"
 
     def test_surfaces_executor_extra_description(self) -> None:
         tool = make_add_tool()

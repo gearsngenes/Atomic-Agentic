@@ -207,7 +207,9 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
     return deps
 
 
-def extract_identifiers(source: ast.expr | dict[str, Any]) -> list[str]:
+def extract_identifiers(
+    source: ast.expr | dict[str, Any] | tuple[Any, ...] | list[Any],
+) -> list[str]:
     """
     Walk any ``ast.Name`` reference in ``source`` and return every referenced
     identifier, deduplicated in first-seen order (not a set: multiplicity
@@ -215,15 +217,24 @@ def extract_identifiers(source: ast.expr | dict[str, Any]) -> list[str]:
     orderable contract). Used by ``ScriptAgent`` (``utils/script.py``) to
     find a statement's real dependencies from its parsed argument tree.
 
-    Accepts either a single parsed expression node, or a slot's ``args``
-    dict -- in the dict form, only values that are still unresolved
-    ``ast.expr`` nodes contribute identifiers; an already-folded raw literal
-    value contributes none.
+    Accepts a single parsed expression node, a slot's ``kwargs`` dict, or a
+    slot's ``args`` tuple/list -- in the dict/tuple/list forms, only values
+    that are still unresolved ``ast.expr`` nodes contribute identifiers; an
+    already-folded raw literal value contributes none. A ``CodeStatement``
+    with both containers calls this once per container and merges the
+    results -- this function stays single-container. An ``ast.Starred``
+    entry (a ``*expr`` unpack in ``args``) is itself an ``ast.expr``
+    subtype, so it's picked up by the plain expression branch below with no
+    special-casing: ``ast.walk`` already recurses into its ``.value``.
     """
     raw: list[str] = []
 
     if isinstance(source, dict):
         for value in source.values():
+            if isinstance(value, ast.expr):
+                raw.extend(extract_identifiers(value))
+    elif isinstance(source, (tuple, list)):
+        for value in source:
             if isinstance(value, ast.expr):
                 raw.extend(extract_identifiers(value))
     else:

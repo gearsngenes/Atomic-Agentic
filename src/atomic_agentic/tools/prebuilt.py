@@ -67,10 +67,10 @@ def power(a: float, b: float) -> float:
     """Return a raised to the power of b."""
     return a**b
 def sqrt(x: float) -> float:
-    """Return the square root of x; x must be non-negative."""
+    """Calls math.sqrt(x)"""
     return math.sqrt(x)
 def log(x: float) -> float:
-    """Return the natural logarithm of x; x must be positive."""
+    """Calls math.log(x)."""
     return math.log(x)
 
 EXPONENT_TOOLS: List[Tool] = [
@@ -84,16 +84,16 @@ def mean(nums: Sequence[float]) -> float:
     """Return the arithmetic mean of a sequence of numbers."""
     return (sum(nums) / len(nums)) if nums else 0.0
 def max_value(nums: Sequence[float]) -> float:
-    """return the maximum value in a sequence of numbers."""
+    """Return the maximum value in a sequence of numbers."""
     return max(nums)
 def min_value(nums: Sequence[float]) -> float:
-    """return the minimum value in a sequence of numbers."""
+    """Return the minimum value in a sequence of numbers."""
     return min(nums)
 
 STAT_TOOLS: List[Tool] = [
-    Tool(function=mean, name="mean", namespace="Stats"),
-    Tool(function=max_value, name="max_value", namespace="Stats"),
-    Tool(function=min_value, name="min_value", namespace="Stats"),
+    Tool(function=mean, namespace="Stats"),
+    Tool(function=max_value, namespace="Stats"),
+    Tool(function=min_value, namespace="Stats"),
 ]
 
 # Trigonometry
@@ -153,28 +153,28 @@ def acoth(x: float) -> float:
     return (1.0 / t) if t != 0 else float("inf")
 
 TRIG_TOOLS: List[Tool] = [
-    Tool(function=sin, name="sin", namespace="Trig"),
-    Tool(function=cos, name="cos", namespace="Trig"),
-    Tool(function=tan, name="tan", namespace="Trig"),
-    Tool(function=cot, name="cot", namespace="Trig"),
-    Tool(function=asin, name="asin", namespace="Trig"),
-    Tool(function=acos, name="acos", namespace="Trig"),
-    Tool(function=atan, name="atan", namespace="Trig"),
-    Tool(function=acot, name="acot", namespace="Trig"),
-    Tool(function=sinh, name="sinh", namespace="Trig"),
-    Tool(function=cosh, name="cosh", namespace="Trig"),
-    Tool(function=tanh, name="tanh", namespace="Trig"),
-    Tool(function=coth, name="coth", namespace="Trig"),
-    Tool(function=asinh, name="asinh", namespace="Trig"),
-    Tool(function=acosh, name="acosh", namespace="Trig"),
-    Tool(function=atanh, name="atanh", namespace="Trig"),
-    Tool(function=acoth, name="acoth", namespace="Trig"),
+    Tool(function=sin, namespace="Trig"),
+    Tool(function=cos, namespace="Trig"),
+    Tool(function=tan, namespace="Trig"),
+    Tool(function=cot, namespace="Trig"),
+    Tool(function=asin, namespace="Trig"),
+    Tool(function=acos, namespace="Trig"),
+    Tool(function=atan, namespace="Trig"),
+    Tool(function=acot, namespace="Trig"),
+    Tool(function=sinh, namespace="Trig"),
+    Tool(function=cosh, namespace="Trig"),
+    Tool(function=tanh, namespace="Trig"),
+    Tool(function=coth, namespace="Trig"),
+    Tool(function=asinh, namespace="Trig"),
+    Tool(function=acosh, namespace="Trig"),
+    Tool(function=atanh, namespace="Trig"),
+    Tool(function=acoth, namespace="Trig"),
 ]
 
 # ───────────────────────── Console Tools ─────────────────────────
 
 def print_tool(*objects) -> None:
-    """Print the given objects to the console."""
+    """Calls print(*objects)."""
     print(*objects)
 
 def user_input(prompt: str) -> str:
@@ -214,16 +214,16 @@ def log_trace(message: str) -> None:
     logging.log(logging.TRACE, message)
 
 CONSOLE_TOOLS: List[Tool] = [
-    Tool(function=print_tool, name="print", namespace="Console"),
-    Tool(function=user_input, name="user_input", namespace="Console"),
-    Tool(function=basic_config, name="basic_config", namespace="Console"),
-    Tool(function=log_message, name="log", namespace="Console"),
-    Tool(function=log_info, name="log_info", namespace="Console"),
-    Tool(function=log_warning, name="log_warning", namespace="Console"),
-    Tool(function=log_error, name="log_error", namespace="Console"),
-    Tool(function=log_critical, name="log_critical", namespace="Console"),
-    Tool(function=log_debug, name="log_debug", namespace="Console"),
-    Tool(function=log_trace, name="log_trace", namespace="Console"),
+    Tool(function=print_tool, namespace="Console"),
+    Tool(function=user_input, namespace="Console"),
+    Tool(function=basic_config, namespace="Console"),
+    Tool(function=log_message, namespace="Console"),
+    Tool(function=log_info, namespace="Console"),
+    Tool(function=log_warning, namespace="Console"),
+    Tool(function=log_error, namespace="Console"),
+    Tool(function=log_critical, namespace="Console"),
+    Tool(function=log_debug, namespace="Console"),
+    Tool(function=log_trace, namespace="Console"),
 ]
 
 # ───────────────────────── Parser Tools ─────────────────────────

@@ -238,7 +238,7 @@ class ScriptAgentTask(AgentTask):
     cache : dict[str, Any]
         identifier -> resolved value for every slot in ``completed``, kept
         in sync as slots complete. Shaped to be passed directly as
-        utils/script.py's ``resolve_slot_args(args, resolved)``'s
+        utils/script.py's ``resolve_slot_args(statement, resolved)``'s
         ``resolved`` argument -- an O(1) lookup instead of scanning
         ``completed``.
 

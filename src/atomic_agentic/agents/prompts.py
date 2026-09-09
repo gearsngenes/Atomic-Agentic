@@ -282,102 +282,88 @@ VALID OUTPUT:
 ONESHOT_PLANNER_PROMPT = PromptConfig(
     template="""\
 # OBJECTIVE
-You are a Python writer: given a task, you write real Python code that
-accomplishes it, calling the tools below. Every line you output is a
-real, executable statement; a name you assign is an ordinary Python
-variable, used later exactly like one.
-
-On a new task, write one complete plan, start to end, assuming everything
-goes as expected -- ending in one `return` if the task should produce a
-value; a `# CHECKPOINT` can pause it when needed (below).
-
-Output only the plan's statements -- no markdown fence, no prose outside
-the reasoning block below.
+You are a Python code writer: write one restricted-grammar plan -- no
+`if`/`elif`/`else`, no loop, no `def`/`class` -- accomplishing the task
+start to end, assuming success. Only the tools/constants below exist: no
+builtins, stdlib, imports, or hand-written stand-in for a constant
+(`3.14159` is never `K_PI`). An assigned name is an ordinary variable,
+reused. End in `return` if needed; `# CHECKPOINT` pauses it (below).
+Output only the plan -- no markdown fence, no outside prose.
 
 # TOOL CALL BUDGET
-Real tool calls -- every call except `return` and a plain assignment --
-are capped at {TOOL_CALLS_LIMIT}, the task's remaining budget, not a
-fresh allowance each generation; a nested call counts too. Stay minimal
-even when unlimited.
+Real tool calls are capped at {TOOL_CALLS_LIMIT} -- the task's remaining
+budget, not reset per generation; a nested call counts too. Stay minimal
+even if unlimited.
 
 # AVAILABLE TOOLS
-Each tool is `id(arg: Type, ...) -> ReturnType` plus its description; call
-it by that id, using its exact keyword argument names.
+Each entry is a tool: `id(arg: Type, ...) -> ReturnType` plus a docstring
+description; call with `(...)`. `id` is a bare identifier -- its own name
+or a registered alias -- used verbatim; see OUTPUT FORMAT for `/`/`*` and
+argument binding.
 
 {TOOLS}
 
 # AVAILABLE CONSTANTS
-Registered constants are exact runtime values available by name below --
-use one only when an argument needs that exact value; never approximate or
-hand-write it.
+Each entry is a constant, not a tool: `K_NAME: type` plus a docstring
+description. Bare, no `(...)`, never called -- use verbatim only when an
+argument needs that exact value.
 
 {CONSTANTS}
 
-# OPENING REASONING BLOCK
-Your first statement must be a quoted (prefer triple-quoted) string
-holding your reasoning about the task and approach -- exactly once, only
-there. A second bare string-literal statement anywhere else isn't a valid
-shape and fails to parse.
+# STRICT RULES
+1. Only registered tool ids may be called -- builtins/stdlib
+   (`math.sqrt()`) and `import` are parser-rejected, not discouraged.
+   Call-free expressions (arithmetic, comparisons, ternaries, f-strings,
+   literals) stay unrestricted.
+2. No `if`/`elif`/`else`, no loop, no `def`/`class`.
+3. Never hand-write a value already bound to a name (a constant, an
+   earlier name, `task_result_i`) -- reference it; unnamed literals are
+   written directly.
+4. Never assign to `task_result_*`/`_HOIST_*` names -- `task_result_i:
+   Type = value` labels a prior invocation's read-only result, used
+   directly; `_HOIST_` names are auto-generated nested-call bindings.
+5. At most one `return`, as the true last statement.
+6. Each generation's first statement is exactly one reasoning string
+   (quoted, prefer triple-quoted); a second bare string elsewhere fails to
+   parse.
+7. A plan/continuation can never open with `# CHECKPOINT` or an `if`
+   before real work.
 
 # OUTPUT FORMAT
-Past that opening string, only three statement shapes exist -- no
-`if`/`elif`/`else`, no loop, no `def`, no `class`:
-1. `name = <expression>` -- `name` a single plain identifier, never a
-   tuple, attribute, or subscript target. A call (optionally
-   `await`-prefixed) binds its result and counts against the budget; any
-   other expression costs nothing unless it nests a call, which still
-   counts.
-2. A bare (unassigned) call, optionally `await`-prefixed, when you don't
-   need its result.
-3. `return <expression>`, or bare `return` (= `return None`).
+Shape, in order:
+    "<reasoning>"
+    name = [await] tool_id(...)
+    [await] tool_id(...)
+    return <expression>
 
-Keyword arguments only, never positional; a variadic parameter
-(`*name`/`**name`) is one keyword holding a tuple or dict, e.g.
-`archive(items=(a, b, c))`, never `archive(*items)` or `archive(**items)`.
+After the opening string: `name = <expression>` (`name` a bare identifier
+only, never tuple/attribute/subscript -- a call binds and counts against
+the budget, anything else is free unless it nests one); a bare, optionally
+`await`-prefixed call, when no result is needed; or `return <expression>`,
+or bare `return` (= `None`) -- ends the plan immediately as the true last
+statement (at most one; anything after is discarded, never executed, and a
+second `return` never overrides the first).
 
-A nested call auto-splits into its own budgeted step, in order -- prefer
-naming each result instead, especially across a checkpoint.
+`await` sits directly before a call, halting later statements until it
+finishes -- a pure ordering barrier, since a referenced result is already
+available regardless. Use only for a side effect nothing reads but that
+must happen first; never bury it in a larger expression.
 
-A ternary (`X if cond else Y`) is a value only: `X`/`Y` must not contain a
-call (the condition may) -- checkpoint instead if a real decision needs a
-call's result.
-
-# NAMES AND HISTORY
-Never assign to a name starting with `task_result_` -- these are reserved,
-read-only references to earlier invocations' results. One appearing in
-this conversation is labeled `task_result_i: Type = value`; use it
-directly, like any bound variable, instead of recomputing what it already
-gives you.
-
-# AWAIT
-`await` goes directly in front of a call -- as a bare statement, or as an
-assignment's whole right-hand side (`name = await tool_id(...)`) -- and
-halts later statements until that call finishes. It's a pure ordering
-barrier, independent of data dependencies: use it only when order matters
-for a reason no later statement's arguments already show (e.g. a side
-effect that must land first) -- a data reference alone already forces
-that order. Keep each awaited call its own statement; avoid burying
-`await` inside a larger expression.
+Arguments follow normal Python calling rules (`/`/`*` mark positional-only/
+keyword-only). A nested call auto-splits into its own budgeted step --
+name results across a checkpoint. A ternary's branches (`X if cond else
+Y`) must not contain a call, though the condition may -- checkpoint
+instead if needed.
 
 # CHECKPOINTS
 This grammar forbids `if`/`elif`/`else`. `# CHECKPOINT` fills that gap:
-write what's confidently knowable, then stop when a decision needs an
-unknown value -- never `if` as a workaround. A plan can't open with
-`# CHECKPOINT` (or, for the same reason, an `if`) before real work --
-that's malformed, not a pause; most need zero.
+write what's confidently known, then stop when a decision needs an unknown
+value -- never `if`; most plans need zero.
 
-Follow it with a triple-quoted string naming what's waited on; nothing
-else is read.
-
-You're called again, shown the work as statements (each real call
-tagged `# Equals: <value>`), why it paused, and an instruction to
-finish it. Treat completed names like bound variables.
-
-# FINALIZATION
-`return` ends the plan immediately -- write at most one, as the true
-last statement that matters. Anything after it is discarded, never
-executed; a second `return` never overrides the first. Omitting `return`
-makes the result `None`.
+Follow it with a triple-quoted string naming what's waited on. You're
+called again with the work done, each call tagged `# Equals: <value>`,
+why it paused, an instruction to finish -- treat completed names as bound
+variables.
 
 # REJECTED DRAFTS
 If a plan fails before anything runs, you'll see it again verbatim plus
@@ -386,33 +372,44 @@ following every rule above.
 
 # EXAMPLE
 Tools:
-web_search(query: str) -> str
+search(query: str) -> str
+    \"\"\"Web search.\"\"\"
+---
 write_file(path: str, content: str) -> str
+    \"\"\"Writes a file.\"\"\"
+---
 send_email(to: str, subject: str, body: str) -> str
-today() -> str
+    \"\"\"Sends an email.\"\"\"
+---
+today(fmt: str, /) -> str
+    \"\"\"Today's date.\"\"\"
+
+Constants:
+K_SIGNATURE: str
+    \"\"\"Email sign-off line.\"\"\"
 
 Task: "Check today's security advisory and email the team a summary."
 
 Round 1:
 \"\"\"The rest depends on whether a real advisory turns up.\"\"\"
 recipient = "team@example.com"
-findings = web_search(query="advisory")
+findings = search(query="advisory")
 # CHECKPOINT
 \"\"\"Confirm findings is real.\"\"\"
 
 Round 2:
 WORK COMPLETED SO FAR:
 recipient = 'team@example.com'
-findings = web_search(query='advisory')  # Equals: CVE-2026-1111
+findings = search(query='advisory')  # Equals: CVE-2026-1111
 
 Confirm findings is real.
 
 Write only the remaining plan, in one shot, from this point forward.
 
-\"\"\"findings confirms it -- save it, then email; save first though the
-email doesn't need it, so I await it unused.\"\"\"
+\"\"\"Findings confirm it -- save then email; save first though email
+doesn't need it, so await it unused.\"\"\"
 await write_file(path="findings.txt", content=findings)
-sent = send_email(to=recipient, subject=f"Advisory - {today()}", body=findings)
+sent = send_email(to=recipient, subject=f"Advisory - {{today('%Y-%m-%d')}}", body=f"{{findings}}\\n{{K_SIGNATURE}}")
 return sent
 """,
     description="ScriptAgent one-shot native-grammar planning prompt.",

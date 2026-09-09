@@ -291,23 +291,110 @@ class AtomicInvokable(ABC):
     def signature(self) -> str:
         """
         Returns a signature like:
+            name(a: T, b: T, /, c: T, d: T = 1, *args: T, e: T, f: T = 2, **kwargs: T) -> return_type
 
-            ClassName.name(param1: Type, param2: Type = default) -> return_type
+        Mirrors ``inspect.Signature.__str__``'s own convention: a bare
+        ``/`` marks the end of a run of POSITIONAL_ONLY parameters (only
+        when at least one preceded it), and a bare ``*`` marks the start
+        of KEYWORD_ONLY parameters -- but only when no VAR_POSITIONAL
+        (``*name``) already opened keyword-only territory, since a second
+        bare ``*`` right after it would be redundant/invalid.
         """
         params = []
+        emitted_positional_only = False
+        seen_var_positional = False
+        emitted_keyword_only_marker = False
+
         for spec in self._parameters:
             ptype = " | ".join(spec.type)
             default_marker = ""
             if spec.default is not NO_VAL:
                 default_marker = f" = {spec.default!r}"
-            
+
+            if spec.kind == ParamSpec.POSITIONAL_ONLY:
+                emitted_positional_only = True
+            elif emitted_positional_only:
+                params.append("/")
+                emitted_positional_only = False
+
+            if (
+                spec.kind == ParamSpec.KEYWORD_ONLY
+                and not seen_var_positional
+                and not emitted_keyword_only_marker
+            ):
+                params.append("*")
+                emitted_keyword_only_marker = True
+
             if spec.kind == ParamSpec.VAR_POSITIONAL:
+                seen_var_positional = True
                 params.append(f"*{spec.name}: {ptype}{default_marker}")
             elif spec.kind == ParamSpec.VAR_KEYWORD:
                 params.append(f"**{spec.name}: {ptype}{default_marker}")
             else:
                 params.append(f"{spec.name}: {ptype}{default_marker}")
-        
+
+        if emitted_positional_only:
+            # Every parameter was POSITIONAL_ONLY -- the closing "/" never
+            # got emitted inside the loop above (it only fires on the
+            # *next* differently-kinded parameter), so emit it here.
+            params.append("/")
+
+        params_str = ", ".join(params)
+        return f"{self.name}({params_str}) -> {self.return_type}"
+
+    @property
+    def fullname_signature(self) -> str:
+        """
+        Returns a signature like:
+
+            ClassName.name(a: T, b: T, /, c: T, d: T = 1, *args: T, e: T, f: T = 2, **kwargs: T) -> return_type
+
+        Mirrors ``inspect.Signature.__str__``'s own convention: a bare
+        ``/`` marks the end of a run of POSITIONAL_ONLY parameters (only
+        when at least one preceded it), and a bare ``*`` marks the start
+        of KEYWORD_ONLY parameters -- but only when no VAR_POSITIONAL
+        (``*name``) already opened keyword-only territory, since a second
+        bare ``*`` right after it would be redundant/invalid.
+        """
+        params = []
+        emitted_positional_only = False
+        seen_var_positional = False
+        emitted_keyword_only_marker = False
+
+        for spec in self._parameters:
+            ptype = " | ".join(spec.type)
+            default_marker = ""
+            if spec.default is not NO_VAL:
+                default_marker = f" = {spec.default!r}"
+
+            if spec.kind == ParamSpec.POSITIONAL_ONLY:
+                emitted_positional_only = True
+            elif emitted_positional_only:
+                params.append("/")
+                emitted_positional_only = False
+
+            if (
+                spec.kind == ParamSpec.KEYWORD_ONLY
+                and not seen_var_positional
+                and not emitted_keyword_only_marker
+            ):
+                params.append("*")
+                emitted_keyword_only_marker = True
+
+            if spec.kind == ParamSpec.VAR_POSITIONAL:
+                seen_var_positional = True
+                params.append(f"*{spec.name}: {ptype}{default_marker}")
+            elif spec.kind == ParamSpec.VAR_KEYWORD:
+                params.append(f"**{spec.name}: {ptype}{default_marker}")
+            else:
+                params.append(f"{spec.name}: {ptype}{default_marker}")
+
+        if emitted_positional_only:
+            # Every parameter was POSITIONAL_ONLY -- the closing "/" never
+            # got emitted inside the loop above (it only fires on the
+            # *next* differently-kinded parameter), so emit it here.
+            params.append("/")
+
         params_str = ", ".join(params)
         return f"{self.full_name}({params_str}) -> {self.return_type}"
 

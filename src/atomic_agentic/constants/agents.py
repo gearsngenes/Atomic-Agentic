@@ -192,6 +192,11 @@ HOISTED_NAME_PREFIX = "_HOIST_"
 RETURN_ALIAS = "return"
 TASK_RESULT_PREFIX = "task_result_"
 
+# Reserved CodeStatement.kwargs key marking a `**expr` unpack in a real call.
+# "**" is never a valid Python identifier, so it can never collide with a
+# real keyword argument name -- no validation needed to guarantee this.
+KWARGS_UNPACK_KEY = "**"
+
 # Fallback continuation-note text (agents/script.py's checkpoint-triggered
 # reactive continuation): used only when an explicit `# CHECKPOINT` marker is
 # not followed by a triple-quoted explanation -- never used for a
@@ -217,6 +222,7 @@ __all__ = [
     "HOISTED_NAME_PREFIX",
     "RETURN_ALIAS",
     "TASK_RESULT_PREFIX",
+    "KWARGS_UNPACK_KEY",
     "DEFAULT_CONTINUATION_NOTE",
     # LLM step fields
     "STEP_FIELD",

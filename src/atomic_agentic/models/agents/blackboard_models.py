@@ -389,10 +389,24 @@ class CodeStatement:
         tools-used/tool-call budget accounting (enforced by a future,
         out-of-scope caller).
 
-    args : dict[str, Any]
-        Keyword arguments (real tool call) or ``{"val": <expr>}``
-        (``rhs_assign``). Each value is either an already-resolved Python
-        literal or an unresolved ``ast.expr`` node -- see class docstring.
+    args : tuple[Any, ...]
+        Positional call arguments, in source order. Each entry is a plain
+        resolved literal, a pending ``ast.expr`` (an ordinary
+        dependency-bearing positional value), or a pending ``ast.Starred``
+        (a ``*expr`` unpack -- never eagerly constant-folded regardless of
+        whether its own inner expr has dependencies, so its Starred-ness
+        survives to resolve time). Empty for a keyword-only call, or for
+        the ``rhs_assign``/``return`` sentinel shape (which lives entirely
+        in ``kwargs``).
+
+    kwargs : dict[str, Any]
+        Keyword call arguments (real tool call), or ``{"val": <expr>}``
+        (``rhs_assign``/``return``). Each value is either an
+        already-resolved Python literal or an unresolved ``ast.expr`` node
+        -- see class docstring. A ``**expr`` unpack is stored under the
+        reserved key ``constants.agents.KWARGS_UNPACK_KEY`` (``"**"``,
+        never a valid Python identifier, so it never collides with a real
+        parameter name) -- at most one per statement.
 
     awaited : bool
         True iff this statement's RHS was ``await <call>`` before hoisting
@@ -413,7 +427,8 @@ class CodeStatement:
 
     identifier: Optional[str]
     tool: str
-    args: dict[str, Any]
+    args: tuple[Any, ...] = ()
+    kwargs: dict[str, Any] = field(default_factory=dict)
     awaited: bool = False
     result: AtomicResult | None = None
     exception: Exception | None = None
@@ -437,20 +452,29 @@ class CodeStatement:
                 f"CodeStatement.tool must be a non-empty string; got {self.tool!r}."
             )
 
-        # 3. args must be a dict.
-        if not isinstance(self.args, dict):
+        # 3. args must be a tuple or list (no per-element validation --
+        # values may be literally anything, including raw ast nodes).
+        # Normalized to a tuple below.
+        if isinstance(self.args, (str, bytes)) or not isinstance(self.args, (tuple, list)):
             raise TypeError(
-                f"CodeStatement.args must be a dict; got {type(self.args).__name__!r}."
+                f"CodeStatement.args must be a tuple or list; got {type(self.args).__name__!r}."
+            )
+        self.args = tuple(self.args)
+
+        # 4. kwargs must be a dict.
+        if not isinstance(self.kwargs, dict):
+            raise TypeError(
+                f"CodeStatement.kwargs must be a dict; got {type(self.kwargs).__name__!r}."
             )
 
-        # 4. awaited must be exactly a bool (bool is an int subclass; guard
+        # 5. awaited must be exactly a bool (bool is an int subclass; guard
         # against e.g. 0/1 silently passing an isinstance check).
         if type(self.awaited) is not bool:
             raise TypeError(
                 f"CodeStatement.awaited must be a bool; got {type(self.awaited).__name__!r}."
             )
 
-        # 5. result/exception are set internally by future, not-yet-built
+        # 6. result/exception are set internally by future, not-yet-built
         # lifecycle code, not derived from external/LLM input -- not
         # defensively validated here, per 01-overview.md Section 4's
         # boundary-only-validation rule.
