@@ -172,6 +172,39 @@ tailored thinking instructions, WHILE ABIDING by the rules above.
 THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n"
 
 
+# =============================================================================
+# ScriptAgent code-statement reserved literals
+# =============================================================================
+# Used by:
+# - models/agents/blackboard_models.py: CodeStatement.tool default alias
+# - utils/script.py: parse_statement_to_slots hoisting/rhs_assign/return/
+#   task-result-reference logic
+# - agents/script.py: render_turn/_initialize_task cross-invocation result
+#   addressing (TASK_RESULT_PREFIX)
+#
+# Reserved namespaces: RHS_ASSIGN_ALIAS/RETURN_ALIAS can never be real
+# registered tool aliases; HOISTED_NAME_PREFIX/TASK_RESULT_PREFIX can never
+# be a model-chosen identifier. Enforcement points live outside this file's
+# scope.
+
+RHS_ASSIGN_ALIAS = "rhs_assign"
+HOISTED_NAME_PREFIX = "_HOIST_"
+RETURN_ALIAS = "return"
+TASK_RESULT_PREFIX = "task_result_"
+
+# Fallback continuation-note text (agents/script.py's checkpoint-triggered
+# reactive continuation): used only when an explicit `# CHECKPOINT` marker is
+# not followed by a triple-quoted explanation -- never used for a
+# resolution/execution failure, which always surfaces its own real, dynamic
+# reason instead of this generic text.
+DEFAULT_CONTINUATION_NOTE = (
+    "It was deemed necessary to pause code writing and execution to "
+    "accurately determine the next steps for completing the task. Review "
+    "the work completed so far and continue writing code based on what "
+    "you can now reason."
+)
+
+
 __all__ = [
     # Conversation storage
     "DEFAULT_CONVERSATION_NAME",
@@ -179,6 +212,12 @@ __all__ = [
     "TRAILING_FORK_INDEX_PATTERN",
     # Framework-reserved parameters
     "RUN_ID_PARAM",
+    # ScriptAgent code-statement reserved literals
+    "RHS_ASSIGN_ALIAS",
+    "HOISTED_NAME_PREFIX",
+    "RETURN_ALIAS",
+    "TASK_RESULT_PREFIX",
+    "DEFAULT_CONTINUATION_NOTE",
     # LLM step fields
     "STEP_FIELD",
     "TOOL_FIELD",

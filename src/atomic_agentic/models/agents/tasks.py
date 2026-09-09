@@ -4,15 +4,14 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ...constants.core import NO_VAL
-from .blackboard_models import BlackboardSlot
+from .blackboard_models import BlackboardSlot, CodeStatement
 from .records import AgentRecord, LLMRecord
 from .thought_models import AgentThought
-from .toolagent2_models import BlackboardSlotV2
 
 __all__ = [
     "AgentTask",
     "ToolAgentTask",
-    "ToolAgentTaskV2",
+    "ScriptAgentTask",
     "PlanActTask",
     "ReActTask",
     "ReActStepMeta",
@@ -172,10 +171,10 @@ class ToolAgentTask(AgentTask):
 
 
 @dataclass(slots=True)
-class ToolAgentTaskV2(AgentTask):
+class ScriptAgentTask(AgentTask):
     """
-    ToolAgent2-flavored task -- a sibling to ToolAgentTask, not a subclass
-    (ToolAgent2 is a new agent family, not a ToolAgent subclass, per this
+    ScriptAgent-flavored task -- a sibling to ToolAgentTask, not a subclass
+    (ScriptAgent is a new agent family, not a ToolAgent subclass, per this
     branch's established convention).
 
     No __post_init__ -- matches AgentTask's own family-wide convention of
@@ -184,14 +183,14 @@ class ToolAgentTaskV2(AgentTask):
 
     Fields
     ------
-    completed : list[BlackboardSlotV2]
+    completed : list[CodeStatement]
         Every terminal slot (executed successfully or failed) produced so
         far this run, in commit order. Purely historical -- nothing here is
         ever mutated once a slot lands in this list. Becomes
-        ToolAgentRecordV2.blackboard verbatim (normalized to a tuple) at
+        ScriptAgentRecord.statements verbatim (normalized to a tuple) at
         commit time.
 
-    pending : list[list[BlackboardSlotV2]]
+    pending : list[list[CodeStatement]]
         Every not-yet-executed dependency batch compiled so far for the
         current plan -- not scoped to just the next checkpoint. The whole
         one-shot draft (or, after a replan, the whole freshly regenerated
@@ -239,14 +238,14 @@ class ToolAgentTaskV2(AgentTask):
     cache : dict[str, Any]
         identifier -> resolved value for every slot in ``completed``, kept
         in sync as slots complete. Shaped to be passed directly as
-        utils/toolagent2.py's ``resolve_slot_args(args, resolved)``'s
+        utils/script.py's ``resolve_slot_args(args, resolved)``'s
         ``resolved`` argument -- an O(1) lookup instead of scanning
         ``completed``.
 
     annotations : list[str]
         Every triple-quoted reasoning block the model wrote this run (the
         initial block plus one per replan round that included one). Becomes
-        ToolAgentRecordV2.annotations verbatim (normalized to a tuple) at
+        ScriptAgentRecord.annotations verbatim (normalized to a tuple) at
         commit time.
 
     retries_used : int
@@ -264,8 +263,8 @@ class ToolAgentTaskV2(AgentTask):
         (or by ``prepare()``'s empty-``pending`` guard). Empty whenever
         there is nothing currently prepared to execute.
     """
-    completed: list[BlackboardSlotV2] = field(default_factory=list)
-    pending: list[list[BlackboardSlotV2]] = field(default_factory=list)
+    completed: list[CodeStatement] = field(default_factory=list)
+    pending: list[list[CodeStatement]] = field(default_factory=list)
     cache: dict[str, Any] = field(default_factory=dict)
     annotations: list[str] = field(default_factory=list)
     retries_used: int = 0

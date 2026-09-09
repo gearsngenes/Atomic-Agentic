@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Literal, Optional
+from dataclasses import replace
+from typing import Any, Callable, ClassVar, Literal, Optional
 
 from ..mcp.MCPClientHub import MCPClientHub
 from ..a2a.A2AClientHub import A2AClientHub
@@ -12,15 +13,14 @@ from .prompts import ONESHOT_PLANNER_PROMPT
 from ..core.Invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..tools.Toolify import toolify
-from ..models.agents.blackboard_models import ConstantSpec
-from ..models.agents.records import AgentRecord, LLMRecord, ToolAgentRecordV2
-from ..models.agents.tasks import ToolAgentTaskV2
-from ..models.agents.toolagent2_models import BlackboardSlotV2
+from ..models.agents.blackboard_models import CodeStatement, ConstantSpec
+from ..models.agents.records import AgentRecord, LLMRecord, ScriptAgentRecord
+from ..models.agents.tasks import ScriptAgentTask
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
-from ..constants.toolagent2 import RETURN_ALIAS, RHS_ASSIGN_ALIAS
+from ..constants.agents import RETURN_ALIAS, RHS_ASSIGN_ALIAS
 from ..exceptions import BlackboardParseError, ToolAgentError, ToolRegistrationError
 from ..utils.core import run_coro_sync
-from ..utils.toolagent2 import (
+from ..utils.script import (
     compile_batches,
     parse_generation,
     render_completed_as_python,
@@ -28,11 +28,8 @@ from ..utils.toolagent2 import (
     validate_references,
 )
 
-_HubClient = MCPClientHub | A2AClientHub | PyA2AtomicClient
-_COLLISION_POLICIES = ("raise", "skip", "replace")
 
-
-class ToolAgent2(Agent):
+class ScriptAgent(Agent):
     """
     Adaptive, one-shot-planning tool-invoking agent (sibling family to
     ``ToolAgent``, not a subclass). Writes native-grammar, Python-style
@@ -69,6 +66,9 @@ class ToolAgent2(Agent):
     name.
     """
 
+    _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
+    _CONSTANT_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace", "suffix")
+
     def __init__(
         self,
         name: str,
@@ -86,13 +86,19 @@ class ToolAgent2(Agent):
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
         assistant_response_source: Literal["raw", "final"] = "raw",
+        tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
+        constants: Optional[list[Any]] = None,
+        constant_aliases: Optional[list[Optional[str]]] = None,
+        constant_descriptions: Optional[list[Optional[str]]] = None,
     ) -> None:
         """
         Validate/store ``generation_retries``, then ``tool_calls_limit``/
         ``planning_rounds_limit`` together (at most one may be ``None``),
-        then initialize empty toolbox/constants storage. ``extra_parameters``
-        is never forwarded to ``super().__init__`` — matches
-        ``ToolAgent.__init__``'s own precedent.
+        then initialize empty toolbox/constants storage and register any
+        construction-time ``tools``/``constants`` by delegating to
+        ``register_tools``/``register_constants`` -- no validation duplicated
+        here. ``extra_parameters`` is never forwarded to ``super().__init__``
+        — matches ``ToolAgent.__init__``'s own precedent.
         """
         super().__init__(
             name=name,
@@ -131,8 +137,16 @@ class ToolAgent2(Agent):
 
         self._toolbox: dict[str, AtomicInvokable] = {}
         self._constants: dict[str, ConstantSpec] = {}
+        self._constant_counter: int = 0
 
         self._system_prompts["planner"] = ONESHOT_PLANNER_PROMPT
+
+        if tools is not None:
+            self.register_tools(tools)
+        if constants is not None:
+            self.register_constants(
+                constants, aliases=constant_aliases, descriptions=constant_descriptions
+            )
 
     # ------------------------------------------------------------------ #
     # Construction-time / mutable knobs
@@ -195,11 +209,16 @@ class ToolAgent2(Agent):
     # Shared helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _normalize_collision_policy(name_collision_policy: str) -> str:
+    def _normalize_collision_policy(name_collision_policy: str, allowed: tuple[str, ...]) -> str:
+        """Takes an explicit ``allowed`` set -- tool call sites pass
+        ``self._TOOL_COLLISION_POLICIES``, constant call sites pass
+        ``self._CONSTANT_COLLISION_POLICIES`` (constants alone support the
+        extra ``"suffix"`` mode)."""
         policy = name_collision_policy.lower().strip()
-        if policy not in _COLLISION_POLICIES:
+        if policy not in allowed:
             raise ToolRegistrationError(
-                "name_collision_policy must be one of: 'raise', 'skip', 'replace'."
+                f"name_collision_policy must be one of: "
+                f"{', '.join(repr(p) for p in allowed)}."
             )
         return policy
 
@@ -239,7 +258,7 @@ class ToolAgent2(Agent):
         Returns whether the tool was newly registered (``False`` only when
         ``name_collision_policy="skip"`` hits an existing effective id).
         """
-        policy = self._normalize_collision_policy(name_collision_policy)
+        policy = self._normalize_collision_policy(name_collision_policy, self._TOOL_COLLISION_POLICIES)
 
         if isinstance(tool, AtomicInvokable):
             invokable = tool
@@ -277,7 +296,7 @@ class ToolAgent2(Agent):
 
     def register_tools(
         self,
-        tools: list[AtomicInvokable | Callable | _HubClient],
+        tools: list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient],
         aliases: Optional[list[Optional[str]]] = None,
         *,
         name_collision_policy: Literal["raise", "skip", "replace"] = "raise",
@@ -295,7 +314,7 @@ class ToolAgent2(Agent):
         can make this ``False``; ``"raise"``/``"replace"`` are unconditionally
         ``True`` once the call doesn't raise).
         """
-        policy = self._normalize_collision_policy(name_collision_policy)
+        policy = self._normalize_collision_policy(name_collision_policy, self._TOOL_COLLISION_POLICIES)
 
         if aliases is not None and len(aliases) != len(tools):
             raise ValueError(
@@ -441,31 +460,50 @@ class ToolAgent2(Agent):
     def register_constant(
         self,
         constant: Any,
-        alias: str,
+        alias: Optional[str] = None,
         description: Optional[str] = None,
         *,
-        name_collision_policy: Literal["raise", "skip", "replace"] = "raise",
+        name_collision_policy: Literal["raise", "skip", "replace", "suffix"] = "raise",
     ) -> bool:
         """
-        Register one named runtime constant. ``alias`` is required (a raw
-        value has no intrinsic identity to fall back to); it is stored under
-        ``alias.upper()`` (no ``K_`` prefix — the dict key stays search-
-        friendly), while the wire-facing ``ConstantSpec.name`` is
-        unconditionally ``f"K_{alias.upper()}"``.
+        Register one named runtime constant. ``alias`` is optional: given,
+        stored under ``alias.upper()`` (wire-facing ``ConstantSpec.name`` is
+        ``f"K_{alias.upper()}"``), exactly as before; omitted, auto-named
+        from ``self._constant_counter`` (``f"K_{counter}"`` -- both the dict
+        key and ``ConstantSpec.name`` are this same string, then the counter
+        increments). The counter never decrements, so a retired auto-name is
+        never reissued.
 
-        Returns whether the constant was newly registered (``False`` only
-        when ``name_collision_policy="skip"`` hits an existing key).
+        ``description``, when omitted or blank/whitespace-only, stores the
+        literal string ``"No details"`` -- never ``None``.
+
+        ``name_collision_policy`` gains a fourth value, ``"suffix"``: on
+        collision, retries ``f"{key}_0"``, ``f"{key}_1"``, ... until an
+        unused key is found, and registers under that key instead of
+        raising/skipping.
+
+        Returns whether the constant was newly registered under its
+        originally intended key (``False`` only when
+        ``name_collision_policy="skip"`` hits an existing key; ``"suffix"``
+        always returns ``True``, since it renames instead of skipping).
         """
-        policy = self._normalize_collision_policy(name_collision_policy)
+        policy = self._normalize_collision_policy(name_collision_policy, self._CONSTANT_COLLISION_POLICIES)
 
-        if not isinstance(alias, str) or not alias.strip():
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: alias must be a non-empty string; "
-                f"got {alias!r}."
-            )
+        if alias is None:
+            key = f"K_{self._constant_counter}"
+            self._constant_counter += 1
+            name = key
+        else:
+            if not isinstance(alias, str) or not alias.strip():
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: alias must be None or a "
+                    f"non-empty string; got {alias!r}."
+                )
+            key = alias.upper()
+            name = f"K_{key}"
 
-        key = alias.upper()
-        spec = ConstantSpec(name=f"K_{key}", value=constant, description=description)
+        normalized_description = description.strip() if isinstance(description, str) else None
+        effective_description = normalized_description if normalized_description else "No details"
 
         if key in self._constants:
             if policy == "raise":
@@ -475,54 +513,106 @@ class ToolAgent2(Agent):
                 )
             if policy == "skip":
                 return False
+            if policy == "suffix":
+                i = 0
+                candidate = f"{key}_{i}"
+                while candidate in self._constants:
+                    i += 1
+                    candidate = f"{key}_{i}"
+                key = candidate
+                name = f"K_{key}"
             # "replace" falls through to the unconditional overwrite below.
 
-        self._constants[key] = spec
+        self._constants[key] = ConstantSpec(name=name, value=constant, description=effective_description)
         return True
 
     def register_constants(
         self,
         constants: list[Any],
-        aliases: list[str],
+        aliases: Optional[list[Optional[str]]] = None,
+        descriptions: Optional[list[Optional[str]]] = None,
         *,
-        name_collision_policy: Literal["raise", "skip", "replace"] = "raise",
+        name_collision_policy: Literal["raise", "skip", "replace", "suffix"] = "raise",
     ) -> bool:
         """
-        Register a batch of constants; ``aliases`` is required and must match
-        ``constants`` in length. Whole-batch validation before any mutation;
-        intra-batch duplicate ``alias.upper()`` keys always raise regardless
-        of ``name_collision_policy``.
+        Register a batch of constants. ``aliases``/``descriptions`` are
+        optional and positionally aligned with ``constants`` -- an omitted
+        list, or an individual ``None`` entry, means "auto-name"/"default
+        description" for that position, exactly mirroring
+        ``register_constant``'s single-item behavior. Whole-batch length
+        validation before any mutation.
 
-        Returns ``True`` iff every item was newly registered.
+        Under ``name_collision_policy="suffix"``, the existing "intra-batch
+        duplicates always raise" rule is bypassed: a colliding key (whether
+        against another entry in this same batch or against the existing
+        registry) is resolved by the same ``f"{key}_i"`` retry used by
+        ``register_constant``, rather than raising. The other three policies
+        keep the unconditional intra-batch raise.
+
+        Returns ``True`` iff every item was newly registered under its
+        originally intended key (only ``"skip"`` can make this ``False``).
         """
-        policy = self._normalize_collision_policy(name_collision_policy)
+        policy = self._normalize_collision_policy(name_collision_policy, self._CONSTANT_COLLISION_POLICIES)
 
-        if len(aliases) != len(constants):
+        if aliases is not None and len(aliases) != len(constants):
             raise ValueError(
                 f"{type(self).__name__}.{self.name}: aliases must be the same "
                 f"length as constants; got {len(aliases)} vs {len(constants)}."
             )
+        if descriptions is not None and len(descriptions) != len(constants):
+            raise ValueError(
+                f"{type(self).__name__}.{self.name}: descriptions must be the same "
+                f"length as constants; got {len(descriptions)} vs {len(constants)}."
+            )
 
         candidates: dict[str, ConstantSpec] = {}
-        for value, alias in zip(constants, aliases):
-            if not isinstance(alias, str) or not alias.strip():
-                raise ToolAgentError(
-                    f"{type(self).__name__}.{self.name}: alias must be a non-empty "
-                    f"string; got {alias!r}."
-                )
+        for index, value in enumerate(constants):
+            alias = aliases[index] if aliases is not None else None
+            raw_description = descriptions[index] if descriptions is not None else None
+            normalized_description = raw_description.strip() if isinstance(raw_description, str) else None
+            effective_description = normalized_description if normalized_description else "No details"
 
-            key = alias.upper()
-            if key in candidates:
+            if alias is None:
+                key = f"K_{self._constant_counter}"
+                self._constant_counter += 1
+                name = key
+            else:
+                if not isinstance(alias, str) or not alias.strip():
+                    raise ToolAgentError(
+                        f"{type(self).__name__}.{self.name}: alias must be None or "
+                        f"a non-empty string; got {alias!r}."
+                    )
+                key = alias.upper()
+                name = f"K_{key}"
+
+            # Intra-batch dedup: "suffix" resolves it below instead of
+            # raising; the other three policies keep the unconditional raise.
+            if key in candidates and policy != "suffix":
                 raise ToolAgentError(
                     f"{type(self).__name__}.{self.name}: duplicate constant name in "
                     f"batch: {key!r}."
                 )
-            candidates[key] = ConstantSpec(name=f"K_{key}", value=value)
 
+            # "suffix" resolves either collision source (intra-batch or
+            # pre-existing registry) uniformly, right here -- this entry is
+            # guaranteed collision-free before it ever reaches `candidates`.
+            if policy == "suffix" and (key in candidates or key in self._constants):
+                i = 0
+                candidate_key = f"{key}_{i}"
+                while candidate_key in candidates or candidate_key in self._constants:
+                    i += 1
+                    candidate_key = f"{key}_{i}"
+                key = candidate_key
+                name = f"K_{key}"
+
+            candidates[key] = ConstantSpec(name=name, value=value, description=effective_description)
+
+        # Cross-check against the existing registry per policy. "suffix"
+        # entries never trigger anything here -- already resolved above.
         any_skipped = False
         vetted: dict[str, ConstantSpec] = {}
         for key, spec in candidates.items():
-            if key in self._constants:
+            if key in self._constants and policy != "suffix":
                 if policy == "raise":
                     raise ToolAgentError(
                         f"{type(self).__name__}.{self.name}: constant already "
@@ -563,6 +653,29 @@ class ToolAgent2(Agent):
         """Remove the constant registered under ``alias`` (case-insensitive).
         Returns whether it was present."""
         return self._constants.pop(alias.upper(), None) is not None
+
+    def update_constant_description(self, alias: str, description: str) -> None:
+        """
+        Replace only the ``description`` of an already-registered constant
+        -- ``.name``/``.value`` are never touched. Looked up the same way
+        ``get_constant`` resolves ``alias`` (``alias.upper()``; works for a
+        user-given alias or a literal auto-generated ``K_i`` key).
+        ``description`` must be a real, non-empty string once stripped --
+        there is no reset-to-default (``None``) path.
+
+        Raises ``ToolAgentError`` if no constant is registered under
+        ``alias``, or if ``description`` is not a non-empty string.
+        """
+        key = alias.upper()
+        spec = self._constants.get(key)
+        if spec is None:
+            raise ToolAgentError(f"{type(self).__name__}.{self.name}: unknown constant {alias!r}.")
+        if not isinstance(description, str) or not description.strip():
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: description must be a "
+                f"non-empty string; got {description!r}."
+            )
+        self._constants[key] = replace(spec, description=description.strip())
 
     def clear_constants(self) -> None:
         """Remove every registered constant."""
@@ -621,24 +734,24 @@ class ToolAgent2(Agent):
     # ------------------------------------------------------------------ #
     def _build_record_from_task(
         self,
-        task: ToolAgentTaskV2,
+        task: ScriptAgentTask,
         turns: list[AgentRecord],
-    ) -> ToolAgentRecordV2:
+    ) -> ScriptAgentRecord:
         """
-        Assemble a completed ``ToolAgentRecordV2`` from a finished
-        ``ToolAgentTaskV2``. No agent-level global blackboard to persist
+        Assemble a completed ``ScriptAgentRecord`` from a finished
+        ``ScriptAgentTask``. No agent-level global blackboard to persist
         into (unlike v1 ``ToolAgent``'s span-tracking
         ``update_blackboard`` append) -- each record owns its own slots
         outright, so this is a direct field copy.
         """
         prev = turns[-1] if turns else None
-        return ToolAgentRecordV2(
+        return ScriptAgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
             inputs=task.inputs,
             llm_records=tuple(task.llm_records),
             prev=prev,
-            blackboard=tuple(task.completed),
+            statements=tuple(task.completed),
             annotations=tuple(task.annotations),
         )
 
@@ -682,8 +795,8 @@ class ToolAgent2(Agent):
         turns: list[AgentRecord],
         prompt: str,
         inputs: dict,
-    ) -> ToolAgentTaskV2:
-        """Return a ``ToolAgentTaskV2`` with the planner system prompt
+    ) -> ScriptAgentTask:
+        """Return a ``ScriptAgentTask`` with the planner system prompt
         active, its ``cache`` pre-seeded with every visible prior turn's
         result under ``task_result_{i}`` -- unconditional over whatever
         ``turns`` contains (empty when there's nothing to seed; already
@@ -692,14 +805,14 @@ class ToolAgent2(Agent):
         pending/annotations/resolved_args/continue_planning/
         planning_rounds_used/tool_calls_used/continuation_note all start at
         their dataclass defaults."""
-        task = ToolAgentTaskV2(
+        task = ScriptAgentTask(
             turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="planner",
         )
         for turn in turns:
             task.cache[f"task_result_{self._turn_position(turn)}"] = turn.generated_response
         return task
 
-    def _render_system_message(self, task: ToolAgentTaskV2) -> list[dict[str, str]]:
+    def _render_system_message(self, task: ScriptAgentTask) -> list[dict[str, str]]:
         """Renders the active system prompt against tool/constant/budget
         context. Mirrors ``ToolAgent._render_system_message``'s established
         shape exactly: a fresh, framework-controlled context dict, never
@@ -721,7 +834,7 @@ class ToolAgent2(Agent):
         rendered = self._system_prompts[task.system_prompt_name].render(context)
         return [{"role": "system", "content": rendered}]
 
-    def _render_task_messages(self, task: ToolAgentTaskV2) -> list[dict[str, str]]:
+    def _render_task_messages(self, task: ScriptAgentTask) -> list[dict[str, str]]:
         """Build-once contract per base ``Agent``'s documented pattern: a
         single user message carrying the task's own prompt, unchanged
         across generation retries within this phase.
@@ -764,8 +877,8 @@ class ToolAgent2(Agent):
     # Generation (think())
     # ------------------------------------------------------------------ #
     def _process_generation_output(
-        self, raw_text: str, task: ToolAgentTaskV2,
-    ) -> tuple[list[list[BlackboardSlotV2]], list[str], bool, Optional[str]] | str:
+        self, raw_text: str, task: ScriptAgentTask,
+    ) -> tuple[list[list[CodeStatement]], list[str], bool, Optional[str]] | str:
         """
         Pure-computation validate callback for the planning retry loop:
         parse, validate references + remaining tool-call budget, and
@@ -805,8 +918,8 @@ class ToolAgent2(Agent):
         return pending, annotations, continue_planning, continuation_note
 
     def _run_planning_retry_loop(
-        self, *, task: ToolAgentTaskV2,
-    ) -> tuple[list[list[BlackboardSlotV2]], list[str], bool, Optional[str]]:
+        self, *, task: ScriptAgentTask,
+    ) -> tuple[list[list[CodeStatement]], list[str], bool, Optional[str]]:
         """
         Render, call the engine, record the attempt, validate/compile via
         ``_process_generation_output``, and retry with injected feedback on
@@ -850,8 +963,8 @@ class ToolAgent2(Agent):
             return result
 
     async def _arun_planning_retry_loop(
-        self, *, task: ToolAgentTaskV2,
-    ) -> tuple[list[list[BlackboardSlotV2]], list[str], bool, Optional[str]]:
+        self, *, task: ScriptAgentTask,
+    ) -> tuple[list[list[CodeStatement]], list[str], bool, Optional[str]]:
         """Async mirror of ``_run_planning_retry_loop``: uses
         ``async_invoke`` for the engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
@@ -887,7 +1000,7 @@ class ToolAgent2(Agent):
 
             return result
 
-    def _check_planning_rounds_budget(self, task: ToolAgentTaskV2) -> None:
+    def _check_planning_rounds_budget(self, task: ScriptAgentTask) -> None:
         """Shared by ``think``/``async_think``: raises once the continuation-
         round budget is exhausted, else increments it. Only ever called for
         a genuine continuation (``task.completed`` non-empty) -- the
@@ -903,7 +1016,7 @@ class ToolAgent2(Agent):
             )
         task.planning_rounds_used += 1
 
-    def think(self, task: ToolAgentTaskV2) -> ToolAgentTaskV2:
+    def think(self, task: ScriptAgentTask) -> ScriptAgentTask:
         """
         Generate, validate, and compile the next segment of the plan --
         either the unconditional first generation, or (once a prior round
@@ -926,7 +1039,7 @@ class ToolAgent2(Agent):
         task.task_messages.clear()
         return task
 
-    async def async_think(self, task: ToolAgentTaskV2) -> ToolAgentTaskV2:
+    async def async_think(self, task: ScriptAgentTask) -> ScriptAgentTask:
         """Async mirror of ``think``, using ``_arun_planning_retry_loop``."""
         if task.pending or task.complete:
             return task
@@ -945,7 +1058,7 @@ class ToolAgent2(Agent):
     # ------------------------------------------------------------------ #
     # Prepare next batch
     # ------------------------------------------------------------------ #
-    def prepare(self, task: ToolAgentTaskV2) -> ToolAgentTaskV2:
+    def prepare(self, task: ScriptAgentTask) -> ScriptAgentTask:
         """
         Resolve the next pending batch's args, or short-circuit completion
         (or a needed continuation) if nothing remains.
@@ -997,7 +1110,7 @@ class ToolAgent2(Agent):
         task.resolved_args = resolved
         return task
 
-    async def async_prepare(self, task: ToolAgentTaskV2) -> ToolAgentTaskV2:
+    async def async_prepare(self, task: ScriptAgentTask) -> ScriptAgentTask:
         """Direct passthrough to ``prepare`` -- no I/O of its own."""
         return self.prepare(task)
 
@@ -1005,7 +1118,7 @@ class ToolAgent2(Agent):
     # Execute prepared batch
     # ------------------------------------------------------------------ #
     async def _gather_batch_results(
-        self, batch: list[BlackboardSlotV2], resolved: list[dict[str, Any]],
+        self, batch: list[CodeStatement], resolved: list[dict[str, Any]],
     ) -> list[Any]:
         """
         Dispatch every real tool-call slot in ``batch`` concurrently;
@@ -1029,11 +1142,11 @@ class ToolAgent2(Agent):
 
     def _apply_batch_results(
         self,
-        task: ToolAgentTaskV2,
-        batch: list[BlackboardSlotV2],
+        task: ScriptAgentTask,
+        batch: list[CodeStatement],
         resolved: list[dict[str, Any]],
         raw_results: list[Any],
-    ) -> ToolAgentTaskV2:
+    ) -> ScriptAgentTask:
         """
         Shared post-gather bookkeeping for ``act``/``async_act``: apply
         results, update completed/cache, handle a terminal ``return`` slot,
@@ -1091,7 +1204,7 @@ class ToolAgent2(Agent):
 
         return task
 
-    def act(self, task: ToolAgentTaskV2) -> ToolAgentTaskV2:
+    def act(self, task: ScriptAgentTask) -> ScriptAgentTask:
         """
         Execute the currently resolved batch, or no-op if ``prepare``
         produced nothing to run this round (covers a short-circuited round
@@ -1105,7 +1218,7 @@ class ToolAgent2(Agent):
         raw_results = run_coro_sync(self._gather_batch_results(batch, resolved))
         return self._apply_batch_results(task, batch, resolved, raw_results)
 
-    async def async_act(self, task: ToolAgentTaskV2) -> ToolAgentTaskV2:
+    async def async_act(self, task: ScriptAgentTask) -> ScriptAgentTask:
         """Async mirror of ``act``; awaits ``_gather_batch_results``
         directly rather than ``run_coro_sync``-wrapping it."""
         if not task.resolved_args:

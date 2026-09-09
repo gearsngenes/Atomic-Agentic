@@ -5,13 +5,13 @@ from typing import Any, Dict
 
 from ..results.agents import AgentResult
 from ..results.llm import LLMResult
-from .toolagent2_models import BlackboardSlotV2
+from .blackboard_models import CodeStatement
 
 __all__ = [
     "LLMRecord",
     "AgentRecord",
     "ToolAgentRecord",
-    "ToolAgentRecordV2",
+    "ScriptAgentRecord",
     "ThinkingAgentRecord",
 ]
 
@@ -267,10 +267,10 @@ class ToolAgentRecord(AgentRecord):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolAgentRecordV2(AgentRecord):
+class ScriptAgentRecord(AgentRecord):
     """
-    Canonical memory record for one completed ToolAgent2 invocation -- a
-    sibling to ToolAgentRecord, not a subclass (ToolAgent2 is a new agent
+    Canonical memory record for one completed ScriptAgent invocation -- a
+    sibling to ToolAgentRecord, not a subclass (ScriptAgent is a new agent
     family, not a ToolAgent subclass).
 
     Unlike the Task family, Record types in this codebase validate at
@@ -285,18 +285,18 @@ class ToolAgentRecordV2(AgentRecord):
 
     Fields
     ------
-    blackboard : tuple[BlackboardSlotV2, ...]
-        Every slot ToolAgentTaskV2.completed accumulated this run, carried
+    statements : tuple[CodeStatement, ...]
+        Every slot ScriptAgentTask.completed accumulated this run, carried
         over at commit time (normalized to a tuple here, mirroring
         llm_records' existing list-or-tuple-in, tuple-stored normalization).
 
     annotations : tuple[str, ...]
-        Every triple-quoted reasoning block ToolAgentTaskV2.annotations
+        Every triple-quoted reasoning block ScriptAgentTask.annotations
         accumulated this run, carried over at commit time (same
         normalize-to-tuple treatment).
     """
 
-    blackboard: tuple[BlackboardSlotV2, ...] = ()
+    statements: tuple[CodeStatement, ...] = ()
     annotations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -306,40 +306,40 @@ class ToolAgentRecordV2(AgentRecord):
         # CPython gotcha for slotted-dataclass inheritance chains; confirmed
         # live: bare super() raises "obj must be an instance or subtype of
         # type" here).
-        super(ToolAgentRecordV2, self).__post_init__()
+        super(ScriptAgentRecord, self).__post_init__()
 
-        # 1. blackboard must be a list/tuple of BlackboardSlotV2 instances.
-        if isinstance(self.blackboard, (str, bytes)) or not isinstance(self.blackboard, (list, tuple)):
+        # 1. statements must be a list/tuple of CodeStatement instances.
+        if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
             raise TypeError(
-                "ToolAgentRecordV2.blackboard must be a list or tuple of "
-                f"BlackboardSlotV2 instances; got {type(self.blackboard).__name__!r}."
+                "ScriptAgentRecord.statements must be a list or tuple of "
+                f"CodeStatement instances; got {type(self.statements).__name__!r}."
             )
-        for index, slot in enumerate(self.blackboard):
-            if not isinstance(slot, BlackboardSlotV2):
+        for index, slot in enumerate(self.statements):
+            if not isinstance(slot, CodeStatement):
                 raise TypeError(
-                    f"ToolAgentRecordV2.blackboard[{index}] must be a "
-                    f"BlackboardSlotV2 instance; got {type(slot).__name__!r}."
+                    f"ScriptAgentRecord.statements[{index}] must be a "
+                    f"CodeStatement instance; got {type(slot).__name__!r}."
                 )
 
         # 2. normalize to a tuple -- object.__setattr__ required, the
         # dataclass is frozen (mirrors llm_records/inputs normalization
         # above).
-        object.__setattr__(self, "blackboard", tuple(self.blackboard))
+        object.__setattr__(self, "statements", tuple(self.statements))
 
         # 3. annotations must be a list/tuple of str.
         if isinstance(self.annotations, (str, bytes)) or not isinstance(self.annotations, (list, tuple)):
             raise TypeError(
-                "ToolAgentRecordV2.annotations must be a list or tuple of "
+                "ScriptAgentRecord.annotations must be a list or tuple of "
                 f"str; got {type(self.annotations).__name__!r}."
             )
         for index, annotation in enumerate(self.annotations):
             if not isinstance(annotation, str):
                 raise TypeError(
-                    f"ToolAgentRecordV2.annotations[{index}] must be a str; "
+                    f"ScriptAgentRecord.annotations[{index}] must be a str; "
                     f"got {type(annotation).__name__!r}."
                 )
 
-        # 4. normalize to a tuple, same reasoning as blackboard above.
+        # 4. normalize to a tuple, same reasoning as statements above.
         object.__setattr__(self, "annotations", tuple(self.annotations))
 
 

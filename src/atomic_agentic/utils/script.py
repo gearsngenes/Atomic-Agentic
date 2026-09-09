@@ -4,7 +4,7 @@ import ast
 import re
 from typing import Any, Optional
 
-from ..constants.toolagent2 import (
+from ..constants.agents import (
     DEFAULT_CONTINUATION_NOTE,
     HOISTED_NAME_PREFIX,
     RETURN_ALIAS,
@@ -12,11 +12,11 @@ from ..constants.toolagent2 import (
     TASK_RESULT_PREFIX,
 )
 from ..exceptions import BlackboardParseError
-from ..models.agents.toolagent2_models import BlackboardSlotV2
+from ..models.agents.blackboard_models import CodeStatement
+from .agents import extract_identifiers
 
 __all__ = [
     "parse_statement_to_slots",
-    "extract_dependencies_v2",
     "resolve_slot_args",
     "parse_generation",
     "validate_references",
@@ -67,45 +67,16 @@ def _evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:
     return eval(code, {"__builtins__": {}}, namespace)
 
 
-def extract_dependencies_v2(source: ast.expr | dict[str, Any]) -> list[str]:
-    """
-    Generalized replacement for ``utils/agents.py``'s ``extract_dependencies``
-    -- walks any ``ast.Name`` reference rather than matching a fixed
-    placeholder regex. Returns a deduplicated, first-seen-order list (not a
-    set): multiplicity is not meaningful for a dependency list, but a list
-    is kept for a stable, orderable contract.
-
-    Accepts either a single parsed expression node, or a slot's ``args``
-    dict -- in the dict form, only values that are still unresolved
-    ``ast.expr`` nodes contribute dependencies; an already-folded raw
-    literal value contributes none.
-    """
-    raw: list[str] = []
-
-    if isinstance(source, dict):
-        for value in source.values():
-            if isinstance(value, ast.expr):
-                raw.extend(extract_dependencies_v2(value))
-    else:
-        raw.extend(
-            node.id
-            for node in ast.walk(source)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-        )
-
-    return list(dict.fromkeys(raw))
-
-
 def resolve_slot_args(args: dict[str, Any], resolved: dict[str, Any]) -> dict[str, Any]:
     """
     Substitute every unresolved ``ast.expr`` value in ``args`` with its
     concrete value from ``resolved`` (identifier -> value), leaving
     already-folded raw literals untouched. Purely transient -- never
-    persisted back onto a ``BlackboardSlotV2``.
+    persisted back onto a ``CodeStatement``.
 
     Assumes every dependency in ``args`` is already present in ``resolved``;
     does not itself check readiness (a future ``prepare()``-phase caller's
-    job, combining ``extract_dependencies_v2`` with an
+    job, combining ``extract_identifiers`` with an
     all-dependencies-have-results check before ever calling this). A
     missing identifier is not defensively guarded against here -- it
     surfaces as whatever `_evaluate_expr` naturally raises.
@@ -124,7 +95,7 @@ def _process_call_args(
     *,
     counter: list[int],
     start_index: int,
-    hoisted: list[BlackboardSlotV2],
+    hoisted: list[CodeStatement],
 ) -> dict[str, Any]:
     """
     Build one call's final args dict: hoists any nested call found in each
@@ -147,7 +118,7 @@ def _process_call_args(
         processed_value = _hoist_calls(
             kw.value, counter=counter, start_index=start_index, hoisted=hoisted
         )
-        deps = extract_dependencies_v2(processed_value)
+        deps = extract_identifiers(processed_value)
         if not deps:
             try:
                 args[kw.arg] = _evaluate_expr(processed_value, {})
@@ -167,14 +138,14 @@ def _hoist_calls(
     *,
     counter: list[int],
     start_index: int,
-    hoisted: list[BlackboardSlotV2],
+    hoisted: list[CodeStatement],
 ) -> ast.expr:
     """
     Post-order rewrite: replaces every ``Call`` node found anywhere within
     ``node`` (at any depth -- a ``BinOp`` operand, another call's keyword
     value, an f-string's embedded expression, a container literal element,
     ...) with a ``Name`` reference to a newly synthesized, hoisted
-    ``BlackboardSlotV2``, appended to ``hoisted`` in discovery order.
+    ``CodeStatement``, appended to ``hoisted`` in discovery order.
 
     ``ast.NodeTransformer.generic_visit`` recurses into a call's own
     children before ``visit_Call`` builds that call's own hoisted slot, so
@@ -225,7 +196,7 @@ def _hoist_calls(
         )
         tool_name = ast.unparse(call_node.func)
         hoisted.append(
-            BlackboardSlotV2(
+            CodeStatement(
                 identifier=hoisted_identifier, tool=tool_name, args=hoisted_args, awaited=awaited
             )
         )
@@ -256,10 +227,10 @@ def _hoist_calls(
     return _CallHoister().visit(node)
 
 
-def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[BlackboardSlotV2]:
+def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeStatement]:
     """
     Parse one raw generated statement string into an ordered list of
-    ``BlackboardSlotV2`` objects: any auto-hoisted slots first (in
+    ``CodeStatement`` objects: any auto-hoisted slots first (in
     discovery/post-order), the statement's own slot last.
 
     Three top-level statement shapes are accepted: an assignment (case A/B
@@ -293,13 +264,13 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[Black
     # compile()-to-bytecode time, which this pipeline never does to a whole
     # statement (only to bare expressions, via _evaluate_expr).
     if isinstance(stmt, ast.Return):
-        hoisted: list[BlackboardSlotV2] = []
+        hoisted: list[CodeStatement] = []
         counter = [0]
         return_value = stmt.value if stmt.value is not None else ast.Constant(value=None)
         processed = _hoist_calls(
             return_value, counter=counter, start_index=start_index, hoisted=hoisted
         )
-        deps = extract_dependencies_v2(processed)
+        deps = extract_identifiers(processed)
         if not deps:
             try:
                 val: Any = _evaluate_expr(processed, {})
@@ -309,7 +280,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[Black
                 ) from e
         else:
             val = processed
-        final_slot = BlackboardSlotV2(
+        final_slot = CodeStatement(
             identifier=None, tool=RETURN_ALIAS, args={"val": val}, awaited=False
         )
         return [*hoisted, final_slot]
@@ -333,7 +304,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[Black
         args = _process_call_args(
             bare_rhs, counter=counter, start_index=start_index, hoisted=hoisted
         )
-        final_slot = BlackboardSlotV2(
+        final_slot = CodeStatement(
             identifier=None, tool=tool, args=args, awaited=bare_awaited
         )
         return [*hoisted, final_slot]
@@ -377,7 +348,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[Black
         awaited = True
         rhs = rhs.value
 
-    hoisted: list[BlackboardSlotV2] = []
+    hoisted: list[CodeStatement] = []
     counter = [0]
 
     if isinstance(rhs, ast.Call):
@@ -394,7 +365,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[Black
         # (the common choke point every call path funnels through) --
         # nothing extra needed here.
         processed = _hoist_calls(rhs, counter=counter, start_index=start_index, hoisted=hoisted)
-        deps = extract_dependencies_v2(processed)
+        deps = extract_identifiers(processed)
         if not deps:
             try:
                 val: Any = _evaluate_expr(processed, {})
@@ -406,13 +377,13 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[Black
             val = processed
         args = {"val": val}
 
-    final_slot = BlackboardSlotV2(identifier=identifier, tool=tool, args=args, awaited=awaited)
+    final_slot = CodeStatement(identifier=identifier, tool=tool, args=args, awaited=awaited)
     return [*hoisted, final_slot]
 
 
 def parse_generation(
     raw_text: str,
-) -> tuple[list[BlackboardSlotV2], list[str], bool, Optional[str]]:
+) -> tuple[list[CodeStatement], list[str], bool, Optional[str]]:
     """
     Parse one whole generation (a fresh plan, or a checkpoint-triggered
     continuation) into a flat slot sequence, its annotation blocks, and
@@ -463,7 +434,7 @@ def parse_generation(
     parts = _CHECKPOINT_PATTERN.split(text, maxsplit=1)
     before = parts[0]
 
-    flat_slots: list[BlackboardSlotV2] = []
+    flat_slots: list[CodeStatement] = []
     annotations: list[str] = []
     hoist_index = 0
 
@@ -531,7 +502,7 @@ def parse_generation(
 
 
 def validate_references(
-    slots: list[BlackboardSlotV2],
+    slots: list[CodeStatement],
     known_tools: frozenset[str],
     known_constants: frozenset[str],
     known_history: frozenset[str],
@@ -571,7 +542,7 @@ def validate_references(
         if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS) and slot.tool not in known_tools:
             issues.append(f"statement producing {label} calls unregistered tool {slot.tool!r}.")
 
-        for name in extract_dependencies_v2(slot.args):
+        for name in extract_identifiers(slot.args):
             if (
                 name not in bound
                 and name not in known_tools
@@ -595,7 +566,7 @@ def validate_references(
     return issues
 
 
-def compile_batches(slots: list[BlackboardSlotV2]) -> list[list[BlackboardSlotV2]]:
+def compile_batches(slots: list[CodeStatement]) -> list[list[CodeStatement]]:
     """
     Group ``slots`` into dependency batches for concurrent execution.
 
@@ -615,8 +586,8 @@ def compile_batches(slots: list[BlackboardSlotV2]) -> list[list[BlackboardSlotV2
     of ``slots`` now, since ``parse_generation`` terminates the sequence
     there -- nothing structurally follows it to force a boundary against.
     """
-    batches: list[list[BlackboardSlotV2]] = []
-    current_batch: list[BlackboardSlotV2] = []
+    batches: list[list[CodeStatement]] = []
+    current_batch: list[CodeStatement] = []
     current_batch_identifiers: set[str] = set()
 
     def close_current() -> None:
@@ -628,7 +599,7 @@ def compile_batches(slots: list[BlackboardSlotV2]) -> list[list[BlackboardSlotV2
         current_batch_identifiers = set()
 
     for slot in slots:
-        deps = extract_dependencies_v2(slot.args)
+        deps = extract_identifiers(slot.args)
         if any(name in current_batch_identifiers for name in deps):
             close_current()
 
@@ -644,7 +615,7 @@ def compile_batches(slots: list[BlackboardSlotV2]) -> list[list[BlackboardSlotV2
 
 
 def render_completed_as_python(
-    completed: list[BlackboardSlotV2],
+    completed: list[CodeStatement],
     preview_limit: Optional[int],
 ) -> str:
     """

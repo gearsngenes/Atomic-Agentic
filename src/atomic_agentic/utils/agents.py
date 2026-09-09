@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from typing import Any
@@ -12,6 +13,7 @@ from ..constants.agents import THOUGHT_MARKER_PATTERN
 
 __all__ = [
     "extract_dependencies",
+    "extract_identifiers",
     "extract_json_object",
     "normalize_role_prompt",
     "normalize_thinking_instructions",
@@ -203,6 +205,36 @@ def extract_dependencies(obj: Any, placeholder_pattern: re.Pattern[str]) -> set[
 
     walk(obj)
     return deps
+
+
+def extract_identifiers(source: ast.expr | dict[str, Any]) -> list[str]:
+    """
+    Walk any ``ast.Name`` reference in ``source`` and return every referenced
+    identifier, deduplicated in first-seen order (not a set: multiplicity
+    isn't meaningful for a dependency list, but a list keeps a stable,
+    orderable contract). Used by ``ScriptAgent`` (``utils/script.py``) to
+    find a statement's real dependencies from its parsed argument tree.
+
+    Accepts either a single parsed expression node, or a slot's ``args``
+    dict -- in the dict form, only values that are still unresolved
+    ``ast.expr`` nodes contribute identifiers; an already-folded raw literal
+    value contributes none.
+    """
+    raw: list[str] = []
+
+    if isinstance(source, dict):
+        for value in source.values():
+            if isinstance(value, ast.expr):
+                raw.extend(extract_identifiers(value))
+    else:
+        raw.extend(
+            node.id
+            for node in ast.walk(source)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        )
+
+    return list(dict.fromkeys(raw))
+
 
 def parse_thoughts(text: str) -> list[AgentThought]:
     """

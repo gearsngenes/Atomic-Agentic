@@ -41,14 +41,14 @@ class ThinkingAgentError(RuntimeError):
 
 
 class BlackboardParseError(RuntimeError):
-    """Raised when parsing one raw statement into BlackboardSlotV2 object(s)
+    """Raised when parsing one raw statement into CodeStatement object(s)
     fails.
 
     Subclasses RuntimeError to match this codebase's existing convention for
     domain error types superseding a bare RuntimeError (see LLMEngineError,
     MCPError, ThinkingAgentError) -- callers doing `except RuntimeError`
     upstream still catch these. Deliberately not rooted in ToolAgentError:
-    ToolAgent2 is a new sibling family, not a ToolAgent subclass, so sharing
+    ScriptAgent is a new sibling family, not a ToolAgent subclass, so sharing
     ToolAgentError's lineage here would imply a relationship that doesn't
     exist (mirrors ThinkingAgentError's own "sibling, not subclass" note).
 
@@ -65,7 +65,7 @@ class BlackboardParseError(RuntimeError):
 
 class DependencyFailedError(Exception):
     """Raised (by a future prepare()-phase caller, not by this release's own
-    utils) when a BlackboardSlotV2's argument depends on another slot whose
+    utils) when a CodeStatement's argument depends on another slot whose
     own resolution failed.
 
     Does not forward the upstream exception instance verbatim -- wraps it so

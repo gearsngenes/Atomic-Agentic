@@ -265,18 +265,18 @@ VALID OUTPUT:
 
 
 # =============================================================================
-# ToolAgent2 prompts
+# ScriptAgent prompts
 # =============================================================================
 # Used by:
-# - agents/toolagent2.py: ToolAgent2's one-shot planning prompt
+# - agents/script.py: ScriptAgent's one-shot planning prompt
 #
-# Teaches ToolAgent2's native Python-statement grammar (utils/toolagent2.py:
+# Teaches ScriptAgent's native Python-statement grammar (utils/script.py:
 # parse_statement_to_slots/parse_generation/validate_references/
 # compile_batches) -- real AST evaluation against a real namespace, not a
 # placeholder-substitution scheme: a bare identifier is an ordinary Python
 # name reference, unlike PLANNER_PROMPT/ORCHESTRATOR_PROMPT's <<__sN__>>
 # tags. {TOOLS}/{CONSTANTS}/{TOOL_CALLS_LIMIT} are filled by
-# ToolAgent2._render_system_message, mirroring how PLANNER_PROMPT's own
+# ScriptAgent._render_system_message, mirroring how PLANNER_PROMPT's own
 # {TOOLS}/{CONSTANTS} stay off the caller-facing schema.
 
 ONESHOT_PLANNER_PROMPT = PromptConfig(
@@ -415,7 +415,7 @@ await write_file(path="findings.txt", content=findings)
 sent = send_email(to=recipient, subject=f"Advisory - {today()}", body=findings)
 return sent
 """,
-    description="ToolAgent2 one-shot native-grammar planning prompt.",
+    description="ScriptAgent one-shot native-grammar planning prompt.",
 )
 
 
