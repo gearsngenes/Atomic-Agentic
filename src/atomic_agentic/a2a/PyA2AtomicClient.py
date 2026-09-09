@@ -13,7 +13,7 @@ from python_a2a import (
 
 from ..constants.core import HeaderValue
 from ..exceptions import PyA2AtomicConnectionError, RemoteInvocationError
-from ..utils.core import normalize_headers
+from ..utils.core import apply_name_filter, normalize_headers, validate_name_filter
 from ..constants.python_a2a import (
     GET_INVOKABLE_METADATA_FUNCTION,
     LIST_INVOKABLES_FUNCTION,
@@ -41,6 +41,11 @@ class PyA2AtomicClient:
     python_a2a's own behavior). Genuine failures surface via refresh() or
     on the first real remote operation (list_invokables/
     get_invokable_metadata/call_invokable).
+
+    include_names/exclude_names (frozen at construction) filter
+    list_invokables()'s output only -- discovery-only, not enforced on
+    call_invokable()/get_invokable_metadata(), which remain callable by any
+    remote name regardless of this filter.
     """
 
     def __init__(
@@ -49,12 +54,17 @@ class PyA2AtomicClient:
         headers: Mapping[str, HeaderValue] | None = None,
         timeout: float = 600,
         google_a2a_compatible: bool = False,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
     ) -> None:
         if not isinstance(url, str) or not url.strip():
             raise ValueError("url must be a non-empty string.")
 
         resolved_url = url.strip()
         self._headers: Mapping[str, str] | None = normalize_headers(headers)
+        self._include_names, self._exclude_names = validate_name_filter(
+            include_names, exclude_names
+        )
 
         self._client = A2AClient(
             resolved_url,
@@ -149,6 +159,8 @@ class PyA2AtomicClient:
         headers: Mapping[str, HeaderValue] | None = None,
         timeout: float = 600,
         google_a2a_compatible: bool = False,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
     ) -> "PyA2AtomicClient":
         """Non-blocking construction. __init__ performs a blocking HTTP
         fetch internally via A2AClient's own constructor, so this runs it
@@ -159,11 +171,21 @@ class PyA2AtomicClient:
             headers=headers,
             timeout=timeout,
             google_a2a_compatible=google_a2a_compatible,
+            include_names=include_names,
+            exclude_names=exclude_names,
         )
 
     @property
     def agent_card(self) -> Any:
         return self._agent_card
+
+    @property
+    def include_names(self) -> frozenset[str] | None:
+        return self._include_names
+
+    @property
+    def exclude_names(self) -> frozenset[str] | None:
+        return self._exclude_names
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -190,7 +212,7 @@ class PyA2AtomicClient:
                 )
             result[name] = dict(meta)
 
-        return result
+        return apply_name_filter(result, self._include_names, self._exclude_names)
 
     def get_invokable_metadata(self, remote_name: str) -> dict[str, Any]:
         resolved_remote_name = str(remote_name).strip()
@@ -247,6 +269,8 @@ class PyA2AtomicClient:
             "timeout": self.timeout,
             "google_a2a_compatible": self.google_a2a_compatible,
             "agent_name": getattr(self._agent_card, "name", None),
+            "include_names": sorted(self.include_names) if self.include_names is not None else None,
+            "exclude_names": sorted(self.exclude_names) if self.exclude_names is not None else None,
         }
 
     # ------------------------------------------------------------------ #
