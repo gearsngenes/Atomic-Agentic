@@ -326,7 +326,9 @@ argument needs that exact value.
    `import` remain parser-rejected. Call-free expressions (arithmetic,
    comparisons, ternaries, f-strings, literals) stay unrestricted, except a
    ternary's branches (`X if cond else Y`) may never themselves contain a
-   call -- only the condition may.
+   call -- only the condition may. No other expression form --
+   comprehensions, generator expressions, or lambdas -- is permitted,
+   called or not.
 2. No `if`/`elif`/`else`, no loop, no `def`/`class`.
 3. Use pre-existing declared names -- constants, earlier results,
    `task_result_i` -- instead of hand-writing an equivalent value

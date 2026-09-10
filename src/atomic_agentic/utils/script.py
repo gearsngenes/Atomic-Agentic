@@ -39,6 +39,17 @@ _PAUSE_PATTERN = re.compile(r"^\s*#\s*PAUSE\b", re.IGNORECASE | re.MULTILINE)
 # (```python, ```py, ```text, a bare ```, ...), not just ```python.
 _CODE_FENCE_PATTERN = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.DOTALL)
 
+# Expression node types _hoist_calls rejects unconditionally (see its own
+# docstring) -- each introduces a local binding scope neither this module
+# nor extract_identifiers has any awareness of.
+_UNSUPPORTED_EXPR_LABELS: dict[type, str] = {
+    ast.ListComp: "list comprehension",
+    ast.SetComp: "set comprehension",
+    ast.DictComp: "dict comprehension",
+    ast.GeneratorExp: "generator expression",
+    ast.Lambda: "lambda",
+}
+
 
 def _strip_code_fence(raw_text: str) -> str:
     """
@@ -246,6 +257,22 @@ def _hoist_calls(
     than being discarded or left dangling on a now-bare ``Name``. An
     ``await`` wrapping anything other than a call (nested or not) still
     raises, since there is nothing else in this grammar to await.
+
+    Also rejects, at this same choke point and just as unconditionally as
+    the ``IfExp`` check below, any comprehension (``ast.ListComp``/
+    ``ast.SetComp``/``ast.DictComp``/``ast.GeneratorExp``) or ``ast.Lambda``
+    found anywhere in ``node`` -- regardless of whether it contains a call.
+    Both constructs introduce a local binding scope (a comprehension's loop
+    variable(s), a lambda's parameters) that neither this function nor
+    ``extract_identifiers`` has any awareness of: a call-free comprehension's
+    loop variable would otherwise be misclassified as an unresolved external
+    dependency (a misleading error), and worse, one whose bound name happens
+    to collide with an already-bound identifier elsewhere in the plan would
+    silently resolve against that unrelated value instead of erroring at
+    all. Checked before hoisting proceeds, so this also catches the
+    construct nested arbitrarily deep (inside a call's own keyword argument,
+    inside another hoisted call) -- the scan walks the whole original tree
+    before any rewriting happens.
     """
     for candidate in ast.walk(node):
         if isinstance(candidate, ast.IfExp) and (
@@ -257,6 +284,14 @@ def _hoist_calls(
                 "calls (wastes budget evaluating the untaken branch): "
                 f"{ast.unparse(candidate)!r} -- restructure as separate "
                 "statements or a pause."
+            )
+
+        label = _UNSUPPORTED_EXPR_LABELS.get(type(candidate))
+        if label is not None:
+            raise BlackboardParseError(
+                f"{label} expressions are not supported: "
+                f"{ast.unparse(candidate)!r} -- rewrite as explicit "
+                "statements instead."
             )
 
     def _hoist_one_call(call_node: ast.Call, *, awaited: bool) -> ast.Name:
