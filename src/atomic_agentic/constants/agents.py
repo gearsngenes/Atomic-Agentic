@@ -182,15 +182,48 @@ THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n
 # - agents/script.py: render_turn/_initialize_task cross-invocation result
 #   addressing (TASK_RESULT_PREFIX)
 #
-# Reserved namespaces: RHS_ASSIGN_ALIAS/RETURN_ALIAS can never be real
-# registered tool aliases; HOISTED_NAME_PREFIX/TASK_RESULT_PREFIX can never
-# be a model-chosen identifier. Enforcement points live outside this file's
-# scope.
+# Reserved namespaces: RHS_ASSIGN_ALIAS/RETURN_ALIAS/PY_BUILTIN_ALIAS can
+# never be real registered tool aliases; HOISTED_NAME_PREFIX/
+# TASK_RESULT_PREFIX can never be a model-chosen identifier. Enforcement
+# points live outside this file's scope.
 
 RHS_ASSIGN_ALIAS = "rhs_assign"
 HOISTED_NAME_PREFIX = "_HOIST_"
 RETURN_ALIAS = "return"
 TASK_RESULT_PREFIX = "task_result_"
+
+PY_BUILTIN_ALIAS = "py_builtin"
+"""Reserved CodeStatement.tool sentinel for a rewritten Python builtin call
+-- joins RHS_ASSIGN_ALIAS/RETURN_ALIAS as a name no real registered tool
+alias may ever equal (see agents/script.py's _validate_tool_alias). Unlike
+those two sentinels, a PY_BUILTIN_ALIAS slot dispatches through a real Tool
+(agents.tools.builtin_call_tool) instead of skipping dispatch entirely."""
+
+EXCLUDED_PY_BUILTINS: frozenset[str] = frozenset(
+    {
+        # Code execution
+        "eval", "exec", "compile", "__build_class__",
+        # Module/scope access
+        "__import__", "globals", "locals", "vars", "dir",
+        # Attribute reflection by string
+        "getattr", "setattr", "delattr",
+        # Filesystem/stdin I/O
+        "open", "input",
+        # Process/interpreter control
+        "exit", "quit", "breakpoint",
+        # Interactive/blocking, site banners
+        "help", "copyright", "credits", "license",
+        # Return an awaitable -- the one case where "no approved builtin is
+        # async" wouldn't hold if these were permitted
+        "anext", "aiter",
+    }
+)
+"""Builtins excluded from ScriptAgent's py_builtin dispatch. Checked by both
+utils/script.py's rewrite_builtin_calls (parse-time eligibility) and
+agents/tools.py's _call_py_builtin (runtime enforcement -- the authoritative
+gate; the parse-time check exists so an excluded name gets a specific
+regen-repair message instead of falling through to the generic
+"unregistered tool" one)."""
 
 # Reserved CodeStatement.kwargs key marking a `**expr` unpack in a real call.
 # "**" is never a valid Python identifier, so it can never collide with a
@@ -222,6 +255,8 @@ __all__ = [
     "HOISTED_NAME_PREFIX",
     "RETURN_ALIAS",
     "TASK_RESULT_PREFIX",
+    "PY_BUILTIN_ALIAS",
+    "EXCLUDED_PY_BUILTINS",
     "KWARGS_UNPACK_KEY",
     "DEFAULT_CONTINUATION_NOTE",
     # LLM step fields

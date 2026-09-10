@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import builtins
 from typing import Any
 
 from ..tools import Tool
 from ..constants.agents import (
+    EXCLUDED_PY_BUILTINS,
+    PY_BUILTIN_ALIAS,
     RETURN_TOOL_DESCRIPTION,
     RETURN_TOOL_FULL_NAME,
     RETURN_TOOL_NAME,
@@ -11,7 +14,7 @@ from ..constants.agents import (
     RETURN_VALUE_FIELD,
 )
 
-__all__ = ["identity_pre_tool", "identity_post_tool", "return_tool"]
+__all__ = ["identity_pre_tool", "identity_post_tool", "return_tool", "builtin_call_tool"]
 
 
 def identity_pre(*, prompt: str) -> str:
@@ -77,3 +80,36 @@ if _return_param_names != [RETURN_VALUE_FIELD]:
         f"return_tool parameter mismatch: expected {[RETURN_VALUE_FIELD]!r}, "
         f"got {_return_param_names!r}."
     )
+
+
+def _call_py_builtin(name: str, *args: Any, **kwargs: Any) -> Any:
+    """
+    Dispatch body for ScriptAgent's approved-Python-builtin calls.
+
+    Raises ``ValueError`` for an excluded or nonexistent builtin name --
+    the authoritative runtime gate; ``utils/script.py``'s
+    ``rewrite_builtin_calls`` already guarantees this can't happen for a
+    slot it rewrote, but this check doesn't trust that upstream guarantee.
+    """
+    if name in EXCLUDED_PY_BUILTINS or not hasattr(builtins, name):
+        raise ValueError(f"python builtin {name!r} is not available here")
+    fn = getattr(builtins, name)
+    return fn(*args, **kwargs)
+
+
+# Never registered into any agent's toolbox -- resolved directly by
+# ScriptAgent.prepare()/_gather_batch_results() via the PY_BUILTIN_ALIAS
+# sentinel, never through get_tool(). No return_tool-style identity assert
+# needed: nothing references this Tool by a full_name string, only by
+# direct object reference from agents/script.py.
+builtin_call_tool = Tool(
+    function=_call_py_builtin,
+    name=PY_BUILTIN_ALIAS,
+    namespace="script_agent",
+    description=(
+        "Internal ScriptAgent dispatcher for approved Python builtin calls. "
+        "Never registered into any agent's toolbox -- resolved directly by "
+        "ScriptAgent.prepare()/_gather_batch_results() via the "
+        "PY_BUILTIN_ALIAS sentinel, never through get_tool()."
+    ),
+)

@@ -364,9 +364,13 @@ class CodeStatement:
     Every generated statement normalizes to this one call-shaped record --
     a real tool call (``tool`` = the call's dotted name, optionally a bare
     unassigned call with ``identifier=None``), a bare expression (``tool``
-    = ``RHS_ASSIGN_ALIAS``, ``args = {"val": <expr>}``), or a terminal
-    ``return`` statement (``tool`` = ``RETURN_ALIAS``, ``identifier=None``).
-    ``args`` values are mixed: a dependency-free expression is evaluated
+    = ``RHS_ASSIGN_ALIAS``, ``args = {"val": <expr>}``), a terminal
+    ``return`` statement (``tool`` = ``RETURN_ALIAS``, ``identifier=None``),
+    or a rewritten Python builtin call (``tool`` = ``PY_BUILTIN_ALIAS``,
+    structurally a real tool call with the builtin's name spliced into
+    ``args[0]``, dispatched through ``agents.tools.builtin_call_tool``
+    rather than a registered tool). ``args`` values are mixed: a
+    dependency-free expression is evaluated
     eagerly at parse time and stored as a plain Python value; an expression
     referencing another slot's identifier is stored unresolved as the raw
     ``ast.expr`` node, pending a future ``resolve_slot_args`` call. Mutable
@@ -387,7 +391,11 @@ class CodeStatement:
         ``RHS_ASSIGN_ALIAS`` (``"rhs_assign"``) for a bare-expression
         statement. ``rhs_assign`` calls never count against
         tools-used/tool-call budget accounting (enforced by a future,
-        out-of-scope caller).
+        out-of-scope caller). ``PY_BUILTIN_ALIAS`` (``"py_builtin"``) marks
+        a rewritten approved-builtin call -- also exempt from tool-call
+        budget accounting like ``rhs_assign``/``return``, but (unlike those
+        two) still dispatches through a real ``Tool``
+        (``agents.tools.builtin_call_tool``).
 
     args : tuple[Any, ...]
         Positional call arguments, in source order. Each entry is a plain

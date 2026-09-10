@@ -275,9 +275,10 @@ VALID OUTPUT:
 # compile_batches) -- real AST evaluation against a real namespace, not a
 # placeholder-substitution scheme: a bare identifier is an ordinary Python
 # name reference, unlike PLANNER_PROMPT/ORCHESTRATOR_PROMPT's <<__sN__>>
-# tags. {TOOLS}/{CONSTANTS}/{TOOL_CALLS_LIMIT} are filled by
-# ScriptAgent._render_system_message, mirroring how PLANNER_PROMPT's own
-# {TOOLS}/{CONSTANTS} stay off the caller-facing schema.
+# tags. {TOOLS}/{CONSTANTS}/{TOOL_CALLS_LIMIT}/{EXCLUDED_PY_BUILTINS} are
+# filled by ScriptAgent._render_system_message, mirroring how
+# PLANNER_PROMPT's own {TOOLS}/{CONSTANTS} stay off the caller-facing
+# schema.
 
 ONESHOT_PLANNER_PROMPT = PromptConfig(
     template="""\
@@ -295,12 +296,22 @@ even if unlimited.
 
 # AVAILABLE TOOLS
 Below are the available tools & their docstrings. You can call any of
-them synchronously or asynchronously, like `id(arg = val, ...)` or 
+them synchronously or asynchronously, like `id(arg = val, ...)` or
 `await id(arg = val,...)`, respectively. `id` is a bare identifier --
 its own name or a registered alias -- used verbatim; see OUTPUT FORMAT
 for `/`/`*` and argument binding.
 
 {TOOLS}
+
+# AVAILABLE PYTHON BUILTINS
+Beyond the tools above, any Python builtin not listed below is also
+callable the same way (`len(x)`, `str(5)`, `sorted(items)`, ...) --
+unlimited, exempt from the budget above, and always synchronous (omit
+`await`; any you add is ignored). A registered tool name always wins over
+a same-named builtin.
+
+Excluded (treated as unregistered if called):
+{EXCLUDED_PY_BUILTINS}
 
 # AVAILABLE CONSTANTS
 Each entry is a constant, not a tool: `K_NAME: type` plus a docstring
@@ -310,11 +321,12 @@ argument needs that exact value.
 {CONSTANTS}
 
 # STRICT RULES
-1. Only registered tool ids may be called -- builtins/stdlib
-   (`math.sqrt()`) and `import` are parser-rejected, not discouraged.
-   Call-free expressions (arithmetic, comparisons, ternaries, f-strings,
-   literals) stay unrestricted, except a ternary's branches (`X if cond
-   else Y`) may never themselves contain a call -- only the condition may.
+1. Only registered tool ids and non-excluded Python builtins may be called
+   (see AVAILABLE PYTHON BUILTINS) -- stdlib modules (`math.sqrt()`) and
+   `import` remain parser-rejected. Call-free expressions (arithmetic,
+   comparisons, ternaries, f-strings, literals) stay unrestricted, except a
+   ternary's branches (`X if cond else Y`) may never themselves contain a
+   call -- only the condition may.
 2. No `if`/`elif`/`else`, no loop, no `def`/`class`.
 3. Use pre-existing declared names -- constants, earlier results,
    `task_result_i` -- instead of hand-writing an equivalent value

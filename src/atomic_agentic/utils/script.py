@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import re
 from typing import Any, Optional
 
 from ..constants.agents import (
     DEFAULT_CONTINUATION_NOTE,
+    EXCLUDED_PY_BUILTINS,
     HOISTED_NAME_PREFIX,
     KWARGS_UNPACK_KEY,
+    PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
     TASK_RESULT_PREFIX,
@@ -20,6 +23,7 @@ __all__ = [
     "parse_statement_to_slots",
     "resolve_slot_args",
     "parse_generation",
+    "rewrite_builtin_calls",
     "validate_references",
     "compile_batches",
     "render_completed_as_python",
@@ -581,6 +585,52 @@ def parse_generation(
     return flat_slots, annotations, True, continuation_note
 
 
+def rewrite_builtin_calls(
+    slots: list[CodeStatement], known_tools: frozenset[str],
+) -> list[str]:
+    """
+    Rewrite eligible builtin-call slots in place to dispatch through the
+    ``PY_BUILTIN_ALIAS`` sentinel, mutating ``slot.tool``/``.args``/
+    ``.awaited`` directly. Run once, over the full flat slot list, between
+    ``parse_generation()`` and ``validate_references()``.
+
+    A slot is eligible when its ``tool`` isn't already a sentinel or a
+    registered tool (which always wins on a name collision) and names a
+    real Python builtin. An eligible slot gets its builtin name spliced in
+    as a new leading positional arg, its ``tool`` replaced with
+    ``PY_BUILTIN_ALIAS``, and ``awaited`` forced to ``False`` -- no approved
+    builtin is genuinely async, so any ``await`` written on one is a no-op
+    the model doesn't need, silently dropped rather than rejected.
+
+    A name that resolves to a real but excluded builtin is left unrewritten
+    and reported as its own issue, distinct from
+    ``validate_references``'s generic "unregistered tool" message that an
+    unrecognized name (a real typo/hallucination) still falls through to.
+
+    Returns the list of excluded-builtin issues found (``[]`` if none).
+    """
+    issues: list[str] = []
+    for slot in slots:
+        if slot.tool in (RHS_ASSIGN_ALIAS, RETURN_ALIAS) or slot.tool in known_tools:
+            continue
+        if not hasattr(builtins, slot.tool):
+            continue
+
+        label = slot.identifier if slot.identifier is not None else "(unassigned)"
+        if slot.tool in EXCLUDED_PY_BUILTINS:
+            issues.append(
+                f"statement producing {label} calls python builtin "
+                f"{slot.tool!r}, which is excluded and cannot be used."
+            )
+            continue
+
+        slot.args = (slot.tool, *slot.args)
+        slot.tool = PY_BUILTIN_ALIAS
+        slot.awaited = False
+
+    return issues
+
+
 def validate_references(
     slots: list[CodeStatement],
     known_tools: frozenset[str],
@@ -593,7 +643,10 @@ def validate_references(
     also check the whole plan's real-tool-call count against a budget.
 
     For each slot: its own ``tool`` must be a registered tool id unless
-    it's the ``rhs_assign``/``return`` sentinel; every still-unresolved
+    it's the ``rhs_assign``/``return``/``py_builtin`` sentinel, or a real
+    but excluded builtin name (``rewrite_builtin_calls`` already reported
+    that case with a specific message -- this generic check must not
+    double-report it); every still-unresolved
     (``ast.expr``-typed) dependency in its ``args`` must already be bound
     by an earlier slot in this same walk, a registered tool id, a
     registered constant, or a name in ``known_history`` (a prior
@@ -619,7 +672,11 @@ def validate_references(
     for slot in slots:
         label = slot.identifier if slot.identifier is not None else "(unassigned)"
 
-        if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS) and slot.tool not in known_tools:
+        if (
+            slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS)
+            and slot.tool not in known_tools
+            and slot.tool not in EXCLUDED_PY_BUILTINS
+        ):
             issues.append(f"statement producing {label} calls unregistered tool {slot.tool!r}.")
 
         for name in (*extract_identifiers(slot.args), *extract_identifiers(slot.kwargs)):
@@ -636,7 +693,10 @@ def validate_references(
         if slot.identifier is not None:
             bound.add(slot.identifier)
 
-    real_call_count = sum(1 for slot in slots if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS))
+    real_call_count = sum(
+        1 for slot in slots
+        if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS)
+    )
     if tool_calls_limit is not None and real_call_count > tool_calls_limit:
         issues.append(
             f"the plan calls {real_call_count} real tool(s), exceeding the "
@@ -736,9 +796,18 @@ def render_completed_as_python(
             lines.append(f"{prefix}{render_value(slot.kwargs['val'])}")
             continue
 
+        # A py_builtin slot renders back as the original natural call
+        # syntax (`len(x)`), never the internal rewritten form
+        # (`py_builtin('len', x)`) -- unsplice the builtin name before
+        # falling into the same generic rendering as any real tool call.
+        if slot.tool == PY_BUILTIN_ALIAS:
+            call_name, call_args = slot.args[0], slot.args[1:]
+        else:
+            call_name, call_args = slot.tool, slot.args
+
         positional_tokens = [
             f"*{render_value(entry.value)}" if isinstance(entry, ast.Starred) else render_value(entry)
-            for entry in slot.args
+            for entry in call_args
         ]
         keyword_tokens = [
             f"**{render_value(value)}" if name == KWARGS_UNPACK_KEY else f"{name}={render_value(value)}"
@@ -746,7 +815,7 @@ def render_completed_as_python(
         ]
         args_source = ", ".join(positional_tokens + keyword_tokens)
         resolved_value = slot.result.result if slot.result is not None else None
-        call_source = f"{slot.tool}({args_source})"
+        call_source = f"{call_name}({args_source})"
         if slot.awaited:
             call_source = f"await {call_source}"
         lines.append(f"{prefix}{call_source}  # Equals: {preview(resolved_value)}")

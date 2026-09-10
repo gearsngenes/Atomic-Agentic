@@ -10,6 +10,7 @@ from ..a2a.PyA2AtomicClient import PyA2AtomicClient
 
 from .base import Agent
 from .prompts import ONESHOT_PLANNER_PROMPT
+from .tools import builtin_call_tool
 from ..core.Invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..tools.Toolify import toolify
@@ -17,7 +18,12 @@ from ..models.agents.blackboard_models import CodeStatement, ConstantSpec
 from ..models.agents.records import AgentRecord, LLMRecord, ScriptAgentRecord
 from ..models.agents.tasks import ScriptAgentTask
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
-from ..constants.agents import RETURN_ALIAS, RHS_ASSIGN_ALIAS
+from ..constants.agents import (
+    EXCLUDED_PY_BUILTINS,
+    PY_BUILTIN_ALIAS,
+    RETURN_ALIAS,
+    RHS_ASSIGN_ALIAS,
+)
 from ..exceptions import BlackboardParseError, ToolAgentError, ToolRegistrationError
 from ..utils.core import run_coro_sync
 from ..utils.script import (
@@ -25,6 +31,7 @@ from ..utils.script import (
     parse_generation,
     render_completed_as_python,
     resolve_slot_args,
+    rewrite_builtin_calls,
     validate_references,
 )
 
@@ -250,7 +257,7 @@ class ScriptAgent(Agent):
             raise ToolRegistrationError(
                 f"alias must be None or a Python-identifier-legal string; got {alias!r}."
             )
-        if alias in (RHS_ASSIGN_ALIAS, RETURN_ALIAS):
+        if alias in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS):
             raise ToolRegistrationError(
                 f"alias {alias!r} is reserved for the parser's own sentinel tool "
                 "names and cannot be used as a registered tool alias."
@@ -858,6 +865,7 @@ class ScriptAgent(Agent):
             "TOOLS": self.actions_context(),
             "TOOL_CALLS_LIMIT": limit_text,
             "CONSTANTS": self.constants_context(),
+            "EXCLUDED_PY_BUILTINS": ", ".join(sorted(EXCLUDED_PY_BUILTINS)),
         }
         rendered = self._system_prompts[task.system_prompt_name].render(context)
         return [{"role": "system", "content": rendered}]
@@ -923,6 +931,12 @@ class ScriptAgent(Agent):
             return str(e)
 
         known_tools = frozenset(self._toolbox.keys())
+        # Rewrite eligible builtin calls before whole-sequence validation,
+        # so a rewritten slot is validated as PY_BUILTIN_ALIAS, not as an
+        # unregistered tool; excluded-but-real builtin names are reported
+        # here with a specific message instead of validate_references'
+        # generic "unregistered tool" one.
+        builtin_issues = rewrite_builtin_calls(flat_slots, known_tools)
         # Derived from each ConstantSpec's own .name (already correctly
         # K_-prefixed exactly once for both the auto-named and aliased
         # registration paths -- see register_constant/register_constants),
@@ -944,7 +958,7 @@ class ScriptAgent(Agent):
             None if self._tool_calls_limit is None
             else self._tool_calls_limit - task.tool_calls_used
         )
-        issues = validate_references(
+        issues = builtin_issues + validate_references(
             flat_slots, known_tools, known_constants, known_history, remaining_budget
         )
         if issues:
@@ -1174,7 +1188,11 @@ class ScriptAgent(Agent):
                 continue
 
             try:
-                tool = self.get_tool(slot.tool)
+                tool = (
+                    builtin_call_tool
+                    if slot.tool == PY_BUILTIN_ALIAS
+                    else self.get_tool(slot.tool)
+                )
                 resolved.append(tool._args_kwargs_to_dict(*positional, **keyword))
             except Exception as e:
                 issues.append(
@@ -1216,7 +1234,12 @@ class ScriptAgent(Agent):
         for i, slot in enumerate(batch):
             if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS):
                 dispatch_map[i] = len(coros)
-                coros.append(self.get_tool(slot.tool).async_invoke(resolved[i]))
+                tool = (
+                    builtin_call_tool
+                    if slot.tool == PY_BUILTIN_ALIAS
+                    else self.get_tool(slot.tool)
+                )
+                coros.append(tool.async_invoke(resolved[i]))
 
         gathered = await asyncio.gather(*coros, return_exceptions=True) if coros else []
         return [
@@ -1244,12 +1267,21 @@ class ScriptAgent(Agent):
         checking for failures.
         """
         real_call_count = sum(
-            1 for slot in batch if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS)
+            1 for slot in batch
+            if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS)
         )
         task.tool_calls_used += real_call_count
 
+        def _failure_label(slot: CodeStatement) -> str:
+            # A py_builtin slot's real, model-written name lives in
+            # args[0], not slot.tool -- report that instead of leaking the
+            # internal sentinel into model-facing failure feedback.
+            if slot.tool == PY_BUILTIN_ALIAS:
+                return repr(slot.args[0])
+            return repr(slot.tool)
+
         failures = [
-            f"{batch[idx].tool!r} (identifier={batch[idx].identifier!r}): {raw!r}"
+            f"{_failure_label(batch[idx])} (identifier={batch[idx].identifier!r}): {raw!r}"
             for idx, raw in enumerate(raw_results)
             if isinstance(raw, BaseException)
         ]
