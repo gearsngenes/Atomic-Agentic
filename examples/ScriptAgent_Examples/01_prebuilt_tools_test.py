@@ -34,7 +34,7 @@ agent = ScriptAgent(
 )
 
 # Register tool lists
-agent.register_tools(EXPONENT_TOOLS)
+# agent.register_tools(EXPONENT_TOOLS)
 # agent.register_tools(BASIC_MATH_TOOLS)
 agent.register_tools(CONSOLE_TOOLS)
 
