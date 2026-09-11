@@ -230,18 +230,6 @@ regen-repair message instead of falling through to the generic
 # real keyword argument name -- no validation needed to guarantee this.
 KWARGS_UNPACK_KEY = "**"
 
-# Fallback continuation-note text (agents/script.py's pause-triggered
-# reactive continuation): used only when an explicit `# PAUSE` marker is
-# not followed by a triple-quoted explanation -- never used for a
-# resolution/execution failure, which always surfaces its own real, dynamic
-# reason instead of this generic text.
-DEFAULT_CONTINUATION_NOTE = (
-    "It was deemed necessary to pause code writing and execution to "
-    "accurately determine the next steps for completing the task. Review "
-    "the work completed so far and continue writing code based on what "
-    "you can now reason."
-)
-
 
 __all__ = [
     # Conversation storage
@@ -258,7 +246,6 @@ __all__ = [
     "PY_BUILTIN_ALIAS",
     "EXCLUDED_PY_BUILTINS",
     "KWARGS_UNPACK_KEY",
-    "DEFAULT_CONTINUATION_NOTE",
     # LLM step fields
     "STEP_FIELD",
     "TOOL_FIELD",

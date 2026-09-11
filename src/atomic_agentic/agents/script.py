@@ -29,6 +29,7 @@ from ..utils.core import run_coro_sync
 from ..utils.script import (
     compile_batches,
     parse_generation,
+    render_cache_snapshot,
     render_completed_as_python,
     resolve_slot_args,
     rewrite_builtin_calls,
@@ -68,7 +69,7 @@ class ScriptAgent(Agent):
 
     Checkpoint-triggered reactive continuation (Pass 2.3): a generation
     always terminates at the first of a ``return``, an explicit
-    ``# PAUSE`` (with an optional trailing triple-quoted note), or a
+    ``# PAUSE`` (a bare, complete sentinel -- no trailing note), or a
     defensively-pruned ``if`` statement (the grammar still forbids
     conditionals outright; a model that writes one anyway is handled by
     silent truncation, not rejection, unless nothing real precedes it). A
@@ -77,9 +78,12 @@ class ScriptAgent(Agent):
     anymore. Whichever one occurs (other than ``return``) sets
     ``task.continue_planning``, and ``think()`` re-invokes the same planner
     for a fresh continuation, seeing a Python-source snapshot of the work
-    already done this invoke plus a reason (the model's own note, a
-    hardcoded default, or the real failure text, depending on which of the
-    four cases applies) -- no separate judge/critic model. `tool_calls_limit`
+    already done this invoke plus, only for a resolution/execution failure,
+    the real failure text (an explicit ``# PAUSE``/if-cutoff carries no
+    reason of its own to show) -- no separate judge/critic model. Also told
+    in-band when it has reached its final allowed planning round: writing
+    another ``# PAUSE`` there is rejected as a regen-repair issue rather
+    than granted as a continuation. `tool_calls_limit`
     is a budget shared across every generation round in one invoke, not a
     fresh allowance per round; `planning_rounds_limit` separately bounds how
     many continuation rounds are allowed, independent of
@@ -95,6 +99,10 @@ class ScriptAgent(Agent):
 
     _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
     _CONSTANT_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace", "suffix")
+    _FINAL_ROUND_WARNING: ClassVar[str] = (
+        " This is your FINAL planning round -- you must complete the "
+        "entire task now. Do not write # PAUSE."
+    )
 
     def __init__(
         self,
@@ -107,6 +115,7 @@ class ScriptAgent(Agent):
         generation_retries: Optional[int] = 0,
         tool_calls_limit: Optional[int] = None,
         planning_rounds_limit: Optional[int] = None,
+        tool_concurrency_limit: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
@@ -121,11 +130,14 @@ class ScriptAgent(Agent):
         """
         Validate/store ``generation_retries``, then ``tool_calls_limit``/
         ``planning_rounds_limit`` together (at most one may be ``None``),
-        then initialize empty toolbox/constants storage and register any
-        construction-time ``tools``/``constants`` by delegating to
-        ``register_tools``/``register_constants`` -- no validation duplicated
-        here. ``extra_parameters`` is never forwarded to ``super().__init__``
-        — matches ``ToolAgent.__init__``'s own precedent.
+        then ``tool_concurrency_limit`` (no cross-field validation against
+        the other two -- orthogonal concerns: concurrency shape vs.
+        total-call/round budget), then initialize empty toolbox/constants
+        storage and register any construction-time ``tools``/``constants``
+        by delegating to ``register_tools``/``register_constants`` -- no
+        validation duplicated here. ``extra_parameters`` is never forwarded
+        to ``super().__init__`` — matches ``ToolAgent.__init__``'s own
+        precedent.
         """
         super().__init__(
             name=name,
@@ -161,6 +173,7 @@ class ScriptAgent(Agent):
         self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
         self.planning_rounds_limit = planning_rounds_limit
+        self.tool_concurrency_limit = tool_concurrency_limit
 
         self._toolbox: dict[str, AtomicInvokable] = {}
         self._constants: dict[str, ConstantSpec] = {}
@@ -231,6 +244,23 @@ class ScriptAgent(Agent):
                 "budget unbounded at once."
             )
         self._planning_rounds_limit = value
+
+    @property
+    def tool_concurrency_limit(self) -> Optional[int]:
+        """Max dispatched (real tool/builtin) calls allowed in a single
+        concurrently-executed batch -- a bound on the existing
+        dependency-inferred batching, not a model-facing signal (zero
+        prompt footprint). ``None`` means unlimited (today's status quo)."""
+        return self._tool_concurrency_limit
+
+    @tool_concurrency_limit.setter
+    def tool_concurrency_limit(self, value: Optional[int]) -> None:
+        if value is not None and (type(value) is not int or value < 1):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: tool_concurrency_limit "
+                f"must be None or an int >= 1; got {value!r}."
+            )
+        self._tool_concurrency_limit = value
 
     # ------------------------------------------------------------------ #
     # Shared helpers
@@ -870,43 +900,86 @@ class ScriptAgent(Agent):
         rendered = self._system_prompts[task.system_prompt_name].render(context)
         return [{"role": "system", "content": rendered}]
 
-    def _render_task_messages(self, task: ScriptAgentTask) -> list[dict[str, str]]:
-        """Build-once contract per base ``Agent``'s documented pattern: a
-        single user message carrying the task's own prompt, unchanged
-        across generation retries within this phase.
+    def _render_current_task_message(self, task: ScriptAgentTask) -> dict[str, str]:
+        """Bare "what is the task" user message -- reused verbatim for
+        round 1 and every continuation round's opening message. Mirrors
+        ``ToolAgent._render_task_banner``'s role (dedup a repeated banner
+        across every round) scoped to this family's own established
+        wording (no ``===== ... =====`` markers -- that's ToolAgent-family
+        styling, this family never used it). No "translate this into a
+        plan" framing -- ``ONESHOT_PLANNER_PROMPT``'s OBJECTIVE section
+        already states that once; repeating it every round would be
+        redundant."""
+        return {"role": "user", "content": f"CURRENT TASK:\n{task.user_prompt}"}
 
-        ``task.completed`` empty means this is the unconditional first
-        generation -- rendered exactly as before. Non-empty means this is a
-        pause/if-cutoff/failure-triggered continuation (this method is
-        only ever called when ``task.pending`` is already empty, so a
-        non-empty ``completed`` here can only mean a genuine prior round,
-        never a same-round partial drain) -- rendered instead as a snapshot
-        of the work already done plus whatever reason/note applies, asking
-        for only the remaining plan.
+    def _render_task_messages(self, task: ScriptAgentTask) -> list[dict[str, str]]:
+        """Build-once contract per base ``Agent``'s documented pattern.
+        Mirrors ``ReActAgent._render_task_messages``'s own 3-part
+        organization (banner / assistant-authored state snapshot / user
+        instruction) instead of cramming everything into one user message.
+
+        Branches on ``task.continue_planning`` rather than
+        ``task.completed`` -- ``continue_planning`` is the one flag
+        reliably ``True`` for every real continuation, including the edge
+        case where a resolution/execution failure hits on the very first
+        batch of round 1 (``prepare()``/``_apply_batch_results`` set it
+        directly, before anything ever lands in ``completed``); checking
+        ``completed`` alone would silently drop that failure's reason and
+        misrender it as a fresh round-1 call.
+
+        Round 1 (``continue_planning`` still ``False``): just the banner,
+        with the final-round warning appended inline when
+        ``self._is_final_round(task)`` (covers ``planning_rounds_limit ==
+        0``) -- nothing else needed, the system prompt already specifies
+        everything.
+
+        A continuation round: banner, then an assistant-role state message
+        (reconstructed code -- flat, no batch grouping, see
+        ``render_completed_as_python`` -- plus ``render_cache_snapshot``'s
+        block; directive-free, reads as state not instruction), then a
+        user instruction. ``task.continuation_note`` (framework-authored
+        only -- a real resolution/execution failure reason, never a
+        model-authored pause note, which no longer exists) is consulted
+        and cleared back to ``None`` in the same read, so a stale,
+        already-addressed note can never leak into a later round. The
+        final-round warning is appended last when applicable.
         """
         if task.task_messages:
             return task.task_messages
 
-        if not task.completed:
-            current_task_framed_prompt = (
-                "Given the below latest message, translate the request into "
-                "a python-formatted plan:\n"
-                f"\nCURRENT TASK:\n{task.user_prompt}"
-            )
-        else:
-            snapshot = render_completed_as_python(task.completed, self._response_preview_limit)
-            # `continuation_note` is `None` for a silent if-cutoff -- omit
-            # that section entirely rather than interpolating the literal
-            # text "None" into the rendered message, which would violate
-            # the if-cutoff's own "purely defensive, zero visibility" intent.
-            note_section = f"{task.continuation_note}\n\n" if task.continuation_note else ""
-            current_task_framed_prompt = (
-                f"WORK COMPLETED SO FAR:\n{snapshot}\n\n"
-                f"{note_section}"
-                "Write only the remaining plan, in one shot, from this point forward."
-            )
+        banner = self._render_current_task_message(task)
 
-        task.task_messages = [{"role": "user", "content": current_task_framed_prompt}]
+        if not task.continue_planning:
+            content = banner["content"]
+            if self._is_final_round(task):
+                content += self._FINAL_ROUND_WARNING
+            task.task_messages = [{"role": "user", "content": content}]
+            return task.task_messages
+
+        snapshot = render_completed_as_python(task.completed) or "(nothing completed yet)"
+        cache_snapshot = render_cache_snapshot(
+            task.completed, task.cache, self._response_preview_limit
+        )
+        cache_section = f"\n\n{cache_snapshot}" if cache_snapshot else ""
+        state_message = {
+            "role": "assistant",
+            "content": f"# WORK COMPLETED SO FAR:\n{snapshot}{cache_section}",
+        }
+
+        note = task.continuation_note
+        task.continuation_note = None
+        parts = []
+        if note:
+            parts.append(f"The previous attempt failed: {note}")
+        parts.append(
+            "Continue planning the rest of this task. Use the existing "
+            "work done to guide you on what the next steps should be."
+        )
+        if self._is_final_round(task):
+            parts.append(self._FINAL_ROUND_WARNING.strip())
+        instruction = " ".join(parts)
+
+        task.task_messages = [banner, state_message, {"role": "user", "content": instruction}]
         return task.task_messages
 
     # ------------------------------------------------------------------ #
@@ -914,18 +987,19 @@ class ScriptAgent(Agent):
     # ------------------------------------------------------------------ #
     def _process_generation_output(
         self, raw_text: str, task: ScriptAgentTask,
-    ) -> tuple[list[list[CodeStatement]], list[str], bool, Optional[str]] | str:
+    ) -> tuple[list[list[CodeStatement]], list[str], bool] | str:
         """
         Pure-computation validate callback for the planning retry loop:
-        parse, validate references + remaining tool-call budget, and
-        compile into batches. Returns the compiled result on success, or a
-        feedback string describing every problem found on failure -- a
-        ``BlackboardParseError`` from parsing is converted here, not
-        propagated, so the retry loop can inject it as corrective feedback.
+        parse, validate references + remaining tool-call budget + the
+        final-round pause prohibition, and compile into batches. Returns
+        the compiled result on success, or a feedback string describing
+        every problem found on failure -- a ``BlackboardParseError`` from
+        parsing is converted here, not propagated, so the retry loop can
+        inject it as corrective feedback.
         """
         print("[DEBUG] Raw generation output:\n", raw_text)
         try:
-            flat_slots, annotations, continue_planning, continuation_note = parse_generation(raw_text)
+            flat_slots, annotations, continue_planning = parse_generation(raw_text)
         except BlackboardParseError as e:
             print(f"[DEBUG] Parse error: {e}")
             return str(e)
@@ -961,17 +1035,30 @@ class ScriptAgent(Agent):
         issues = builtin_issues + validate_references(
             flat_slots, known_tools, known_constants, known_history, remaining_budget
         )
+
+        if self._is_final_round(task) and continue_planning:
+            issues.append(
+                "this was your final planning round -- you may not pause "
+                "again; produce a complete plan with no trailing # PAUSE, "
+                "ending in return."
+            )
+
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
             print("[DEBUG] Validation issues:\n", issues_msg)
             return issues_msg
 
-        pending = compile_batches(flat_slots)
-        return pending, annotations, continue_planning, continuation_note
+        pending = compile_batches(
+            flat_slots,
+            max_concurrency=self._tool_concurrency_limit,
+            start_batch_index=task.batch_counter,
+        )
+        task.batch_counter += len(pending)
+        return pending, annotations, continue_planning
 
     def _run_planning_retry_loop(
         self, *, task: ScriptAgentTask,
-    ) -> tuple[list[list[CodeStatement]], list[str], bool, Optional[str]]:
+    ) -> tuple[list[list[CodeStatement]], list[str], bool]:
         """
         Render, call the engine, record the attempt, validate/compile via
         ``_process_generation_output``, and retry with injected feedback on
@@ -1016,7 +1103,7 @@ class ScriptAgent(Agent):
 
     async def _arun_planning_retry_loop(
         self, *, task: ScriptAgentTask,
-    ) -> tuple[list[list[CodeStatement]], list[str], bool, Optional[str]]:
+    ) -> tuple[list[list[CodeStatement]], list[str], bool]:
         """Async mirror of ``_run_planning_retry_loop``: uses
         ``async_invoke`` for the engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
@@ -1052,21 +1139,29 @@ class ScriptAgent(Agent):
 
             return result
 
-    def _check_planning_rounds_budget(self, task: ScriptAgentTask) -> None:
-        """Shared by ``think``/``async_think``: raises once the continuation-
-        round budget is exhausted, else increments it. Only ever called for
-        a genuine continuation (``task.completed`` non-empty) -- the
-        unconditional first generation never consumes this budget."""
-        if (
+    def _is_final_round(self, task: ScriptAgentTask) -> bool:
+        """
+        True iff the round about to be generated (or, for round 1, this
+        very generation) is the last one ``planning_rounds_limit``
+        permits -- computed on demand from ``task.planning_rounds_used``
+        vs. ``self._planning_rounds_limit``, never stored, so the render
+        and validation sites that both consult it can never see it drift
+        out of sync. ``None`` limit means never final (unlimited
+        continuations). Correctly covers round 1 itself when the limit is
+        ``0`` (``task.planning_rounds_used`` starts at that value).
+
+        A final round can no longer successfully re-pause: if it still
+        writes ``# PAUSE`` anyway, ``_process_generation_output`` rejects
+        that as a regen-repair issue instead of granting a continuation --
+        there is deliberately no dedicated "planning round budget
+        exhausted" raise anymore (unlike ``tool_calls_limit``): a round
+        beyond the limit is never reachable, since a final round either
+        completes or exhausts ``generation_retries`` first.
+        """
+        return (
             self._planning_rounds_limit is not None
             and task.planning_rounds_used >= self._planning_rounds_limit
-        ):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: planning round budget "
-                f"exhausted after {task.planning_rounds_used} continuation "
-                "round(s)."
-            )
-        task.planning_rounds_used += 1
+        )
 
     def _finalize_without_continuation(self, task: ScriptAgentTask) -> ScriptAgentTask:
         """A drain with no ``# PAUSE`` and no error -- the absence of a
@@ -1103,13 +1198,12 @@ class ScriptAgent(Agent):
             return task
 
         if task.completed:
-            self._check_planning_rounds_budget(task)
+            task.planning_rounds_used += 1
 
-        pending, annotations, continue_planning, continuation_note = self._run_planning_retry_loop(task=task)
+        pending, annotations, continue_planning = self._run_planning_retry_loop(task=task)
         task.pending = pending
         task.annotations.extend(annotations)
         task.continue_planning = continue_planning
-        task.continuation_note = continuation_note
         task.task_messages.clear()
         return task
 
@@ -1119,13 +1213,12 @@ class ScriptAgent(Agent):
             return task
 
         if task.completed:
-            self._check_planning_rounds_budget(task)
+            task.planning_rounds_used += 1
 
-        pending, annotations, continue_planning, continuation_note = await self._arun_planning_retry_loop(task=task)
+        pending, annotations, continue_planning = await self._arun_planning_retry_loop(task=task)
         task.pending = pending
         task.annotations.extend(annotations)
         task.continue_planning = continue_planning
-        task.continuation_note = continuation_note
         task.task_messages.clear()
         return task
 

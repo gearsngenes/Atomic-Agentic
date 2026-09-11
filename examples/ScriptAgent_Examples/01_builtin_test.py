@@ -44,7 +44,7 @@ agent.register_constant(math.pi, alias="PI", description="Hardcodes the math con
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
-Answer ONLY these questions and PRINT their results as '#) <question>: <answer>' format:
+Answer ONLY these questions and call 'print' on their results as '#) <question>: <answer>' format:
 1) Compute the area of a circle with a radius of 5.
 2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
 3) Compute the volume of a cylinder with radius of 2 and height of 10.

@@ -416,12 +416,15 @@ class CodeStatement:
         never a valid Python identifier, so it never collides with a real
         parameter name) -- at most one per statement.
 
-    awaited : bool
-        True iff this statement's RHS was ``await <call>`` before hoisting
-        (this slot's own tool call must be a real, unhoisted top-level call
-        for this to ever be True). Forward-barrier batch-scheduling
-        semantics; interpreted by a future, out-of-scope
-        ``prepare()``/``act()`` caller, not by anything in this slice.
+    batch_index : int | None
+        Which concurrently-dispatched batch this slot belongs to, stamped
+        once by ``compile_batches`` when the batch closes. ``None`` until
+        then -- never observed externally in that state, since only
+        committed slots (always already batch-stamped) ever reach
+        ``.completed`` or a rendered record. Not defensively validated in
+        ``__post_init__``, matching ``result``/``exception``'s treatment
+        below: set internally by framework lifecycle code, not derived
+        from external/LLM input.
 
     result : AtomicResult | None
         Full result envelope from a future ``act()``-phase caller. ``None``
@@ -437,7 +440,7 @@ class CodeStatement:
     tool: str
     args: tuple[Any, ...] = ()
     kwargs: dict[str, Any] = field(default_factory=dict)
-    awaited: bool = False
+    batch_index: Optional[int] = None
     result: AtomicResult | None = None
     exception: Exception | None = None
 
@@ -475,14 +478,7 @@ class CodeStatement:
                 f"CodeStatement.kwargs must be a dict; got {type(self.kwargs).__name__!r}."
             )
 
-        # 5. awaited must be exactly a bool (bool is an int subclass; guard
-        # against e.g. 0/1 silently passing an isinstance check).
-        if type(self.awaited) is not bool:
-            raise TypeError(
-                f"CodeStatement.awaited must be a bool; got {type(self.awaited).__name__!r}."
-            )
-
-        # 6. result/exception are set internally by future, not-yet-built
+        # 5. batch_index/result/exception are set internally by framework
         # lifecycle code, not derived from external/LLM input -- not
         # defensively validated here, per 01-overview.md Section 4's
         # boundary-only-validation rule.

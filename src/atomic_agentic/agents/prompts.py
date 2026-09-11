@@ -291,26 +291,23 @@ only the plan code ONLY -- no prose or markdown fences.
 
 # TOOL CALL BUDGET
 Real tool calls are capped at {TOOL_CALLS_LIMIT} -- the task's remaining
-budget, not reset per generation; a nested call counts too. Stay minimal
+budget, not reset per generation; nested calls count too. Stay minimal
 even if unlimited.
 
 # AVAILABLE TOOLS
-Below are the available tools & their docstrings. You can call any of
-them synchronously or asynchronously, like `id(arg = val, ...)` or
-`await id(arg = val,...)`, respectively. `id` is a bare identifier --
-its own name or a registered alias -- used verbatim; see OUTPUT FORMAT
-for `/`/`*` and argument binding.
+Available tools and docstrings below. Call one like `id(arg = val, ...)`;
+`id` is a bare identifier -- its own name or a registered alias -- used
+verbatim; see OUTPUT FORMAT for `/`/`*` and argument binding.
 
 {TOOLS}
 
 # AVAILABLE PYTHON BUILTINS
-Beyond the tools above, any Python builtin not listed below is also
-callable the same way (`len(x)`, `str(5)`, `sorted(items)`, ...) --
-unlimited, exempt from the budget above, and always synchronous (omit
-`await`; any you add is ignored). A registered tool name always wins over
-a same-named builtin.
+Any Python builtin not listed below is also callable the same way
+(`len(x)`, `str(5)`, `sorted(items)`, ...) -- unlimited, exempt from the
+budget above. A registered tool name always wins over a same-named
+builtin.
 
-Excluded (treated as unregistered if called):
+Excluded (unregistered if called):
 {EXCLUDED_PY_BUILTINS}
 
 # AVAILABLE CONSTANTS
@@ -337,9 +334,7 @@ argument needs that exact value.
 4. Never assign to `task_result_*`/`_HOIST_*` names -- `task_result_i:
    Type = value` labels a prior invocation's read-only result, used
    directly; `_HOIST_` names are auto-generated nested-call bindings.
-5. At most one `return`, as the true last statement -- anything after is
-   discarded, never executed, and a second `return` never overrides the
-   first.
+5. At most one `return`, only as the true last statement you write.
 6. Each generation's first statement is exactly one reasoning string
    (quoted, prefer triple-quoted); a second bare string elsewhere fails to
    parse.
@@ -351,20 +346,19 @@ following every rule above.
 # OUTPUT FORMAT
 Shape, in order:
     \"\"\"<reasoning>\"\"\"
-    name = [await] tool_id(...)
-    [await] tool_id(...)
+    name = tool_id(...)
+    tool_id(...)
     return <expression>
+    # PAUSE
+
+The last two lines are alternative endings -- write exactly one, never
+both -- then stop: never fabricate a further round, a `# Batch` header,
+or a value yourself.
 
 After the opening string: `name = <expression>` (`name` a bare identifier
 only, never tuple/attribute/subscript -- a call binds and counts against
-the budget, anything else is free unless it nests one); a bare, optionally
-`await`-prefixed call, when no result is needed; or `return <expression>`,
-or bare `return` (= `None`).
-
-`await` sits directly before a call, halting later statements until it
-finishes -- a pure ordering barrier, since a referenced result is already
-available regardless. Use only for a side effect nothing reads but that
-must happen first; never bury it in a larger expression.
+the budget, anything else is free unless it nests one); or a bare call,
+when no result is needed.
 
 Arguments follow normal Python calling rules (`/`/`*` mark positional-only/
 keyword-only); a nested call is allowed and auto-splits into its own
@@ -373,56 +367,48 @@ hoisted step -- never pre-name it yourself (see STRICT RULES).
 # PAUSE
 This grammar forbids `if`/`elif`/`else`; `# PAUSE` covers that gap, and
 can never open a plan/continuation -- write real work first. End your
-plan with it if you reach a branching decision point and need to reflect
-on the work and results completed so far; most plans need zero. Anything
-you'll still need afterward must already have a name -- an unnamed value
-doesn't survive the pause.
+plan with it alone, a bare complete sentinel (nothing past it is read),
+when you reach a branching decision point and need to reflect on work
+done so far; most plans need zero. Anything you'll still need afterward
+must already have a name -- an unnamed value doesn't survive the pause.
 
-Follow it with a triple-quoted string naming what's unknown. You're
-called again once it's known (tagged `# Equals: <value>`) -- treat it as
-a bound variable and finish the plan.
+A continuation isn't something you write: a fresh message shows completed
+code and bound values (`Cached values:`), then tells you to continue --
+or that this is your final round, in which case finish now with no
+further pause.
 
 # EXAMPLE
+(Round 2's first three messages are framework-shown, not written by you;
+only "(your response)" is.)
+
 Tools:
 search(query: str) -> str
     \"\"\"Web search.\"\"\"
----
-write_file(path: str, content: str) -> str
-    \"\"\"Writes a file.\"\"\"
----
-send_email(to: str, subject: str, body: str) -> str
-    \"\"\"Sends an email.\"\"\"
----
-today(fmt: str, /) -> str
-    \"\"\"Today's date.\"\"\"
 
-Constants:
-K_SIGNATURE: str
-    \"\"\"Email sign-off line.\"\"\"
-
-Task: "Check today's security advisory and email the team a summary."
+Task: "Find today's top headline, then look up detail on it."
 
 Round 1:
-\"\"\"The rest depends on whether a real advisory turns up.\"\"\"
-recipient = "team@example.com"
-findings = search(query="advisory")
+\"\"\"Need the headline before searching for its detail.\"\"\"
+headline = search(query="today's top headline")
 # PAUSE
-\"\"\"Confirm findings is real.\"\"\"
 
 Round 2:
-WORK COMPLETED SO FAR:
-recipient = 'team@example.com'
-findings = search(query='advisory')  # Equals: CVE-2026-1111
+(user) CURRENT TASK: (resent verbatim)
 
-Confirm findings is real.
+(assistant) # WORK COMPLETED SO FAR:
+headline = search(query="today's top headline")
 
-Write only the remaining plan, in one shot, from this point forward.
+```
+Cached values:
+headline: str = 'Markets rally on rate-cut hopes'
+```
 
-\"\"\"Findings confirm it -- save then email; save first though email
-doesn't need it, so await it unused.\"\"\"
-await write_file(path="findings.txt", content=findings)
-sent = send_email(to=recipient, subject=f"Advisory - {{today('%Y-%m-%d')}}", body=f"{{findings}}\\n{{K_SIGNATURE}}")
-return sent
+(user) Continue planning...
+
+(your response)
+\"\"\"Headline confirmed -- get the detail.\"\"\"
+detail = search(query=headline)
+return detail
 """,
     description="ScriptAgent one-shot native-grammar planning prompt.",
 )

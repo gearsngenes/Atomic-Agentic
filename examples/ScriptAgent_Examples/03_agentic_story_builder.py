@@ -5,12 +5,12 @@ Mirrors PlanAct_Examples/03_agentic_story_builder.py, rebuilt on ScriptAgent.
 Three BasicAgents (StoryOutliner/StoryWriter/DraftReviewer) are registered
 as tools verbatim -- nothing about them is ScriptAgent-specific. Where this
 pairs interestingly with 02_async_planner_test.py: 02 has five void calls
-with zero data dependency, so `await` is the only thing that can force
-ordering. Here, every step's input is literally the previous step's output
-(writer(outline=...), reviewer(draft_md=...), writer(revision_notes=...),
-...) -- real data dependencies, which compile_batches already sequences
-correctly with NO `await` needed. `await` is only for a side-effecting call
-nothing reads; a real dependency chain orders itself for free.
+with zero data dependency, so only the developer-level
+`tool_concurrency_limit` knob can force ordering there. Here, every step's
+input is literally the previous step's output (writer(outline=...),
+reviewer(draft_md=...), writer(revision_notes=...), ...) -- real data
+dependencies, which compile_batches already sequences correctly for free,
+no concurrency knob needed.
 
 Budget note: unlike PlanAct's JSON "return" step (a counted step),
 ScriptAgent's `return <expr>` is a language terminal, not a tool call --

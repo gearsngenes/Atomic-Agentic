@@ -230,13 +230,14 @@ class ScriptAgentTask(AgentTask):
         passed into ``validate_references``.
 
     continuation_note : Optional[str]
-        The reason/guidance text for the next generation, set alongside
-        ``continue_planning=True``: the model's own trailing triple-quoted
-        note (or a hardcoded default if it wrote none) for an explicit
-        pause, ``None`` for a silent if-cutoff, or the real dynamic
-        issue/failure text for a resolution or execution failure. Consumed
-        by ``_render_task_messages`` on the next generation, then reset to
-        ``None`` once a fresh generation has been requested.
+        Framework-authored (never model-authored) reason text, set only by
+        ``prepare()``'s resolution-failure branch or
+        ``_apply_batch_results``'s execution-failure branch -- the real,
+        dynamic issue/failure text. An explicit ``# PAUSE`` no longer
+        produces one (bare sentinel, no trailing note); consulted and
+        cleared back to ``None`` in the same read by
+        ``_render_task_messages`` on the next generation, so a stale note
+        from an already-addressed failure never leaks into a later round.
 
     cache : dict[str, Any]
         identifier -> resolved value for every slot in ``completed``, kept
@@ -265,6 +266,14 @@ class ScriptAgentTask(AgentTask):
         run. Reset to ``[]`` by ``act()`` once that batch is fully consumed
         (or by ``prepare()``'s empty-``pending`` guard). Empty whenever
         there is nothing currently prepared to execute.
+
+    batch_counter : int
+        Running total of batches compiled so far this invoke, across every
+        generation round -- never reset mid-run. Passed to
+        ``compile_batches`` as ``start_batch_index`` each time it's called,
+        then advanced by the number of batches that call produced, so
+        ``CodeStatement.batch_index`` values stay globally unique across a
+        whole invoke.
     """
     completed: list[CodeStatement] = field(default_factory=list)
     pending: list[list[CodeStatement]] = field(default_factory=list)
@@ -276,6 +285,7 @@ class ScriptAgentTask(AgentTask):
     planning_rounds_used: int = 0
     tool_calls_used: int = 0
     continuation_note: Optional[str] = None
+    batch_counter: int = 0
 
 
 @dataclass(slots=True)

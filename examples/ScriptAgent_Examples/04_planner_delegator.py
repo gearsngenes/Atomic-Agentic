@@ -142,7 +142,7 @@ if __name__ == "__main__":
     task_prompt = (
         f"Write a haiku for each topic here:\n{haiku_prompts}\n\n"
         f"Solve each math problem here:\n{math_problems}\n\n"
-        "Each call already prints its own result -- you don't need to print, bind, or return anything yourself."
+        "Return nothing."
     )
 
     print("\n⇢ Planning + execution …")

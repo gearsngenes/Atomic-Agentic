@@ -100,7 +100,7 @@ def reviewer_post(critique: str) -> dict:
 reviewer = BasicAgent(
     name="CodeReviewer",
     namespace="examples",
-    description="Reviews draft code and returns a structured {approved, feedback} verdict.",
+    description="Reviews draft code and returns a structured feedback dictionary.",
     llm_engine=sub_agent_llm,
     role_prompt=(
         "You are an expert Python code analyst. Thoroughly and brutally evaluate the code for "
@@ -126,7 +126,7 @@ orchestrator = ScriptAgent(
     description="Orchestrates a write/review loop between CodeWriter and CodeReviewer.",
     llm_engine=llm_engine,
     context_enabled=True,
-    tool_calls_limit=10,
+    tool_calls_limit=15,
     planning_rounds_limit=6,
     response_preview_limit=50,
     generation_retries=None,
@@ -135,17 +135,16 @@ orchestrator.register_tool(writer)
 orchestrator.register_tool(reviewer)
 
 if __name__ == "__main__":
-    task = (
-        "Write a Python module that scaffolds an agentic AI design with clean OOP and "
-        "provider-agnostic LLM backends (e.g., Bedrock, OpenAI, llama-cpp-python).\n\n"
-        "Process:\n"
-        "1) Write a draft of the code.\n"
-        "2) Review the code and provide feedback.\n"
-        "3) Pause after each review to check if the reviewer has approved."
-        "If not approved, use the whole feedback report to write a new draft.\n"
-        "4) Repeat untill approved and RETURN THE FINAL CODE DRAFT"
-    )
-
+    task = """
+    Send to the code writer the following task:
+        ```
+        Write a Python module that scaffolds an agentic AI design with clean OOP and provider-agnostic 
+        LLM backends (e.g., Bedrock, OpenAI, llama-cpp-python).
+        ```
+    Then send the code to the code reviewer. Then pause and inspect the feedback. If the reviewer approved,
+    then you can stop and return the writer's draft. Otherwise, send the feedback to the code writer.
+    Repeat this review-rewrite process until the reviewer approves, and return the final code module.
+    """
     result = orchestrator.invoke({"prompt": task}).result
     record = orchestrator.get_conversation()[-1]
 

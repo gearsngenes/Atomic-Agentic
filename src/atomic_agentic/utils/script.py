@@ -6,7 +6,6 @@ import re
 from typing import Any, Optional
 
 from ..constants.agents import (
-    DEFAULT_CONTINUATION_NOTE,
     EXCLUDED_PY_BUILTINS,
     HOISTED_NAME_PREFIX,
     KWARGS_UNPACK_KEY,
@@ -27,6 +26,7 @@ __all__ = [
     "validate_references",
     "compile_batches",
     "render_completed_as_python",
+    "render_cache_snapshot",
 ]
 
 # Matches a `#`-comment line whose content is (case-insensitively) the word
@@ -92,9 +92,10 @@ def resolve_slot_args(
     ``tool._args_kwargs_to_dict(*positional, **keyword)`` (or, for a
     ``rhs_assign``/``return`` sentinel, to read ``keyword["val"]``
     directly). Substitutes every unresolved ``ast.expr`` value with its
-    concrete value from ``resolved`` (identifier -> value), leaving
-    already-folded raw literals untouched. Purely transient -- never
-    persisted back onto a ``CodeStatement``.
+    concrete value from ``resolved`` (identifier -> value), passing through
+    any already-plain (non-``ast.expr``) value unchanged (e.g. the
+    spliced-in builtin name string from ``rewrite_builtin_calls``). Purely
+    transient -- never persisted back onto a ``CodeStatement``.
 
     Assumes every dependency is already present in ``resolved``; does not
     itself check readiness (a ``prepare()``-phase caller's job, combining
@@ -153,8 +154,10 @@ def _process_call_args(
     """
     Build one call's final ``(args, kwargs)`` pair: hoists any nested call
     found in each positional or keyword value (appending synthesized slots
-    to ``hoisted``), then eagerly constant-folds each resulting
-    dependency-free argument. Shared by both the top-level call (case A)
+    to ``hoisted``), then validates each resulting dependency-free argument
+    via a dry-run evaluation (raising early on a guaranteed-bad constant
+    expression) without folding it -- the original expression form is
+    always what gets stored. Shared by both the top-level call (case A)
     and every recursively hoisted call.
 
     A positional entry that is an ``ast.Starred`` (a ``*expr`` unpack) is
@@ -180,14 +183,13 @@ def _process_call_args(
         deps = extract_identifiers(processed)
         if not deps:
             try:
-                args.append(_evaluate_expr(processed, {}))
+                _evaluate_expr(processed, {})
             except Exception as e:
                 raise BlackboardParseError(
                     "positional argument is a constant expression that "
                     f"failed to evaluate: {e!r}"
                 ) from e
-        else:
-            args.append(processed)
+        args.append(processed)
 
     kwargs: dict[str, Any] = {}
     seen_unpack = False
@@ -208,16 +210,34 @@ def _process_call_args(
         deps = extract_identifiers(processed_value)
         if not deps:
             try:
-                kwargs[key] = _evaluate_expr(processed_value, {})
+                _evaluate_expr(processed_value, {})
             except Exception as e:
                 raise BlackboardParseError(
                     f"argument {key!r} is a constant expression that failed "
                     f"to evaluate: {e!r}"
                 ) from e
-        else:
-            kwargs[key] = processed_value
+        kwargs[key] = processed_value
 
     return tuple(args), kwargs
+
+
+def _reject_await(node: ast.expr) -> None:
+    """
+    Raise the one dedicated `await`-no-longer-supported parse error. Shared
+    by `_hoist_calls`'s rejection scan (an `await` nested anywhere, or used
+    as a bare/rhs-assign top-level expression that still routes through
+    `_hoist_calls`) and `parse_statement_to_slots`'s top-level bare-call
+    shape (the sole position that never reaches `_hoist_calls`, since it
+    reads the statement's own `Expr.value` directly rather than one of a
+    call's own argument expressions). Keeps wording identical across both
+    sites rather than risking drift between two independent raises.
+    """
+    raise BlackboardParseError(
+        "'await' is not supported: "
+        f"{ast.unparse(node)!r} -- write the call as an ordinary "
+        "statement; execution order is inferred automatically from data "
+        "dependencies."
+    )
 
 
 def _hoist_calls(
@@ -248,15 +268,15 @@ def _hoist_calls(
     keyword arguments) funnels through -- a per-call-site check would miss
     a ternary buried inside a call argument.
 
-    A nested ``ast.Await`` (anywhere ``node`` isn't itself one of the two
-    top-level await positions ``parse_statement_to_slots`` already unwraps
-    before calling here -- e.g. inside a call's own keyword argument, or a
-    bare ``return await f()``) is hoisted exactly like an ordinary nested
-    call, except the synthesized slot itself carries ``awaited=True`` --
-    the awaited-ness travels with the call to wherever it lands, rather
-    than being discarded or left dangling on a now-bare ``Name``. An
-    ``await`` wrapping anything other than a call (nested or not) still
-    raises, since there is nothing else in this grammar to await.
+    Also rejects, at this same choke point, any ``ast.Await`` found
+    anywhere in ``node`` via ``_reject_await`` -- there is no more
+    await-aware execution semantics left in this grammar (concurrency is
+    now inferred from data dependencies alone, bounded by the agent's own
+    ``tool_concurrency_limit``, never signaled by the model), so any use
+    (bare, nested inside a call argument, an RHS assignment target) is
+    rejected uniformly, before hoisting proceeds -- covers arbitrary
+    nesting depth for the same reason the comprehension/lambda scan below
+    does.
 
     Also rejects, at this same choke point and just as unconditionally as
     the ``IfExp`` check below, any comprehension (``ast.ListComp``/
@@ -286,6 +306,9 @@ def _hoist_calls(
                 "statements or a pause."
             )
 
+        if isinstance(candidate, ast.Await):
+            _reject_await(candidate)
+
         label = _UNSUPPORTED_EXPR_LABELS.get(type(candidate))
         if label is not None:
             raise BlackboardParseError(
@@ -294,11 +317,9 @@ def _hoist_calls(
                 "statements instead."
             )
 
-    def _hoist_one_call(call_node: ast.Call, *, awaited: bool) -> ast.Name:
+    def _hoist_one_call(call_node: ast.Call) -> ast.Name:
         """Build one hoisted slot for `call_node` (appended to `hoisted`)
-        and return a `Name` reference to it. Shared tail for both
-        `visit_Call` (awaited=False) and `visit_Await` (awaited=True) --
-        the only difference between an ordinary and an awaited hoist."""
+        and return a `Name` reference to it."""
         index = counter[0] + start_index
         counter[0] += 1
         hoisted_identifier = f"{HOISTED_NAME_PREFIX}{index}"
@@ -313,7 +334,6 @@ def _hoist_calls(
                 tool=tool_name,
                 args=hoisted_positional,
                 kwargs=hoisted_keyword,
-                awaited=awaited,
             )
         )
 
@@ -327,18 +347,7 @@ def _hoist_calls(
             # never itself a nested call.
             for kw in call_node.keywords:
                 kw.value = self.visit(kw.value)
-            return _hoist_one_call(call_node, awaited=False)
-
-        def visit_Await(self, await_node: ast.Await) -> ast.Name:
-            if not isinstance(await_node.value, ast.Call):
-                raise BlackboardParseError(
-                    "`await` must directly wrap a call; got "
-                    f"{type(await_node.value).__name__}."
-                )
-            call_node = await_node.value
-            for kw in call_node.keywords:
-                kw.value = self.visit(kw.value)
-            return _hoist_one_call(call_node, awaited=True)
+            return _hoist_one_call(call_node)
 
     return _CallHoister().visit(node)
 
@@ -350,8 +359,8 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     discovery/post-order), the statement's own slot last.
 
     Three top-level statement shapes are accepted: an assignment (case A/B
-    below), a bare (unassigned) call -- optionally ``await``-wrapped -- and
-    a ``return`` statement. The latter two produce a slot with
+    below), a bare (unassigned) call, and a ``return`` statement. The
+    latter two produce a slot with
     ``identifier=None``: nothing can ever reference either by name, so no
     synthesized name is needed the way hoisting needs one.
 
@@ -389,40 +398,32 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
         deps = extract_identifiers(processed)
         if not deps:
             try:
-                val: Any = _evaluate_expr(processed, {})
+                _evaluate_expr(processed, {})
             except Exception as e:
                 raise BlackboardParseError(
                     f"return expression is a constant that failed to evaluate: {e!r}"
                 ) from e
-        else:
-            val = processed
-        final_slot = CodeStatement(
-            identifier=None, tool=RETURN_ALIAS, kwargs={"val": val}, awaited=False
-        )
+        val: Any = processed
+        final_slot = CodeStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": val})
         return [*hoisted, final_slot]
 
-    # Bare (unassigned) call, optionally `await`-wrapped -- void-style tool
-    # calls the model doesn't need a name for, still logged as a real slot
-    # for ordering/budget/history.
-    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, (ast.Call, ast.Await)):
+    # A bare top-level `await ...` never reaches `_hoist_calls` (this
+    # branch reads `stmt.value` directly, not one of a call's own argument
+    # expressions) -- rejected explicitly here via the same shared helper.
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Await):
+        _reject_await(stmt.value)
+
+    # Bare (unassigned) call -- void-style tool calls the model doesn't
+    # need a name for, still logged as a real slot for budget/history.
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
         bare_rhs = stmt.value
-        bare_awaited = False
-        if isinstance(bare_rhs, ast.Await):
-            bare_awaited = True
-            bare_rhs = bare_rhs.value
-        if not isinstance(bare_rhs, ast.Call):
-            raise BlackboardParseError(
-                f"a bare `await` expression must wrap a call; got {type(bare_rhs).__name__}."
-            )
         hoisted = []
         counter = [0]
         tool = ast.unparse(bare_rhs.func)
         args, kwargs = _process_call_args(
             bare_rhs, counter=counter, start_index=start_index, hoisted=hoisted
         )
-        final_slot = CodeStatement(
-            identifier=None, tool=tool, args=args, kwargs=kwargs, awaited=bare_awaited
-        )
+        final_slot = CodeStatement(identifier=None, tool=tool, args=args, kwargs=kwargs)
         return [*hoisted, final_slot]
 
     # isinstance, not a looser check -- ast.AugAssign ("x += 1") is a
@@ -457,27 +458,23 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
             "cannot be assigned to."
         )
 
-    # Unwrap an optional top-level `await`.
     rhs = stmt.value
-    awaited = False
-    if isinstance(rhs, ast.Await):
-        awaited = True
-        rhs = rhs.value
-
     hoisted: list[CodeStatement] = []
     counter = [0]
 
     if isinstance(rhs, ast.Call):
-        # Case A: bare top-level call -- the only shape `awaited` stays True for.
+        # Case A: bare top-level call.
         tool = ast.unparse(rhs.func)
         args, kwargs = _process_call_args(
             rhs, counter=counter, start_index=start_index, hoisted=hoisted
         )
     else:
-        # Case B: rhs_assign. Also where an `await` wrapping anything other
-        # than a bare call lands -- forced False regardless of the unwrap
-        # above, since this branch means rhs was never a bare call at all.
-        awaited = False
+        # Case B: rhs_assign. An `ast.Await` here (e.g. `x = await f()`) is
+        # no longer specially unwrapped -- it flows into `_hoist_calls`
+        # below exactly like any other node, which rejects it via its own
+        # rejection scan (`ast.walk` yields `rhs` itself before its
+        # children, same precedent already established for a bare
+        # comprehension/lambda RHS).
         tool = RHS_ASSIGN_ALIAS
         # Ternary-with-calls rejection lives inside _hoist_calls itself now
         # (the common choke point every call path funnels through) --
@@ -486,28 +483,25 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
         deps = extract_identifiers(processed)
         if not deps:
             try:
-                val: Any = _evaluate_expr(processed, {})
+                _evaluate_expr(processed, {})
             except Exception as e:
                 raise BlackboardParseError(
                     f"expression is a constant that failed to evaluate: {e!r}"
                 ) from e
-        else:
-            val = processed
+        val: Any = processed
         args, kwargs = (), {"val": val}
 
-    final_slot = CodeStatement(
-        identifier=identifier, tool=tool, args=args, kwargs=kwargs, awaited=awaited
-    )
+    final_slot = CodeStatement(identifier=identifier, tool=tool, args=args, kwargs=kwargs)
     return [*hoisted, final_slot]
 
 
 def parse_generation(
     raw_text: str,
-) -> tuple[list[CodeStatement], list[str], bool, Optional[str]]:
+) -> tuple[list[CodeStatement], list[str], bool]:
     """
     Parse one whole generation (a fresh plan, or a pause-triggered
     continuation) into a flat slot sequence, its annotation blocks, and
-    whether/why a further continuation round is needed.
+    whether a further continuation round is needed.
 
     Pause-splitting happens on raw text, before any AST parsing --
     ``# PAUSE`` is a comment, and ``ast.parse`` strips comments, so a
@@ -537,18 +531,16 @@ def parse_generation(
     execute anyway, and a second `return` must never silently overwrite the
     first.
 
-    ``after`` (present only when a pause marker was found) is read only to
-    look for its own leading bare string-literal statement, which becomes
-    the continuation note; anything else in ``after`` -- a missing note, a
-    syntax error, or genuine further statements -- is discarded without
-    complaint, and ``DEFAULT_CONTINUATION_NOTE`` is used in place of a
-    missing note.
+    ``after`` (present only when a pause marker was found) is never
+    inspected at all -- ``# PAUSE`` is a bare, complete sentinel; no
+    trailing note is expected, taught, or parsed. Whatever a model writes
+    past the marker is discarded without complaint, same as any other
+    post-terminal content.
 
-    Returns ``(flat_slots, annotations, continue_planning,
-    continuation_note)``. Raises ``BlackboardParseError`` on any structural
-    failure (propagated from ``parse_statement_to_slots``, a genuine
-    ``ast.parse`` syntax error in ``before``, or one of the two
-    "nothing real yet" cases above).
+    Returns ``(flat_slots, annotations, continue_planning)``. Raises
+    ``BlackboardParseError`` on any structural failure (propagated from
+    ``parse_statement_to_slots``, a genuine ``ast.parse`` syntax error in
+    ``before``, or one of the two "nothing real yet" cases above).
     """
     text = _strip_code_fence(raw_text)
     parts = _PAUSE_PATTERN.split(text, maxsplit=1)
@@ -582,7 +574,7 @@ def parse_generation(
                         "whatever the condition depends on first, as a "
                         "real statement."
                     )
-                return flat_slots, annotations, True, None
+                return flat_slots, annotations, True
 
             stmt_source = ast.unparse(node)
             slots = parse_statement_to_slots(stmt_source, start_index=hoist_index)
@@ -590,12 +582,12 @@ def parse_generation(
             hoist_index += len(slots)
 
             if slots and slots[-1].tool == RETURN_ALIAS:
-                return flat_slots, annotations, False, None
+                return flat_slots, annotations, False
 
     if len(parts) == 1:
         # No pause marker anywhere -- completes normally (or falls off the
         # end with an inferred `None` result if no `return` ran).
-        return flat_slots, annotations, False, None
+        return flat_slots, annotations, False
 
     if not flat_slots:
         raise BlackboardParseError(
@@ -604,20 +596,7 @@ def parse_generation(
             "what follows still depends on something not yet known."
         )
 
-    continuation_note = DEFAULT_CONTINUATION_NOTE
-    try:
-        after_tree = ast.parse(parts[1], mode="exec")
-        if (
-            after_tree.body
-            and isinstance(after_tree.body[0], ast.Expr)
-            and isinstance(after_tree.body[0].value, ast.Constant)
-            and isinstance(after_tree.body[0].value.value, str)
-        ):
-            continuation_note = after_tree.body[0].value.value
-    except SyntaxError:
-        pass  # malformed trailing content -- fall back to the default note
-
-    return flat_slots, annotations, True, continuation_note
+    return flat_slots, annotations, True
 
 
 def rewrite_builtin_calls(
@@ -625,17 +604,15 @@ def rewrite_builtin_calls(
 ) -> list[str]:
     """
     Rewrite eligible builtin-call slots in place to dispatch through the
-    ``PY_BUILTIN_ALIAS`` sentinel, mutating ``slot.tool``/``.args``/
-    ``.awaited`` directly. Run once, over the full flat slot list, between
-    ``parse_generation()`` and ``validate_references()``.
+    ``PY_BUILTIN_ALIAS`` sentinel, mutating ``slot.tool``/``.args`` directly.
+    Run once, over the full flat slot list, between ``parse_generation()``
+    and ``validate_references()``.
 
     A slot is eligible when its ``tool`` isn't already a sentinel or a
     registered tool (which always wins on a name collision) and names a
     real Python builtin. An eligible slot gets its builtin name spliced in
-    as a new leading positional arg, its ``tool`` replaced with
-    ``PY_BUILTIN_ALIAS``, and ``awaited`` forced to ``False`` -- no approved
-    builtin is genuinely async, so any ``await`` written on one is a no-op
-    the model doesn't need, silently dropped rather than rejected.
+    as a new leading positional arg and its ``tool`` replaced with
+    ``PY_BUILTIN_ALIAS``.
 
     A name that resolves to a real but excluded builtin is left unrewritten
     and reported as its own issue, distinct from
@@ -661,7 +638,6 @@ def rewrite_builtin_calls(
 
         slot.args = (slot.tool, *slot.args)
         slot.tool = PY_BUILTIN_ALIAS
-        slot.awaited = False
 
     return issues
 
@@ -741,9 +717,14 @@ def validate_references(
     return issues
 
 
-def compile_batches(slots: list[CodeStatement]) -> list[list[CodeStatement]]:
+def compile_batches(
+    slots: list[CodeStatement],
+    max_concurrency: Optional[int] = None,
+    start_batch_index: int = 0,
+) -> list[list[CodeStatement]]:
     """
-    Group ``slots`` into dependency batches for concurrent execution.
+    Group ``slots`` into dependency batches for concurrent execution, and
+    stamp each slot's ``.batch_index`` with the batch it landed in.
 
     A slot joins the currently-open batch only if none of its dependencies
     were bound by a slot already sitting in that same open batch (i.e. every
@@ -752,38 +733,56 @@ def compile_batches(slots: list[CodeStatement]) -> list[list[CodeStatement]]:
     is assumed already checked by ``validate_references``). Otherwise the
     open batch closes first and this slot starts a new one.
 
-    A batch always closes right after an ``awaited=True`` slot is added --
-    a forward barrier, so nothing textually after it can share that batch
-    regardless of real dependency edges (this is also why a batch can never
-    hold more than one awaited call: the first one already forces closure
-    before a second could ever join). There is no longer a pause-driven
-    closure case: a pause (or an if-cutoff) always sits at the very end of
-    ``slots`` now, since ``parse_generation`` terminates the sequence there
-    -- nothing structurally follows it to force a boundary against.
+    Additionally, when about to add a *dispatched* slot (``tool`` not in
+    ``(RHS_ASSIGN_ALIAS, RETURN_ALIAS)`` -- includes ``PY_BUILTIN_ALIAS``,
+    a distinct exclusion set from ``validate_references``'s budget-only
+    ``real_call_count``) to a batch that already holds ``max_concurrency``
+    dispatched slots, the batch closes first -- a purely additive
+    concurrency cap, never replacing the dependency-conflict closure rule
+    above. ``max_concurrency=None`` means no cap (today's greedy default).
+
+    Every slot in a batch is stamped with the same ``batch_index`` --
+    ``start_batch_index`` plus that batch's own 0-based position among the
+    batches this call produces -- the moment the batch closes. Lets a
+    caller running multiple generation rounds in one invoke
+    (``ScriptAgentTask.batch_counter``) keep indices globally unique across
+    rounds by passing the running total in as ``start_batch_index``.
     """
     batches: list[list[CodeStatement]] = []
     current_batch: list[CodeStatement] = []
     current_batch_identifiers: set[str] = set()
+    current_batch_dispatched = 0
 
     def close_current() -> None:
-        nonlocal current_batch, current_batch_identifiers
+        nonlocal current_batch, current_batch_identifiers, current_batch_dispatched
         if not current_batch:
             return
+        index = start_batch_index + len(batches)
+        for slot in current_batch:
+            slot.batch_index = index
         batches.append(current_batch)
         current_batch = []
         current_batch_identifiers = set()
+        current_batch_dispatched = 0
 
     for slot in slots:
         deps = (*extract_identifiers(slot.args), *extract_identifiers(slot.kwargs))
         if any(name in current_batch_identifiers for name in deps):
             close_current()
 
+        is_dispatched = slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS)
+        if (
+            is_dispatched
+            and max_concurrency is not None
+            and current_batch_dispatched >= max_concurrency
+        ):
+            close_current()
+
         current_batch.append(slot)
         if slot.identifier is not None:
             current_batch_identifiers.add(slot.identifier)
-
-        if slot.awaited:
-            close_current()
+        if is_dispatched:
+            current_batch_dispatched += 1
 
     close_current()
     return batches
@@ -791,37 +790,47 @@ def compile_batches(slots: list[CodeStatement]) -> list[list[CodeStatement]]:
 
 def render_completed_as_python(
     completed: list[CodeStatement],
-    preview_limit: Optional[int],
+    show_batches: bool = False,
 ) -> str:
     """
     Reconstruct a Python-source-formatted snapshot of already-completed
-    slots, for a pause-triggered continuation round's rendered context:
-    one line per slot, in commit order, mirroring the statement that
-    originally produced it.
+    slots: one line per slot, in commit order, mirroring the statement
+    that originally produced it.
 
-    A dispatched real tool call gets a trailing ``# Equals: <preview>``
-    comment showing its resolved value -- truncated the same way
-    ``Agent.render_turn`` truncates a rendered response (via
-    ``preview_limit``; that logic lives on ``Agent``, in ``agents/``, which
-    sits above ``utils/`` in this project's layering, so it's replicated
-    here rather than imported). A plain ``rhs_assign`` slot needs no such
-    comment -- its value is already the literal shown. A ``return`` slot is
-    never expected here (it always ends the invoke, so no continuation is
-    ever rendered afterward) but is handled defensively rather than
-    crashing. Returns the joined lines, or ``""`` for an empty ``completed``.
+    ``show_batches`` (default ``False``) controls whether output is
+    grouped under a ``# Batch N:`` header per concurrently-dispatched
+    batch. Model-facing callers (``ScriptAgent``'s own continuation-message
+    building) must leave this ``False`` -- ``# Batch N:`` headers appearing
+    in text shown to the model were found, empirically, to get echoed and
+    fabricated back into later generations. The grouped form remains
+    available, opt-in, for standalone human inspection
+    (``ScriptAgentRecord.render_as_code``), where there is no such risk.
+    Consecutive slots sharing the same ``.batch_index`` are already
+    contiguous in ``completed`` (a batch drains fully before the next one
+    starts), so grouping only needs to detect index changes, not sort.
+
+    No per-slot result preview or ``await`` echo -- both judged noise
+    cluttering the reconstructed code itself. A caller needing actual
+    resolved values (a continuation round genuinely needs this -- see
+    ``render_cache_snapshot``) renders them as a separate block instead of
+    interleaving them per line. A ``return`` slot is never expected here
+    (it always ends the invoke, so no continuation is ever rendered
+    afterward) but is handled defensively rather than crashing. Returns
+    the joined lines, or ``""`` for an empty ``completed``.
     """
 
     def render_value(value: Any) -> str:
         return ast.unparse(value) if isinstance(value, ast.expr) else repr(value)
 
-    def preview(value: Any) -> str:
-        text = str(value)
-        if preview_limit is not None and len(text) > preview_limit:
-            text = text[:preview_limit] + "..."
-        return text
-
     lines: list[str] = []
+    current_index: Optional[int] = None
     for slot in completed:
+        if show_batches and slot.batch_index != current_index:
+            if current_index is not None:
+                lines.append("")
+            lines.append(f"# Batch {slot.batch_index}:")
+            current_index = slot.batch_index
+
         if slot.tool == RETURN_ALIAS:
             lines.append(f"return {render_value(slot.kwargs['val'])}")
             continue
@@ -849,10 +858,59 @@ def render_completed_as_python(
             for name, value in slot.kwargs.items()
         ]
         args_source = ", ".join(positional_tokens + keyword_tokens)
-        resolved_value = slot.result.result if slot.result is not None else None
-        call_source = f"{call_name}({args_source})"
-        if slot.awaited:
-            call_source = f"await {call_source}"
-        lines.append(f"{prefix}{call_source}  # Equals: {preview(resolved_value)}")
+        lines.append(f"{prefix}{call_name}({args_source})")
 
     return "\n".join(lines)
+
+
+def render_cache_snapshot(
+    completed: list[CodeStatement],
+    cache: dict[str, Any],
+    preview_limit: Optional[int],
+) -> str:
+    """
+    Render the current value of every identifier bound by ``completed``
+    this round, as its own fenced block, separate from the reconstructed
+    code (``render_completed_as_python``) -- keeps per-statement lines free
+    of inline value noise while still giving a continuation round real
+    visibility into what a prior dispatched call actually returned (the
+    one thing a bare ``name = tool(...)`` statement can never reveal on
+    its own; a reactive, content-driven pause decision -- e.g. reading a
+    reviewer's actual verdict -- depends on this).
+
+    Identifiers are taken from ``completed`` in first-occurrence order,
+    each looked up fresh in ``cache`` (so a reassigned name shows its
+    latest value, not its first -- every identifier bound by a slot in
+    ``completed`` is guaranteed present in ``cache``, populated the moment
+    that slot lands there). Each line is ``name: type = value``
+    (``type(value).__name__``, a runtime snapshot, not a declared/static
+    type), under a leading ``"Cached values:"`` label, wrapped in a
+    triple-backtick fence -- visually distinct from the reconstructed-code
+    block above it, and unambiguous to a model that this section is data,
+    not code to continue writing. ``preview_limit`` truncates each
+    rendered value the same way ``Agent.render_turn`` truncates a rendered
+    response (``None`` means no truncation) -- guards against dumping an
+    excessively long value into every subsequent generation call. Returns
+    ``""`` when ``completed`` binds no identifiers at all (nothing to
+    show) -- the caller omits the block entirely rather than rendering an
+    empty fence.
+    """
+    ordered: dict[str, Any] = {}
+    for slot in completed:
+        if slot.identifier is not None:
+            ordered[slot.identifier] = cache[slot.identifier]
+
+    if not ordered:
+        return ""
+
+    def preview(value: Any) -> str:
+        text = repr(value)
+        if preview_limit is not None and len(text) > preview_limit:
+            text = text[:preview_limit] + "..."
+        return text
+
+    lines = [
+        f"{name}: {type(value).__name__} = {preview(value)}"
+        for name, value in ordered.items()
+    ]
+    return "```\nCached values:\n" + "\n".join(lines) + "\n```"
