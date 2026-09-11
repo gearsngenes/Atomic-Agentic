@@ -389,13 +389,13 @@ class CodeStatement:
     tool : str
         Dotted call name (e.g. ``"Type.namespace.name"``), or
         ``RHS_ASSIGN_ALIAS`` (``"rhs_assign"``) for a bare-expression
-        statement. ``rhs_assign`` calls never count against
-        tools-used/tool-call budget accounting (enforced by a future,
-        out-of-scope caller). ``PY_BUILTIN_ALIAS`` (``"py_builtin"``) marks
-        a rewritten approved-builtin call -- also exempt from tool-call
-        budget accounting like ``rhs_assign``/``return``, but (unlike those
-        two) still dispatches through a real ``Tool``
-        (``agents.tools.builtin_call_tool``).
+        statement. ``rhs_assign``/``RETURN_ALIAS`` calls never count
+        against tool-call budget accounting -- they're never dispatched at
+        all. ``PY_BUILTIN_ALIAS`` (``"py_builtin"``) marks a rewritten
+        approved-builtin call -- dispatches through a real ``Tool``
+        (``agents.tools.builtin_call_tool``) and counts toward tool-call
+        budget accounting identically to a real registered-tool call (no
+        exemption).
 
     args : tuple[Any, ...]
         Positional call arguments, in source order. Each entry is a plain

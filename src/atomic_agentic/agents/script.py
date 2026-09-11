@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 from dataclasses import replace
 from typing import Any, Callable, ClassVar, Literal, Optional
 
@@ -20,6 +21,7 @@ from ..models.agents.tasks import ScriptAgentTask
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
 from ..constants.agents import (
     EXCLUDED_PY_BUILTINS,
+    FINAL_ROUND_WARNING,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
@@ -28,6 +30,7 @@ from ..exceptions import BlackboardParseError, ToolAgentError, ToolRegistrationE
 from ..utils.core import run_coro_sync
 from ..utils.script import (
     compile_batches,
+    is_dispatched_slot,
     parse_generation,
     render_cache_snapshot,
     render_completed_as_python,
@@ -83,13 +86,21 @@ class ScriptAgent(Agent):
     reason of its own to show) -- no separate judge/critic model. Also told
     in-band when it has reached its final allowed planning round: writing
     another ``# PAUSE`` there is rejected as a regen-repair issue rather
-    than granted as a continuation. `tool_calls_limit`
-    is a budget shared across every generation round in one invoke, not a
-    fresh allowance per round; `planning_rounds_limit` separately bounds how
-    many continuation rounds are allowed, independent of
-    `generation_retries` (which governs only per-generation malformed-draft
-    regen-repair). Exactly one of `tool_calls_limit`/`planning_rounds_limit`
-    may be `None` -- never both.
+    than granted as a continuation. `tool_calls_limit` is an optional,
+    fully independent budget on total dispatched calls (tools and builtins
+    counted identically) across every generation round in one invoke --
+    `None` (the default) means no such cap, relying on
+    `planning_rounds_limit` alone. `planning_rounds_limit` separately
+    bounds how many times the agent is permitted to plan in total --
+    the first generation counts as one, not a free attempt before the
+    budget starts -- defaulting to 25 (safe-by-default); an explicit
+    `None` opts into unbounded rounds. `regeneration_limit` (always a
+    plain `int`, never `None`, default 5) independently bounds how many
+    times a single round's malformed/invalid draft may be regenerated
+    before raising -- distinct from `planning_rounds_limit`, which governs
+    genuine incremental progress across rounds ("how many times may it
+    plan, starting from scratch"), not within-round mistake recovery
+    ("how many second chances does one attempt get").
 
     Cross-invocation result addressing is implemented: a prior turn's
     result is seeded into `task.cache` and labeled in rendered history as
@@ -99,10 +110,6 @@ class ScriptAgent(Agent):
 
     _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
     _CONSTANT_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace", "suffix")
-    _FINAL_ROUND_WARNING: ClassVar[str] = (
-        " This is your FINAL planning round -- you must complete the "
-        "entire task now. Do not write # PAUSE."
-    )
 
     def __init__(
         self,
@@ -112,9 +119,9 @@ class ScriptAgent(Agent):
         llm_engine: LLMEngine,
         context_enabled: bool = False,
         *,
-        generation_retries: Optional[int] = 0,
+        regeneration_limit: int = 5,
         tool_calls_limit: Optional[int] = None,
-        planning_rounds_limit: Optional[int] = None,
+        planning_rounds_limit: Optional[int] = 25,
         tool_concurrency_limit: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
@@ -128,13 +135,14 @@ class ScriptAgent(Agent):
         constant_descriptions: Optional[list[Optional[str]]] = None,
     ) -> None:
         """
-        Validate/store ``generation_retries``, then ``tool_calls_limit``/
-        ``planning_rounds_limit`` together (at most one may be ``None``),
-        then ``tool_concurrency_limit`` (no cross-field validation against
-        the other two -- orthogonal concerns: concurrency shape vs.
-        total-call/round budget), then initialize empty toolbox/constants
-        storage and register any construction-time ``tools``/``constants``
-        by delegating to ``register_tools``/``register_constants`` -- no
+        Validate/store ``regeneration_limit`` (must be an ``int >= 0`` -- no
+        ``None``/unlimited option), then assign ``tool_calls_limit``/
+        ``planning_rounds_limit``/``tool_concurrency_limit`` through their
+        own independent setters (no cross-field validation between any of
+        them -- orthogonal concerns: concurrency shape, total-call budget,
+        and round budget), then initialize empty toolbox/constants storage
+        and register any construction-time ``tools``/``constants`` by
+        delegating to ``register_tools``/``register_constants`` -- no
         validation duplicated here. ``extra_parameters`` is never forwarded
         to ``super().__init__`` — matches ``ToolAgent.__init__``'s own
         precedent.
@@ -153,24 +161,13 @@ class ScriptAgent(Agent):
             assistant_response_source=assistant_response_source,
         )
 
-        if generation_retries is not None and (
-            type(generation_retries) is not int or generation_retries < 0
-        ):
+        if type(regeneration_limit) is not int or regeneration_limit < 0:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: generation_retries must be "
-                f"None or an int >= 0; got {generation_retries!r}."
+                f"{type(self).__name__}.{self.name}: regeneration_limit must "
+                f"be an int >= 0; got {regeneration_limit!r}."
             )
-        self._generation_retries = generation_retries
+        self._regeneration_limit = regeneration_limit
 
-        # Cross-field validation (tool_calls_limit/planning_rounds_limit may
-        # not both be None) needs each field's other value already present
-        # before either setter's own cross-check runs below -- pre-seed the
-        # raw attribute directly (bypassing its own validation transiently)
-        # so the first setter call sees the real final value, not a
-        # placeholder. Each field still gets its own full validation via its
-        # own setter call.
-        self._planning_rounds_limit: Optional[int] = planning_rounds_limit
-        self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
         self.planning_rounds_limit = planning_rounds_limit
         self.tool_concurrency_limit = tool_concurrency_limit
@@ -192,11 +189,13 @@ class ScriptAgent(Agent):
     # Construction-time / mutable knobs
     # ------------------------------------------------------------------ #
     @property
-    def generation_retries(self) -> Optional[int]:
-        """Bounded-attempts ceiling shared by structural generation retries and
-        (later pass) failure-triggered checklist regeneration. ``None`` means
-        unlimited. Read-only."""
-        return self._generation_retries
+    def regeneration_limit(self) -> int:
+        """Bounded-attempts ceiling for regenerating a single round's
+        malformed/invalid draft (structural parse/reference/budget
+        failures) before raising -- always a plain ``int``, never ``None``
+        (unlike ``planning_rounds_limit``, mistake-recovery within one
+        round is never legitimately unbounded). Read-only."""
+        return self._regeneration_limit
 
     @property
     def tool_calls_limit(self) -> Optional[int]:
@@ -212,21 +211,18 @@ class ScriptAgent(Agent):
                 f"{type(self).__name__}.{self.name}: tool_calls_limit must be "
                 f"None or an int >= 0; got {value!r}."
             )
-        if value is None and self._planning_rounds_limit is None:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: tool_calls_limit and "
-                "planning_rounds_limit cannot both be None -- that would "
-                "leave both the tool-call budget and the replanning-round "
-                "budget unbounded at once."
-            )
         self._tool_calls_limit = value
 
     @property
     def planning_rounds_limit(self) -> Optional[int]:
-        """Max continuation rounds (pause/if-cutoff/failure-triggered
-        re-generations) allowed per ``invoke()`` run -- the unconditional
-        first generation never counts against this. ``None`` means
-        unlimited."""
+        """Max total planning generations (the first generation plus every
+        pause/if-cutoff/failure-triggered re-generation) permitted per
+        ``invoke()`` run -- how many times the agent is allowed to plan,
+        starting from scratch counts as one, not a count of "extra chances"
+        beyond a free first attempt. Defaults to ``25`` (safe-by-default,
+        matching common industry convention for this kind of round/
+        iteration cap). ``None`` means unlimited -- a deliberate,
+        non-default opt-in, not the default posture."""
         return self._planning_rounds_limit
 
     @planning_rounds_limit.setter
@@ -235,13 +231,6 @@ class ScriptAgent(Agent):
             raise ToolAgentError(
                 f"{type(self).__name__}.{self.name}: planning_rounds_limit "
                 f"must be None or an int >= 0; got {value!r}."
-            )
-        if value is None and self._tool_calls_limit is None:
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: tool_calls_limit and "
-                "planning_rounds_limit cannot both be None -- that would "
-                "leave both the tool-call budget and the replanning-round "
-                "budget unbounded at once."
             )
         self._planning_rounds_limit = value
 
@@ -281,16 +270,45 @@ class ScriptAgent(Agent):
 
     @staticmethod
     def _validate_tool_alias(alias: Optional[str]) -> None:
+        """Shape-only check on an explicit ``alias`` -- ``None`` (no alias
+        given) always passes; a given alias must be a Python-identifier-
+        legal string. Reserved-sentinel/builtin-collision checks live on
+        the *resolved* effective id instead (``_validate_effective_tool_id``
+        below), since a bare tool ``name`` falling back from no alias needs
+        the same protection an explicit alias does."""
         if alias is not None and (
             not isinstance(alias, str) or not IDENTIFIER_PATTERN.fullmatch(alias)
         ):
             raise ToolRegistrationError(
                 f"alias must be None or a Python-identifier-legal string; got {alias!r}."
             )
-        if alias in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS):
+
+    @staticmethod
+    def _validate_effective_tool_id(effective_id: str) -> None:
+        """Validate a tool's final effective id (an explicit alias, or the
+        bare ``name``/``invokable.name`` fallback when none is given) --
+        called after resolution at every registration call site, so both
+        paths get identical protection.
+
+        Never a reserved parser sentinel (``RHS_ASSIGN_ALIAS``/
+        ``RETURN_ALIAS``/``PY_BUILTIN_ALIAS``), and never a real,
+        non-excluded Python builtin name -- a builtin always resolves
+        first (see ``utils/script.py``'s ``rewrite_builtin_calls``), so a
+        tool registered under a colliding name would be permanently,
+        silently unreachable rather than raising here.
+        """
+        if effective_id in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS):
             raise ToolRegistrationError(
-                f"alias {alias!r} is reserved for the parser's own sentinel tool "
-                "names and cannot be used as a registered tool alias."
+                f"effective id {effective_id!r} is reserved for the parser's "
+                "own sentinel tool names and cannot be used as a registered "
+                "tool alias or name."
+            )
+        if hasattr(builtins, effective_id) and effective_id not in EXCLUDED_PY_BUILTINS:
+            raise ToolRegistrationError(
+                f"effective id {effective_id!r} collides with a real Python "
+                "builtin of the same name -- registering a tool under this "
+                "name would make it permanently unreachable (the builtin "
+                "always resolves first). Choose a different alias."
             )
 
     # ------------------------------------------------------------------ #
@@ -345,6 +363,7 @@ class ScriptAgent(Agent):
 
         self._validate_tool_alias(alias)
         effective_id = alias if alias is not None else invokable.name
+        self._validate_effective_tool_id(effective_id)
 
         if effective_id in self._toolbox:
             if policy == "raise":
@@ -436,6 +455,7 @@ class ScriptAgent(Agent):
             elif isinstance(item, AtomicInvokable):
                 self._validate_tool_alias(item_alias)
                 effective_id = item_alias if item_alias is not None else item.name
+                self._validate_effective_tool_id(effective_id)
                 candidates.append((effective_id, item))
 
             elif callable(item):
@@ -453,6 +473,7 @@ class ScriptAgent(Agent):
                     ) from exc
                 self._validate_tool_alias(item_alias)
                 effective_id = item_alias if item_alias is not None else invokable.name
+                self._validate_effective_tool_id(effective_id)
                 candidates.append((effective_id, invokable))
 
             else:
@@ -878,22 +899,15 @@ class ScriptAgent(Agent):
         return task
 
     def _render_system_message(self, task: ScriptAgentTask) -> list[dict[str, str]]:
-        """Renders the active system prompt against tool/constant/budget
-        context. Mirrors ``ToolAgent._render_system_message``'s established
-        shape exactly: a fresh, framework-controlled context dict, never
-        merged with ``task.inputs`` (neither prompt uses an input-derived
-        placeholder). ``{TOOL_CALLS_LIMIT}`` renders the REMAINING budget
-        (the configured limit minus every real call dispatched so far this
-        invoke, across every generation round) -- on the first generation
-        this is numerically identical to the configured limit, since
-        nothing has been dispatched yet."""
-        if self._tool_calls_limit is None:
-            limit_text = "unlimited"
-        else:
-            limit_text = str(self._tool_calls_limit - task.tool_calls_used)
+        """Renders the active system prompt against tool/constant context.
+        Mirrors ``ToolAgent._render_system_message``'s established shape
+        exactly: a fresh, framework-controlled context dict, never merged
+        with ``task.inputs`` (neither prompt uses an input-derived
+        placeholder). No budget content is rendered here -- `tool_calls_limit`
+        is a silent, structural-only backstop, never shown to the model
+        (see ``_process_generation_output``/``utils.script.validate_references``)."""
         context = {
             "TOOLS": self.actions_context(),
-            "TOOL_CALLS_LIMIT": limit_text,
             "CONSTANTS": self.constants_context(),
             "EXCLUDED_PY_BUILTINS": ", ".join(sorted(EXCLUDED_PY_BUILTINS)),
         }
@@ -927,22 +941,30 @@ class ScriptAgent(Agent):
         ``completed`` alone would silently drop that failure's reason and
         misrender it as a fresh round-1 call.
 
-        Round 1 (``continue_planning`` still ``False``): just the banner,
-        with the final-round warning appended inline when
-        ``self._is_final_round(task)`` (covers ``planning_rounds_limit ==
-        0``) -- nothing else needed, the system prompt already specifies
-        everything.
+        Round 1 (``continue_planning`` still ``False``): the banner plus a
+        trailing imperative ("Write a plan to accomplish this task now.")
+        -- mirrors the continuation branch's own closing instruction, so
+        round 1 isn't the one case with no explicit "go" signal right
+        before generation -- with the final-round warning appended inline
+        when ``self._is_final_round(task)`` (covers ``planning_rounds_limit
+        == 1``, where round 1 is immediately the only round permitted)
+        after that.
 
         A continuation round: banner, then an assistant-role state message
         (reconstructed code -- flat, no batch grouping, see
         ``render_completed_as_python`` -- plus ``render_cache_snapshot``'s
         block; directive-free, reads as state not instruction), then a
         user instruction. ``task.continuation_note`` (framework-authored
-        only -- a real resolution/execution failure reason, never a
-        model-authored pause note, which no longer exists) is consulted
-        and cleared back to ``None`` in the same read, so a stale,
-        already-addressed note can never leak into a later round. The
-        final-round warning is appended last when applicable.
+        only -- never a model-authored pause note, which no longer exists)
+        now carries a multi-line block: the failed batch's own rendered
+        source plus its labeled issue/failure list (see ``prepare()``/
+        ``_apply_batch_results()``). When present, it is prepended as its
+        own paragraph before the fixed instruction sentence, rather than
+        folded into one inline sentence -- it no longer fits a "previous
+        attempt failed: <reason>" framing now that it can span several
+        lines. Consulted and cleared back to ``None`` in the same read, so
+        a stale, already-addressed note can never leak into a later round.
+        The final-round warning is appended last when applicable.
         """
         if task.task_messages:
             return task.task_messages
@@ -950,9 +972,12 @@ class ScriptAgent(Agent):
         banner = self._render_current_task_message(task)
 
         if not task.continue_planning:
-            content = banner["content"]
+            content = (
+                banner["content"]
+                + "\n\nWrite a plan to accomplish this task now."
+            )
             if self._is_final_round(task):
-                content += self._FINAL_ROUND_WARNING
+                content += " " + FINAL_ROUND_WARNING
             task.task_messages = [{"role": "user", "content": content}]
             return task.task_messages
 
@@ -968,16 +993,13 @@ class ScriptAgent(Agent):
 
         note = task.continuation_note
         task.continuation_note = None
-        parts = []
-        if note:
-            parts.append(f"The previous attempt failed: {note}")
-        parts.append(
+        fixed_instruction = (
             "Continue planning the rest of this task. Use the existing "
             "work done to guide you on what the next steps should be."
         )
+        instruction = f"{note}\n\n{fixed_instruction}" if note else fixed_instruction
         if self._is_final_round(task):
-            parts.append(self._FINAL_ROUND_WARNING.strip())
-        instruction = " ".join(parts)
+            instruction += " " + FINAL_ROUND_WARNING
 
         task.task_messages = [banner, state_message, {"role": "user", "content": instruction}]
         return task.task_messages
@@ -1010,7 +1032,7 @@ class ScriptAgent(Agent):
         # unregistered tool; excluded-but-real builtin names are reported
         # here with a specific message instead of validate_references'
         # generic "unregistered tool" one.
-        builtin_issues = rewrite_builtin_calls(flat_slots, known_tools)
+        builtin_issues = rewrite_builtin_calls(flat_slots)
         # Derived from each ConstantSpec's own .name (already correctly
         # K_-prefixed exactly once for both the auto-named and aliased
         # registration paths -- see register_constant/register_constants),
@@ -1062,11 +1084,13 @@ class ScriptAgent(Agent):
         """
         Render, call the engine, record the attempt, validate/compile via
         ``_process_generation_output``, and retry with injected feedback on
-        failure until success or the retry budget (``self._generation_retries``,
-        tracked via ``task.retries_used``) is exhausted. ``None`` means
-        unlimited -- unlike v1's shared retry loop, which assumes ``int``,
-        the budget check here explicitly guards against ``None`` rather
-        than comparing directly (which would raise ``TypeError``).
+        failure until success or the regeneration budget
+        (``self._regeneration_limit``, tracked via
+        ``task.regenerations_used``) is exhausted. ``regeneration_limit``
+        is always a plain ``int`` (never ``None``), so this check is a
+        direct comparison -- no ``None``-guard needed, unlike
+        ``planning_rounds_limit``/``tool_calls_limit`` elsewhere in this
+        class.
         """
         additional_messages: list[dict[str, str]] = []
 
@@ -1083,10 +1107,10 @@ class ScriptAgent(Agent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if self._generation_retries is not None and task.retries_used >= self._generation_retries:
+                if task.regenerations_used >= self._regeneration_limit:
                     raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget "
-                        f"exhausted after {task.retries_used + 1} attempt(s). "
+                        f"{type(self).__name__}.{self.name}: regeneration budget "
+                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -1096,7 +1120,7 @@ class ScriptAgent(Agent):
                         "Produce a corrected plan."
                     )},
                 ]
-                task.retries_used += 1
+                task.regenerations_used += 1
                 continue
 
             return result
@@ -1121,10 +1145,10 @@ class ScriptAgent(Agent):
 
             result = self._process_generation_output(raw_output, task)
             if isinstance(result, str):
-                if self._generation_retries is not None and task.retries_used >= self._generation_retries:
+                if task.regenerations_used >= self._regeneration_limit:
                     raise ToolAgentError(
-                        f"{type(self).__name__}.{self.name}: generation retry budget "
-                        f"exhausted after {task.retries_used + 1} attempt(s). "
+                        f"{type(self).__name__}.{self.name}: regeneration budget "
+                        f"exhausted after {task.regenerations_used + 1} attempt(s). "
                         f"Last feedback: {result}"
                     )
                 additional_messages = [
@@ -1134,21 +1158,24 @@ class ScriptAgent(Agent):
                         "Produce a corrected plan."
                     )},
                 ]
-                task.retries_used += 1
+                task.regenerations_used += 1
                 continue
 
             return result
 
     def _is_final_round(self, task: ScriptAgentTask) -> bool:
         """
-        True iff the round about to be generated (or, for round 1, this
-        very generation) is the last one ``planning_rounds_limit``
-        permits -- computed on demand from ``task.planning_rounds_used``
-        vs. ``self._planning_rounds_limit``, never stored, so the render
-        and validation sites that both consult it can never see it drift
-        out of sync. ``None`` limit means never final (unlimited
-        continuations). Correctly covers round 1 itself when the limit is
-        ``0`` (``task.planning_rounds_used`` starts at that value).
+        True iff the round currently being generated is the last one
+        ``planning_rounds_limit`` permits -- computed on demand from
+        ``task.planning_rounds_used`` vs. ``self._planning_rounds_limit``,
+        never stored, so the render and validation sites that both consult
+        it can never see it drift out of sync. ``None`` limit means never
+        final (unlimited rounds). ``planning_rounds_used`` is already
+        incremented (by ``think()``/``async_think()``, unconditionally,
+        including for round 1) before this is ever consulted, so the
+        comparison alone correctly covers round 1 too when the limit is
+        ``1`` -- there's no separate zero-based special case to reason
+        about.
 
         A final round can no longer successfully re-pause: if it still
         writes ``# PAUSE`` anyway, ``_process_generation_output`` rejects
@@ -1156,7 +1183,7 @@ class ScriptAgent(Agent):
         there is deliberately no dedicated "planning round budget
         exhausted" raise anymore (unlike ``tool_calls_limit``): a round
         beyond the limit is never reachable, since a final round either
-        completes or exhausts ``generation_retries`` first.
+        completes or exhausts ``regeneration_limit`` first.
         """
         return (
             self._planning_rounds_limit is not None
@@ -1193,12 +1220,21 @@ class ScriptAgent(Agent):
         ``task.complete`` there and then, so this hook's own top guard
         already short-circuits before ever reaching the regeneration call
         below -- no separate check needed here.
+
+        ``task.planning_rounds_used`` increments unconditionally on every
+        real call to this hook, including the first -- ``planning_rounds_limit``
+        bounds the total number of planning generations permitted for this
+        invoke, not a count of continuations beyond a free first one. This
+        also means a ``prepare()`` resolution failure on the very first
+        batch of round 1 (which sets ``continue_planning`` before anything
+        has ever completed) is correctly counted the same as any other
+        round -- there is no separate signal to consult here, just a plain
+        increment every time this hook actually runs.
         """
         if task.pending or task.complete:
             return task
 
-        if task.completed:
-            task.planning_rounds_used += 1
+        task.planning_rounds_used += 1
 
         pending, annotations, continue_planning = self._run_planning_retry_loop(task=task)
         task.pending = pending
@@ -1212,8 +1248,7 @@ class ScriptAgent(Agent):
         if task.pending or task.complete:
             return task
 
-        if task.completed:
-            task.planning_rounds_used += 1
+        task.planning_rounds_used += 1
 
         pending, annotations, continue_planning = await self._arun_planning_retry_loop(task=task)
         task.pending = pending
@@ -1221,6 +1256,12 @@ class ScriptAgent(Agent):
         task.continue_planning = continue_planning
         task.task_messages.clear()
         return task
+
+    def _resolve_dispatch_tool(self, tool_id: str) -> AtomicInvokable:
+        """Resolve a slot's ``tool`` id to the actual invokable to dispatch
+        -- the shared ``PY_BUILTIN_ALIAS``-vs-registered-tool selection used
+        by ``prepare()`` and ``_gather_batch_results``."""
+        return builtin_call_tool if tool_id == PY_BUILTIN_ALIAS else self.get_tool(tool_id)
 
     # ------------------------------------------------------------------ #
     # Prepare next batch
@@ -1281,11 +1322,7 @@ class ScriptAgent(Agent):
                 continue
 
             try:
-                tool = (
-                    builtin_call_tool
-                    if slot.tool == PY_BUILTIN_ALIAS
-                    else self.get_tool(slot.tool)
-                )
+                tool = self._resolve_dispatch_tool(slot.tool)
                 resolved.append(tool._args_kwargs_to_dict(*positional, **keyword))
             except Exception as e:
                 issues.append(
@@ -1296,10 +1333,14 @@ class ScriptAgent(Agent):
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
             print("[DEBUG] prepare() resolution issues:\n", issues_msg)
+            task.continuation_note = (
+                "The following batch could not be resolved:\n"
+                f"{render_completed_as_python(batch)}"
+                f"\n\nIssues:\n{issues_msg}"
+            )
             task.pending.clear()
             task.resolved_args = []
             task.continue_planning = True
-            task.continuation_note = issues_msg
             return task
 
         task.resolved_args = resolved
@@ -1316,7 +1357,8 @@ class ScriptAgent(Agent):
         self, batch: list[CodeStatement], resolved: list[dict[str, Any]],
     ) -> list[Any]:
         """
-        Dispatch every real tool-call slot in ``batch`` concurrently;
+        Dispatch every dispatched-call slot in ``batch`` (registered tool
+        or approved builtin, via ``is_dispatched_slot``) concurrently;
         ``rhs_assign``/``return`` slots need no dispatch, their result is
         already the resolved ``"val"`` value. Shared by ``act``/
         ``async_act`` -- both differ only in how the resulting coroutine is
@@ -1325,13 +1367,9 @@ class ScriptAgent(Agent):
         coros: list[Any] = []
         dispatch_map: dict[int, int] = {}
         for i, slot in enumerate(batch):
-            if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS):
+            if is_dispatched_slot(slot):
                 dispatch_map[i] = len(coros)
-                tool = (
-                    builtin_call_tool
-                    if slot.tool == PY_BUILTIN_ALIAS
-                    else self.get_tool(slot.tool)
-                )
+                tool = self._resolve_dispatch_tool(slot.tool)
                 coros.append(tool.async_invoke(resolved[i]))
 
         gathered = await asyncio.gather(*coros, return_exceptions=True) if coros else []
@@ -1354,15 +1392,13 @@ class ScriptAgent(Agent):
         failed, record whichever succeeded, abandon the rest of this round,
         and require a continuation instead of raising.
 
-        Every real call in ``batch`` was actually dispatched via
+        Every dispatched call in ``batch`` (registered tool or approved
+        builtin, via ``is_dispatched_slot``) was actually dispatched via
         ``asyncio.gather`` regardless of whether any of them failed, so all
         of them count against ``tool_calls_used`` unconditionally, before
         checking for failures.
         """
-        real_call_count = sum(
-            1 for slot in batch
-            if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS)
-        )
+        real_call_count = sum(1 for slot in batch if is_dispatched_slot(slot))
         task.tool_calls_used += real_call_count
 
         def _failure_label(slot: CodeStatement) -> str:
@@ -1399,10 +1435,14 @@ class ScriptAgent(Agent):
         if failures:
             failures_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(failures))
             print("[DEBUG] act() execution failures:\n", failures_msg)
+            task.continuation_note = (
+                "The following batch encountered execution failures:\n"
+                f"{render_completed_as_python(batch)}"
+                f"\n\nFailures:\n{failures_msg}"
+            )
             task.pending.clear()
             task.resolved_args = []
             task.continue_planning = True
-            task.continuation_note = failures_msg
             return task
 
         for slot, kwargs in zip(batch, resolved):

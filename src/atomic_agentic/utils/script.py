@@ -6,13 +6,16 @@ import re
 from typing import Any, Optional
 
 from ..constants.agents import (
+    CODE_FENCE_PATTERN,
     EXCLUDED_PY_BUILTINS,
     HOISTED_NAME_PREFIX,
     KWARGS_UNPACK_KEY,
+    PAUSE_PATTERN,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
     TASK_RESULT_PREFIX,
+    UNSUPPORTED_EXPR_LABELS,
 )
 from ..exceptions import BlackboardParseError
 from ..models.agents.blackboard_models import CodeStatement
@@ -23,32 +26,12 @@ __all__ = [
     "resolve_slot_args",
     "parse_generation",
     "rewrite_builtin_calls",
+    "is_dispatched_slot",
     "validate_references",
     "compile_batches",
     "render_completed_as_python",
     "render_cache_snapshot",
 ]
-
-# Matches a `#`-comment line whose content is (case-insensitively) the word
-# PAUSE -- line-anchored so a tool argument that happens to contain the
-# text is never misread as a real marker.
-_PAUSE_PATTERN = re.compile(r"^\s*#\s*PAUSE\b", re.IGNORECASE | re.MULTILINE)
-
-# Matches an optional single markdown code fence wrapping the *entire*
-# generation -- any (or no) language tag on the opening fence line
-# (```python, ```py, ```text, a bare ```, ...), not just ```python.
-_CODE_FENCE_PATTERN = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.DOTALL)
-
-# Expression node types _hoist_calls rejects unconditionally (see its own
-# docstring) -- each introduces a local binding scope neither this module
-# nor extract_identifiers has any awareness of.
-_UNSUPPORTED_EXPR_LABELS: dict[type, str] = {
-    ast.ListComp: "list comprehension",
-    ast.SetComp: "set comprehension",
-    ast.DictComp: "dict comprehension",
-    ast.GeneratorExp: "generator expression",
-    ast.Lambda: "lambda",
-}
 
 
 def _strip_code_fence(raw_text: str) -> str:
@@ -61,7 +44,7 @@ def _strip_code_fence(raw_text: str) -> str:
     (``ast.parse`` will reject that on its own terms, as a real structural
     problem).
     """
-    match = _CODE_FENCE_PATTERN.match(raw_text)
+    match = CODE_FENCE_PATTERN.match(raw_text)
     return match.group(1) if match else raw_text
 
 
@@ -309,7 +292,7 @@ def _hoist_calls(
         if isinstance(candidate, ast.Await):
             _reject_await(candidate)
 
-        label = _UNSUPPORTED_EXPR_LABELS.get(type(candidate))
+        label = UNSUPPORTED_EXPR_LABELS.get(type(candidate))
         if label is not None:
             raise BlackboardParseError(
                 f"{label} expressions are not supported: "
@@ -529,7 +512,14 @@ def parse_generation(
     ``before``, if anything, is never even parsed) -- for the same reason
     a later real call must never land in the same batch as the return and
     execute anyway, and a second `return` must never silently overwrite the
-    first.
+    first. If a pause marker was ALSO found anywhere in the raw text
+    (``len(parts) == 2``), this is a structural error, not silently
+    resolved in ``return``'s favor: a generation writing both terminals is
+    self-contradictory (observed live -- a model hedging between "return
+    this" and "pause to reconsider" in the same breath), and letting
+    ``return`` silently win discards the pause with zero signal, risking a
+    premature/unverified final answer. Raises, feeding regen-repair so the
+    model is told directly to pick exactly one.
 
     ``after`` (present only when a pause marker was found) is never
     inspected at all -- ``# PAUSE`` is a bare, complete sentinel; no
@@ -543,7 +533,7 @@ def parse_generation(
     ``before``, or one of the two "nothing real yet" cases above).
     """
     text = _strip_code_fence(raw_text)
-    parts = _PAUSE_PATTERN.split(text, maxsplit=1)
+    parts = PAUSE_PATTERN.split(text, maxsplit=1)
     before = parts[0]
 
     flat_slots: list[CodeStatement] = []
@@ -582,6 +572,13 @@ def parse_generation(
             hoist_index += len(slots)
 
             if slots and slots[-1].tool == RETURN_ALIAS:
+                if len(parts) == 2:
+                    raise BlackboardParseError(
+                        "a generation cannot contain both a return statement "
+                        "and a # PAUSE marker -- pick exactly one way to end: "
+                        "return a final value, or # PAUSE (with no return) to "
+                        "continue next round."
+                    )
                 return flat_slots, annotations, False
 
     if len(parts) == 1:
@@ -599,19 +596,21 @@ def parse_generation(
     return flat_slots, annotations, True
 
 
-def rewrite_builtin_calls(
-    slots: list[CodeStatement], known_tools: frozenset[str],
-) -> list[str]:
+def rewrite_builtin_calls(slots: list[CodeStatement]) -> list[str]:
     """
     Rewrite eligible builtin-call slots in place to dispatch through the
     ``PY_BUILTIN_ALIAS`` sentinel, mutating ``slot.tool``/``.args`` directly.
     Run once, over the full flat slot list, between ``parse_generation()``
     and ``validate_references()``.
 
-    A slot is eligible when its ``tool`` isn't already a sentinel or a
-    registered tool (which always wins on a name collision) and names a
-    real Python builtin. An eligible slot gets its builtin name spliced in
-    as a new leading positional arg and its ``tool`` replaced with
+    A slot is eligible when its ``tool`` isn't already a sentinel and names
+    a real Python builtin. A registered tool can no longer share a name
+    with a real, non-excluded builtin at all (enforced at registration time
+    by ``ScriptAgent._validate_tool_alias``), so there is no precedence
+    rule to apply here -- a name reaching this function is either a
+    registered tool (never a builtin) or not, mutually exclusive by
+    construction. An eligible slot gets its builtin name spliced in as a
+    new leading positional arg and its ``tool`` replaced with
     ``PY_BUILTIN_ALIAS``.
 
     A name that resolves to a real but excluded builtin is left unrewritten
@@ -623,7 +622,7 @@ def rewrite_builtin_calls(
     """
     issues: list[str] = []
     for slot in slots:
-        if slot.tool in (RHS_ASSIGN_ALIAS, RETURN_ALIAS) or slot.tool in known_tools:
+        if slot.tool in (RHS_ASSIGN_ALIAS, RETURN_ALIAS):
             continue
         if not hasattr(builtins, slot.tool):
             continue
@@ -642,6 +641,19 @@ def rewrite_builtin_calls(
     return issues
 
 
+def is_dispatched_slot(slot: CodeStatement) -> bool:
+    """
+    True iff ``slot`` represents a real dispatched call (a registered tool
+    or an approved Python builtin) rather than an ``rhs_assign``/``return``
+    sentinel, which are never dispatched at all. Shared by
+    ``compile_batches`` (concurrency-batch accounting) and
+    ``validate_references`` (tool-call-budget accounting) -- both use the
+    identical predicate, since builtins count toward the budget the same
+    as registered tools (no per-category exemption).
+    """
+    return slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS)
+
+
 def validate_references(
     slots: list[CodeStatement],
     known_tools: frozenset[str],
@@ -651,7 +663,7 @@ def validate_references(
 ) -> list[str]:
     """
     Walk ``slots`` in order, tracking every previously-bound identifier;
-    also check the whole plan's real-tool-call count against a budget.
+    also check the whole plan's dispatched-call count against a budget.
 
     For each slot: its own ``tool`` must be a registered tool id unless
     it's the ``rhs_assign``/``return``/``py_builtin`` sentinel, or a real
@@ -669,10 +681,13 @@ def validate_references(
     real tool call could have spent budget in between).
 
     Separately, independent of the per-slot walk: if ``tool_calls_limit``
-    is not ``None`` and the count of real tool-call slots (excluding
-    ``rhs_assign``/``return``, hoisted calls included) exceeds it, that's
-    also collected as an issue -- one regen-repair round can report both
-    a bad reference and an excess tool-call count together.
+    is not ``None`` and the count of dispatched slots (registered tool
+    calls and approved-builtin calls combined, via ``is_dispatched_slot``;
+    ``rhs_assign``/``return`` excluded, hoisted calls included) exceeds it,
+    that's also collected as an issue -- one regen-repair round can report
+    both a bad reference and an excess call count together. Tools and
+    builtins are counted identically; there is no separate budget or
+    exemption for either category.
 
     Returns ``[]`` if every reference resolves and the plan is within
     budget.
@@ -704,14 +719,11 @@ def validate_references(
         if slot.identifier is not None:
             bound.add(slot.identifier)
 
-    real_call_count = sum(
-        1 for slot in slots
-        if slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS)
-    )
+    real_call_count = sum(1 for slot in slots if is_dispatched_slot(slot))
     if tool_calls_limit is not None and real_call_count > tool_calls_limit:
         issues.append(
-            f"the plan calls {real_call_count} real tool(s), exceeding the "
-            f"configured limit of {tool_calls_limit}."
+            f"the plan calls {real_call_count} tool(s)/builtin(s), "
+            f"exceeding the configured limit of {tool_calls_limit}."
         )
 
     return issues
@@ -733,10 +745,9 @@ def compile_batches(
     is assumed already checked by ``validate_references``). Otherwise the
     open batch closes first and this slot starts a new one.
 
-    Additionally, when about to add a *dispatched* slot (``tool`` not in
-    ``(RHS_ASSIGN_ALIAS, RETURN_ALIAS)`` -- includes ``PY_BUILTIN_ALIAS``,
-    a distinct exclusion set from ``validate_references``'s budget-only
-    ``real_call_count``) to a batch that already holds ``max_concurrency``
+    Additionally, when about to add a *dispatched* slot (``is_dispatched_slot``
+    -- the same predicate ``validate_references`` now uses for its own
+    budget accounting) to a batch that already holds ``max_concurrency``
     dispatched slots, the batch closes first -- a purely additive
     concurrency cap, never replacing the dependency-conflict closure rule
     above. ``max_concurrency=None`` means no cap (today's greedy default).
@@ -770,7 +781,7 @@ def compile_batches(
         if any(name in current_batch_identifiers for name in deps):
             close_current()
 
-        is_dispatched = slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS)
+        is_dispatched = is_dispatched_slot(slot)
         if (
             is_dispatched
             and max_concurrency is not None

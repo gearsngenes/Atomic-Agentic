@@ -1,4 +1,5 @@
 from __future__ import annotations
+import ast
 import re
 from ..models.parameters import ParamSpec
 from ..constants.core import IDENTIFIER_PATTERN_TEXT
@@ -230,6 +231,39 @@ regen-repair message instead of falling through to the generic
 # real keyword argument name -- no validation needed to guarantee this.
 KWARGS_UNPACK_KEY = "**"
 
+# Matches a `#`-comment line whose content is (case-insensitively) the word
+# PAUSE -- line-anchored so a tool argument that happens to contain the text
+# is never misread as a real marker. Used by utils/script.py's
+# parse_generation to split a raw generation into its pre-pause/post-pause
+# halves.
+PAUSE_PATTERN: re.Pattern[str] = re.compile(r"^\s*#\s*PAUSE\b", re.IGNORECASE | re.MULTILINE)
+
+# Matches an optional single markdown code fence wrapping the *entire*
+# generation -- any (or no) language tag on the opening fence line
+# (```python, ```py, ```text, a bare ```, ...), not just ```python. Used by
+# utils/script.py's _strip_code_fence.
+CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.DOTALL)
+
+# Expression node types utils/script.py's _hoist_calls rejects unconditionally
+# (see its own docstring) -- each introduces a local binding scope neither
+# that module nor extract_identifiers has any awareness of.
+UNSUPPORTED_EXPR_LABELS: dict[type, str] = {
+    ast.ListComp: "list comprehension",
+    ast.SetComp: "set comprehension",
+    ast.DictComp: "dict comprehension",
+    ast.GeneratorExp: "generator expression",
+    ast.Lambda: "lambda",
+}
+
+FINAL_ROUND_WARNING = (
+    "This is your FINAL planning round -- you must complete the entire "
+    "task now. Do not write # PAUSE."
+)
+"""Appended (space-separated) to a ScriptAgent continuation instruction when
+ScriptAgent._is_final_round(task) is true -- shared by
+_render_task_messages' round-1 and continuation branches so the two call
+sites can never drift in wording."""
+
 
 __all__ = [
     # Conversation storage
@@ -246,6 +280,10 @@ __all__ = [
     "PY_BUILTIN_ALIAS",
     "EXCLUDED_PY_BUILTINS",
     "KWARGS_UNPACK_KEY",
+    "PAUSE_PATTERN",
+    "CODE_FENCE_PATTERN",
+    "UNSUPPORTED_EXPR_LABELS",
+    "FINAL_ROUND_WARNING",
     # LLM step fields
     "STEP_FIELD",
     "TOOL_FIELD",

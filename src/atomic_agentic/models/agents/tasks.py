@@ -213,30 +213,36 @@ class ScriptAgentTask(AgentTask):
         ever gets a turn to regenerate an uninvited round).
 
     planning_rounds_used : int
-        Count of continuation rounds requested so far this invoke -- the
-        unconditional first generation never counts, only rounds requested
-        because ``continue_planning`` was set. Checked by ``think()``
-        against ``self._planning_rounds_limit`` before requesting another.
+        Count of planning generations made so far this invoke, including
+        the first -- total-count semantics, not "extra chances beyond a
+        free first attempt" (contrast ``regenerations_used``, which
+        specifically counts second chances within one round).
+        Incremented unconditionally by ``think()``/``async_think()`` on
+        every real call, then checked against
+        ``self._planning_rounds_limit`` before requesting another.
 
     tool_calls_used : int
-        Cumulative count of real (non-``rhs_assign``/``return``) calls
-        actually dispatched so far this invoke, across every generation
-        round -- never decremented. Incremented only in
-        ``_apply_batch_results`` (a real dispatch happened, whether it
-        succeeded or failed); never in ``prepare()`` (a resolution failure
-        means nothing was ever dispatched). Read by ``_render_system_message``
-        to render the *remaining* ``{TOOL_CALLS_LIMIT}``, and by
+        Cumulative count of dispatched (non-``rhs_assign``/``return``)
+        calls actually dispatched so far this invoke, across every
+        generation round -- registered-tool and approved-builtin calls
+        counted identically (no per-category exemption), never decremented.
+        Incremented only in ``_apply_batch_results`` (a real dispatch
+        happened, whether it succeeded or failed); never in ``prepare()``
+        (a resolution failure means nothing was ever dispatched). Read by
         ``_process_generation_output`` to compute the remaining budget
         passed into ``validate_references``.
 
     continuation_note : Optional[str]
         Framework-authored (never model-authored) reason text, set only by
         ``prepare()``'s resolution-failure branch or
-        ``_apply_batch_results``'s execution-failure branch -- the real,
-        dynamic issue/failure text. An explicit ``# PAUSE`` no longer
-        produces one (bare sentinel, no trailing note); consulted and
-        cleared back to ``None`` in the same read by
-        ``_render_task_messages`` on the next generation, so a stale note
+        ``_apply_batch_results``'s execution-failure branch -- a
+        multi-line block combining the failed batch's own rendered source
+        (via ``render_completed_as_python``) with its labeled issue/failure
+        list, so the next continuation round sees both what it wrote and
+        specifically what went wrong with it. An explicit ``# PAUSE`` or
+        if-cutoff continuation never sets this (bare sentinel, no note of
+        any kind); consulted and cleared back to ``None`` in the same read
+        by ``_render_task_messages`` on the next generation, so a stale note
         from an already-addressed failure never leaks into a later round.
 
     cache : dict[str, Any]
@@ -252,13 +258,15 @@ class ScriptAgentTask(AgentTask):
         ScriptAgentRecord.annotations verbatim (normalized to a tuple) at
         commit time.
 
-    retries_used : int
-        Cumulative generation-retry attempts consumed across every
-        generation call this run (initial plan, judge, planner repair
-        calls) -- structural/syntax failures only. Unlike tool-call budget
-        accounting, not derivable from ``completed`` (retries are
-        generation attempts, not slots), so this stays an explicit counter
-        -- same role as ToolAgentTask.retries_used.
+    regenerations_used : int
+        Cumulative regeneration attempts consumed across every generation
+        call this run (initial plan, planner repair calls) -- structural/
+        syntax/validation failures only. Unlike tool-call budget
+        accounting, not derivable from ``completed`` (regenerations are
+        generation attempts, not slots), so this stays an explicit counter.
+        Checked against ``self._regeneration_limit`` (always a plain
+        non-negative ``int``, never ``None``) before permitting another
+        attempt within one round.
 
     resolved_args : list[dict[str, Any]]
         Positionally matched to ``pending[0]``'s slots -- the resolved
@@ -279,7 +287,7 @@ class ScriptAgentTask(AgentTask):
     pending: list[list[CodeStatement]] = field(default_factory=list)
     cache: dict[str, Any] = field(default_factory=dict)
     annotations: list[str] = field(default_factory=list)
-    retries_used: int = 0
+    regenerations_used: int = 0
     resolved_args: list[dict[str, Any]] = field(default_factory=list)
     continue_planning: bool = False
     planning_rounds_used: int = 0

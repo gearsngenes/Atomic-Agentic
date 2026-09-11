@@ -108,7 +108,6 @@ orch = ScriptAgent(
     llm_engine=llm_engine,
     context_enabled=True,
     planning_rounds_limit=1,
-    generation_retries=2,
 )
 
 # Registered under each agent's own bare name -- no id capture needed, the

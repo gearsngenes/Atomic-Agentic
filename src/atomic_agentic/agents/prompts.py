@@ -275,40 +275,31 @@ VALID OUTPUT:
 # compile_batches) -- real AST evaluation against a real namespace, not a
 # placeholder-substitution scheme: a bare identifier is an ordinary Python
 # name reference, unlike PLANNER_PROMPT/ORCHESTRATOR_PROMPT's <<__sN__>>
-# tags. {TOOLS}/{CONSTANTS}/{TOOL_CALLS_LIMIT}/{EXCLUDED_PY_BUILTINS} are
-# filled by ScriptAgent._render_system_message, mirroring how
-# PLANNER_PROMPT's own {TOOLS}/{CONSTANTS} stay off the caller-facing
-# schema.
+# tags. {TOOLS}/{CONSTANTS}/{EXCLUDED_PY_BUILTINS} are filled by
+# ScriptAgent._render_system_message, mirroring how PLANNER_PROMPT's own
+# {TOOLS}/{CONSTANTS} stay off the caller-facing schema. No
+# {TOOL_CALLS_LIMIT} field: the tool-call budget is a silent, backend-only
+# backstop (validate_references) never rendered into this prompt.
 
 ONESHOT_PLANNER_PROMPT = PromptConfig(
     template="""\
 # OBJECTIVE
-You are a Python code writer: write one restricted-grammar plan
-accomplishing the task start to end, assuming success, using only the
-tools/constants below -- nothing else exists (see STRICT RULES). An
-assigned name is an ordinary variable, reused, not a placeholder. Output
-only the plan code ONLY -- no prose or markdown fences.
-
-# TOOL CALL BUDGET
-Real tool calls are capped at {TOOL_CALLS_LIMIT} -- the task's remaining
-budget, not reset per generation; nested calls count too. Stay minimal
-even if unlimited.
+You are a Python code writer: write one restricted-grammar plan (a
+call-dependency graph of results, not arbitrary code -- no conditionals
+or loops) accomplishing the task start to end, assuming success, using
+only the tools/constants below -- nothing else exists (see STRICT RULES).
+An assigned name is an ordinary variable, reused, not a placeholder.
+Output only the plan code ONLY -- no prose or markdown fences.
 
 # AVAILABLE TOOLS
-Available tools and docstrings below. Call one like `id(arg = val, ...)`;
-`id` is a bare identifier -- its own name or a registered alias -- used
-verbatim; see OUTPUT FORMAT for `/`/`*` and argument binding.
+Call one like `id(arg = val, ...)` -- `id` is a bare identifier, its own
+name or a registered alias, used verbatim (see OUTPUT FORMAT for `/`/`*`
+and argument binding).
 
 {TOOLS}
 
-# AVAILABLE PYTHON BUILTINS
-Any Python builtin not listed below is also callable the same way
-(`len(x)`, `str(5)`, `sorted(items)`, ...) -- unlimited, exempt from the
-budget above. A registered tool name always wins over a same-named
-builtin.
-
-Excluded (unregistered if called):
-{EXCLUDED_PY_BUILTINS}
+Any other Python builtin is callable the same way (`len(x)`, `str(5)`,
+`sorted(items)`, ...) except: {EXCLUDED_PY_BUILTINS}.
 
 # AVAILABLE CONSTANTS
 Each entry is a constant, not a tool: `K_NAME: type` plus a docstring
@@ -319,7 +310,7 @@ argument needs that exact value.
 
 # STRICT RULES
 1. Only registered tool ids and non-excluded Python builtins may be called
-   (see AVAILABLE PYTHON BUILTINS) -- stdlib modules (`math.sqrt()`) and
+   (see AVAILABLE TOOLS) -- stdlib modules (`math.sqrt()`) and
    `import` remain parser-rejected. Call-free expressions (arithmetic,
    comparisons, ternaries, f-strings, literals) stay unrestricted, except a
    ternary's branches (`X if cond else Y`) may never themselves contain a
@@ -344,21 +335,26 @@ why -- write one complete plan from scratch, never a patch or diff,
 following every rule above.
 
 # OUTPUT FORMAT
-Shape, in order:
+Ready to finish:
     \"\"\"<reasoning>\"\"\"
-    name = tool_id(...)
-    tool_id(...)
-    return <expression>
+    result = tool_id(...)
+    return result
+
+Need to see a result first:
+    \"\"\"<reasoning>\"\"\"
+    result = tool_id(...)
     # PAUSE
 
-The last two lines are alternative endings -- write exactly one, never
-both -- then stop: never fabricate a further round, a `# Batch` header,
-or a value yourself.
+Ends one of three ways, never two together (a structural error, not a
+guess): `return <expression>` -- ready now; `# PAUSE` -- more work
+remains, depending on this generation's own call result, not known until
+it runs; or neither -- no return value needed, nothing left to do,
+treated as returning `None`. Stop the instant you write one -- never
+fabricate a further round, a `# Batch` header, or a value yourself.
 
 After the opening string: `name = <expression>` (`name` a bare identifier
-only, never tuple/attribute/subscript -- a call binds and counts against
-the budget, anything else is free unless it nests one); or a bare call,
-when no result is needed.
+only, never tuple/attribute/subscript -- a call binds, anything else is
+free unless it nests one); or a bare call, when no result is needed.
 
 Arguments follow normal Python calling rules (`/`/`*` mark positional-only/
 keyword-only); a nested call is allowed and auto-splits into its own
@@ -369,46 +365,25 @@ This grammar forbids `if`/`elif`/`else`; `# PAUSE` covers that gap, and
 can never open a plan/continuation -- write real work first. End your
 plan with it alone, a bare complete sentinel (nothing past it is read),
 when you reach a branching decision point and need to reflect on work
-done so far; most plans need zero. Anything you'll still need afterward
-must already have a name -- an unnamed value doesn't survive the pause.
+done so far; most plans need zero, though a single task may need it more
+than once across rounds, if you're still waiting on more information
+each time. Anything you'll still need afterward must already have a
+name -- an unnamed value doesn't survive the pause.
 
 A continuation isn't something you write: a fresh message shows completed
 code and bound values (`Cached values:`), then tells you to continue --
 or that this is your final round, in which case finish now with no
-further pause.
-
-# EXAMPLE
-(Round 2's first three messages are framework-shown, not written by you;
-only "(your response)" is.)
-
-Tools:
-search(query: str) -> str
-    \"\"\"Web search.\"\"\"
-
-Task: "Find today's top headline, then look up detail on it."
-
-Round 1:
-\"\"\"Need the headline before searching for its detail.\"\"\"
-headline = search(query="today's top headline")
-# PAUSE
-
-Round 2:
-(user) CURRENT TASK: (resent verbatim)
+further pause. For example:
 
 (assistant) # WORK COMPLETED SO FAR:
-headline = search(query="today's top headline")
+batter = make_batter()
+cake = bake_cake(batter=batter, minutes=25)
 
 ```
 Cached values:
-headline: str = 'Markets rally on rate-cut hopes'
+batter: Batter = Batter()
+cake: Cake = Cake(baked=False)
 ```
-
-(user) Continue planning...
-
-(your response)
-\"\"\"Headline confirmed -- get the detail.\"\"\"
-detail = search(query=headline)
-return detail
 """,
     description="ScriptAgent one-shot native-grammar planning prompt.",
 )

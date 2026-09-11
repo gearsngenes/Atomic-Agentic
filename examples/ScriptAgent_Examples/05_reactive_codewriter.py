@@ -129,21 +129,19 @@ orchestrator = ScriptAgent(
     tool_calls_limit=15,
     planning_rounds_limit=6,
     response_preview_limit=50,
-    generation_retries=None,
 )
 orchestrator.register_tool(writer)
 orchestrator.register_tool(reviewer)
 
 if __name__ == "__main__":
     task = """
-    Send to the code writer the following task:
-        ```
+    Objective:
         Write a Python module that scaffolds an agentic AI design with clean OOP and provider-agnostic 
         LLM backends (e.g., Bedrock, OpenAI, llama-cpp-python).
-        ```
-    Then send the code to the code reviewer. Then pause and inspect the feedback. If the reviewer approved,
-    then you can stop and return the writer's draft. Otherwise, send the feedback to the code writer.
-    Repeat this review-rewrite process until the reviewer approves, and return the final code module.
+    Process:
+    1. Send the task to the code writer, then send the draft to the reviewer.
+    2. PAUSE and inspect the reviewer's feedback. If the reviewer approved, then you can return the CODER WRITER's result
+    3. Otherwise, repeat steps 1-2.
     """
     result = orchestrator.invoke({"prompt": task}).result
     record = orchestrator.get_conversation()[-1]

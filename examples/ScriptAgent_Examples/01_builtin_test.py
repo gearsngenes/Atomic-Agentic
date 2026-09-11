@@ -30,7 +30,6 @@ agent = ScriptAgent(
     llm_engine=llm_engine,
     context_enabled=True,
     planning_rounds_limit=2,
-    generation_retries=2,
 )
 
 # Register tool lists
