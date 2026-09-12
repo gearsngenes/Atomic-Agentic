@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import builtins
+import copy
 from dataclasses import replace
 from typing import Any, Callable, ClassVar, Literal, Optional
 
@@ -11,7 +13,7 @@ from ..a2a.PyA2AtomicClient import PyA2AtomicClient
 
 from .base import Agent
 from .prompts import ONESHOT_PLANNER_PROMPT
-from .tools import builtin_call_tool
+from .tools import attr_call_tool, builtin_call_tool
 from ..core.Invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..tools.Toolify import toolify
@@ -20,6 +22,7 @@ from ..models.agents.records import AgentRecord, LLMRecord, ScriptAgentRecord
 from ..models.agents.tasks import ScriptAgentTask
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
 from ..constants.agents import (
+    ATTR_CALL_ALIAS,
     EXCLUDED_PY_BUILTINS,
     FINAL_ROUND_WARNING,
     PY_BUILTIN_ALIAS,
@@ -291,13 +294,13 @@ class ScriptAgent(Agent):
         paths get identical protection.
 
         Never a reserved parser sentinel (``RHS_ASSIGN_ALIAS``/
-        ``RETURN_ALIAS``/``PY_BUILTIN_ALIAS``), and never a real,
-        non-excluded Python builtin name -- a builtin always resolves
-        first (see ``utils/script.py``'s ``rewrite_builtin_calls``), so a
-        tool registered under a colliding name would be permanently,
+        ``RETURN_ALIAS``/``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``), and
+        never a real, non-excluded Python builtin name -- a builtin always
+        resolves first (see ``utils/script.py``'s ``rewrite_builtin_calls``),
+        so a tool registered under a colliding name would be permanently,
         silently unreachable rather than raising here.
         """
-        if effective_id in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS):
+        if effective_id in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS):
             raise ToolRegistrationError(
                 f"effective id {effective_id!r} is reserved for the parser's "
                 "own sentinel tool names and cannot be used as a registered "
@@ -838,7 +841,6 @@ class ScriptAgent(Agent):
             llm_records=tuple(task.llm_records),
             prev=prev,
             statements=tuple(task.completed),
-            annotations=tuple(task.annotations),
         )
 
     # ------------------------------------------------------------------ #
@@ -875,6 +877,27 @@ class ScriptAgent(Agent):
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
     # ------------------------------------------------------------------ #
+    _ATOMIC_IMMUTABLE_TYPES: ClassVar[tuple[type, ...]] = (
+        str, int, float, bool, complex, bytes, type(None),
+    )
+
+    @classmethod
+    def _copy_for_task_namespace(cls, value: Any) -> Any:
+        """
+        Return ``value`` unchanged if it's a known atomic-immutable type
+        (nothing callable on these ever mutates in place); otherwise return
+        a deep copy. Used to seed both ``task.cache``'s ``task_result_i``
+        entries and ``task.constant_values`` exactly once per invocation,
+        so a mutating attribute/method call on either can never reach the
+        real, shared registered constant or a prior invocation's stored
+        result -- covers aliasing and nested-attribute mutation uniformly,
+        since nothing shared is ever exposed by direct reference in the
+        first place.
+        """
+        if isinstance(value, cls._ATOMIC_IMMUTABLE_TYPES):
+            return value
+        return copy.deepcopy(value)
+
     def _initialize_task(
         self,
         *,
@@ -887,15 +910,24 @@ class ScriptAgent(Agent):
         result under ``task_result_{i}`` -- unconditional over whatever
         ``turns`` contains (empty when there's nothing to seed; already
         gated upstream by conversation-resolution/``context_enabled``/
-        ``records_window``). No other field needs seeding -- completed/
-        pending/annotations/resolved_args/continue_planning/
-        planning_rounds_used/tool_calls_used/continuation_note all start at
-        their dataclass defaults."""
+        ``records_window``) -- and its ``constant_values`` pre-seeded from
+        every registered constant. Both are copied via
+        ``_copy_for_task_namespace`` exactly once here, not re-derived
+        later, so a mutation is visible for the rest of this invocation's
+        own rounds but never reaches the real constant or a future
+        invocation. No other field needs seeding -- completed/pending/
+        resolved_args/continue_planning/planning_rounds_used/
+        tool_calls_used/continuation_note all start at their dataclass
+        defaults."""
         task = ScriptAgentTask(
             turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="planner",
         )
         for turn in turns:
-            task.cache[f"task_result_{self._turn_position(turn)}"] = turn.generated_response
+            task.cache[f"task_result_{self._turn_position(turn)}"] = self._copy_for_task_namespace(
+                turn.generated_response
+            )
+        for spec in self._constants.values():
+            task.constant_values[spec.name] = self._copy_for_task_namespace(spec.value)
         return task
 
     def _render_system_message(self, task: ScriptAgentTask) -> list[dict[str, str]]:
@@ -1009,7 +1041,7 @@ class ScriptAgent(Agent):
     # ------------------------------------------------------------------ #
     def _process_generation_output(
         self, raw_text: str, task: ScriptAgentTask,
-    ) -> tuple[list[list[CodeStatement]], list[str], bool] | str:
+    ) -> tuple[list[list[CodeStatement]], bool] | str:
         """
         Pure-computation validate callback for the planning retry loop:
         parse, validate references + remaining tool-call budget + the
@@ -1021,7 +1053,7 @@ class ScriptAgent(Agent):
         """
         print("[DEBUG] Raw generation output:\n", raw_text)
         try:
-            flat_slots, annotations, continue_planning = parse_generation(raw_text)
+            flat_slots, continue_planning = parse_generation(raw_text)
         except BlackboardParseError as e:
             print(f"[DEBUG] Parse error: {e}")
             return str(e)
@@ -1076,11 +1108,11 @@ class ScriptAgent(Agent):
             start_batch_index=task.batch_counter,
         )
         task.batch_counter += len(pending)
-        return pending, annotations, continue_planning
+        return pending, continue_planning
 
     def _run_planning_retry_loop(
         self, *, task: ScriptAgentTask,
-    ) -> tuple[list[list[CodeStatement]], list[str], bool]:
+    ) -> tuple[list[list[CodeStatement]], bool]:
         """
         Render, call the engine, record the attempt, validate/compile via
         ``_process_generation_output``, and retry with injected feedback on
@@ -1127,7 +1159,7 @@ class ScriptAgent(Agent):
 
     async def _arun_planning_retry_loop(
         self, *, task: ScriptAgentTask,
-    ) -> tuple[list[list[CodeStatement]], list[str], bool]:
+    ) -> tuple[list[list[CodeStatement]], bool]:
         """Async mirror of ``_run_planning_retry_loop``: uses
         ``async_invoke`` for the engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
@@ -1236,9 +1268,8 @@ class ScriptAgent(Agent):
 
         task.planning_rounds_used += 1
 
-        pending, annotations, continue_planning = self._run_planning_retry_loop(task=task)
+        pending, continue_planning = self._run_planning_retry_loop(task=task)
         task.pending = pending
-        task.annotations.extend(annotations)
         task.continue_planning = continue_planning
         task.task_messages.clear()
         return task
@@ -1250,18 +1281,21 @@ class ScriptAgent(Agent):
 
         task.planning_rounds_used += 1
 
-        pending, annotations, continue_planning = await self._arun_planning_retry_loop(task=task)
+        pending, continue_planning = await self._arun_planning_retry_loop(task=task)
         task.pending = pending
-        task.annotations.extend(annotations)
         task.continue_planning = continue_planning
         task.task_messages.clear()
         return task
 
     def _resolve_dispatch_tool(self, tool_id: str) -> AtomicInvokable:
         """Resolve a slot's ``tool`` id to the actual invokable to dispatch
-        -- the shared ``PY_BUILTIN_ALIAS``-vs-registered-tool selection used
-        by ``prepare()`` and ``_gather_batch_results``."""
-        return builtin_call_tool if tool_id == PY_BUILTIN_ALIAS else self.get_tool(tool_id)
+        -- the shared ``PY_BUILTIN_ALIAS``/``ATTR_CALL_ALIAS``-vs-registered-
+        tool selection used by ``prepare()`` and ``_gather_batch_results``."""
+        if tool_id == PY_BUILTIN_ALIAS:
+            return builtin_call_tool
+        if tool_id == ATTR_CALL_ALIAS:
+            return attr_call_tool
+        return self.get_tool(tool_id)
 
     # ------------------------------------------------------------------ #
     # Prepare next batch
@@ -1300,14 +1334,16 @@ class ScriptAgent(Agent):
         issues: list[str] = []
         # Constants are validated as known references (validate_references'
         # known_constants) and rendered to the model (constants_context()),
-        # but their actual runtime values live only on self._constants --
-        # never in task.cache, which is scoped purely to slot-execution
-        # results and cross-invocation task_result_N history. Merge them in
-        # here, once per batch, so a correct K_NAME reference actually
-        # resolves instead of raising NameError; task.cache last so a real
-        # bound/history name would win on the (never expected) collision.
-        constant_values = {spec.name: spec.value for spec in self._constants.values()}
-        resolution_namespace = {**constant_values, **task.cache}
+        # but their actual runtime values live in task.constant_values --
+        # a per-invocation copy seeded once by _initialize_task, never
+        # re-derived from self._constants here (that would hand out the
+        # live, shared constant object fresh every batch, defeating the
+        # "a mutation stays visible for the rest of this invocation, never
+        # leaks to another" guarantee). Merged in here, once per batch, so
+        # a correct K_NAME reference actually resolves instead of raising
+        # NameError; task.cache last so a real bound/history name would win
+        # on the (never expected) collision.
+        resolution_namespace = {**task.constant_values, **task.cache}
         for slot in batch:
             label = slot.identifier if slot.identifier is not None else "(unassigned)"
 
@@ -1403,10 +1439,16 @@ class ScriptAgent(Agent):
 
         def _failure_label(slot: CodeStatement) -> str:
             # A py_builtin slot's real, model-written name lives in
-            # args[0], not slot.tool -- report that instead of leaking the
-            # internal sentinel into model-facing failure feedback.
+            # args[0], not slot.tool; an attr_call slot's lives in
+            # "obj.method" (args[0]/args[1]) -- report either instead of
+            # leaking the internal sentinel into model-facing failure
+            # feedback.
             if slot.tool == PY_BUILTIN_ALIAS:
                 return repr(slot.args[0])
+            if slot.tool == ATTR_CALL_ALIAS:
+                obj = slot.args[0]
+                obj_repr = ast.unparse(obj) if isinstance(obj, ast.expr) else repr(obj)
+                return f"{obj_repr}.{slot.args[1]}"
             return repr(slot.tool)
 
         failures = [

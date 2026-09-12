@@ -5,6 +5,7 @@ from typing import Any
 
 from ..tools import Tool
 from ..constants.agents import (
+    ATTR_CALL_ALIAS,
     EXCLUDED_PY_BUILTINS,
     PY_BUILTIN_ALIAS,
     RETURN_TOOL_DESCRIPTION,
@@ -14,7 +15,13 @@ from ..constants.agents import (
     RETURN_VALUE_FIELD,
 )
 
-__all__ = ["identity_pre_tool", "identity_post_tool", "return_tool", "builtin_call_tool"]
+__all__ = [
+    "identity_pre_tool",
+    "identity_post_tool",
+    "return_tool",
+    "builtin_call_tool",
+    "attr_call_tool",
+]
 
 
 def identity_pre(*, prompt: str) -> str:
@@ -111,5 +118,33 @@ builtin_call_tool = Tool(
         "Never registered into any agent's toolbox -- resolved directly by "
         "ScriptAgent.prepare()/_gather_batch_results() via the "
         "PY_BUILTIN_ALIAS sentinel, never through get_tool()."
+    ),
+)
+
+
+def _call_attr_method(obj: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
+    """
+    Dispatch body for ScriptAgent's attribute/method-call slots
+    (``obj.method(...)``). Dunder method names are already rejected at
+    parse time (``utils/script.py``'s ``_hoist_calls``/``_build_call_slot``
+    checks) -- this does not re-check, mirroring ``_call_py_builtin``'s own
+    split between the authoritative runtime gate and an upstream guarantee.
+    """
+    return getattr(obj, method_name)(*args, **kwargs)
+
+
+# Never registered into any agent's toolbox -- resolved directly by
+# ScriptAgent.prepare()/_gather_batch_results() via the ATTR_CALL_ALIAS
+# sentinel, never through get_tool(). Same treatment as builtin_call_tool.
+attr_call_tool = Tool(
+    function=_call_attr_method,
+    name=ATTR_CALL_ALIAS,
+    namespace="script_agent",
+    description=(
+        "Internal ScriptAgent dispatcher for attribute/method calls on a "
+        "value the plan already holds. Never registered into any agent's "
+        "toolbox -- resolved directly by ScriptAgent.prepare()/"
+        "_gather_batch_results() via the ATTR_CALL_ALIAS sentinel, never "
+        "through get_tool()."
     ),
 )

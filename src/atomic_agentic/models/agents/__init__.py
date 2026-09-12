@@ -1,5 +1,12 @@
 from .prompts import PromptConfig
-from .records import AgentRecord, LLMRecord, ToolAgentRecord, ScriptAgentRecord, ThinkingAgentRecord
+from .records import (
+    AgentRecord,
+    LLMRecord,
+    ToolAgentRecord,
+    ScriptAgentRecord,
+    ScriptAgentToolUsage,
+    ThinkingAgentRecord,
+)
 from .blackboard_models import BlackboardSlot, CodeStatement, ConstantSpec
 from .thought_models import AgentThought
 from .tasks import (
@@ -18,6 +25,7 @@ __all__ = [
     "LLMRecord",
     "ToolAgentRecord",
     "ScriptAgentRecord",
+    "ScriptAgentToolUsage",
     "ThinkingAgentRecord",
     "BlackboardSlot",
     "CodeStatement",

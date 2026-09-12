@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Mapping, Optional
 
@@ -368,20 +369,24 @@ class CodeStatement:
     ``return`` statement (``tool`` = ``RETURN_ALIAS``, ``identifier=None``),
     or a rewritten Python builtin call (``tool`` = ``PY_BUILTIN_ALIAS``,
     structurally a real tool call with the builtin's name spliced into
-    ``args[0]``, dispatched through ``agents.tools.builtin_call_tool``
-    rather than a registered tool). ``args`` values are mixed: a
-    dependency-free expression is evaluated
-    eagerly at parse time and stored as a plain Python value; an expression
-    referencing another slot's identifier is stored unresolved as the raw
-    ``ast.expr`` node, pending a future ``resolve_slot_args`` call. Mutable
-    (not frozen) -- ``result``/``exception`` are populated after
+    ``args[0]`` as a plain ``str`` by ``rewrite_builtin_calls`` -- the one
+    exception to the rule below, since it's a post-parse rewrite, not
+    something the model itself wrote as an expression). Every other
+    ``args``/``kwargs`` value is always the original ``ast.expr`` node the
+    model wrote, whether or not the expression has a dependency on
+    another slot's identifier -- a dependency-free expression is only
+    dry-run evaluated at parse time (catching a guaranteed-bad constant
+    expression early), never folded into a plain value; the sole
+    ``resolve_slot_args`` call at prepare time is where every such value,
+    dependency-bearing or not, actually resolves to a plain Python value.
+    Mutable (not frozen) -- ``result``/``exception`` are populated after
     construction by a future ``act()``-phase caller.
 
     Fields
     ------
     identifier : str | None
         This slot's bound name -- the statement's LHS, or a synthesized
-        ``_HOIST_N`` name for an auto-hoisted nested call. ``None`` for a
+        ``_SUB_N`` name for an auto-hoisted nested call. ``None`` for a
         bare (unassigned) call or a ``return`` statement -- never
         resolvable by name, and never written into
         ``ScriptAgentTask.cache``.
@@ -398,20 +403,19 @@ class CodeStatement:
         exemption).
 
     args : tuple[Any, ...]
-        Positional call arguments, in source order. Each entry is a plain
-        resolved literal, a pending ``ast.expr`` (an ordinary
-        dependency-bearing positional value), or a pending ``ast.Starred``
-        (a ``*expr`` unpack -- never eagerly constant-folded regardless of
-        whether its own inner expr has dependencies, so its Starred-ness
-        survives to resolve time). Empty for a keyword-only call, or for
-        the ``rhs_assign``/``return`` sentinel shape (which lives entirely
-        in ``kwargs``).
+        Positional call arguments, in source order. Each entry is an
+        ``ast.expr`` (dependency-bearing or not -- see class docstring) or
+        an ``ast.Starred`` (a ``*expr`` unpack, its Starred-ness preserved
+        regardless of whether its own inner expr has dependencies, so it
+        survives to resolve time) -- except ``args[0]`` on a
+        ``PY_BUILTIN_ALIAS`` slot, a plain ``str`` (see class docstring).
+        Empty for a keyword-only call, or for the ``rhs_assign``/
+        ``return`` sentinel shape (which lives entirely in ``kwargs``).
 
     kwargs : dict[str, Any]
         Keyword call arguments (real tool call), or ``{"val": <expr>}``
-        (``rhs_assign``/``return``). Each value is either an
-        already-resolved Python literal or an unresolved ``ast.expr`` node
-        -- see class docstring. A ``**expr`` unpack is stored under the
+        (``rhs_assign``/``return``). Each value is an ``ast.expr`` node --
+        see class docstring. A ``**expr`` unpack is stored under the
         reserved key ``constants.agents.KWARGS_UNPACK_KEY`` (``"**"``,
         never a valid Python identifier, so it never collides with a real
         parameter name) -- at most one per statement.
@@ -482,3 +486,27 @@ class CodeStatement:
         # lifecycle code, not derived from external/LLM input -- not
         # defensively validated here, per 01-overview.md Section 4's
         # boundary-only-validation rule.
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Return the explicit serialized dictionary representation, for
+        debugging/observability only -- never used to reconstruct or
+        re-plan. An args/kwargs value still an unresolved ``ast.expr``/
+        ``ast.Starred`` (this slot depended on another slot's identifier,
+        never folded back per ``resolve_slot_args``'s own docstring) is
+        rendered as its source text via ``ast.unparse`` rather than the
+        raw AST node, which is not JSON-serializable.
+        """
+
+        def render(value: Any) -> Any:
+            return ast.unparse(value) if isinstance(value, (ast.expr, ast.Starred)) else value
+
+        return {
+            "identifier": self.identifier,
+            "tool": self.tool,
+            "args": [render(value) for value in self.args],
+            "kwargs": {key: render(value) for key, value in self.kwargs.items()},
+            "batch_index": self.batch_index,
+            "result": self.result.to_dict() if self.result is not None else None,
+            "exception": repr(self.exception) if self.exception is not None else None,
+        }

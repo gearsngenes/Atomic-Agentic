@@ -6,15 +6,17 @@ import re
 from typing import Any, Optional
 
 from ..constants.agents import (
+    ATTR_CALL_ALIAS,
     CODE_FENCE_PATTERN,
+    DUNDER_ATTRIBUTE_PATTERN,
     EXCLUDED_PY_BUILTINS,
-    HOISTED_NAME_PREFIX,
     KWARGS_UNPACK_KEY,
     LEADING_CODE_FENCE_PATTERN,
     PAUSE_PATTERN,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
+    SUB_NAME_PREFIX,
     TASK_RESULT_PREFIX,
     TRAILING_CODE_FENCE_PATTERN,
     UNSUPPORTED_EXPR_LABELS,
@@ -214,6 +216,61 @@ def _process_call_args(
     return tuple(args), kwargs
 
 
+def _build_call_slot(
+    call_node: ast.Call,
+    *,
+    identifier: Optional[str],
+    counter: list[int],
+    start_index: int,
+    hoisted: list[CodeStatement],
+) -> CodeStatement:
+    """
+    Build one ``CodeStatement`` for ``call_node``, branching on whether its
+    ``func`` is a plain dotted-name chain (a registered tool/builtin id) or
+    an ``ast.Attribute`` (a method call on some object). Shared by the
+    top-level bare-unassigned-call and assignment (``name = call(...)``)
+    statement shapes in ``parse_statement_to_slots``, and by
+    ``_hoist_calls``'s own nested-call hoisting -- the one place this
+    branch lives, so all three call sites can never drift out of sync.
+
+    For an attribute/method call: the method name (``call_node.func.attr``)
+    is checked against ``DUNDER_ATTRIBUTE_PATTERN`` here -- the one
+    position ``_hoist_calls``'s own rejection scan never sees, since it
+    only ever walks ``call_node.func.value``, not ``call_node.func``
+    itself. The object sub-expression (``call_node.func.value``) is run
+    through ``_hoist_calls`` exactly like any other operand: a call-free
+    chain (``x.y.z``) passes through unchanged (no new binding created),
+    an embedded call (``x.y.method1()`` inside
+    ``x.y.method1().z.method2()``) gets hoisted into its own prior slot
+    first, recursively, to any depth.
+    """
+    if isinstance(call_node.func, ast.Attribute):
+        method_name = call_node.func.attr
+        if DUNDER_ATTRIBUTE_PATTERN.fullmatch(method_name):
+            raise BlackboardParseError(
+                f"dunder attribute access is not permitted: "
+                f"{ast.unparse(call_node.func)!r}."
+            )
+        obj_expr = _hoist_calls(
+            call_node.func.value, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        positional, keyword = _process_call_args(
+            call_node, counter=counter, start_index=start_index, hoisted=hoisted
+        )
+        return CodeStatement(
+            identifier=identifier,
+            tool=ATTR_CALL_ALIAS,
+            args=(obj_expr, method_name, *positional),
+            kwargs=keyword,
+        )
+
+    tool_name = ast.unparse(call_node.func)
+    positional, keyword = _process_call_args(
+        call_node, counter=counter, start_index=start_index, hoisted=hoisted
+    )
+    return CodeStatement(identifier=identifier, tool=tool_name, args=positional, kwargs=keyword)
+
+
 def _reject_await(node: ast.expr) -> None:
     """
     Raise the one dedicated `await`-no-longer-supported parse error. Shared
@@ -286,6 +343,18 @@ def _hoist_calls(
     construct nested arbitrarily deep (inside a call's own keyword argument,
     inside another hoisted call) -- the scan walks the whole original tree
     before any rewriting happens.
+
+    Also rejects, at this same choke point, any ``ast.Attribute`` node
+    anywhere in ``node`` whose ``.attr`` matches ``DUNDER_ATTRIBUTE_PATTERN``
+    -- a bare dunder read (``x.__class__``) or one buried mid-chain
+    (``x.__class__.y``), at any depth, including inside a to-be-hoisted
+    call's own object expression. Closes the classic attribute-chaining
+    sandbox-escape class (``().__class__.__bases__[0].__subclasses__()``-
+    style), which the ``{"__builtins__": {}}`` eval lockout elsewhere in
+    this module does not defend against on its own. A method-call's own
+    method name (``call_node.func.attr``) sits outside this scan (it's
+    never itself walked as a standalone ``ast.Attribute`` node here) and is
+    checked separately, in ``_build_call_slot``.
     """
     for candidate in ast.walk(node):
         if isinstance(candidate, ast.IfExp) and (
@@ -310,23 +379,26 @@ def _hoist_calls(
                 "statements instead."
             )
 
+        if isinstance(candidate, ast.Attribute) and DUNDER_ATTRIBUTE_PATTERN.fullmatch(candidate.attr):
+            raise BlackboardParseError(
+                f"dunder attribute access is not permitted: {ast.unparse(candidate)!r}."
+            )
+
     def _hoist_one_call(call_node: ast.Call) -> ast.Name:
-        """Build one hoisted slot for `call_node` (appended to `hoisted`)
-        and return a `Name` reference to it."""
+        """Build one hoisted slot for `call_node` (appended to `hoisted`,
+        via `_build_call_slot` -- handles both a plain tool/builtin id and
+        an attribute/method call) and return a `Name` reference to it."""
         index = counter[0] + start_index
         counter[0] += 1
-        hoisted_identifier = f"{HOISTED_NAME_PREFIX}{index}"
+        hoisted_identifier = f"{SUB_NAME_PREFIX}{index}"
 
-        hoisted_positional, hoisted_keyword = _process_call_args(
-            call_node, counter=counter, start_index=start_index, hoisted=hoisted
-        )
-        tool_name = ast.unparse(call_node.func)
         hoisted.append(
-            CodeStatement(
+            _build_call_slot(
+                call_node,
                 identifier=hoisted_identifier,
-                tool=tool_name,
-                args=hoisted_positional,
-                kwargs=hoisted_keyword,
+                counter=counter,
+                start_index=start_index,
+                hoisted=hoisted,
             )
         )
 
@@ -335,9 +407,12 @@ def _hoist_calls(
 
     class _CallHoister(ast.NodeTransformer):
         def visit_Call(self, call_node: ast.Call) -> ast.Name:
-            # Only recurse into keyword values, not `func` -- a call's own
-            # callable is always a plain dotted-name chain in this grammar,
-            # never itself a nested call.
+            # Only recurse into keyword values here, not `func` -- a plain
+            # tool/builtin call's own callable is always a dotted-name
+            # chain, never itself a nested call. An attribute/method call's
+            # func.value CAN contain a nested call, but that's hoisted
+            # explicitly inside _build_call_slot (a fresh _hoist_calls
+            # entry), not via this transformer's own traversal.
             for kw in call_node.keywords:
                 kw.value = self.visit(kw.value)
             return _hoist_one_call(call_node)
@@ -357,7 +432,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     ``identifier=None``: nothing can ever reference either by name, so no
     synthesized name is needed the way hoisting needs one.
 
-    ``start_index`` lets a future whole-block caller avoid ``_HOIST_N``
+    ``start_index`` lets a future whole-block caller avoid ``_SUB_N``
     collisions across multiple calls within the same subtask -- pass the
     running count of hoisted slots already emitted so far for this block;
     this function is otherwise pure/stateless.
@@ -412,11 +487,9 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
         bare_rhs = stmt.value
         hoisted = []
         counter = [0]
-        tool = ast.unparse(bare_rhs.func)
-        args, kwargs = _process_call_args(
-            bare_rhs, counter=counter, start_index=start_index, hoisted=hoisted
+        final_slot = _build_call_slot(
+            bare_rhs, identifier=None, counter=counter, start_index=start_index, hoisted=hoisted
         )
-        final_slot = CodeStatement(identifier=None, tool=tool, args=args, kwargs=kwargs)
         return [*hoisted, final_slot]
 
     # isinstance, not a looser check -- ast.AugAssign ("x += 1") is a
@@ -438,10 +511,10 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
         )
 
     identifier = target.id
-    if identifier.startswith(HOISTED_NAME_PREFIX):
+    if identifier.startswith(SUB_NAME_PREFIX):
         raise BlackboardParseError(
             f"identifier {identifier!r} uses the reserved hoisted-name prefix "
-            f"{HOISTED_NAME_PREFIX!r}."
+            f"{SUB_NAME_PREFIX!r}."
         )
     if identifier.startswith(TASK_RESULT_PREFIX):
         raise BlackboardParseError(
@@ -456,33 +529,36 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     counter = [0]
 
     if isinstance(rhs, ast.Call):
-        # Case A: bare top-level call.
-        tool = ast.unparse(rhs.func)
-        args, kwargs = _process_call_args(
-            rhs, counter=counter, start_index=start_index, hoisted=hoisted
+        # Case A: bare top-level call -- delegate the plain-tool-vs-
+        # attribute-call branch to _build_call_slot (shared with the
+        # bare-unassigned-call shape above and _hoist_calls's own
+        # nested-call hoisting).
+        final_slot = _build_call_slot(
+            rhs, identifier=identifier, counter=counter, start_index=start_index, hoisted=hoisted
         )
-    else:
-        # Case B: rhs_assign. An `ast.Await` here (e.g. `x = await f()`) is
-        # no longer specially unwrapped -- it flows into `_hoist_calls`
-        # below exactly like any other node, which rejects it via its own
-        # rejection scan (`ast.walk` yields `rhs` itself before its
-        # children, same precedent already established for a bare
-        # comprehension/lambda RHS).
-        tool = RHS_ASSIGN_ALIAS
-        # Ternary-with-calls rejection lives inside _hoist_calls itself now
-        # (the common choke point every call path funnels through) --
-        # nothing extra needed here.
-        processed = _hoist_calls(rhs, counter=counter, start_index=start_index, hoisted=hoisted)
-        deps = extract_identifiers(processed)
-        if not deps:
-            try:
-                _evaluate_expr(processed, {})
-            except Exception as e:
-                raise BlackboardParseError(
-                    f"expression is a constant that failed to evaluate: {e!r}"
-                ) from e
-        val: Any = processed
-        args, kwargs = (), {"val": val}
+        return [*hoisted, final_slot]
+
+    # Case B: rhs_assign. An `ast.Await` here (e.g. `x = await f()`) is
+    # no longer specially unwrapped -- it flows into `_hoist_calls`
+    # below exactly like any other node, which rejects it via its own
+    # rejection scan (`ast.walk` yields `rhs` itself before its
+    # children, same precedent already established for a bare
+    # comprehension/lambda RHS).
+    tool = RHS_ASSIGN_ALIAS
+    # Ternary-with-calls rejection lives inside _hoist_calls itself now
+    # (the common choke point every call path funnels through) --
+    # nothing extra needed here.
+    processed = _hoist_calls(rhs, counter=counter, start_index=start_index, hoisted=hoisted)
+    deps = extract_identifiers(processed)
+    if not deps:
+        try:
+            _evaluate_expr(processed, {})
+        except Exception as e:
+            raise BlackboardParseError(
+                f"expression is a constant that failed to evaluate: {e!r}"
+            ) from e
+    val: Any = processed
+    args, kwargs = (), {"val": val}
 
     final_slot = CodeStatement(identifier=identifier, tool=tool, args=args, kwargs=kwargs)
     return [*hoisted, final_slot]
@@ -490,11 +566,11 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
 
 def parse_generation(
     raw_text: str,
-) -> tuple[list[CodeStatement], list[str], bool]:
+) -> tuple[list[CodeStatement], bool]:
     """
     Parse one whole generation (a fresh plan, or a pause-triggered
-    continuation) into a flat slot sequence, its annotation blocks, and
-    whether a further continuation round is needed.
+    continuation) into a flat slot sequence and whether a further
+    continuation round is needed.
 
     Pause-splitting happens on raw text, before any AST parsing --
     ``# PAUSE`` is a comment, and ``ast.parse`` strips comments, so a
@@ -505,9 +581,11 @@ def parse_generation(
     ``before``/``after``.
 
     ``before`` is parsed and dispatched statement-by-statement exactly as
-    always, with two special first-statement/any-position cases: an opening
-    reasoning block (a bare string-literal statement at position 0), and an
-    ``ast.If`` node. The latter is a defensive backstop, not a taught
+    always, with two special any-position cases: a bare string-literal
+    statement (a reasoning note -- inert, never stored or dispatched, legal
+    anywhere, not just first; genuinely valid Python this grammar has no
+    other use for, so there is nothing to validate beyond "it's a string"),
+    and an ``ast.If`` node. The latter is a defensive backstop, not a taught
     convention -- the prompt tells the model never to write one -- so a
     model that does anyway is handled by silently truncating there (exactly
     like a ``return``) rather than failing the whole generation, UNLESS
@@ -537,7 +615,7 @@ def parse_generation(
     past the marker is discarded without complaint, same as any other
     post-terminal content.
 
-    Returns ``(flat_slots, annotations, continue_planning)``. Raises
+    Returns ``(flat_slots, continue_planning)``. Raises
     ``BlackboardParseError`` on any structural failure (propagated from
     ``parse_statement_to_slots``, a genuine ``ast.parse`` syntax error in
     ``before``, or one of the two "nothing real yet" cases above).
@@ -547,7 +625,6 @@ def parse_generation(
     before = parts[0]
 
     flat_slots: list[CodeStatement] = []
-    annotations: list[str] = []
     hoist_index = 0
 
     if before.strip():
@@ -556,14 +633,12 @@ def parse_generation(
         except SyntaxError as e:
             raise BlackboardParseError(str(e)) from e
 
-        for j, node in enumerate(tree.body):
+        for node in tree.body:
             if (
-                j == 0
-                and isinstance(node, ast.Expr)
+                isinstance(node, ast.Expr)
                 and isinstance(node.value, ast.Constant)
                 and isinstance(node.value.value, str)
             ):
-                annotations.append(node.value.value)
                 continue
 
             if isinstance(node, ast.If):
@@ -574,7 +649,7 @@ def parse_generation(
                         "whatever the condition depends on first, as a "
                         "real statement."
                     )
-                return flat_slots, annotations, True
+                return flat_slots, True
 
             stmt_source = ast.unparse(node)
             slots = parse_statement_to_slots(stmt_source, start_index=hoist_index)
@@ -589,12 +664,12 @@ def parse_generation(
                         "return a final value, or # PAUSE (with no return) to "
                         "continue next round."
                     )
-                return flat_slots, annotations, False
+                return flat_slots, False
 
     if len(parts) == 1:
         # No pause marker anywhere -- completes normally (or falls off the
         # end with an inferred `None` result if no `return` ran).
-        return flat_slots, annotations, False
+        return flat_slots, False
 
     if not flat_slots:
         raise BlackboardParseError(
@@ -603,7 +678,7 @@ def parse_generation(
             "what follows still depends on something not yet known."
         )
 
-    return flat_slots, annotations, True
+    return flat_slots, True
 
 
 def rewrite_builtin_calls(slots: list[CodeStatement]) -> list[str]:
@@ -676,19 +751,25 @@ def validate_references(
     also check the whole plan's dispatched-call count against a budget.
 
     For each slot: its own ``tool`` must be a registered tool id unless
-    it's the ``rhs_assign``/``return``/``py_builtin`` sentinel, or a real
-    but excluded builtin name (``rewrite_builtin_calls`` already reported
-    that case with a specific message -- this generic check must not
-    double-report it); every still-unresolved
+    it's the ``rhs_assign``/``return``/``py_builtin``/``attr_call``
+    sentinel, or a real but excluded builtin name (``rewrite_builtin_calls``
+    already reported that case with a specific message -- this generic
+    check must not double-report it); every still-unresolved
     (``ast.expr``-typed) dependency in its ``args`` must already be bound
     by an earlier slot in this same walk, a registered tool id, a
     registered constant, or a name in ``known_history`` (a prior
     invocation's ``task_result_N`` result -- checked identically to a
     registered constant: always externally known, never introduced
-    mid-walk). Comprehensive, not fail-fast: every unresolvable reference
-    across the whole sequence is collected and returned, never just the
-    first (cheaper than discovering one issue per regeneration round when a
-    real tool call could have spent budget in between).
+    mid-walk). An assignment target (``slot.identifier`` not ``None``) that
+    names a registered constant is also rejected here -- constants are
+    reserved, read-only bindings, the same protection ``task_result_*``/
+    ``_SUB_*`` prefixes already get via ``parse_statement_to_slots``'s own
+    LHS check (that check is prefix-based and registry-free by design; this
+    one needs ``known_constants``, so it lives here instead). Comprehensive,
+    not fail-fast: every unresolvable reference across the whole sequence is
+    collected and returned, never just the first (cheaper than discovering
+    one issue per regeneration round when a real tool call could have spent
+    budget in between).
 
     Separately, independent of the per-slot walk: if ``tool_calls_limit``
     is not ``None`` and the count of dispatched slots (registered tool
@@ -709,7 +790,7 @@ def validate_references(
         label = slot.identifier if slot.identifier is not None else "(unassigned)"
 
         if (
-            slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS)
+            slot.tool not in (RHS_ASSIGN_ALIAS, RETURN_ALIAS, PY_BUILTIN_ALIAS, ATTR_CALL_ALIAS)
             and slot.tool not in known_tools
             and slot.tool not in EXCLUDED_PY_BUILTINS
         ):
@@ -727,6 +808,12 @@ def validate_references(
                 )
 
         if slot.identifier is not None:
+            if slot.identifier in known_constants:
+                issues.append(
+                    f"statement assigns to {slot.identifier!r}, a registered "
+                    "constant's name; constants are read-only and cannot be "
+                    "reassigned."
+                )
             bound.add(slot.identifier)
 
     real_call_count = sum(1 for slot in slots if is_dispatched_slot(slot))
@@ -864,9 +951,13 @@ def render_completed_as_python(
         # A py_builtin slot renders back as the original natural call
         # syntax (`len(x)`), never the internal rewritten form
         # (`py_builtin('len', x)`) -- unsplice the builtin name before
-        # falling into the same generic rendering as any real tool call.
+        # falling into the same generic rendering as any real tool call. An
+        # attr_call slot gets the same treatment: `obj.method(args)`, not
+        # the internal (obj, "method", *args) shape.
         if slot.tool == PY_BUILTIN_ALIAS:
             call_name, call_args = slot.args[0], slot.args[1:]
+        elif slot.tool == ATTR_CALL_ALIAS:
+            call_name, call_args = f"{render_value(slot.args[0])}.{slot.args[1]}", slot.args[2:]
         else:
             call_name, call_args = slot.tool, slot.args
 

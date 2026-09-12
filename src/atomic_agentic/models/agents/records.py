@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import ast
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional
 
+from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
 from ..results.agents import AgentResult
 from ..results.llm import LLMResult
-from ...utils.script import render_completed_as_python
+from ...utils.script import is_dispatched_slot, render_completed_as_python
 from .blackboard_models import CodeStatement
 
 __all__ = [
@@ -13,6 +15,7 @@ __all__ = [
     "AgentRecord",
     "ToolAgentRecord",
     "ScriptAgentRecord",
+    "ScriptAgentToolUsage",
     "ThinkingAgentRecord",
 ]
 
@@ -268,6 +271,54 @@ class ToolAgentRecord(AgentRecord):
 
 
 @dataclass(frozen=True, slots=True)
+class ScriptAgentToolUsage:
+    """
+    Five orthogonal counts derived from one completed ``ScriptAgentRecord``'s
+    ``statements``, for debugging/observability only -- never used to
+    reconstruct or re-plan. ``registered_tool_calls`` + ``builtin_calls`` +
+    ``attribute_calls`` is the same total already enforced (silently)
+    against ``tool_calls_limit``; this just slices it three ways instead of
+    one. ``binop_count`` is a subset of ``rhs_assignment_count``, not
+    double-counted against the other three.
+
+    Fields
+    ------
+    registered_tool_calls : int
+        Dispatched slots that are neither a builtin nor an attribute/method
+        call -- a real registered-tool invocation.
+
+    builtin_calls : int
+        Slots dispatched through the approved-Python-builtin path
+        (``PY_BUILTIN_ALIAS``).
+
+    attribute_calls : int
+        Slots dispatched through the attribute/method-call path
+        (``ATTR_CALL_ALIAS``).
+
+    binop_count : int
+        Bare-expression (``RHS_ASSIGN_ALIAS``) slots whose stored value is
+        still an ``ast.expr`` containing an ``ast.BinOp`` anywhere --
+        constant expressions are never folded before commit (only
+        dry-run-validated at parse time), so this is a plain post-hoc walk,
+        not a count tracked separately during parsing.
+
+    rhs_assignment_count : int
+        Total ``RHS_ASSIGN_ALIAS`` slot count, independent of whether it
+        contains a binop.
+    """
+
+    registered_tool_calls: int
+    builtin_calls: int
+    attribute_calls: int
+    binop_count: int
+    rhs_assignment_count: int
+
+    def to_dict(self) -> dict[str, int]:
+        """Return the explicit serialized dictionary representation."""
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class ScriptAgentRecord(AgentRecord):
     """
     Canonical memory record for one completed ScriptAgent invocation -- a
@@ -290,15 +341,13 @@ class ScriptAgentRecord(AgentRecord):
         Every slot ScriptAgentTask.completed accumulated this run, carried
         over at commit time (normalized to a tuple here, mirroring
         llm_records' existing list-or-tuple-in, tuple-stored normalization).
-
-    annotations : tuple[str, ...]
-        Every triple-quoted reasoning block ScriptAgentTask.annotations
-        accumulated this run, carried over at commit time (same
-        normalize-to-tuple treatment).
+        A bare reasoning string the model wrote is never a slot in its own
+        right (parse_generation treats it as an inert, unstored no-op,
+        legal anywhere in a generation) -- there is no separate annotation
+        record of it.
     """
 
     statements: tuple[CodeStatement, ...] = ()
-    annotations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
@@ -327,22 +376,6 @@ class ScriptAgentRecord(AgentRecord):
         # above).
         object.__setattr__(self, "statements", tuple(self.statements))
 
-        # 3. annotations must be a list/tuple of str.
-        if isinstance(self.annotations, (str, bytes)) or not isinstance(self.annotations, (list, tuple)):
-            raise TypeError(
-                "ScriptAgentRecord.annotations must be a list or tuple of "
-                f"str; got {type(self.annotations).__name__!r}."
-            )
-        for index, annotation in enumerate(self.annotations):
-            if not isinstance(annotation, str):
-                raise TypeError(
-                    f"ScriptAgentRecord.annotations[{index}] must be a str; "
-                    f"got {type(annotation).__name__!r}."
-                )
-
-        # 4. normalize to a tuple, same reasoning as statements above.
-        object.__setattr__(self, "annotations", tuple(self.annotations))
-
     def render_as_code(self) -> str:
         """
         Reconstruct this run's statements as source-formatted text, grouped
@@ -355,6 +388,49 @@ class ScriptAgentRecord(AgentRecord):
         """
         return render_completed_as_python(self.statements, show_batches=True)
 
+    def tool_usage(self) -> ScriptAgentToolUsage:
+        """
+        Compute a ``ScriptAgentToolUsage`` snapshot from ``self.statements``
+        in one pass. Pure/derived -- not stored, recomputed on each call.
+        """
+        registered_tool_calls = 0
+        builtin_calls = 0
+        attribute_calls = 0
+        binop_count = 0
+        rhs_assignment_count = 0
+
+        for slot in self.statements:
+            if slot.tool == PY_BUILTIN_ALIAS:
+                builtin_calls += 1
+            elif slot.tool == ATTR_CALL_ALIAS:
+                attribute_calls += 1
+            elif slot.tool == RHS_ASSIGN_ALIAS:
+                rhs_assignment_count += 1
+                value = slot.kwargs["val"]
+                if isinstance(value, ast.expr) and any(
+                    isinstance(node, ast.BinOp) for node in ast.walk(value)
+                ):
+                    binop_count += 1
+            elif is_dispatched_slot(slot):
+                registered_tool_calls += 1
+
+        return ScriptAgentToolUsage(
+            registered_tool_calls=registered_tool_calls,
+            builtin_calls=builtin_calls,
+            attribute_calls=attribute_calls,
+            binop_count=binop_count,
+            rhs_assignment_count=rhs_assignment_count,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation."""
+        # Explicit two-argument super() -- same slotted-dataclass gotcha
+        # __post_init__ documents above; bare super() raises here too.
+        d = super(ScriptAgentRecord, self).to_dict()
+        d.update({
+            "statements": [s.to_dict() for s in self.statements],
+        })
+        return d
 
 @dataclass(frozen=True, slots=True)
 class ThinkingAgentRecord(AgentRecord):

@@ -252,11 +252,16 @@ class ScriptAgentTask(AgentTask):
         ``resolved`` argument -- an O(1) lookup instead of scanning
         ``completed``.
 
-    annotations : list[str]
-        Every triple-quoted reasoning block the model wrote this run (the
-        initial block plus one per replan round that included one). Becomes
-        ScriptAgentRecord.annotations verbatim (normalized to a tuple) at
-        commit time.
+    constant_values : dict[str, Any]
+        Registered-constant name -> value, populated exactly once by
+        ``ScriptAgent._initialize_task`` (deep-copied per constant except
+        for known atomic-immutable types) and never touched again after
+        that. Every batch's resolution namespace reads this instead of
+        re-deriving values from the agent's own ``self._constants`` each
+        time, so a mutating attribute/method call in one round is visible
+        to a later round of the *same* invocation (same copy, shared for
+        this task's lifetime) but never reaches a different invocation (a
+        fresh task gets a fresh copy).
 
     regenerations_used : int
         Cumulative regeneration attempts consumed across every generation
@@ -286,7 +291,7 @@ class ScriptAgentTask(AgentTask):
     completed: list[CodeStatement] = field(default_factory=list)
     pending: list[list[CodeStatement]] = field(default_factory=list)
     cache: dict[str, Any] = field(default_factory=dict)
-    annotations: list[str] = field(default_factory=list)
+    constant_values: dict[str, Any] = field(default_factory=dict)
     regenerations_used: int = 0
     resolved_args: list[dict[str, Any]] = field(default_factory=list)
     continue_planning: bool = False

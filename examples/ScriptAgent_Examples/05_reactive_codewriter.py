@@ -142,6 +142,8 @@ if __name__ == "__main__":
     1. Send the task to the code writer, then send the draft to the reviewer.
     2. PAUSE and inspect the reviewer's feedback. If the reviewer approved, then you can return the CODER WRITER's result
     3. Otherwise, repeat steps 1-2.
+    
+    Returns: the latest CODEWRITER draft result
     """
     result = orchestrator.invoke({"prompt": task}).result
     record = orchestrator.get_conversation()[-1]

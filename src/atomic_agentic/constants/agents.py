@@ -183,13 +183,13 @@ THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n
 # - agents/script.py: render_turn/_initialize_task cross-invocation result
 #   addressing (TASK_RESULT_PREFIX)
 #
-# Reserved namespaces: RHS_ASSIGN_ALIAS/RETURN_ALIAS/PY_BUILTIN_ALIAS can
-# never be real registered tool aliases; HOISTED_NAME_PREFIX/
+# Reserved namespaces: RHS_ASSIGN_ALIAS/RETURN_ALIAS/PY_BUILTIN_ALIAS/
+# ATTR_CALL_ALIAS can never be real registered tool aliases; SUB_NAME_PREFIX/
 # TASK_RESULT_PREFIX can never be a model-chosen identifier. Enforcement
 # points live outside this file's scope.
 
 RHS_ASSIGN_ALIAS = "rhs_assign"
-HOISTED_NAME_PREFIX = "_HOIST_"
+SUB_NAME_PREFIX = "_SUB_"
 RETURN_ALIAS = "return"
 TASK_RESULT_PREFIX = "task_result_"
 
@@ -199,6 +199,13 @@ PY_BUILTIN_ALIAS = "py_builtin"
 alias may ever equal (see agents/script.py's _validate_tool_alias). Unlike
 those two sentinels, a PY_BUILTIN_ALIAS slot dispatches through a real Tool
 (agents.tools.builtin_call_tool) instead of skipping dispatch entirely."""
+
+ATTR_CALL_ALIAS = "attr_call"
+"""Reserved CodeStatement.tool sentinel for an attribute/method call
+(`obj.method(...)`) on a value the plan already holds -- same treatment as
+PY_BUILTIN_ALIAS: reserved from real tool aliases, dispatches through a real
+Tool (agents.tools.attr_call_tool), counts toward tool-call budget
+accounting identically to a registered-tool call."""
 
 EXCLUDED_PY_BUILTINS: frozenset[str] = frozenset(
     {
@@ -253,6 +260,15 @@ CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*
 LEADING_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"^[ \t]*```[^\n]*\n")
 TRAILING_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"\n[ \t]*```[ \t]*$")
 
+# Matches a dunder-shaped attribute name (`__class__`, `__globals__`, ...).
+# Rejected unconditionally by utils/script.py's _hoist_calls (for a bare
+# `ast.Attribute` anywhere in an expression) and _build_call_slot (for a
+# method-call's own method name, the one position _hoist_calls itself never
+# scans) -- closes the classic attribute-chaining sandbox-escape class
+# (`().__class__.__bases__[0].__subclasses__()`-style), which the
+# `{"__builtins__": {}}` eval lockout alone does not defend against.
+DUNDER_ATTRIBUTE_PATTERN: re.Pattern[str] = re.compile(r"^__.*__$")
+
 # Expression node types utils/script.py's _hoist_calls rejects unconditionally
 # (see its own docstring) -- each introduces a local binding scope neither
 # that module nor extract_identifiers has any awareness of.
@@ -283,16 +299,18 @@ __all__ = [
     "RUN_ID_PARAM",
     # ScriptAgent code-statement reserved literals
     "RHS_ASSIGN_ALIAS",
-    "HOISTED_NAME_PREFIX",
+    "SUB_NAME_PREFIX",
     "RETURN_ALIAS",
     "TASK_RESULT_PREFIX",
     "PY_BUILTIN_ALIAS",
+    "ATTR_CALL_ALIAS",
     "EXCLUDED_PY_BUILTINS",
     "KWARGS_UNPACK_KEY",
     "PAUSE_PATTERN",
     "CODE_FENCE_PATTERN",
     "LEADING_CODE_FENCE_PATTERN",
     "TRAILING_CODE_FENCE_PATTERN",
+    "DUNDER_ATTRIBUTE_PATTERN",
     "UNSUPPORTED_EXPR_LABELS",
     "FINAL_ROUND_WARNING",
     # LLM step fields
