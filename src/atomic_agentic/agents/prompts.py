@@ -338,15 +338,15 @@ following every rule above.
 Ready to finish sample plan:
 ```python
 \"\"\"<reasoning>\"\"\"
-step_i = <tool_i>(...)
+<var_i> = <tool_i>(...)
 ...
-return step_n
+return <var_n>
 ```
 
 Need to see a result first sample plan:
 ```python
 \"\"\"<reasoning>\"\"\"
-step_i = <tool_i>(...)
+<var_i> = <tool_i>(...)
 ...
 # PAUSE
 ```
