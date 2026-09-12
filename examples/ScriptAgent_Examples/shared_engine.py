@@ -7,10 +7,11 @@ same provider/model choices as
 model per provider.
 
 Provider selection: set the ``SCRIPT_AGENT_PROVIDER`` env var to one of
-``o``/``g``/``m``/``a``/``l``/``t`` (openai/gemini/mistral/anthropic/
-llamacpp/litellm). If unset (or not a recognized value), falls back to an
-interactive prompt -- the same one the live smoke test uses -- so this also
-works untouched when just running an example by hand.
+``o``/``g``/``m``/``a``/``l``/``3``/``t`` (openai/gemini/mistral/anthropic/
+llamacpp-phi4/llamacpp-gemma3/litellm). If unset (or not a recognized
+value), falls back to an interactive prompt -- the same one the live smoke
+test uses -- so this also works untouched when just running an example by
+hand.
 
 Usage in an example file (same directory, no path shim needed -- Python
 puts a script's own directory on ``sys.path[0]``)::
@@ -37,13 +38,35 @@ PROVIDER_MODELS: dict[str, tuple[type, dict]] = {
     "g": (GeminiEngine, {"api_key": os.getenv("GOOGLE_API_KEY"), "model": "gemini-2.5-flash"}),
     "m": (MistralEngine, {"api_key": os.getenv("MISTRAL_API_KEY"), "model": "mistral-medium-latest"}),
     "a": (AnthropicEngine, {"api_key": os.getenv("ANTHROPIC_API_KEY"), "model": "claude-haiku-4-5"}),
-    "l": (
+    "p": (
         LlamaCppEngine,
         {
-            "model_path": os.getenv("LLAMA_MODEL_PATH"),
+            "model_path": os.getenv("PHI_4_PATH"),
             "repo_id": "unsloth/phi-4-GGUF",
             "filename": "phi-4-Q4_K_M.gguf",
-            "n_ctx": 8182,
+            "n_ctx": 16384,
+            "verbose": False,
+            "n_threads": 4,
+        },
+    ),
+    "3": (
+        LlamaCppEngine,
+        {
+            "model_path": os.getenv("GEMMA_3_PATH"),
+            "repo_id": "ggml-org/gemma-3-4b-it-GGUF",
+            "filename": "gemma-3-4b-it-Q4_K_M.gguf",
+            "n_ctx": 32768,
+            "verbose": False,
+            "n_threads": 4,
+        },
+    ),
+    "4": (
+        LlamaCppEngine,
+        {
+            "model_path": os.getenv("GRANITE_4_1_PATH"),
+            "repo_id": "ibm-granite/granite-4.1-8b-GGUF",
+            "filename": "granite-4.1-8b-Q4_K_M.gguf",
+            "n_ctx": 32768,
             "verbose": False,
             "n_threads": 4,
         },
@@ -57,7 +80,8 @@ def _pick_provider() -> str:
     if env_choice in PROVIDER_MODELS:
         return env_choice
     return input(
-        "Pick provider: (o)penai, (g)emini, (m)istral, (a)nthropic, (l)lamacpp, (t)lite: "
+        "Pick provider: (o)penai, (g)emini, (m)istral, (a)nthropic, "
+        "(l)lamacpp-phi4, gemma(3), (p)hi4, granite(4).1, (t)lite: "
     ).strip().lower()
 
 

@@ -27,6 +27,7 @@ from pathlib import Path
 import logging
 
 from atomic_agentic.agents import BasicAgent, ScriptAgent
+from atomic_agentic.llm import OpenAIEngine
 
 from shared_engine import llm_engine
 
@@ -58,11 +59,13 @@ Input: draft_md (markdown).
 Output: bullet-point critique ONLY (max 8 bullets). No rewriting.
 """.strip()
 
+sub_agent_llm = OpenAIEngine(model="gpt-4o-mini")
+
 outliner = BasicAgent(
     name="StoryOutliner",
     namespace="examples",
     description="Generate a structured outline from a one-sentence idea.",
-    llm_engine=llm_engine,
+    llm_engine=sub_agent_llm,
     role_prompt=OUTLINER_PROMPT,
 )
 
@@ -80,7 +83,7 @@ writer = BasicAgent(
     name="StoryWriter",
     namespace="examples",
     description="Writes drafts based on the outline or reviewer notes (exclusive, do NOT send both).",
-    llm_engine=llm_engine,
+    llm_engine=sub_agent_llm,
     role_prompt=WRITER_PROMPT,
     context_enabled=True,
     pre_invoke=writer_pre,
@@ -94,8 +97,8 @@ def reviewer_pre(draft: str) -> str:
 reviewer = BasicAgent(
     name="DraftReviewer",
     namespace="examples",
-    description="Reviews drafts and provides revision notes.",
-    llm_engine=llm_engine,
+    description="Reviews a writer's draft and returns revision notes to send back to the writer.",
+    llm_engine=sub_agent_llm,
     role_prompt=REVIEWER_PROMPT,
     context_enabled=True,
     pre_invoke=reviewer_pre,
@@ -124,9 +127,7 @@ if __name__ == "__main__":
     if loops <= 0:
         raise ValueError("loops must be > 0")
 
-    # outline (1) + initial write (1) + loops * (reviewer + writer) (2 * loops)
-    # -- no separate budget slot for `return`, unlike PlanAct's counted step.
-    orch.tool_calls_limit = 2 * loops + 2
+    orch.tool_calls_limit = 3 * loops
 
     task_prompt = (
         f"TASK: Write a story based on the following idea: {idea!r}\n"

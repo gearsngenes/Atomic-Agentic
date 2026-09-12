@@ -43,6 +43,7 @@ import logging
 from typing import Any
 
 from atomic_agentic.agents import BasicAgent, ScriptAgent
+from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.tools.prebuilt import EXPONENT_TOOLS, STAT_TOOLS
 
 from shared_engine import llm_engine
@@ -51,6 +52,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ──────────────────────────  HAIKU WRITER  ──────────────────────────
 
+sub_agent_llm = OpenAIEngine(model="gpt-4o-mini")
 
 def haiku_pre(premise: str) -> str:
     return premise
@@ -65,7 +67,7 @@ haiku_writer = BasicAgent(
     name="HaikuWriter",
     namespace="examples",
     description="Writes and prints a 3-line 5-7-5 haiku for the given premise, returning the final poem.",
-    llm_engine=llm_engine,
+    llm_engine=sub_agent_llm,
     role_prompt=(
         "You are a master of writing haiku. Given a topic, write a "
         "3-line haiku about it, following a 5-7-5 syllable structure. "
@@ -92,7 +94,7 @@ math_specialist = ScriptAgent(
     name="MathSpecialist",
     namespace="examples",
     description="Solves one math question and prints the question/answer pair, while returning the final result.",
-    llm_engine=llm_engine,
+    llm_engine=sub_agent_llm,
     context_enabled=False,
     tool_calls_limit=3,
     planning_rounds_limit=1,

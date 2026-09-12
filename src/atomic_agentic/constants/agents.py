@@ -238,11 +238,20 @@ KWARGS_UNPACK_KEY = "**"
 # halves.
 PAUSE_PATTERN: re.Pattern[str] = re.compile(r"^\s*#\s*PAUSE\b", re.IGNORECASE | re.MULTILINE)
 
-# Matches an optional single markdown code fence wrapping the *entire*
-# generation -- any (or no) language tag on the opening fence line
-# (```python, ```py, ```text, a bare ```, ...), not just ```python. Used by
-# utils/script.py's _strip_code_fence.
+# Matches a single markdown code fence wrapping the *entire* generation --
+# any (or no) language tag on the opening fence line (```python, ```py,
+# ```text, a bare ```, ...), not just ```python. Tried first by
+# utils/script.py's _strip_code_fence, since a matched pair unambiguously
+# marks everything between them as the intended code.
 CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.DOTALL)
+
+# Fallback for when CODE_FENCE_PATTERN doesn't match (a model emitting only
+# one side, unmatched) -- each stripped independently, never a fence
+# appearing mid-text (that's a real structural problem, left for ast.parse
+# to reject on its own terms). Same fence-line shape as CODE_FENCE_PATTERN.
+# Used by utils/script.py's _strip_code_fence.
+LEADING_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"^[ \t]*```[^\n]*\n")
+TRAILING_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"\n[ \t]*```[ \t]*$")
 
 # Expression node types utils/script.py's _hoist_calls rejects unconditionally
 # (see its own docstring) -- each introduces a local binding scope neither
@@ -282,6 +291,8 @@ __all__ = [
     "KWARGS_UNPACK_KEY",
     "PAUSE_PATTERN",
     "CODE_FENCE_PATTERN",
+    "LEADING_CODE_FENCE_PATTERN",
+    "TRAILING_CODE_FENCE_PATTERN",
     "UNSUPPORTED_EXPR_LABELS",
     "FINAL_ROUND_WARNING",
     # LLM step fields

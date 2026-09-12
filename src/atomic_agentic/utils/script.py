@@ -10,11 +10,13 @@ from ..constants.agents import (
     EXCLUDED_PY_BUILTINS,
     HOISTED_NAME_PREFIX,
     KWARGS_UNPACK_KEY,
+    LEADING_CODE_FENCE_PATTERN,
     PAUSE_PATTERN,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
     TASK_RESULT_PREFIX,
+    TRAILING_CODE_FENCE_PATTERN,
     UNSUPPORTED_EXPR_LABELS,
 )
 from ..exceptions import BlackboardParseError
@@ -36,16 +38,24 @@ __all__ = [
 
 def _strip_code_fence(raw_text: str) -> str:
     """
-    Strip a single markdown code fence wrapping the whole generation, if
-    present -- defensive against a model wrapping otherwise-valid output in
-    a code fence despite being told not to. Generic to any language tag
-    (or none) on the opening fence line. Only strips a fence wrapping the
-    *entire* text; a fence appearing only partway through is left alone
-    (``ast.parse`` will reject that on its own terms, as a real structural
-    problem).
+    Strip a markdown code fence wrapping the generation, if present --
+    defensive against a model wrapping otherwise-valid output in a code
+    fence despite being told not to. Generic to any language tag (or none)
+    on the opening fence line.
+
+    Tries a fully matched pair first (``CODE_FENCE_PATTERN``) -- unambiguous,
+    so its captured inner text is used as-is. If that doesn't match (a model
+    emitting only one side), falls back to stripping a leading and/or
+    trailing fence line independently. Either way, a fence appearing only
+    mid-text is left alone (``ast.parse`` will reject that on its own terms,
+    as a real structural problem).
     """
-    match = CODE_FENCE_PATTERN.match(raw_text)
-    return match.group(1) if match else raw_text
+    full_match = CODE_FENCE_PATTERN.match(raw_text)
+    if full_match:
+        return full_match.group(1)
+    text = LEADING_CODE_FENCE_PATTERN.sub("", raw_text, count=1)
+    text = TRAILING_CODE_FENCE_PATTERN.sub("", text, count=1)
+    return text
 
 
 def _evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:

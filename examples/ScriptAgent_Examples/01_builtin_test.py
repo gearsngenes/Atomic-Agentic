@@ -1,12 +1,15 @@
-"""01_prebuilt_tools_test.py
+"""01_builtin_test.py
 
-Basic decomposition test -- mirrors PlanAct_Examples/01_prebuilt_tools_test.py
-(formerly "plugins test"; renamed since the prebuilt tool lists were never
-called "plugins"), rebuilt on ScriptAgent instead of PlanActAgent.
+Basic decomposition test -- originally mirrored PlanAct_Examples/
+01_prebuilt_tools_test.py (registering EXPONENT_TOOLS/BASIC_MATH_TOOLS/
+CONSOLE_TOOLS), renamed and repurposed once Python builtin calls landed
+(Pass 5.5): no tool lists are registered at all now -- only a PI constant.
+The whole three-part math task below is solvable via bare arithmetic
+(power/sqrt via `**`) plus builtins (`print`) alone, testing that the
+builtin-support grammar path genuinely replaces what those tool lists used
+to provide for basic math, not just supplements them.
 
-Registers the same three prebuilt tool lists and a PI constant, then hands
-the agent a three-part math task it must decompose into a straight-line
-script on its own. After the run, prints the reconstructed source via
+After the run, prints the reconstructed source via
 ScriptAgentRecord.render_as_code() -- showing exactly what the agent
 executed, not just its final answer.
 """
@@ -14,7 +17,6 @@ import logging
 import math
 
 from atomic_agentic.agents import ScriptAgent
-from atomic_agentic.tools.prebuilt import EXPONENT_TOOLS, BASIC_MATH_TOOLS, CONSOLE_TOOLS
 
 from shared_engine import llm_engine
 
@@ -32,10 +34,8 @@ agent = ScriptAgent(
     planning_rounds_limit=2,
 )
 
-# Register tool lists
-# agent.register_tools(EXPONENT_TOOLS)
-# agent.register_tools(BASIC_MATH_TOOLS)
-# agent.register_tools(CONSOLE_TOOLS)
+# No tool lists registered -- the task below is solvable via bare
+# arithmetic and Python builtins alone (see module docstring).
 
 # Register the pi constant (value first, alias second -- ScriptAgent's
 # register_constant signature is the reverse of v1 ToolAgent's).
@@ -43,7 +43,8 @@ agent.register_constant(math.pi, alias="PI", description="Hardcodes the math con
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
-Answer ONLY these questions and call 'print' on their results as '#) <question>: <answer>' format:
+Answer ONLY these questions and call 'print' on their results as
+'<question #>) <question>: <answer>' format:
 1) Compute the area of a circle with a radius of 5.
 2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
 3) Compute the volume of a cylinder with radius of 2 and height of 10.

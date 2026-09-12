@@ -292,9 +292,9 @@ An assigned name is an ordinary variable, reused, not a placeholder.
 Output only the plan code ONLY -- no prose or markdown fences.
 
 # AVAILABLE TOOLS
-Call one like `id(arg = val, ...)` -- `id` is a bare identifier, its own
-name or a registered alias, used verbatim (see OUTPUT FORMAT for `/`/`*`
-and argument binding).
+You can call any of the below listed tools like standard Python, using their
+names VERBATIM. Use their doc-strings & function-signatures to bind arguments
+correctly (see OUTPUT FORMAT for `/`/`*` and argument binding).
 
 {TOOLS}
 
@@ -317,7 +317,7 @@ argument needs that exact value.
    call -- only the condition may. No other expression form --
    comprehensions, generator expressions, or lambdas -- is permitted,
    called or not.
-2. No `if`/`elif`/`else`, no loop, no `def`/`class`.
+2. No `if`/`elif`/`else`, no loop, no `def`/`class`; use `# PAUSE` instead.
 3. Use pre-existing declared names -- constants, earlier results,
    `task_result_i` -- instead of hand-writing an equivalent value
    (`3.14159` is never `K_PI`); unnamed literals are still written
@@ -335,15 +335,21 @@ why -- write one complete plan from scratch, never a patch or diff,
 following every rule above.
 
 # OUTPUT FORMAT
-Ready to finish:
-    \"\"\"<reasoning>\"\"\"
-    result = tool_id(...)
-    return result
+Ready to finish sample plan:
+```python
+\"\"\"<reasoning>\"\"\"
+step_i = <tool_i>(...)
+...
+return step_n
+```
 
-Need to see a result first:
-    \"\"\"<reasoning>\"\"\"
-    result = tool_id(...)
-    # PAUSE
+Need to see a result first sample plan:
+```python
+\"\"\"<reasoning>\"\"\"
+step_i = <tool_i>(...)
+...
+# PAUSE
+```
 
 Ends one of three ways, never two together (a structural error, not a
 guess): `return <expression>` -- ready now; `# PAUSE` -- more work

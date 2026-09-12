@@ -22,6 +22,11 @@ Turn sequence, each deliberately probing a different angle:
 4. Bare-arithmetic use of the PI constant (degree -> radian conversion) --
    STRICT RULES #1 already permits call-free arithmetic, so this needs no
    dedicated conversion tool, only PI itself.
+5. Full-history recall: identify and restate the very first turn's question
+   AND answer together -- the hardest reuse case, since it needs both a
+   piece of `task_result_i` (the answer) and something never stored as a
+   value at all (the ORIGINAL PROMPT TEXT of turn 0), which only lives in
+   the rendered conversation history, not the cache.
 
 After each turn, prints the answer plus record.render_as_code() -- that's
 what makes reuse vs. hallucination vs. wasted recompute actually visible,
