@@ -841,6 +841,7 @@ class ScriptAgent(Agent):
             llm_records=tuple(task.llm_records),
             prev=prev,
             statements=tuple(task.completed),
+            failed_statements=tuple(task.failed_statements),
         )
 
     # ------------------------------------------------------------------ #
@@ -917,8 +918,8 @@ class ScriptAgent(Agent):
         own rounds but never reaches the real constant or a future
         invocation. No other field needs seeding -- completed/pending/
         resolved_args/continue_planning/planning_rounds_used/
-        tool_calls_used/continuation_note all start at their dataclass
-        defaults."""
+        tool_calls_used/continuation_note/failed_statements all start at
+        their dataclass defaults."""
         task = ScriptAgentTask(
             turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="planner",
         )
@@ -1051,11 +1052,9 @@ class ScriptAgent(Agent):
         parsing is converted here, not propagated, so the retry loop can
         inject it as corrective feedback.
         """
-        print("[DEBUG] Raw generation output:\n", raw_text)
         try:
             flat_slots, continue_planning = parse_generation(raw_text)
         except BlackboardParseError as e:
-            print(f"[DEBUG] Parse error: {e}")
             return str(e)
 
         known_tools = frozenset(self._toolbox.keys())
@@ -1099,7 +1098,6 @@ class ScriptAgent(Agent):
 
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
-            print("[DEBUG] Validation issues:\n", issues_msg)
             return issues_msg
 
         pending = compile_batches(
@@ -1368,7 +1366,6 @@ class ScriptAgent(Agent):
 
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
-            print("[DEBUG] prepare() resolution issues:\n", issues_msg)
             task.continuation_note = (
                 "The following batch could not be resolved:\n"
                 f"{render_completed_as_python(batch)}"
@@ -1446,9 +1443,7 @@ class ScriptAgent(Agent):
             if slot.tool == PY_BUILTIN_ALIAS:
                 return repr(slot.args[0])
             if slot.tool == ATTR_CALL_ALIAS:
-                obj = slot.args[0]
-                obj_repr = ast.unparse(obj) if isinstance(obj, ast.expr) else repr(obj)
-                return f"{obj_repr}.{slot.args[1]}"
+                return f"{ast.unparse(slot.args[0])}.{slot.args[1]}"
             return repr(slot.tool)
 
         failures = [
@@ -1459,6 +1454,8 @@ class ScriptAgent(Agent):
 
         for slot, value in zip(batch, raw_results):
             if isinstance(value, BaseException):
+                slot.exception = value
+                task.failed_statements.append(slot)
                 continue
             task.completed.append(slot)
             # A dispatched tool call's raw_results entry is a full
@@ -1476,7 +1473,6 @@ class ScriptAgent(Agent):
 
         if failures:
             failures_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(failures))
-            print("[DEBUG] act() execution failures:\n", failures_msg)
             task.continuation_note = (
                 "The following batch encountered execution failures:\n"
                 f"{render_completed_as_python(batch)}"

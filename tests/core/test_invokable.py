@@ -225,6 +225,89 @@ class TestAtomicInvokableParameterContract:
         assert "-> dict[str, Any]" in signature
 
 
+class TestAtomicInvokableSignatureRendering:
+    """Covers the `/`/`*` marker logic shared verbatim by `signature` and
+    `fullname_signature` -- parametrized across both properties so a future
+    dedup of their duplicated bodies stays covered either way."""
+
+    @staticmethod
+    def _render(invokable: EchoInvokable, prop: str) -> str:
+        return getattr(invokable, prop)
+
+    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    def test_bare_slash_after_positional_only_run(self, prop: str) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.POSITIONAL_ONLY, type_="int"),
+            make_param("b", 1, ParamSpec.POSITIONAL_ONLY, type_="int"),
+            make_param("c", 2, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int"),
+        ])
+
+        rendered = self._render(invokable, prop)
+
+        assert "a: int, b: int, /, c: int" in rendered
+
+    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    def test_bare_star_before_keyword_only_run(self, prop: str) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int"),
+            make_param("b", 1, ParamSpec.KEYWORD_ONLY, type_="int"),
+            make_param("c", 2, ParamSpec.KEYWORD_ONLY, type_="int"),
+        ])
+
+        rendered = self._render(invokable, prop)
+
+        assert "a: int, *, b: int, c: int" in rendered
+
+    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    def test_var_positional_suppresses_bare_star(self, prop: str) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int"),
+            make_param("args", 1, ParamSpec.VAR_POSITIONAL, type_="int"),
+            make_param("b", 2, ParamSpec.KEYWORD_ONLY, type_="int"),
+        ])
+
+        rendered = self._render(invokable, prop)
+
+        # A bare "*" would be redundant right after "*args" -- must not appear.
+        assert "*args: int, b: int" in rendered
+        assert "*args: int, *, b: int" not in rendered
+
+    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    def test_all_positional_only_still_emits_closing_slash(self, prop: str) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.POSITIONAL_ONLY, type_="int"),
+            make_param("b", 1, ParamSpec.POSITIONAL_ONLY, type_="int"),
+        ])
+
+        rendered = self._render(invokable, prop)
+
+        assert "a: int, b: int, /)" in rendered
+
+    @pytest.mark.parametrize("prop", ["signature", "fullname_signature"])
+    def test_default_value_rendered_regardless_of_kind(self, prop: str) -> None:
+        invokable = make_invokable(parameters=[
+            make_param("a", 0, ParamSpec.POSITIONAL_OR_KEYWORD, type_="int", default=1),
+            make_param("b", 1, ParamSpec.KEYWORD_ONLY, type_="int", default=2),
+        ])
+
+        rendered = self._render(invokable, prop)
+
+        assert "a: int = 1" in rendered
+        assert "b: int = 2" in rendered
+
+    def test_signature_omits_class_and_namespace_prefix(self) -> None:
+        invokable = make_invokable(name="echo", namespace="tests")
+
+        assert invokable.signature.startswith("echo(")
+        assert "EchoInvokable" not in invokable.signature
+        assert "tests" not in invokable.signature
+
+    def test_fullname_signature_includes_class_and_namespace_prefix(self) -> None:
+        invokable = make_invokable(name="echo", namespace="tests")
+
+        assert invokable.fullname_signature.startswith("EchoInvokable.tests.echo(")
+
+
 class TestAtomicInvokableFiltering:
     def test_filter_inputs_requires_mapping(self) -> None:
         invokable = make_invokable()

@@ -8,8 +8,8 @@ This module exposes *prebuilt lists of Tools* that you can register on a ToolAge
 
 Example
 -------
->>> from atomic_agentic.tools.prebuilt import MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
->>> agent.batch_register(MATH_TOOLS)
+>>> from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, CONSOLE_TOOLS, PARSER_TOOLS
+>>> agent.batch_register(BASIC_MATH_TOOLS)
 >>> agent.batch_register(CONSOLE_TOOLS)
 >>> agent.batch_register(PARSER_TOOLS)
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import builtins
+import io
 import re
+import tokenize
 from typing import Any, Optional
 
 from ..constants.agents import (
@@ -159,9 +161,12 @@ def _process_call_args(
     never eagerly folded, regardless of whether its own inner expr has
     dependencies -- its Starred-ness must survive to resolve time
     (``resolve_slot_args``), and an already-folded plain value has no way
-    to carry that tag. A keyword entry whose ``kw.arg is None`` (a
-    ``**expr`` unpack) is stored under ``KWARGS_UNPACK_KEY`` -- at most
-    one per call; a second one raises immediately.
+    to carry that tag. It still gets the same dependency-free dry-run
+    validation as every other argument category, applied to its inner
+    expr before it's wrapped back in ``ast.Starred``. A keyword entry whose
+    ``kw.arg is None`` (a ``**expr`` unpack) is stored under
+    ``KWARGS_UNPACK_KEY`` -- at most one per call; a second one raises
+    immediately.
     """
     args: list[Any] = []
     for arg_node in call_node.args:
@@ -169,6 +174,15 @@ def _process_call_args(
             inner = _hoist_calls(
                 arg_node.value, counter=counter, start_index=start_index, hoisted=hoisted
             )
+            deps = extract_identifiers(inner)
+            if not deps:
+                try:
+                    _evaluate_expr(inner, {})
+                except Exception as e:
+                    raise BlackboardParseError(
+                        "* unpack is a constant expression that failed to "
+                        f"evaluate: {e!r}"
+                    ) from e
             args.append(ast.Starred(value=inner, ctx=ast.Load()))
             continue
 
@@ -564,6 +578,41 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     return [*hoisted, final_slot]
 
 
+def _find_pause_marker(text: str) -> tuple[int, int] | None:
+    """
+    Locate the first real ``# PAUSE`` comment in ``text`` via ``tokenize``
+    rather than a raw-text regex scan, so a legal (freely-interspersed,
+    triple-quoted-preferred) reasoning-note string that happens to contain
+    the text "# PAUSE" on one of its own lines can never be misread as the
+    real sentinel -- ``tokenize`` never emits a ``COMMENT`` token from
+    inside a ``STRING`` token, unlike a plain regex over raw text, which
+    has no concept of "am I inside a string literal."
+
+    Only a comment that is the sole content on its line (nothing but
+    whitespace precedes it) counts, matching ``PAUSE_PATTERN``'s original
+    line-anchored intent -- a trailing comment after real code on the same
+    line is not a marker, unchanged from before this rewrite.
+
+    Returns the marker's ``(row, col)`` start position (1-indexed row,
+    ``tokenize``'s own convention), or ``None`` if no real marker exists
+    (including when ``text`` fails to tokenize at all -- a genuine
+    lexical error surfaces downstream via ``ast.parse``, exactly as it
+    would have regardless of this function).
+    """
+    lines = text.splitlines()
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type != tokenize.COMMENT or not PAUSE_PATTERN.match(tok.string):
+                continue
+            row, col = tok.start
+            if lines[row - 1][:col].strip():
+                continue
+            return tok.start
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return None
+    return None
+
+
 def parse_generation(
     raw_text: str,
 ) -> tuple[list[CodeStatement], bool]:
@@ -572,13 +621,16 @@ def parse_generation(
     continuation) into a flat slot sequence and whether a further
     continuation round is needed.
 
-    Pause-splitting happens on raw text, before any AST parsing --
-    ``# PAUSE`` is a comment, and ``ast.parse`` strips comments, so a
-    marker's position can't be recovered from a parsed tree. Only the FIRST
-    marker matters: a generation has at most one meaningful pause, since
-    reaching one always terminates it (mirroring how a ``return`` already
-    terminates it) -- ``maxsplit=1`` produces at most two pieces,
-    ``before``/``after``.
+    Pause-splitting happens before any AST parsing -- ``# PAUSE`` is a
+    comment, and ``ast.parse`` strips comments, so a marker's position
+    can't be recovered from a parsed tree. Located via ``_find_pause_marker``
+    (``tokenize``-based, not a raw-text regex scan -- a legal reasoning-note
+    string containing the text "# PAUSE" is never misread as the real
+    sentinel). Only the FIRST marker matters: a generation has at most one
+    meaningful pause, since reaching one always terminates it (mirroring
+    how a ``return`` already terminates it) -- everything at or after it is
+    discarded, only ``before`` (everything strictly preceding it) is ever
+    parsed.
 
     ``before`` is parsed and dispatched statement-by-statement exactly as
     always, with two special any-position cases: a bare string-literal
@@ -609,11 +661,10 @@ def parse_generation(
     premature/unverified final answer. Raises, feeding regen-repair so the
     model is told directly to pick exactly one.
 
-    ``after`` (present only when a pause marker was found) is never
-    inspected at all -- ``# PAUSE`` is a bare, complete sentinel; no
-    trailing note is expected, taught, or parsed. Whatever a model writes
-    past the marker is discarded without complaint, same as any other
-    post-terminal content.
+    Whatever follows a found marker is never inspected at all -- ``# PAUSE``
+    is a bare, complete sentinel; no trailing note is expected, taught, or
+    parsed. Whatever a model writes past the marker is discarded without
+    complaint, same as any other post-terminal content.
 
     Returns ``(flat_slots, continue_planning)``. Raises
     ``BlackboardParseError`` on any structural failure (propagated from
@@ -621,8 +672,14 @@ def parse_generation(
     ``before``, or one of the two "nothing real yet" cases above).
     """
     text = _strip_code_fence(raw_text)
-    parts = PAUSE_PATTERN.split(text, maxsplit=1)
-    before = parts[0]
+    marker = _find_pause_marker(text)
+    if marker is None:
+        before = text
+    else:
+        row, col = marker
+        lines = text.splitlines(keepends=True)
+        before = "".join(lines[: row - 1]) + lines[row - 1][:col]
+    marker_found = marker is not None
 
     flat_slots: list[CodeStatement] = []
     hoist_index = 0
@@ -657,7 +714,7 @@ def parse_generation(
             hoist_index += len(slots)
 
             if slots and slots[-1].tool == RETURN_ALIAS:
-                if len(parts) == 2:
+                if marker_found:
                     raise BlackboardParseError(
                         "a generation cannot contain both a return statement "
                         "and a # PAUSE marker -- pick exactly one way to end: "
@@ -666,7 +723,7 @@ def parse_generation(
                     )
                 return flat_slots, False
 
-    if len(parts) == 1:
+    if not marker_found:
         # No pause marker anywhere -- completes normally (or falls off the
         # end with an inferred `None` result if no `return` ran).
         return flat_slots, False
@@ -849,6 +906,12 @@ def compile_batches(
     concurrency cap, never replacing the dependency-conflict closure rule
     above. ``max_concurrency=None`` means no cap (today's greedy default).
 
+    A ``RETURN_ALIAS`` slot is never grouped with anything else -- it always
+    closes the current batch, lands alone in a batch of its own, then closes
+    that batch too. This guarantees ``_apply_batch_results`` can never see a
+    return slot sharing a batch with an unrelated failing call, which would
+    otherwise let that failure suppress an already-resolved return.
+
     Every slot in a batch is stamped with the same ``batch_index`` --
     ``start_batch_index`` plus that batch's own 0-based position among the
     batches this call produces -- the moment the batch closes. Lets a
@@ -874,6 +937,17 @@ def compile_batches(
         current_batch_dispatched = 0
 
     for slot in slots:
+        if slot.tool == RETURN_ALIAS:
+            # A return is never grouped with anything else -- closing
+            # before AND after guarantees it lands alone in its own batch,
+            # so an unrelated failure elsewhere can never suppress it (a
+            # partial-batch failure can only ever apply to slots that were
+            # actually batched alongside the failure).
+            close_current()
+            current_batch.append(slot)
+            close_current()
+            continue
+
         deps = (*extract_identifiers(slot.args), *extract_identifiers(slot.kwargs))
         if any(name in current_batch_identifiers for name in deps):
             close_current()

@@ -44,6 +44,7 @@ from atomic_agentic.a2a import A2AClientHub
 from atomic_agentic.tools import A2AProxyTool
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.utils.core import apply_name_filter, validate_name_filter
 
 
 def _a2a_sdk_skill_metadata(*, remote_name: str) -> A2AtomicSkillMetadata:
@@ -64,10 +65,18 @@ class FakeA2AClientHub(A2AClientHub):
     network construction, matching the FakeMCPClientHub/FakePyA2AtomicClient
     precedent in tests/tools/test_toolify.py."""
 
-    def __init__(self, *, skills: dict[str, A2AtomicSkillMetadata] | None = None) -> None:
-        self._skills = (
+    def __init__(
+        self,
+        *,
+        skills: dict[str, A2AtomicSkillMetadata] | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+    ) -> None:
+        raw_skills = (
             {"add": _a2a_sdk_skill_metadata(remote_name="add")} if skills is None else skills
         )
+        resolved_include, resolved_exclude = validate_name_filter(include_names, exclude_names)
+        self._skills = apply_name_filter(raw_skills, resolved_include, resolved_exclude)
         self._card = type("FakeCard", (), {"name": "FakeA2AAgent", "description": ""})()
         self.skill_calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -509,22 +518,6 @@ class TestToolRegistration:
         with pytest.raises(ValueError):
             agent.batch_register(tools=[])
 
-    def test_batch_register_remote_names_without_client_raises(self) -> None:
-        agent = make_agent()
-        with pytest.raises(ValueError, match="remote_names requires a client"):
-            agent.batch_register(tools=[add], remote_names=["foo"])
-
-    def test_batch_register_remote_names_not_found_raises(self) -> None:
-        """remote_names entries absent from the client's list raise ToolRegistrationError."""
-        class _StubClient:
-            def list_invokables(self) -> list[str]:
-                return ["Tool.tests.foo"]
-
-        agent = make_agent()
-        stub = _StubClient()
-        with pytest.raises(ToolRegistrationError, match="not found on client"):
-            agent.batch_register(client=stub, remote_names=["Tool.tests.foo", "Tool.tests.bar"])
-
     def test_batch_register_intraset_duplicate_raises(self) -> None:
         """Duplicate full_name in incoming batch always raises regardless of mode."""
         agent = make_agent()
@@ -579,17 +572,23 @@ class TestToolRegistration:
         assert f"A2AProxyTool.{agent.name}.send_parts" in keys
         assert len(keys) == 3
 
-    def test_batch_register_a2a_client_hub_remote_names_filters_skills_only(self) -> None:
-        """remote_names whitelists skill ids only -- the generic tool is unaffected."""
+    def test_batch_register_hub_include_names_filters_skills_only(self) -> None:
+        """A hub's include_names whitelists skill ids only -- the generic tool is unaffected.
+
+        Filtering is now a hub-construction-time concern (include_names/
+        exclude_names), not a batch_register kwarg -- batch_register simply
+        consumes whatever already-filtered view get_atomic_skills() reports.
+        """
         agent = make_agent()
         hub = FakeA2AClientHub(
             skills={
                 "add": _a2a_sdk_skill_metadata(remote_name="add"),
                 "multiply": _a2a_sdk_skill_metadata(remote_name="multiply"),
-            }
+            },
+            include_names=["add"],
         )
 
-        keys = agent.batch_register(client=hub, remote_names=["add"])
+        keys = agent.batch_register(client=hub)
 
         assert f"A2AProxyTool.{agent.name}.add" in keys
         assert f"A2AProxyTool.{agent.name}.multiply" not in keys
@@ -605,12 +604,10 @@ class TestToolRegistration:
 
         assert keys == [f"A2AProxyTool.{agent.name}.send_parts"]
 
-    def test_batch_register_a2a_client_hub_remote_names_empty_list_raises(self) -> None:
-        """Existing remote_names=[] guard fires unchanged for an A2AClientHub."""
-        agent = make_agent()
-        hub = FakeA2AClientHub()
+    def test_a2a_client_hub_include_names_empty_list_raises(self) -> None:
+        """An empty include_names list is rejected at hub construction, not batch_register."""
         with pytest.raises(ValueError):
-            agent.batch_register(client=hub, remote_names=[])
+            FakeA2AClientHub(include_names=[])
 
     def test_batch_register_a2a_client_hub_registered_tool_invokes_fake_hub(self) -> None:
         """The registered skill-mode tool actually dispatches to the hub."""

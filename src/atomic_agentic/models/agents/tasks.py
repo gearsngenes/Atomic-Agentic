@@ -184,11 +184,11 @@ class ScriptAgentTask(AgentTask):
     Fields
     ------
     completed : list[CodeStatement]
-        Every terminal slot (executed successfully or failed) produced so
-        far this run, in commit order. Purely historical -- nothing here is
-        ever mutated once a slot lands in this list. Becomes
-        ScriptAgentRecord.statements verbatim (normalized to a tuple) at
-        commit time.
+        Every slot that executed successfully so far this run, in commit
+        order. Purely historical -- nothing here is ever mutated once a
+        slot lands in this list. Becomes ScriptAgentRecord.statements
+        verbatim (normalized to a tuple) at commit time. A slot whose
+        dispatch raised is never appended here -- see failed_statements.
 
     pending : list[list[CodeStatement]]
         Every not-yet-executed dependency batch compiled so far for the
@@ -287,6 +287,17 @@ class ScriptAgentTask(AgentTask):
         then advanced by the number of batches that call produced, so
         ``CodeStatement.batch_index`` values stay globally unique across a
         whole invoke.
+
+    failed_statements : list[CodeStatement]
+        Every slot whose dispatch raised, in the order the failure was
+        observed, across every round this invoke -- the permanent
+        counterpart to ``continuation_note``'s ephemeral text (which is
+        consulted and cleared on the very next render). Appended by
+        ``_apply_batch_results`` at the same point a failure is detected,
+        with ``slot.exception`` set to the raised value first. Never
+        cleared or mutated once appended. Becomes
+        ScriptAgentRecord.failed_statements verbatim (normalized to a
+        tuple) at commit time.
     """
     completed: list[CodeStatement] = field(default_factory=list)
     pending: list[list[CodeStatement]] = field(default_factory=list)
@@ -299,6 +310,7 @@ class ScriptAgentTask(AgentTask):
     tool_calls_used: int = 0
     continuation_note: Optional[str] = None
     batch_counter: int = 0
+    failed_statements: list[CodeStatement] = field(default_factory=list)
 
 
 @dataclass(slots=True)

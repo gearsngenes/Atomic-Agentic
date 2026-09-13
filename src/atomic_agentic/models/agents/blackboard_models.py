@@ -499,7 +499,7 @@ class CodeStatement:
         """
 
         def render(value: Any) -> Any:
-            return ast.unparse(value) if isinstance(value, (ast.expr, ast.Starred)) else value
+            return ast.unparse(value) if isinstance(value, ast.expr) else value
 
         return {
             "identifier": self.identifier,

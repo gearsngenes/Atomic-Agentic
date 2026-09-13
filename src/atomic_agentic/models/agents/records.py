@@ -345,9 +345,19 @@ class ScriptAgentRecord(AgentRecord):
         right (parse_generation treats it as an inert, unstored no-op,
         legal anywhere in a generation) -- there is no separate annotation
         record of it.
+
+    failed_statements : tuple[CodeStatement, ...]
+        Every slot whose dispatch raised this run, carried over from
+        ScriptAgentTask.failed_statements at commit time (same
+        list-or-tuple-in, tuple-stored normalization as statements). Each
+        entry's ``.exception`` is the raised value. The permanent record of
+        what failed during this invocation -- unlike ``continuation_note``
+        (ephemeral, consulted and cleared each round), this list is never
+        cleared.
     """
 
     statements: tuple[CodeStatement, ...] = ()
+    failed_statements: tuple[CodeStatement, ...] = ()
 
     def __post_init__(self) -> None:
         # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
@@ -371,10 +381,27 @@ class ScriptAgentRecord(AgentRecord):
                     f"CodeStatement instance; got {type(slot).__name__!r}."
                 )
 
-        # 2. normalize to a tuple -- object.__setattr__ required, the
+        # 2. failed_statements must be a list/tuple of CodeStatement
+        # instances, same shape as statements above.
+        if isinstance(self.failed_statements, (str, bytes)) or not isinstance(
+            self.failed_statements, (list, tuple)
+        ):
+            raise TypeError(
+                "ScriptAgentRecord.failed_statements must be a list or tuple "
+                f"of CodeStatement instances; got {type(self.failed_statements).__name__!r}."
+            )
+        for index, slot in enumerate(self.failed_statements):
+            if not isinstance(slot, CodeStatement):
+                raise TypeError(
+                    f"ScriptAgentRecord.failed_statements[{index}] must be a "
+                    f"CodeStatement instance; got {type(slot).__name__!r}."
+                )
+
+        # 3. normalize both to a tuple -- object.__setattr__ required, the
         # dataclass is frozen (mirrors llm_records/inputs normalization
         # above).
         object.__setattr__(self, "statements", tuple(self.statements))
+        object.__setattr__(self, "failed_statements", tuple(self.failed_statements))
 
     def render_as_code(self) -> str:
         """
@@ -429,8 +456,10 @@ class ScriptAgentRecord(AgentRecord):
         d = super(ScriptAgentRecord, self).to_dict()
         d.update({
             "statements": [s.to_dict() for s in self.statements],
+            "failed_statements": [s.to_dict() for s in self.failed_statements],
         })
         return d
+
 
 @dataclass(frozen=True, slots=True)
 class ThinkingAgentRecord(AgentRecord):

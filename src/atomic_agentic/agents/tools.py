@@ -6,6 +6,7 @@ from typing import Any
 from ..tools import Tool
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
+    DUNDER_ATTRIBUTE_PATTERN,
     EXCLUDED_PY_BUILTINS,
     PY_BUILTIN_ALIAS,
     RETURN_TOOL_DESCRIPTION,
@@ -125,11 +126,17 @@ builtin_call_tool = Tool(
 def _call_attr_method(obj: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
     """
     Dispatch body for ScriptAgent's attribute/method-call slots
-    (``obj.method(...)``). Dunder method names are already rejected at
-    parse time (``utils/script.py``'s ``_hoist_calls``/``_build_call_slot``
-    checks) -- this does not re-check, mirroring ``_call_py_builtin``'s own
-    split between the authoritative runtime gate and an upstream guarantee.
+    (``obj.method(...)``).
+
+    Raises ``ValueError`` for a dunder method name -- the authoritative
+    runtime gate, matching ``_call_py_builtin``'s own posture: dunder names
+    are already rejected at parse time (``utils/script.py``'s
+    ``_hoist_calls``/``_build_call_slot`` checks), but this is the one
+    remaining sandbox-escape surface in the whole grammar, so this check
+    doesn't trust that upstream guarantee either.
     """
+    if DUNDER_ATTRIBUTE_PATTERN.fullmatch(method_name):
+        raise ValueError(f"attribute/method name {method_name!r} is not available here")
     return getattr(obj, method_name)(*args, **kwargs)
 
 

@@ -387,6 +387,42 @@ class TestAgentRecord:
         record = AgentRecord(user_prompt="second", generated_response="r2", prev=prev_record)
         assert record.to_dict()["prev_run_id"] == agent_result.run_id
 
+    def test_children_defaults_to_empty_list(self) -> None:
+        record = AgentRecord(user_prompt="x", generated_response="y")
+        assert record.children == []
+
+    def test_children_accepts_agent_record_instances(self) -> None:
+        child = AgentRecord(
+            user_prompt="child", generated_response="r", final_result=make_agent_result()
+        )
+        record = AgentRecord(user_prompt="x", generated_response="y", children=[child])
+        assert record.children == [child]
+
+    def test_children_rejects_non_list_tuple(self) -> None:
+        with pytest.raises(TypeError, match="children"):
+            AgentRecord(user_prompt="x", generated_response="y", children="not a list")  # type: ignore[arg-type]
+
+    def test_children_rejects_non_agent_record_element(self) -> None:
+        with pytest.raises(TypeError, match="children"):
+            AgentRecord(user_prompt="x", generated_response="y", children=["not a record"])  # type: ignore[list-item]
+
+    def test_children_not_normalized_to_tuple(self) -> None:
+        # Deliberately mutable -- unlike llm_records, children is appended to
+        # in place after construction (Agent._commit_emit's fork-vs-continue
+        # bookkeeping), so it must stay a real list, not a frozen tuple.
+        record = AgentRecord(user_prompt="x", generated_response="y")
+        assert isinstance(record.children, list)
+        record.children.append(
+            AgentRecord(user_prompt="c", generated_response="r", final_result=make_agent_result())
+        )
+        assert len(record.children) == 1
+
+    def test_to_dict_child_ids_reflects_current_children(self) -> None:
+        child_result = make_agent_result()
+        child = AgentRecord(user_prompt="child", generated_response="r", final_result=child_result)
+        record = AgentRecord(user_prompt="x", generated_response="y", children=[child])
+        assert record.to_dict()["child_ids"] == [child_result.run_id]
+
 
 class TestToolAgentRecord:
     def test_is_an_agent_record(self) -> None:

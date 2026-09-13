@@ -309,14 +309,16 @@ argument needs that exact value.
 {CONSTANTS}
 
 # STRICT RULES
-1. Only registered tool ids and non-excluded Python builtins may be called
-   (see AVAILABLE TOOLS) -- stdlib modules (`math.sqrt()`) and
-   `import` remain parser-rejected. Call-free expressions (arithmetic,
-   comparisons, ternaries, f-strings, literals) stay unrestricted, except a
-   ternary's branches (`X if cond else Y`) may never themselves contain a
-   call -- only the condition may. No other expression form --
-   comprehensions, generator expressions, or lambdas -- is permitted,
-   called or not.
+1. Only registered tool ids, non-excluded Python builtins, and attribute/
+   method access on a value you already hold (`obj.attr`, `obj.method(...)`;
+   dunder names excluded) may be used (see AVAILABLE TOOLS) --
+   `import <module>`-style statements are illegal, so no module-qualified
+   call (e.g. a stdlib function) is ever reachable. Call-free expressions
+   (arithmetic, comparisons, ternaries, f-strings, literals) stay
+   unrestricted, except a ternary's branches (`X if cond else Y`) may never
+   themselves contain a call -- only the condition may. No other expression
+   form -- comprehensions, generator expressions, or lambdas -- is
+   permitted, called or not.
 2. No `if`/`elif`/`else`, no loop, no `def`/`class`; use `# PAUSE` instead.
 3. Use pre-existing declared names -- constants, earlier results,
    `task_result_i` -- instead of hand-writing an equivalent value

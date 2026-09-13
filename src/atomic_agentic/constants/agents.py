@@ -238,11 +238,13 @@ regen-repair message instead of falling through to the generic
 # real keyword argument name -- no validation needed to guarantee this.
 KWARGS_UNPACK_KEY = "**"
 
-# Matches a `#`-comment line whose content is (case-insensitively) the word
-# PAUSE -- line-anchored so a tool argument that happens to contain the text
-# is never misread as a real marker. Used by utils/script.py's
-# parse_generation to split a raw generation into its pre-pause/post-pause
-# halves.
+# Matches a `#`-comment whose content is (case-insensitively) the word
+# PAUSE. Matched against a single tokenize COMMENT token's own string (by
+# utils/script.py's _find_pause_marker), not scanned over raw multi-line
+# text -- tokenize never emits a COMMENT token from inside a string
+# literal, so a reasoning-note string containing this same text can never
+# be misread as a real marker. Still line-anchored (^\s*) since a token's
+# string always starts at its own "#".
 PAUSE_PATTERN: re.Pattern[str] = re.compile(r"^\s*#\s*PAUSE\b", re.IGNORECASE | re.MULTILINE)
 
 # Matches a single markdown code fence wrapping the *entire* generation --

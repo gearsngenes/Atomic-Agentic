@@ -5,11 +5,23 @@ import math
 import pytest
 
 from atomic_agentic.exceptions import ToolInvocationError
-from atomic_agentic.tools.prebuilt import CONSOLE_TOOLS, BASIC_MATH_TOOLS, PARSER_TOOLS
+from atomic_agentic.tools.prebuilt import (
+    BASIC_MATH_TOOLS,
+    CONSOLE_TOOLS,
+    EXPONENT_TOOLS,
+    PARSER_TOOLS,
+    STAT_TOOLS,
+)
 from atomic_agentic.tools.base import Tool
 
 
-ALL_PLUGIN_TOOLS = [*BASIC_MATH_TOOLS, *CONSOLE_TOOLS, *PARSER_TOOLS]
+ALL_PLUGIN_TOOLS = [
+    *BASIC_MATH_TOOLS,
+    *EXPONENT_TOOLS,
+    *STAT_TOOLS,
+    *CONSOLE_TOOLS,
+    *PARSER_TOOLS,
+]
 
 
 def tool_by_full_name(full_name: str) -> Tool:
@@ -21,10 +33,14 @@ def tool_by_full_name(full_name: str) -> Tool:
 class TestPluginBundles:
     def test_plugin_bundles_are_non_empty_lists(self) -> None:
         assert isinstance(BASIC_MATH_TOOLS, list)
+        assert isinstance(EXPONENT_TOOLS, list)
+        assert isinstance(STAT_TOOLS, list)
         assert isinstance(CONSOLE_TOOLS, list)
         assert isinstance(PARSER_TOOLS, list)
 
         assert BASIC_MATH_TOOLS
+        assert EXPONENT_TOOLS
+        assert STAT_TOOLS
         assert CONSOLE_TOOLS
         assert PARSER_TOOLS
 
@@ -48,25 +64,25 @@ class TestPluginBundles:
 
 class TestMathPluginSmoke:
     def test_math_add_invokes_correctly(self) -> None:
-        tool = tool_by_full_name("Tool.Math.add")
+        tool = tool_by_full_name("Tool.Basic_Math.add")
 
         assert tool.invoke({"a": 2, "b": 3}).result == 5
 
     def test_math_divide_by_zero_returns_inf(self) -> None:
-        tool = tool_by_full_name("Tool.Math.divide")
+        tool = tool_by_full_name("Tool.Basic_Math.divide")
 
         result = tool.invoke({"a": 2, "b": 0})
 
         assert math.isinf(result.result)
 
     def test_math_sqrt_negative_wraps_value_error(self) -> None:
-        tool = tool_by_full_name("Tool.Math.sqrt")
+        tool = tool_by_full_name("Tool.Exponents.sqrt")
 
         with pytest.raises(ToolInvocationError, match="invocation failed"):
             tool.invoke({"x": -1})
 
     def test_math_mean_empty_returns_zero(self) -> None:
-        tool = tool_by_full_name("Tool.Math.mean")
+        tool = tool_by_full_name("Tool.Stats.mean")
 
         assert tool.invoke({"nums": []}).result == 0.0
 
@@ -87,11 +103,6 @@ class TestParserPluginSmoke:
 
         assert tool.invoke({"lst": ["a", "b", "c"], "sep": "-"}).result == "a-b-c"
 
-    def test_parser_extract_json_string_finds_object(self) -> None:
-        tool = tool_by_full_name("Tool.Parser.extract_json_string")
-
-        assert tool.invoke({"s": "prefix {\"a\": 1} suffix"}).result == '{"a": 1}'
-
     def test_parser_safe_eval_literal_smoke(self) -> None:
         tool = tool_by_full_name("Tool.Parser.safe_eval")
 
@@ -100,16 +111,16 @@ class TestParserPluginSmoke:
 
 class TestConsolePluginSmoke:
     def test_console_print_tool_can_print_value(self, capsys: pytest.CaptureFixture[str]) -> None:
-        tool = tool_by_full_name("Tool.Console.print")
+        tool = tool_by_full_name("Tool.Console.print_tool")
 
-        result = tool.invoke({"value": "hello"})
+        result = tool.invoke({"objects": ("hello",)})
 
         captured = capsys.readouterr()
         assert result.result is None
         assert captured.out == "hello\n"
 
     def test_console_log_tool_invokes_without_error(self) -> None:
-        tool = tool_by_full_name("Tool.Console.log")
+        tool = tool_by_full_name("Tool.Console.log_message")
 
         assert tool.invoke({"message": "hello", "level": "INFO"}).result is None
 

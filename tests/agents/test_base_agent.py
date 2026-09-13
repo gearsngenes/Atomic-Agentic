@@ -690,6 +690,211 @@ class TestAgentContext:
         assert agent.get_conversation() == []
 
 
+class TestConversationManagement:
+    """Named-conversation branching: create/fork/delete/set_active plus the
+    implicit fork-on-invoke path (continuing from a record that already has
+    children forks instead of appending in place)."""
+
+    def test_fresh_agent_has_single_default_active_conversation(self) -> None:
+        agent = make_agent()
+
+        assert agent.conversation_names == ["default"]
+        assert agent.active_conversation == "default"
+        assert agent.get_conversation() == []
+
+    def test_create_conversation_returns_true_on_fresh_name(self) -> None:
+        agent = make_agent()
+
+        assert agent.create_conversation("scratch") is True
+        assert "scratch" in agent.conversation_names
+        assert agent.get_conversation("scratch") == []
+        # create_conversation never auto-activates.
+        assert agent.active_conversation == "default"
+
+    def test_create_conversation_returns_false_on_existing_name_no_mutation(self) -> None:
+        agent = make_agent(context_enabled=True)
+        agent.create_conversation("scratch")
+        agent.set_active_conversation("scratch")
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        assert agent.create_conversation("scratch") is False
+        # The existing conversation's history survives the no-op collision.
+        assert len(agent.get_conversation("scratch")) == 1
+
+    @pytest.mark.parametrize("bad_name", ["bad name", "1bad", "name_5", ""])
+    def test_create_conversation_rejects_invalid_name_shape(self, bad_name: str) -> None:
+        agent = make_agent()
+
+        with pytest.raises(ValueError):
+            agent.create_conversation(bad_name)
+
+    def test_set_active_conversation_switches_active(self) -> None:
+        agent = make_agent()
+        agent.create_conversation("scratch")
+
+        agent.set_active_conversation("scratch")
+
+        assert agent.active_conversation == "scratch"
+
+    def test_set_active_conversation_unknown_key_raises(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(AgentInvocationError):
+            agent.set_active_conversation("nope")
+
+    def test_get_conversation_unknown_key_raises(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(AgentInvocationError):
+            agent.get_conversation("nope")
+
+    def test_get_conversation_turns_zero_raises(self) -> None:
+        agent = make_agent(context_enabled=True)
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        with pytest.raises(ValueError):
+            agent.get_conversation(turns=0)
+
+    def test_get_conversation_turns_returns_trailing_slice(self) -> None:
+        agent = make_agent(context_enabled=True)
+        agent.invoke({"topic": "first", "tone": "strict"})
+        agent.invoke({"topic": "second", "tone": "strict"})
+        agent.invoke({"topic": "third", "tone": "strict"})
+
+        tail = agent.get_conversation(turns=2)
+
+        assert len(tail) == 2
+        assert [r.inputs["topic"] for r in tail] == ["second", "third"]
+
+    def test_get_conversation_return_value_is_independent_of_storage(self) -> None:
+        agent = make_agent(context_enabled=True)
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        history = agent.get_conversation()
+        history.append("not a real record")  # type: ignore[arg-type]
+
+        assert len(agent.get_conversation()) == 1
+
+    def test_delete_conversation_unknown_key_raises(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(AgentInvocationError):
+            agent.delete_conversation("nope")
+
+    def test_delete_conversation_refuses_active_conversation(self) -> None:
+        agent = make_agent()
+        agent.create_conversation("scratch")
+        agent.set_active_conversation("scratch")
+
+        with pytest.raises(AgentInvocationError):
+            agent.delete_conversation("scratch")
+
+    def test_delete_conversation_removes_non_active_conversation(self) -> None:
+        agent = make_agent(context_enabled=True)
+        agent.create_conversation("scratch")
+        agent.set_active_conversation("scratch")
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+        agent.set_active_conversation("default")
+
+        removed = agent.delete_conversation("scratch")
+
+        assert len(removed) == 1
+        assert "scratch" not in agent.conversation_names
+
+    def test_delete_conversation_default_resets_in_place_never_removed(self) -> None:
+        agent = make_agent(context_enabled=True)
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        removed = agent.delete_conversation("default")
+
+        assert len(removed) == 1
+        assert "default" in agent.conversation_names
+        assert agent.get_conversation("default") == []
+
+    def test_fork_conversation_unknown_source_raises(self) -> None:
+        agent = make_agent()
+
+        with pytest.raises(AgentInvocationError):
+            agent.fork_conversation("nope", run_id="whatever")
+
+    def test_fork_conversation_unknown_run_id_raises(self) -> None:
+        agent = make_agent(context_enabled=True)
+        agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        with pytest.raises(ValueError):
+            agent.fork_conversation("default", run_id="nonexistent")
+
+    def test_fork_conversation_never_changes_active_conversation(self) -> None:
+        agent = make_agent(context_enabled=True)
+        first = agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        agent.fork_conversation("default", run_id=first.run_id)
+
+        assert agent.active_conversation == "default"
+
+    def test_fork_conversation_explicit_name_collision_raises(self) -> None:
+        agent = make_agent(context_enabled=True)
+        first = agent.invoke({"topic": "pytest", "tone": "strict"})
+        agent.create_conversation("taken")
+
+        with pytest.raises(ValueError):
+            agent.fork_conversation("default", run_id=first.run_id, fork_name="taken")
+
+    def test_fork_conversation_result_is_independent_copy(self) -> None:
+        agent = make_agent(context_enabled=True)
+        first = agent.invoke({"topic": "pytest", "tone": "strict"})
+
+        forked_name = agent.fork_conversation("default", run_id=first.run_id)
+        agent.set_active_conversation(forked_name)
+        agent.invoke({"topic": "forked-only", "tone": "strict"})
+
+        # The fork's own new turn must never appear back in "default".
+        assert len(agent.get_conversation("default")) == 1
+        assert len(agent.get_conversation(forked_name)) == 2
+
+    def test_fork_conversation_auto_name_survives_clear_memory(self) -> None:
+        # self._branch_counter is deliberately not reset by clear_memory(),
+        # so an auto-generated name must never be reissued across a clear
+        # even though the old name becomes technically free again.
+        agent = make_agent(context_enabled=True)
+        first = agent.invoke({"topic": "pytest", "tone": "strict"})
+        first_fork_name = agent.fork_conversation("default", run_id=first.run_id)
+
+        agent.clear_memory()
+
+        second = agent.invoke({"topic": "pytest", "tone": "strict"})
+        second_fork_name = agent.fork_conversation("default", run_id=second.run_id)
+
+        assert second_fork_name != first_fork_name
+
+    def test_continuing_from_childless_record_appends_in_place(self) -> None:
+        agent = make_agent(context_enabled=True)
+        first = agent.invoke({"topic": "first", "tone": "strict"})
+
+        agent.invoke({"topic": "second", "tone": "strict", "run_id": first.run_id})
+
+        assert agent.conversation_names == ["default"]
+        assert len(agent.get_conversation("default")) == 2
+
+    def test_continuing_from_record_with_children_forks_instead(self) -> None:
+        agent = make_agent(context_enabled=True)
+        first = agent.invoke({"topic": "first", "tone": "strict"})
+        agent.invoke({"topic": "second", "tone": "strict", "run_id": first.run_id})
+
+        # first.run_id now already has a child (the "second" turn) -- a third
+        # invocation continuing from the same point must fork, not append.
+        agent.invoke({"topic": "third", "tone": "strict", "run_id": first.run_id})
+
+        assert len(agent.conversation_names) == 2
+        # "default" is untouched by the fork.
+        assert len(agent.get_conversation("default")) == 2
+        forked_name = next(n for n in agent.conversation_names if n != "default")
+        forked = agent.get_conversation(forked_name)
+        assert len(forked) == 2
+        assert forked[0].inputs["topic"] == "first"
+        assert forked[1].inputs["topic"] == "third"
+
+
 class TestAgentValidation:
     def test_invoke_rejects_non_mapping_inputs(self) -> None:
         agent = make_agent()
