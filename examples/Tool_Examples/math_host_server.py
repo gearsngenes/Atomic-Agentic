@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from atomic_agentic.a2a import PyA2AtomicHost
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.tools.prebuilt import MATH_TOOLS
+from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
 
 load_dotenv()
 
@@ -25,7 +25,7 @@ def main() -> None:
         context_enabled=False,
         tool_calls_limit=12,
     )
-    math_agent.batch_register(MATH_TOOLS, name_collision_mode="raise")
+    math_agent.batch_register(BASIC_MATH_TOOLS, name_collision_mode="raise")
 
     host = PyA2AtomicHost(
         invokables=[math_agent],

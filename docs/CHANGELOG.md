@@ -5,6 +5,98 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a30] - 2026-09-13
+
+This release ships `ScriptAgent`, a new agent family that plans by writing
+native, restricted-grammar Python statements instead of JSON tool calls --
+combining CodeAct-style code-writing with call-dependency-graph batching so
+independent calls in the same plan execute concurrently. It also
+rearchitects `Agent`'s conversation history from one flat record list into
+named, forkable conversations, and moves MCP/A2A tool- and skill-discovery
+filtering down into the client hub itself. This is a breaking release:
+conversation-history storage and lookup changed shape, and
+`ToolAgent.batch_register`'s `remote_names` filtering was removed in favor
+of the new hub-level filters.
+
+### Added
+
+- `ScriptAgent` (`agents/script.py`) -- a new `Agent` subclass that plans in
+  one adaptive generation: the model writes a sequence of Python-style
+  statements (assignments, bare calls, a terminal `return`) calling
+  registered tools, a curated set of approved Python builtins, and
+  attribute/method access on already-resolved values. Statements with no
+  data dependency on each other are batched and dispatched concurrently,
+  inferred automatically from a call-dependency graph over the plan;
+  `tool_concurrency_limit` bounds how much of that inferred concurrency is
+  actually used (`None` = fully concurrent, `1` = fully sequential, matching
+  a CodeAct-style posture). The model self-inserts `# PAUSE` markers
+  wherever it's genuinely uncertain the remaining plan still holds; a parse
+  failure, an argument-resolution failure, or a tool-execution failure all
+  trigger the same reactive-continuation mechanism automatically, re-
+  invoking the planner with a snapshot of the work already done rather than
+  aborting the run. Construction-time surface: `tools=`/`constants=`/
+  `constant_aliases=`/`constant_descriptions=` for registration,
+  `tool_calls_limit` (a silent structural backstop, no prompt-visible
+  budget), `planning_rounds_limit` (default `25`), `regeneration_limit`
+  (default `5`), `tool_concurrency_limit`. The grammar accepts positional,
+  keyword, `*args`, and `**kwargs` unpacking mirroring real Python calling
+  conventions, but deliberately rejects `for`/`while` loops, comprehensions,
+  and lambdas outright -- no loop/control-flow semantics are supported.
+  New `BlackboardParseError`/`DependencyFailedError` exceptions.
+- `examples/ScriptAgent_Examples/` -- six new example scripts (approved-
+  builtin usage, async planning, an agentic story builder, a planner/
+  delegator pipeline, a reactive writer/reviewer loop resolved via
+  checkpoint continuation, and a cross-invocation trig chatbot) plus a
+  shared engine-construction helper.
+- `MCPClientHub`, `A2AClientHub`, and `PyA2AtomicClient` gain construction-
+  time `include_names`/`exclude_names` allow/deny-list filtering on their
+  tool/skill discovery surface (`list_tools`/`get_atomic_skills`/
+  `list_invokables`). Filtering is discovery-only -- it does not gate
+  `call_tool`/`call_atomic_skill`/`call_invokable` directly.
+- `Agent` conversation-management API: `create_conversation(name)`,
+  `fork_conversation(conversation_id, run_id, fork_name=None)`,
+  `set_active_conversation(key)`, `delete_conversation(key)`, plus new
+  `active_conversation`/`conversation_names` read-only properties.
+- `AgentRecord.children: list[AgentRecord]` -- the forward-pointing
+  counterpart to the existing `prev` field, making record history a
+  doubly-linked tree rather than a singly-linked chain. A record with more
+  than one child marks a fork point where more than one conversation
+  continued from the same point in history.
+- `ToolAgent`, `PlanActAgent`, and `ReActAgent` now emit a `FutureWarning`
+  on construction, naming `ScriptAgent` as the forward migration path (no
+  removal timeline committed, no behavior change).
+
+### Changed
+
+- breaking: `Agent`'s history storage is rearchitected from one flat
+  `records` list into named, independently-addressable conversations
+  (`self._conversations: dict[str, list[AgentRecord]]`, seeded with a
+  single `"default"` conversation at construction). The `records` property
+  is removed.
+- breaking: `Agent.get_conversation()`'s first parameter is renamed
+  `conversation_id` and changes meaning -- it now selects a conversation by
+  name (a plain dict-key lookup) rather than a starting record by `run_id`
+  (a `prev`-chain walk). An unknown conversation raises
+  `AgentInvocationError`.
+- breaking: `run_id` passed to `invoke()`/`async_invoke()` now resolves
+  only within the *active* conversation; an unresolvable `run_id` now
+  raises `ValueError` (previously `AgentInvocationError`). Continuing from
+  a record that already has children now automatically forks a new
+  conversation instead of extending the existing one in place.
+- breaking: `Agent.clear_memory()` now resets *all* conversations back to a
+  single empty `"default"` conversation, rather than clearing one flat
+  record list.
+- breaking: `context_enabled=False` (or `records_window=0`) invocations no
+  longer store any record anywhere -- previously a record was still
+  appended for observability even with context disabled.
+- breaking: `ToolAgent.batch_register()`'s `remote_names` parameter is
+  removed -- use the new hub-level `include_names`/`exclude_names`
+  filtering instead.
+- `AtomicInvokable` gains a `fullname_signature` property alongside the
+  existing `signature`, and both now correctly render `/`/`*` calling-
+  convention markers (positional-only, keyword-only) instead of showing
+  every non-variadic parameter identically.
+
 ## [2.0.0a29] - 2026-08-21
 
 Every LLM provider adapter now supports provider-native, schema-constrained

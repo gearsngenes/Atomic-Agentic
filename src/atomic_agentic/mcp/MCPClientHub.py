@@ -25,11 +25,13 @@ from mcp.client.streamable_http import streamable_http_client
 from ..constants.core import HeaderValue, T
 from ..exceptions import MCPConnectionError, MCPToolError
 from ..utils.core import (
+    apply_name_filter,
     normalize_headers,
     run_coro_async,
     run_coro_sync,
     start_background_loop,
     stop_background_loop,
+    validate_name_filter,
 )
 from ..utils.mcp import (
     _build_mcp_tool_metadata,
@@ -63,9 +65,15 @@ class MCPClientHub:
     forgotten close() doesn't orphan the underlying stdio subprocess.
 
     Immutable transport identity: transport_mode, endpoint, command, args,
-    persistent. Mutable request/session configuration: headers (direct
-    setter, or via refresh()), client_kwargs/session_kwargs (via refresh()
-    only). read_timeout_seconds is fixed at construction.
+    persistent, include_names, exclude_names. Mutable request/session
+    configuration: headers (direct setter, or via refresh()),
+    client_kwargs/session_kwargs (via refresh() only). read_timeout_seconds
+    is fixed at construction.
+
+    include_names/exclude_names filter list_tools()/async_list_tools()'s
+    output only -- discovery-only, not enforced on call_tool()/
+    async_call_tool(), which remain callable by any remote name regardless
+    of this filter.
     """
 
     def __init__(
@@ -79,6 +87,8 @@ class MCPClientHub:
         read_timeout_seconds: float | None = None,
         client_kwargs: Mapping[str, Any] | None = None,
         session_kwargs: Mapping[str, Any] | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
     ) -> None:
         mode = str(transport_mode).strip()
         if mode not in {"stdio", "sse", "streamable_http"}:
@@ -123,6 +133,9 @@ class MCPClientHub:
         normalized_session_kwargs = self._normalize_kwargs_mapping(
             session_kwargs, param_name="session_kwargs"
         )
+        normalized_include_names, normalized_exclude_names = validate_name_filter(
+            include_names, exclude_names
+        )
 
         self._validate_streamable_http_collision(
             transport_mode=mode,
@@ -138,6 +151,8 @@ class MCPClientHub:
         self._read_timeout_seconds: float | None = normalized_read_timeout_seconds
         self._client_kwargs: Dict[str, Any] | None = normalized_client_kwargs
         self._session_kwargs: Dict[str, Any] | None = normalized_session_kwargs
+        self._include_names: frozenset[str] | None = normalized_include_names
+        self._exclude_names: frozenset[str] | None = normalized_exclude_names
         self._persistent: bool = persistent
 
         # Persistent-connection state -- None/absent unless persistent=True.
@@ -255,6 +270,14 @@ class MCPClientHub:
     @property
     def persistent(self) -> bool:
         return self._persistent
+
+    @property
+    def include_names(self) -> frozenset[str] | None:
+        return self._include_names
+
+    @property
+    def exclude_names(self) -> frozenset[str] | None:
+        return self._exclude_names
 
     @property
     def is_connected(self) -> bool:
@@ -406,6 +429,8 @@ class MCPClientHub:
             ),
             "persistent": self.persistent,
             "is_connected": self.is_connected,
+            "include_names": sorted(self.include_names) if self.include_names is not None else None,
+            "exclude_names": sorted(self.exclude_names) if self.exclude_names is not None else None,
         }
 
     def _unpack_transport_streams(self, transport: Any) -> tuple[Any, Any]:
@@ -708,7 +733,8 @@ class MCPClientHub:
 
             return result
 
-        return run_coro_sync(self._do_operation(_op), loop=self._bg_loop)
+        result = run_coro_sync(self._do_operation(_op), loop=self._bg_loop)
+        return apply_name_filter(result, self._include_names, self._exclude_names)
 
     def call_tool(
         self,
@@ -759,8 +785,10 @@ class MCPClientHub:
             return result
 
         if self._bg_loop is not None:
-            return await run_coro_async(self._do_operation(_op), loop=self._bg_loop)
-        return await self._do_operation(_op)
+            result = await run_coro_async(self._do_operation(_op), loop=self._bg_loop)
+        else:
+            result = await self._do_operation(_op)
+        return apply_name_filter(result, self._include_names, self._exclude_names)
 
     async def async_call_tool(
         self,

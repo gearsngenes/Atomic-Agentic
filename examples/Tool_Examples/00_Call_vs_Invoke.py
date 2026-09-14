@@ -21,7 +21,7 @@ print(sample_tool)
 print()
 
 print("--- SIGNATURE ---")
-print(sample_tool.signature)
+print(sample_tool.fullname_signature)
 print()
 
 

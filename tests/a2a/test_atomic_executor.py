@@ -321,3 +321,93 @@ class TestEndToEndDispatch:
             assert len(skills["add"].params) == 2
         finally:
             hub.close()
+
+
+class TestHubNameFiltering:
+    """include_names/exclude_names filter get_atomic_skills()'s output only
+    -- construction-time, discovery-only, per A2AClientHub's own docstring."""
+
+    def test_include_names_narrows_to_matching_skill(self, fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(
+            fixture_server.http_url, TRANSPORT_JSON_RPC, False, include_names=["add"]
+        )
+        try:
+            assert set(hub.get_atomic_skills()) == {"add"}
+        finally:
+            hub.close()
+
+    def test_exclude_names_removes_matching_skill(self, fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(
+            fixture_server.http_url, TRANSPORT_JSON_RPC, False, exclude_names=["boom"]
+        )
+        try:
+            assert set(hub.get_atomic_skills()) == {"add"}
+        finally:
+            hub.close()
+
+    def test_include_names_entry_absent_from_available_is_silently_dropped(
+        self, fixture_server: FixtureServer
+    ) -> None:
+        hub = A2AClientHub(
+            fixture_server.http_url,
+            TRANSPORT_JSON_RPC,
+            False,
+            include_names=["add", "does_not_exist"],
+        )
+        try:
+            assert set(hub.get_atomic_skills()) == {"add"}
+        finally:
+            hub.close()
+
+    def test_call_atomic_skill_ignores_the_filter(self, fixture_server: FixtureServer) -> None:
+        # Discovery-only: a name excluded from get_atomic_skills() must
+        # still be directly callable.
+        hub = A2AClientHub(
+            fixture_server.http_url, TRANSPORT_JSON_RPC, False, exclude_names=["add"]
+        )
+        try:
+            assert "add" not in hub.get_atomic_skills()
+            assert hub.call_atomic_skill("add", {"a": 2, "b": 3}) == 5
+        finally:
+            hub.close()
+
+    def test_refresh_reapplies_the_stored_filter(self, fixture_server: FixtureServer) -> None:
+        hub = A2AClientHub(
+            fixture_server.http_url, TRANSPORT_JSON_RPC, False, include_names=["add"]
+        )
+        try:
+            hub.refresh(timeout=123.0)
+            assert set(hub.get_atomic_skills()) == {"add"}
+        finally:
+            hub.close()
+
+    def test_empty_include_names_raises_at_construction(
+        self, fixture_server: FixtureServer
+    ) -> None:
+        with pytest.raises(ValueError):
+            A2AClientHub(fixture_server.http_url, TRANSPORT_JSON_RPC, False, include_names=[])
+
+    def test_include_exclude_overlap_raises_at_construction(
+        self, fixture_server: FixtureServer
+    ) -> None:
+        with pytest.raises(ValueError):
+            A2AClientHub(
+                fixture_server.http_url,
+                TRANSPORT_JSON_RPC,
+                False,
+                include_names=["add"],
+                exclude_names=["add"],
+            )
+
+    def test_to_dict_reports_include_and_exclude_names(
+        self, fixture_server: FixtureServer
+    ) -> None:
+        hub = A2AClientHub(
+            fixture_server.http_url, TRANSPORT_JSON_RPC, False, include_names=["add"]
+        )
+        try:
+            data = hub.to_dict()
+            assert data["include_names"] == ["add"]
+            assert data["exclude_names"] is None
+        finally:
+            hub.close()

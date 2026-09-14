@@ -201,6 +201,49 @@ result = agent.invoke({"prompt": "Compute (6*7) + 5. Return only the number."})
 print(result.result)
 ```
 
+**Note:** `PlanActAgent`/`ReActAgent` plan in JSON and are still fully
+supported, but are superseded by `ScriptAgent` below (they now emit a
+`FutureWarning` on construction naming it as the migration target).
+
+------------------------------------------------------------------------
+
+## Quickstart E: ScriptAgent
+
+`ScriptAgent` is the successor to the JSON-based tool-calling agents above.
+Instead of planning in JSON, it plans by writing native, restricted-grammar
+Python statements — calling registered tools, a curated set of approved
+Python builtins, and attribute/method access on already-resolved values.
+Statements with no data dependency on each other are batched and dispatched
+concurrently, inferred automatically from the plan's own call-dependency
+graph, with no model-facing concurrency signal needed.
+
+```python
+from atomic_agentic.agents import ScriptAgent
+from atomic_agentic.llm import OpenAIEngine
+from atomic_agentic.tools.prebuilt import MATH_TOOLS
+
+engine = OpenAIEngine(model="gpt-4.1-mini")
+
+agent = ScriptAgent(
+    name="scripter",
+    namespace="planning",
+    description="Plans and solves tasks by writing Python-style call statements.",
+    llm_engine=engine,
+)
+
+agent.register_tools(MATH_TOOLS)
+
+result = agent.invoke({"prompt": "Compute (6*7) + 5. Return only the number."})
+print(result.result)
+```
+
+The grammar accepts positional args, keyword args, `*args`, and `**kwargs`
+unpacking, but deliberately rejects `for`/`while` loops, comprehensions,
+and lambdas outright — it is not a general code-execution sandbox. See
+`examples/ScriptAgent_Examples/` for more, including concurrent dispatch,
+checkpoint-triggered reactive continuation, and cross-invocation result
+addressing.
+
 ------------------------------------------------------------------------
 
 ## Structured Output: StructuredInvokable
@@ -291,6 +334,7 @@ Atomic-Agentic/
 |   |-- LLM_Examples/
 |   |-- PlanAct_Examples/
 |   |-- ReAct_Examples/
+|   |-- ScriptAgent_Examples/
 |   |-- Tool_Examples/
 |   |-- Workflow_Examples/
 |

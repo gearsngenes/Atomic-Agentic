@@ -356,12 +356,13 @@ class TestPlanActAgent:
         agent = make_planact_agent(
             [
                 f'[{{"step": 0, "tool": "{return_tool.full_name}", "args": {{"val": 42}}}}]'
-            ]
+            ],
+            context_enabled=True,
         )
 
         agent.invoke({"prompt": "run"})
 
-        for rec in agent.records[-1].llm_records:
+        for rec in agent.get_conversation()[-1].llm_records:
             assert rec.system_prompt_name == "plan_first"
 
 
@@ -540,9 +541,10 @@ class TestPlanActGenerationRetry:
             description=".",
             llm_engine=engine,
             generation_retries=1,
+            context_enabled=True,
         )
         agent.invoke({"prompt": "run"})
-        llm_records = agent.records[-1].llm_records
+        llm_records = agent.get_conversation()[-1].llm_records
         assert len(llm_records) == 2
         assert len(llm_records[0].messages) == 1
         # Self-contained convention: retry's messages = full task_messages so
@@ -566,10 +568,11 @@ class TestPlanActGenerationRetry:
             description=".",
             llm_engine=engine,
             generation_retries=1,
+            context_enabled=True,
         )
         register_math_tools(agent)  # type: ignore[arg-type]
         agent.invoke({"prompt": "run"})
-        llm_records = agent.records[-1].llm_records
+        llm_records = agent.get_conversation()[-1].llm_records
         assert len(llm_records) == 2
         assert len(llm_records[0].messages) == 1
         # Self-contained convention: retry's messages = full task_messages so

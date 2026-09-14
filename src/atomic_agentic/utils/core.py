@@ -10,12 +10,14 @@ from typing import Any
 from ..constants.core import HeaderValue, T
 
 __all__ = [
+    "apply_name_filter",
     "dataclass_record_to_dict",
     "normalize_headers",
     "run_coro_async",
     "run_coro_sync",
     "start_background_loop",
     "stop_background_loop",
+    "validate_name_filter",
 ]
 
 
@@ -224,6 +226,81 @@ def _normalize_header_value(value: Any, *, key: str) -> str:
 def _contains_forbidden_header_char(value: str) -> bool:
     """Return whether a header name/value contains CR, LF, or NUL."""
     return "\r" in value or "\n" in value or "\x00" in value
+
+
+def validate_name_filter(
+    include_names: list[str] | None,
+    exclude_names: list[str] | None,
+) -> tuple[frozenset[str] | None, frozenset[str] | None]:
+    """
+    Validate and normalize a construction-time include/exclude name filter
+    pair, shared by MCPClientHub, A2AClientHub, and PyA2AtomicClient.
+
+    ``None`` disables that side of the filter. A non-``None`` list must be
+    non-empty and contain only non-empty (after stripping) strings -- an
+    explicit empty list is rejected rather than silently treated as "match/
+    exclude nothing", since that's almost certainly a caller mistake. The
+    two resolved sides may not share a name.
+    """
+    resolved_include = _validate_name_list(include_names, param_name="include_names")
+    resolved_exclude = _validate_name_list(exclude_names, param_name="exclude_names")
+
+    if resolved_include is not None and resolved_exclude is not None:
+        overlap = resolved_include & resolved_exclude
+        if overlap:
+            raise ValueError(
+                f"include_names and exclude_names overlap on: {sorted(overlap)!r}."
+            )
+
+    return resolved_include, resolved_exclude
+
+
+def _validate_name_list(
+    value: list[str] | None,
+    *,
+    param_name: str,
+) -> frozenset[str] | None:
+    """Validate and normalize one side of a name filter list; see validate_name_filter."""
+    if value is None:
+        return None
+
+    if not isinstance(value, list):
+        raise ValueError(f"{param_name} must be a list of strings when provided.")
+
+    if len(value) == 0:
+        raise ValueError(
+            f"{param_name} must not be an empty list; omit it (None) to "
+            "disable this side of the filter."
+        )
+
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{param_name} entries must be non-empty strings.")
+
+    return frozenset(value)
+
+
+def apply_name_filter(
+    available: Mapping[str, T],
+    include_names: frozenset[str] | None,
+    exclude_names: frozenset[str] | None,
+) -> dict[str, T]:
+    """
+    Apply an already-validated include/exclude filter to a name-keyed
+    mapping (a hub's live "what's available" result).
+
+    Discovery-only: a configured name absent from ``available`` is simply
+    never added to the result -- no error, no signal, on any call.
+    """
+    result = dict(available)
+
+    if include_names is not None:
+        result = {name: value for name, value in result.items() if name in include_names}
+
+    if exclude_names is not None:
+        result = {name: value for name, value in result.items() if name not in exclude_names}
+
+    return result
 
 
 def start_background_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thread]:

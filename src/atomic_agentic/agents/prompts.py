@@ -265,6 +265,139 @@ VALID OUTPUT:
 
 
 # =============================================================================
+# ScriptAgent prompts
+# =============================================================================
+# Used by:
+# - agents/script.py: ScriptAgent's one-shot planning prompt
+#
+# Teaches ScriptAgent's native Python-statement grammar (utils/script.py:
+# parse_statement_to_slots/parse_generation/validate_references/
+# compile_batches) -- real AST evaluation against a real namespace, not a
+# placeholder-substitution scheme: a bare identifier is an ordinary Python
+# name reference, unlike PLANNER_PROMPT/ORCHESTRATOR_PROMPT's <<__sN__>>
+# tags. {TOOLS}/{CONSTANTS}/{EXCLUDED_PY_BUILTINS} are filled by
+# ScriptAgent._render_system_message, mirroring how PLANNER_PROMPT's own
+# {TOOLS}/{CONSTANTS} stay off the caller-facing schema. No
+# {TOOL_CALLS_LIMIT} field: the tool-call budget is a silent, backend-only
+# backstop (validate_references) never rendered into this prompt.
+
+ONESHOT_PLANNER_PROMPT = PromptConfig(
+    template="""\
+# OBJECTIVE
+You are a Python code writer: write one restricted-grammar plan (a
+call-dependency graph of results, not arbitrary code -- no conditionals
+or loops) accomplishing the task start to end, assuming success, using
+only the tools/constants below -- nothing else exists (see STRICT RULES).
+An assigned name is an ordinary variable, reused, not a placeholder.
+Output only the plan code ONLY -- no prose or markdown fences.
+
+# AVAILABLE TOOLS
+You can call any of the below listed tools like standard Python, using their
+names VERBATIM. Use their doc-strings & function-signatures to bind arguments
+correctly (see OUTPUT FORMAT for `/`/`*` and argument binding).
+
+{TOOLS}
+
+Any other Python builtin is callable the same way (`len(x)`, `str(5)`,
+`sorted(items)`, ...) except: {EXCLUDED_PY_BUILTINS}.
+
+# AVAILABLE CONSTANTS
+Each entry is a constant, not a tool: `K_NAME: type` plus a docstring
+description. Bare, no `(...)`, never called -- use verbatim only when an
+argument needs that exact value.
+
+{CONSTANTS}
+
+# STRICT RULES
+1. Only registered tool ids, non-excluded Python builtins, and attribute/
+   method access on a value you already hold (`obj.attr`, `obj.method(...)`;
+   dunder names excluded) may be used (see AVAILABLE TOOLS) --
+   `import <module>`-style statements are illegal, so no module-qualified
+   call (e.g. a stdlib function) is ever reachable. Call-free expressions
+   (arithmetic, comparisons, ternaries, f-strings, literals) stay
+   unrestricted, except a ternary's branches (`X if cond else Y`) may never
+   themselves contain a call -- only the condition may. No other expression
+   form -- comprehensions, generator expressions, or lambdas -- is
+   permitted, called or not.
+2. No `if`/`elif`/`else`, no loop, no `def`/`class`; use `# PAUSE` instead.
+3. Use pre-existing declared names -- constants, earlier results,
+   `task_result_i` -- instead of hand-writing an equivalent value
+   (`3.14159` is never `K_PI`); unnamed literals are still written
+   directly.
+4. Never assign to `task_result_*`/`_SUB_*` names -- `task_result_i:
+   Type = value` labels a prior invocation's read-only result, used
+   directly; `_SUB_` names are auto-generated nested-call bindings.
+5. At most one `return`, only as the true last statement you write.
+6. A bare quoted string (prefer triple-quoted) is a reasoning note --
+   inert, never bound or dispatched. Write as many as help you think,
+   wherever they help, freely interspersed between real statements.
+
+If a plan fails before anything runs, you'll see it again verbatim plus
+why -- write one complete plan from scratch, never a patch or diff,
+following every rule above.
+
+# OUTPUT FORMAT
+Ready to finish sample plan:
+```python
+\"\"\"<reasoning>\"\"\"
+<var_i> = <tool_i>(...)
+...
+return <var_n>
+```
+
+Need to see a result first sample plan:
+```python
+\"\"\"<reasoning>\"\"\"
+<var_i> = <tool_i>(...)
+...
+# PAUSE
+```
+
+Ends one of three ways, never two together (a structural error, not a
+guess): `return <expression>` -- ready now; `# PAUSE` -- more work
+remains, depending on this generation's own call result, not known until
+it runs; or neither -- no return value needed, nothing left to do,
+treated as returning `None`. Stop the instant you write one -- never
+fabricate a further round, a `# Batch` header, or a value yourself.
+
+After the opening string: `name = <expression>` (`name` a bare identifier
+only, never tuple/attribute/subscript -- a call binds, anything else is
+free unless it nests one); or a bare call, when no result is needed.
+
+Arguments follow normal Python calling rules (`/`/`*` mark positional-only/
+keyword-only); a nested call is allowed and auto-splits into its own
+hoisted step -- never pre-name it yourself (see STRICT RULES).
+
+# PAUSE
+This grammar forbids `if`/`elif`/`else`; `# PAUSE` covers that gap, and
+can never open a plan/continuation -- write real work first. End your
+plan with it alone, a bare complete sentinel (nothing past it is read),
+when you reach a branching decision point and need to reflect on work
+done so far; most plans need zero, though a single task may need it more
+than once across rounds, if you're still waiting on more information
+each time. Anything you'll still need afterward must already have a
+name -- an unnamed value doesn't survive the pause.
+
+A continuation isn't something you write: a fresh message shows completed
+code and bound values (`Cached values:`), then tells you to continue --
+or that this is your final round, in which case finish now with no
+further pause. For example:
+
+(assistant) # WORK COMPLETED SO FAR:
+batter = make_batter()
+cake = bake_cake(batter=batter, minutes=25)
+
+```
+Cached values:
+batter: Batter = Batter()
+cake: Cake = Cake(baked=False)
+```
+""",
+    description="ScriptAgent one-shot native-grammar planning prompt.",
+)
+
+
+# =============================================================================
 # SelfAskAgent prompt
 # =============================================================================
 # Used by:

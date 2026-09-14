@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import pytest
 
+from atomic_agentic.agents.script import ScriptAgent
 from atomic_agentic.models.agents.tasks import (
     AgentTask,
     ToolAgentTask,
     PlanActTask,
     ReActTask,
     ReActStepMeta,
+    ScriptAgentTask,
     ThinkingTask,
 )
 from atomic_agentic.models.agents.thought_models import AgentThought
 from atomic_agentic.constants.core import NO_VAL
+from ...fake_engines import FakeLLMEngine
 
 
 class TestAgentTask:
@@ -207,3 +210,82 @@ class TestThinkingTask:
         first.thoughts.append([AgentThought(category="OTHER", content="x")])
 
         assert second.thoughts == []
+
+
+class TestScriptAgentTask:
+    def test_inherits_agent_task_fields(self) -> None:
+        task = ScriptAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
+
+        assert isinstance(task, AgentTask)
+
+    def test_added_field_defaults(self) -> None:
+        task = ScriptAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
+
+        assert task.completed == []
+        assert task.pending == []
+        assert task.resolved_args == []
+        assert task.failed_statements == []
+        assert task.cache == {}
+        assert task.constant_values == {}
+        assert task.regenerations_used == 0
+        assert task.planning_rounds_used == 0
+        assert task.tool_calls_used == 0
+        assert task.batch_counter == 0
+        assert task.continue_planning is False
+        assert task.continuation_note is None
+
+    def test_default_factories_are_independent_per_instance(self) -> None:
+        first = ScriptAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
+        second = ScriptAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
+
+        first.completed.append("marker")  # type: ignore[arg-type]
+        first.cache["x"] = 1
+        first.constant_values["K_X"] = 1
+        first.failed_statements.append("marker")  # type: ignore[arg-type]
+
+        assert second.completed == []
+        assert second.cache == {}
+        assert second.constant_values == {}
+        assert second.failed_statements == []
+
+    def test_continuation_note_round_trips(self) -> None:
+        task = ScriptAgentTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="planner")
+
+        task.continuation_note = "the previous batch failed"
+
+        assert task.continuation_note == "the previous batch failed"
+
+
+class TestScriptAgentTaskConstantValuesSeeding:
+    """
+    Integration-level: constant_values is populated by
+    ScriptAgent._initialize_task, not by bare ScriptAgentTask construction.
+    Cross-invocation/cross-round mutation-persistence behavior belongs to
+    tests/agents/test_script.py's TestScriptAgentMutationSafety -- these
+    cases stay focused on the field itself getting populated correctly.
+    """
+
+    def test_constant_values_populated_with_the_right_keys_and_values(self) -> None:
+        agent = ScriptAgent(
+            name="tests", namespace="tests", description="test",
+            llm_engine=FakeLLMEngine(responses=[]),
+        )
+        agent.register_constant([1, 2, 3], alias="mylist")
+
+        task = agent._initialize_task(turns=[], prompt="test", inputs={})
+
+        constant_name = agent.get_constant("mylist").name
+        assert task.constant_values == {constant_name: [1, 2, 3]}
+
+    def test_mutable_constant_value_is_a_deep_copy_not_the_live_object(self) -> None:
+        original = [1, 2, 3]
+        agent = ScriptAgent(
+            name="tests", namespace="tests", description="test",
+            llm_engine=FakeLLMEngine(responses=[]),
+        )
+        agent.register_constant(original, alias="mylist")
+
+        task = agent._initialize_task(turns=[], prompt="test", inputs={})
+
+        constant_name = agent.get_constant("mylist").name
+        assert task.constant_values[constant_name] is not original

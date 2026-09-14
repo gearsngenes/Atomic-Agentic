@@ -119,6 +119,7 @@ from datetime import datetime
 import logging
 import re
 import json
+import warnings
 from typing import (
     Any,
     Callable,
@@ -352,7 +353,24 @@ class ToolAgent(Agent, ABC):
             Whether rendered assistant history uses the raw generated
             response or the final post-``post_invoke`` result. Defaults to
             ``"raw"``.
+
+        Emits a ``FutureWarning`` on every construction: the ``ToolAgent``
+        family (this class, ``PlanActAgent``, ``ReActAgent``) is superseded
+        by ``ScriptAgent``. No behavior changes as a result of this warning
+        -- purely an additive signal.
         """
+        warnings.warn(
+            f"{type(self).__name__} is part of Atomic-Agentic's legacy "
+            "ToolAgent family (JSON-based tool-call planning, parsed and "
+            "repaired as free text). This approach is superseded by "
+            "ScriptAgent, which plans using native Python call statements "
+            "instead of loose JSON strings; any future agent that still "
+            "needs JSON-shaped output should use provider-native "
+            "structured output (LLMEngine's output_structure) rather than "
+            "hand-rolled parsing. Consider migrating to ScriptAgent.",
+            FutureWarning,
+            stacklevel=3,
+        )
         super().__init__(
             name=name,
             namespace=namespace,
@@ -511,7 +529,7 @@ class ToolAgent(Agent, ABC):
                 line if not line.strip() else f"  {line}"
                 for line in t.description.splitlines()
             ]
-            blocks.append(f"{t.signature}\n" + "\n".join(indented_lines))
+            blocks.append(f"{t.fullname_signature}\n" + "\n".join(indented_lines))
         return "\n---\n".join(blocks)
 
     def list_tools(self) -> dict[str, AtomicInvokable]:
@@ -881,7 +899,6 @@ class ToolAgent(Agent, ABC):
         tools: list[AtomicInvokable | Callable] | None = None,
         client: PyA2AtomicClient | MCPClientHub | A2AClientHub | None = None,
         *,
-        remote_names: list[str] | None = None,
         name_collision_mode: str = "raise",
     ) -> list[str]:
         """Register a batch of invokables on this ToolAgent.
@@ -891,6 +908,14 @@ class ToolAgent(Agent, ABC):
         duplicate full_names within the incoming batch always raise regardless
         of ``name_collision_mode``.
 
+        Filtering which remote names get registered is no longer a
+        ``batch_register`` concern -- it belongs to the hub itself
+        (``MCPClientHub``/``A2AClientHub``/``PyA2AtomicClient``'s frozen
+        ``include_names``/``exclude_names``, set at hub construction). Every
+        consumer of a given hub (this method, ``batch_toolify``,
+        ``ScriptAgent.register_tools``, or a caller using the hub directly)
+        sees the identical already-filtered view.
+
         Parameters
         ----------
         tools : list[AtomicInvokable | Callable] | None
@@ -898,16 +923,14 @@ class ToolAgent(Agent, ABC):
             callables are normalized via ``toolify(namespace=self.name)``.
         client : PyA2AtomicClient | MCPClientHub | A2AClientHub | None
             Remote client to enumerate and register tools from. Combined with
-            ``tools`` in one registration pass when both are provided. For an
-            ``A2AClientHub``, every discovered Atomic skill is registered in
-            skill mode, plus one generic-mode tool registered unconditionally
-            (not filtered by ``remote_names`` -- it isn't a discoverable
-            skill, it's the hub's baseline reachability path).
-        remote_names : list[str] | None
-            Whitelist of remote tool names to register from ``client``.
-            ``None`` registers all available remote tools. Requires ``client``.
-            For an ``A2AClientHub``, filters among skill ids only -- has no
-            effect on the always-registered generic tool.
+            ``tools`` in one registration pass when both are provided.
+            Registers every name the client's own discovery surface reports
+            (already filtered by the client's own construction-time
+            include/exclude configuration, if any). For an ``A2AClientHub``,
+            every discovered Atomic skill is registered in skill mode, plus
+            one generic-mode tool registered unconditionally -- the generic
+            tool is never filtered, since it isn't sourced from
+            ``get_atomic_skills()``.
         name_collision_mode : str
             Per-item collision policy for toolbox conflicts. One of
             ``"raise"`` (default), ``"skip"``, or ``"replace"``. Does not
@@ -922,16 +945,12 @@ class ToolAgent(Agent, ABC):
         Raises
         ------
         ValueError
-            If both ``tools`` and ``client`` are ``None``; if ``tools`` is
-            empty and no ``client`` is provided; if ``remote_names`` is
-            supplied without a ``client``; or if ``remote_names`` is an empty
-            list when a ``client`` is provided.
+            If both ``tools`` and ``client`` are ``None``, or if ``tools`` is
+            empty and no ``client`` is provided.
         ToolRegistrationError
             If ``name_collision_mode`` is invalid; if a duplicate full_name
             appears in the incoming batch; if toolification of any item fails;
             or if a toolbox collision is detected under ``"raise"`` mode.
-            Also raised if ``remote_names`` contains entries not present in the
-            client's available tool list.
         """
         name_collision_mode = name_collision_mode.lower().strip()
         if name_collision_mode not in ("raise", "skip", "replace"):
@@ -950,16 +969,6 @@ class ToolAgent(Agent, ABC):
                 f"{type(self).__name__}.batch_register: tools list is empty and no "
                 "client provided."
             )
-        if remote_names is not None and client is None:
-            raise ValueError(
-                f"{type(self).__name__}.batch_register: remote_names requires a client."
-            )
-        if client is not None and remote_names is not None and len(remote_names) == 0:
-            raise ValueError(
-                f"{type(self).__name__}.batch_register: remote_names is an empty list; "
-                "nothing to register from client."
-            )
-
         # Expand all sources into (full_name, invokable) pairs
         combined: list[tuple[str, AtomicInvokable]] = []
 
@@ -993,19 +1002,7 @@ class ToolAgent(Agent, ABC):
             else:
                 available = client.list_invokables()
 
-            if remote_names is not None:
-                available_set = set(available)
-                missing = [n for n in remote_names if n not in available_set]
-                if missing:
-                    raise ToolRegistrationError(
-                        f"{type(self).__name__}.{self.name}: remote_names entries not found "
-                        f"on client: {sorted(missing)!r}."
-                    )
-                names_to_register = [n for n in available if n in remote_names]
-            else:
-                names_to_register = available
-
-            for remote_name in names_to_register:
+            for remote_name in available:
                 try:
                     proxy = toolify(
                         component=client,
@@ -1020,10 +1017,12 @@ class ToolAgent(Agent, ABC):
                 combined.append((proxy.full_name, proxy))
 
             # A2A generic tool: always registered when client is an
-            # A2AClientHub, unconditionally -- not filtered by remote_names,
-            # since it isn't a discoverable skill. A same-named skill
-            # colliding with it on full_name is caught by the intra-batch
-            # dedup check below, same as any other collision.
+            # A2AClientHub, unconditionally -- regardless of any hub-level
+            # include/exclude filter, since the hub only filters what
+            # get_atomic_skills() reports and the generic tool isn't sourced
+            # from that list. A same-named skill colliding with it on
+            # full_name is caught by the intra-batch dedup check below, same
+            # as any other collision.
             if isinstance(client, A2AClientHub):
                 try:
                     generic_proxy = toolify(component=client, namespace=self.name)

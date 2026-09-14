@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import builtins
 from typing import Any
 
 from ..tools import Tool
 from ..constants.agents import (
+    ATTR_CALL_ALIAS,
+    DUNDER_ATTRIBUTE_PATTERN,
+    EXCLUDED_PY_BUILTINS,
+    PY_BUILTIN_ALIAS,
     RETURN_TOOL_DESCRIPTION,
     RETURN_TOOL_FULL_NAME,
     RETURN_TOOL_NAME,
@@ -11,7 +16,13 @@ from ..constants.agents import (
     RETURN_VALUE_FIELD,
 )
 
-__all__ = ["identity_pre_tool", "identity_post_tool", "return_tool"]
+__all__ = [
+    "identity_pre_tool",
+    "identity_post_tool",
+    "return_tool",
+    "builtin_call_tool",
+    "attr_call_tool",
+]
 
 
 def identity_pre(*, prompt: str) -> str:
@@ -77,3 +88,89 @@ if _return_param_names != [RETURN_VALUE_FIELD]:
         f"return_tool parameter mismatch: expected {[RETURN_VALUE_FIELD]!r}, "
         f"got {_return_param_names!r}."
     )
+
+
+def _call_py_builtin(name: str, args: tuple, kwargs: dict) -> Any:
+    """
+    Dispatch body for ScriptAgent's approved-Python-builtin calls.
+
+    ``args``/``kwargs`` are the real target call's own positional/keyword
+    arguments, passed as opaque packed values (a tuple and a dict) rather
+    than splatted into this function's own parameter list -- a real call's
+    keyword argument named ``name`` would otherwise collide with this
+    dispatcher's own ``name`` parameter during ``Tool``-level binding
+    (the class this collision could produce was a spurious ``TypeError``
+    on an otherwise legitimate call). Unpacked only internally, right at
+    the real invocation.
+
+    Raises ``ValueError`` for an excluded or nonexistent builtin name --
+    the authoritative runtime gate; ``utils/script.py``'s
+    ``rewrite_builtin_calls`` already guarantees this can't happen for a
+    slot it rewrote, but this check doesn't trust that upstream guarantee.
+    """
+    if name in EXCLUDED_PY_BUILTINS or not hasattr(builtins, name):
+        raise ValueError(f"python builtin {name!r} is not available here")
+    fn = getattr(builtins, name)
+    return fn(*args, **kwargs)
+
+
+# Never registered into any agent's toolbox -- resolved directly by
+# ScriptAgent.prepare()/_gather_batch_results() via the PY_BUILTIN_ALIAS
+# sentinel, never through get_tool(). No return_tool-style identity assert
+# needed: nothing references this Tool by a full_name string, only by
+# direct object reference from agents/script.py.
+builtin_call_tool = Tool(
+    function=_call_py_builtin,
+    name=PY_BUILTIN_ALIAS,
+    namespace="script_agent",
+    description=(
+        "Internal ScriptAgent dispatcher for approved Python builtin calls. "
+        "Never registered into any agent's toolbox -- resolved directly by "
+        "ScriptAgent.prepare()/_gather_batch_results() via the "
+        "PY_BUILTIN_ALIAS sentinel, never through get_tool()."
+    ),
+)
+
+
+def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> Any:
+    """
+    Dispatch body for ScriptAgent's attribute/method-call slots
+    (``obj.method(...)``).
+
+    ``args``/``kwargs`` are the real target method's own positional/keyword
+    arguments, passed as opaque packed values (a tuple and a dict) rather
+    than splatted into this function's own parameter list -- a real call's
+    keyword argument named ``obj``/``method_name`` would otherwise collide
+    with this dispatcher's own same-named parameters during ``Tool``-level
+    binding (e.g. ``node.attach(obj=child)`` would raise a spurious
+    "multiple values for argument 'obj'" ``TypeError`` on an otherwise
+    legitimate call). Unpacked only internally, right at the real
+    invocation.
+
+    Raises ``ValueError`` for a dunder method name -- the authoritative
+    runtime gate, matching ``_call_py_builtin``'s own posture: dunder names
+    are already rejected at parse time (``utils/script.py``'s
+    ``_hoist_calls``/``_build_call_slot`` checks), but this is the one
+    remaining sandbox-escape surface in the whole grammar, so this check
+    doesn't trust that upstream guarantee either.
+    """
+    if DUNDER_ATTRIBUTE_PATTERN.fullmatch(method_name):
+        raise ValueError(f"attribute/method name {method_name!r} is not available here")
+    return getattr(obj, method_name)(*args, **kwargs)
+
+
+# Never registered into any agent's toolbox -- resolved directly by
+# ScriptAgent.prepare()/_gather_batch_results() via the ATTR_CALL_ALIAS
+# sentinel, never through get_tool(). Same treatment as builtin_call_tool.
+attr_call_tool = Tool(
+    function=_call_attr_method,
+    name=ATTR_CALL_ALIAS,
+    namespace="script_agent",
+    description=(
+        "Internal ScriptAgent dispatcher for attribute/method calls on a "
+        "value the plan already holds. Never registered into any agent's "
+        "toolbox -- resolved directly by ScriptAgent.prepare()/"
+        "_gather_batch_results() via the ATTR_CALL_ALIAS sentinel, never "
+        "through get_tool()."
+    ),
+)

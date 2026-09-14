@@ -69,7 +69,7 @@ def show_plan(tool: PyA2AtomicTool) -> None:
     print("remote_name :", tool.remote_name)
     print("namespace   :", tool.namespace)
     print("description :", tool.description)
-    print("signature   :", tool.signature)
+    print("signature   :", tool.fullname_signature)
     print("return_type :", tool.return_type)
     print("parameters  :")
     for param in tool.parameters:

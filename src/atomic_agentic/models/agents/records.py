@@ -1,15 +1,34 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict
+import ast
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, Optional
 
+from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
 from ..results.agents import AgentResult
 from ..results.llm import LLMResult
+from .blackboard_models import CodeStatement
+
+# is_dispatched_slot/render_completed_as_python are imported locally inside
+# the two methods that use them (render_as_code/tool_usage below), not at
+# module level -- utils.script itself imports CodeStatement from
+# .blackboard_models (a sibling in this same models.agents package), and
+# models/agents/__init__.py imports this module before blackboard_models.
+# A module-level import here would make loading utils.script first (before
+# anything else touches models.agents) deadlock: utils.script's own import
+# of models.agents.blackboard_models triggers this package's __init__.py,
+# which re-enters this module, which would need utils.script to already be
+# fully initialized -- it isn't yet, since we're still inside its own
+# top-level import statement. Deferring to call time breaks the cycle with
+# no behavior change (both functions are only ever invoked well after
+# import time).
 
 __all__ = [
     "LLMRecord",
     "AgentRecord",
     "ToolAgentRecord",
+    "ScriptAgentRecord",
+    "ScriptAgentToolUsage",
     "ThinkingAgentRecord",
 ]
 
@@ -112,12 +131,15 @@ class AgentRecord:
     accounting; AgentRecord is the memory/rendering record. The completed
     record points to its AgentResult via ``final_result``.
 
-    Records form a singly-linked list via ``prev``: each committed record
-    points to the most recent record that was used as context when it was
-    created. ``prev=None`` marks a chain root (first invocation or a fresh
-    start). Walking ``prev`` backward
-    from any record reconstructs the exact conversation branch that produced
-    it.
+    Records form a doubly-linked tree via ``prev``/``children``: each
+    committed record points backward to the most recent record that was used
+    as context when it was created (``prev``), and that target record points
+    forward to every record that was ever committed on top of it
+    (``children``). ``prev=None`` marks a chain root (first invocation or a
+    fresh start). Walking ``prev`` backward from any record reconstructs the
+    exact conversation branch that produced it; a target with more than one
+    child marks a fork point where more than one conversation continued from
+    the same record.
 
     Fields
     ------
@@ -154,6 +176,17 @@ class AgentRecord:
         The most recent ``AgentRecord`` that was used as context for this
         invocation, or ``None`` if no prior context was used. Always points
         to a completed (non-draft) record on any record committed to history.
+
+    children:
+        Every ``AgentRecord`` (across every conversation) that named this
+        record as its ``prev`` — the forward-pointing counterpart to
+        ``prev``, making the overall structure a doubly-linked tree rather
+        than a singly-linked chain. Mutable-in-place despite this being a
+        frozen dataclass — ``hash=False, compare=False`` mirrors ``inputs``'s
+        existing treatment, so appending to it post-construction doesn't
+        disturb hashing/equality. Never reassigned after construction, only
+        ever mutated via ``.append(...)``; expected to always start empty at
+        construction time (a record cannot have children before it exists).
     """
 
     user_prompt: str
@@ -162,6 +195,7 @@ class AgentRecord:
     final_result: AgentResult | None = None
     llm_records: tuple[LLMRecord, ...] = ()
     prev: AgentRecord | None = None
+    children: list["AgentRecord"] = field(default_factory=list, hash=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.user_prompt, str):
@@ -197,6 +231,22 @@ class AgentRecord:
                     "(final_result is not None); cannot link to a draft."
                 )
 
+        if not isinstance(self.children, (list, tuple)) or isinstance(self.children, (str, bytes)):
+            raise TypeError(
+                "AgentRecord.children must be a list of AgentRecord instances, "
+                f"got {type(self.children).__name__}."
+            )
+        for index, child in enumerate(self.children):
+            if not isinstance(child, AgentRecord):
+                raise TypeError(
+                    "AgentRecord.children must contain only AgentRecord instances; "
+                    f"item {index} is {type(child).__name__}."
+                )
+        # Deliberately NOT normalized to tuple -- children is the one field
+        # exempt from this class's "normalize sequences to tuple" convention,
+        # exactly like the existing inputs dict exemption. It must stay a
+        # mutable list so later commits can append to it in place.
+
     def to_dict(self) -> Dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         return {
@@ -206,6 +256,7 @@ class AgentRecord:
             "final_result": self.final_result.to_dict() if self.final_result is not None else None,
             "llm_records": [r.to_dict() for r in self.llm_records],
             "prev_run_id": self.prev.final_result.run_id if self.prev is not None else None,
+            "child_ids": [c.final_result.run_id for c in self.children],
         }
 
 
@@ -230,6 +281,222 @@ class ToolAgentRecord(AgentRecord):
             "blackboard_start": self.blackboard_start,
             "blackboard_end": self.blackboard_end,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptAgentToolUsage:
+    """
+    Five orthogonal counts derived from one completed ``ScriptAgentRecord``'s
+    ``statements``, for debugging/observability only -- never used to
+    reconstruct or re-plan. ``registered_tool_calls`` + ``builtin_calls`` +
+    ``attribute_calls`` is the same total already enforced (silently)
+    against ``tool_calls_limit``; this just slices it three ways instead of
+    one. ``binop_count`` is a subset of ``rhs_assignment_count``, not
+    double-counted against the other three.
+
+    Fields
+    ------
+    registered_tool_calls : int
+        Dispatched slots that are neither a builtin nor an attribute/method
+        call -- a real registered-tool invocation. Counted across both
+        ``statements`` and ``failed_statements`` -- a dispatched call that
+        raised still counted against ``tool_calls_used`` when it ran, so it
+        must still be counted here for the totals to actually match.
+
+    builtin_calls : int
+        Slots dispatched through the approved-Python-builtin path
+        (``PY_BUILTIN_ALIAS``). Counted across both ``statements`` and
+        ``failed_statements``, same as ``registered_tool_calls``.
+
+    attribute_calls : int
+        Slots dispatched through the attribute/method-call path
+        (``ATTR_CALL_ALIAS``). Counted across both ``statements`` and
+        ``failed_statements``, same as ``registered_tool_calls``.
+
+    binop_count : int
+        Bare-expression (``RHS_ASSIGN_ALIAS``) slots whose stored value is
+        still an ``ast.expr`` containing an ``ast.BinOp`` anywhere --
+        constant expressions are never folded before commit (only
+        dry-run-validated at parse time), so this is a plain post-hoc walk,
+        not a count tracked separately during parsing.
+
+    rhs_assignment_count : int
+        Total ``RHS_ASSIGN_ALIAS`` slot count, independent of whether it
+        contains a binop.
+    """
+
+    registered_tool_calls: int
+    builtin_calls: int
+    attribute_calls: int
+    binop_count: int
+    rhs_assignment_count: int
+
+    def to_dict(self) -> dict[str, int]:
+        """Return the explicit serialized dictionary representation."""
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptAgentRecord(AgentRecord):
+    """
+    Canonical memory record for one completed ScriptAgent invocation -- a
+    sibling to ToolAgentRecord, not a subclass (ScriptAgent is a new agent
+    family, not a ToolAgent subclass).
+
+    Unlike the Task family, Record types in this codebase validate at
+    construction (AgentRecord.__post_init__ already checks user_prompt/
+    llm_records/prev) -- a persisted/serialized/rendered record sits closer
+    to a real boundary than an in-flight task does. This class's own
+    __post_init__ follows that precedent for its own new fields.
+
+    No more agent-level global blackboard for this family -- each record
+    owns its own slots outright. There is no blackboard_start/
+    blackboard_end span to index into, unlike ToolAgentRecord (v1).
+
+    Fields
+    ------
+    statements : tuple[CodeStatement, ...]
+        Every slot ScriptAgentTask.completed accumulated this run, carried
+        over at commit time (normalized to a tuple here, mirroring
+        llm_records' existing list-or-tuple-in, tuple-stored normalization).
+        A bare reasoning string the model wrote is never a slot in its own
+        right (parse_generation treats it as an inert, unstored no-op,
+        legal anywhere in a generation) -- there is no separate annotation
+        record of it.
+
+    failed_statements : tuple[CodeStatement, ...]
+        Every slot whose dispatch raised this run, carried over from
+        ScriptAgentTask.failed_statements at commit time (same
+        list-or-tuple-in, tuple-stored normalization as statements). Each
+        entry's ``.exception`` is the raised value. The permanent record of
+        what failed during this invocation -- unlike ``continuation_note``
+        (ephemeral, consulted and cleared each round), this list is never
+        cleared.
+    """
+
+    statements: tuple[CodeStatement, ...] = ()
+    failed_statements: tuple[CodeStatement, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
+        # the class object to add __slots__, which invalidates the
+        # zero-arg super()'s implicit __class__ closure cell (a documented
+        # CPython gotcha for slotted-dataclass inheritance chains; confirmed
+        # live: bare super() raises "obj must be an instance or subtype of
+        # type" here).
+        super(ScriptAgentRecord, self).__post_init__()
+
+        # 1. statements must be a list/tuple of CodeStatement instances.
+        if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
+            raise TypeError(
+                "ScriptAgentRecord.statements must be a list or tuple of "
+                f"CodeStatement instances; got {type(self.statements).__name__!r}."
+            )
+        for index, slot in enumerate(self.statements):
+            if not isinstance(slot, CodeStatement):
+                raise TypeError(
+                    f"ScriptAgentRecord.statements[{index}] must be a "
+                    f"CodeStatement instance; got {type(slot).__name__!r}."
+                )
+
+        # 2. failed_statements must be a list/tuple of CodeStatement
+        # instances, same shape as statements above.
+        if isinstance(self.failed_statements, (str, bytes)) or not isinstance(
+            self.failed_statements, (list, tuple)
+        ):
+            raise TypeError(
+                "ScriptAgentRecord.failed_statements must be a list or tuple "
+                f"of CodeStatement instances; got {type(self.failed_statements).__name__!r}."
+            )
+        for index, slot in enumerate(self.failed_statements):
+            if not isinstance(slot, CodeStatement):
+                raise TypeError(
+                    f"ScriptAgentRecord.failed_statements[{index}] must be a "
+                    f"CodeStatement instance; got {type(slot).__name__!r}."
+                )
+
+        # 3. normalize both to a tuple -- object.__setattr__ required, the
+        # dataclass is frozen (mirrors llm_records/inputs normalization
+        # above).
+        object.__setattr__(self, "statements", tuple(self.statements))
+        object.__setattr__(self, "failed_statements", tuple(self.failed_statements))
+
+    def render_as_code(self) -> str:
+        """
+        Reconstruct this run's statements as source-formatted text, grouped
+        by concurrent batch (``show_batches=True`` -- a standalone,
+        human-only view; the live continuation-message path this mirrors,
+        ``ScriptAgent._render_task_messages``, deliberately never shows
+        batch grouping to the model itself). Named generically ("code",
+        not "python") since the underlying grammar isn't guaranteed to
+        stay Python-syntax-specific forever.
+        """
+        from ...utils.script import render_completed_as_python
+
+        return render_completed_as_python(self.statements, show_batches=True)
+
+    def tool_usage(self) -> ScriptAgentToolUsage:
+        """
+        Compute a ``ScriptAgentToolUsage`` snapshot from ``self.statements``
+        and ``self.failed_statements`` in one pass. Pure/derived -- not
+        stored, recomputed on each call.
+        """
+        from ...utils.script import is_dispatched_slot
+
+        registered_tool_calls = 0
+        builtin_calls = 0
+        attribute_calls = 0
+        binop_count = 0
+        rhs_assignment_count = 0
+
+        for slot in self.statements:
+            if slot.tool == PY_BUILTIN_ALIAS:
+                builtin_calls += 1
+            elif slot.tool == ATTR_CALL_ALIAS:
+                attribute_calls += 1
+            elif slot.tool == RHS_ASSIGN_ALIAS:
+                rhs_assignment_count += 1
+                value = slot.kwargs["val"]
+                if isinstance(value, ast.expr) and any(
+                    isinstance(node, ast.BinOp) for node in ast.walk(value)
+                ):
+                    binop_count += 1
+            elif is_dispatched_slot(slot):
+                registered_tool_calls += 1
+
+        # failed_statements can only ever contain a dispatched slot (a
+        # registered tool, builtin, or attribute/method call) -- rhs_assign/
+        # return slots are never dispatched, so they can never fail here.
+        # Still counted against the three dispatched-call totals above:
+        # tool_calls_used counts a dispatched call whether it succeeded or
+        # raised, so this snapshot must too, or its own sum-equals-budget
+        # claim would be false whenever any call failed.
+        for slot in self.failed_statements:
+            if slot.tool == PY_BUILTIN_ALIAS:
+                builtin_calls += 1
+            elif slot.tool == ATTR_CALL_ALIAS:
+                attribute_calls += 1
+            elif is_dispatched_slot(slot):
+                registered_tool_calls += 1
+
+        return ScriptAgentToolUsage(
+            registered_tool_calls=registered_tool_calls,
+            builtin_calls=builtin_calls,
+            attribute_calls=attribute_calls,
+            binop_count=binop_count,
+            rhs_assignment_count=rhs_assignment_count,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation."""
+        # Explicit two-argument super() -- same slotted-dataclass gotcha
+        # __post_init__ documents above; bare super() raises here too.
+        d = super(ScriptAgentRecord, self).to_dict()
+        d.update({
+            "statements": [s.to_dict() for s in self.statements],
+            "failed_statements": [s.to_dict() for s in self.failed_statements],
+        })
+        return d
 
 
 @dataclass(frozen=True, slots=True)

@@ -90,7 +90,7 @@ def run_case(label: str, tool: Tool, inputs: dict[str, Any]) -> None:
 
 def show_signature(tool: Tool) -> None:
     print(f"\n-- {tool.name} call plan --")
-    print("signature:", tool.signature)
+    print("signature:", tool.fullname_signature)
     print("parameters:")
     for param in tool.parameters:
         default_str = "default=NO_VAL" if param.default is NO_VAL else f"default={param.default!r}"

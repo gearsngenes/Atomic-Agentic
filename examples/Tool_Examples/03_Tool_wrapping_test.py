@@ -63,7 +63,7 @@ def show_plan(tool: Tool) -> None:
 
     print(f"\n-- {tool.full_name} call plan --")
     print("wraps:", type(tool.function).__name__)
-    print("signature:", tool.signature)
+    print("signature:", tool.fullname_signature)
     print("parameters:")
 
     for param in tool.parameters:

@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from atomic_agentic.agents import ReActAgent
 from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.tools.prebuilt import CONSOLE_TOOLS, MATH_TOOLS  # lists of Tool objects
+from atomic_agentic.tools.prebuilt import CONSOLE_TOOLS, BASIC_MATH_TOOLS  # lists of Tool objects
 
 load_dotenv()  # take environment variables from .env file (if exists)
 
@@ -26,7 +26,7 @@ orchestrator = ReActAgent(
 )
 
 # 3) Register tool lists
-orchestrator.batch_register(MATH_TOOLS)
+orchestrator.batch_register(BASIC_MATH_TOOLS)
 orchestrator.batch_register(CONSOLE_TOOLS)
 
 # 4) Register the pi constant

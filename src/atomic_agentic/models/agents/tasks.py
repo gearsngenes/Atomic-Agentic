@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from ...constants.core import NO_VAL
-from .blackboard_models import BlackboardSlot
+from .blackboard_models import BlackboardSlot, CodeStatement
 from .records import AgentRecord, LLMRecord
 from .thought_models import AgentThought
 
 __all__ = [
     "AgentTask",
     "ToolAgentTask",
+    "ScriptAgentTask",
     "PlanActTask",
     "ReActTask",
     "ReActStepMeta",
@@ -167,6 +168,149 @@ class ToolAgentTask(AgentTask):
     failed_cache_indices: frozenset[int] = field(default_factory=frozenset)
 
     retries_used: int = 0
+
+
+@dataclass(slots=True)
+class ScriptAgentTask(AgentTask):
+    """
+    ScriptAgent-flavored task -- a sibling to ToolAgentTask, not a subclass
+    (ScriptAgent is a new agent family, not a ToolAgent subclass, per this
+    branch's established convention).
+
+    No __post_init__ -- matches AgentTask's own family-wide convention of
+    zero constructor-time validation (an in-flight, internal-only object,
+    not a real boundary, per 01-overview.md Section 4).
+
+    Fields
+    ------
+    completed : list[CodeStatement]
+        Every slot that executed successfully so far this run, in commit
+        order. Purely historical -- nothing here is ever mutated once a
+        slot lands in this list. Becomes ScriptAgentRecord.statements
+        verbatim (normalized to a tuple) at commit time. A slot whose
+        dispatch raised is never appended here -- see failed_statements.
+
+    pending : list[list[CodeStatement]]
+        Every not-yet-executed dependency batch compiled so far for the
+        current plan -- not scoped to just the next pause. The whole
+        one-shot draft (or, after a replan, the whole freshly regenerated
+        tail) is parsed and batch-compiled in a single pass, so this can
+        span multiple pauses' worth of batches at once. The front batch
+        (``pending[0]``) is the next one act() runs; once it fully
+        executes, its slots move into ``completed`` and it is popped from
+        this list.
+
+    continue_planning : bool
+        Set by ``parse_generation`` (via ``think()``) when the round itself
+        asked to continue (a ``# PAUSE``, or a valid if-cutoff), or by
+        ``prepare()``/``_apply_batch_results()`` when a batch's args failed
+        to resolve or a real tool call failed. Read by ``prepare()``'s and
+        ``_apply_batch_results``'s own empty-``pending`` checks -- whichever
+        one actually drains ``pending`` to empty -- to tell "stopped, needs
+        a continuation" (leave the task incomplete for ``think()`` to
+        regenerate next) apart from "genuinely finished" (finalize via
+        ``_finalize_without_continuation`` right there, before ``think()``
+        ever gets a turn to regenerate an uninvited round).
+
+    planning_rounds_used : int
+        Count of planning generations made so far this invoke, including
+        the first -- total-count semantics, not "extra chances beyond a
+        free first attempt" (contrast ``regenerations_used``, which
+        specifically counts second chances within one round).
+        Incremented unconditionally by ``think()``/``async_think()`` on
+        every real call, then checked against
+        ``self._planning_rounds_limit`` before requesting another.
+
+    tool_calls_used : int
+        Cumulative count of dispatched (non-``rhs_assign``/``return``)
+        calls actually dispatched so far this invoke, across every
+        generation round -- registered-tool and approved-builtin calls
+        counted identically (no per-category exemption), never decremented.
+        Incremented only in ``_apply_batch_results`` (a real dispatch
+        happened, whether it succeeded or failed); never in ``prepare()``
+        (a resolution failure means nothing was ever dispatched). Read by
+        ``_process_generation_output`` to compute the remaining budget
+        passed into ``validate_references``.
+
+    continuation_note : Optional[str]
+        Framework-authored (never model-authored) reason text, set only by
+        ``prepare()``'s resolution-failure branch or
+        ``_apply_batch_results``'s execution-failure branch -- a
+        multi-line block combining the failed batch's own rendered source
+        (via ``render_completed_as_python``) with its labeled issue/failure
+        list, so the next continuation round sees both what it wrote and
+        specifically what went wrong with it. An explicit ``# PAUSE`` or
+        if-cutoff continuation never sets this (bare sentinel, no note of
+        any kind); consulted and cleared back to ``None`` in the same read
+        by ``_render_task_messages`` on the next generation, so a stale note
+        from an already-addressed failure never leaks into a later round.
+
+    cache : dict[str, Any]
+        identifier -> resolved value for every slot in ``completed``, kept
+        in sync as slots complete. Shaped to be passed directly as
+        utils/script.py's ``resolve_slot_args(statement, resolved)``'s
+        ``resolved`` argument -- an O(1) lookup instead of scanning
+        ``completed``.
+
+    constant_values : dict[str, Any]
+        Registered-constant name -> value, populated exactly once by
+        ``ScriptAgent._initialize_task`` (deep-copied per constant except
+        for known atomic-immutable types) and never touched again after
+        that. Every batch's resolution namespace reads this instead of
+        re-deriving values from the agent's own ``self._constants`` each
+        time, so a mutating attribute/method call in one round is visible
+        to a later round of the *same* invocation (same copy, shared for
+        this task's lifetime) but never reaches a different invocation (a
+        fresh task gets a fresh copy).
+
+    regenerations_used : int
+        Cumulative regeneration attempts consumed across every generation
+        call this run (initial plan, planner repair calls) -- structural/
+        syntax/validation failures only. Unlike tool-call budget
+        accounting, not derivable from ``completed`` (regenerations are
+        generation attempts, not slots), so this stays an explicit counter.
+        Checked against ``self._regeneration_limit`` (always a plain
+        non-negative ``int``, never ``None``) before permitting another
+        attempt within one round.
+
+    resolved_args : list[dict[str, Any]]
+        Positionally matched to ``pending[0]``'s slots -- the resolved
+        kwargs ``prepare()`` computed for the batch ``act()`` is about to
+        run. Reset to ``[]`` by ``act()`` once that batch is fully consumed
+        (or by ``prepare()``'s empty-``pending`` guard). Empty whenever
+        there is nothing currently prepared to execute.
+
+    batch_counter : int
+        Running total of batches compiled so far this invoke, across every
+        generation round -- never reset mid-run. Passed to
+        ``compile_batches`` as ``start_batch_index`` each time it's called,
+        then advanced by the number of batches that call produced, so
+        ``CodeStatement.batch_index`` values stay globally unique across a
+        whole invoke.
+
+    failed_statements : list[CodeStatement]
+        Every slot whose dispatch raised, in the order the failure was
+        observed, across every round this invoke -- the permanent
+        counterpart to ``continuation_note``'s ephemeral text (which is
+        consulted and cleared on the very next render). Appended by
+        ``_apply_batch_results`` at the same point a failure is detected,
+        with ``slot.exception`` set to the raised value first. Never
+        cleared or mutated once appended. Becomes
+        ScriptAgentRecord.failed_statements verbatim (normalized to a
+        tuple) at commit time.
+    """
+    completed: list[CodeStatement] = field(default_factory=list)
+    pending: list[list[CodeStatement]] = field(default_factory=list)
+    cache: dict[str, Any] = field(default_factory=dict)
+    constant_values: dict[str, Any] = field(default_factory=dict)
+    regenerations_used: int = 0
+    resolved_args: list[dict[str, Any]] = field(default_factory=list)
+    continue_planning: bool = False
+    planning_rounds_used: int = 0
+    tool_calls_used: int = 0
+    continuation_note: Optional[str] = None
+    batch_counter: int = 0
+    failed_statements: list[CodeStatement] = field(default_factory=list)
 
 
 @dataclass(slots=True)

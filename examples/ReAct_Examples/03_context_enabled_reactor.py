@@ -13,7 +13,7 @@ import logging
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import ReActAgent
-from atomic_agentic.tools.prebuilt import MATH_TOOLS
+from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
 from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
@@ -30,7 +30,7 @@ reactor = ReActAgent(
     generation_retries=3,
 )
 
-reactor.batch_register(MATH_TOOLS)
+reactor.batch_register(BASIC_MATH_TOOLS)
 
 while True:
     query = input("Enter a task (or 'q' / 'exit' to quit): ")
@@ -42,7 +42,7 @@ while True:
     print(f"Result: {result.result}\n")
 
     from pprint import pprint
-    record = reactor.records[-1]
+    record = reactor.get_conversation()[-1]
     llm_calls = len(record.llm_records)
     print(f"LLM calls this turn: {llm_calls}")
     print("Blackboard:")

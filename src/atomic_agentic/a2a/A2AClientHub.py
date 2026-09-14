@@ -25,7 +25,15 @@ from ..constants.a2a_sdk import (
 from ..constants.core import HeaderValue
 from ..exceptions import A2AProxyError
 from ..models.a2a_sdk import A2AtomicSkillMetadata
-from ..utils.core import normalize_headers, run_coro_async, run_coro_sync, start_background_loop, stop_background_loop
+from ..utils.core import (
+    apply_name_filter,
+    normalize_headers,
+    run_coro_async,
+    run_coro_sync,
+    start_background_loop,
+    stop_background_loop,
+    validate_name_filter,
+)
 
 __all__ = ["A2AClientHub"]
 
@@ -62,9 +70,16 @@ class A2AClientHub:
     agent_card is still resolved and cached once at construction regardless
     of mode.
 
-    transport_mode/base_url/persistent are immutable identity, fixed at
-    construction -- constructing a new instance is the only way to change
-    any of them. headers/timeout are mutable only via refresh().
+    transport_mode/base_url/persistent/include_names/exclude_names are
+    immutable identity, fixed at construction -- constructing a new instance
+    is the only way to change any of them. headers/timeout are mutable only
+    via refresh().
+
+    include_names/exclude_names filter get_atomic_skills()'s output only --
+    discovery-only, not enforced on call_atomic_skill()/
+    async_call_atomic_skill() or the always-available generic-mode
+    A2AProxyTool path, both of which remain reachable by any skill id
+    regardless of this filter.
     """
 
     def __init__(
@@ -75,6 +90,8 @@ class A2AClientHub:
         headers: Mapping[str, HeaderValue] | None = None,
         timeout: float = 600,
         relative_card_path: str | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
     ) -> None:
         """
         Validate identity/config, then build the underlying connection.
@@ -83,8 +100,9 @@ class A2AClientHub:
         2. Validate transport_mode against VALID_TRANSPORT_MODES.
         3. Validate persistent is a bool.
         4-8. Normalize and store headers/timeout/relative_card_path, the
-           frozen identity triple (base_url/transport_mode/persistent), and
-           an unconditional refresh lock.
+           frozen identity triple (base_url/transport_mode/persistent), an
+           unconditional refresh lock, and the frozen include_names/
+           exclude_names filter (via validate_name_filter).
         9. persistent=True: start_background_loop(), connect on it, roll the
            loop back if connection fails. persistent=False: self._bg_loop/
            _bg_thread/_client are all None; a plain run_coro_sync
@@ -110,6 +128,9 @@ class A2AClientHub:
         self._transport_mode: str = mode
         self._persistent: bool = persistent
         self._refresh_lock: asyncio.Lock = asyncio.Lock()
+        self._include_names, self._exclude_names = validate_name_filter(
+            include_names, exclude_names
+        )
 
         if persistent:
             self._bg_loop, self._bg_thread = start_background_loop()
@@ -117,7 +138,9 @@ class A2AClientHub:
                 self._client, self._agent_card = run_coro_sync(
                     self._connect(self._headers, self._timeout), loop=self._bg_loop
                 )
-                self._atomic_skills = self._build_atomic_skills(self._agent_card)
+                self._atomic_skills = self._build_atomic_skills(
+                    self._agent_card, self._include_names, self._exclude_names
+                )
             except Exception:
                 stop_background_loop(self._bg_loop, self._bg_thread)
                 raise
@@ -126,7 +149,9 @@ class A2AClientHub:
             self._bg_thread = None
             self._client = None
             self._agent_card = run_coro_sync(self._resolve_card(self._headers, self._timeout))
-            self._atomic_skills = self._build_atomic_skills(self._agent_card)
+            self._atomic_skills = self._build_atomic_skills(
+                self._agent_card, self._include_names, self._exclude_names
+            )
 
     @classmethod
     async def async_create(
@@ -137,6 +162,8 @@ class A2AClientHub:
         headers: Mapping[str, HeaderValue] | None = None,
         timeout: float = 600,
         relative_card_path: str | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
     ) -> "A2AClientHub":
         """
         Non-blocking construction. __init__ performs blocking async-bridging
@@ -151,6 +178,8 @@ class A2AClientHub:
             headers=headers,
             timeout=timeout,
             relative_card_path=relative_card_path,
+            include_names=include_names,
+            exclude_names=exclude_names,
         )
 
     async def _connect(
@@ -224,7 +253,11 @@ class A2AClientHub:
         return card
 
     @staticmethod
-    def _build_atomic_skills(card: AgentCard) -> dict[str, A2AtomicSkillMetadata]:
+    def _build_atomic_skills(
+        card: AgentCard,
+        include_names: frozenset[str] | None,
+        exclude_names: frozenset[str] | None,
+    ) -> dict[str, A2AtomicSkillMetadata]:
         """
         Detection only -- no Tool-building here (that's a later track's job).
         Empty dict, not an error, when the extension is absent: a plain
@@ -234,14 +267,19 @@ class A2AClientHub:
         A2AtomicSkillMetadata.from_dict/ParamSpec.from_dict and propagates to
         the caller (constructor or _do_refresh), per doc1's "let natural
         exceptions surface" discipline.
+
+        include_names/exclude_names (already validated) prune the raw
+        extension payload before any A2AtomicSkillMetadata is built, so a
+        filtered-out skill's payload is never even parsed.
         """
         extension = find_extension_by_uri(card, PARAM_SCHEMA_EXT_URI)
         if extension is None:
             return {}
         raw = MessageToDict(extension.params)
+        filtered_raw = apply_name_filter(raw, include_names, exclude_names)
         return {
             remote_name: A2AtomicSkillMetadata.from_dict(payload)
-            for remote_name, payload in raw.items()
+            for remote_name, payload in filtered_raw.items()
         }
 
     def _build_grpc_channel_factory(self) -> Callable[[str], "grpc.aio.Channel"]:
@@ -290,6 +328,14 @@ class A2AClientHub:
     @property
     def agent_card(self) -> AgentCard:
         return self._agent_card
+
+    @property
+    def include_names(self) -> frozenset[str] | None:
+        return self._include_names
+
+    @property
+    def exclude_names(self) -> frozenset[str] | None:
+        return self._exclude_names
 
     def get_atomic_skills(self) -> Mapping[str, A2AtomicSkillMetadata]:
         """
@@ -383,8 +429,11 @@ class A2AClientHub:
             # the refreshed card raises here and the whole refresh rolls
             # back, leaving self._atomic_skills (and everything else)
             # untouched, same guarantee _connect's own failure already gives
-            # self._agent_card.
-            new_atomic_skills = self._build_atomic_skills(new_card)
+            # self._agent_card. include_names/exclude_names are frozen, not
+            # a refresh() parameter -- the same stored filter applies again.
+            new_atomic_skills = self._build_atomic_skills(
+                new_card, self._include_names, self._exclude_names
+            )
 
             if self._bg_loop is not None:
                 old_client = self._client
@@ -538,4 +587,6 @@ class A2AClientHub:
             "header_keys": sorted(self._headers.keys()) if self._headers is not None else [],
             "timeout": self.timeout,
             "agent_name": getattr(self._agent_card, "name", None),
+            "include_names": sorted(self.include_names) if self.include_names is not None else None,
+            "exclude_names": sorted(self.exclude_names) if self.exclude_names is not None else None,
         }

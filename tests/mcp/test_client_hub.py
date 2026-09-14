@@ -53,6 +53,34 @@ class FakeSession:
         )
 
 
+class FakeMultiToolSession(FakeSession):
+    async def list_tools(self) -> Any:
+        return SimpleNamespace(
+            tools=[
+                SimpleNamespace(
+                    name="search",
+                    description="Search documents.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                    outputSchema=None,
+                ),
+                SimpleNamespace(
+                    name="delete",
+                    description="Delete a document.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                    outputSchema=None,
+                ),
+            ]
+        )
+
+
 class FailingListSession(FakeSession):
     async def list_tools(self) -> Any:
         raise ValueError("boom")
@@ -322,6 +350,8 @@ class TestMCPClientHubLocalHelpers:
             "has_client_kwargs": False,
             "client_kwargs_keys": [],
             "has_session_kwargs": False,
+            "include_names": None,
+            "exclude_names": None,
             "session_kwargs_keys": [],
             "persistent": False,
             "is_connected": False,
@@ -412,6 +442,107 @@ class TestMCPClientHubOperationsWithoutRealServer:
 
         with pytest.raises(MCPToolError, match="Failed to call MCP tool 'search'"):
             hub.call_tool("search", {"query": "hello"})
+
+
+class TestMCPClientHubNameFiltering:
+    """include_names/exclude_names filter list_tools()/async_list_tools()'s
+    output only -- construction-time, discovery-only."""
+
+    def test_include_names_narrows_list_tools(self) -> None:
+        hub = FakeHub(
+            FakeMultiToolSession(),
+            transport_mode="stdio",
+            persistent=False,
+            command="python",
+            include_names=["search"],
+        )
+
+        assert list(hub.list_tools()) == ["search"]
+
+    def test_exclude_names_removes_from_list_tools(self) -> None:
+        hub = FakeHub(
+            FakeMultiToolSession(),
+            transport_mode="stdio",
+            persistent=False,
+            command="python",
+            exclude_names=["delete"],
+        )
+
+        assert list(hub.list_tools()) == ["search"]
+
+    def test_include_names_entry_absent_from_available_is_silently_dropped(self) -> None:
+        hub = FakeHub(
+            FakeMultiToolSession(),
+            transport_mode="stdio",
+            persistent=False,
+            command="python",
+            include_names=["search", "does_not_exist"],
+        )
+
+        assert list(hub.list_tools()) == ["search"]
+
+    def test_call_tool_ignores_the_filter(self) -> None:
+        session = FakeMultiToolSession()
+        hub = FakeHub(
+            session,
+            transport_mode="stdio",
+            persistent=False,
+            command="python",
+            exclude_names=["delete"],
+        )
+
+        assert "delete" not in hub.list_tools()
+        hub.call_tool("delete", {"query": "x"})
+
+        assert session.called_tools == [("delete", {"query": "x"})]
+
+    def test_async_list_tools_applies_the_filter(self) -> None:
+        hub = FakeHub(
+            FakeMultiToolSession(),
+            transport_mode="stdio",
+            persistent=False,
+            command="python",
+            include_names=["search"],
+        )
+
+        tools = asyncio.run(hub.async_list_tools())
+
+        assert list(tools) == ["search"]
+
+    def test_empty_include_names_raises_at_construction(self) -> None:
+        with pytest.raises(ValueError):
+            FakeHub(
+                FakeMultiToolSession(),
+                transport_mode="stdio",
+                persistent=False,
+                command="python",
+                include_names=[],
+            )
+
+    def test_include_exclude_overlap_raises_at_construction(self) -> None:
+        with pytest.raises(ValueError):
+            FakeHub(
+                FakeMultiToolSession(),
+                transport_mode="stdio",
+                persistent=False,
+                command="python",
+                include_names=["search"],
+                exclude_names=["search"],
+            )
+
+    def test_to_dict_reports_include_and_exclude_names(self) -> None:
+        hub = FakeHub(
+            FakeMultiToolSession(),
+            transport_mode="stdio",
+            persistent=False,
+            command="python",
+            include_names=["search"],
+        )
+
+        data = hub.to_dict()
+
+        assert data["include_names"] == ["search"]
+        assert data["exclude_names"] is None
 
 
 class TestMCPClientHubRefresh:

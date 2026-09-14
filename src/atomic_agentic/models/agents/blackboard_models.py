@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import asdict, dataclass, field
-from typing import Any, ClassVar, Mapping
+from typing import Any, ClassVar, Mapping, Optional
 
 from ...constants.agents import (
     ARGS_FIELD,
@@ -15,6 +16,7 @@ from ..results import AtomicResult
 __all__ = [
     "ConstantSpec",
     "BlackboardSlot",
+    "CodeStatement",
 ]
 
 
@@ -352,4 +354,159 @@ class BlackboardSlot:
             self.STATUS_FIELD: self.status,
             self.STEP_DEPENDENCIES_FIELD: self.step_dependencies,
             self.AWAIT_STEP_FIELD: self.await_step,
+        }
+
+
+@dataclass(slots=True)
+class CodeStatement:
+    """
+    One slot in a ScriptAgent subtask's per-invocation statement sequence.
+
+    Every generated statement normalizes to this one call-shaped record --
+    a real tool call (``tool`` = the call's dotted name, optionally a bare
+    unassigned call with ``identifier=None``), a bare expression (``tool``
+    = ``RHS_ASSIGN_ALIAS``, ``args = {"val": <expr>}``), a terminal
+    ``return`` statement (``tool`` = ``RETURN_ALIAS``, ``identifier=None``),
+    or a rewritten Python builtin call (``tool`` = ``PY_BUILTIN_ALIAS``,
+    structurally a real tool call with the builtin's name spliced into
+    ``args[0]`` as a plain ``str`` by ``rewrite_builtin_calls`` -- the one
+    exception to the rule below, since it's a post-parse rewrite, not
+    something the model itself wrote as an expression). Every other
+    ``args``/``kwargs`` value is always the original ``ast.expr`` node the
+    model wrote, whether or not the expression has a dependency on
+    another slot's identifier -- a dependency-free expression is only
+    dry-run evaluated at parse time (catching a guaranteed-bad constant
+    expression early), never folded into a plain value; the sole
+    ``resolve_slot_args`` call at prepare time is where every such value,
+    dependency-bearing or not, actually resolves to a plain Python value.
+    Mutable (not frozen) -- ``result``/``exception`` are populated after
+    construction by a future ``act()``-phase caller.
+
+    Fields
+    ------
+    identifier : str | None
+        This slot's bound name -- the statement's LHS, or a synthesized
+        ``_SUB_N`` name for an auto-hoisted nested call. ``None`` for a
+        bare (unassigned) call or a ``return`` statement -- never
+        resolvable by name, and never written into
+        ``ScriptAgentTask.cache``.
+
+    tool : str
+        Dotted call name (e.g. ``"Type.namespace.name"``), or
+        ``RHS_ASSIGN_ALIAS`` (``"rhs_assign"``) for a bare-expression
+        statement. ``rhs_assign``/``RETURN_ALIAS`` calls never count
+        against tool-call budget accounting -- they're never dispatched at
+        all. ``PY_BUILTIN_ALIAS`` (``"py_builtin"``) marks a rewritten
+        approved-builtin call -- dispatches through a real ``Tool``
+        (``agents.tools.builtin_call_tool``) and counts toward tool-call
+        budget accounting identically to a real registered-tool call (no
+        exemption).
+
+    args : tuple[Any, ...]
+        Positional call arguments, in source order. Each entry is an
+        ``ast.expr`` (dependency-bearing or not -- see class docstring) or
+        an ``ast.Starred`` (a ``*expr`` unpack, its Starred-ness preserved
+        regardless of whether its own inner expr has dependencies, so it
+        survives to resolve time) -- except ``args[0]`` on a
+        ``PY_BUILTIN_ALIAS`` slot, a plain ``str`` (see class docstring).
+        Empty for a keyword-only call, or for the ``rhs_assign``/
+        ``return`` sentinel shape (which lives entirely in ``kwargs``).
+
+    kwargs : dict[str, Any]
+        Keyword call arguments (real tool call), or ``{"val": <expr>}``
+        (``rhs_assign``/``return``). Each value is an ``ast.expr`` node --
+        see class docstring. A ``**expr`` unpack is stored under the
+        reserved key ``constants.agents.KWARGS_UNPACK_KEY`` (``"**"``,
+        never a valid Python identifier, so it never collides with a real
+        parameter name) -- at most one per statement.
+
+    batch_index : int | None
+        Which concurrently-dispatched batch this slot belongs to, stamped
+        once by ``compile_batches`` when the batch closes. ``None`` until
+        then -- never observed externally in that state, since only
+        committed slots (always already batch-stamped) ever reach
+        ``.completed`` or a rendered record. Not defensively validated in
+        ``__post_init__``, matching ``result``/``exception``'s treatment
+        below: set internally by framework lifecycle code, not derived
+        from external/LLM input.
+
+    result : AtomicResult | None
+        Full result envelope from a future ``act()``-phase caller. ``None``
+        until executed.
+
+    exception : Exception | None
+        Live exception object from a failed execution attempt, or a
+        ``DependencyFailedError`` if a dependency itself failed. ``None``
+        until a failure occurs. Not stringified.
+    """
+
+    identifier: Optional[str]
+    tool: str
+    args: tuple[Any, ...] = ()
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    batch_index: Optional[int] = None
+    result: AtomicResult | None = None
+    exception: Exception | None = None
+
+    def __post_init__(self) -> None:
+        # 1. identifier, if not None, must be a non-empty, Python-
+        # identifier-legal string. None means a bare call or return.
+        if self.identifier is not None and (
+            not isinstance(self.identifier, str)
+            or not IDENTIFIER_PATTERN.fullmatch(self.identifier)
+        ):
+            raise ValueError(
+                "CodeStatement.identifier must be None or a non-empty, "
+                f"Python-identifier-legal string; got {self.identifier!r}."
+            )
+
+        # 2. tool must be a non-empty string (dotted call names are not
+        # bare identifiers, so IDENTIFIER_PATTERN does not apply here).
+        if not isinstance(self.tool, str) or not self.tool.strip():
+            raise ValueError(
+                f"CodeStatement.tool must be a non-empty string; got {self.tool!r}."
+            )
+
+        # 3. args must be a tuple or list (no per-element validation --
+        # values may be literally anything, including raw ast nodes).
+        # Normalized to a tuple below.
+        if isinstance(self.args, (str, bytes)) or not isinstance(self.args, (tuple, list)):
+            raise TypeError(
+                f"CodeStatement.args must be a tuple or list; got {type(self.args).__name__!r}."
+            )
+        self.args = tuple(self.args)
+
+        # 4. kwargs must be a dict.
+        if not isinstance(self.kwargs, dict):
+            raise TypeError(
+                f"CodeStatement.kwargs must be a dict; got {type(self.kwargs).__name__!r}."
+            )
+
+        # 5. batch_index/result/exception are set internally by framework
+        # lifecycle code, not derived from external/LLM input -- not
+        # defensively validated here, per 01-overview.md Section 4's
+        # boundary-only-validation rule.
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Return the explicit serialized dictionary representation, for
+        debugging/observability only -- never used to reconstruct or
+        re-plan. An args/kwargs value still an unresolved ``ast.expr``/
+        ``ast.Starred`` (this slot depended on another slot's identifier,
+        never folded back per ``resolve_slot_args``'s own docstring) is
+        rendered as its source text via ``ast.unparse`` rather than the
+        raw AST node, which is not JSON-serializable.
+        """
+
+        def render(value: Any) -> Any:
+            return ast.unparse(value) if isinstance(value, ast.expr) else value
+
+        return {
+            "identifier": self.identifier,
+            "tool": self.tool,
+            "args": [render(value) for value in self.args],
+            "kwargs": {key: render(value) for key, value in self.kwargs.items()},
+            "batch_index": self.batch_index,
+            "result": self.result.to_dict() if self.result is not None else None,
+            "exception": repr(self.exception) if self.exception is not None else None,
         }

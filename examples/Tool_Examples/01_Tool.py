@@ -65,7 +65,7 @@ t_sum = Tool(
 def show_plan(tool: Tool) -> None:
     meta = tool.to_dict()
     print(f"\n-- {tool.name} call plan --")
-    print("signature:", tool.signature)
+    print("signature:", tool.fullname_signature)
     print("parameters:")
     for param in tool.parameters:
         default_str = "(no default)" if param.default is NO_VAL else f"default={param.default}"

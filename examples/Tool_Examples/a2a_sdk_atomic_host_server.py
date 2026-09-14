@@ -11,7 +11,7 @@ from starlette.applications import Starlette
 
 from atomic_agentic.a2a import A2AtomicExecutor
 from atomic_agentic.constants.a2a_sdk import TRANSPORT_JSON_RPC
-from atomic_agentic.tools.prebuilt import MATH_TOOLS
+from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
 
 HOST = "127.0.0.1"
 PORT = 9000
@@ -26,7 +26,7 @@ SKILL_NAMES = {"add", "multiply", "sqrt", "mean"}
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
-    skills = [tool for tool in MATH_TOOLS if tool.name in SKILL_NAMES]
+    skills = [tool for tool in BASIC_MATH_TOOLS if tool.name in SKILL_NAMES]
     executor = A2AtomicExecutor(skills)
 
     card = executor.to_agent_card(

@@ -526,6 +526,92 @@ class TestPyA2AtomicClientPublicAPI:
         assert exc_info.value.error_type == "RemoteError"
 
 
+class TestPyA2AtomicClientNameFiltering:
+    """include_names/exclude_names filter list_invokables()'s output only --
+    construction-time, discovery-only, per PyA2AtomicClient's own docstring."""
+
+    def test_include_names_narrows_list_invokables(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient("http://example.test/a2a", include_names=["echo"])
+        fake = latest_fake_client(fake_client_factory)
+        fake.next_payload = {
+            "echo": {"name": "echo", "description": "Echo."},
+            "shout": {"name": "shout", "description": "Shout."},
+        }
+
+        assert client.list_invokables() == {"echo": {"name": "echo", "description": "Echo."}}
+
+    def test_exclude_names_removes_from_list_invokables(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient("http://example.test/a2a", exclude_names=["shout"])
+        fake = latest_fake_client(fake_client_factory)
+        fake.next_payload = {
+            "echo": {"name": "echo", "description": "Echo."},
+            "shout": {"name": "shout", "description": "Shout."},
+        }
+
+        assert list(client.list_invokables()) == ["echo"]
+
+    def test_include_names_entry_absent_from_available_is_silently_dropped(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient(
+            "http://example.test/a2a", include_names=["echo", "does_not_exist"]
+        )
+        fake = latest_fake_client(fake_client_factory)
+        fake.next_payload = {"echo": {"name": "echo", "description": "Echo."}}
+
+        assert list(client.list_invokables()) == ["echo"]
+
+    def test_get_invokable_metadata_ignores_the_filter(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient("http://example.test/a2a", exclude_names=["shout"])
+        fake = latest_fake_client(fake_client_factory)
+        fake.next_payload = {
+            "name": "shout",
+            "description": "Shout.",
+            "parameters": [],
+            "return_type": "dict[str, Any]",
+            "invokable_type": "ShoutInvokable",
+        }
+
+        # Discovery-only: a name excluded from list_invokables() must still
+        # be directly fetchable/callable.
+        metadata = client.get_invokable_metadata("shout")
+
+        assert metadata["name"] == "shout"
+
+    def test_empty_include_names_raises_at_construction(self) -> None:
+        with pytest.raises(ValueError):
+            PyA2AtomicClient("http://example.test/a2a", include_names=[])
+
+    def test_include_exclude_overlap_raises_at_construction(self) -> None:
+        with pytest.raises(ValueError):
+            PyA2AtomicClient(
+                "http://example.test/a2a",
+                include_names=["echo"],
+                exclude_names=["echo"],
+            )
+
+    def test_to_dict_reports_include_and_exclude_names(
+        self,
+        fake_client_factory: FakeA2AClientFactory,
+    ) -> None:
+        client = PyA2AtomicClient("http://example.test/a2a", include_names=["echo"])
+
+        data = client.to_dict()
+
+        assert data["include_names"] == ["echo"]
+        assert data["exclude_names"] is None
+
+
 class TestPyA2AtomicClientRefresh:
     def test_refresh_with_nothing_provided_raises(
         self,

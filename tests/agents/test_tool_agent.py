@@ -44,6 +44,7 @@ from atomic_agentic.a2a import A2AClientHub
 from atomic_agentic.tools import A2AProxyTool
 from atomic_agentic.models.a2a_sdk import A2AtomicSkillMetadata
 from atomic_agentic.models.parameters import ParamSpec
+from atomic_agentic.utils.core import apply_name_filter, validate_name_filter
 
 
 def _a2a_sdk_skill_metadata(*, remote_name: str) -> A2AtomicSkillMetadata:
@@ -64,10 +65,18 @@ class FakeA2AClientHub(A2AClientHub):
     network construction, matching the FakeMCPClientHub/FakePyA2AtomicClient
     precedent in tests/tools/test_toolify.py."""
 
-    def __init__(self, *, skills: dict[str, A2AtomicSkillMetadata] | None = None) -> None:
-        self._skills = (
+    def __init__(
+        self,
+        *,
+        skills: dict[str, A2AtomicSkillMetadata] | None = None,
+        include_names: list[str] | None = None,
+        exclude_names: list[str] | None = None,
+    ) -> None:
+        raw_skills = (
             {"add": _a2a_sdk_skill_metadata(remote_name="add")} if skills is None else skills
         )
+        resolved_include, resolved_exclude = validate_name_filter(include_names, exclude_names)
+        self._skills = apply_name_filter(raw_skills, resolved_include, resolved_exclude)
         self._card = type("FakeCard", (), {"name": "FakeA2AAgent", "description": ""})()
         self.skill_calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -509,22 +518,6 @@ class TestToolRegistration:
         with pytest.raises(ValueError):
             agent.batch_register(tools=[])
 
-    def test_batch_register_remote_names_without_client_raises(self) -> None:
-        agent = make_agent()
-        with pytest.raises(ValueError, match="remote_names requires a client"):
-            agent.batch_register(tools=[add], remote_names=["foo"])
-
-    def test_batch_register_remote_names_not_found_raises(self) -> None:
-        """remote_names entries absent from the client's list raise ToolRegistrationError."""
-        class _StubClient:
-            def list_invokables(self) -> list[str]:
-                return ["Tool.tests.foo"]
-
-        agent = make_agent()
-        stub = _StubClient()
-        with pytest.raises(ToolRegistrationError, match="not found on client"):
-            agent.batch_register(client=stub, remote_names=["Tool.tests.foo", "Tool.tests.bar"])
-
     def test_batch_register_intraset_duplicate_raises(self) -> None:
         """Duplicate full_name in incoming batch always raises regardless of mode."""
         agent = make_agent()
@@ -579,17 +572,23 @@ class TestToolRegistration:
         assert f"A2AProxyTool.{agent.name}.send_parts" in keys
         assert len(keys) == 3
 
-    def test_batch_register_a2a_client_hub_remote_names_filters_skills_only(self) -> None:
-        """remote_names whitelists skill ids only -- the generic tool is unaffected."""
+    def test_batch_register_hub_include_names_filters_skills_only(self) -> None:
+        """A hub's include_names whitelists skill ids only -- the generic tool is unaffected.
+
+        Filtering is now a hub-construction-time concern (include_names/
+        exclude_names), not a batch_register kwarg -- batch_register simply
+        consumes whatever already-filtered view get_atomic_skills() reports.
+        """
         agent = make_agent()
         hub = FakeA2AClientHub(
             skills={
                 "add": _a2a_sdk_skill_metadata(remote_name="add"),
                 "multiply": _a2a_sdk_skill_metadata(remote_name="multiply"),
-            }
+            },
+            include_names=["add"],
         )
 
-        keys = agent.batch_register(client=hub, remote_names=["add"])
+        keys = agent.batch_register(client=hub)
 
         assert f"A2AProxyTool.{agent.name}.add" in keys
         assert f"A2AProxyTool.{agent.name}.multiply" not in keys
@@ -605,12 +604,10 @@ class TestToolRegistration:
 
         assert keys == [f"A2AProxyTool.{agent.name}.send_parts"]
 
-    def test_batch_register_a2a_client_hub_remote_names_empty_list_raises(self) -> None:
-        """Existing remote_names=[] guard fires unchanged for an A2AClientHub."""
-        agent = make_agent()
-        hub = FakeA2AClientHub()
+    def test_a2a_client_hub_include_names_empty_list_raises(self) -> None:
+        """An empty include_names list is rejected at hub construction, not batch_register."""
         with pytest.raises(ValueError):
-            agent.batch_register(client=hub, remote_names=[])
+            FakeA2AClientHub(include_names=[])
 
     def test_batch_register_a2a_client_hub_registered_tool_invokes_fake_hub(self) -> None:
         """The registered skill-mode tool actually dispatches to the hub."""
@@ -1239,9 +1236,11 @@ class TestScriptedInvokeLoop:
         )
 
         assert agent.invoke({"prompt": "run"}).result == 5
-        # update_blackboard always runs; context_enabled only controls what's shown to the LLM.
+        # update_blackboard always runs regardless of context_enabled, but
+        # context_enabled=False now also means nothing is stored in any
+        # conversation.
         assert len(agent.blackboard) == 2
-        assert len(agent.records) == 1
+        assert agent.get_conversation() == []
 
     def test_context_enabled_stores_tool_agent_turn_with_blackboard_span(self) -> None:
         agent = make_agent(context_enabled=True)
@@ -1255,8 +1254,8 @@ class TestScriptedInvokeLoop:
 
         assert agent.invoke({"prompt": "run"}).result == 5
 
-        assert len(agent.records) == 1
-        turn = agent.records[0]
+        assert len(agent.get_conversation()) == 1
+        turn = agent.get_conversation()[0]
         assert isinstance(turn, ToolAgentRecord)
         assert turn.user_prompt == "run"
         assert turn.generated_response == 5
@@ -1315,12 +1314,12 @@ class TestScriptedInvokeLoop:
         agent.invoke({"prompt": "run"})
 
         assert agent.blackboard
-        assert agent.records
+        assert agent.get_conversation()
 
         agent.clear_memory()
 
         assert agent.blackboard == []
-        assert agent.records == []
+        assert agent.get_conversation() == []
 
     def test_prepare_empty_batch_raises(self) -> None:
         agent = make_agent()
@@ -1485,7 +1484,7 @@ class TestBlackboardPersistenceAndDisplay:
         result = agent.invoke({"prompt": "run"})
 
         assert result.result == "long:abcdefghijklmnopqrstuvwxyz"
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         assert "CACHED STEPS" in content
         assert "result" in content
         assert "long:abcd" in content
@@ -1503,7 +1502,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         assert agent.invoke({"prompt": "run"}).result == 3
 
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         assert "CACHED STEPS" in content
         assert "'args'" in content
         assert "'result'" not in content
@@ -1532,7 +1531,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         assert agent.invoke({"prompt": "run"}).result == "long:abcdefghijklmnopqrstuvwxyz"
 
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         assert "abcdefghijklmnopqrstuvwxyz" in content
         assert "'long:abcd..." in content
 
@@ -1561,7 +1560,7 @@ class TestBlackboardPersistenceAndDisplay:
 
         assert agent.invoke({"prompt": "run"}).result == "long:abcdefghijklmnopqrstuvwxyz"
 
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         response_section = content.split("CACHED STEPS", maxsplit=1)[0]
         cached_section = content.split("CACHED STEPS", maxsplit=1)[1]
         assert "RESPONSE:\nlong:abcde..." in response_section
@@ -1601,7 +1600,7 @@ class TestToolAgentRecordRendering:
 
         assert agent.invoke({"prompt": "run"}).result == 3
 
-        rendered = agent.render_turn(agent.records[0])
+        rendered = agent.render_turn(agent.get_conversation()[0])
 
         assert len(rendered) == 2
         assert [message["role"] for message in rendered] == ["user", "assistant"]
@@ -1630,8 +1629,8 @@ class TestToolAgentRecordRendering:
         )
         assert agent.invoke({"prompt": "second"}).result == 20
 
-        first_rendered = agent.render_turn(agent.records[0])[1]["content"]
-        second_rendered = agent.render_turn(agent.records[1])[1]["content"]
+        first_rendered = agent.render_turn(agent.get_conversation()[0])[1]["content"]
+        second_rendered = agent.render_turn(agent.get_conversation()[1])[1]["content"]
 
         assert "CACHED STEPS [0, 1] PRODUCED" in first_rendered
         assert "CACHED STEPS [2, 3] PRODUCED" in second_rendered
@@ -1691,14 +1690,14 @@ class TestRenderTurnWithFailedSlots:
         agent = self._make_agent_with_failed_slot(peek_at_cache=True)
         # Must not raise -- FAILED slots' slot.result = NO_VAL must never be
         # passed to _preview_blackboard_result.
-        rendered = agent.render_turn(agent.records[0])
+        rendered = agent.render_turn(agent.get_conversation()[0])
         assert rendered is not None
         assert len(rendered) == 2
 
     def test_render_turn_mixed_span_shows_cached_and_failed_sections(self) -> None:
         """Mixed span: both CACHED STEPS and FAILED STEPS sections appear."""
         agent = self._make_agent_with_failed_slot()
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         assert "CACHED STEPS" in content
         assert "FAILED STEPS" in content
         assert "RESPONSE:" in content
@@ -1709,7 +1708,7 @@ class TestRenderTurnWithFailedSlots:
     def test_render_turn_failed_entries_omit_args_include_tool_and_error(self) -> None:
         """FAILED STEPS entries contain tool + error but NOT args."""
         agent = self._make_agent_with_failed_slot()
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         failed_section = content.split("FAILED STEPS")[1]
         assert "fail_tool" in failed_section
         assert "'error'" in failed_section
@@ -1719,7 +1718,7 @@ class TestRenderTurnWithFailedSlots:
     def test_render_turn_failed_error_truncated_by_preview_limit(self) -> None:
         """Error strings in FAILED entries are truncated by blackboard_preview_limit."""
         agent = self._make_agent_with_failed_slot(blackboard_preview_limit=10)
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         failed_section = content.split("FAILED STEPS")[1]
         # The stored error is ToolInvocationError wrapping RuntimeError("intentional failure").
         # str(slot.error) = "Tool.tests.fail_tool: invocation failed: intentional failure" (57 chars).
@@ -1737,7 +1736,7 @@ class TestRenderTurnWithFailedSlots:
         ])
         result = agent.invoke({"prompt": "run"})
         assert result.result == 99
-        content = agent.render_turn(agent.records[0])[1]["content"]
+        content = agent.render_turn(agent.get_conversation()[0])[1]["content"]
         # Return slot executed -> CACHED section present.
         assert "CACHED STEPS" in content
         # Failed steps -> FAILED section present.
@@ -1979,15 +1978,20 @@ class TestToolAgentRecordMetadataContract:
         assert isinstance(blackboard_index, int)
         assert isinstance(error, Exception)
 
-    def test_blackboard_span_is_integer_when_context_disabled(self) -> None:
-        agent = make_agent(context_enabled=False)
+    def test_blackboard_span_is_integer_regardless_of_context_enabled(self) -> None:
+        # context_enabled no longer determines whether span metadata is
+        # computed correctly (that's internal to _build_record_from_task);
+        # it only determines whether the resulting record is stored at all.
+        # Use context_enabled=True here so the record is retained and its
+        # span fields can be inspected via the public get_conversation() API.
+        agent = make_agent(context_enabled=True)
         agent.set_script(
             [[{"tool": return_tool.full_name, "args": {"val": 1}}]]
         )
 
         agent.invoke({"prompt": "run"})
 
-        record = agent.records[0]
+        record = agent.get_conversation()[0]
         assert isinstance(record.blackboard_start, int)
         assert isinstance(record.blackboard_end, int)
 

@@ -13,7 +13,7 @@ import logging
 from dotenv import load_dotenv
 
 from atomic_agentic.agents import BasicAgent, PlanActAgent
-from atomic_agentic.tools.prebuilt import MATH_TOOLS
+from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, EXPONENT_TOOLS
 from atomic_agentic.llm import OpenAIEngine
 
 load_dotenv()
@@ -61,8 +61,8 @@ batch_math_planner = PlanActAgent(
     description="Handles tasks involving math problems and printing solutions",
     llm_engine=llm_engine,
 )
-batch_math_planner.batch_register(MATH_TOOLS)
-
+batch_math_planner.batch_register(BASIC_MATH_TOOLS)
+batch_math_planner.batch_register(EXPONENT_TOOLS)
 
 def print_math_solution(problem: str, solution: str) -> None:
     print(f"Question: {problem}\nAnswer: {solution}")

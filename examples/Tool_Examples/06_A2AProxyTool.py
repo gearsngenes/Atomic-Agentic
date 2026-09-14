@@ -46,7 +46,7 @@ def show_plan(tool: A2AProxyTool) -> None:
     print("transport_mode:", tool.transport_mode)
     print("base_url      :", tool.base_url)
     print("description   :", tool.description)
-    print("signature     :", tool.signature)
+    print("signature     :", tool.fullname_signature)
     print("return_type   :", tool.return_type)
     print("parameters    :")
     for param in tool.parameters:
