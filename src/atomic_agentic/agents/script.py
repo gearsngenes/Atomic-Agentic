@@ -443,6 +443,7 @@ class ScriptAgent(Agent):
                             f"{type(self).__name__}.{self.name}: failed to toolify "
                             f"remote {remote_name!r}: {exc}"
                         ) from exc
+                    self._validate_effective_tool_id(proxy.name)
                     candidates.append((proxy.name, proxy))
 
                 if isinstance(item, A2AClientHub):
@@ -453,6 +454,7 @@ class ScriptAgent(Agent):
                             f"{type(self).__name__}.{self.name}: failed to toolify "
                             f"generic A2A tool: {exc}"
                         ) from exc
+                    self._validate_effective_tool_id(generic_proxy.name)
                     candidates.append((generic_proxy.name, generic_proxy))
 
             elif isinstance(item, AtomicInvokable):
@@ -1210,10 +1212,13 @@ class ScriptAgent(Agent):
         A final round can no longer successfully re-pause: if it still
         writes ``# PAUSE`` anyway, ``_process_generation_output`` rejects
         that as a regen-repair issue instead of granting a continuation --
-        there is deliberately no dedicated "planning round budget
-        exhausted" raise anymore (unlike ``tool_calls_limit``): a round
-        beyond the limit is never reachable, since a final round either
-        completes or exhausts ``regeneration_limit`` first.
+        that path never starts a new round, so it needs no separate raise.
+        A *forced* continuation (a resolution failure in ``prepare()`` or
+        an execution failure in ``_apply_batch_results``) is a different
+        path entirely and is not covered by this method at all -- see
+        ``think()``'s own explicit ``planning_rounds_used`` ceiling check,
+        which is what actually stops a forced continuation from starting a
+        round beyond the limit.
         """
         return (
             self._planning_rounds_limit is not None
@@ -1260,9 +1265,34 @@ class ScriptAgent(Agent):
         has ever completed) is correctly counted the same as any other
         round -- there is no separate signal to consult here, just a plain
         increment every time this hook actually runs.
+
+        Before that increment: an explicit ceiling check. A resolution
+        failure (``prepare()``) or execution failure (``_apply_batch_results``)
+        sets ``task.continue_planning`` directly, bypassing
+        ``_process_generation_output``'s own final-round pause rejection
+        entirely (that check only ever sees a *model-authored* ``# PAUSE``,
+        never a framework-forced continuation) -- without this check, this
+        hook would otherwise generate an unbounded number of rounds beyond
+        ``planning_rounds_limit`` whenever every round happens to end in a
+        forced continuation rather than a clean pause/return. Raises the
+        same way ``regeneration_limit`` exhaustion already does elsewhere
+        in this class -- a real, terminal budget failure, not a regen-repair
+        issue to feed back to the model.
         """
         if task.pending or task.complete:
             return task
+
+        if (
+            self._planning_rounds_limit is not None
+            and task.planning_rounds_used >= self._planning_rounds_limit
+        ):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: planning round budget "
+                f"exhausted ({task.planning_rounds_used}/{self._planning_rounds_limit}) "
+                "-- the prior round ended in a forced continuation (a "
+                "resolution or execution failure), but no further planning "
+                "rounds are permitted."
+            )
 
         task.planning_rounds_used += 1
 
@@ -1273,9 +1303,23 @@ class ScriptAgent(Agent):
         return task
 
     async def async_think(self, task: ScriptAgentTask) -> ScriptAgentTask:
-        """Async mirror of ``think``, using ``_arun_planning_retry_loop``."""
+        """Async mirror of ``think``, using ``_arun_planning_retry_loop``. See
+        ``think()``'s own docstring for why the ceiling check below is
+        needed before the increment."""
         if task.pending or task.complete:
             return task
+
+        if (
+            self._planning_rounds_limit is not None
+            and task.planning_rounds_used >= self._planning_rounds_limit
+        ):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: planning round budget "
+                f"exhausted ({task.planning_rounds_used}/{self._planning_rounds_limit}) "
+                "-- the prior round ended in a forced continuation (a "
+                "resolution or execution failure), but no further planning "
+                "rounds are permitted."
+            )
 
         task.planning_rounds_used += 1
 
@@ -1357,7 +1401,24 @@ class ScriptAgent(Agent):
 
             try:
                 tool = self._resolve_dispatch_tool(slot.tool)
-                resolved.append(tool._args_kwargs_to_dict(*positional, **keyword))
+                # PY_BUILTIN_ALIAS/ATTR_CALL_ALIAS pack the real target
+                # call's own trailing positional args/kwargs as opaque
+                # tuple/dict values instead of splatting them -- splatting
+                # would let a real call's own argument name (e.g. `name`,
+                # `obj`, `method_name`) collide with the dispatcher's own
+                # same-named parameter during binding (see agents/tools.py).
+                if slot.tool == PY_BUILTIN_ALIAS:
+                    resolved.append(
+                        tool._args_kwargs_to_dict(positional[0], tuple(positional[1:]), keyword)
+                    )
+                elif slot.tool == ATTR_CALL_ALIAS:
+                    resolved.append(
+                        tool._args_kwargs_to_dict(
+                            positional[0], positional[1], tuple(positional[2:]), keyword
+                        )
+                    )
+                else:
+                    resolved.append(tool._args_kwargs_to_dict(*positional, **keyword))
             except Exception as e:
                 issues.append(
                     f"{label}: argument(s) do not match {slot.tool!r}'s "
@@ -1446,14 +1507,23 @@ class ScriptAgent(Agent):
                 return f"{ast.unparse(slot.args[0])}.{slot.args[1]}"
             return repr(slot.tool)
 
+        # A raised exception only ever appears here for a slot that was
+        # actually dispatched (asyncio.gather(..., return_exceptions=True)
+        # is the only source of a bare BaseException in raw_results) -- an
+        # rhs_assign/return slot's raw_results entry is always its plain
+        # resolved value (see _gather_batch_results), which may itself
+        # legitimately BE a BaseException instance (e.g. a registered
+        # constant holding an exception object as data). Gating on
+        # is_dispatched_slot prevents misclassifying that legitimate value
+        # as an execution failure.
         failures = [
             f"{_failure_label(batch[idx])} (identifier={batch[idx].identifier!r}): {raw!r}"
             for idx, raw in enumerate(raw_results)
-            if isinstance(raw, BaseException)
+            if is_dispatched_slot(batch[idx]) and isinstance(raw, BaseException)
         ]
 
         for slot, value in zip(batch, raw_results):
-            if isinstance(value, BaseException):
+            if is_dispatched_slot(slot) and isinstance(value, BaseException):
                 slot.exception = value
                 task.failed_statements.append(slot)
                 continue

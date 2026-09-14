@@ -133,10 +133,11 @@ if __name__ == "__main__":
         f"TASK: Write a story based on the following idea: {idea!r}\n"
         "Create a structured outline, then write a first draft. "
         f"Then for {loops} cycles, review and critique the draft then forward the notes to rewrite it."
+        "Return the final draft."
     )
 
     print("\n⇢ Planning + execution …")
-    final_draft_md = orch.invoke({"prompt": task_prompt}).result
+    final_draft_md = str(orch.invoke({"prompt": task_prompt}).result)
 
     print("\n========== FINAL DRAFT ==========\n")
     print(final_draft_md)

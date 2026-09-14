@@ -90,9 +90,18 @@ if _return_param_names != [RETURN_VALUE_FIELD]:
     )
 
 
-def _call_py_builtin(name: str, *args: Any, **kwargs: Any) -> Any:
+def _call_py_builtin(name: str, args: tuple, kwargs: dict) -> Any:
     """
     Dispatch body for ScriptAgent's approved-Python-builtin calls.
+
+    ``args``/``kwargs`` are the real target call's own positional/keyword
+    arguments, passed as opaque packed values (a tuple and a dict) rather
+    than splatted into this function's own parameter list -- a real call's
+    keyword argument named ``name`` would otherwise collide with this
+    dispatcher's own ``name`` parameter during ``Tool``-level binding
+    (the class this collision could produce was a spurious ``TypeError``
+    on an otherwise legitimate call). Unpacked only internally, right at
+    the real invocation.
 
     Raises ``ValueError`` for an excluded or nonexistent builtin name --
     the authoritative runtime gate; ``utils/script.py``'s
@@ -123,10 +132,20 @@ builtin_call_tool = Tool(
 )
 
 
-def _call_attr_method(obj: Any, method_name: str, *args: Any, **kwargs: Any) -> Any:
+def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> Any:
     """
     Dispatch body for ScriptAgent's attribute/method-call slots
     (``obj.method(...)``).
+
+    ``args``/``kwargs`` are the real target method's own positional/keyword
+    arguments, passed as opaque packed values (a tuple and a dict) rather
+    than splatted into this function's own parameter list -- a real call's
+    keyword argument named ``obj``/``method_name`` would otherwise collide
+    with this dispatcher's own same-named parameters during ``Tool``-level
+    binding (e.g. ``node.attach(obj=child)`` would raise a spurious
+    "multiple values for argument 'obj'" ``TypeError`` on an otherwise
+    legitimate call). Unpacked only internally, right at the real
+    invocation.
 
     Raises ``ValueError`` for a dunder method name -- the authoritative
     runtime gate, matching ``_call_py_builtin``'s own posture: dunder names

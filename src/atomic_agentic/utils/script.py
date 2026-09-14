@@ -268,6 +268,20 @@ def _build_call_slot(
         obj_expr = _hoist_calls(
             call_node.func.value, counter=counter, start_index=start_index, hoisted=hoisted
         )
+        # Same dependency-free dry-run validation every other argument
+        # category gets in _process_call_args -- without this, a guaranteed-
+        # bad constant object expression (e.g. `(1/0).to_bytes(...)`) isn't
+        # caught here at parse time; it instead surfaces later as an opaque
+        # resolution failure in prepare().
+        obj_deps = extract_identifiers(obj_expr)
+        if not obj_deps:
+            try:
+                _evaluate_expr(obj_expr, {})
+            except Exception as e:
+                raise BlackboardParseError(
+                    "attribute/method call's object expression is a constant "
+                    f"expression that failed to evaluate: {e!r}"
+                ) from e
         positional, keyword = _process_call_args(
             call_node, counter=counter, start_index=start_index, hoisted=hoisted
         )
@@ -278,6 +292,13 @@ def _build_call_slot(
             kwargs=keyword,
         )
 
+    # call_node.func never itself reaches _hoist_calls in this branch (it's
+    # used verbatim, via ast.unparse, as the tool id -- never hoisted or
+    # rewritten) -- without this explicit call, a lambda/comprehension/
+    # ternary-with-call/await/dunder-attribute used directly as a call's
+    # own callee (e.g. `(lambda x: x)(1)`) would silently produce a
+    # nonsense tool id instead of a clean rejection here.
+    _reject_unsupported_forms(call_node.func)
     tool_name = ast.unparse(call_node.func)
     positional, keyword = _process_call_args(
         call_node, counter=counter, start_index=start_index, hoisted=hoisted
@@ -304,71 +325,24 @@ def _reject_await(node: ast.expr) -> None:
     )
 
 
-def _hoist_calls(
-    node: ast.expr,
-    *,
-    counter: list[int],
-    start_index: int,
-    hoisted: list[CodeStatement],
-) -> ast.expr:
+def _reject_unsupported_forms(node: ast.expr) -> None:
     """
-    Post-order rewrite: replaces every ``Call`` node found anywhere within
-    ``node`` (at any depth -- a ``BinOp`` operand, another call's keyword
-    value, an f-string's embedded expression, a container literal element,
-    ...) with a ``Name`` reference to a newly synthesized, hoisted
-    ``CodeStatement``, appended to ``hoisted`` in discovery order.
+    Walk ``node`` and raise on any of: a ternary (``ast.IfExp``) whose
+    either branch contains a ``Call``, an ``ast.Await`` anywhere, a
+    comprehension/lambda (``UNSUPPORTED_EXPR_LABELS``) anywhere, or an
+    ``ast.Attribute`` whose ``.attr`` matches ``DUNDER_ATTRIBUTE_PATTERN``
+    anywhere. Shared by ``_hoist_calls`` (called on every value it's about
+    to hoist calls within) and ``_build_call_slot``'s plain-tool branch
+    (called on ``call_node.func`` itself, the one position that reaches
+    neither ``_hoist_calls`` nor this scan otherwise -- a plain-tool call's
+    own callee is used verbatim via ``ast.unparse``, never routed through
+    ``_hoist_calls``, so without this explicit call a lambda used directly
+    as a call's own callee, e.g. ``(lambda x: x)(1)``, would silently
+    produce a nonsense ``tool`` id instead of a clean rejection here).
 
-    ``ast.NodeTransformer.generic_visit`` recurses into a call's own
-    children before ``visit_Call`` builds that call's own hoisted slot, so
-    doubly/triply-nested calls flatten correctly bottom-up.
-
-    Rejects (before any hoisting) an ``ast.IfExp`` anywhere in ``node``
-    whose either branch contains a ``Call`` -- both branches would
-    otherwise be hoisted and eagerly executed regardless of the condition,
-    defeating the ternary's short-circuit semantics and wasting tool-call
-    budget on the untaken branch. Checked here, the single choke point
-    every caller (a bare rhs_assign, a top-level call's own keyword
-    arguments via ``_process_call_args``, and any nested/hoisted call's
-    keyword arguments) funnels through -- a per-call-site check would miss
-    a ternary buried inside a call argument.
-
-    Also rejects, at this same choke point, any ``ast.Await`` found
-    anywhere in ``node`` via ``_reject_await`` -- there is no more
-    await-aware execution semantics left in this grammar (concurrency is
-    now inferred from data dependencies alone, bounded by the agent's own
-    ``tool_concurrency_limit``, never signaled by the model), so any use
-    (bare, nested inside a call argument, an RHS assignment target) is
-    rejected uniformly, before hoisting proceeds -- covers arbitrary
-    nesting depth for the same reason the comprehension/lambda scan below
-    does.
-
-    Also rejects, at this same choke point and just as unconditionally as
-    the ``IfExp`` check below, any comprehension (``ast.ListComp``/
-    ``ast.SetComp``/``ast.DictComp``/``ast.GeneratorExp``) or ``ast.Lambda``
-    found anywhere in ``node`` -- regardless of whether it contains a call.
-    Both constructs introduce a local binding scope (a comprehension's loop
-    variable(s), a lambda's parameters) that neither this function nor
-    ``extract_identifiers`` has any awareness of: a call-free comprehension's
-    loop variable would otherwise be misclassified as an unresolved external
-    dependency (a misleading error), and worse, one whose bound name happens
-    to collide with an already-bound identifier elsewhere in the plan would
-    silently resolve against that unrelated value instead of erroring at
-    all. Checked before hoisting proceeds, so this also catches the
-    construct nested arbitrarily deep (inside a call's own keyword argument,
-    inside another hoisted call) -- the scan walks the whole original tree
-    before any rewriting happens.
-
-    Also rejects, at this same choke point, any ``ast.Attribute`` node
-    anywhere in ``node`` whose ``.attr`` matches ``DUNDER_ATTRIBUTE_PATTERN``
-    -- a bare dunder read (``x.__class__``) or one buried mid-chain
-    (``x.__class__.y``), at any depth, including inside a to-be-hoisted
-    call's own object expression. Closes the classic attribute-chaining
-    sandbox-escape class (``().__class__.__bases__[0].__subclasses__()``-
-    style), which the ``{"__builtins__": {}}`` eval lockout elsewhere in
-    this module does not defend against on its own. A method-call's own
-    method name (``call_node.func.attr``) sits outside this scan (it's
-    never itself walked as a standalone ``ast.Attribute`` node here) and is
-    checked separately, in ``_build_call_slot``.
+    Raises before any hoisting/unparsing proceeds -- every check here is
+    unconditional over the whole tree passed in, at any depth, regardless
+    of whether it actually contains a ``Call``.
     """
     for candidate in ast.walk(node):
         if isinstance(candidate, ast.IfExp) and (
@@ -397,6 +371,39 @@ def _hoist_calls(
             raise BlackboardParseError(
                 f"dunder attribute access is not permitted: {ast.unparse(candidate)!r}."
             )
+
+
+def _hoist_calls(
+    node: ast.expr,
+    *,
+    counter: list[int],
+    start_index: int,
+    hoisted: list[CodeStatement],
+) -> ast.expr:
+    """
+    Post-order rewrite: replaces every ``Call`` node found anywhere within
+    ``node`` (at any depth -- a ``BinOp`` operand, another call's keyword
+    value, an f-string's embedded expression, a container literal element,
+    ...) with a ``Name`` reference to a newly synthesized, hoisted
+    ``CodeStatement``, appended to ``hoisted`` in discovery order.
+
+    ``ast.NodeTransformer.generic_visit`` recurses into a call's own
+    children before ``visit_Call`` builds that call's own hoisted slot, so
+    doubly/triply-nested calls flatten correctly bottom-up.
+
+    Rejects (before any hoisting) every form ``_reject_unsupported_forms``
+    covers -- a ternary whose either branch contains a ``Call``, an
+    ``ast.Await`` anywhere, a comprehension/lambda anywhere, and a dunder
+    attribute access anywhere (including inside a to-be-hoisted call's own
+    object expression; closes the classic attribute-chaining sandbox-escape
+    class, ``().__class__.__bases__[0].__subclasses__()``-style, which the
+    ``{"__builtins__": {}}`` eval lockout elsewhere in this module does not
+    defend against on its own). A method-call's own method name
+    (``call_node.func.attr``) sits outside this scan (it's never itself
+    walked as a standalone ``ast.Attribute`` node here) and is checked
+    separately, in ``_build_call_slot``.
+    """
+    _reject_unsupported_forms(node)
 
     def _hoist_one_call(call_node: ast.Call) -> ast.Name:
         """Build one hoisted slot for `call_node` (appended to `hoisted`,
@@ -854,9 +861,21 @@ def validate_references(
             issues.append(f"statement producing {label} calls unregistered tool {slot.tool!r}.")
 
         for name in (*extract_identifiers(slot.args), *extract_identifiers(slot.kwargs)):
-            if (
+            if name in known_tools:
+                # A registered tool id is never a resolvable value -- only
+                # reachable here since attr_call made a bare tool name into
+                # a legal object expression (`sometool.attr()`). Previously
+                # unreachable (a tool name never appeared as a bare Name in
+                # args/kwargs before that mechanism existed), so this was
+                # dead permissiveness, not a real allowance to preserve.
+                issues.append(
+                    f"statement producing {label} references {name!r}, a "
+                    "registered tool id, as a value -- a tool cannot be used "
+                    "as an argument or as the object of an attribute/method "
+                    "call; call it directly instead."
+                )
+            elif (
                 name not in bound
-                and name not in known_tools
                 and name not in known_constants
                 and name not in known_history
             ):

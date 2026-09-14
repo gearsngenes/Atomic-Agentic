@@ -145,7 +145,7 @@ if __name__ == "__main__":
     
     Returns: the latest CODEWRITER draft result
     """
-    result = orchestrator.invoke({"prompt": task}).result
+    result = str(orchestrator.invoke({"prompt": task}).result)
     record = orchestrator.get_conversation()[-1]
 
     out_dir = Path("examples/output_markdowns")

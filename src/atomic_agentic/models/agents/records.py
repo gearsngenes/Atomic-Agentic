@@ -7,8 +7,21 @@ from typing import Any, Dict, Optional
 from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
 from ..results.agents import AgentResult
 from ..results.llm import LLMResult
-from ...utils.script import is_dispatched_slot, render_completed_as_python
 from .blackboard_models import CodeStatement
+
+# is_dispatched_slot/render_completed_as_python are imported locally inside
+# the two methods that use them (render_as_code/tool_usage below), not at
+# module level -- utils.script itself imports CodeStatement from
+# .blackboard_models (a sibling in this same models.agents package), and
+# models/agents/__init__.py imports this module before blackboard_models.
+# A module-level import here would make loading utils.script first (before
+# anything else touches models.agents) deadlock: utils.script's own import
+# of models.agents.blackboard_models triggers this package's __init__.py,
+# which re-enters this module, which would need utils.script to already be
+# fully initialized -- it isn't yet, since we're still inside its own
+# top-level import statement. Deferring to call time breaks the cycle with
+# no behavior change (both functions are only ever invoked well after
+# import time).
 
 __all__ = [
     "LLMRecord",
@@ -285,15 +298,20 @@ class ScriptAgentToolUsage:
     ------
     registered_tool_calls : int
         Dispatched slots that are neither a builtin nor an attribute/method
-        call -- a real registered-tool invocation.
+        call -- a real registered-tool invocation. Counted across both
+        ``statements`` and ``failed_statements`` -- a dispatched call that
+        raised still counted against ``tool_calls_used`` when it ran, so it
+        must still be counted here for the totals to actually match.
 
     builtin_calls : int
         Slots dispatched through the approved-Python-builtin path
-        (``PY_BUILTIN_ALIAS``).
+        (``PY_BUILTIN_ALIAS``). Counted across both ``statements`` and
+        ``failed_statements``, same as ``registered_tool_calls``.
 
     attribute_calls : int
         Slots dispatched through the attribute/method-call path
-        (``ATTR_CALL_ALIAS``).
+        (``ATTR_CALL_ALIAS``). Counted across both ``statements`` and
+        ``failed_statements``, same as ``registered_tool_calls``.
 
     binop_count : int
         Bare-expression (``RHS_ASSIGN_ALIAS``) slots whose stored value is
@@ -413,13 +431,18 @@ class ScriptAgentRecord(AgentRecord):
         not "python") since the underlying grammar isn't guaranteed to
         stay Python-syntax-specific forever.
         """
+        from ...utils.script import render_completed_as_python
+
         return render_completed_as_python(self.statements, show_batches=True)
 
     def tool_usage(self) -> ScriptAgentToolUsage:
         """
         Compute a ``ScriptAgentToolUsage`` snapshot from ``self.statements``
-        in one pass. Pure/derived -- not stored, recomputed on each call.
+        and ``self.failed_statements`` in one pass. Pure/derived -- not
+        stored, recomputed on each call.
         """
+        from ...utils.script import is_dispatched_slot
+
         registered_tool_calls = 0
         builtin_calls = 0
         attribute_calls = 0
@@ -438,6 +461,21 @@ class ScriptAgentRecord(AgentRecord):
                     isinstance(node, ast.BinOp) for node in ast.walk(value)
                 ):
                     binop_count += 1
+            elif is_dispatched_slot(slot):
+                registered_tool_calls += 1
+
+        # failed_statements can only ever contain a dispatched slot (a
+        # registered tool, builtin, or attribute/method call) -- rhs_assign/
+        # return slots are never dispatched, so they can never fail here.
+        # Still counted against the three dispatched-call totals above:
+        # tool_calls_used counts a dispatched call whether it succeeded or
+        # raised, so this snapshot must too, or its own sum-equals-budget
+        # claim would be false whenever any call failed.
+        for slot in self.failed_statements:
+            if slot.tool == PY_BUILTIN_ALIAS:
+                builtin_calls += 1
+            elif slot.tool == ATTR_CALL_ALIAS:
+                attribute_calls += 1
             elif is_dispatched_slot(slot):
                 registered_tool_calls += 1
 

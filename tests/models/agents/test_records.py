@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 
+from atomic_agentic.constants.agents import (
+    ATTR_CALL_ALIAS,
+    PY_BUILTIN_ALIAS,
+    RETURN_ALIAS,
+    RHS_ASSIGN_ALIAS,
+)
 from atomic_agentic.models.agents.records import (
     AgentRecord,
     LLMRecord,
+    ScriptAgentRecord,
+    ScriptAgentToolUsage,
     ThinkingAgentRecord,
     ToolAgentRecord,
 )
-from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, ConstantSpec
+from atomic_agentic.models.agents.blackboard_models import BlackboardSlot, CodeStatement, ConstantSpec
 from atomic_agentic.constants.core import NO_VAL
 from atomic_agentic.models.results import AtomicResult, LLMModelData, LLMResult, TokenUsage
 from atomic_agentic.models.results.agents import AgentResult
@@ -721,3 +730,138 @@ class TestBlackboardSlot:
             "step_dependencies": (0,),
             "await_step": 0,
         }
+
+
+def _name(identifier: str) -> ast.Name:
+    return ast.Name(id=identifier, ctx=ast.Load())
+
+
+def _const(value: object) -> ast.Constant:
+    return ast.Constant(value=value)
+
+
+class TestScriptAgentRecordSerialization:
+    def test_to_dict_handles_every_slot_shape_without_crashing(self) -> None:
+        # Regression guard for the documented slots=True-under-inheritance
+        # super() gotcha (bare super() raises for a slotted dataclass in an
+        # inheritance chain) -- exercises CodeStatement.to_dict() across
+        # every slot shape, plus ScriptAgentRecord.to_dict()'s own super()
+        # call.
+        statements = (
+            CodeStatement(identifier="x", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)}),
+            CodeStatement(identifier="y", tool="add", args=(_name("x"), _const(2))),
+            CodeStatement(identifier="z", tool=PY_BUILTIN_ALIAS, args=("len", _name("y"))),
+            CodeStatement(identifier="w", tool=ATTR_CALL_ALIAS, args=(_name("y"), "method")),
+            CodeStatement(identifier=None, tool=RETURN_ALIAS, kwargs={"val": _name("w")}),
+        )
+        failed = (CodeStatement(identifier="f", tool="add", exception=ValueError("boom")),)
+        record = ScriptAgentRecord(
+            user_prompt="do it", generated_response=5, statements=statements, failed_statements=failed,
+        )
+
+        d = record.to_dict()
+
+        assert len(d["statements"]) == 5
+        assert len(d["failed_statements"]) == 1
+        assert d["failed_statements"][0]["exception"] == repr(ValueError("boom"))
+
+    def test_to_dict_renders_py_builtin_args_as_json_serializable(self) -> None:
+        slot = CodeStatement(identifier="z", tool=PY_BUILTIN_ALIAS, args=("len", _name("y")))
+
+        d = slot.to_dict()
+
+        assert d["args"] == ["len", "y"]
+
+    def test_to_dict_renders_attr_call_args_with_unparsed_object_source(self) -> None:
+        slot = CodeStatement(identifier="w", tool=ATTR_CALL_ALIAS, args=(_name("y"), "method", _const(1)))
+
+        d = slot.to_dict()
+
+        # Every entry still an ast.expr node -- including a plain
+        # ast.Constant -- is rendered via ast.unparse (source text, not the
+        # raw value); only method_name (already a bare str, args[1]) passes
+        # through unchanged.
+        assert d["args"] == ["y", "method", "1"]
+
+    def test_render_as_code_groups_by_batch(self) -> None:
+        a = CodeStatement(identifier="a", tool="tool_a", batch_index=0)
+        b = CodeStatement(identifier="b", tool="tool_b", batch_index=1)
+        record = ScriptAgentRecord(user_prompt="do it", generated_response=None, statements=(a, b))
+
+        rendered = record.render_as_code()
+
+        assert "# Batch 0:" in rendered
+        assert "# Batch 1:" in rendered
+
+
+class TestScriptAgentToolUsage:
+    def test_computes_all_five_metrics_from_statements(self) -> None:
+        binop_val = ast.parse("1 + 2", mode="eval").body
+        statements = (
+            CodeStatement(identifier="a", tool="add"),
+            CodeStatement(identifier="b", tool="add"),
+            CodeStatement(identifier="c", tool=PY_BUILTIN_ALIAS, args=("len", _name("a"))),
+            CodeStatement(identifier="d", tool=ATTR_CALL_ALIAS, args=(_name("a"), "method")),
+            CodeStatement(identifier="e", tool=RHS_ASSIGN_ALIAS, kwargs={"val": binop_val}),
+            CodeStatement(identifier="f", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)}),
+        )
+        record = ScriptAgentRecord(user_prompt="do it", generated_response=None, statements=statements)
+
+        usage = record.tool_usage()
+
+        assert usage == ScriptAgentToolUsage(
+            registered_tool_calls=2, builtin_calls=1, attribute_calls=1,
+            binop_count=1, rhs_assignment_count=2,
+        )
+
+    def test_failed_registered_tool_call_is_counted(self) -> None:
+        # tool_usage() must count a failed dispatched call (from
+        # failed_statements) the same as a succeeded one, since
+        # tool_calls_used counted it unconditionally when it ran.
+        statements = (CodeStatement(identifier="a", tool="add"),)
+        failed = (CodeStatement(identifier="b", tool="add", exception=RuntimeError("boom")),)
+        record = ScriptAgentRecord(
+            user_prompt="do it", generated_response=None, statements=statements, failed_statements=failed,
+        )
+
+        usage = record.tool_usage()
+
+        assert usage.registered_tool_calls == 2
+
+    def test_failed_builtin_and_attr_calls_are_counted(self) -> None:
+        failed = (
+            CodeStatement(identifier="a", tool=PY_BUILTIN_ALIAS, args=("len", _name("x")), exception=ValueError()),
+            CodeStatement(identifier="b", tool=ATTR_CALL_ALIAS, args=(_name("x"), "m"), exception=ValueError()),
+        )
+        record = ScriptAgentRecord(user_prompt="do it", generated_response=None, failed_statements=failed)
+
+        usage = record.tool_usage()
+
+        assert usage.builtin_calls == 1
+        assert usage.attribute_calls == 1
+
+    def test_failed_statements_never_affect_binop_or_rhs_assignment_counts(self) -> None:
+        statements = (
+            CodeStatement(identifier="a", tool=RHS_ASSIGN_ALIAS, kwargs={"val": _const(1)}),
+        )
+        without_failures = ScriptAgentRecord(
+            user_prompt="do it", generated_response=None, statements=statements,
+        )
+        with_failures = ScriptAgentRecord(
+            user_prompt="do it", generated_response=None, statements=statements,
+            failed_statements=(CodeStatement(identifier="b", tool="add", exception=ValueError()),),
+        )
+
+        assert without_failures.tool_usage().binop_count == with_failures.tool_usage().binop_count
+        assert (
+            without_failures.tool_usage().rhs_assignment_count
+            == with_failures.tool_usage().rhs_assignment_count
+        )
+
+    def test_empty_record_has_all_zero_metrics(self) -> None:
+        record = ScriptAgentRecord(user_prompt="do it", generated_response=None)
+
+        assert record.tool_usage() == ScriptAgentToolUsage(
+            registered_tool_calls=0, builtin_calls=0, attribute_calls=0,
+            binop_count=0, rhs_assignment_count=0,
+        )

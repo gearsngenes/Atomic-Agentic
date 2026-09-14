@@ -81,7 +81,7 @@ def _pick_provider() -> str:
         return env_choice
     return input(
         "Pick provider: (o)penai, (g)emini, (m)istral, (a)nthropic, "
-        "(l)lamacpp-phi4, gemma(3), (p)hi4, granite(4).1, (t)lite: "
+        "gemma(3), (p)hi4, granite(4).1, (t)lite: "
     ).strip().lower()
 
 

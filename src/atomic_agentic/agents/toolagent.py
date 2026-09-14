@@ -119,6 +119,7 @@ from datetime import datetime
 import logging
 import re
 import json
+import warnings
 from typing import (
     Any,
     Callable,
@@ -352,7 +353,24 @@ class ToolAgent(Agent, ABC):
             Whether rendered assistant history uses the raw generated
             response or the final post-``post_invoke`` result. Defaults to
             ``"raw"``.
+
+        Emits a ``FutureWarning`` on every construction: the ``ToolAgent``
+        family (this class, ``PlanActAgent``, ``ReActAgent``) is superseded
+        by ``ScriptAgent``. No behavior changes as a result of this warning
+        -- purely an additive signal.
         """
+        warnings.warn(
+            f"{type(self).__name__} is part of Atomic-Agentic's legacy "
+            "ToolAgent family (JSON-based tool-call planning, parsed and "
+            "repaired as free text). This approach is superseded by "
+            "ScriptAgent, which plans using native Python call statements "
+            "instead of loose JSON strings; any future agent that still "
+            "needs JSON-shaped output should use provider-native "
+            "structured output (LLMEngine's output_structure) rather than "
+            "hand-rolled parsing. Consider migrating to ScriptAgent.",
+            FutureWarning,
+            stacklevel=3,
+        )
         super().__init__(
             name=name,
             namespace=namespace,
