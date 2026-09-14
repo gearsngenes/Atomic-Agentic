@@ -107,16 +107,23 @@ class OpenAITokenUsage(TokenUsage):
     """
     OpenAI Responses API token-usage details.
 
-    ``cached_tokens`` is an input-token subset and is not additive to
-    ``input_tokens``.
+    ``cached_tokens`` and ``cache_write_tokens`` are both input-token
+    subsets and are not additive to ``input_tokens``: ``cached_tokens`` is
+    the portion of this call's input that was served from an existing
+    prompt-cache entry (a reuse), while ``cache_write_tokens`` is the
+    portion newly stored into the cache by this call (seeding a future
+    reuse) — a call's input tokens land in one bucket or the other, not
+    both.
     """
 
     cached_tokens: int | None = None
+    cache_write_tokens: int | None = None
     reasoning_tokens: int | None = None
 
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
         self._validate_optional_token_count("cached_tokens", self.cached_tokens)
+        self._validate_optional_token_count("cache_write_tokens", self.cache_write_tokens)
         self._validate_optional_token_count("reasoning_tokens", self.reasoning_tokens)
 
 

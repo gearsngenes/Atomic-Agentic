@@ -3,10 +3,13 @@
 
 from typing import Annotated
 from pydantic import Field
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP as MCPServer  # mcp < 2
+except ImportError:
+    from mcp.server.mcpserver import MCPServer  # mcp >= 2
 import math
 
-mcp = FastMCP(name="Demo Mathematics Server")
+mcp = MCPServer(name="Demo Mathematics Server")
 
 @mcp.tool()
 def mul(

@@ -21,14 +21,14 @@ classifiers = [
 
 # Core deps — direct runtime imports only.
 dependencies = [
-  "mcp>=1.25,<2",
+  "mcp>=1.25,<3",
   "python-a2a>=0.5.10,<0.6",
   "a2a-sdk[grpc]>=1.1.2,<2",
   "httpx>=0.28.1,<0.29",
-  "openai>=2.15,<3",
+  "openai>=2.45,<4",
   "google-genai>=2.10.0,<3",
   "mistralai>=2.6.0,<3",
-  "anthropic>=0.116.0,<1.0.0",
+  "anthropic>=0.116.0,<2",
   "litellm>=1.91.1,<3",
 ]
 

@@ -5,9 +5,12 @@ transport, exercising the real anyio-based mcp SDK client/server plumbing
 (no mocks) that test_client_hub.py's monkeypatched fakes cannot reach.
 """
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP as MCPServer  # mcp < 2
+except ImportError:
+    from mcp.server.mcpserver import MCPServer  # mcp >= 2
 
-mcp = FastMCP(name="AA Test Fixture Stdio Server")
+mcp = MCPServer(name="AA Test Fixture Stdio Server")
 
 
 @mcp.tool()

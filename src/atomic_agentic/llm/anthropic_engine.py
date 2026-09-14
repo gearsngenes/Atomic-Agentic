@@ -311,12 +311,21 @@ class AnthropicEngine(LLMEngine):
         }
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
+
+        # anthropic>=1.0 dropped temperature/top_p/top_k from messages.create()'s
+        # top-level signature; extra_body is the SDK's supported passthrough for
+        # provider params it no longer validates client-side, and is accepted
+        # identically on anthropic 0.x and 1.x.
+        extra_body: dict[str, Any] = {}
         if self.temperature is not None:
-            payload["temperature"] = self.temperature
+            extra_body["temperature"] = self.temperature
         if self.top_p is not None:
-            payload["top_p"] = self.top_p
+            extra_body["top_p"] = self.top_p
         if self.top_k is not None:
-            payload["top_k"] = self.top_k
+            extra_body["top_k"] = self.top_k
+        if extra_body:
+            payload["extra_body"] = extra_body
+
         if self.stop_sequences is not None:
             payload["stop_sequences"] = self.stop_sequences
         if self.thinking_config is not None:
