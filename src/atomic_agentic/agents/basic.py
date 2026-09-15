@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Optional
 
 import logging
 
@@ -49,7 +49,6 @@ class BasicAgent(Agent):
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
-        assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
         # 1. Normalize the role prompt and discover its placeholders.
         config = normalize_role_prompt(role_prompt, self.DEFAULT_ROLE_PROMPT)
@@ -69,7 +68,6 @@ class BasicAgent(Agent):
             extra_parameters=role_params,
             records_window=records_window,
             response_preview_limit=response_preview_limit,
-            assistant_response_source=assistant_response_source,
         )
 
         # 3. Register the role prompt.

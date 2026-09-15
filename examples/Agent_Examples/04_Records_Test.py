@@ -31,14 +31,13 @@ def main() -> None:
     agent = BasicAgent(
         name="basic_turn_demo_agent",
         namespace="examples",
-        description="Basic Agent demo showing raw/final turn rendering.",
+        description="Basic Agent demo showing canonical turn history and rendering.",
         llm_engine=engine,
         role_prompt="You are concise. Answer in one short sentence.",
         context_enabled=True,
         records_window=None,
         post_invoke=summarize_result,
         response_preview_limit=300,
-        assistant_response_source="raw",
     )
 
     result = agent.invoke(
@@ -60,22 +59,8 @@ def main() -> None:
         print("final_response:")
         pprint.pp(turn.final_result)
 
-    print("\n=== Rendered turn using raw assistant response ===")
+    print("\n=== Rendered turn ===")
     pprint.pp(agent.render_turn(agent.get_conversation()[0]))
-
-    print("\n=== Rendered turn using final assistant response ===")
-    # assistant_response_source is read-only after construction; build a view agent for the alternate source
-    final_view = BasicAgent(
-        name="basic_turn_demo_agent",
-        namespace="examples",
-        description="Basic Agent demo showing raw/final turn rendering.",
-        llm_engine=engine,
-        role_prompt="You are concise. Answer in one short sentence.",
-        post_invoke=summarize_result,
-        response_preview_limit=300,
-        assistant_response_source="final",
-    )
-    pprint.pp(final_view.render_turn(agent.get_conversation()[0]))
 
     print("\n=== Messages that would be sent on the next invoke ===")
     next_messages = agent.build_messages(

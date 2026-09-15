@@ -6,7 +6,6 @@ from typing import (
     Callable,
     Dict,
     List,
-    Literal,
     Mapping,
     Optional,
 )
@@ -185,7 +184,6 @@ class Agent(AtomicInvokable, ABC):
         extra_parameters: list[str] | list[ParamSpec] | None = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
-        assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
 
         # ── Pre-invoke ───────────────────────────────────────────────────────
@@ -313,10 +311,6 @@ class Agent(AtomicInvokable, ABC):
         else:
             self._response_preview_limit = response_preview_limit
 
-        if not isinstance(assistant_response_source, str) or assistant_response_source not in {"raw", "final"}:
-            raise AgentError("assistant_response_source must be either 'raw' or 'final'.")
-        self._assistant_response_source = assistant_response_source
-
         super().__init__(
             name=name,
             namespace=namespace,
@@ -427,11 +421,6 @@ class Agent(AtomicInvokable, ABC):
         return self._response_preview_limit
 
     @property
-    def assistant_response_source(self) -> Literal["raw", "final"]:
-        """Whether rendered assistant history uses raw or final turn responses."""
-        return self._assistant_response_source
-
-    @property
     def active_conversation(self) -> str:
         """Key of the currently active conversation."""
         return self._active_conversation
@@ -480,28 +469,19 @@ class Agent(AtomicInvokable, ABC):
     def render_turn(self, turn: AgentRecord) -> List[Dict[str, str]]:
         """Render one canonical ``AgentRecord`` into LLM-facing messages.
 
-        The assistant content is selected from either ``turn.generated_response``
-        or ``turn.final_result.result`` according to ``assistant_response_source``.
-        ``response_preview_limit`` is applied only to the rendered text.
-        ``turn.user_prompt`` is used verbatim as the user message content — it
-        is already a fully-resolved string, not a template.
+        The assistant content is always ``turn.generated_response`` — the
+        LLM's own raw output, never ``post_invoke``'s transformed
+        ``final_result``. ``response_preview_limit`` is applied only to the
+        rendered text. ``turn.user_prompt`` is used verbatim as the user
+        message content — it is already a fully-resolved string, not a
+        template.
         """
         if not isinstance(turn, AgentRecord):
             raise AgentInvocationError(
                 f"render_turn expected AgentRecord, got {type(turn)!r}"
             )
 
-        if self._assistant_response_source == "final" and turn.final_result is None:
-            raise AgentInvocationError(
-                "render_turn: assistant_response_source='final' but this record's "
-                "final_result is None (record is a draft and has not been committed)."
-            )
-        response = (
-            turn.generated_response
-            if self._assistant_response_source == "raw"
-            else turn.final_result.result
-        )
-        response_text = str(response)
+        response_text = str(turn.generated_response)
 
         if (
             self._response_preview_limit is not None
@@ -1298,7 +1278,6 @@ class Agent(AtomicInvokable, ABC):
             "context_enabled": self.context_enabled,
             "records_window": self.records_window,
             "response_preview_limit": self.response_preview_limit,
-            "assistant_response_source": self.assistant_response_source,
             "conversations": {
                 key: [r.to_dict() for r in records]
                 for key, records in self._conversations.items()},

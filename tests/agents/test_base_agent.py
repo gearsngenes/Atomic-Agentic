@@ -281,7 +281,6 @@ def make_agent(
     post_result_key: str | None = None,
     system_prompt: str = ROLE_PROMPT,
     response_preview_limit: int | None = None,
-    assistant_response_source: str = "raw",
 ) -> _EchoAgent:
     return _EchoAgent(
         name="writer_agent",
@@ -295,7 +294,6 @@ def make_agent(
         post_invoke=post_invoke,
         post_result_key=post_result_key,
         response_preview_limit=response_preview_limit,
-        assistant_response_source=assistant_response_source,
     )
 
 
@@ -1109,12 +1107,6 @@ class TestAgentFrozenRenderingProperties:
         with pytest.raises(AttributeError):
             agent.response_preview_limit = 100  # type: ignore[misc]
 
-    def test_assistant_response_source_is_frozen(self) -> None:
-        agent = make_agent()
-
-        with pytest.raises(AttributeError):
-            agent.assistant_response_source = "final"  # type: ignore[misc]
-
     def test_response_preview_limit_construction_rejects_zero(self) -> None:
         with pytest.raises(AgentError, match="response_preview_limit"):
             make_agent(response_preview_limit=0)
@@ -1126,14 +1118,6 @@ class TestAgentFrozenRenderingProperties:
     def test_response_preview_limit_construction_rejects_non_int(self) -> None:
         with pytest.raises(AgentError, match="response_preview_limit"):
             make_agent(response_preview_limit="100")  # type: ignore[arg-type]
-
-    def test_assistant_response_source_construction_rejects_bad_value(self) -> None:
-        with pytest.raises(AgentError, match="assistant_response_source"):
-            make_agent(assistant_response_source="both")  # type: ignore[arg-type]
-
-    def test_assistant_response_source_construction_rejects_non_string(self) -> None:
-        with pytest.raises(AgentError, match="assistant_response_source"):
-            make_agent(assistant_response_source=1)  # type: ignore[arg-type]
 
     def test_attach_api_removed(self) -> None:
         agent = make_agent()
@@ -1785,24 +1769,6 @@ class TestAgentRecordsNeverStoredWhenContextDisabled:
         # Second call's messages should have no prior-turn content
         second_call = engine.calls[1]
         assert len(second_call) == 2  # just system + user from _MinimalAgent
-
-
-class TestAgentRenderTurnGuards:
-    """Tests for render_turn defensive checks."""
-
-    def test_render_turn_final_source_on_draft_record_raises(self) -> None:
-        engine = FakeLLMEngine(response_fn=echo_latest_user())
-        agent = make_agent(
-            engine=engine,
-            assistant_response_source="final",
-        )
-        draft = AgentRecord(
-            user_prompt="hello",
-            generated_response="raw text",
-            final_result=None,
-        )
-        with pytest.raises(AgentInvocationError, match="final_result is None"):
-            agent.render_turn(draft)
 
 
 class TestAgentDescriptionOverrideRemoval:

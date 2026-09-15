@@ -13,7 +13,7 @@ using whatever thoughts exist, never a raise.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Optional
 
 from .base import Agent
 from .basic import BasicAgent
@@ -81,7 +81,6 @@ class SelfAskAgent(BasicAgent):
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
-        assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
         """
         Parameters
@@ -140,7 +139,6 @@ class SelfAskAgent(BasicAgent):
             extra_parameters=combined_extra_params,
             records_window=records_window,
             response_preview_limit=response_preview_limit,
-            assistant_response_source=assistant_response_source,
         )
 
         self._system_prompts["role"] = role_config
