@@ -217,9 +217,12 @@ class TestLLMResult:
         assert d["token_usage"] == result.token_usage.to_dict()
         assert d["model_data"] == result.model_data.to_dict()
 
-    def test_rejects_non_string_result(self) -> None:
+    def test_rejects_unsupported_result_type(self) -> None:
+        # int/float/bool/None are all valid JSON-decodable result types now
+        # (widened alongside response-schema-basic-agent's addendum) -- a
+        # set is genuinely still outside the allowed closure.
         with pytest.raises(TypeError, match="result"):
-            self._make(result=123)
+            self._make(result={1, 2, 3})
 
     def test_rejects_wrong_token_usage_type(self) -> None:
         with pytest.raises(TypeError, match="token_usage"):
@@ -233,3 +236,19 @@ class TestLLMResult:
         result = self._make(result={"a": 1})
         assert result.result == {"a": 1}
         assert result.to_dict()["result"] == {"a": 1}
+
+    def test_accepts_int_result(self) -> None:
+        result = self._make(result=7)
+        assert result.result == 7
+
+    def test_accepts_float_result(self) -> None:
+        result = self._make(result=3.14)
+        assert result.result == 3.14
+
+    def test_accepts_bool_result(self) -> None:
+        result = self._make(result=True)
+        assert result.result is True
+
+    def test_accepts_none_result(self) -> None:
+        result = self._make(result=None)
+        assert result.result is None

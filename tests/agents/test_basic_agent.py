@@ -237,6 +237,100 @@ class TestBasicAgentAsyncInvoke:
         assert agent.get_conversation()[0].llm_records[0].system_prompt_name == "role"
 
 
+class TestBasicAgentResponseSchema:
+    def test_defaults_to_none(self) -> None:
+        agent = make_basic_agent()
+        assert agent.response_schema is None
+
+    def test_stored_as_given(self) -> None:
+        schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+        agent = make_basic_agent(response_schema=schema)
+        assert agent.response_schema == schema
+
+    def test_has_no_setter(self) -> None:
+        agent = make_basic_agent()
+        with pytest.raises(AttributeError):
+            agent.response_schema = {"type": "object"}  # type: ignore[misc]
+
+    def test_rejects_non_mapping_non_none(self) -> None:
+        with pytest.raises(AgentError, match="response_schema"):
+            make_basic_agent(response_schema="not a dict")  # type: ignore[arg-type]
+
+    def test_act_forwards_schema_into_output_structure(self) -> None:
+        engine = FakeLLMEngine(response_fn=lambda msgs: "plain text")
+        schema = {"type": "object"}
+        agent = make_basic_agent(engine=engine, response_schema=schema)
+
+        agent.invoke({"prompt": "hi"})
+
+        assert engine.payloads[-1]["output_structure"] == schema
+
+    def test_act_omits_schema_when_unset(self) -> None:
+        engine = FakeLLMEngine(response_fn=lambda msgs: "plain text")
+        agent = make_basic_agent(engine=engine)
+
+        agent.invoke({"prompt": "hi"})
+
+        assert engine.payloads[-1]["output_structure"] is None
+
+    def test_act_accepts_dict_result_when_schema_set(self) -> None:
+        engine = FakeLLMEngine(responses=[{"answer": 42}])
+        agent = make_basic_agent(engine=engine, response_schema={"type": "object"})
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.result == {"answer": 42}
+
+    def test_act_accepts_list_result_when_schema_set(self) -> None:
+        engine = FakeLLMEngine(responses=[["a", "b"]])
+        agent = make_basic_agent(engine=engine, response_schema={"type": "array"})
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.result == ["a", "b"]
+
+    def test_act_accepts_int_result_when_schema_set(self) -> None:
+        engine = FakeLLMEngine(responses=[7])
+        agent = make_basic_agent(engine=engine, response_schema={"type": "integer"})
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.result == 7
+
+    def test_act_accepts_float_result_when_schema_set(self) -> None:
+        engine = FakeLLMEngine(responses=[3.14])
+        agent = make_basic_agent(engine=engine, response_schema={"type": "number"})
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.result == 3.14
+
+    def test_act_accepts_bool_result_when_schema_set(self) -> None:
+        engine = FakeLLMEngine(responses=[True])
+        agent = make_basic_agent(engine=engine, response_schema={"type": "boolean"})
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.result is True
+
+    def test_act_accepts_none_result_when_schema_set(self) -> None:
+        engine = FakeLLMEngine(responses=[None])
+        agent = make_basic_agent(engine=engine, response_schema={"type": "null"})
+
+        result = agent.invoke({"prompt": "hi"})
+
+        assert result.result is None
+
+    def test_async_act_forwards_schema_and_accepts_structured_result(self) -> None:
+        engine = FakeLLMEngine(responses=[{"answer": 42}])
+        agent = make_basic_agent(engine=engine, response_schema={"type": "object"})
+
+        result = asyncio.run(agent.async_invoke({"prompt": "hi"}))
+
+        assert engine.payloads[-1]["output_structure"] == {"type": "object"}
+        assert result.result == {"answer": 42}
+
+
 class TestBasicAgentSerialization:
     def test_to_dict_includes_role_prompt_convenience_key(self) -> None:
         agent = make_basic_agent(role_prompt="Custom.")

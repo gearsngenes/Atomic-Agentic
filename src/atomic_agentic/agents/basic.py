@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import logging
 
-from ..exceptions import AgentInvocationError
+from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..models.agents.prompts import PromptConfig
@@ -49,6 +49,7 @@ class BasicAgent(Agent):
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
+        response_schema: dict[str, Any] | None = None,
     ) -> None:
         # 1. Normalize the role prompt and discover its placeholders.
         config = normalize_role_prompt(role_prompt, self.DEFAULT_ROLE_PROMPT)
@@ -73,6 +74,16 @@ class BasicAgent(Agent):
         # 3. Register the role prompt.
         self._system_prompts["role"] = config
 
+        # 4. Validate and store response_schema -- no deeper validation
+        # (no JSON-Schema key checks), matching LLMEngine's own
+        # output_structure contract.
+        if response_schema is not None and not isinstance(response_schema, Mapping):
+            raise AgentError(
+                f"{type(self).__name__}.response_schema must be a dict/Mapping "
+                f"or None, got {type(response_schema).__name__}."
+            )
+        self._response_schema = response_schema
+
     # ------------------------------------------------------------------ #
     # Role prompt API
     # ------------------------------------------------------------------ #
@@ -80,6 +91,12 @@ class BasicAgent(Agent):
     def role_prompt(self) -> str:
         """Role prompt template string."""
         return self._system_prompts["role"].template
+
+    @property
+    def response_schema(self) -> dict[str, Any] | None:
+        """Structured-output schema applied to this agent's replies;
+        ``None`` requests plain text. Frozen at construction -- no setter."""
+        return self._response_schema
 
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
@@ -121,11 +138,14 @@ class BasicAgent(Agent):
         task complete.
         """
         messages = self.render_task(task)
-        engine_result = self._llm_engine.invoke({"messages": messages})
+        engine_result = self._llm_engine.invoke({
+            "messages": messages,
+            "output_structure": self._response_schema,
+        })
         text = engine_result.result
-        if not isinstance(text, str):
+        if not isinstance(text, (str, int, float, bool, list, dict, type(None))):
             raise AgentInvocationError(
-                f"LLM engine returned non-string result (type={type(text).__name__})."
+                f"LLM engine returned unexpected result type (type={type(text).__name__})."
             )
         llm_record = LLMRecord(
             messages=list(task.task_messages),
@@ -144,11 +164,14 @@ class BasicAgent(Agent):
         on ``Agent``'s inherited ``asyncio.to_thread``-wrapping default.
         """
         messages = self.render_task(task)
-        engine_result = await self._llm_engine.async_invoke({"messages": messages})
+        engine_result = await self._llm_engine.async_invoke({
+            "messages": messages,
+            "output_structure": self._response_schema,
+        })
         text = engine_result.result
-        if not isinstance(text, str):
+        if not isinstance(text, (str, int, float, bool, list, dict, type(None))):
             raise AgentInvocationError(
-                f"LLM engine returned non-string result (type={type(text).__name__})."
+                f"LLM engine returned unexpected result type (type={type(text).__name__})."
             )
         llm_record = LLMRecord(
             messages=list(task.task_messages),
@@ -167,4 +190,5 @@ class BasicAgent(Agent):
         """Return a diagnostic snapshot including the role prompt."""
         d = super().to_dict()
         d["role_prompt"] = self.role_prompt
+        d["response_schema"] = self.response_schema
         return d

@@ -429,7 +429,7 @@ class LiteLLMEngine(LLMEngine):
 
     def _extract_result(
         self, response: Any, requested_structured: bool
-    ) -> str | list[Any] | dict[str, Any]:
+    ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
         Return the first choice's message content, or ``""`` if empty. When
         `requested_structured` is True, the text is parsed via `json.loads`;

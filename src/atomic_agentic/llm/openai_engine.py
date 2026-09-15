@@ -461,7 +461,7 @@ class OpenAIEngine(LLMEngine):
 
     def _extract_result(
         self, response: Any, requested_structured: bool
-    ) -> str | list[Any] | dict[str, Any]:
+    ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
         Extract the assistant's textual or structured reply from a Responses
         API response object.

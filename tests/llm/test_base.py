@@ -30,7 +30,7 @@ class TestLLMEngineConstruction:
             "requesting provider-native, schema-constrained structured "
             "output for this call. None (default) requests plain text."
         )
-        assert engine.return_type == "str | list[Any] | dict[str, Any]"
+        assert engine.return_type == "str | int | float | bool | list[Any] | dict[str, Any] | None"
         assert [(param.name, param.kind, param.type) for param in engine.parameters] == [
             ("messages", "POSITIONAL_OR_KEYWORD", ("list[dict[str, str]]",)),
             ("output_structure", "KEYWORD_ONLY", ("None", "dict[str, Any]")),
@@ -148,8 +148,11 @@ class TestLLMEngineMessagesAndInvoke:
         with pytest.raises(LLMEngineError, match="role.*content"):
             engine.invoke({"messages": [message]})  # type: ignore[list-item]
 
-    def test_extract_text_must_return_string(self) -> None:
-        engine = FakeLLMEngine(responses=[123])
+    def test_extract_result_rejects_unsupported_type(self) -> None:
+        # int/float/bool/None are all valid JSON-decodable result types now
+        # (widened alongside response-schema-basic-agent's addendum) -- a
+        # set is genuinely still outside the allowed closure.
+        engine = FakeLLMEngine(responses=[{1, 2, 3}])
 
         with pytest.raises(LLMEngineError, match="must return str"):
             engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})
@@ -400,8 +403,48 @@ class TestLLMEngineOutputStructure:
         assert result.result == {"a": 1}
         assert isinstance(result.result, dict)
 
-    def test_extract_still_rejects_non_str_list_dict_result(self) -> None:
-        engine = FakeLLMEngine(responses=[123])
+    def test_extract_accepts_int_result(self) -> None:
+        engine = FakeLLMEngine(responses=[7])
+
+        result = engine.invoke(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "output_structure": {"type": "integer"},
+            }
+        )
+
+        assert result.result == 7
+        assert isinstance(result.result, int)
+
+    def test_extract_accepts_bool_result(self) -> None:
+        engine = FakeLLMEngine(responses=[True])
+
+        result = engine.invoke(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "output_structure": {"type": "boolean"},
+            }
+        )
+
+        assert result.result is True
+
+    def test_extract_accepts_none_result(self) -> None:
+        engine = FakeLLMEngine(responses=[None])
+
+        result = engine.invoke(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "output_structure": {"type": "null"},
+            }
+        )
+
+        assert result.result is None
+
+    def test_extract_still_rejects_unsupported_type(self) -> None:
+        # int/float/bool/None are all valid JSON-decodable result types now
+        # (widened alongside response-schema-basic-agent's addendum) -- a
+        # set is genuinely still outside the allowed closure.
+        engine = FakeLLMEngine(responses=[{1, 2, 3}])
 
         with pytest.raises(LLMEngineError, match="must return str"):
             engine.invoke({"messages": [{"role": "user", "content": "Hello"}]})

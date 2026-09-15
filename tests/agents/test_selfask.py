@@ -26,6 +26,7 @@ def make_agent(
     max_thinking_rounds: int = 3,
     thoughts_per_round: int = 1,
     context_enabled: bool = True,
+    response_schema: dict[str, Any] | None = None,
 ) -> SelfAskAgent:
     return SelfAskAgent(
         name="tests",
@@ -37,6 +38,7 @@ def make_agent(
         max_thinking_rounds=max_thinking_rounds,
         thoughts_per_round=thoughts_per_round,
         context_enabled=context_enabled,
+        response_schema=response_schema,
     )
 
 
@@ -68,6 +70,29 @@ class TestConstruction:
     def test_thoughts_per_round_non_int_raises(self) -> None:
         with pytest.raises(AgentError, match="thoughts_per_round"):
             make_agent(thoughts_per_round=1.5)  # type: ignore[arg-type]
+
+
+class TestSelfAskResponseSchema:
+    def test_defaults_to_none(self) -> None:
+        agent = make_agent()
+        assert agent.response_schema is None
+
+    def test_stored_as_given(self) -> None:
+        schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+        agent = make_agent(response_schema=schema)
+        assert agent.response_schema == schema
+
+    def test_rejects_non_mapping_non_none(self) -> None:
+        with pytest.raises(AgentError, match="response_schema"):
+            make_agent(response_schema="not a dict")  # type: ignore[arg-type]
+
+    def test_reply_phase_forwards_schema(self) -> None:
+        engine = FakeLLMEngine(["final reply"])
+        agent = make_agent(engine=engine, max_thinking_rounds=0, response_schema={"type": "object"})
+
+        agent.invoke({"prompt": "hello"})
+
+        assert engine.payloads[-1]["output_structure"] == {"type": "object"}
 
     def test_role_prompt_and_thinking_instructions_incompatible_collision_raises(self) -> None:
         role = PromptConfig(

@@ -13,7 +13,7 @@ using whatever thoughts exist, never a raise.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from .base import Agent
 from .basic import BasicAgent
@@ -81,6 +81,7 @@ class SelfAskAgent(BasicAgent):
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
+        response_schema: dict[str, Any] | None = None,
     ) -> None:
         """
         Parameters
@@ -101,6 +102,10 @@ class SelfAskAgent(BasicAgent):
         thoughts_per_round : int
             Max thoughts kept per round; excess parsed thoughts are
             silently truncated. Must be a positive int (``>= 1``).
+        response_schema : dict[str, Any] | None
+            Structured-output schema applied to the reply phase only --
+            the thinking phase stays free-form regardless. Same contract
+            as ``BasicAgent``'s.
         """
         if max_thinking_rounds is None or type(max_thinking_rounds) is not int or max_thinking_rounds < 0:
             raise AgentError(
@@ -148,6 +153,16 @@ class SelfAskAgent(BasicAgent):
         self._max_thinking_rounds = max_thinking_rounds
         self._thoughts_per_round = thoughts_per_round
         self._thoughts: list[list[AgentThought]] = []
+
+        # response_schema is not part of Agent.__init__'s param set --
+        # BasicAgent.__init__ is bypassed above, so this class stores it
+        # itself, matching BasicAgent's own validation exactly.
+        if response_schema is not None and not isinstance(response_schema, Mapping):
+            raise AgentError(
+                f"{type(self).__name__}.response_schema must be a dict/Mapping "
+                f"or None, got {type(response_schema).__name__}."
+            )
+        self._response_schema = response_schema
 
     # ------------------------------------------------------------------ #
     # Memory management
