@@ -473,14 +473,13 @@ class ThinkingTask(AgentTask):
     Fields
     ------
     thoughts : list[str | int | float | bool | list | dict | None]
-        Task-local accumulator, one raw value per completed round (always
-        ``str`` until ``thinking_schema`` exists; the wider union is
-        declared now to avoid re-touching this type twice). Mirrors
-        ``ToolAgentTask.running_blackboard`` — merged into the agent-level
-        persisted ``self._thoughts`` only at ``_build_record_from_task``
-        time, never appended to the agent-level list mid-run. Its own
-        length doubles as the completed-round count — no separate counter
-        field is kept.
+        Task-local accumulator, one raw value per completed round (widened
+        type declared for ``thinking_schema`` support). Persisted onto the
+        completed ``ThinkingAgentRecord.thoughts`` tuple verbatim at
+        ``_build_record_from_task`` time -- there is no agent-level
+        accumulator; the record is the only place this content survives
+        past the task's own lifetime. Its own length doubles as the
+        completed-round count — no separate counter field is kept.
 
     thinking_rounds : int
         Validated per-invocation round budget, resolved once by

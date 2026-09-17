@@ -69,11 +69,7 @@ story_agent = ThinkingAgent(
         "question about what the twist could be, a commitment to a specific "
         "twist, or what needs to be planted earlier for it to land. Focus "
         "your thoughts on what the twist should be and what needs to be set "
-        "up beforehand for it to land. Respond with a single brief "
-        "paragraph containing exactly one idea -- no headers, no numbered "
-        "lists, no labeling your own response with a round number or any "
-        "other heading; earlier rounds shown to you above are for context "
-        "only, not a format to imitate."
+        "up beforehand for it to land."
     ),
     description="A short-fiction writer that scopes a twist ending via self-questioning before drafting.",
 )
@@ -102,9 +98,12 @@ result = story_agent.invoke({
     ),
 })
 
+record = story_agent.get_conversation(turns=1)[0]
+
 print(f"TASK: {task}\n")
 print("THINKING THOUGHTS (scoping the twist before writing, via the cheaper thinking engine):")
-for round_index, thought in enumerate(story_agent.get_thoughts(result.run_id)):
+for round_index, thought in enumerate(record.thoughts):
     print(f"  Round {round_index}: {thought}")
 
+print(f"\nTHINKING ROUNDS USED: {result.thinking_rounds_used}")
 print(f"\n~~~ FINAL STORY (drafted by the main engine) ~~~\n{result.result}")

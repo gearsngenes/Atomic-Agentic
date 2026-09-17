@@ -50,6 +50,12 @@ def make_agent(
     )
 
 
+def last_thoughts(agent: ThinkingAgent) -> tuple:
+    """Convenience: thoughts of the active conversation's most recent
+    record -- what every example now does after a single invoke()."""
+    return agent.get_conversation(turns=1)[0].thoughts
+
+
 class TestConstruction:
     def test_response_schema_defaults_to_none(self) -> None:
         assert make_agent().response_schema is None
@@ -168,10 +174,10 @@ class TestThinkingRounds:
         engine = FakeLLMEngine(["t1", "reply"])
         agent = make_agent(engine=engine)
 
-        result = agent.invoke({"prompt": "hello"})
+        agent.invoke({"prompt": "hello"})
 
         assert len(engine.calls) == 2
-        assert agent.get_thoughts(result.run_id) == ["t1"]
+        assert last_thoughts(agent) == ("t1",)
 
     def test_zero_skips_thinking_without_engine_call(self) -> None:
         engine = FakeLLMEngine(["final reply"])
@@ -181,7 +187,7 @@ class TestThinkingRounds:
 
         assert result.result == "final reply"
         assert len(engine.calls) == 1
-        assert agent.get_thoughts(result.run_id) == []
+        assert last_thoughts(agent) == ()
 
     def test_non_int_raises_agent_invocation_error(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
@@ -205,19 +211,19 @@ class TestThinkingRounds:
         engine = FakeLLMEngine(["t1", "t2", "t3", "reply"])
         agent = make_agent(engine=engine)
 
-        result = agent.invoke({"prompt": "hello", "thinking_rounds": 3})
+        agent.invoke({"prompt": "hello", "thinking_rounds": 3})
 
         assert len(engine.calls) == 4
-        assert len(agent.get_thoughts(result.run_id)) == 3
+        assert len(last_thoughts(agent)) == 3
 
     def test_async_exact_n_rounds_mirrors_sync(self) -> None:
         engine = FakeLLMEngine(["t1", "t2", "t3", "reply"])
         agent = make_agent(engine=engine)
 
-        result = asyncio.run(agent.async_invoke({"prompt": "hello", "thinking_rounds": 3}))
+        asyncio.run(agent.async_invoke({"prompt": "hello", "thinking_rounds": 3}))
 
         assert len(engine.calls) == 4
-        assert len(agent.get_thoughts(result.run_id)) == 3
+        assert len(last_thoughts(agent)) == 3
 
 
 class TestThinkPhase:
@@ -225,34 +231,34 @@ class TestThinkPhase:
         engine = FakeLLMEngine([" padded thought ", "reply"])
         agent = make_agent(engine=engine)
 
-        result = agent.invoke({"prompt": "hello", "thinking_rounds": 1})
+        agent.invoke({"prompt": "hello", "thinking_rounds": 1})
 
-        assert agent.get_thoughts(result.run_id) == ["padded thought"]
+        assert last_thoughts(agent) == ("padded thought",)
 
     def test_appends_falsy_string_unconditionally(self) -> None:
         engine = FakeLLMEngine(["", "reply"])
         agent = make_agent(engine=engine)
 
-        result = agent.invoke({"prompt": "hello", "thinking_rounds": 1})
+        agent.invoke({"prompt": "hello", "thinking_rounds": 1})
 
-        assert agent.get_thoughts(result.run_id) == [""]
+        assert last_thoughts(agent) == ("",)
 
     def test_stores_non_str_value_verbatim_when_schema_set(self) -> None:
         thought_value = {"focus": "x", "leads": [], "working_hypothesis": "h", "ruled_out": []}
         engine = FakeLLMEngine([thought_value, "reply"])
         agent = make_agent(engine=engine, thinking_schema={"type": "object"})
 
-        result = agent.invoke({"prompt": "hello", "thinking_rounds": 1})
+        agent.invoke({"prompt": "hello", "thinking_rounds": 1})
 
-        assert agent.get_thoughts(result.run_id) == [thought_value]
+        assert last_thoughts(agent) == (thought_value,)
 
     def test_multiple_rounds_accumulate_in_order(self) -> None:
         engine = FakeLLMEngine(["first", "second", "third", "reply"])
         agent = make_agent(engine=engine)
 
-        result = agent.invoke({"prompt": "hello", "thinking_rounds": 3})
+        agent.invoke({"prompt": "hello", "thinking_rounds": 3})
 
-        assert agent.get_thoughts(result.run_id) == ["first", "second", "third"]
+        assert last_thoughts(agent) == ("first", "second", "third")
 
     def test_noops_once_in_role_phase(self) -> None:
         engine = FakeLLMEngine([])
@@ -269,9 +275,9 @@ class TestThinkPhase:
         engine = FakeLLMEngine(["only", "reply"])
         agent = make_agent(engine=engine)
 
-        result = asyncio.run(agent.async_invoke({"prompt": "hello", "thinking_rounds": 1}))
+        asyncio.run(agent.async_invoke({"prompt": "hello", "thinking_rounds": 1}))
 
-        assert agent.get_thoughts(result.run_id) == ["only"]
+        assert last_thoughts(agent) == ("only",)
 
 
 class TestActPhase:
@@ -431,17 +437,32 @@ class TestRenderPipeline:
         assert "hello" in rendered[0]["content"]
         assert _THINKING_FRAMING in rendered[0]["content"]
 
-    def test_thinking_task_messages_includes_snapshot_and_continuation_nudge_on_later_rounds(self) -> None:
+    def test_thinking_task_messages_one_message_pair_per_completed_thought(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
         task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
-        task.thoughts.append("prior thought")
+        task.thoughts.append("first thought")
+        task.thoughts.append({"a": 1})
 
         rendered = agent._render_task_messages(task)
 
-        assert len(rendered) == 3
-        assert "## Round 0" in rendered[1]["content"]
-        assert "prior thought" in rendered[1]["content"]
-        assert _THINKING_CONTINUATION_NUDGE in rendered[2]["content"]
+        assert rendered[0]["role"] == "user"
+        assert "hello" in rendered[0]["content"]
+        assert _THINKING_FRAMING in rendered[0]["content"]
+        assert rendered[1] == {"role": "assistant", "content": "first thought"}
+        assert rendered[2] == {"role": "user", "content": _THINKING_CONTINUATION_NUDGE}
+        assert rendered[3] == {"role": "assistant", "content": json.dumps({"a": 1})}
+        assert rendered[4] == {"role": "user", "content": _THINKING_CONTINUATION_NUDGE}
+        assert len(rendered) == 5
+
+    def test_thinking_phase_messages_never_contain_round_headers(self) -> None:
+        agent = make_agent(engine=FakeLLMEngine([]))
+        task = agent._initialize_task(turns=[], prompt="hello", inputs={"thinking_rounds": 3})
+        task.thoughts.append("first thought")
+        task.thoughts.append({"a": 1})
+
+        rendered = agent._render_task_messages(task)
+
+        assert all("## Round" not in m["content"] for m in rendered)
 
     def test_role_phase_task_messages_include_thoughts_snapshot_and_respond_instruction(self) -> None:
         agent = make_agent(engine=FakeLLMEngine([]))
@@ -452,6 +473,7 @@ class TestRenderPipeline:
         rendered = agent._render_task_messages(task)
 
         assert len(rendered) == 3
+        assert "## Round 0" in rendered[1]["content"]
         assert "reasoned thing" in rendered[1]["content"]
         assert "respond to the current task" in rendered[2]["content"]
 
@@ -473,83 +495,72 @@ class TestRenderPipeline:
         assert "## Round 1" in rendered
         assert json.dumps({"a": 1}) in rendered
 
-
-class TestGetThoughts:
-    def test_none_resolves_to_latest_record(self) -> None:
-        engine = FakeLLMEngine(["obs one", "reply one"])
-        agent = make_agent(engine=engine)
-        agent.invoke({"prompt": "hello", "thinking_rounds": 1})
-
-        assert agent.get_thoughts(None) == ["obs one"]
-
-    def test_unknown_run_id_raises(self) -> None:
-        agent = make_agent(engine=FakeLLMEngine([]))
-
-        with pytest.raises(AgentInvocationError):
-            agent.get_thoughts("not-a-real-run-id")
-
-    def test_empty_history_returns_empty_list(self) -> None:
-        agent = make_agent(engine=FakeLLMEngine([]))
-
-        assert agent.get_thoughts(None) == []
-
-    def test_by_explicit_run_id_isolates_that_invocation(self) -> None:
-        engine = FakeLLMEngine([
-            "first invoke thought", "reply one",
-            "second invoke thought", "reply two",
-        ])
-        agent = make_agent(engine=engine)
-        first_result = agent.invoke({"prompt": "first", "thinking_rounds": 1})
-        second_result = agent.invoke({"prompt": "second", "thinking_rounds": 1})
-
-        assert agent.get_thoughts(first_result.run_id) == ["first invoke thought"]
-        assert agent.get_thoughts(second_result.run_id) == ["second invoke thought"]
-
-
-class TestClearMemory:
-    def test_clear_memory_clears_records_and_thoughts(self) -> None:
-        engine = FakeLLMEngine(["obs", "reply"])
-        agent = make_agent(engine=engine)
-        agent.invoke({"prompt": "hello", "thinking_rounds": 1})
-
-        assert agent.get_conversation()
-        assert agent.get_thoughts(None)
-
-        agent.clear_memory()
-
-        assert agent.get_conversation() == []
-        assert agent.get_thoughts(None) == []
+    def test_stringify_thought_matches_format_thoughts_rendering(self) -> None:
+        # Guards the two call sites (per-thought thinking-phase rendering,
+        # reply-phase combined block) against drifting on how a non-str
+        # thought gets stringified.
+        value = {"a": 1}
+        assert ThinkingAgent._stringify_thought(value) == json.dumps(value)
+        assert ThinkingAgent._stringify_thought(value) in ThinkingAgent._format_thoughts([value])
 
 
 class TestRecordAndResultConstruction:
-    def test_invoke_returns_thinking_agent_result_with_thoughts_span(self) -> None:
+    def test_invoke_returns_thinking_agent_result_with_rounds_used(self) -> None:
         engine = FakeLLMEngine(["obs", "reply"])
         agent = make_agent(engine=engine)
 
         result = agent.invoke({"prompt": "hello", "thinking_rounds": 1})
 
         assert isinstance(result, ThinkingAgentResult)
-        assert result.thoughts_start == 0
-        assert result.thoughts_end == 1
+        assert result.thinking_rounds_used == 1
 
-    def test_second_invocation_thoughts_span_starts_where_first_ended(self) -> None:
+    def test_record_thoughts_holds_full_content(self) -> None:
+        engine = FakeLLMEngine(["obs", "reply"])
+        agent = make_agent(engine=engine)
+
+        result = agent.invoke({"prompt": "hello", "thinking_rounds": 1})
+        record = agent.get_conversation(turns=1)[0]
+
+        assert record.thoughts == ("obs",)
+        assert record.final_result.run_id == result.run_id
+
+    def test_second_invocation_records_its_own_thoughts_independently(self) -> None:
         engine = FakeLLMEngine(["first", "reply one", "second", "reply two"])
         agent = make_agent(engine=engine)
 
-        first_result = agent.invoke({"prompt": "first", "thinking_rounds": 1})
-        second_result = agent.invoke({"prompt": "second", "thinking_rounds": 1})
+        agent.invoke({"prompt": "first", "thinking_rounds": 1})
+        agent.invoke({"prompt": "second", "thinking_rounds": 1})
 
-        assert first_result.thoughts_start == 0
-        assert first_result.thoughts_end == 1
-        assert second_result.thoughts_start == 1
-        assert second_result.thoughts_end == 2
+        first_record, second_record = agent.get_conversation()
+        assert first_record.thoughts == ("first",)
+        assert second_record.thoughts == ("second",)
 
-    def test_to_dict_includes_persisted_thoughts_and_thinking_schema(self) -> None:
+    def test_to_dict_includes_thinking_schema_but_not_thoughts(self) -> None:
         engine = FakeLLMEngine(["obs", "reply"])
         agent = make_agent(engine=engine, thinking_schema={"type": "object"})
         agent.invoke({"prompt": "hello", "thinking_rounds": 1})
 
         data = agent.to_dict()
 
-        assert data["thoughts"] == ["obs"]
         assert data["thinking_schema"] == {"type": "object"}
+        assert "thoughts" not in data
+
+
+class TestToDictThinkingLlm:
+    def test_omits_thinking_llm_when_unset(self) -> None:
+        agent = make_agent(engine=FakeLLMEngine([]))
+
+        assert "thinking_llm" not in agent.to_dict()
+
+    def test_omits_thinking_llm_when_same_object_as_main_engine(self) -> None:
+        engine = FakeLLMEngine([])
+        agent = make_agent(engine=engine, thinking_llm_engine=engine)
+
+        assert "thinking_llm" not in agent.to_dict()
+
+    def test_includes_thinking_llm_when_distinct_engine_set(self) -> None:
+        main_engine = FakeLLMEngine([])
+        thinking_engine = FakeLLMEngine([])
+        agent = make_agent(engine=main_engine, thinking_llm_engine=thinking_engine)
+
+        assert agent.to_dict()["thinking_llm"] == thinking_engine.to_dict()

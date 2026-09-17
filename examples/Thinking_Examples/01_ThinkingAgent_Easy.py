@@ -25,11 +25,7 @@ trivia_agent = ThinkingAgent(
         "one focused thought that builds on the rounds before it: first "
         "identify what the question is really asking, then work through the "
         "chain of intermediate facts one at a time, then combine them into "
-        "the final answer, then double-check your reasoning. Respond with a "
-        "single brief paragraph containing exactly one idea -- no headers, "
-        "no numbered lists, no labeling your own response with a round "
-        "number or any other heading; earlier rounds shown to you above are "
-        "for context only, not a format to imitate."
+        "the final answer, then double-check your reasoning."
     ),
     description="A trivia assistant that reasons through multi-hop questions via self-questioning.",
 )
@@ -49,10 +45,12 @@ question = (
     "for Best Picture in the same year 'Inception' was released?"
 )
 result = trivia_agent.invoke({"prompt": question, "thinking_rounds": 6})
+record = trivia_agent.get_conversation(turns=1)[0]
 
 print(f"QUESTION: {question}\n")
 print("THINKING THOUGHTS:")
-for round_index, thought in enumerate(trivia_agent.get_thoughts(result.run_id)):
+for round_index, thought in enumerate(record.thoughts):
     print(f"  Round {round_index}: {thought}")
 
-print(f"\nFINAL ANSWER: {result.result}")
+print(f"\nTHINKING ROUNDS USED: {result.thinking_rounds_used}")
+print(f"FINAL ANSWER: {result.result}")

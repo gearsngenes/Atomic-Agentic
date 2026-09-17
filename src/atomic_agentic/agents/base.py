@@ -884,8 +884,9 @@ class Agent(AtomicInvokable, ABC):
         ``self._active_conversation`` internally -- ``_resolve_context``
         must be able to pass its own already-snapshotted key so a
         concurrent ``set_active_conversation`` can never make this method's
-        search and its caller's own snapshot disagree. Shared by
-        ``_resolve_context`` and ``ThinkingAgent.get_thoughts``.
+        search and its caller's own snapshot disagree. Used by
+        ``_resolve_context`` to resolve a ``run_id`` (or ``None``) against a
+        specific conversation's history.
         """
         history = self._conversations[conversation_id]
         if run_id is None:

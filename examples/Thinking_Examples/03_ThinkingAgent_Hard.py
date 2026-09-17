@@ -92,10 +92,6 @@ state the puzzle's overall final answer or unlock phrase while thinking, even
 if you're confident you already know it. The final answer belongs solely in
 your reply, after thinking concludes.
 
-Keep every field's text plain prose with no headers, numbering, or round
-labels of your own -- earlier rounds shown to you above are for context
-only, not a format to imitate.
-
 Verification style: {verification_style}
 """,
     description="Sequential-puzzle-solving thinking instructions, parameterized by verification rigor.",
@@ -152,10 +148,13 @@ result = puzzle_agent.invoke({
     ),
 })
 
+record = puzzle_agent.get_conversation(turns=1)[0]
+
 print(f"TASK: {task}\n")
 print("THINKING THOUGHTS (structured leads explored per stage):")
-for round_index, thought in enumerate(puzzle_agent.get_thoughts(result.run_id)):
+for round_index, thought in enumerate(record.thoughts):
     print(f"  Round {round_index}:")
     print(json.dumps(thought, indent=4))
 
+print(f"\nTHINKING ROUNDS USED: {result.thinking_rounds_used}")
 print(f"\nFINAL ANSWER:\n{result.result}")

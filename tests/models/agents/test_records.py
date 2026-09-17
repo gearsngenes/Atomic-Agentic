@@ -496,19 +496,40 @@ class TestThinkingAgentRecord:
         record = ThinkingAgentRecord(
             user_prompt="write a poem",
             generated_response="a poem",
-            thoughts_start=2,
-            thoughts_end=5,
+            thoughts=("first thought", "second thought"),
         )
         assert isinstance(record, AgentRecord)
-        assert record.thoughts_start == 2
-        assert record.thoughts_end == 5
+        assert record.thoughts == ("first thought", "second thought")
 
-    def test_to_dict_includes_thoughts_span_fields(self) -> None:
+    def test_thoughts_defaults_to_empty_tuple(self) -> None:
         record = ThinkingAgentRecord(
             user_prompt="write a poem",
             generated_response="a poem",
-            thoughts_start=2,
-            thoughts_end=5,
+        )
+        assert record.thoughts == ()
+
+    def test_thoughts_normalizes_list_to_tuple(self) -> None:
+        record = ThinkingAgentRecord(
+            user_prompt="write a poem",
+            generated_response="a poem",
+            thoughts=["a thought", {"k": "v"}, 3],
+        )
+        assert record.thoughts == ("a thought", {"k": "v"}, 3)
+        assert isinstance(record.thoughts, tuple)
+
+    def test_thoughts_rejects_non_sequence(self) -> None:
+        with pytest.raises(TypeError, match="thoughts"):
+            ThinkingAgentRecord(
+                user_prompt="write a poem",
+                generated_response="a poem",
+                thoughts="not a sequence",  # type: ignore[arg-type]
+            )
+
+    def test_to_dict_includes_thoughts(self) -> None:
+        record = ThinkingAgentRecord(
+            user_prompt="write a poem",
+            generated_response="a poem",
+            thoughts=["a thought", {"k": "v"}, 3],
         )
         assert record.to_dict() == {
             "user_prompt": "write a poem",
@@ -518,17 +539,8 @@ class TestThinkingAgentRecord:
             "llm_records": [],
             "prev_run_id": None,
             "child_ids": [],
-            "thoughts_start": 2,
-            "thoughts_end": 5,
+            "thoughts": ["a thought", {"k": "v"}, 3],
         }
-
-    def test_thoughts_span_defaults_to_none(self) -> None:
-        record = ThinkingAgentRecord(
-            user_prompt="write a poem",
-            generated_response="a poem",
-        )
-        assert record.thoughts_start is None
-        assert record.thoughts_end is None
 
     def test_inherits_agent_record_validation(self) -> None:
         with pytest.raises(TypeError, match="user_prompt"):
@@ -537,7 +549,7 @@ class TestThinkingAgentRecord:
     def test_is_frozen(self) -> None:
         record = ThinkingAgentRecord(user_prompt="run", generated_response="raw")
         with pytest.raises(FrozenInstanceError):
-            record.thoughts_start = 1  # type: ignore[misc]
+            record.thoughts = ("x",)  # type: ignore[misc]
 
 
 class TestBlackboardSlot:

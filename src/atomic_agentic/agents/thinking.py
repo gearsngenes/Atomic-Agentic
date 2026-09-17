@@ -180,8 +180,6 @@ class ThinkingAgent(BasicAgent):
         self._system_prompts["role"] = role_config
         self._thinking_instructions_config = thinking_config
 
-        self._thoughts: list[str | int | float | bool | list | dict | None] = []
-
         # response_schema is not part of Agent.__init__'s param set --
         # BasicAgent.__init__ is bypassed above, so this class stores it
         # itself, matching BasicAgent's own validation exactly.
@@ -231,54 +229,6 @@ class ThinkingAgent(BasicAgent):
         ``None`` requests free-form text. Frozen at construction -- no
         setter. Mirrors ``BasicAgent.response_schema``'s exact shape."""
         return self._thinking_schema
-
-    # ------------------------------------------------------------------ #
-    # Memory management
-    # ------------------------------------------------------------------ #
-    def clear_memory(self) -> None:
-        """Clear the stored turn history and the persisted thoughts."""
-        super().clear_memory()
-        self._thoughts.clear()
-
-    def get_thoughts(self, run_id: str | None = None) -> list[str | int | float | bool | list | dict | None]:
-        """Return the thought rounds produced by one invocation.
-
-        Routes through the shared ``Agent._find_in_conversation`` lookup
-        rather than duplicating a flat-list scan: ``None`` resolves to the
-        active conversation's most recently committed record; an unknown
-        ``run_id`` raises ``AgentInvocationError`` (this is a pure lookup,
-        not part of ``invoke()``'s narrowed fork-triggering ``run_id``
-        semantics, so it keeps this method's original unknown-lookup
-        convention rather than ``_resolve_context``'s ``ValueError``).
-        ``self._active_conversation`` is read live here -- harmless, since
-        ``get_thoughts`` (unlike ``_resolve_context``) has no earlier
-        snapshot to preserve. Every record in the active conversation for
-        this agent is always a ``ThinkingAgentRecord`` (built exclusively by
-        this class's own ``_build_record_from_task``), so
-        ``thoughts_start``/``thoughts_end`` are always present -- not
-        re-checked here.
-
-        Returns a shallow copy of the relevant slice of
-        ``self._thoughts`` (one raw value per round).
-        """
-        record = self._find_in_conversation(self._active_conversation, run_id)
-        if record is None:
-            if run_id is None:
-                return []
-            raise AgentInvocationError(
-                f"get_thoughts: no record with run_id {run_id!r} found in agent history."
-            )
-        return list(self._thoughts[record.thoughts_start:record.thoughts_end])
-
-    @property
-    def thoughts(self) -> list[str | int | float | bool | list | dict | None]:
-        """Shallow copy of the full persisted thought-round history, across
-        every invocation. Pairs with ``ThinkingAgentResult``/
-        ``ThinkingAgentRecord``'s own ``thoughts_start``/``thoughts_end``
-        span indices (``agent.thoughts[thoughts_start:thoughts_end]``),
-        mirroring ``ToolAgent.blackboard``'s equivalent relationship with
-        ``ToolAgentRecord.blackboard_start``/``blackboard_end``."""
-        return list(self._thoughts)
 
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
@@ -440,31 +390,39 @@ class ThinkingAgent(BasicAgent):
         Build-once contract as with every other family. The banner gains a
         fixed framing line -- signaling this is a preparatory thinking step,
         not the final reply -- only while ``task.system_prompt_name`` is
-        the thinking phase; the role phase keeps the bare banner. Once
-        thoughts exist, both phases append the thoughts-so-far snapshot and
-        a phase-specific instruction.
+        the thinking phase; the role phase keeps the bare banner.
+
+        The two phases diverge in shape, not just instruction text, past
+        the banner: the thinking phase replays each completed thought as
+        its own assistant turn (raw content, no round-number header),
+        immediately followed by a "continue thinking" user turn -- so the
+        model is never shown a self-labeling convention of its own to
+        imitate or miscount. The reply phase keeps the single combined,
+        headered summary block -- there is no imitation risk once thinking
+        has concluded and the model is doing one-shot synthesis, not
+        continuing its own act.
         """
         if task.task_messages:
             return task.task_messages
 
         banner = self._render_task_banner_text(task)
+
         if task.system_prompt_name == self.THINKING_PROMPT_NAME:
             banner = banner + "\n---\n" + _THINKING_FRAMING
-
-        messages = [{"role": "user", "content": banner}]
-
-        if task.thoughts:
-            messages.append(
-                {"role": "assistant", "content": self._format_thoughts(task.thoughts)}
-            )
-            if task.system_prompt_name == self.THINKING_PROMPT_NAME:
-                instruction = _THINKING_CONTINUATION_NUDGE
-            else:
-                instruction = (
+            messages = [{"role": "user", "content": banner}]
+            for thought in task.thoughts:
+                messages.append({"role": "assistant", "content": self._stringify_thought(thought)})
+                messages.append({"role": "user", "content": _THINKING_CONTINUATION_NUDGE})
+        else:
+            messages = [{"role": "user", "content": banner}]
+            if task.thoughts:
+                messages.append(
+                    {"role": "assistant", "content": self._format_thoughts(task.thoughts)}
+                )
+                messages.append({"role": "user", "content": (
                     "Given the current task and the thoughts above, respond "
                     "to the current task."
-                )
-            messages.append({"role": "user", "content": instruction})
+                )})
 
         task.task_messages = messages
         return task.task_messages
@@ -477,18 +435,27 @@ class ThinkingAgent(BasicAgent):
         return f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK ====="
 
     @staticmethod
+    def _stringify_thought(value: str | int | float | bool | list | dict | None) -> str:
+        """Render one raw thought value as display text -- a ``str`` value
+        used as-is, any other JSON-decodable value ``json.dumps``-rendered.
+        Shared by the thinking-phase per-thought rendering above and
+        ``_format_thoughts`` below, so the two can't drift on how a non-str
+        thought gets stringified."""
+        return value if isinstance(value, str) else json.dumps(value)
+
+    @staticmethod
     def _format_thoughts(
         rounds: list[str | int | float | bool | list | dict | None],
         *,
         start_round: int = 0,
     ) -> str:
         """Render rounds of raw thought values as ``## Round N`` blocks --
-        a ``str`` value used as-is, any other JSON-decodable value
-        ``json.dumps``-rendered for display."""
-        blocks: list[str] = []
-        for i, value in enumerate(rounds, start=start_round):
-            rendered_value = value if isinstance(value, str) else json.dumps(value)
-            blocks.append(f"## Round {i}\n{rendered_value}")
+        reply-phase use only (see ``_render_task_messages``); the thinking
+        phase never shows this labeled shape to the model."""
+        blocks = [
+            f"## Round {i}\n{ThinkingAgent._stringify_thought(value)}"
+            for i, value in enumerate(rounds, start=start_round)
+        ]
         return "\n\n".join(blocks)
 
     # ------------------------------------------------------------------ #
@@ -499,20 +466,16 @@ class ThinkingAgent(BasicAgent):
         task: ThinkingTask,
         turns: list[AgentRecord],
     ) -> ThinkingAgentRecord:
-        """Persist ``task.thoughts`` into ``self._thoughts`` and capture
-        the span, mirroring ``ToolAgent.update_blackboard``'s pattern."""
+        """Persist ``task.thoughts`` directly onto the completed record --
+        no agent-level accumulator, no span bookkeeping."""
         prev = turns[-1] if turns else None
-        thoughts_start = len(self._thoughts)
-        self._thoughts.extend(task.thoughts)
-        thoughts_end = len(self._thoughts)
         return ThinkingAgentRecord(
             user_prompt=task.user_prompt,
             generated_response=task.generated_response,
             inputs=task.inputs,
             llm_records=tuple(task.llm_records),
             prev=prev,
-            thoughts_start=thoughts_start,
-            thoughts_end=thoughts_end,
+            thoughts=tuple(task.thoughts),
         )
 
     def build_result_from_record(
@@ -535,8 +498,7 @@ class ThinkingAgent(BasicAgent):
             result_cls=ThinkingAgentResult,
             llm_token_usage=llm_token_usage,
             llm_model_data=llm_model_data,
-            thoughts_start=record.thoughts_start,
-            thoughts_end=record.thoughts_end,
+            thinking_rounds_used=len(record.thoughts),
         )
 
     # ------------------------------------------------------------------ #
@@ -544,9 +506,10 @@ class ThinkingAgent(BasicAgent):
     # ------------------------------------------------------------------ #
     def to_dict(self) -> dict:
         """Return a diagnostic snapshot including this agent's own
-        construction knobs and persisted thoughts."""
+        construction knobs."""
         d = super().to_dict()
         d["thinking_instructions"] = self._thinking_instructions_config.template
         d["thinking_schema"] = self._thinking_schema
-        d["thoughts"] = list(self._thoughts)
+        if self._thinking_llm_engine is not None and self._thinking_llm_engine is not self._llm_engine:
+            d["thinking_llm"] = self._thinking_llm_engine.to_dict()
         return d

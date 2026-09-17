@@ -209,32 +209,29 @@ class ThinkingAgentResult(AgentResult):
     Successful thinking-capable agent invocation result (currently only
     ``ThinkingAgent``).
 
-    Extends ``AgentResult`` with the half-open index span into the agent's
-    persisted thoughts list produced by this invocation. Indices only, not
-    the thought content itself -- mirrors ``ThinkingAgentRecord``'s own
-    ``thoughts_start``/``thoughts_end`` exactly (no ``__post_init__``
-    override needed here, matching that precedent: plain ``int | None``
-    fields, no cross-field validation). A caller needing the actual
-    thought content either calls ``ThinkingAgent.get_thoughts(run_id)``
-    directly, or slices the agent's own public ``thoughts`` property
-    (``agent.thoughts[thoughts_start:thoughts_end]``).
+    Extends ``AgentResult`` with a derived count of completed thinking
+    rounds -- mirrors how ``llm_token_usage`` is already a derived
+    reduction of ``record.llm_records``, not a duplicate of it. A caller
+    needing the actual thought content reads it off the record instead
+    (``agent.get_conversation(turns=1)[0].thoughts`` for the invocation
+    just made; scan ``get_conversation(conversation_id, turns=None)`` and
+    match ``r.final_result.run_id`` for an older one).
+
+    No ``__post_init__`` override needed -- plain ``int`` field, no
+    cross-field validation, matching this class's existing precedent (the
+    value is always internally computed as ``len(record.thoughts)``, never
+    caller-supplied at a real boundary).
 
     Fields
     ------
-    thoughts_start:
-        Start index (inclusive) of this invocation's thoughts in the
-        agent's persisted ``self._thoughts`` list.
-    thoughts_end:
-        End index (exclusive) of this invocation's thoughts in the agent's
-        persisted ``self._thoughts`` list.
+    thinking_rounds_used:
+        Count of thinking rounds completed during this invocation.
     """
 
-    thoughts_start: int | None = None
-    thoughts_end: int | None = None
+    thinking_rounds_used: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         data = AgentResult.to_dict(self)
-        data["thoughts_start"] = self.thoughts_start
-        data["thoughts_end"] = self.thoughts_end
+        data["thinking_rounds_used"] = self.thinking_rounds_used
         return data
