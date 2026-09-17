@@ -35,6 +35,7 @@ def make_agent(
     context_enabled: bool = True,
     response_schema: dict[str, Any] | None = None,
     thinking_schema: dict[str, Any] | None = None,
+    thinking_rounds_limit: int | None = None,
 ) -> ThinkingAgent:
     return ThinkingAgent(
         name="tests",
@@ -47,6 +48,7 @@ def make_agent(
         thinking_llm_engine=thinking_llm_engine,
         response_schema=response_schema,
         thinking_schema=thinking_schema,
+        thinking_rounds_limit=thinking_rounds_limit,
     )
 
 
@@ -167,6 +169,82 @@ class TestConstruction:
         agent = make_agent()
         names = [p.name for p in agent.parameters]
         assert names.index("thinking_rounds") < names.index("run_id")
+
+
+class TestThinkingRoundsLimit:
+    def test_defaults_to_none_unlimited(self) -> None:
+        assert make_agent().thinking_rounds_limit is None
+
+    def test_construction_rejects_invalid_type(self) -> None:
+        with pytest.raises(AgentError, match="thinking_rounds_limit"):
+            make_agent(thinking_rounds_limit="not an int")  # type: ignore[arg-type]
+
+    def test_construction_rejects_negative(self) -> None:
+        with pytest.raises(AgentError, match="thinking_rounds_limit"):
+            make_agent(thinking_rounds_limit=-1)
+
+    def test_construction_accepts_valid_value(self) -> None:
+        assert make_agent(thinking_rounds_limit=3).thinking_rounds_limit == 3
+
+    def test_setter_accepts_valid_value_or_none(self) -> None:
+        agent = make_agent()
+
+        agent.thinking_rounds_limit = 5
+        assert agent.thinking_rounds_limit == 5
+
+        agent.thinking_rounds_limit = None
+        assert agent.thinking_rounds_limit is None
+
+    def test_setter_rejects_invalid_value(self) -> None:
+        agent = make_agent()
+        with pytest.raises(TypeError):
+            agent.thinking_rounds_limit = -1  # type: ignore[assignment]
+
+    def test_invoke_within_limit_succeeds(self) -> None:
+        engine = FakeLLMEngine(["t1", "t2", "reply"])
+        agent = make_agent(engine=engine, thinking_rounds_limit=3)
+
+        agent.invoke({"prompt": "hello", "thinking_rounds": 2})
+
+        assert len(engine.calls) == 3
+
+    def test_invoke_at_limit_succeeds(self) -> None:
+        engine = FakeLLMEngine(["t1", "t2", "t3", "reply"])
+        agent = make_agent(engine=engine, thinking_rounds_limit=3)
+
+        agent.invoke({"prompt": "hello", "thinking_rounds": 3})
+
+        assert len(engine.calls) == 4
+
+    def test_invoke_exceeding_limit_raises(self) -> None:
+        engine = FakeLLMEngine([])
+        agent = make_agent(engine=engine, thinking_rounds_limit=2)
+
+        with pytest.raises(AgentInvocationError, match="thinking_rounds_limit"):
+            agent.invoke({"prompt": "hello", "thinking_rounds": 3})
+
+        assert engine.calls == []
+
+    def test_no_limit_allows_any_value(self) -> None:
+        engine = FakeLLMEngine(["t1", "t2", "t3", "t4", "t5", "reply"])
+        agent = make_agent(engine=engine)
+
+        agent.invoke({"prompt": "hello", "thinking_rounds": 5})
+
+        assert len(engine.calls) == 6
+
+    def test_extra_description_empty_when_unset(self) -> None:
+        assert make_agent()._extra_description() == ""
+
+    def test_extra_description_reports_limit_when_set(self) -> None:
+        agent = make_agent(thinking_rounds_limit=4)
+
+        assert "4" in agent._extra_description()
+        assert "4" in agent.description
+
+    def test_to_dict_includes_thinking_rounds_limit(self) -> None:
+        assert make_agent().to_dict()["thinking_rounds_limit"] is None
+        assert make_agent(thinking_rounds_limit=4).to_dict()["thinking_rounds_limit"] == 4
 
 
 class TestThinkingRounds:

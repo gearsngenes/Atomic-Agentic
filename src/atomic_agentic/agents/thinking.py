@@ -101,6 +101,7 @@ class ThinkingAgent(BasicAgent):
         response_preview_limit: Optional[int] = None,
         response_schema: dict[str, Any] | None = None,
         thinking_schema: dict[str, Any] | None = None,
+        thinking_rounds_limit: int | None = None,
     ) -> None:
         """
         Parameters
@@ -140,6 +141,21 @@ class ThinkingAgent(BasicAgent):
             label/decision fields -- production data shows a measurable
             quality hit otherwise) is documentation only, never
             runtime-enforced.
+        thinking_rounds_limit : int | None
+            Optional ceiling on the reserved runtime ``thinking_rounds``
+            parameter for this instance. ``None`` (default) means
+            unlimited -- identical to this parameter not existing.
+            When set, ``_initialize_task`` raises ``AgentInvocationError``
+            if a caller-supplied ``thinking_rounds`` exceeds it. Exists to
+            bound cost/latency when this agent is registered as a tool
+            under an orchestrating ``ToolAgent``, whose planner LLM would
+            otherwise be free to request any round count -- see
+            ``_extra_description``, which is how that planner actually
+            learns the cap. Mutable after construction via the
+            ``thinking_rounds_limit`` property -- only code holding a
+            Python reference to this instance can change it; an
+            orchestrating LLM caller has no path to mutate it through
+            ``invoke(inputs)``.
 
         The number of thinking rounds run per invocation is not a
         construction-time parameter -- it is the reserved runtime
@@ -203,6 +219,15 @@ class ThinkingAgent(BasicAgent):
             )
         self._thinking_schema = thinking_schema
 
+        if thinking_rounds_limit is not None and (
+            type(thinking_rounds_limit) is not int or thinking_rounds_limit < 0
+        ):
+            raise AgentError(
+                f"{type(self).__name__}.thinking_rounds_limit must be None or a "
+                f"concrete int >= 0, got {thinking_rounds_limit!r}."
+            )
+        self._thinking_rounds_limit = thinking_rounds_limit
+
     # ------------------------------------------------------------------ #
     # Secondary thinking engine
     # ------------------------------------------------------------------ #
@@ -228,6 +253,20 @@ class ThinkingAgent(BasicAgent):
         ``None`` requests free-form text. Frozen at construction -- no
         setter. Mirrors ``BasicAgent.response_schema``'s exact shape."""
         return self._thinking_schema
+
+    @property
+    def thinking_rounds_limit(self) -> int | None:
+        """Ceiling on the reserved runtime ``thinking_rounds`` parameter
+        for this instance, or ``None`` if unset (unlimited). Enforced by
+        ``_initialize_task``, which raises ``AgentInvocationError`` if a
+        caller-supplied ``thinking_rounds`` exceeds it."""
+        return self._thinking_rounds_limit
+
+    @thinking_rounds_limit.setter
+    def thinking_rounds_limit(self, value: int | None) -> None:
+        if value is not None and (type(value) is not int or value < 0):
+            raise TypeError("thinking_rounds_limit must be None or an int >= 0.")
+        self._thinking_rounds_limit = value
 
     # ------------------------------------------------------------------ #
     # Task-lifecycle hooks
@@ -258,6 +297,11 @@ class ThinkingAgent(BasicAgent):
             raise AgentInvocationError(
                 f"{self.full_name}: thinking_rounds must be a concrete int "
                 f">= 0, got {thinking_rounds!r}."
+            )
+        if self._thinking_rounds_limit is not None and thinking_rounds > self._thinking_rounds_limit:
+            raise AgentInvocationError(
+                f"{self.full_name}: thinking_rounds ({thinking_rounds}) exceeds "
+                f"this instance's thinking_rounds_limit ({self._thinking_rounds_limit})."
             )
 
         return ThinkingTask(
@@ -502,12 +546,31 @@ class ThinkingAgent(BasicAgent):
     # ------------------------------------------------------------------ #
     # Serialization
     # ------------------------------------------------------------------ #
+    def _extra_description(self) -> str:
+        """Report this instance's ``thinking_rounds_limit`` to an
+        orchestrating caller, only when one is set -- empty otherwise
+        (nothing new to say beyond what the base description already
+        implies). This is what an orchestrating ``ToolAgent``'s planner
+        LLM actually reads (via the composed ``description`` property)
+        when deciding what value to pass as ``thinking_rounds`` --
+        distinct from ``THINKING_ROUNDS_PARAM.description``
+        (``constants/agents.py``), a single shared ``ParamSpec`` object
+        identical across every ``ThinkingAgent`` instance that can never
+        carry this instance's own number."""
+        if self._thinking_rounds_limit is None:
+            return ""
+        return (
+            f"This instance caps thinking_rounds at {self._thinking_rounds_limit}; "
+            f"values above this raise."
+        )
+
     def to_dict(self) -> dict:
         """Return a diagnostic snapshot including this agent's own
         construction knobs."""
         d = super().to_dict()
         d["thinking_instructions"] = self._thinking_instructions_config.template
         d["thinking_schema"] = self._thinking_schema
+        d["thinking_rounds_limit"] = self._thinking_rounds_limit
         if self._thinking_llm_engine is not None and self._thinking_llm_engine is not self._llm_engine:
             d["thinking_llm"] = self._thinking_llm_engine.to_dict()
         return d
