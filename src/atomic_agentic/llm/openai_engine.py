@@ -461,7 +461,7 @@ class OpenAIEngine(LLMEngine):
 
     def _extract_result(
         self, response: Any, requested_structured: bool
-    ) -> str | list[Any] | dict[str, Any]:
+    ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
         Extract the assistant's textual or structured reply from a Responses
         API response object.
@@ -493,14 +493,18 @@ class OpenAIEngine(LLMEngine):
         - input_tokens: prompt/input-side tokens
         - output_tokens: generated-side tokens
         - total_tokens: total input + generated tokens
-        - input_tokens_details.cached_tokens: cached input-token subset (optional)
+        - input_tokens_details.cached_tokens: input-token subset served from an
+          existing prompt-cache entry, i.e. a reuse (optional)
+        - input_tokens_details.cache_write_tokens: input-token subset newly
+          stored into the prompt cache by this call, i.e. seeding a future
+          reuse (optional; requires openai>=2.45)
         - output_tokens_details.reasoning_tokens: hidden reasoning-token subset
           counted inside output_tokens (optional)
 
         Both ``output_tokens_details`` and ``input_tokens_details`` are optional and
         may be absent (``None``) from the response.  When absent, ``reasoning_tokens``
-        defaults to ``0`` (no reasoning occurred) and ``cached_tokens`` defaults to
-        ``None`` (not reported).
+        defaults to ``0`` (no reasoning occurred) and ``cached_tokens``/
+        ``cache_write_tokens`` both default to ``None`` (not reported).
 
         ``response_tokens`` is derived as ``output_tokens - reasoning_tokens``.
         """
@@ -515,6 +519,7 @@ class OpenAIEngine(LLMEngine):
 
         input_details = usage.input_tokens_details
         cached_tokens = input_details.cached_tokens if input_details is not None else None
+        cache_write_tokens = input_details.cache_write_tokens if input_details is not None else None
 
         return OpenAITokenUsage(
             input_tokens=usage.input_tokens,
@@ -522,6 +527,7 @@ class OpenAIEngine(LLMEngine):
             total_tokens=usage.total_tokens,
             response_tokens=response_tokens,
             cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
             reasoning_tokens=reasoning_tokens,
         )
 

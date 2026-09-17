@@ -281,7 +281,7 @@ class TestToolAgentResult:
 # ── TestThinkingAgentResult ───────────────────────────────────────────────────
 
 class TestThinkingAgentResult:
-    def _make_result(self, *, thoughts_start=None, thoughts_end=None) -> ThinkingAgentResult:
+    def _make_result(self, *, thinking_rounds_used=0) -> ThinkingAgentResult:
         started_at = datetime.now(timezone.utc)
         return ThinkingAgentResult(
             result="done",
@@ -290,33 +290,31 @@ class TestThinkingAgentResult:
             ended_at=started_at + timedelta(seconds=1),
             llm_token_usage=(make_token_usage(),),
             llm_model_data=make_model_data(),
-            thoughts_start=thoughts_start,
-            thoughts_end=thoughts_end,
+            thinking_rounds_used=thinking_rounds_used,
         )
 
     def test_is_agent_result(self) -> None:
         result = self._make_result()
         assert isinstance(result, AgentResult)
 
-    def test_thoughts_span_defaults_to_none(self) -> None:
+    def test_thinking_rounds_used_defaults_to_zero(self) -> None:
         result = self._make_result()
-        assert result.thoughts_start is None
-        assert result.thoughts_end is None
+        assert result.thinking_rounds_used == 0
 
-    def test_thoughts_span_stores_indices(self) -> None:
-        result = self._make_result(thoughts_start=2, thoughts_end=5)
-        assert result.thoughts_start == 2
-        assert result.thoughts_end == 5
+    def test_thinking_rounds_used_stores_value(self) -> None:
+        result = self._make_result(thinking_rounds_used=5)
+        assert result.thinking_rounds_used == 5
 
-    def test_to_dict_includes_thoughts_span(self) -> None:
-        result = self._make_result(thoughts_start=2, thoughts_end=5)
+    def test_to_dict_includes_thinking_rounds_used(self) -> None:
+        result = self._make_result(thinking_rounds_used=5)
         d = result.to_dict()
-        assert d["thoughts_start"] == 2
-        assert d["thoughts_end"] == 5
+        assert d["thinking_rounds_used"] == 5
         assert "llm_token_usage" in d
+        assert "thoughts_start" not in d
+        assert "thoughts_end" not in d
         assert "thoughts" not in d
 
     def test_is_frozen(self) -> None:
         result = self._make_result()
         with pytest.raises(FrozenInstanceError):
-            result.thoughts_start = 1  # type: ignore[misc]
+            result.thinking_rounds_used = 1  # type: ignore[misc]

@@ -123,7 +123,6 @@ import warnings
 from typing import (
     Any,
     Callable,
-    Literal,
     Mapping,
     Optional,
 )
@@ -294,7 +293,6 @@ class ToolAgent(Agent, ABC):
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
-        assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
         """
         Parameters
@@ -349,10 +347,6 @@ class ToolAgent(Agent, ABC):
         records_window : int | None
             Maximum number of prior ``AgentRecord`` turns rendered into LLM
             context. ``None`` means all records are rendered.
-        assistant_response_source : "raw" | "final"
-            Whether rendered assistant history uses the raw generated
-            response or the final post-``post_invoke`` result. Defaults to
-            ``"raw"``.
 
         Emits a ``FutureWarning`` on every construction: the ``ToolAgent``
         family (this class, ``PlanActAgent``, ``ReActAgent``) is superseded
@@ -382,7 +376,6 @@ class ToolAgent(Agent, ABC):
             post_result_key=post_result_key,
             records_window=records_window,
             response_preview_limit=response_preview_limit,
-            assistant_response_source=assistant_response_source,
         )
 
         self._toolbox: dict[str, AtomicInvokable] = {}
@@ -1813,7 +1806,7 @@ class ToolAgent(Agent, ABC):
         """Render one stored ToolAgentRecord into LLM-facing user/assistant messages.
 
         The base assistant response is rendered through `Agent.render_turn(...)`, preserving
-        `assistant_response_source` and `response_preview_limit` behavior. If the turn has
+        its `response_preview_limit` behavior. If the turn has
         a non-empty blackboard span and all slots executed, this method appends a
         cached-step block (``CACHED STEPS`` section) with each produced step's unresolved args and
         ``run_id``. When some slots are FAILED (``fail_fast=False``), the output splits into a

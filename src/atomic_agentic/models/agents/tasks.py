@@ -6,7 +6,6 @@ from typing import Any, Optional
 from ...constants.core import NO_VAL
 from .blackboard_models import BlackboardSlot, CodeStatement
 from .records import AgentRecord, LLMRecord
-from .thought_models import AgentThought
 
 __all__ = [
     "AgentTask",
@@ -72,8 +71,8 @@ class AgentTask:
         Rendered ``turns``, built lazily once per invoke by
         ``Agent._render_historic_messages`` and reused for the rest of it.
         Never rebuilt mid-invoke — turn-rendering is phase-invariant,
-        governed only by ``assistant_response_source``/
-        ``response_preview_limit``, both static per-agent config.
+        governed only by ``response_preview_limit``, itself static
+        per-agent config.
 
     task_messages : list[dict[str, str]]
         Phase-scoped LLM-facing content, lazily built by each subclass's
@@ -457,30 +456,43 @@ class ReActTask(ToolAgentTask):
 @dataclass(slots=True)
 class ThinkingTask(AgentTask):
     """
-    SelfAskAgent-flavored task.
+    ThinkingAgent-flavored task.
 
     No ``phase`` field: ``AgentTask.system_prompt_name`` doubles as the
     phase discriminator. The name ``"role"`` is reserved for the reply
-    phase; any other value (``SelfAskAgent.SELF_ASK_PROMPT_NAME``) means a
+    phase; any other value (``ThinkingAgent.THINKING_PROMPT_NAME``) means a
     thinking round is still active. This is why the field is required (no
     default) on the base ``AgentTask`` — every concrete subclass must
     decide it explicitly, and here that decision *is* the phase.
 
-    No retry-budget field: the free-flowing category-marker parser
-    (``parse_thoughts``) degrades unmarked text to a single ``OTHER``
-    thought rather than failing, so a thinking round either produces at
-    least one thought or ``think()`` raises outright — there is no
-    malformed-output case to retry.
+    No retry-budget field: a thinking round either produces a non-empty
+    stripped string (or structured value, once ``thinking_schema`` exists)
+    or ``think()`` raises outright — there is no malformed-output case to
+    retry against, since there is no parsing step left to fail partially.
 
     Fields
     ------
-    thoughts : list[list[AgentThought]]
-        Task-local accumulator, one inner list per completed round (a round
-        may produce more than one thought, up to ``thoughts_per_round``).
-        Mirrors ``ToolAgentTask.running_blackboard`` — merged into the
-        agent-level persisted ``self._thoughts`` only at
-        ``_build_record_from_task`` time, never appended to the agent-level
-        list mid-run. Its own length doubles as the completed-round count —
-        no separate counter field is kept.
+    thoughts : list[str | int | float | bool | list | dict | None]
+        Task-local accumulator, one raw value per completed round (widened
+        type declared for ``thinking_schema`` support). Persisted onto the
+        completed ``ThinkingAgentRecord.thoughts`` tuple verbatim at
+        ``_build_record_from_task`` time -- there is no agent-level
+        accumulator; the record is the only place this content survives
+        past the task's own lifetime. Its own length doubles as the
+        completed-round count — no separate counter field is kept.
+
+    thinking_rounds : int
+        Validated per-invocation round budget, resolved once by
+        ``ThinkingAgent._initialize_task`` from the reserved
+        ``thinking_rounds`` runtime parameter and never changed for the
+        rest of this task's lifetime. Declared with a default of ``1``
+        only because Python dataclass field ordering requires every field
+        following ``AgentTask``'s own defaulted fields to carry one too —
+        the real value is always passed explicitly at construction
+        (mirrors ``ToolAgentTask.tool_calls_used: int = 0``'s identical
+        precedent). ``think()``/``async_think()`` read this field directly
+        instead of any agent-level attribute — there is no construction-time
+        equivalent left; the round budget is purely per-invocation now.
     """
-    thoughts: list[list[AgentThought]] = field(default_factory=list)
+    thoughts: list[str | int | float | bool | list | dict | None] = field(default_factory=list)
+    thinking_rounds: int = 1

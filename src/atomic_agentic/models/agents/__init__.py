@@ -8,7 +8,6 @@ from .records import (
     ThinkingAgentRecord,
 )
 from .blackboard_models import BlackboardSlot, CodeStatement, ConstantSpec
-from .thought_models import AgentThought
 from .tasks import (
     AgentTask,
     ToolAgentTask,
@@ -30,7 +29,6 @@ __all__ = [
     "BlackboardSlot",
     "CodeStatement",
     "ConstantSpec",
-    "AgentThought",
     "AgentTask",
     "ToolAgentTask",
     "ScriptAgentTask",

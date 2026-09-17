@@ -113,6 +113,24 @@ def _plain_mcp_value(value: Any) -> Any:
     return value
 
 
+_UNSET = object()
+
+
+def _mcp_field(obj: Any, new_name: str, old_name: str) -> Any:
+    """
+    Read an MCP SDK object attribute whose canonical name changed under
+    mcp>=2.0 (`new_name`), falling back to the pre-2.0 name (`old_name`)
+    when the new one isn't present on this SDK's object. A sentinel probe
+    is required rather than a plain ``getattr(obj, new_name, None)``
+    default, since a real ``None`` value on an existing field (e.g. an
+    unset optional schema) must not be mistaken for "attribute absent".
+    """
+    value = getattr(obj, new_name, _UNSET)
+    if value is not _UNSET:
+        return value
+    return getattr(obj, old_name, None)
+
+
 def _infer_mcp_extraction_mode(output_schema: Any) -> MCPExtractionMode:
     """
     Decide how the proxy should extract the final AA-facing value.
@@ -182,8 +200,9 @@ def _build_mcp_tool_metadata(raw_tool: mcp_types.Tool) -> Dict[str, Any]:
     """
     Convert one raw MCP Tool object into the client hub's processed metadata shape.
     """
-    input_schema = raw_tool.inputSchema if isinstance(raw_tool.inputSchema, Mapping) else {}
-    output_schema = getattr(raw_tool, "outputSchema", None)
+    raw_input_schema = _mcp_field(raw_tool, "input_schema", "inputSchema")
+    input_schema = raw_input_schema if isinstance(raw_input_schema, Mapping) else {}
+    output_schema = _mcp_field(raw_tool, "output_schema", "outputSchema")
 
     properties = input_schema.get("properties")
     required_raw = input_schema.get("required")
@@ -227,7 +246,7 @@ def _build_mcp_tool_metadata(raw_tool: mcp_types.Tool) -> Dict[str, Any]:
     raw_metadata: Dict[str, Any] = {
         "name": raw_tool.name,
         "description": raw_tool.description,
-        "inputSchema": _plain_mcp_value(raw_tool.inputSchema),
+        "inputSchema": _plain_mcp_value(raw_input_schema),
         "outputSchema": _plain_mcp_value(output_schema),
     }
 
@@ -235,7 +254,7 @@ def _build_mcp_tool_metadata(raw_tool: mcp_types.Tool) -> Dict[str, Any]:
     if annotations is not None:
         raw_metadata["annotations"] = _plain_mcp_value(annotations)
 
-    meta = getattr(raw_tool, "_meta", None)
+    meta = _mcp_field(raw_tool, "meta", "_meta")
     if meta is not None:
         raw_metadata["_meta"] = _plain_mcp_value(meta)
 
@@ -264,6 +283,6 @@ def _normalize_mcp_call_result(raw: mcp_types.CallToolResult) -> Dict[str, Any]:
     """
     return {
         "content": list(raw.content),
-        "structuredContent": raw.structuredContent,
-        "isError": raw.isError,
+        "structuredContent": _mcp_field(raw, "structured_content", "structuredContent"),
+        "isError": _mcp_field(raw, "is_error", "isError"),
     }

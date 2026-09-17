@@ -38,7 +38,7 @@ blackboard management, and tool registry see ``agents/toolagent.py``
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Literal, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 import pprint
 
 from .toolagent import ToolAgent
@@ -144,7 +144,6 @@ class ReActAgent(ToolAgent):
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_result_key: Optional[str] = None,
         records_window: int | None = None,
-        assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
         """
         Initialize a ReActAgent.
@@ -173,7 +172,6 @@ class ReActAgent(ToolAgent):
             post_invoke=post_invoke,
             post_result_key=post_result_key,
             records_window=records_window,
-            assistant_response_source=assistant_response_source,
         )
         self._system_prompts["reason_then_act"] = ORCHESTRATOR_PROMPT
 

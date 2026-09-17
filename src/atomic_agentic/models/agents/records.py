@@ -503,21 +503,35 @@ class ScriptAgentRecord(AgentRecord):
 class ThinkingAgentRecord(AgentRecord):
     """
     Canonical memory record for one completed thinking-capable agent
-    invocation (currently only ``SelfAskAgent``).
+    invocation (currently only ``ThinkingAgent``).
 
     In addition to the base AgentRecord lifecycle artifacts, a
-    ThinkingAgentRecord stores the half-open span of persisted thoughts
-    produced by the invocation. ``SelfAskAgent`` renders that span into
-    future LLM-facing context when building messages.
+    ThinkingAgentRecord stores the full thought content produced by the
+    invocation directly -- one raw value per completed round, in order.
+    Mirrors ``AgentRecord.llm_records``'s own pattern (the full artifact
+    lives on the record, not a span into some agent-level accumulator).
     """
 
-    thoughts_start: int | None = None
-    thoughts_end: int | None = None
+    thoughts: tuple[str | int | float | bool | list | dict | None, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
+        # the class object to add __slots__, which invalidates the
+        # zero-arg super()'s implicit __class__ closure cell (same
+        # slotted-dataclass-subclass gotcha ScriptAgentRecord.__post_init__
+        # already documents above).
+        super(ThinkingAgentRecord, self).__post_init__()
+
+        if isinstance(self.thoughts, (str, bytes)) or not isinstance(self.thoughts, (list, tuple)):
+            raise TypeError(
+                "ThinkingAgentRecord.thoughts must be a list or tuple, "
+                f"got {type(self.thoughts).__name__}."
+            )
+        object.__setattr__(self, "thoughts", tuple(self.thoughts))
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         return {
             **super(ThinkingAgentRecord, self).to_dict(),
-            "thoughts_start": self.thoughts_start,
-            "thoughts_end": self.thoughts_end,
+            "thoughts": list(self.thoughts),
         }

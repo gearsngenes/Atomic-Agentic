@@ -131,7 +131,6 @@ class ScriptAgent(Agent):
         post_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
-        assistant_response_source: Literal["raw", "final"] = "raw",
         tools: Optional[list[AtomicInvokable | Callable | MCPClientHub | A2AClientHub | PyA2AtomicClient]] = None,
         constants: Optional[list[Any]] = None,
         constant_aliases: Optional[list[Optional[str]]] = None,
@@ -161,7 +160,6 @@ class ScriptAgent(Agent):
             post_result_key=post_result_key,
             records_window=records_window,
             response_preview_limit=response_preview_limit,
-            assistant_response_source=assistant_response_source,
         )
 
         if type(regeneration_limit) is not int or regeneration_limit < 0:

@@ -1,21 +1,28 @@
 import os
 from dotenv import load_dotenv
-from atomic_agentic.agents import SelfAskAgent
+from atomic_agentic.agents import ThinkingAgent
 from atomic_agentic.models.agents.prompts import PromptConfig
 from atomic_agentic.llm import OpenAIEngine, GeminiEngine, MistralEngine, LlamaCppEngine
 
 load_dotenv()
 
-# --- define our agent's llm (openai, bedrock, azure, etc.) ---
-llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model = "gpt-5-mini")
+# --- the main engine drafts the final story -- reserved for the reply phase
+#     only, never used for thinking rounds once thinking_llm_engine is set ---
+llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-5-mini")
 # llm = GeminiEngine(api_key = os.getenv("GOOGLE_API_KEY"), model = "gemini-2.5-flash")
 # llm = MistralEngine(api_key= os.getenv("MISTRAL_API_KEY"), model = "mistral-small-latest")
 # llm = LlamaCppEngine(model_path=os.getenv("LLAMA_MODEL_PATH"), repo_id = "unsloth/phi-4-GGUF", filename= "phi-4-Q4_K_M.gguf", n_ctx = 512, verbose = False, n_threads=16)
 
+# --- a second, cheaper/faster engine handles every thinking round instead --
+#     brainstorming plot-twist ideas doesn't need the same model quality as
+#     actually drafting the finished prose. thinking_llm_engine is optional;
+#     omitting it just makes every round use the main engine above ---
+thinking_llm = OpenAIEngine(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4o-mini")
+
 # --- the role_prompt is a PromptConfig with its OWN two caller-facing
 #     placeholders, {max_word_count}/{writing_rules} -- these are real,
 #     required extra_parameters on the agent's schema (role_prompt's and
-#     thinking_instructions' own discovered placeholders are SelfAskAgent's
+#     thinking_instructions' own discovered placeholders are ThinkingAgent's
 #     two extra_parameters sources, reconciled against each other at
 #     construction), supplied at invoke() time like any other input,
 #     distinct from thinking_instructions below. writing_rules is
@@ -42,38 +49,37 @@ nothing decorative, nothing wasted.
 )
 
 # --- thinking_instructions is separate from role_prompt: extra guidance
-#     visible only to the self-ask thinking phase's own prompt, spliced into
-#     its reserved slot. It deliberately does NOT repeat the literal word
-#     count or writing_rules text -- the self-ask rounds reason about the
-#     twist in the abstract; only the reply phase (which renders the
-#     fully-resolved role_prompt) ever sees the literal 1000/writing_rules
+#     visible only to the thinking phase's own prompt, spliced into its
+#     reserved slot. It deliberately does NOT repeat the literal word count
+#     or writing_rules text -- the thinking rounds reason about the twist in
+#     the abstract; only the reply phase (rendering the fully-resolved
+#     role_prompt, on the main engine) ever sees the literal 1000/writing_rules
 #     values ---
-story_agent = SelfAskAgent(
+story_agent = ThinkingAgent(
     name="Twist_Story_Writer",
     namespace="examples",
     llm_engine=llm,
     role_prompt=STORY_WRITER_ROLE_PROMPT,
+    thinking_llm_engine=thinking_llm,
     thinking_instructions=(
         "You are planning a tightly word-budgeted short story built around a "
         "twist ending that recontextualizes the whole narrative. Each round, "
-        "work through several angles at once rather than one thought at a "
-        "time -- e.g. an OBSERVATION about what the premise implies, a "
-        "QUESTION about what the twist could be, an ASSUMPTION you need to "
-        "commit to, and an INSTRUCTION about what must be planted earlier "
-        "for it to land -- as separate thoughts in the same round. Focus "
+        "produce exactly one focused thought that builds on the rounds "
+        "before it -- an observation about what the premise implies, a "
+        "question about what the twist could be, a commitment to a specific "
+        "twist, or what needs to be planted earlier for it to land. Focus "
         "your thoughts on what the twist should be and what needs to be set "
         "up beforehand for it to land."
     ),
     description="A short-fiction writer that scopes a twist ending via self-questioning before drafting.",
-    max_thinking_rounds=8,
-    thoughts_per_round=4,
 )
 
 # --- the task itself declares genre + a small seed premise -- an open-ended
 #     starting point, not a full plot. Figuring out an actual satisfying
 #     twist (and what it requires setting up beforehand) from just this seed
-#     takes several rounds of self-asked scoping questions before writing is
-#     even possible ---
+#     takes several rounds of thinking-phase scoping questions before writing
+#     is even possible. thinking_rounds is a per-invocation runtime
+#     parameter -- passed here alongside the task's own inputs ---
 task = (
     "Write a horror story about a lighthouse keeper who begins receiving radio "
     "transmissions from a ship that sank decades ago. The story's ending should "
@@ -82,6 +88,7 @@ task = (
 )
 result = story_agent.invoke({
     "prompt": task,
+    "thinking_rounds": 6,
     "max_word_count": 1000,
     "writing_rules": (
         "Show, don't tell. Every sentence must either advance the plot or "
@@ -91,11 +98,12 @@ result = story_agent.invoke({
     ),
 })
 
-print(f"TASK: {task}\n")
-print("SELF-ASK THOUGHTS (scoping the twist before writing):")
-for round_index, round_thoughts in enumerate(story_agent.get_thoughts(result.run_id)):
-    print(f"  Round {round_index}:")
-    for thought in round_thoughts:
-        print(f"    [{thought.category}] {thought.content}")
+record = story_agent.get_conversation(turns=1)[0]
 
-print(f"\n~~~ FINAL STORY ~~~\n{result.result}")
+print(f"TASK: {task}\n")
+print("THINKING THOUGHTS (scoping the twist before writing, via the cheaper thinking engine):")
+for round_index, thought in enumerate(record.thoughts):
+    print(f"  Round {round_index}: {thought}")
+
+print(f"\nTHINKING ROUNDS USED: {result.thinking_rounds_used}")
+print(f"\n~~~ FINAL STORY (drafted by the main engine) ~~~\n{result.result}")

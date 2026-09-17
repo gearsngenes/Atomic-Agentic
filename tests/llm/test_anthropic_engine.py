@@ -297,7 +297,7 @@ class TestAnthropicEngine:
 
         payload = engine._build_provider_payload(msgs, {})
 
-        for key in ("temperature", "top_p", "top_k", "stop_sequences", "thinking"):
+        for key in ("temperature", "top_p", "top_k", "extra_body", "stop_sequences", "thinking"):
             assert key not in payload
 
     def test_build_payload_optional_params_included_when_set(
@@ -316,9 +316,10 @@ class TestAnthropicEngine:
 
         payload = engine._build_provider_payload(msgs, {})
 
-        assert payload["temperature"] == 0.7
-        assert payload["top_p"] == 0.9
-        assert payload["top_k"] == 20
+        assert payload["extra_body"] == {"temperature": 0.7, "top_p": 0.9, "top_k": 20}
+        assert "temperature" not in payload
+        assert "top_p" not in payload
+        assert "top_k" not in payload
         assert payload["stop_sequences"] == ["END"]
         assert payload["thinking"] == {"type": "adaptive"}
 

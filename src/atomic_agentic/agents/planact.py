@@ -38,7 +38,7 @@ For the shared iteration loop, blackboard management, and tool registry see
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Literal, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import logging
 
@@ -126,7 +126,6 @@ class PlanActAgent(ToolAgent):
         post_invoke: AtomicInvokable | Callable[..., Any] | None = None,
         post_result_key: Optional[str] = None,
         records_window: int | None = None,
-        assistant_response_source: Literal["raw", "final"] = "raw",
     ) -> None:
         """
         Initialize a PlanActAgent.
@@ -152,7 +151,6 @@ class PlanActAgent(ToolAgent):
             post_invoke=post_invoke,
             post_result_key=post_result_key,
             records_window=records_window,
-            assistant_response_source=assistant_response_source,
         )
         self._system_prompts["plan_first"] = PLANNER_PROMPT
 

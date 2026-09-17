@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any, Mapping, Optional
 import warnings
 
@@ -281,7 +282,6 @@ def make_agent(
     post_result_key: str | None = None,
     system_prompt: str = ROLE_PROMPT,
     response_preview_limit: int | None = None,
-    assistant_response_source: str = "raw",
 ) -> _EchoAgent:
     return _EchoAgent(
         name="writer_agent",
@@ -295,7 +295,6 @@ def make_agent(
         post_invoke=post_invoke,
         post_result_key=post_result_key,
         response_preview_limit=response_preview_limit,
-        assistant_response_source=assistant_response_source,
     )
 
 
@@ -581,6 +580,22 @@ class TestAgentContext:
         assert [m["role"] for m in rendered] == ["user", "assistant"]
         assert rendered[0]["content"] == "Write about pytest in a strict tone."
         assert rendered[1]["content"] == "ECHO: Write about pytest in a strict tone."
+
+    def test_render_turn_stringifies_non_str_generated_response_as_json(self) -> None:
+        # Regression guard: a structured (response_schema-produced)
+        # generated_response must round-trip back into history as valid
+        # JSON, not Python repr syntax (single-quoted keys, True/None) --
+        # see utils.agents.stringify_result.
+        agent = make_agent(engine=FakeLLMEngine([]), context_enabled=True)
+        record = AgentRecord(
+            user_prompt="hello",
+            generated_response={"summary": "ok", "confident": True, "score": None},
+        )
+
+        rendered = agent.render_turn(record)
+
+        assert rendered[1]["content"] == '{"summary": "ok", "confident": true, "score": null}'
+        assert json.loads(rendered[1]["content"]) == {"summary": "ok", "confident": True, "score": None}
 
     def test_context_enabled_resends_prior_history_on_second_call(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())
@@ -1109,12 +1124,6 @@ class TestAgentFrozenRenderingProperties:
         with pytest.raises(AttributeError):
             agent.response_preview_limit = 100  # type: ignore[misc]
 
-    def test_assistant_response_source_is_frozen(self) -> None:
-        agent = make_agent()
-
-        with pytest.raises(AttributeError):
-            agent.assistant_response_source = "final"  # type: ignore[misc]
-
     def test_response_preview_limit_construction_rejects_zero(self) -> None:
         with pytest.raises(AgentError, match="response_preview_limit"):
             make_agent(response_preview_limit=0)
@@ -1126,14 +1135,6 @@ class TestAgentFrozenRenderingProperties:
     def test_response_preview_limit_construction_rejects_non_int(self) -> None:
         with pytest.raises(AgentError, match="response_preview_limit"):
             make_agent(response_preview_limit="100")  # type: ignore[arg-type]
-
-    def test_assistant_response_source_construction_rejects_bad_value(self) -> None:
-        with pytest.raises(AgentError, match="assistant_response_source"):
-            make_agent(assistant_response_source="both")  # type: ignore[arg-type]
-
-    def test_assistant_response_source_construction_rejects_non_string(self) -> None:
-        with pytest.raises(AgentError, match="assistant_response_source"):
-            make_agent(assistant_response_source=1)  # type: ignore[arg-type]
 
     def test_attach_api_removed(self) -> None:
         agent = make_agent()
@@ -1785,24 +1786,6 @@ class TestAgentRecordsNeverStoredWhenContextDisabled:
         # Second call's messages should have no prior-turn content
         second_call = engine.calls[1]
         assert len(second_call) == 2  # just system + user from _MinimalAgent
-
-
-class TestAgentRenderTurnGuards:
-    """Tests for render_turn defensive checks."""
-
-    def test_render_turn_final_source_on_draft_record_raises(self) -> None:
-        engine = FakeLLMEngine(response_fn=echo_latest_user())
-        agent = make_agent(
-            engine=engine,
-            assistant_response_source="final",
-        )
-        draft = AgentRecord(
-            user_prompt="hello",
-            generated_response="raw text",
-            final_result=None,
-        )
-        with pytest.raises(AgentInvocationError, match="final_result is None"):
-            agent.render_turn(draft)
 
 
 class TestAgentDescriptionOverrideRemoval:

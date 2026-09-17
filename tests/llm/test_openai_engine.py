@@ -447,7 +447,7 @@ class TestOpenAIExtractTokenUsage:
             output_tokens=8,
             total_tokens=18,
             output_tokens_details=SimpleNamespace(reasoning_tokens=3),
-            input_tokens_details=SimpleNamespace(cached_tokens=2),
+            input_tokens_details=SimpleNamespace(cached_tokens=2, cache_write_tokens=7),
         ))
 
         result = engine._extract_token_usage(response)
@@ -455,6 +455,7 @@ class TestOpenAIExtractTokenUsage:
         assert result.reasoning_tokens == 3
         assert result.response_tokens == 5
         assert result.cached_tokens == 2
+        assert result.cache_write_tokens == 7
 
     def test_output_tokens_details_none_defaults_reasoning_to_zero(
         self, monkeypatch: pytest.MonkeyPatch
@@ -462,7 +463,7 @@ class TestOpenAIExtractTokenUsage:
         engine = self._engine(monkeypatch)
         response = SimpleNamespace(usage=self._usage(
             output_tokens_details=None,
-            input_tokens_details=SimpleNamespace(cached_tokens=1),
+            input_tokens_details=SimpleNamespace(cached_tokens=1, cache_write_tokens=0),
         ))
 
         result = engine._extract_token_usage(response)
@@ -470,6 +471,7 @@ class TestOpenAIExtractTokenUsage:
         assert result.reasoning_tokens == 0
         assert result.response_tokens == 5
         assert result.cached_tokens == 1
+        assert result.cache_write_tokens == 0
 
     def test_input_tokens_details_none_defaults_cached_to_none(
         self, monkeypatch: pytest.MonkeyPatch
@@ -483,6 +485,7 @@ class TestOpenAIExtractTokenUsage:
         result = engine._extract_token_usage(response)
 
         assert result.cached_tokens is None
+        assert result.cache_write_tokens is None
 
     def test_usage_none_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         engine = self._engine(monkeypatch)

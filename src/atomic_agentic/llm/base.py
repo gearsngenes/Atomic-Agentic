@@ -54,9 +54,12 @@ class LLMEngine(AtomicInvokable, ABC):
                 "output_structure": dict[str, Any] | None}) -> LLMResult
 
     ``LLMResult.result`` is the generated assistant reply: a plain string for
-    ordinary calls, or a ``list``/``dict`` when ``output_structure`` requested
-    provider-native structured output. The declared invokable ``return_type``
-    is ``"str | list[Any] | dict[str, Any]"`` to reflect this.
+    ordinary calls, or a ``str``/``int``/``float``/``bool``/``list``/``dict``/
+    ``None`` when ``output_structure`` requested provider-native structured
+    output -- whatever a conformant JSON value decodes to via ``json.loads``.
+    The declared invokable ``return_type`` is
+    ``"str | int | float | bool | list[Any] | dict[str, Any] | None"`` to
+    reflect this.
 
     Structured-output result contract
     ----------------------------------
@@ -198,7 +201,7 @@ class LLMEngine(AtomicInvokable, ABC):
                               "plain text."
                           )),
             ],
-            return_type="str | list[Any] | dict[str, Any]",
+            return_type="str | int | float | bool | list[Any] | dict[str, Any] | None",
         )
 
         self._timeout_seconds = float(timeout_seconds)
@@ -408,7 +411,7 @@ class LLMEngine(AtomicInvokable, ABC):
 
     def extract(
         self, response: Any, requested_structured: bool
-    ) -> tuple[str | list[Any] | dict[str, Any], TokenUsage, LLMModelData]:
+    ) -> tuple[str | int | float | bool | list[Any] | dict[str, Any] | None, TokenUsage, LLMModelData]:
         """
         Extract the normalized generated result (text, or structured list/dict),
         token usage, and configured model data from one provider response.
@@ -422,10 +425,10 @@ class LLMEngine(AtomicInvokable, ABC):
         the provider, capture timestamps, or construct ``LLMResult``.
         """
         result = self._extract_result(response, requested_structured)
-        if not isinstance(result, (str, list, dict)):
+        if not isinstance(result, (str, int, float, bool, list, dict, type(None))):
             raise LLMEngineError(
-                f"{type(self).__name__}._extract_result must return str, list, "
-                f"or dict; got {type(result)!r}"
+                f"{type(self).__name__}._extract_result must return str, int, "
+                f"float, bool, list, dict, or None; got {type(result)!r}"
             )
 
         token_usage = self._extract_token_usage(response)
@@ -660,7 +663,7 @@ class LLMEngine(AtomicInvokable, ABC):
     @abstractmethod
     def _extract_result(
         self, response: Any, requested_structured: bool
-    ) -> str | list[Any] | dict[str, Any]:
+    ) -> str | int | float | bool | list[Any] | dict[str, Any] | None:
         """
         Extract the assistant's textual OR structured reply from a provider
         response object.
@@ -673,7 +676,8 @@ class LLMEngine(AtomicInvokable, ABC):
         - ``requested_structured=False``: return plain text unchanged, same
           as pre-structured-generation behavior.
         - ``requested_structured=True``: attempt to coerce the provider's raw
-          text output into structured (list/dict) data; on any parse
+          text output into any JSON-decodable value (object, array, string,
+          number, boolean, or null — not just object/array); on any parse
           failure, fall back to returning the raw text string rather than
           raising uncaught. A caller that requested structure and receives a
           ``str`` back is expected to detect and handle that itself.

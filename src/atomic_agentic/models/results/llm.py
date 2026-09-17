@@ -107,16 +107,23 @@ class OpenAITokenUsage(TokenUsage):
     """
     OpenAI Responses API token-usage details.
 
-    ``cached_tokens`` is an input-token subset and is not additive to
-    ``input_tokens``.
+    ``cached_tokens`` and ``cache_write_tokens`` are both input-token
+    subsets and are not additive to ``input_tokens``: ``cached_tokens`` is
+    the portion of this call's input that was served from an existing
+    prompt-cache entry (a reuse), while ``cache_write_tokens`` is the
+    portion newly stored into the cache by this call (seeding a future
+    reuse) — a call's input tokens land in one bucket or the other, not
+    both.
     """
 
     cached_tokens: int | None = None
+    cache_write_tokens: int | None = None
     reasoning_tokens: int | None = None
 
     def __post_init__(self) -> None:
         TokenUsage.__post_init__(self)
         self._validate_optional_token_count("cached_tokens", self.cached_tokens)
+        self._validate_optional_token_count("cache_write_tokens", self.cache_write_tokens)
         self._validate_optional_token_count("reasoning_tokens", self.reasoning_tokens)
 
 
@@ -303,20 +310,24 @@ class LLMResult(AtomicResult):
     """
     Successful LLM generation result.
 
-    ``LLMResult.result`` is the generated assistant reply: a plain ``str`` for
-    ordinary calls, or a ``list``/``dict`` when the engine's ``output_structure``
-    parameter requested provider-native structured output. Token accounting
-    and configured model identity are stored as explicit nested result records.
-    This class does not model provider raw responses.
+    ``LLMResult.result`` is the generated assistant reply: a plain ``str``,
+    ``int``, ``float``, ``bool``, ``list``, ``dict``, or ``None`` -- ``str``
+    for ordinary calls, any of the others when the engine's
+    ``output_structure`` parameter requested provider-native structured
+    output and the provider returned a non-object/array JSON value at the
+    root. Token accounting and configured model identity are stored as
+    explicit nested result records. This class does not model provider raw
+    responses.
     """
 
     token_usage: TokenUsage
     model_data: LLMModelData
 
     def __post_init__(self) -> None:
-        if not isinstance(self.result, (str, list, dict)):
+        if not isinstance(self.result, (str, int, float, bool, list, dict, type(None))):
             raise TypeError(
-                f"result must be a str, list, or dict, got {type(self.result).__name__}."
+                f"result must be a str, int, float, bool, list, dict, or "
+                f"None, got {type(self.result).__name__}."
             )
 
         if not isinstance(self.token_usage, TokenUsage):
