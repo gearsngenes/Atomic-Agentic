@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any, Mapping, Optional
 import warnings
 
@@ -579,6 +580,22 @@ class TestAgentContext:
         assert [m["role"] for m in rendered] == ["user", "assistant"]
         assert rendered[0]["content"] == "Write about pytest in a strict tone."
         assert rendered[1]["content"] == "ECHO: Write about pytest in a strict tone."
+
+    def test_render_turn_stringifies_non_str_generated_response_as_json(self) -> None:
+        # Regression guard: a structured (response_schema-produced)
+        # generated_response must round-trip back into history as valid
+        # JSON, not Python repr syntax (single-quoted keys, True/None) --
+        # see utils.agents.stringify_result.
+        agent = make_agent(engine=FakeLLMEngine([]), context_enabled=True)
+        record = AgentRecord(
+            user_prompt="hello",
+            generated_response={"summary": "ok", "confident": True, "score": None},
+        )
+
+        rendered = agent.render_turn(record)
+
+        assert rendered[1]["content"] == '{"summary": "ok", "confident": true, "score": null}'
+        assert json.loads(rendered[1]["content"]) == {"summary": "ok", "confident": True, "score": None}
 
     def test_context_enabled_resends_prior_history_on_second_call(self) -> None:
         engine = FakeLLMEngine(response_fn=echo_latest_user())

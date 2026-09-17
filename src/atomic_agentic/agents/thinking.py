@@ -12,7 +12,6 @@ not a construction-time knob -- before replying. There is no early exit.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
 
@@ -26,7 +25,7 @@ from ..models.agents.records import AgentRecord, LLMRecord, ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
 from ..models.parameters import ParamSpec
 from ..models.results.agents import ThinkingAgentResult
-from ..utils.agents import normalize_role_prompt, normalize_thinking_instructions
+from ..utils.agents import normalize_role_prompt, normalize_thinking_instructions, stringify_result
 from ..utils.parameters import (
     apply_parameter_reports,
     build_parameter_reports,
@@ -436,12 +435,11 @@ class ThinkingAgent(BasicAgent):
 
     @staticmethod
     def _stringify_thought(value: str | int | float | bool | list | dict | None) -> str:
-        """Render one raw thought value as display text -- a ``str`` value
-        used as-is, any other JSON-decodable value ``json.dumps``-rendered.
-        Shared by the thinking-phase per-thought rendering above and
-        ``_format_thoughts`` below, so the two can't drift on how a non-str
-        thought gets stringified."""
-        return value if isinstance(value, str) else json.dumps(value)
+        """Render one raw thought value as display text -- delegates to the
+        shared ``utils.agents.stringify_result`` helper (also used by
+        ``Agent.render_turn``) so the two render paths can't drift on how a
+        non-str value gets stringified."""
+        return stringify_result(value)
 
     @staticmethod
     def _format_thoughts(

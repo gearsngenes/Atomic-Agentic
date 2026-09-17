@@ -44,6 +44,7 @@ from ..utils.parameters import (
     build_parameter_reports,
     apply_parameter_reports,
 )
+from ..utils.agents import stringify_result
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Agent
@@ -485,7 +486,7 @@ class Agent(AtomicInvokable, ABC):
                 f"render_turn expected AgentRecord, got {type(turn)!r}"
             )
 
-        response_text = str(turn.generated_response)
+        response_text = stringify_result(turn.generated_response)
 
         if (
             self._response_preview_limit is not None

@@ -12,7 +12,6 @@ from atomic_agentic.models.agents.tasks import (
     ScriptAgentTask,
     ThinkingTask,
 )
-from atomic_agentic.models.agents.thought_models import AgentThought
 from atomic_agentic.constants.core import NO_VAL
 from ...fake_engines import FakeLLMEngine
 
@@ -195,19 +194,19 @@ class TestThinkingTask:
 
         assert not hasattr(task, "phase")
 
-    def test_thoughts_holds_nested_rounds_of_agent_thought_instances(self) -> None:
-        thought = AgentThought(category="OBSERVATION", content="obs")
+    def test_thoughts_holds_raw_values_directly(self) -> None:
         task = ThinkingTask(
-            turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking", thoughts=[[thought]]
+            turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking",
+            thoughts=["a raw thought", {"focus": "x"}],
         )
 
-        assert task.thoughts == [[thought]]
+        assert task.thoughts == ["a raw thought", {"focus": "x"}]
 
     def test_default_factories_are_independent_per_instance(self) -> None:
         first = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
         second = ThinkingTask(turns=[], inputs={}, user_prompt="hi", system_prompt_name="thinking")
 
-        first.thoughts.append([AgentThought(category="OTHER", content="x")])
+        first.thoughts.append("x")
 
         assert second.thoughts == []
 

@@ -4,7 +4,7 @@ from typing import Any, Callable, Mapping, Optional
 
 import logging
 
-from ..exceptions import AgentError, AgentInvocationError
+from ..exceptions import AgentError
 from ..llm.base import LLMEngine
 from ..models.agents.records import AgentRecord, LLMRecord
 from ..models.agents.prompts import PromptConfig
@@ -143,10 +143,6 @@ class BasicAgent(Agent):
             "output_structure": self._response_schema,
         })
         text = engine_result.result
-        if not isinstance(text, (str, int, float, bool, list, dict, type(None))):
-            raise AgentInvocationError(
-                f"LLM engine returned unexpected result type (type={type(text).__name__})."
-            )
         llm_record = LLMRecord(
             messages=list(task.task_messages),
             llm_result=engine_result,
@@ -169,10 +165,6 @@ class BasicAgent(Agent):
             "output_structure": self._response_schema,
         })
         text = engine_result.result
-        if not isinstance(text, (str, int, float, bool, list, dict, type(None))):
-            raise AgentInvocationError(
-                f"LLM engine returned unexpected result type (type={type(text).__name__})."
-            )
         llm_record = LLMRecord(
             messages=list(task.task_messages),
             llm_result=engine_result,

@@ -5,7 +5,26 @@ from typing import Any
 
 import pytest
 
-from atomic_agentic.utils.agents import extract_json_object
+from atomic_agentic.utils.agents import extract_json_object, stringify_result
+
+
+class TestStringifyResult:
+    def test_str_value_returned_verbatim(self) -> None:
+        assert stringify_result("plain text") == "plain text"
+
+    def test_dict_value_rendered_as_json(self) -> None:
+        value = {"summary": "ok", "confident": True, "score": None}
+        assert stringify_result(value) == json.dumps(value)
+        assert json.loads(stringify_result(value)) == value
+
+    def test_list_value_rendered_as_json(self) -> None:
+        assert stringify_result([1, 2, 3]) == "[1, 2, 3]"
+
+    def test_int_float_bool_none_rendered_as_json_literals(self) -> None:
+        assert stringify_result(3) == "3"
+        assert stringify_result(3.5) == "3.5"
+        assert stringify_result(True) == "true"
+        assert stringify_result(None) == "null"
 
 
 class TestExtractJsonObject:
