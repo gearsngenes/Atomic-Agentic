@@ -503,11 +503,11 @@ class ScriptAgentRecord(AgentRecord):
 class ThinkingAgentRecord(AgentRecord):
     """
     Canonical memory record for one completed thinking-capable agent
-    invocation (currently only ``SelfAskAgent``).
+    invocation (currently only ``ThinkingAgent``).
 
     In addition to the base AgentRecord lifecycle artifacts, a
     ThinkingAgentRecord stores the half-open span of persisted thoughts
-    produced by the invocation. ``SelfAskAgent`` renders that span into
+    produced by the invocation. ``ThinkingAgent`` renders that span into
     future LLM-facing context when building messages.
     """
 

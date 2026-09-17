@@ -31,26 +31,17 @@ class ToolRegistrationError(ToolAgentError):
     """Raised when registering tools fails due to collisions or bad inputs."""
 
 
-class ThinkingAgentError(RuntimeError):
-    """Base exception for SelfAskAgent thinking-phase errors.
-
-    Sibling to AgentError, not a subclass of it -- mirrors ToolAgentError's
-    own convention (a domain error type superseding a bare RuntimeError;
-    callers doing `except RuntimeError` upstream still catch these).
-    """
-
-
 class BlackboardParseError(RuntimeError):
     """Raised when parsing one raw statement into CodeStatement object(s)
     fails.
 
     Subclasses RuntimeError to match this codebase's existing convention for
     domain error types superseding a bare RuntimeError (see LLMEngineError,
-    MCPError, ThinkingAgentError) -- callers doing `except RuntimeError`
-    upstream still catch these. Deliberately not rooted in ToolAgentError:
-    ScriptAgent is a new sibling family, not a ToolAgent subclass, so sharing
-    ToolAgentError's lineage here would imply a relationship that doesn't
-    exist (mirrors ThinkingAgentError's own "sibling, not subclass" note).
+    MCPError) -- callers doing `except RuntimeError` upstream still catch
+    these. Deliberately not rooted in ToolAgentError: ScriptAgent is a new
+    sibling family, not a ToolAgent subclass, so sharing ToolAgentError's
+    lineage here would imply a relationship that doesn't exist (a
+    sibling-not-subclass relationship, not an inheritance one).
 
     Unifies every rejection category from parse_statement_to_slots under one
     catchable type: genuine ast.parse SyntaxErrors, illegal assignment
@@ -187,7 +178,6 @@ __all__ = [
     "AgentInvocationError",
     "ToolAgentError",
     "ToolRegistrationError",
-    "ThinkingAgentError",
     "BlackboardParseError",
     "DependencyFailedError",
     "WorkflowError",

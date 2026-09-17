@@ -160,10 +160,14 @@ class Agent(AtomicInvokable, ABC):
 
         Base ``Agent`` reserves only ``run_id``. A subclass with its own
         fixed/reserved parameter overrides this as
-        ``return super().get_reserved_parameters() + [MY_RESERVED_PARAM]``,
-        so the same collision/overlap/graft machinery in ``__init__`` covers
-        its reserved name too, without base ``Agent`` needing advance
-        knowledge of it.
+        ``return [MY_RESERVED_PARAM] + super().get_reserved_parameters()``
+        -- prepended, not appended -- so the same collision/overlap/graft
+        machinery in ``__init__`` covers its reserved name too, without base
+        ``Agent`` needing advance knowledge of it, and so that ``run_id``
+        (the most generic reservation, defined here at the root) keeps
+        sorting last among reserved keyword-only parameters in the final
+        schema no matter how many subclass levels each prepend their own
+        more-specific reservation ahead of it.
         """
         return [RUN_ID_PARAM]
 
@@ -881,7 +885,7 @@ class Agent(AtomicInvokable, ABC):
         must be able to pass its own already-snapshotted key so a
         concurrent ``set_active_conversation`` can never make this method's
         search and its caller's own snapshot disagree. Shared by
-        ``_resolve_context`` and ``SelfAskAgent.get_thoughts``.
+        ``_resolve_context`` and ``ThinkingAgent.get_thoughts``.
         """
         history = self._conversations[conversation_id]
         if run_id is None:

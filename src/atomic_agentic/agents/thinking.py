@@ -1,47 +1,53 @@
 """
-SelfAskAgent: Adaptive Self-Questioning BasicAgent
+ThinkingAgent: Self-Questioning BasicAgent
 
-This module provides ``SelfAskAgent``, a concrete ``BasicAgent`` subclass
-overriding ``think()``/``act()`` alone to add an adaptive, free-flowing
-self-questioning phase before the reply. Each thinking round is one LLM
-call producing categorized ``[CATEGORY] content`` lines (no JSON schema);
-thinking continues until the model emits ``|STOP_THINKING|`` or
-``max_thinking_rounds`` is hit -- a hard safety valve that forces a reply
-using whatever thoughts exist, never a raise.
+This module provides ``ThinkingAgent``, a concrete ``BasicAgent`` subclass
+overriding ``think()``/``act()`` alone to add a self-questioning phase
+before the reply. Each thinking round is one LLM call producing one
+free-form thought (a plain string, or a structured value when
+``thinking_schema`` is set); the agent always runs exactly
+``thinking_rounds`` rounds -- a reserved per-invocation runtime parameter,
+not a construction-time knob -- before replying. There is no early exit.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Callable, Mapping, Optional
 
 from .base import Agent
 from .basic import BasicAgent
-from .prompts import SELF_ASK_PROMPT
-from ..constants.agents import (
-    STOP_THINKING_SENTINEL,
-    THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER,
-    THINKING_ADDITIONAL_INSTRUCTIONS_HEADER,
-)
-from ..exceptions import AgentError, AgentInvocationError, ThinkingAgentError
+from ..constants.agents import THINKING_ROUNDS_PARAM
+from ..exceptions import AgentError, AgentInvocationError
 from ..llm.base import LLMEngine
 from ..models.agents.prompts import PromptConfig
 from ..models.agents.records import AgentRecord, LLMRecord, ThinkingAgentRecord
 from ..models.agents.tasks import ThinkingTask
-from ..models.agents.thought_models import AgentThought
+from ..models.parameters import ParamSpec
 from ..models.results.agents import ThinkingAgentResult
 from ..utils.agents import normalize_role_prompt, normalize_thinking_instructions
-from ..utils.agents import parse_thoughts
 from ..utils.parameters import (
     apply_parameter_reports,
     build_parameter_reports,
     insert_by_category,
 )
 
+_THINKING_FRAMING = (
+    "Think about this task and produce insights, questions, and "
+    "reasoning that clarify or enhance your understanding of it -- this "
+    "is preparation for a final response, not the response itself."
+)
+_THINKING_CONTINUATION_NUDGE = (
+    "Continue thinking about this task. Produce additional insights, "
+    "questions, or reasoning that further clarify or enhance your "
+    "understanding of it."
+)
 
-class SelfAskAgent(BasicAgent):
+
+class ThinkingAgent(BasicAgent):
     """
-    ``BasicAgent`` subclass adding an adaptive self-questioning phase.
+    ``BasicAgent`` subclass adding a fixed-round self-questioning phase.
 
     Overrides ``think()``/``act()``; ``prepare()`` stays ``BasicAgent``'s
     inherited no-op -- there is no deterministic bookkeeping step between
@@ -50,9 +56,9 @@ class SelfAskAgent(BasicAgent):
     it happens.
 
     Exactly two system prompts exist for any instance: ``"role"`` (the
-    caller's own role prompt, reply phase only) and ``"self_ask"`` (this
-    class's own fixed prompt, thinking phase only, with
-    ``thinking_instructions`` spliced into its own reserved slot).
+    caller's own role prompt, reply phase only) and ``"thinking"`` (built
+    directly from ``thinking_instructions`` each render, thinking phase
+    only -- no fixed scaffold, no wrapper).
 
     Bypasses ``BasicAgent.__init__`` and calls ``Agent.__init__`` directly
     -- ``thinking_instructions`` needs to contribute its own placeholders
@@ -62,7 +68,21 @@ class SelfAskAgent(BasicAgent):
     ``thinking_instructions``'s; a true collision raises.
     """
 
-    SELF_ASK_PROMPT_NAME = "self_ask"
+    THINKING_PROMPT_NAME = "thinking"
+
+    DEFAULT_THINKING_PROMPT: str = (
+        "You are a thinking assistant that produces various thoughts, "
+        "questions, and task-enhancement clarifications to describe or "
+        "enhance a user task prompt"
+    )
+
+    @classmethod
+    def get_reserved_parameters(cls) -> list[ParamSpec]:
+        """Prepend ``thinking_rounds`` onto the base ``run_id`` reservation,
+        per ``Agent.get_reserved_parameters``'s own documented subclass-
+        extension convention -- keeps ``run_id`` sorting last among
+        reserved keyword-only parameters in the declared schema."""
+        return [THINKING_ROUNDS_PARAM] + super().get_reserved_parameters()
 
     def __init__(
         self,
@@ -74,14 +94,14 @@ class SelfAskAgent(BasicAgent):
         thinking_instructions: str | PromptConfig | None = None,
         context_enabled: bool = True,
         *,
-        max_thinking_rounds: int,
-        thoughts_per_round: int = 1,
+        thinking_llm_engine: LLMEngine | None = None,
         pre_invoke: Optional[Callable | Any] = None,
         post_invoke: Optional[Callable | Any] = None,
         post_result_key: Optional[str] = None,
         records_window: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         response_schema: dict[str, Any] | None = None,
+        thinking_schema: dict[str, Any] | None = None,
     ) -> None:
         """
         Parameters
@@ -89,37 +109,48 @@ class SelfAskAgent(BasicAgent):
         role_prompt : str | PromptConfig | None
             Reply-phase persona prompt. Same contract as ``BasicAgent``'s.
         thinking_instructions : str | PromptConfig | None
-            Optional additional instructions spliced into the thinking
-            phase's own prompt. May declare its own ``{placeholder}``s,
-            reconciled against ``role_prompt``'s (role_prompt wins on
-            compatible-but-not-identical overlap; true collisions raise).
-        max_thinking_rounds : int
-            Required. Hard cap on thinking rounds -- the only backstop
-            guaranteeing the self-ask loop terminates. Must be a concrete
-            int ``>= 0``; ``0`` means "skip thinking, reply immediately"
-            (``think()``'s own round-budget check is already satisfied
-            before any round runs). ``None`` (unbounded) is not permitted.
-        thoughts_per_round : int
-            Max thoughts kept per round; excess parsed thoughts are
-            silently truncated. Must be a positive int (``>= 1``).
+            Free-form instructions rendered directly as the thinking
+            phase's entire system message -- no imposed structure, no
+            wrapper. Defaults to ``DEFAULT_THINKING_PROMPT`` when omitted.
+            May declare its own ``{placeholder}``s, reconciled against
+            ``role_prompt``'s (role_prompt wins on compatible-but-not-
+            identical overlap; true collisions raise).
+        thinking_llm_engine : LLMEngine | None
+            Optional secondary engine used for thinking-round calls only
+            (``think``/``async_think``). ``None`` (default) falls back to
+            ``llm_engine`` -- every thinking round then uses the same
+            engine as the reply phase, identical to this class's behavior
+            before this parameter existed. The reply phase
+            (``act``/``async_act``) never consults this value under any
+            setting.
         response_schema : dict[str, Any] | None
             Structured-output schema applied to the reply phase only --
             the thinking phase stays free-form regardless. Same contract
             as ``BasicAgent``'s.
-        """
-        if max_thinking_rounds is None or type(max_thinking_rounds) is not int or max_thinking_rounds < 0:
-            raise AgentError(
-                f"{type(self).__name__} requires max_thinking_rounds to be a "
-                "concrete int >= 0 -- it is the only backstop guaranteeing "
-                "the self-ask loop terminates. None (unbounded) is not permitted."
-            )
-        if type(thoughts_per_round) is not int or thoughts_per_round < 1:
-            raise AgentError("thoughts_per_round must be a positive int (>= 1).")
+        thinking_schema : dict[str, Any] | None
+            Structured-output schema applied to thinking-round calls only
+            (``think``/``async_think``) -- the reply phase never consults
+            this value. ``None`` (default) keeps thinking fully free-form.
+            Fully independent of ``response_schema``; setting one has no
+            effect on the other. Same validation contract as
+            ``response_schema`` (``Mapping``-or-raise, no deeper
+            JSON-Schema key checking). When set, a thinking round's stored
+            value may be any JSON-decodable type, not just ``str``
+            (mirrors ``ThinkingTask.thoughts``'s already-widened type).
+            Field-ordering guidance (place reasoning-shaped fields before
+            label/decision fields -- production data shows a measurable
+            quality hit otherwise) is documentation only, never
+            runtime-enforced.
 
+        The number of thinking rounds run per invocation is not a
+        construction-time parameter -- it is the reserved runtime
+        parameter ``thinking_rounds`` (default ``1``, no ceiling here),
+        validated in ``_initialize_task``.
+        """
         role_config = normalize_role_prompt(role_prompt, self.DEFAULT_ROLE_PROMPT)
         role_params = list(role_config.parameters)
 
-        thinking_config = normalize_thinking_instructions(thinking_instructions)
+        thinking_config = normalize_thinking_instructions(thinking_instructions, self.DEFAULT_THINKING_PROMPT)
         thinking_params = list(thinking_config.parameters)
 
         # Reconcile role_prompt vs thinking_instructions BEFORE combining --
@@ -147,12 +178,9 @@ class SelfAskAgent(BasicAgent):
         )
 
         self._system_prompts["role"] = role_config
-        self._system_prompts[self.SELF_ASK_PROMPT_NAME] = SELF_ASK_PROMPT
         self._thinking_instructions_config = thinking_config
 
-        self._max_thinking_rounds = max_thinking_rounds
-        self._thoughts_per_round = thoughts_per_round
-        self._thoughts: list[list[AgentThought]] = []
+        self._thoughts: list[str | int | float | bool | list | dict | None] = []
 
         # response_schema is not part of Agent.__init__'s param set --
         # BasicAgent.__init__ is bypassed above, so this class stores it
@@ -164,6 +192,46 @@ class SelfAskAgent(BasicAgent):
             )
         self._response_schema = response_schema
 
+        if thinking_llm_engine is not None and not isinstance(thinking_llm_engine, LLMEngine):
+            raise AgentError(
+                f"{type(self).__name__}.thinking_llm_engine must be an LLMEngine "
+                f"instance or None, got {type(thinking_llm_engine).__name__}."
+            )
+        self._thinking_llm_engine = thinking_llm_engine
+
+        if thinking_schema is not None and not isinstance(thinking_schema, Mapping):
+            raise AgentError(
+                f"{type(self).__name__}.thinking_schema must be a dict/Mapping "
+                f"or None, got {type(thinking_schema).__name__}."
+            )
+        self._thinking_schema = thinking_schema
+
+    # ------------------------------------------------------------------ #
+    # Secondary thinking engine
+    # ------------------------------------------------------------------ #
+    @property
+    def thinking_llm_engine(self) -> LLMEngine | None:
+        """The secondary engine used for thinking rounds, or ``None`` if
+        unset. Returned exactly as stored -- ``None`` means "no override
+        configured," distinct from "explicitly set to the same object as
+        ``llm_engine``." ``think()``/``async_think()`` resolve the engine
+        actually used via ``self._thinking_llm_engine or self._llm_engine``
+        internally; this property is the raw, unresolved value."""
+        return self._thinking_llm_engine
+
+    @thinking_llm_engine.setter
+    def thinking_llm_engine(self, engine: LLMEngine | None) -> None:
+        if engine is not None and not isinstance(engine, LLMEngine):
+            raise TypeError("thinking_llm_engine must be an LLMEngine instance or None.")
+        self._thinking_llm_engine = engine
+
+    @property
+    def thinking_schema(self) -> dict[str, Any] | None:
+        """Structured-output schema applied to thinking rounds only;
+        ``None`` requests free-form text. Frozen at construction -- no
+        setter. Mirrors ``BasicAgent.response_schema``'s exact shape."""
+        return self._thinking_schema
+
     # ------------------------------------------------------------------ #
     # Memory management
     # ------------------------------------------------------------------ #
@@ -172,7 +240,7 @@ class SelfAskAgent(BasicAgent):
         super().clear_memory()
         self._thoughts.clear()
 
-    def get_thoughts(self, run_id: str | None = None) -> list[list[AgentThought]]:
+    def get_thoughts(self, run_id: str | None = None) -> list[str | int | float | bool | list | dict | None]:
         """Return the thought rounds produced by one invocation.
 
         Routes through the shared ``Agent._find_in_conversation`` lookup
@@ -191,7 +259,7 @@ class SelfAskAgent(BasicAgent):
         re-checked here.
 
         Returns a shallow copy of the relevant slice of
-        ``self._thoughts`` (one inner list per round).
+        ``self._thoughts`` (one raw value per round).
         """
         record = self._find_in_conversation(self._active_conversation, run_id)
         if record is None:
@@ -203,7 +271,7 @@ class SelfAskAgent(BasicAgent):
         return list(self._thoughts[record.thoughts_start:record.thoughts_end])
 
     @property
-    def thoughts(self) -> list[list[AgentThought]]:
+    def thoughts(self) -> list[str | int | float | bool | list | dict | None]:
         """Shallow copy of the full persisted thought-round history, across
         every invocation. Pairs with ``ThinkingAgentResult``/
         ``ThinkingAgentRecord``'s own ``thoughts_start``/``thoughts_end``
@@ -223,17 +291,32 @@ class SelfAskAgent(BasicAgent):
         inputs: dict,
     ) -> ThinkingTask:
         """
-        Bare seed -- no LLM call. The task always starts in the self-ask
-        phase; ``max_thinking_rounds == 0`` means ``think()``'s own
-        round-budget check (``len(task.thoughts) >= self._max_thinking_rounds``,
-        true even before any round runs) switches straight to the reply
-        phase on the very first call, without ever invoking the engine.
+        Validate the reserved ``thinking_rounds`` runtime parameter and
+        seed the task with it -- no LLM call here. ``inputs["thinking_rounds"]``
+        is always present (``filter_inputs`` already injected
+        ``THINKING_ROUNDS_PARAM``'s default of ``1`` if the caller omitted
+        it, same guarantee ``run_id`` relies on). An invalid value raises
+        here, before any round runs, rather than deeper inside ``think()``.
+
+        The task always starts in the thinking phase; ``thinking_rounds == 0``
+        means ``think()``'s own round-budget check
+        (``len(task.thoughts) >= task.thinking_rounds``, true even before
+        any round runs) switches straight to the reply phase on the very
+        first call, without ever invoking the engine.
         """
+        thinking_rounds = inputs["thinking_rounds"]
+        if type(thinking_rounds) is not int or thinking_rounds < 0:
+            raise AgentInvocationError(
+                f"{self.full_name}: thinking_rounds must be a concrete int "
+                f">= 0, got {thinking_rounds!r}."
+            )
+
         return ThinkingTask(
             turns=turns,
             inputs=inputs,
             user_prompt=prompt,
-            system_prompt_name=self.SELF_ASK_PROMPT_NAME,
+            system_prompt_name=self.THINKING_PROMPT_NAME,
+            thinking_rounds=thinking_rounds,
         )
 
     def think(self, task: ThinkingTask) -> ThinkingTask:
@@ -243,34 +326,36 @@ class SelfAskAgent(BasicAgent):
 
         No-ops (returns ``task`` unchanged) once ``task.system_prompt_name
         == "role"``. Otherwise: if the round budget is already exhausted
-        (covers ``max_thinking_rounds=0``), switches straight to the reply
+        (covers ``thinking_rounds=0``), switches straight to the reply
         phase without calling the engine. Otherwise renders, calls the
-        engine, and parses the (possibly ``|STOP_THINKING|``-truncated)
-        output into categorized thoughts via ``parse_thoughts``.
+        engine, and stores the stripped output as this round's raw thought
+        value.
 
-        No retries: an empty raw LLM response is a hard failure
-        (``ThinkingAgentError``), and the lax category-marker format
-        degrades unmarked text to a single ``OTHER`` thought -- so the
-        only other hard failure is a round whose parsed thoughts end up
-        empty regardless (e.g. a bare/whitespace-only ``|STOP_THINKING|``
-        with nothing before it). Never silently recorded as a no-op round.
+        A round's stored value is the engine's raw returned output verbatim
+        -- stripped if it's a ``str``, used as-is for any other
+        JSON-decodable type (only possible when ``thinking_schema`` is
+        set). There is no "empty round" concept: whatever the engine
+        returns becomes this round's thought unconditionally, including a
+        falsy value like ``False``, ``0``, or an empty string/collection --
+        AA imposes no judgment on provider output here, matching how
+        ``response_schema``/``LLMEngine`` already treat every
+        JSON-decodable value as legitimate.
         """
         if task.system_prompt_name == "role":
             return task
 
-        if len(task.thoughts) >= self._max_thinking_rounds:
+        if len(task.thoughts) >= task.thinking_rounds:
             task.system_prompt_name = "role"
             task.task_messages = []
             return task
 
         task.task_messages = []
         messages = self.render_task(task)
-        engine_result = self._llm_engine.invoke({"messages": messages})
+        engine_result = (self._thinking_llm_engine or self._llm_engine).invoke({
+            "messages": messages,
+            "output_structure": self._thinking_schema,
+        })
         raw = engine_result.result
-        if not raw:
-            raise ThinkingAgentError(
-                f"{self.full_name}: thinking round produced empty output."
-            )
 
         task.llm_records.append(LLMRecord(
             messages=list(task.task_messages),
@@ -278,17 +363,10 @@ class SelfAskAgent(BasicAgent):
             system_prompt_name=task.system_prompt_name,
         ))
 
-        stop_seen = STOP_THINKING_SENTINEL in raw
-        prefix = raw.split(STOP_THINKING_SENTINEL, 1)[0] if stop_seen else raw
-        parsed = parse_thoughts(prefix)[: self._thoughts_per_round]
-        if not parsed:
-            raise ThinkingAgentError(
-                f"{self.full_name}: thinking round produced no parsable "
-                "thoughts (stop sentinel or empty content with no thought text)."
-            )
-        task.thoughts.append(parsed)
+        content = raw.strip() if isinstance(raw, str) else raw
+        task.thoughts.append(content)
 
-        if stop_seen or len(task.thoughts) >= self._max_thinking_rounds:
+        if len(task.thoughts) >= task.thinking_rounds:
             task.system_prompt_name = "role"
             task.task_messages = []
 
@@ -301,19 +379,18 @@ class SelfAskAgent(BasicAgent):
         if task.system_prompt_name == "role":
             return task
 
-        if len(task.thoughts) >= self._max_thinking_rounds:
+        if len(task.thoughts) >= task.thinking_rounds:
             task.system_prompt_name = "role"
             task.task_messages = []
             return task
 
         task.task_messages = []
         messages = self.render_task(task)
-        engine_result = await self._llm_engine.async_invoke({"messages": messages})
+        engine_result = await (self._thinking_llm_engine or self._llm_engine).async_invoke({
+            "messages": messages,
+            "output_structure": self._thinking_schema,
+        })
         raw = engine_result.result
-        if not raw:
-            raise ThinkingAgentError(
-                f"{self.full_name}: thinking round produced empty output."
-            )
 
         task.llm_records.append(LLMRecord(
             messages=list(task.task_messages),
@@ -321,17 +398,10 @@ class SelfAskAgent(BasicAgent):
             system_prompt_name=task.system_prompt_name,
         ))
 
-        stop_seen = STOP_THINKING_SENTINEL in raw
-        prefix = raw.split(STOP_THINKING_SENTINEL, 1)[0] if stop_seen else raw
-        parsed = parse_thoughts(prefix)[: self._thoughts_per_round]
-        if not parsed:
-            raise ThinkingAgentError(
-                f"{self.full_name}: thinking round produced no parsable "
-                "thoughts (stop sentinel or empty content with no thought text)."
-            )
-        task.thoughts.append(parsed)
+        content = raw.strip() if isinstance(raw, str) else raw
+        task.thoughts.append(content)
 
-        if stop_seen or len(task.thoughts) >= self._max_thinking_rounds:
+        if len(task.thoughts) >= task.thinking_rounds:
             task.system_prompt_name = "role"
             task.task_messages = []
 
@@ -354,61 +424,41 @@ class SelfAskAgent(BasicAgent):
     # Render pipeline
     # ------------------------------------------------------------------ #
     def _render_system_message(self, task: ThinkingTask) -> list[dict[str, str]]:
-        """Dispatch ``self_ask`` locally; delegate ``role`` to
-        ``BasicAgent``'s own implementation.
-
-        The self-ask render context resolves ``thinking_instructions``
-        against ``task.inputs`` first, wraps the result in a labeled
-        section only when non-empty, then plugs it into
-        ``SELF_ASK_PROMPT``'s own ``{user_thinking_instructions}`` slot
-        alongside ``{thoughts_per_round}``/``{max_thinking_rounds}``.
-        """
-        if task.system_prompt_name != self.SELF_ASK_PROMPT_NAME:
+        """Dispatch ``thinking`` locally by rendering
+        ``thinking_instructions`` directly, with no additional wrapper or
+        fixed scaffold; delegate ``role`` to ``BasicAgent``'s own
+        implementation."""
+        if task.system_prompt_name != self.THINKING_PROMPT_NAME:
             return super()._render_system_message(task)
 
-        user_text = self._thinking_instructions_config.render(task.inputs)
-        round_limit_text = (
-            f"You may think across AT MOST {self._max_thinking_rounds} round(s) "
-            "total for this task."
-        )
-        self_ask_context = {
-            "thoughts_per_round": self._thoughts_per_round,
-            "max_thinking_rounds": round_limit_text,
-            "user_thinking_instructions": (
-                THINKING_ADDITIONAL_INSTRUCTIONS_HEADER
-                + user_text
-                + THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER
-                if user_text
-                else ""
-            ),
-        }
-        rendered = self._system_prompts[self.SELF_ASK_PROMPT_NAME].render(self_ask_context)
+        rendered = self._thinking_instructions_config.render(task.inputs)
         return [{"role": "system", "content": rendered}]
 
     def _render_task_messages(self, task: ThinkingTask) -> list[dict[str, str]]:
-        """Build this phase's task messages, self_ask and role alike.
+        """Build this phase's task messages.
 
-        Build-once contract as with every other family. Both phases share
-        the exact same shape -- banner alone when ``task.thoughts`` is
-        empty, banner + thoughts-so-far snapshot + a phase-specific
-        instruction once it isn't (rendered regardless of *why* thinking
-        concluded, sentinel or round budget) -- so it's built as one
-        gated sequence of appends rather than two parallel branches.
+        Build-once contract as with every other family. The banner gains a
+        fixed framing line -- signaling this is a preparatory thinking step,
+        not the final reply -- only while ``task.system_prompt_name`` is
+        the thinking phase; the role phase keeps the bare banner. Once
+        thoughts exist, both phases append the thoughts-so-far snapshot and
+        a phase-specific instruction.
         """
         if task.task_messages:
             return task.task_messages
 
-        messages = [{"role": "user", "content": self._render_task_banner_text(task)}]
+        banner = self._render_task_banner_text(task)
+        if task.system_prompt_name == self.THINKING_PROMPT_NAME:
+            banner = banner + "\n---\n" + _THINKING_FRAMING
+
+        messages = [{"role": "user", "content": banner}]
 
         if task.thoughts:
             messages.append(
                 {"role": "assistant", "content": self._format_thoughts(task.thoughts)}
             )
-            if task.system_prompt_name == self.SELF_ASK_PROMPT_NAME:
-                instruction = (
-                    "Produce the next round of thoughts, one per line in "
-                    "[CATEGORY] content format."
-                )
+            if task.system_prompt_name == self.THINKING_PROMPT_NAME:
+                instruction = _THINKING_CONTINUATION_NUDGE
             else:
                 instruction = (
                     "Given the current task and the thoughts above, respond "
@@ -427,13 +477,18 @@ class SelfAskAgent(BasicAgent):
         return f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK ====="
 
     @staticmethod
-    def _format_thoughts(rounds: list[list[AgentThought]], *, start_round: int = 0) -> str:
-        """Render rounds of thoughts as ``## Round N`` grouped blocks, each
-        thought as ``[CATEGORY] content``."""
+    def _format_thoughts(
+        rounds: list[str | int | float | bool | list | dict | None],
+        *,
+        start_round: int = 0,
+    ) -> str:
+        """Render rounds of raw thought values as ``## Round N`` blocks --
+        a ``str`` value used as-is, any other JSON-decodable value
+        ``json.dumps``-rendered for display."""
         blocks: list[str] = []
-        for i, round_thoughts in enumerate(rounds, start=start_round):
-            lines = "\n".join(f"[{t.category}] {t.content}" for t in round_thoughts)
-            blocks.append(f"## Round {i}\n{lines}")
+        for i, value in enumerate(rounds, start=start_round):
+            rendered_value = value if isinstance(value, str) else json.dumps(value)
+            blocks.append(f"## Round {i}\n{rendered_value}")
         return "\n\n".join(blocks)
 
     # ------------------------------------------------------------------ #
@@ -491,8 +546,7 @@ class SelfAskAgent(BasicAgent):
         """Return a diagnostic snapshot including this agent's own
         construction knobs and persisted thoughts."""
         d = super().to_dict()
-        d["max_thinking_rounds"] = self._max_thinking_rounds
-        d["thoughts_per_round"] = self._thoughts_per_round
         d["thinking_instructions"] = self._thinking_instructions_config.template
-        d["thoughts"] = [[t.to_dict() for t in round_] for round_ in self._thoughts]
+        d["thinking_schema"] = self._thinking_schema
+        d["thoughts"] = list(self._thoughts)
         return d

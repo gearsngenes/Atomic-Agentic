@@ -207,7 +207,7 @@ class ToolAgentResult(AgentResult):
 class ThinkingAgentResult(AgentResult):
     """
     Successful thinking-capable agent invocation result (currently only
-    ``SelfAskAgent``).
+    ``ThinkingAgent``).
 
     Extends ``AgentResult`` with the half-open index span into the agent's
     persisted thoughts list produced by this invocation. Indices only, not
@@ -215,7 +215,7 @@ class ThinkingAgentResult(AgentResult):
     ``thoughts_start``/``thoughts_end`` exactly (no ``__post_init__``
     override needed here, matching that precedent: plain ``int | None``
     fields, no cross-field validation). A caller needing the actual
-    ``AgentThought`` content either calls ``SelfAskAgent.get_thoughts(run_id)``
+    thought content either calls ``ThinkingAgent.get_thoughts(run_id)``
     directly, or slices the agent's own public ``thoughts`` property
     (``agent.thoughts[thoughts_start:thoughts_end]``).
 

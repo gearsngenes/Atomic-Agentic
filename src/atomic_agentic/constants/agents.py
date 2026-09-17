@@ -48,6 +48,12 @@ RUN_ID_PARAM: ParamSpec = ParamSpec(
     description="Optional UUID hexstring used to point to a specific historical run of this agent. Do NOT provide natural-language instructions here; this is a reserved parameter to programatically select where in an agent's history to resume execution."
 )
 
+THINKING_ROUNDS_PARAM: ParamSpec = ParamSpec(
+    name="thinking_rounds", index=0, kind=ParamSpec.KEYWORD_ONLY,
+    type=("int",), default=1,
+    description="Number of thinking rounds ThinkingAgent runs before replying. Must be a concrete int >= 0; 0 skips thinking entirely and replies immediately."
+)
+
 # =============================================================================
 # ToolAgent LLM-output JSON fields
 # =============================================================================
@@ -135,43 +141,6 @@ RETURN_TOOL_DESCRIPTION = (
 RETURN_TOOL_FULL_NAME = (
     f"Tool.{RETURN_TOOL_NAMESPACE}.{RETURN_TOOL_NAME}"
 )
-
-# =============================================================================
-# Explicit public export list
-# =============================================================================
-# Keep this explicit so adding local helper names or imports cannot accidentally
-# widen the module's public surface.
-
-THOUGHT_CATEGORIES: tuple[str, ...] = (
-    "OBSERVATION",
-    "QUESTION",
-    "CLARIFICATION",
-    "ASSUMPTION",
-    "REASON",
-    "INSTRUCTION",
-    "OTHER",
-)
-
-THOUGHT_MARKER_PATTERN = re.compile(
-    r"^\s*\[(" + "|".join(THOUGHT_CATEGORIES) + r")\]\s*",
-    re.MULTILINE | re.IGNORECASE,
-)
-
-STOP_THINKING_SENTINEL = "|STOP_THINKING|"
-
-# Wraps a resolved (non-empty) thinking_instructions render into its own
-# labeled section around SELF_ASK_PROMPT's {user_thinking_instructions}
-# slot (agents/prompts.py). Concatenated around the resolved text, not part
-# of any PromptConfig template -- plain literal wrapper text, not a prompt
-# itself.
-THINKING_ADDITIONAL_INSTRUCTIONS_HEADER = """\
-# ADDITIONAL INSTRUCTIONS
-Below are additional instructions provided by the user directly for \
-tailored thinking instructions, WHILE ABIDING by the rules above.
-===Additional Instructions Start===
-"""
-THINKING_ADDITIONAL_INSTRUCTIONS_FOOTER = "\n===Additional Instructions End===\n"
-
 
 # =============================================================================
 # ScriptAgent code-statement reserved literals
@@ -299,6 +268,7 @@ __all__ = [
     "TRAILING_FORK_INDEX_PATTERN",
     # Framework-reserved parameters
     "RUN_ID_PARAM",
+    "THINKING_ROUNDS_PARAM",
     # ScriptAgent code-statement reserved literals
     "RHS_ASSIGN_ALIAS",
     "SUB_NAME_PREFIX",
