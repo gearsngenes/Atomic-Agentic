@@ -5,6 +5,88 @@ All notable changes to Atomic-Agentic are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Atomic-Agentic's v2 line is currently pre-1.0 alpha (`2.0.0aN`).
 
+## [2.0.0a31] - 2026-09-17
+
+This release rebuilds `SelfAskAgent` into `ThinkingAgent`: a renamed,
+substantially reworked reasoning agent with a genuinely free-form thinking
+phase, an optional secondary "thinking" LLM engine, optional schema-
+constrained thinking rounds, a reserved per-invocation `thinking_rounds`
+parameter that replaces the old round-count/early-exit mechanism entirely,
+and a new construction-time ceiling protecting against runaway cost when
+the agent is registered as a tool under an orchestrating LLM. Alongside
+it, `BasicAgent` gains a `response_schema` knob for schema-constrained
+replies, AA's LLM-result type contract widens to cover every JSON-
+decodable type, the long-standing `assistant_response_source` knob is
+removed, and the `openai`/`anthropic`/`mcp` provider adapters are verified
+and repaired against their latest major SDK versions. A dedicated code-
+integrity audit also found and fixed a real bug where structured replies
+were corrupting multi-turn conversation history. This is a breaking
+release: `SelfAskAgent` no longer exists (renamed and substantially
+reshaped as `ThinkingAgent`), and `assistant_response_source` is removed
+entirely.
+
+### Added
+
+- `ThinkingAgent` (renamed from `SelfAskAgent`) gains three new
+  construction-time knobs: `thinking_llm_engine` (optional secondary
+  engine used for thinking rounds only, mutable, falls back to the main
+  engine); `thinking_schema` (optional, frozen structured-output schema
+  applied to thinking rounds, fully independent of `response_schema`);
+  and `thinking_rounds_limit` (optional, mutable ceiling on the runtime
+  `thinking_rounds` parameter -- exceeding it raises, and the limit is
+  surfaced to an orchestrating LLM via a new description addition).
+- `BasicAgent`/`ThinkingAgent` gain `response_schema: dict | None` -- a
+  construction-time, frozen structured-output schema applied to the reply
+  phase.
+- New examples: `examples/Agent_Examples/08_Response_Schema_Demo.py` and
+  a fully rewritten `examples/Thinking_Examples/01-03_ThinkingAgent_*.py`
+  (replacing the old `SelfAsk` examples).
+
+### Changed
+
+- breaking: `SelfAskAgent` is renamed `ThinkingAgent`, with a
+  substantially reworked thinking phase:
+  - `max_thinking_rounds`/`thoughts_per_round` construction parameters are
+    removed. Round count is now the reserved, per-invocation
+    `thinking_rounds` runtime parameter (default `1`), passed to
+    `invoke()`/`async_invoke()` the same way `run_id` is.
+  - The model's voluntary early-exit signal (`STOP_THINKING_SENTINEL`) is
+    removed entirely -- an invocation always runs exactly the requested
+    number of thinking rounds, with no early exit.
+  - Category-marked (`[CATEGORY] content`) thought parsing and the
+    `AgentThought` class are removed. A thinking round's stored value is
+    now the engine's raw output directly -- a `str` by default, or any
+    JSON-decodable value when `thinking_schema` is set.
+  - `get_thoughts()` and the `thoughts` property are removed. Thought
+    content is now read directly off `ThinkingAgentRecord.thoughts` (e.g.
+    `agent.get_conversation(turns=1)[0].thoughts`) instead of a dedicated
+    lookup method.
+  - `ThinkingAgentRecord`'s `thoughts_start`/`thoughts_end` span-index
+    fields are replaced by a `thoughts: tuple[...]` field holding the
+    actual content; `ThinkingAgentResult`'s equivalent span fields are
+    replaced by a derived `thinking_rounds_used: int`.
+  - `ThinkingAgentError` is removed -- a thinking round's output is stored
+    unconditionally now, with no failure mode left to raise for.
+- breaking: `assistant_response_source` (`"raw" | "final"`) is removed
+  from `Agent` and every subclass -- turn history always renders the
+  LLM's own raw output now.
+- `LLMEngine.extract()`/`LLMResult.result`/`BasicAgent`'s reply-phase
+  result guard widen to accept the full JSON-decodable closure (`str,
+  int, float, bool, list, dict, None`), not just `str, list, dict`.
+- `openai`, `anthropic`, and `mcp` provider adapters verified and
+  repaired against their latest major SDK versions; dependency pins
+  widened accordingly (`openai>=2.45,<4`, `anthropic>=0.116.0,<2`,
+  `mcp>=1.25,<3`).
+
+### Fixed
+
+- `Agent.render_turn` rendered a structured (non-`str`) `generated_response`
+  via Python's `repr()` instead of JSON when replaying it into multi-turn
+  history, producing invalid JSON syntax that was fed back into the model
+  on the next call. Now renders it as proper JSON.
+- Removed a confirmed-dead, unreachable type guard in `BasicAgent.act`/
+  `async_act` (already enforced upstream by `LLMEngine`/`LLMResult`).
+
 ## [2.0.0a30] - 2026-09-13
 
 This release ships `ScriptAgent`, a new agent family that plans by writing
