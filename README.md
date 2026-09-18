@@ -299,15 +299,15 @@ explicitly when you need to project a step's output dict to a fixed schema
 v2 is a deliberate breaking-change line with two headline improvements:
 
 **Reorganized package structure.** `src/atomic_agentic/` is now
-organized into concern-based layers â€” `exceptions/`, `constants/`,
+organized into concern-based layers — `exceptions/`, `constants/`,
 `models/`, and `utils/` sit below the domain packages (`agents/`,
 `tools/`, `workflows/`, `llm/`, `mcp/`, `a2a/`), with `core/`
 holding only the shared invocation contract. The dependency topology
 is explicit and there are no cross-layer back-edges.
 
-**AtomicResult-family return contract.** Every `AtomicInvokable` â€”
+**AtomicResult-family return contract.** Every `AtomicInvokable` —
 Tool, Agent, ToolAgent, Workflow, Engine, Command, StructuredInvokable
-â€” now returns a typed `AtomicResult`-family envelope from
+— now returns a typed `AtomicResult`-family envelope from
 `invoke()`/`async_invoke()`. The `.result` field is always the
 caller-facing payload; envelope fields (`run_id`, `started_at`,
 `ended_at`, `elapsed_s`, `invoker_id`, and subclass-specific fields
@@ -318,8 +318,8 @@ with a per-run `trace` of the actual child results produced, opt-out via
 `include_trace=False`.
 
 For a full breakdown of breaking changes and a v1→v2 migration guide:
-- [`docs/MIGRATION.md`](docs/MIGRATION.md) â€” v1→v2 migration guide *(coming soon)*
-- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) â€” full release history
+- [`docs/MIGRATION.md`](docs/MIGRATION.md) — v1→v2 migration guide *(coming soon)*
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — full release history
 
 ------------------------------------------------------------------------
 
