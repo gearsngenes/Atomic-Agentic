@@ -22,6 +22,7 @@ __all__ = [
     "return_tool",
     "builtin_call_tool",
     "attr_call_tool",
+    "call_python_builtin",
 ]
 
 
@@ -174,3 +175,36 @@ attr_call_tool = Tool(
         "through get_tool()."
     ),
 )
+
+
+def call_python_builtin(name: str, *args: Any, **kwargs: Any) -> Any:
+    """
+    DagAgent's sanctioned computation escape hatch -- its value-expression
+    grammar permits no function/method calls at all (see
+    utils.agents.reject_unsupported_forms(forbid_calls=True)), so real
+    computation happens here instead: a normal, budgeted, plan-visible
+    dispatched call, never smuggled into an expression value.
+
+    Unlike ScriptAgent's builtin_call_tool/attr_call_tool, this is a plain,
+    ordinary Python function -- not a manually constructed Tool, and not
+    resolved through a bypass sentinel. DagAgent.__init__ auto-registers it
+    on every instance via the normal register_tool(...) path (toolify()'d,
+    dispatched through the ordinary get_tool()/tool.invoke() path like any
+    other registered tool).
+
+    A plain *args/**kwargs splat is safe here -- deliberately not the
+    packed-tuple/dict signature builtin_call_tool/attr_call_tool's
+    dispatch bodies use. Those needed packing because their own fixed
+    identifying parameters (name+args+kwargs as one unit; obj/method_name)
+    sit in the same positional/keyword namespace as the real wrapped
+    call's own arguments, and a wrapped call's own keyword genuinely could
+    collide with "obj"/"method_name" in ordinary usage. This function has
+    only one fixed leading parameter (name, always the wire schema's first
+    positional argument), and no real Python builtin's own call needs a
+    keyword literally named "name" passed through it, so the same
+    collision risk doesn't apply.
+    """
+    if name in EXCLUDED_PY_BUILTINS or not hasattr(builtins, name):
+        raise ValueError(f"python builtin {name!r} is not available here")
+    fn = getattr(builtins, name)
+    return fn(*args, **kwargs)

@@ -9,23 +9,19 @@ from typing import Any, Optional
 
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
-    CODE_FENCE_PATTERN,
     DUNDER_ATTRIBUTE_PATTERN,
     EXCLUDED_PY_BUILTINS,
     KWARGS_UNPACK_KEY,
-    LEADING_CODE_FENCE_PATTERN,
     PAUSE_PATTERN,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
     SUB_NAME_PREFIX,
     TASK_RESULT_PREFIX,
-    TRAILING_CODE_FENCE_PATTERN,
-    UNSUPPORTED_EXPR_LABELS,
 )
 from ..exceptions import BlackboardParseError
 from ..models.agents.blackboard_models import CodeStatement
-from .agents import extract_identifiers
+from .agents import evaluate_expr, extract_identifiers, reject_unsupported_forms, strip_code_fence
 
 __all__ = [
     "parse_statement_to_slots",
@@ -38,46 +34,6 @@ __all__ = [
     "render_completed_as_python",
     "render_cache_snapshot",
 ]
-
-
-def _strip_code_fence(raw_text: str) -> str:
-    """
-    Strip a markdown code fence wrapping the generation, if present --
-    defensive against a model wrapping otherwise-valid output in a code
-    fence despite being told not to. Generic to any language tag (or none)
-    on the opening fence line.
-
-    Tries a fully matched pair first (``CODE_FENCE_PATTERN``) -- unambiguous,
-    so its captured inner text is used as-is. If that doesn't match (a model
-    emitting only one side), falls back to stripping a leading and/or
-    trailing fence line independently. Either way, a fence appearing only
-    mid-text is left alone (``ast.parse`` will reject that on its own terms,
-    as a real structural problem).
-    """
-    full_match = CODE_FENCE_PATTERN.match(raw_text)
-    if full_match:
-        return full_match.group(1)
-    text = LEADING_CODE_FENCE_PATTERN.sub("", raw_text, count=1)
-    text = TRAILING_CODE_FENCE_PATTERN.sub("", text, count=1)
-    return text
-
-
-def _evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:
-    """
-    Evaluate one parsed expression node against a namespace, with no
-    builtins available. Safe because every arg reaching this function is
-    guaranteed Call-free by the hoisting rule -- nothing reachable through
-    ``namespace`` can itself be invoked.
-
-    Raises whatever the evaluation naturally raises (``TypeError``,
-    ``ZeroDivisionError``, ``NameError``, ``KeyError``, ...), uncaught --
-    callers decide whether to wrap (parse-time constant folding) or let it
-    surface naturally (``resolve_slot_args``).
-    """
-    expr_wrapper = ast.Expression(body=node)
-    ast.fix_missing_locations(expr_wrapper)
-    code = compile(expr_wrapper, filename="<blackboard-slot-v2>", mode="eval")
-    return eval(code, {"__builtins__": {}}, namespace)
 
 
 def resolve_slot_args(
@@ -98,7 +54,7 @@ def resolve_slot_args(
     itself check readiness (a ``prepare()``-phase caller's job, combining
     ``extract_identifiers`` with an all-dependencies-have-results check
     before ever calling this). A missing identifier is not defensively
-    guarded against here -- it surfaces as whatever ``_evaluate_expr``
+    guarded against here -- it surfaces as whatever ``evaluate_expr``
     naturally raises.
 
     A positional entry that is an ``ast.Starred`` (a ``*expr`` unpack) has
@@ -114,7 +70,7 @@ def resolve_slot_args(
     """
 
     def resolve_one(value: Any) -> Any:
-        return _evaluate_expr(value, resolved) if isinstance(value, ast.expr) else value
+        return evaluate_expr(value, resolved) if isinstance(value, ast.expr) else value
 
     positional: list[Any] = []
     for entry in statement.args:
@@ -177,7 +133,7 @@ def _process_call_args(
             deps = extract_identifiers(inner)
             if not deps:
                 try:
-                    _evaluate_expr(inner, {})
+                    evaluate_expr(inner, {})
                 except Exception as e:
                     raise BlackboardParseError(
                         "* unpack is a constant expression that failed to "
@@ -192,7 +148,7 @@ def _process_call_args(
         deps = extract_identifiers(processed)
         if not deps:
             try:
-                _evaluate_expr(processed, {})
+                evaluate_expr(processed, {})
             except Exception as e:
                 raise BlackboardParseError(
                     "positional argument is a constant expression that "
@@ -219,7 +175,7 @@ def _process_call_args(
         deps = extract_identifiers(processed_value)
         if not deps:
             try:
-                _evaluate_expr(processed_value, {})
+                evaluate_expr(processed_value, {})
             except Exception as e:
                 raise BlackboardParseError(
                     f"argument {key!r} is a constant expression that failed "
@@ -276,7 +232,7 @@ def _build_call_slot(
         obj_deps = extract_identifiers(obj_expr)
         if not obj_deps:
             try:
-                _evaluate_expr(obj_expr, {})
+                evaluate_expr(obj_expr, {})
             except Exception as e:
                 raise BlackboardParseError(
                     "attribute/method call's object expression is a constant "
@@ -298,7 +254,7 @@ def _build_call_slot(
     # ternary-with-call/await/dunder-attribute used directly as a call's
     # own callee (e.g. `(lambda x: x)(1)`) would silently produce a
     # nonsense tool id instead of a clean rejection here.
-    _reject_unsupported_forms(call_node.func)
+    reject_unsupported_forms(call_node.func)
     tool_name = ast.unparse(call_node.func)
     positional, keyword = _process_call_args(
         call_node, counter=counter, start_index=start_index, hoisted=hoisted
@@ -325,54 +281,6 @@ def _reject_await(node: ast.expr) -> None:
     )
 
 
-def _reject_unsupported_forms(node: ast.expr) -> None:
-    """
-    Walk ``node`` and raise on any of: a ternary (``ast.IfExp``) whose
-    either branch contains a ``Call``, an ``ast.Await`` anywhere, a
-    comprehension/lambda (``UNSUPPORTED_EXPR_LABELS``) anywhere, or an
-    ``ast.Attribute`` whose ``.attr`` matches ``DUNDER_ATTRIBUTE_PATTERN``
-    anywhere. Shared by ``_hoist_calls`` (called on every value it's about
-    to hoist calls within) and ``_build_call_slot``'s plain-tool branch
-    (called on ``call_node.func`` itself, the one position that reaches
-    neither ``_hoist_calls`` nor this scan otherwise -- a plain-tool call's
-    own callee is used verbatim via ``ast.unparse``, never routed through
-    ``_hoist_calls``, so without this explicit call a lambda used directly
-    as a call's own callee, e.g. ``(lambda x: x)(1)``, would silently
-    produce a nonsense ``tool`` id instead of a clean rejection here).
-
-    Raises before any hoisting/unparsing proceeds -- every check here is
-    unconditional over the whole tree passed in, at any depth, regardless
-    of whether it actually contains a ``Call``.
-    """
-    for candidate in ast.walk(node):
-        if isinstance(candidate, ast.IfExp) and (
-            any(isinstance(n, ast.Call) for n in ast.walk(candidate.body))
-            or any(isinstance(n, ast.Call) for n in ast.walk(candidate.orelse))
-        ):
-            raise BlackboardParseError(
-                "conditional expression branches must not contain tool "
-                "calls (wastes budget evaluating the untaken branch): "
-                f"{ast.unparse(candidate)!r} -- restructure as separate "
-                "statements or a pause."
-            )
-
-        if isinstance(candidate, ast.Await):
-            _reject_await(candidate)
-
-        label = UNSUPPORTED_EXPR_LABELS.get(type(candidate))
-        if label is not None:
-            raise BlackboardParseError(
-                f"{label} expressions are not supported: "
-                f"{ast.unparse(candidate)!r} -- rewrite as explicit "
-                "statements instead."
-            )
-
-        if isinstance(candidate, ast.Attribute) and DUNDER_ATTRIBUTE_PATTERN.fullmatch(candidate.attr):
-            raise BlackboardParseError(
-                f"dunder attribute access is not permitted: {ast.unparse(candidate)!r}."
-            )
-
-
 def _hoist_calls(
     node: ast.expr,
     *,
@@ -391,7 +299,7 @@ def _hoist_calls(
     children before ``visit_Call`` builds that call's own hoisted slot, so
     doubly/triply-nested calls flatten correctly bottom-up.
 
-    Rejects (before any hoisting) every form ``_reject_unsupported_forms``
+    Rejects (before any hoisting) every form ``reject_unsupported_forms``
     covers -- a ternary whose either branch contains a ``Call``, an
     ``ast.Await`` anywhere, a comprehension/lambda anywhere, and a dunder
     attribute access anywhere (including inside a to-be-hoisted call's own
@@ -403,7 +311,7 @@ def _hoist_calls(
     walked as a standalone ``ast.Attribute`` node here) and is checked
     separately, in ``_build_call_slot``.
     """
-    _reject_unsupported_forms(node)
+    reject_unsupported_forms(node)
 
     def _hoist_one_call(call_node: ast.Call) -> ast.Name:
         """Build one hoisted slot for `call_node` (appended to `hoisted`,
@@ -476,7 +384,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     # `return None`). No Python-grammar obstacle to a module-level Return
     # node here -- the "return outside function" check only fires at
     # compile()-to-bytecode time, which this pipeline never does to a whole
-    # statement (only to bare expressions, via _evaluate_expr).
+    # statement (only to bare expressions, via evaluate_expr).
     if isinstance(stmt, ast.Return):
         hoisted: list[CodeStatement] = []
         counter = [0]
@@ -487,7 +395,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
         deps = extract_identifiers(processed)
         if not deps:
             try:
-                _evaluate_expr(processed, {})
+                evaluate_expr(processed, {})
             except Exception as e:
                 raise BlackboardParseError(
                     f"return expression is a constant that failed to evaluate: {e!r}"
@@ -573,7 +481,7 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     deps = extract_identifiers(processed)
     if not deps:
         try:
-            _evaluate_expr(processed, {})
+            evaluate_expr(processed, {})
         except Exception as e:
             raise BlackboardParseError(
                 f"expression is a constant that failed to evaluate: {e!r}"
@@ -678,7 +586,7 @@ def parse_generation(
     ``parse_statement_to_slots``, a genuine ``ast.parse`` syntax error in
     ``before``, or one of the two "nothing real yet" cases above).
     """
-    text = _strip_code_fence(raw_text)
+    text = strip_code_fence(raw_text)
     marker = _find_pause_marker(text)
     if marker is None:
         before = text

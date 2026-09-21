@@ -5,13 +5,15 @@ from .records import (
     ToolAgentRecord,
     ScriptAgentRecord,
     ScriptAgentToolUsage,
+    DagAgentRecord,
     ThinkingAgentRecord,
 )
-from .blackboard_models import BlackboardSlot, CodeStatement, ConstantSpec
+from .blackboard_models import BlackboardSlot, CodeStatement, ConstantSpec, DagToolCall
 from .tasks import (
     AgentTask,
     ToolAgentTask,
     ScriptAgentTask,
+    DagAgentTask,
     PlanActTask,
     ReActTask,
     ReActStepMeta,
@@ -25,13 +27,16 @@ __all__ = [
     "ToolAgentRecord",
     "ScriptAgentRecord",
     "ScriptAgentToolUsage",
+    "DagAgentRecord",
     "ThinkingAgentRecord",
     "BlackboardSlot",
     "CodeStatement",
     "ConstantSpec",
+    "DagToolCall",
     "AgentTask",
     "ToolAgentTask",
     "ScriptAgentTask",
+    "DagAgentTask",
     "PlanActTask",
     "ReActTask",
     "ReActStepMeta",

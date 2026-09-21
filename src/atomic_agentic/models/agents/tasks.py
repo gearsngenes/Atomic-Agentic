@@ -4,13 +4,14 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ...constants.core import NO_VAL
-from .blackboard_models import BlackboardSlot, CodeStatement
+from .blackboard_models import BlackboardSlot, CodeStatement, DagToolCall
 from .records import AgentRecord, LLMRecord
 
 __all__ = [
     "AgentTask",
     "ToolAgentTask",
     "ScriptAgentTask",
+    "DagAgentTask",
     "PlanActTask",
     "ReActTask",
     "ReActStepMeta",
@@ -310,6 +311,75 @@ class ScriptAgentTask(AgentTask):
     continuation_note: Optional[str] = None
     batch_counter: int = 0
     failed_statements: list[CodeStatement] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class DagAgentTask(AgentTask):
+    """
+    DagAgent-flavored task -- a sibling to ScriptAgentTask, not a subclass
+    (DagAgent is a new agent family, not a ScriptAgent subclass, matching
+    ScriptAgentTask's own precedent relative to ToolAgentTask).
+
+    Field-for-field structural copy of ScriptAgentTask, CodeStatement
+    swapped for DagToolCall everywhere it appears -- no new fields. (An
+    earlier design draft added a return_value staging field for the round's
+    raw return payload; superseded once return was decided to reuse
+    RETURN_ALIAS/the normal batch pipeline instead of a bespoke
+    resolve-outside-the-batch-compiler mechanism.) No __post_init__ --
+    matches AgentTask's family-wide convention of zero constructor-time
+    validation (an in-flight, internal-only object, not a real boundary).
+
+    Fields
+    ------
+    completed : list[DagToolCall]
+        Every call that executed successfully so far this run, in commit
+        order (the RETURN_ALIAS call, once it executes, lands here too --
+        it is not excluded). Becomes DagAgentRecord.statements verbatim
+        (normalized to a tuple) at commit time.
+
+    pending : list[list[DagToolCall]]
+        Every not-yet-executed dependency batch compiled so far for the
+        current plan. pending[0] is the next batch act() runs.
+
+    continue_planning : bool
+        Unified continuation trigger, set either by the model's own
+        more_planning_needed schema signal or by the framework itself on a
+        resolution/execution failure -- same single reactive-continuation
+        path either way, no split between "continuation" and "repair"
+        handling. Same role ScriptAgentTask.continue_planning already has.
+
+    cache : dict[str, Any]
+        identifier -> resolved value for every call in completed, kept in
+        sync as calls complete, plus task_result_i entries seeded once at
+        _initialize_task. Precedence on lookup: constant_values and this
+        dict, together, always outrank a plan-local assign_to name on a
+        name collision -- though a real collision is structurally
+        impossible by construction, since assign_to/task_result_* names can
+        never start with K_ and constant names always do (enforced by
+        validate_calls).
+
+    constant_values : dict[str, Any]
+        Registered-constant name -> value, populated once by
+        DagAgent._initialize_task and never touched again after that.
+
+    regenerations_used, resolved_args, planning_rounds_used,
+    tool_calls_used, continuation_note, batch_counter, failed_statements
+        Identical role and shape to ScriptAgentTask's same-named fields --
+        see that class's own docstring for the authoritative description;
+        nothing about them changes for DagAgentTask.
+    """
+    completed: list[DagToolCall] = field(default_factory=list)
+    pending: list[list[DagToolCall]] = field(default_factory=list)
+    cache: dict[str, Any] = field(default_factory=dict)
+    constant_values: dict[str, Any] = field(default_factory=dict)
+    regenerations_used: int = 0
+    resolved_args: list[dict[str, Any]] = field(default_factory=list)
+    continue_planning: bool = False
+    planning_rounds_used: int = 0
+    tool_calls_used: int = 0
+    continuation_note: Optional[str] = None
+    batch_counter: int = 0
+    failed_statements: list[DagToolCall] = field(default_factory=list)
 
 
 @dataclass(slots=True)

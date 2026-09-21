@@ -1,6 +1,7 @@
 from __future__ import annotations
 import ast
 import re
+from typing import Any
 from ..models.parameters import ParamSpec
 from ..constants.core import IDENTIFIER_PATTERN_TEXT
 
@@ -219,30 +220,35 @@ PAUSE_PATTERN: re.Pattern[str] = re.compile(r"^\s*#\s*PAUSE\b", re.IGNORECASE | 
 # Matches a single markdown code fence wrapping the *entire* generation --
 # any (or no) language tag on the opening fence line (```python, ```py,
 # ```text, a bare ```, ...), not just ```python. Tried first by
-# utils/script.py's _strip_code_fence, since a matched pair unambiguously
-# marks everything between them as the intended code.
+# utils/agents.py's strip_code_fence (shared by ScriptAgent and DagAgent),
+# since a matched pair unambiguously marks everything between them as the
+# intended code.
 CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.DOTALL)
 
 # Fallback for when CODE_FENCE_PATTERN doesn't match (a model emitting only
 # one side, unmatched) -- each stripped independently, never a fence
 # appearing mid-text (that's a real structural problem, left for ast.parse
 # to reject on its own terms). Same fence-line shape as CODE_FENCE_PATTERN.
-# Used by utils/script.py's _strip_code_fence.
+# Used by utils/agents.py's strip_code_fence.
 LEADING_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"^[ \t]*```[^\n]*\n")
 TRAILING_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"\n[ \t]*```[ \t]*$")
 
 # Matches a dunder-shaped attribute name (`__class__`, `__globals__`, ...).
-# Rejected unconditionally by utils/script.py's _hoist_calls (for a bare
-# `ast.Attribute` anywhere in an expression) and _build_call_slot (for a
-# method-call's own method name, the one position _hoist_calls itself never
-# scans) -- closes the classic attribute-chaining sandbox-escape class
+# Rejected unconditionally by utils/agents.py's reject_unsupported_forms
+# (for a bare `ast.Attribute` anywhere in an expression -- shared by both
+# ScriptAgent and DagAgent, including recursively inside a DagAgent
+# f-string's own replacement field) and utils/script.py's _build_call_slot
+# (for a method-call's own method name, the one position
+# reject_unsupported_forms's own walk never scans) -- closes the classic
+# attribute-chaining sandbox-escape class
 # (`().__class__.__bases__[0].__subclasses__()`-style), which the
 # `{"__builtins__": {}}` eval lockout alone does not defend against.
 DUNDER_ATTRIBUTE_PATTERN: re.Pattern[str] = re.compile(r"^__.*__$")
 
-# Expression node types utils/script.py's _hoist_calls rejects unconditionally
-# (see its own docstring) -- each introduces a local binding scope neither
-# that module nor extract_identifiers has any awareness of.
+# Expression node types utils/agents.py's reject_unsupported_forms rejects
+# unconditionally (see its own docstring) -- each introduces a local
+# binding scope neither that function nor extract_identifiers has any
+# awareness of.
 UNSUPPORTED_EXPR_LABELS: dict[type, str] = {
     ast.ListComp: "list comprehension",
     ast.SetComp: "set comprehension",
@@ -253,12 +259,104 @@ UNSUPPORTED_EXPR_LABELS: dict[type, str] = {
 
 FINAL_ROUND_WARNING = (
     "This is your FINAL planning round -- you must complete the entire "
-    "task now. Do not write # PAUSE."
+    "task now; you may not defer further."
 )
-"""Appended (space-separated) to a ScriptAgent continuation instruction when
-ScriptAgent._is_final_round(task) is true -- shared by
-_render_task_messages' round-1 and continuation branches so the two call
-sites can never drift in wording."""
+"""Appended (space-separated) to a continuation instruction when
+<agent>._is_final_round(task) is true -- shared verbatim by both
+ScriptAgent and DagAgent (each family's own _render_task_messages' round-1
+and continuation branches), so all four call sites can never drift in
+wording. Deliberately grammar-neutral -- earlier revisions said "Do not
+write # PAUSE", a ScriptAgent-specific instruction meaningless in
+DagAgent's own grammar (there is no "# PAUSE" marker or equivalent; a
+DagAgent round signals continuation via the more_planning_needed JSON
+field instead) -- "you may not defer further" already fully covers the
+same intent (deferring IS writing # PAUSE, for ScriptAgent) without
+naming a mechanism that doesn't exist in DagAgent's own output schema."""
+
+# =============================================================================
+# DagAgent output_structure schema
+# =============================================================================
+# Used by:
+# - utils/dag.py: build_dag_schema deep-copies this template and injects the
+#   dynamic call.enum from the current toolbox.
+# - agents/dag.py (Pass 3): passes the built schema as output_structure on
+#   every planning-round engine call.
+#
+# Field names are plain string literals, not separate per-field-name
+# constants (unlike STEP_FIELD/TOOL_FIELD/etc. above) -- this schema has
+# exactly one producer (this constant) and one consumer (utils/dag.py's
+# parse_generation), so there is no cross-file drift risk a shared constant
+# would guard against. call.enum ships empty -- never sent to a provider
+# as-is; build_dag_schema always populates it first.
+#
+# "summary" is a top-level field, not a per-plan-item "reason" (revised
+# 2026-09-20, during Pass 3's prompt design -- superseding the original
+# per-item reason field this schema shipped with in Pass 2). Only
+# "properties" dict insertion order is load-bearing for constrained
+# decoding (not "required"'s order) -- summary must be declared before
+# plan/more_planning_needed/return so the model's stated reasoning can
+# causally precede every one of them, the same field-order principle the
+# original per-item reason design was built on, just applied once per
+# round instead of once per call: cheaper (one reasoning blob, not N), and
+# lets the model reason about the whole batch's strategy and its own
+# halt/continue decision, neither of which a per-call reason ever
+# actually informed.
+
+DAG_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "plan", "more_planning_needed", "return"],
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": (
+                "Briefly describe the work this round's plan accomplishes, "
+                "and whether the task will be complete after it runs."
+            ),
+        },
+        "plan": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["call", "assign_to", "arguments"],
+                "properties": {
+                    "call": {"type": "string", "enum": []},
+                    "assign_to": {"type": ["string", "null"]},
+                    "arguments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["name", "value"],
+                            "properties": {
+                                "name": {"type": ["string", "null"]},
+                                "value": {
+                                    "type": "string",
+                                    "description": (
+                                        "Python source for a literal or expression -- "
+                                        "e.g. 42, 'a string', x + 1, f'{name}!', "
+                                        "[a, b], obj.field, items[0]. No function or "
+                                        "method calls permitted."
+                                    ),
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        "more_planning_needed": {"type": "boolean"},
+        "return": {
+            "type": ["string", "null"],
+            "description": (
+                "A non-null value is Python source, following the same rules "
+                "as an argument's value. null means nothing is returned this "
+                "round (more_planning_needed governs instead)."
+            ),
+        },
+    },
+}
 
 
 __all__ = [
@@ -305,4 +403,6 @@ __all__ = [
     "RETURN_TOOL_NAMESPACE",
     "RETURN_TOOL_DESCRIPTION",
     "RETURN_TOOL_FULL_NAME",
+    # DagAgent output_structure schema
+    "DAG_OUTPUT_SCHEMA",
 ]

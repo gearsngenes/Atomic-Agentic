@@ -33,7 +33,10 @@ class ToolRegistrationError(ToolAgentError):
 
 class BlackboardParseError(RuntimeError):
     """Raised when parsing one raw statement into CodeStatement object(s)
-    fails.
+    fails, or when the shared expression-parsing/rejection helpers in
+    utils/agents.py (`evaluate_expr`, `reject_unsupported_forms`) reject an
+    expression -- used by both ScriptAgent's statement parsing and
+    DagAgent's value-expression parsing, not ScriptAgent-only.
 
     Subclasses RuntimeError to match this codebase's existing convention for
     domain error types superseding a bare RuntimeError (see LLMEngineError,

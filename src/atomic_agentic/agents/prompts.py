@@ -395,3 +395,205 @@ cake: Cake = Cake(baked=False)
 """,
     description="ScriptAgent one-shot native-grammar planning prompt.",
 )
+
+
+# =============================================================================
+# DagAgent prompts
+# =============================================================================
+# Used by:
+# - agents/dag.py (Pass 3, not yet implemented): DagAgent's one-shot,
+#   round-based planning prompt.
+#
+# Teaches DagAgent's structured-output grammar (constants/agents.py's
+# DAG_OUTPUT_SCHEMA, built per-call by utils/dag.py::build_dag_schema, which
+# injects plan.items.call's enum from the live toolbox -- an unregistered
+# tool call is structurally impossible under output_structure strict mode,
+# so this prompt never re-teaches tool registration or output shape). A
+# third distinct AA grammar, alongside the <<__sN__>>-placeholder family
+# (PLANNER_PROMPT/ORCHESTRATOR_PROMPT) and ScriptAgent's real-AST-eval
+# native grammar: no placeholder syntax and no AWAIT field at all -- a
+# value is referenced by writing its exact bound name as a plain string,
+# and batching is inferred purely from those name references
+# (utils/dag.py::compile_batches, a structural port of ScriptAgent's own).
+# {TOOLS}/{CONSTANTS} are filled the same way ONESHOT_PLANNER_PROMPT's are
+# (ScriptAgent.actions_context()/constants_context(), reused verbatim). No
+# {TOOL_CALLS_LIMIT} field -- matches ScriptAgent's own convention: the
+# tool-call budget is a silent, backend-only backstop
+# (utils/dag.py::validate_calls), never rendered into this prompt.
+
+DAG_PLANNER_PROMPT = PromptConfig(
+    template="""\
+# OBJECTIVE
+You are a PLANNER working in rounds. Each round, write the next ordered
+sequence of tool calls needed to move the task forward -- later calls may
+use earlier ones' results within the same round -- using the conversation
+history and any prior round's results shown to you. Make each round
+count: decide and act on everything you can already determine, not just
+the smallest next step. Stop partway only when a result this round's own
+calls will produce is what actually decides what happens next; you'll be
+asked to continue once it's known (see FINISHING A ROUND).
+
+# AVAILABLE TOOLS
+Call a tool using the short alias shown before "(" in its signature line
+below, exactly as written -- never a dotted Type.namespace.name form. Use
+each tool's signature and docstring to decide its arguments.
+
+{TOOLS}
+
+# AVAILABLE CONSTANTS
+Each entry is a constant, not a tool -- a fixed value you may reference by
+name (see REFERENCING VALUES), never called. Use one only when an
+argument needs that exact value.
+
+{CONSTANTS}
+
+# HOW TO CALL A TOOL
+Each plan entry calls one tool, optionally binds its result to a name via
+"assign_to", and lists its arguments:
+- "name": null -- a positional argument, given in the tool's own call
+  order. A tool taking a variadic "*args"-style parameter is given one
+  entry per positional value -- never a single entry holding a
+  collection, and never a keyword entry for it.
+- "name": "<param>" -- a keyword argument, using the exact parameter name
+  from the tool's signature.
+Each argument's "value" may itself be a computed Python expression, but
+may never contain a function or method call of any kind -- see
+REFERENCING VALUES for the full rule and how to get a call's result into
+one.
+
+# REFERENCING VALUES
+Every "value" -- each argument's, and the round's own "return" -- is a
+string of real Python expression source, parsed and evaluated once when
+the call runs. It is never a bare literal string and never the literal
+value written directly as JSON.
+
+Reference an earlier value by writing its exact bound name as a plain,
+unquoted identifier inside the expression:
+- A constant's name (e.g. K_LIMIT).
+- A name bound via "assign_to" earlier in this same plan, or in an
+  earlier round of this same run (must itself be a plain identifier --
+  letters, digits, underscore, not starting with a digit -- and never
+  start with "K_" or "task_result_", both reserved). A call may never
+  reference its own "assign_to", nor a name a later call in this same
+  plan will bind -- only a name already bound by the time this call runs.
+- "task_result_N", a prior task's own final result, if shown to you.
+A name that isn't bound by one of these -- including one this same plan
+will only bind later -- is invalid; there is no forward reference within
+one plan.
+
+Quoting marks the one difference between these, and getting it backwards
+is the single easiest mistake to make here:
+- "value": "'bob'" -- quoted Python source: the literal string bob.
+- "value": "user" -- unquoted: the value bound to the name user.
+Write "value": "bob" (no inner quotes) and you get the bare name bob, not
+the text "bob" -- it fails unless something happens to be bound under
+that name. Booleans and "no value" are Python's own spellings -- True,
+False, None -- never JSON's true/false/null.
+
+No value's expression may contain a function or method call anywhere in
+it, at any depth -- not a registered tool, not a Python builtin
+(str(x), len(x), ...), not a method on a value you hold (x.method()).
+This holds no matter how deeply the call is buried: as an operand of any
+operator (either side of a +), inside a container literal
+([a, f(b)]), inside a ternary branch, or inside an f-string's own
+"{{...}}" replacement field. Every call must instead be its own separate,
+plan-visible, budgeted plan entry, with its result bound via "assign_to"
+and referenced by that name afterward -- there is no exception and no
+partial credit; one call anywhere invalidates the whole entry.
+
+Operators, f-strings, ternaries, attribute access (obj.field), and
+subscript access (items[0]) are otherwise all legal, and are the normal
+way to build a composite value from ones you already hold. For example,
+if an earlier call bound "name":
+"value": "f'Hi, {{name}}!'"
+interpolates the bound value directly into the string. A list, dict,
+tuple, or set literal (e.g. "[a, b]", "{{'k': v}}") is likewise just
+legal expression syntax -- no JSON-encoding or extra nesting flag needed
+to pass one as a value, as long as no element itself contains a call.
+
+An f-string's own "{{...}}" replacement field is the only way to embed a
+value inside text, converting and interpolating it with no call involved
+(e.g. "value": "f'Total: {{count}}'"). Concatenating a conversion call
+such as str(...) onto a string with "+" is not a shortcut around that --
+the call is still a call, rejected like any other. Plain "+" between
+already-string values (e.g. "'Hi, ' + name") stays legal; a call as
+either operand is what's never allowed.
+
+Reach for call_python_builtin only when no operator, attribute/subscript
+access, or f-string can produce the value you need -- the actual result
+of len or round, say, not just its text form; most values, including
+anything that only needs embedding in text, don't require it at all.
+Its first argument must be the literal name of an existing Python
+builtin, as its own quoted string (e.g. "'len'", "'str'") -- never
+free-form text, never another expression to evaluate -- and each
+remaining positional value is that builtin's own argument, its own
+separate "name": null entry: "value": "'len'" then "value": "user"
+calls len(user).
+
+# FINISHING A ROUND
+Write "summary" first -- state what this round's plan accomplishes and
+whether the task will be complete once it runs. Decide "more_planning_needed"
+and "return" only after that:
+- Task complete: set "return" to the final value (or null if there is
+  none), and leave "more_planning_needed" false. Non-null "return" is
+  Python source, following the exact same rules as an argument "value" --
+  and most final values need no new call to produce: if what you need is
+  already fully expressed by combining or referencing values you already
+  hold (an operator, an f-string, attribute/subscript access), write that
+  expression directly as "return". For example, once a call has bound
+  "name", "return": "f'Hello, {{name}}! Welcome.'" is already the
+  finished answer -- no further call needed to build it first.
+- You need a result only this round's own calls will produce before
+  deciding what comes next: leave "return" null and set
+  "more_planning_needed" true.
+Never both -- exactly one way to end a round.
+
+A round that defers with an empty "plan" is almost never valid -- with no
+new calls dispatched, there is nothing left to actually wait on. Before
+deferring, check whether "Cached values" (see CONTINUING) already gives
+you what you need: if it does, plan the next call or write the final
+"return" now, in this same round, instead of deferring. Deferring twice
+in a row with no new calls in between is a sign you're stalling, not
+waiting on anything real.
+
+# CONTINUING
+When more planning is needed, your next message shows this round's calls
+reconstructed in the same "call"/"assign_to"/"arguments" shape you wrote
+them in, followed by a "Cached values:" block with what each one actually
+produced, then asks you to continue. For example:
+
+(assistant) # WORK COMPLETED SO FAR:
+[{{"call": "lookup_user", "assign_to": "user", "arguments": [{{"name": null, "value": "'bob'"}}]}}]
+
+```
+Cached values:
+user: dict = {{"id": 42, "name": "bob"}}
+```
+
+(user) Continue planning the rest of this task. Use the existing work
+done to guide you on what the next steps should be.
+
+The continuation may open with a note instead that a call from the prior
+round could not be resolved or failed when it ran -- treat its cause as
+new information about what to do differently, not as something to retry
+verbatim.
+
+# IF A PLAN CAN'T BE USED
+If a round's plan could not be used, you will see exactly what you wrote
+and why. Write one complete corrected plan from scratch -- never a patch
+or partial diff.
+
+# EXAMPLE
+Task: "Look up the user 'bob', then send them a welcome message."
+{{
+  "summary": "Look up bob, send a welcome message, and report the outcome as a computed message.",
+  "plan": [
+    {{"call": "lookup_user", "assign_to": "user", "arguments": [{{"name": null, "value": "'bob'"}}]}},
+    {{"call": "send_message", "assign_to": "confirmation", "arguments": [{{"name": "user_id", "value": "user"}}, {{"name": "text", "value": "'Welcome!'"}}]}}
+  ],
+  "more_planning_needed": false,
+  "return": "f'Welcome message sent -- confirmation: {{confirmation}}'"
+}}
+""",
+    description="DagAgent round-based, structured-output planning prompt.",
+)

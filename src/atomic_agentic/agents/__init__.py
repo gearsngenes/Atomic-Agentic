@@ -5,6 +5,7 @@ from .planact import PlanActAgent
 from .react import ReActAgent
 from .thinking import ThinkingAgent
 from .script import ScriptAgent
+from .dag import DagAgent
 
 __all__ = ["Agent",
            "BasicAgent",
@@ -13,4 +14,5 @@ __all__ = ["Agent",
            "PlanActAgent",
            "ThinkingAgent",
            "ScriptAgent",
+           "DagAgent",
            ]

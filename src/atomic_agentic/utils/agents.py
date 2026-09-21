@@ -6,16 +6,27 @@ import re
 from typing import Any
 
 
+from ..constants.agents import (
+    CODE_FENCE_PATTERN,
+    DUNDER_ATTRIBUTE_PATTERN,
+    LEADING_CODE_FENCE_PATTERN,
+    TRAILING_CODE_FENCE_PATTERN,
+    UNSUPPORTED_EXPR_LABELS,
+)
 from ..constants.core import NO_VAL
+from ..exceptions import BlackboardParseError
 from ..models.agents.prompts import PromptConfig
 
 __all__ = [
+    "evaluate_expr",
     "extract_dependencies",
     "extract_identifiers",
     "extract_json_object",
     "normalize_role_prompt",
     "normalize_thinking_instructions",
+    "reject_unsupported_forms",
     "stringify_result",
+    "strip_code_fence",
 ]
 
 
@@ -230,11 +241,15 @@ def extract_identifiers(
     slot's ``args`` tuple/list -- in the dict/tuple/list forms, only values
     that are still unresolved ``ast.expr`` nodes contribute identifiers; an
     already-folded raw literal value contributes none. A ``CodeStatement``
-    with both containers calls this once per container and merges the
-    results -- this function stays single-container. An ``ast.Starred``
-    entry (a ``*expr`` unpack in ``args``) is itself an ``ast.expr``
-    subtype, so it's picked up by the plain expression branch below with no
-    special-casing: ``ast.walk`` already recurses into its ``.value``.
+    (or ``DagToolCall``) with both containers calls this once per container
+    and merges the results -- this function stays single-container. An
+    ``ast.Starred`` entry (a ``*expr`` unpack in ``args``) is itself an
+    ``ast.expr`` subtype, so it's picked up by the plain expression branch
+    below with no special-casing: ``ast.walk`` already recurses into its
+    ``.value``. A raw string entry that hasn't been parsed into an
+    ``ast.expr`` yet (e.g. a ``DagToolCall`` value that failed to parse)
+    contributes nothing here either -- same "only real ``ast.expr`` nodes
+    count" rule.
     """
     raw: list[str] = []
 
@@ -254,3 +269,112 @@ def extract_identifiers(
         )
 
     return list(dict.fromkeys(raw))
+
+
+def strip_code_fence(raw_text: str) -> str:
+    """
+    Strip a markdown code fence wrapping generated text, if present --
+    defensive against a model wrapping otherwise-valid output in a code
+    fence despite being told not to. Generic to any language tag (or none)
+    on the opening fence line. Shared by ``ScriptAgent``'s statement
+    parsing (``utils/script.py``) and ``DagAgent``'s value-expression
+    parsing (``utils/dag.py``).
+
+    Tries a fully matched pair first (``CODE_FENCE_PATTERN``) -- unambiguous,
+    so its captured inner text is used as-is. If that doesn't match (a model
+    emitting only one side), falls back to stripping a leading and/or
+    trailing fence line independently. Either way, a fence appearing only
+    mid-text is left alone (``ast.parse`` will reject that on its own terms,
+    as a real structural problem).
+    """
+    full_match = CODE_FENCE_PATTERN.match(raw_text)
+    if full_match:
+        return full_match.group(1)
+    text = LEADING_CODE_FENCE_PATTERN.sub("", raw_text, count=1)
+    text = TRAILING_CODE_FENCE_PATTERN.sub("", text, count=1)
+    return text
+
+
+def evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:
+    """
+    Evaluate one parsed expression node against a namespace, with no
+    builtins available. Shared by ``ScriptAgent`` (``utils/script.py``,
+    safe because every arg reaching this function is guaranteed Call-free
+    by its hoisting rule) and ``DagAgent`` (``utils/dag.py``, safe because
+    every value reaching this function has already passed
+    ``reject_unsupported_forms(..., forbid_calls=True)``) -- nothing
+    reachable through ``namespace`` can itself be invoked either way.
+
+    Raises whatever the evaluation naturally raises (``TypeError``,
+    ``ZeroDivisionError``, ``NameError``, ``KeyError``, ...), uncaught --
+    callers decide whether to wrap (parse-time constant folding) or let it
+    surface naturally (``resolve_slot_args``/``resolve_call_args``).
+    """
+    expr_wrapper = ast.Expression(body=node)
+    ast.fix_missing_locations(expr_wrapper)
+    code = compile(expr_wrapper, filename="<blackboard-slot-v2>", mode="eval")
+    return eval(code, {"__builtins__": {}}, namespace)
+
+
+def reject_unsupported_forms(node: ast.expr, *, forbid_calls: bool = False) -> None:
+    """
+    Walk ``node`` and raise on any of: a ternary (``ast.IfExp``) whose
+    either branch contains a ``Call``, an ``ast.Await`` anywhere, a
+    comprehension/lambda (``UNSUPPORTED_EXPR_LABELS``) anywhere, or an
+    ``ast.Attribute`` whose ``.attr`` matches ``DUNDER_ATTRIBUTE_PATTERN``
+    anywhere -- the exact set ``ScriptAgent`` (``utils/script.py``) needs,
+    called there with ``forbid_calls`` omitted (default ``False``, current
+    behavior unchanged).
+
+    ``forbid_calls=True`` additionally raises on ANY ``ast.Call`` node
+    found anywhere in the walk, unconditionally -- not just inside a
+    ternary's untaken branch. This alone already rejects ``obj.method(...)``
+    (a ``Call`` whose ``.func`` happens to be an ``Attribute``); plain
+    ``Attribute``/``Subscript`` access themselves stay permitted throughout
+    (only a dunder-named ``Attribute`` is ever rejected, independent of
+    ``forbid_calls``). ``DagAgent`` (``utils/dag.py``) always passes
+    ``forbid_calls=True`` -- its value-expression grammar permits no
+    function/method calls at all, ever.
+
+    Raises before any hoisting/unparsing proceeds -- every check here is
+    unconditional over the whole tree passed in, at any depth, regardless
+    of whether it actually contains the form being checked for.
+    """
+    for candidate in ast.walk(node):
+        if forbid_calls and isinstance(candidate, ast.Call):
+            raise BlackboardParseError(
+                "function/method calls are not permitted in this "
+                f"expression: {ast.unparse(candidate)!r}."
+            )
+
+        if isinstance(candidate, ast.IfExp) and (
+            any(isinstance(n, ast.Call) for n in ast.walk(candidate.body))
+            or any(isinstance(n, ast.Call) for n in ast.walk(candidate.orelse))
+        ):
+            raise BlackboardParseError(
+                "conditional expression branches must not contain tool "
+                "calls (wastes budget evaluating the untaken branch): "
+                f"{ast.unparse(candidate)!r} -- restructure as separate "
+                "statements or a pause."
+            )
+
+        if isinstance(candidate, ast.Await):
+            raise BlackboardParseError(
+                "'await' is not supported: "
+                f"{ast.unparse(candidate)!r} -- write the call as an "
+                "ordinary statement; execution order is inferred "
+                "automatically from data dependencies."
+            )
+
+        label = UNSUPPORTED_EXPR_LABELS.get(type(candidate))
+        if label is not None:
+            raise BlackboardParseError(
+                f"{label} expressions are not supported: "
+                f"{ast.unparse(candidate)!r} -- rewrite as explicit "
+                "statements instead."
+            )
+
+        if isinstance(candidate, ast.Attribute) and DUNDER_ATTRIBUTE_PATTERN.fullmatch(candidate.attr):
+            raise BlackboardParseError(
+                f"dunder attribute access is not permitted: {ast.unparse(candidate)!r}."
+            )

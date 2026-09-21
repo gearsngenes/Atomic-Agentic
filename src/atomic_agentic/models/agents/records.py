@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 from ...constants.agents import ATTR_CALL_ALIAS, PY_BUILTIN_ALIAS, RHS_ASSIGN_ALIAS
 from ..results.agents import AgentResult
 from ..results.llm import LLMResult
-from .blackboard_models import CodeStatement
+from .blackboard_models import CodeStatement, DagToolCall
 
 # is_dispatched_slot/render_completed_as_python are imported locally inside
 # the two methods that use them (render_as_code/tool_usage below), not at
@@ -29,6 +29,7 @@ __all__ = [
     "ToolAgentRecord",
     "ScriptAgentRecord",
     "ScriptAgentToolUsage",
+    "DagAgentRecord",
     "ThinkingAgentRecord",
 ]
 
@@ -492,6 +493,116 @@ class ScriptAgentRecord(AgentRecord):
         # Explicit two-argument super() -- same slotted-dataclass gotcha
         # __post_init__ documents above; bare super() raises here too.
         d = super(ScriptAgentRecord, self).to_dict()
+        d.update({
+            "statements": [s.to_dict() for s in self.statements],
+            "failed_statements": [s.to_dict() for s in self.failed_statements],
+        })
+        return d
+
+
+@dataclass(frozen=True, slots=True)
+class DagAgentRecord(AgentRecord):
+    """
+    Canonical memory record for one completed DagAgent invocation -- a
+    sibling to ScriptAgentRecord, not a subclass (DagAgent is a new agent
+    family). Each record owns its own calls outright, same as
+    ScriptAgentRecord -- no blackboard_start/blackboard_end span to index
+    into.
+
+    Fields
+    ------
+    statements : tuple[DagToolCall, ...]
+        Every call DagAgentTask.completed accumulated this run, carried
+        over at commit time (normalized to a tuple). Includes the
+        RETURN_ALIAS call when the run terminated via return -- not
+        excluded, same as ScriptAgentRecord.statements includes its own
+        RETURN_ALIAS/CodeStatement entries today.
+
+    failed_statements : tuple[DagToolCall, ...]
+        Every call whose dispatch raised this run, carried over from
+        DagAgentTask.failed_statements at commit time (same
+        list-or-tuple-in, tuple-stored normalization as statements).
+    """
+
+    statements: tuple[DagToolCall, ...] = ()
+    failed_statements: tuple[DagToolCall, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
+        # the class object to add __slots__, which invalidates the
+        # zero-arg super()'s implicit __class__ closure cell (same
+        # slotted-dataclass-subclass gotcha ScriptAgentRecord.__post_init__
+        # already documents above).
+        super(DagAgentRecord, self).__post_init__()
+
+        # 1. statements must be a list/tuple of DagToolCall instances.
+        if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
+            raise TypeError(
+                "DagAgentRecord.statements must be a list or tuple of "
+                f"DagToolCall instances; got {type(self.statements).__name__!r}."
+            )
+        for index, call in enumerate(self.statements):
+            if not isinstance(call, DagToolCall):
+                raise TypeError(
+                    f"DagAgentRecord.statements[{index}] must be a "
+                    f"DagToolCall instance; got {type(call).__name__!r}."
+                )
+
+        # 2. failed_statements must be a list/tuple of DagToolCall
+        # instances, same shape as statements above.
+        if isinstance(self.failed_statements, (str, bytes)) or not isinstance(
+            self.failed_statements, (list, tuple)
+        ):
+            raise TypeError(
+                "DagAgentRecord.failed_statements must be a list or tuple "
+                f"of DagToolCall instances; got {type(self.failed_statements).__name__!r}."
+            )
+        for index, call in enumerate(self.failed_statements):
+            if not isinstance(call, DagToolCall):
+                raise TypeError(
+                    f"DagAgentRecord.failed_statements[{index}] must be a "
+                    f"DagToolCall instance; got {type(call).__name__!r}."
+                )
+
+        # 3. normalize both to a tuple -- object.__setattr__ required, the
+        # dataclass is frozen (mirrors ScriptAgentRecord's identical
+        # normalization).
+        object.__setattr__(self, "statements", tuple(self.statements))
+        object.__setattr__(self, "failed_statements", tuple(self.failed_statements))
+
+    def serialize_statements(self) -> list[dict[str, Any]]:
+        """
+        Return this run's statements as a list of wire-shape dicts, each
+        produced by DagToolCall.serialize() -- the model's own
+        call/assign_to/arguments vocabulary, not to_dict()'s internal-field
+        shape. Scoped to statements only, never failed_statements,
+        mirroring ScriptAgentRecord.render_as_code()'s own scope. No
+        batch-grouping parameter needed (unlike render_as_code
+        (show_batches=True)'s formatting need) -- each entry already
+        carries its own batch_index, so a caller can group by that
+        directly.
+        """
+        return [s.serialize() for s in self.statements]
+
+    def render_as_code(self) -> str:
+        """
+        Reconstruct this run's statements as source-formatted text, grouped
+        by concurrent batch -- mirrors ScriptAgentRecord.render_as_code()
+        exactly (same show_batches=True, standalone-human-inspection-only
+        scope; DagAgent's own live continuation-message path never shows
+        batch grouping to the model, matching that method's own rationale).
+        Meaningful now that DagToolCall's values are genuinely parsed
+        Python expressions rather than plain JSON scalars.
+        """
+        from ...utils.dag import render_completed_as_code
+
+        return render_completed_as_code(self.statements, show_batches=True)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation."""
+        # Explicit two-argument super() -- same slotted-dataclass gotcha
+        # __post_init__ documents above; bare super() raises here too.
+        d = super(DagAgentRecord, self).to_dict()
         d.update({
             "statements": [s.to_dict() for s in self.statements],
             "failed_statements": [s.to_dict() for s in self.failed_statements],
