@@ -1,25 +1,25 @@
 from __future__ import annotations
 
-import ast
 import json
+import re
 from copy import deepcopy
 from typing import Any, Iterable, Optional
 
 from ..constants.agents import (
     DAG_OUTPUT_SCHEMA,
+    DAG_REF_PATTERN,
     RETURN_ALIAS,
     RETURN_VALUE_FIELD,
     TASK_RESULT_PREFIX,
 )
 from ..constants.core import IDENTIFIER_PATTERN
-from ..exceptions import BlackboardParseError
 from ..models.agents.blackboard_models import DagToolCall
-from .agents import evaluate_expr, extract_identifiers, reject_unsupported_forms, strip_code_fence
 
 __all__ = [
     "build_dag_schema",
     "parse_generation",
-    "parse_call_expressions",
+    "find_sigil_refs",
+    "resolve_sigil_value",
     "is_dispatched_call",
     "validate_calls",
     "compile_batches",
@@ -43,26 +43,30 @@ def build_dag_schema(tool_names: Iterable[str]) -> dict[str, Any]:
     return schema
 
 
-def parse_generation(payload: dict[str, Any]) -> tuple[list[DagToolCall], bool]:
+def parse_generation(payload: dict[str, Any]) -> tuple[list[DagToolCall], Optional[str]]:
     """
     Normalize ``output_structure``'s already-schema-validated payload into a
     flat call sequence plus the round's completion signal. Pure shape
     unpacking only -- no decoding of any kind happens here. Every
-    ``arguments[].value`` string, and a non-null top-level ``return``
-    string, is carried through exactly as the model wrote it; turning that
-    raw string into a parsed ``ast.expr`` is ``parse_call_expressions``'s
-    job (a later, separate, fallible pass -- see its own docstring for why
-    it isn't folded into this function).
+    ``arguments[].value``/non-null ``return`` is carried through byte-for-
+    byte as the schema handed it back -- a scalar needs no further
+    processing at all; a string may contain ``$name`` sigil references,
+    resolved later, at prepare time (``utils.dag.resolve_call_args``),
+    never here.
 
     No malformed-shape failure mode -- every required key is schema-
     guaranteed present and type-correct; this function never raises.
 
     1. One ``DagToolCall`` is built per ``plan`` entry. The top-level
        ``summary`` field is never read -- decoding-order scaffold only.
-    2. If the top-level ``return`` is not JSON ``null``, it's a raw string
-       (same not-yet-parsed treatment as any argument value) -- a trailing
-       ``RETURN_ALIAS`` call is synthesized and appended, carrying that raw
-       string under ``RETURN_VALUE_FIELD``. ``null`` means nothing is
+    2. ``remaining_work`` is read off the wire schema's ``remaining_work``
+       field and normalized once, here, to the single canonical shape every
+       downstream caller consumes: ``None`` stays ``None``; a string is
+       stripped, and an all-whitespace/empty result also collapses to
+       ``None``; a non-empty stripped string passes through as-is.
+    3. If the top-level ``return`` is not JSON ``null``, a trailing
+       ``RETURN_ALIAS`` call is synthesized and appended, carrying that
+       value under ``RETURN_VALUE_FIELD``. ``null`` means nothing is
        returned this round; nothing is synthesized.
     """
     calls: list[DagToolCall] = []
@@ -76,14 +80,19 @@ def parse_generation(payload: dict[str, Any]) -> tuple[list[DagToolCall], bool]:
                 kwargs[arg["name"]] = arg["value"]
         calls.append(
             DagToolCall(
-                identifier=entry["assign_to"],
+                identifier=entry["result_name"],
                 tool=entry["call"],
                 args=tuple(args),
                 kwargs=kwargs,
             )
         )
 
-    more_planning_needed: bool = payload["more_planning_needed"]
+    raw_remaining_work = payload["remaining_work"]
+    remaining_work: Optional[str] = (
+        raw_remaining_work.strip() or None
+        if isinstance(raw_remaining_work, str)
+        else None
+    )
 
     raw_return = payload["return"]
     if raw_return is not None:
@@ -95,79 +104,25 @@ def parse_generation(payload: dict[str, Any]) -> tuple[list[DagToolCall], bool]:
             )
         )
 
-    return calls, more_planning_needed
+    return calls, remaining_work
 
 
-def parse_call_expressions(calls: list[DagToolCall]) -> list[str]:
+def find_sigil_refs(value: Any) -> frozenset[str]:
     """
-    Second, fallible pass over ``calls`` -- kept separate from
-    ``parse_generation`` so that function's own "never raises" contract
-    stays literally true. Parses every still-raw-string args/kwargs value
-    (including the synthesized ``RETURN_ALIAS`` call's ``RETURN_VALUE_FIELD``
-    entry, if present -- no special-casing needed, it's just another call in
-    the list) into a real ``ast.expr``, mutating each call's ``args``/
-    ``.kwargs`` in place.
+    Given one already-typed args/kwargs value (never a container -- see
+    ``DagToolCall``'s own docstring, args/kwargs entries are always flat
+    scalars now), return every name referenced by a ``$name`` sigil found
+    anywhere in it. Used for batch dependency detection only (``compile_
+    batches``) -- whole-string or embedded, doesn't matter which for this
+    purpose, only *that* a name is referenced.
 
-    Comprehensive, not fail-fast -- every value across every call is
-    attempted, and every problem found is collected, matching
-    ``validate_calls``' own convention. A value that fails at any step below
-    is left as its original raw string and gets one issue string; nothing
-    downstream of a round with any such issue ever runs (the combined issue
-    list blocks progression before ``compile_batches``), so no other method
-    needs to defensively handle a half-parsed value.
-
-    Per value:
-    1. Strip code fencing and surrounding whitespace
-       (``strip_code_fence(raw).strip()``). Empty after that -> an issue,
-       leave the raw string as-is.
-    2. ``ast.parse(cleaned, mode="eval")`` -- a ``SyntaxError`` -> an issue,
-       leave the raw string as-is.
-    3. ``reject_unsupported_forms(tree.body, forbid_calls=True)`` -- a
-       ``BlackboardParseError`` -> an issue, leave the raw string as-is.
-    4. Otherwise replace the value with ``tree.body`` (the parsed
-       ``ast.expr``).
-
-    Returns the combined issues list (possibly empty).
+    A non-``str`` value can never contain a sigil -- returns ``frozenset()``
+    immediately. Never raises -- pure regex scan over an already-guaranteed
+    ``str``.
     """
-    issues: list[str] = []
-
-    def parse_one(raw: str, label: str, position: str) -> Any:
-        cleaned = strip_code_fence(raw).strip()
-        if not cleaned:
-            issues.append(
-                f"{label}: {position} is empty after removing code "
-                "fencing/whitespace."
-            )
-            return raw
-        try:
-            tree = ast.parse(cleaned, mode="eval")
-        except SyntaxError as e:
-            issues.append(f"{label}: {position} is not valid Python: {e}")
-            return raw
-        node = tree.body
-        try:
-            reject_unsupported_forms(node, forbid_calls=True)
-        except BlackboardParseError as e:
-            issues.append(f"{label}: {position}: {e}")
-            return raw
-        return node
-
-    for call in calls:
-        label = call.identifier if call.identifier is not None else "(unassigned)"
-
-        new_args: list[Any] = []
-        for index, raw in enumerate(call.args):
-            if isinstance(raw, str):
-                new_args.append(parse_one(raw, label, f"argument {index}"))
-            else:
-                new_args.append(raw)
-        call.args = tuple(new_args)
-
-        for key, raw in list(call.kwargs.items()):
-            if isinstance(raw, str):
-                call.kwargs[key] = parse_one(raw, label, f"argument {key!r}")
-
-    return issues
+    if not isinstance(value, str):
+        return frozenset()
+    return frozenset(m.group(1) for m in DAG_REF_PATTERN.finditer(value))
 
 
 def is_dispatched_call(call: DagToolCall) -> bool:
@@ -182,7 +137,7 @@ def is_dispatched_call(call: DagToolCall) -> bool:
 
 def validate_calls(
     calls: list[DagToolCall],
-    more_planning_needed: bool,
+    remaining_work: Optional[str],
     tool_calls_limit: Optional[int],
     known_names: frozenset[str],
 ) -> list[str]:
@@ -195,24 +150,34 @@ def validate_calls(
     ``IDENTIFIER_PATTERN``-legal (checked first), and, only if it already is,
     must not start with the reserved ``K_``/``task_result_`` prefixes.
     Separately: the dispatched-call count against ``tool_calls_limit``
-    (``RETURN_ALIAS`` excluded), and a ``RETURN_ALIAS`` call present
-    alongside ``more_planning_needed=True`` -- a contradiction, exactly one
-    way to end a round is permitted.
+    (``RETURN_ALIAS`` excluded); a ``RETURN_ALIAS`` call present alongside a
+    truthy ``remaining_work`` -- a contradiction, exactly one way to end a
+    round is permitted; and a truthy ``remaining_work`` with zero dispatched
+    calls -- deferring with nothing dispatched is never valid, mirrors
+    ``ScriptAgent``'s own "a pause cannot appear before any real work has
+    been done" check. ``remaining_work`` is only ever checked for
+    truthiness here -- an empty-vs-non-empty string was already resolved to
+    ``None``-vs-real-text by ``parse_generation``, so this function never
+    inspects the text content itself.
 
-    New identifier-existence check, walked in ``calls``' own order (already
-    plan order, pre-batching): every ``Name`` a call's args/kwargs
-    reference must already be bound -- in ``known_names`` (the caller's
+    Unbound-``$name``-reference check, narrowed to **whole-string** matches
+    only -- an embedded ``$name`` (not the entire value) stays fully
+    permissive and is never flagged here (silent fallback-to-literal at
+    resolve time, genuinely ambiguous with intentional literal text, e.g. a
+    dollar amount). Walked in ``calls``' own order (already plan order,
+    pre-batching): a value that is *entirely* one ``$name`` token must
+    already be bound -- in ``known_names`` (the caller's
     ``task.cache``/``task.constant_values`` keys), or by an earlier call
     already written in this same plan. A call's own identifier is only
     added to the available set *after* its own references are checked
     against the pre-call set -- a call can never reference its own
-    ``assign_to``, and a later call can only reference an earlier one's,
-    never a forward reference within the same plan.
-    ``extract_identifiers``' own dict/tuple/list-walking already skips any
-    entry that isn't a parsed ``ast.expr`` (a value ``parse_call_expressions``
-    failed to parse and left as a raw string), so a value with its own
-    separate parse-failure issue contributes nothing here -- no
-    double-reporting.
+    ``result_name``, and a later call can only reference an earlier one's,
+    never a forward reference within the same plan. This check exists
+    specifically because ``compile_batches`` only detects a same-batch
+    conflict against names already in the currently-open batch -- a forward
+    reference within one plan would otherwise land both calls in one
+    concurrently-dispatched batch and silently resolve to the literal
+    ``"$name"`` string instead of erroring.
 
     Returns ``[]`` if every call is clean and the plan is within budget.
     """
@@ -223,13 +188,13 @@ def validate_calls(
             continue
         if not IDENTIFIER_PATTERN.fullmatch(call.identifier):
             issues.append(
-                f"assign_to {call.identifier!r} is not a valid identifier."
+                f"result_name {call.identifier!r} is not a valid identifier."
             )
         elif call.identifier.startswith("K_") or call.identifier.startswith(
             TASK_RESULT_PREFIX
         ):
             issues.append(
-                f"assign_to {call.identifier!r} uses a reserved prefix "
+                f"result_name {call.identifier!r} uses a reserved prefix "
                 "('K_' is reserved for constants, "
                 f"{TASK_RESULT_PREFIX!r} for cross-invocation results)."
             )
@@ -242,24 +207,46 @@ def validate_calls(
         )
 
     has_return = any(call.tool == RETURN_ALIAS for call in calls)
-    if has_return and more_planning_needed:
+    if has_return and remaining_work:
         issues.append(
-            "the plan sets a return value and more_planning_needed=true "
-            "in the same round -- pick exactly one way to end: return a "
-            "final value, or signal more planning is needed (with no "
-            "return)."
+            "the plan sets a return value while 'remaining_work' is also "
+            "set -- pick exactly one way to end a round: return a final "
+            "value with 'remaining_work' left null, or leave return null "
+            "and describe what's left in 'remaining_work' to continue."
         )
+
+    if remaining_work and real_call_count == 0:
+        issues.append(
+            "'remaining_work' is set but the plan calls no tools -- "
+            "deferring with nothing dispatched is never valid; either call "
+            "something whose result you need, or finish the round: leave "
+            "'remaining_work' null and set 'return' to the final value."
+        )
+
+    def whole_refs(value: Any) -> Iterable[str]:
+        if isinstance(value, str):
+            m = DAG_REF_PATTERN.fullmatch(value)
+            if m is not None:
+                yield m.group(1)
 
     available: set[str] = set(known_names)
     for call in calls:
         label = call.identifier if call.identifier is not None else "(unassigned)"
-        refs = set(extract_identifiers(call.args)) | set(extract_identifiers(call.kwargs))
+
+        refs: set[str] = set()
+        for value in call.args:
+            refs |= set(whole_refs(value))
+        for value in call.kwargs.values():
+            refs |= set(whole_refs(value))
+
         unresolved = sorted(name for name in refs if name not in available)
         if unresolved:
             issues.append(
-                f"{label}: references unbound name(s) {unresolved!r} -- not "
-                "yet assigned earlier in this plan and not present in "
-                "cache/constants."
+                f"{label}: reference(s) {unresolved!r} do not match any "
+                "earlier result_name, constant, or cross-invocation "
+                "result (only checked for a value that is *entirely* one "
+                "'$name' token -- a '$name' embedded in a longer string is "
+                "never flagged)."
             )
         if call.identifier is not None:
             available.add(call.identifier)
@@ -276,14 +263,15 @@ def compile_batches(
     Group ``calls`` into dependency batches for concurrent execution, and
     stamp each call's ``.batch_index`` with the batch it landed in.
 
-    Dependency source is ``extract_identifiers`` (the same shared, ``ast``-
-    aware helper ``ScriptAgent`` uses), available now that ``args``/
-    ``.kwargs`` hold real ``ast.expr`` nodes -- unlike the old JSON-decoded-
-    container shape, no permissive over-collecting string scan is needed
-    anymore. The ``RETURN_ALIAS``-isolation rule is kept unchanged -- a
-    ``RETURN_ALIAS`` call always closes the current batch, lands alone in a
-    batch of its own, then closes that batch too, so a batch-partial
-    failure elsewhere can never suppress an already-resolved return.
+    Dependency source is ``find_sigil_refs``, scanned over each call's
+    already-native ``args``/``.kwargs`` -- permissive over-collection (a
+    name found here that never actually resolves to anything just never
+    overlaps a real identifier in ``current_batch_identifiers``, harmless,
+    not specially guarded against). The ``RETURN_ALIAS``-isolation rule is
+    kept unchanged -- a ``RETURN_ALIAS`` call always closes the current
+    batch, lands alone in a batch of its own, then closes that batch too,
+    so a batch-partial failure elsewhere can never suppress an
+    already-resolved return.
 
     ``max_concurrency=None`` means no cap. Every call in a batch is stamped
     with the same ``batch_index`` (``start_batch_index`` plus that batch's
@@ -314,7 +302,11 @@ def compile_batches(
             close_current()
             continue
 
-        deps = set(extract_identifiers(call.args)) | set(extract_identifiers(call.kwargs))
+        deps: set[str] = set()
+        for value in call.args:
+            deps |= find_sigil_refs(value)
+        for value in call.kwargs.values():
+            deps |= find_sigil_refs(value)
         if any(name in current_batch_identifiers for name in deps):
             close_current()
 
@@ -336,6 +328,47 @@ def compile_batches(
     return batches
 
 
+def resolve_sigil_value(value: Any, resolved: dict[str, Any]) -> Any:
+    """
+    Given one already-typed args/kwargs value and the resolution namespace
+    (``{**task.cache, **task.constant_values}``, built by the caller), return
+    the value with every resolvable ``$name`` sigil substituted.
+
+    A non-``str`` value passes through unchanged -- can never contain a
+    sigil. A ``str`` that is a **whole** ``DAG_REF_PATTERN`` match against a
+    name present in ``resolved`` returns ``resolved[name]`` directly, real
+    type preserved (may be any scalar type, not just ``str``) -- the only
+    path that can return a non-``str`` result. Otherwise, every embedded
+    ``$name`` occurrence whose name is in ``resolved`` is stringified and
+    spliced in place via a single ``DAG_REF_PATTERN.sub`` pass; an
+    occurrence (whole or embedded) whose name is *not* in ``resolved`` is
+    left untouched, sigil included -- one mechanism uniformly covering a
+    plain literal (no-op), one or more embedded interpolations, and an
+    unresolved sigil at any position.
+
+    Never raises -- no failure mode exists at this layer. Note: a resolved
+    value that itself contains a literal ``$name``-shaped substring (e.g.
+    ``$price`` resolving to the string ``"$5"`` inside a larger interpolated
+    string) is not re-scanned -- a single ``.sub()`` pass, not a fixed
+    point -- so it lands verbatim in the output text. Intentional, not a
+    bug.
+    """
+    if not isinstance(value, str):
+        return value
+
+    whole = DAG_REF_PATTERN.fullmatch(value)
+    if whole is not None and whole.group(1) in resolved:
+        return resolved[whole.group(1)]
+
+    def _splice(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name in resolved:
+            return str(resolved[name])
+        return match.group(0)
+
+    return DAG_REF_PATTERN.sub(_splice, value)
+
+
 def resolve_call_args(
     call: DagToolCall, resolved: dict[str, Any],
 ) -> tuple[list[Any], dict[str, Any]]:
@@ -347,30 +380,23 @@ def resolve_call_args(
     ``keyword[RETURN_VALUE_FIELD]`` directly (that short-circuit lives in
     the caller, not here).
 
-    Rewritten around the shared ``evaluate_expr`` (``utils.agents``) --
-    every value is evaluated exactly once against ``resolved`` (identifier
-    -> value), the same "parse once, evaluate once at prepare time"
-    discipline ``CodeStatement``/``resolve_slot_args`` use. No exact-match
-    string substitution anymore; a ``Name`` reference resolves through real
-    Python evaluation instead.
-
-    Assumes every value here is already a parsed ``ast.expr`` -- only true
-    for a round that produced zero ``parse_call_expressions``/
-    ``validate_calls`` issues, which is the only kind of round that ever
-    reaches this function. Not defensively guarded against otherwise:
-    ``evaluate_expr``'s own ``ast.Expression(body=node)`` construction
-    raises a natural ``TypeError`` if handed a non-node, uncaught, same
-    "let it surface" posture used throughout this module.
+    Built around ``resolve_sigil_value`` -- identifier substitution only, no
+    JSON decoding (that already happened, or didn't need to, by
+    ``parse_generation`` time). Never raises: ``resolve_sigil_value`` has no
+    failure mode, so this function inherits that -- there is no longer any
+    precondition to document about a round having produced zero
+    parse/validate issues first, because there's no parse step left to have
+    failed.
     """
-    positional = [evaluate_expr(value, resolved) for value in call.args]
-    keyword = {key: evaluate_expr(value, resolved) for key, value in call.kwargs.items()}
+    positional = [resolve_sigil_value(value, resolved) for value in call.args]
+    keyword = {key: resolve_sigil_value(value, resolved) for key, value in call.kwargs.items()}
     return positional, keyword
 
 
 def render_completed_as_json(calls: list[DagToolCall]) -> str:
     """
     Render ``calls`` as a JSON array of leaner per-call dicts, in the
-    **wire schema's own shape** (``call``/``assign_to``/``arguments``) --
+    **wire schema's own shape** (``call``/``arguments``/``result_name``) --
     a thin wrapper over ``DagToolCall.serialize()``, which is now the one
     authoritative home for that reconstruction (moved there so
     ``DagAgentRecord.serialize_statements()`` and this function share the

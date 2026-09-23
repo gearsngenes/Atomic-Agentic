@@ -220,9 +220,9 @@ PAUSE_PATTERN: re.Pattern[str] = re.compile(r"^\s*#\s*PAUSE\b", re.IGNORECASE | 
 # Matches a single markdown code fence wrapping the *entire* generation --
 # any (or no) language tag on the opening fence line (```python, ```py,
 # ```text, a bare ```, ...), not just ```python. Tried first by
-# utils/agents.py's strip_code_fence (shared by ScriptAgent and DagAgent),
-# since a matched pair unambiguously marks everything between them as the
-# intended code.
+# utils/agents.py's strip_code_fence (ScriptAgent's own code-statement
+# parsing), since a matched pair unambiguously marks everything between
+# them as the intended code.
 CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.DOTALL)
 
 # Fallback for when CODE_FENCE_PATTERN doesn't match (a model emitting only
@@ -235,10 +235,9 @@ TRAILING_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"\n[ \t]*```[ \t]*$")
 
 # Matches a dunder-shaped attribute name (`__class__`, `__globals__`, ...).
 # Rejected unconditionally by utils/agents.py's reject_unsupported_forms
-# (for a bare `ast.Attribute` anywhere in an expression -- shared by both
-# ScriptAgent and DagAgent, including recursively inside a DagAgent
-# f-string's own replacement field) and utils/script.py's _build_call_slot
-# (for a method-call's own method name, the one position
+# (for a bare `ast.Attribute` anywhere in an expression -- ScriptAgent's
+# own code-statement grammar) and utils/script.py's _build_call_slot (for
+# a method-call's own method name, the one position
 # reject_unsupported_forms's own walk never scans) -- closes the classic
 # attribute-chaining sandbox-escape class
 # (`().__class__.__bases__[0].__subclasses__()`-style), which the
@@ -268,7 +267,7 @@ and continuation branches), so all four call sites can never drift in
 wording. Deliberately grammar-neutral -- earlier revisions said "Do not
 write # PAUSE", a ScriptAgent-specific instruction meaningless in
 DagAgent's own grammar (there is no "# PAUSE" marker or equivalent; a
-DagAgent round signals continuation via the more_planning_needed JSON
+DagAgent round signals continuation via the remaining_work JSON
 field instead) -- "you may not defer further" already fully covers the
 same intent (deferring IS writing # PAUSE, for ScriptAgent) without
 naming a mechanism that doesn't exist in DagAgent's own output schema."""
@@ -294,7 +293,7 @@ naming a mechanism that doesn't exist in DagAgent's own output schema."""
 # per-item reason field this schema shipped with in Pass 2). Only
 # "properties" dict insertion order is load-bearing for constrained
 # decoding (not "required"'s order) -- summary must be declared before
-# plan/more_planning_needed/return so the model's stated reasoning can
+# plan/remaining_work/return so the model's stated reasoning can
 # causally precede every one of them, the same field-order principle the
 # original per-item reason design was built on, just applied once per
 # round instead of once per call: cheaper (one reasoning blob, not N), and
@@ -305,7 +304,7 @@ naming a mechanism that doesn't exist in DagAgent's own output schema."""
 DAG_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["summary", "plan", "more_planning_needed", "return"],
+    "required": ["summary", "plan", "remaining_work", "return"],
     "properties": {
         "summary": {
             "type": "string",
@@ -319,10 +318,9 @@ DAG_OUTPUT_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["call", "assign_to", "arguments"],
+                "required": ["call", "arguments", "result_name"],
                 "properties": {
                     "call": {"type": "string", "enum": []},
-                    "assign_to": {"type": ["string", "null"]},
                     "arguments": {
                         "type": "array",
                         "items": {
@@ -332,31 +330,62 @@ DAG_OUTPUT_SCHEMA: dict[str, Any] = {
                             "properties": {
                                 "name": {"type": ["string", "null"]},
                                 "value": {
-                                    "type": "string",
+                                    "type": ["number", "boolean", "null", "string"],
                                     "description": (
-                                        "Python source for a literal or expression -- "
-                                        "e.g. 42, 'a string', x + 1, f'{name}!', "
-                                        "[a, b], obj.field, items[0]. No function or "
-                                        "method calls permitted."
+                                        "A literal value (any JSON scalar), or a "
+                                        "string. A string that is *exactly* '$name' "
+                                        "(nothing else) refers to an earlier "
+                                        "result_name or a K_/task_result_ value, "
+                                        "substituted with its real value and type. "
+                                        "A '$name' appearing inside a longer string "
+                                        "is spliced in as text (stringified) at that "
+                                        "position. A '$name' that doesn't match "
+                                        "anything is left as literal text, sigil "
+                                        "included -- not an error. To build a "
+                                        "list/tuple/set or dict, call "
+                                        "make_sequence/make_dict instead of writing "
+                                        "a container here."
                                     ),
                                 },
                             },
                         },
                     },
+                    "result_name": {"type": ["string", "null"]},
                 },
             },
         },
-        "more_planning_needed": {"type": "boolean"},
-        "return": {
+        "remaining_work": {
             "type": ["string", "null"],
             "description": (
-                "A non-null value is Python source, following the same rules "
-                "as an argument's value. null means nothing is returned this "
-                "round (more_planning_needed governs instead)."
+                "Null (or blank) once this round's plan, together with "
+                "'return', finishes the task. Otherwise, a non-empty "
+                "string describing exactly what still needs to happen "
+                "and what you need to inspect before deciding the next "
+                "steps -- this text is shown back to you, verbatim, at "
+                "the start of the next round, so write it as a note to "
+                "your own future self, not just a status label."
+            ),
+        },
+        "return": {
+            "type": ["number", "boolean", "null", "string"],
+            "description": (
+                "A non-null value follows the same rules as an argument's "
+                "value (literal, or a '$name' reference/interpolation). "
+                "null means nothing is returned this round ('remaining_"
+                "work' governs instead)."
             ),
         },
     },
 }
+
+# Matches a `$`-sigil reference inside a DagAgent-generated `value`/`return`
+# string: `$` followed by an identifier-legal name, captured as group 1.
+# Used two ways by utils/dag.py -- `DAG_REF_PATTERN.fullmatch(s)` (is the
+# WHOLE string one reference?) and `DAG_REF_PATTERN.finditer(s)`/`.sub(s)`
+# (find/splice every embedded occurrence) -- one pattern serves both, no
+# anchors baked into the text itself (fullmatch anchors on its own, exactly
+# like this file's own IDENTIFIER_PATTERN precedent elsewhere).
+DAG_REF_PATTERN: re.Pattern[str] = re.compile(rf"\$({IDENTIFIER_PATTERN_TEXT})")
 
 
 __all__ = [
@@ -405,4 +434,5 @@ __all__ = [
     "RETURN_TOOL_FULL_NAME",
     # DagAgent output_structure schema
     "DAG_OUTPUT_SCHEMA",
+    "DAG_REF_PATTERN",
 ]

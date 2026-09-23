@@ -520,19 +520,19 @@ class DagToolCall:
     One slot in a DagAgent round's per-invocation call sequence.
 
     Sibling to ``CodeStatement``, not a subclass or shared-base retrofit --
-    the fields are structurally close (both ultimately hold parsed
-    ``ast.expr`` nodes in ``args``/``.kwargs``, evaluated exactly once at
-    prepare time via the shared ``utils.agents.evaluate_expr``), but they
-    arrive there through different front ends: ``CodeStatement`` parses one
-    whole Python statement at once (``ScriptAgent``'s own text-based
-    generation); a ``DagToolCall``'s ``args``/``.kwargs`` entries each start
-    as their own independent wire-schema *string* (``output_structure``
-    strict-mode JSON), parsed one value at a time by
-    ``utils.dag.parse_call_expressions``, not one statement at a time. The
-    real logic (validation/``to_dict``/resolution) still doesn't share
-    anything regardless -- different enough front ends and grammars
-    (``DagAgent`` permits no function/method calls at all; ``ScriptAgent``
-    does) that a shared base class isn't worth it.
+    ``args``/``kwargs`` entries here are always plain, already-typed
+    scalars (``str | int | float | bool | None``) straight from the wire
+    payload, from construction onward -- never an ``ast.expr``, and never a
+    "parse pending/failed" half-state (that state doesn't exist at all;
+    there is no separate parse step anymore, fallible or otherwise). A
+    ``str`` entry may carry zero or more ``$name`` sigil references
+    (whole-string or embedded); resolving those happens once, at prepare
+    time, via ``utils.dag.resolve_call_args``/``resolve_sigil_value`` --
+    never here, never at construction, never more than once. The real logic
+    (validation/``to_dict``/resolution) doesn't share anything with
+    ``CodeStatement`` regardless -- different enough front ends and
+    grammars (``DagAgent`` permits no function/method calls at all;
+    ``ScriptAgent`` does) that a shared base class isn't worth it.
 
     Every ``DagToolCall`` represents a real registered-tool call authored by
     the model into the wire schema's ``plan`` array, or the framework-
@@ -548,17 +548,21 @@ class DagToolCall:
     Fields
     ------
     identifier : str | None
-        This call's bound name -- the wire schema's ``assign_to`` value
+        This call's bound name -- the wire schema's ``result_name`` value
         (stripped, never otherwise validated at this layer -- see
         ``__post_init__``), or ``None`` for a bare unassigned call. Also
         always ``None`` for the framework-synthesized ``RETURN_ALIAS`` call
         (a ``return`` value is never resolvable by name from a later round
-        -- there is no later round). A non-``None`` value that isn't
-        actually identifier-pattern-legal, or collides with a reserved
-        ``K_*``/``task_result_*`` prefix, is accepted here without
-        complaint -- ``utils.dag.validate_calls`` is what catches that,
-        as a regen-repair-eligible issue rather than a construction-time
-        crash.
+        -- there is no later round). A non-``None`` value has exactly one
+        leading ``$`` stripped (after whitespace stripping) before any
+        further use -- ``__post_init__`` step 1c, below -- since no legal
+        identifier can start with ``$``, this is pure recovery from a model
+        blending reference-syntax with definition-syntax, never a
+        collision with an intended name. Beyond that stripping, still
+        accepted here without complaint if not actually identifier-pattern-
+        legal or if it collides with a reserved ``K_*``/``task_result_*``
+        prefix -- ``utils.dag.validate_calls`` is what catches that, as a
+        regen-repair-eligible issue rather than a construction-time crash.
 
     tool : str
         Either a real registered tool's ``full_name`` (the wire schema's
@@ -578,24 +582,19 @@ class DagToolCall:
 
     args : tuple[Any, ...]
         Positional call arguments, in wire-schema order (the ``arguments``
-        list's ``name: null`` entries). Each entry starts, at construction
-        time, as the raw Python-source *string* the wire schema's
-        ``value`` field carries (no decoding of any kind happens in
-        ``parse_generation``) -- ``utils.dag.parse_call_expressions``
-        parses it, exactly once, into an ``ast.expr`` node (mirrors
-        ``CodeStatement``'s own "parsed-once, never re-folded" contract),
-        replacing the raw string in place. An entry that fails to parse
-        (empty after fence-stripping, a ``SyntaxError``, or a rejected
-        form -- see ``reject_unsupported_forms``) stays the original raw
-        string -- but a round with any such entry never proceeds past
-        ``validate_calls``' combined issue list, so no other method ever
-        needs to handle that half-parsed state.
+        list's ``name: null`` entries). Each entry is exactly the value
+        ``DAG_OUTPUT_SCHEMA``'s own value union produced -- ``str | int |
+        float | bool | None`` -- verbatim from construction onward. A
+        ``str`` entry may contain zero or more ``$name`` sigil references
+        (whole-string or embedded); resolving those happens once, at
+        prepare time, via ``utils.dag.resolve_call_args``/
+        ``resolve_sigil_value`` -- never here, never at construction, never
+        more than once.
 
     kwargs : dict[str, Any]
         Keyword call arguments (the ``arguments`` list's ``name: "<str>"``
         entries), or ``{"val": <value>}`` for the synthesized
-        ``RETURN_ALIAS`` call. Same raw-string-then-parsed-``ast.expr``
-        shape as ``args``.
+        ``RETURN_ALIAS`` call. Same already-typed-scalar shape as ``args``.
 
     batch_index : int | None
         Which concurrently-dispatched batch this call belongs to, stamped
@@ -641,6 +640,14 @@ class DagToolCall:
                     f"{type(self.identifier).__name__!r}."
                 )
             self.identifier = self.identifier.strip()
+            # 1c. Exactly one leading '$' is stripped, silently -- no legal
+            # identifier can start with '$', so this is pure recovery from
+            # a model blending reference-syntax ("$total") with
+            # definition-syntax ("total"), never a collision with an
+            # intended name. Not repeated: "$$total" becomes "$total",
+            # still pattern-illegal, left for validate_calls to catch.
+            if self.identifier.startswith("$"):
+                self.identifier = self.identifier[1:].strip()
 
         # 2. tool must be a non-empty string. No further constraint here --
         # dotted full_names and the bare RETURN_ALIAS string are both legal;
@@ -673,22 +680,16 @@ class DagToolCall:
         """
         Return the explicit serialized dictionary representation, for
         debugging/observability only -- never used to reconstruct or
-        re-plan. An args/kwargs value still an unparsed raw string (this
-        call's own parse failed, or -- transiently -- hasn't run yet) is
-        rendered as-is; an already-parsed ``ast.expr`` is rendered as its
-        source text via ``ast.unparse`` (not the raw AST node, which isn't
-        JSON-serializable) -- same fallback shape ``CodeStatement.to_dict()``
-        uses.
+        re-plan. Every args/kwargs value is already JSON-plain (see class
+        docstring), so no rendering/transformation is needed -- unlike
+        ``CodeStatement.to_dict()``'s ``ast.unparse``-or-passthrough
+        fallback, values are used directly.
         """
-
-        def render(value: Any) -> Any:
-            return ast.unparse(value) if isinstance(value, ast.expr) else value
-
         return {
             "identifier": self.identifier,
             "tool": self.tool,
-            "args": [render(value) for value in self.args],
-            "kwargs": {key: render(value) for key, value in self.kwargs.items()},
+            "args": list(self.args),
+            "kwargs": dict(self.kwargs),
             "batch_index": self.batch_index,
             "result": self.result.to_dict() if self.result is not None else None,
             "exception": repr(self.exception) if self.exception is not None else None,
@@ -697,50 +698,45 @@ class DagToolCall:
     def serialize(self) -> dict[str, Any]:
         """
         Return this call reconstructed in the **wire schema's own shape**
-        (``call``/``assign_to``/``arguments: [{"name", "value"}, ...]``),
+        (``call``/``arguments: [{"name", "value"}, ...]``/``result_name``),
         the model's own generation vocabulary -- distinct from
         ``to_dict()``'s internal-field debug view. This is the one
         authoritative home for that reconstruction:
         ``utils.dag.render_completed_as_json`` is a thin wrapper calling
         this once per call, rather than rebuilding the shape itself.
 
-        Same ``ast.unparse``-if-parsed-else-passthrough rendering
-        ``to_dict()`` uses -- a wire-shape ``value`` is always a string
-        either way (Python source), matching ``DAG_OUTPUT_SCHEMA``'s own
-        ``value``/``return`` domain.
+        Every args/kwargs value is already JSON-plain -- used directly, no
+        rendering step needed.
         """
-
-        def render(value: Any) -> str:
-            return ast.unparse(value) if isinstance(value, ast.expr) else value
-
         return {
             "call": self.tool,
-            "assign_to": self.identifier,
             "arguments": (
-                [{"name": None, "value": render(value)} for value in self.args]
-                + [{"name": key, "value": render(value)} for key, value in self.kwargs.items()]
+                [{"name": None, "value": value} for value in self.args]
+                + [{"name": key, "value": value} for key, value in self.kwargs.items()]
             ),
+            "result_name": self.identifier,
         }
 
     def to_python_code(self) -> str:
         """
-        Reconstruct this call as one line of real Python source -- possible
-        now that every args/kwargs value is a genuinely parsed ``ast.expr``,
-        not a JSON scalar. A ``RETURN_ALIAS`` call renders as
-        ``return <val>``; any other call renders as
-        ``<identifier> = <tool>(<args>)`` (bare ``<tool>(<args>)`` when
-        ``identifier`` is ``None``). Assumes every value here is already an
-        ``ast.expr`` -- a round with any unparsed/rejected value never
-        reaches a call site that calls this method (see ``args``/``kwargs``
-        docstrings above); ``ast.unparse`` raises naturally on a plain
-        string, uncaught, if that assumption is ever violated.
+        Reconstruct this call as one line of real Python source, via
+        ``repr()`` on each value (a value is already the real Python object
+        it represents -- there is no ``ast.expr`` left to unparse). A
+        ``RETURN_ALIAS`` call renders as ``return <val!r>``; any other call
+        renders as ``<identifier> = <tool>(<args>)`` (bare ``<tool>(<args>)``
+        when ``identifier`` is ``None``). Still produces one line of real,
+        syntactically valid Python per call -- an unresolved ``$name``-
+        bearing string just repr's as an ordinary quoted string (e.g.
+        ``x = '$total'``), which is exactly what it is pre-resolution.
+        ``repr()`` never raises for any value this class's own
+        ``__post_init__`` already accepted.
         """
         if self.tool == RETURN_ALIAS:
-            return f"return {ast.unparse(self.kwargs['val'])}"
+            return f"return {self.kwargs['val']!r}"
 
         prefix = f"{self.identifier} = " if self.identifier is not None else ""
         args_source = ", ".join(
-            [ast.unparse(value) for value in self.args]
-            + [f"{key}={ast.unparse(value)}" for key, value in self.kwargs.items()]
+            [repr(value) for value in self.args]
+            + [f"{key}={value!r}" for key, value in self.kwargs.items()]
         )
         return f"{prefix}{self.tool}({args_source})"

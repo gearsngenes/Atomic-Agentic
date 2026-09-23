@@ -574,7 +574,7 @@ class DagAgentRecord(AgentRecord):
         """
         Return this run's statements as a list of wire-shape dicts, each
         produced by DagToolCall.serialize() -- the model's own
-        call/assign_to/arguments vocabulary, not to_dict()'s internal-field
+        call/arguments/result_name vocabulary, not to_dict()'s internal-field
         shape. Scoped to statements only, never failed_statements,
         mirroring ScriptAgentRecord.render_as_code()'s own scope. No
         batch-grouping parameter needed (unlike render_as_code

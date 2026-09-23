@@ -343,7 +343,7 @@ class DagAgentTask(AgentTask):
 
     continue_planning : bool
         Unified continuation trigger, set either by the model's own
-        more_planning_needed schema signal or by the framework itself on a
+        remaining_work schema signal or by the framework itself on a
         resolution/execution failure -- same single reactive-continuation
         path either way, no split between "continuation" and "repair"
         handling. Same role ScriptAgentTask.continue_planning already has.
@@ -352,9 +352,9 @@ class DagAgentTask(AgentTask):
         identifier -> resolved value for every call in completed, kept in
         sync as calls complete, plus task_result_i entries seeded once at
         _initialize_task. Precedence on lookup: constant_values and this
-        dict, together, always outrank a plan-local assign_to name on a
+        dict, together, always outrank a plan-local result_name name on a
         name collision -- though a real collision is structurally
-        impossible by construction, since assign_to/task_result_* names can
+        impossible by construction, since result_name/task_result_* names can
         never start with K_ and constant names always do (enforced by
         validate_calls).
 

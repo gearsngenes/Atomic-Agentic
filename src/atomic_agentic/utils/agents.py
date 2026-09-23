@@ -241,15 +241,11 @@ def extract_identifiers(
     slot's ``args`` tuple/list -- in the dict/tuple/list forms, only values
     that are still unresolved ``ast.expr`` nodes contribute identifiers; an
     already-folded raw literal value contributes none. A ``CodeStatement``
-    (or ``DagToolCall``) with both containers calls this once per container
-    and merges the results -- this function stays single-container. An
-    ``ast.Starred`` entry (a ``*expr`` unpack in ``args``) is itself an
-    ``ast.expr`` subtype, so it's picked up by the plain expression branch
-    below with no special-casing: ``ast.walk`` already recurses into its
-    ``.value``. A raw string entry that hasn't been parsed into an
-    ``ast.expr`` yet (e.g. a ``DagToolCall`` value that failed to parse)
-    contributes nothing here either -- same "only real ``ast.expr`` nodes
-    count" rule.
+    with both containers calls this once per container and merges the
+    results -- this function stays single-container. An ``ast.Starred``
+    entry (a ``*expr`` unpack in ``args``) is itself an ``ast.expr``
+    subtype, so it's picked up by the plain expression branch below with no
+    special-casing: ``ast.walk`` already recurses into its ``.value``.
     """
     raw: list[str] = []
 
@@ -276,9 +272,8 @@ def strip_code_fence(raw_text: str) -> str:
     Strip a markdown code fence wrapping generated text, if present --
     defensive against a model wrapping otherwise-valid output in a code
     fence despite being told not to. Generic to any language tag (or none)
-    on the opening fence line. Shared by ``ScriptAgent``'s statement
-    parsing (``utils/script.py``) and ``DagAgent``'s value-expression
-    parsing (``utils/dag.py``).
+    on the opening fence line. Used by ``ScriptAgent``'s statement parsing
+    (``utils/script.py``).
 
     Tries a fully matched pair first (``CODE_FENCE_PATTERN``) -- unambiguous,
     so its captured inner text is used as-is. If that doesn't match (a model
@@ -298,12 +293,10 @@ def strip_code_fence(raw_text: str) -> str:
 def evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:
     """
     Evaluate one parsed expression node against a namespace, with no
-    builtins available. Shared by ``ScriptAgent`` (``utils/script.py``,
-    safe because every arg reaching this function is guaranteed Call-free
-    by its hoisting rule) and ``DagAgent`` (``utils/dag.py``, safe because
-    every value reaching this function has already passed
-    ``reject_unsupported_forms(..., forbid_calls=True)``) -- nothing
-    reachable through ``namespace`` can itself be invoked either way.
+    builtins available. Used by ``ScriptAgent`` (``utils/script.py``, safe
+    because every arg reaching this function is guaranteed Call-free by its
+    hoisting rule) -- nothing reachable through ``namespace`` can itself be
+    invoked.
 
     Raises whatever the evaluation naturally raises (``TypeError``,
     ``ZeroDivisionError``, ``NameError``, ``KeyError``, ...), uncaught --
@@ -316,37 +309,19 @@ def evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:
     return eval(code, {"__builtins__": {}}, namespace)
 
 
-def reject_unsupported_forms(node: ast.expr, *, forbid_calls: bool = False) -> None:
+def reject_unsupported_forms(node: ast.expr) -> None:
     """
     Walk ``node`` and raise on any of: a ternary (``ast.IfExp``) whose
     either branch contains a ``Call``, an ``ast.Await`` anywhere, a
     comprehension/lambda (``UNSUPPORTED_EXPR_LABELS``) anywhere, or an
     ``ast.Attribute`` whose ``.attr`` matches ``DUNDER_ATTRIBUTE_PATTERN``
-    anywhere -- the exact set ``ScriptAgent`` (``utils/script.py``) needs,
-    called there with ``forbid_calls`` omitted (default ``False``, current
-    behavior unchanged).
-
-    ``forbid_calls=True`` additionally raises on ANY ``ast.Call`` node
-    found anywhere in the walk, unconditionally -- not just inside a
-    ternary's untaken branch. This alone already rejects ``obj.method(...)``
-    (a ``Call`` whose ``.func`` happens to be an ``Attribute``); plain
-    ``Attribute``/``Subscript`` access themselves stay permitted throughout
-    (only a dunder-named ``Attribute`` is ever rejected, independent of
-    ``forbid_calls``). ``DagAgent`` (``utils/dag.py``) always passes
-    ``forbid_calls=True`` -- its value-expression grammar permits no
-    function/method calls at all, ever.
+    anywhere -- the exact set ``ScriptAgent`` (``utils/script.py``) needs.
 
     Raises before any hoisting/unparsing proceeds -- every check here is
     unconditional over the whole tree passed in, at any depth, regardless
     of whether it actually contains the form being checked for.
     """
     for candidate in ast.walk(node):
-        if forbid_calls and isinstance(candidate, ast.Call):
-            raise BlackboardParseError(
-                "function/method calls are not permitted in this "
-                f"expression: {ast.unparse(candidate)!r}."
-            )
-
         if isinstance(candidate, ast.IfExp) and (
             any(isinstance(n, ast.Call) for n in ast.walk(candidate.body))
             or any(isinstance(n, ast.Call) for n in ast.walk(candidate.orelse))

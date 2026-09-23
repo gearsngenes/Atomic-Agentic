@@ -12,7 +12,7 @@ from ..a2a.PyA2AtomicClient import PyA2AtomicClient
 
 from .base import Agent
 from .prompts import DAG_PLANNER_PROMPT
-from .tools import call_python_builtin
+from .tools import get_item, make_dict, make_sequence
 from ..core.Invokable import AtomicInvokable
 from ..llm.base import LLMEngine
 from ..tools.Toolify import toolify
@@ -21,7 +21,6 @@ from ..models.agents.records import AgentRecord, DagAgentRecord, LLMRecord
 from ..models.agents.tasks import DagAgentTask
 from ..constants.core import IDENTIFIER_PATTERN, NO_VAL
 from ..constants.agents import (
-    EXCLUDED_PY_BUILTINS,
     FINAL_ROUND_WARNING,
     RETURN_ALIAS,
     RETURN_VALUE_FIELD,
@@ -32,7 +31,6 @@ from ..utils.dag import (
     build_dag_schema,
     compile_batches,
     is_dispatched_call,
-    parse_call_expressions,
     parse_generation,
     render_cache_snapshot,
     render_completed_as_json,
@@ -74,19 +72,25 @@ class DagAgent(Agent):
     picked up front.
 
     Reactive continuation: a round ends at the first of a resolved
-    ``return``, the model's own ``more_planning_needed: true`` signal, or a
+    ``return``, the model's own non-null ``remaining_work`` signal, or a
     framework-detected resolution/execution failure -- none of these raise.
     Whichever one occurs (other than ``return``) sets
     ``task.continue_planning``, and ``think()`` re-invokes the same planner
     for a fresh continuation, seeing this round's own calls (rendered back
-    in the same ``call``/``assign_to``/``arguments`` vocabulary it writes
+    in the same ``call``/``arguments``/``result_name`` vocabulary it writes
     them in) plus a ``Cached values:`` snapshot of what they actually
-    produced, and, only for a resolution/execution failure, the real
-    failure text (the model's own ``more_planning_needed`` signal carries
-    no reason of its own to show) -- no separate judge/critic model. Also
-    told in-band when it has reached its final allowed planning round:
-    signaling ``more_planning_needed: true`` there is rejected as a
-    regen-repair issue rather than granted as a continuation.
+    produced, plus, for either a resolution/execution failure or the
+    model's own stated remaining-work reasoning, the relevant note text --
+    no separate judge/critic model. On a model-signaled continuation, the
+    round's own ``remaining_work`` text becomes ``task.continuation_note``
+    for the next round -- the model's own stated reasoning about what's
+    left survives into its own next turn, not just a framework-authored
+    failure explanation (which still applies, unchanged, for a *forced*
+    continuation -- these are two producers of the same field, never both
+    active for the same round transition). Also told in-band when it has
+    reached its final allowed planning round: signaling a non-null
+    ``remaining_work`` there is rejected as a regen-repair issue rather
+    than granted as a continuation.
     `tool_calls_limit` is an optional, fully independent budget on total
     dispatched calls across every generation round in one invoke --
     `None` (the default) means no such cap, relying on
@@ -147,11 +151,17 @@ class DagAgent(Agent):
         delegating to ``register_tools``/``register_constants`` -- no
         validation duplicated here. ``extra_parameters`` is never forwarded
         to ``super().__init__`` — matches ``ToolAgent.__init__``'s own
-        precedent. ``call_python_builtin`` (``agents/tools.py``) is
-        auto-registered into every instance's toolbox unconditionally,
-        before any construction-time ``tools`` are processed — the
-        sanctioned computation escape hatch now that this agent's value-
-        expression grammar permits no function/method calls at all.
+        precedent. ``make_sequence``, ``make_dict``, and ``get_item``
+        (``agents/tools.py``) are auto-registered into every instance's
+        toolbox unconditionally, before any construction-time ``tools`` are
+        processed — the sanctioned way to build and index into a composite
+        value (a list/tuple/set/dict is never written directly into a
+        ``value``/``return`` string). No general-purpose Python-builtin
+        escape hatch is auto-registered here — DagAgent is deliberately
+        restricted to orchestrating real, task-specific registered tools,
+        never arbitrary computation; a caller who wants
+        ``agents.tools.call_python_builtin`` available anyway can register
+        it themselves like any other tool.
         """
         super().__init__(
             name=name,
@@ -182,25 +192,36 @@ class DagAgent(Agent):
         self._constant_counter: int = 0
 
         # Auto-registered on every instance, unconditionally, before any
-        # construction-time `tools` are processed -- the sanctioned
-        # computation escape hatch now that this agent's value-expression
-        # grammar permits no function/method calls at all. Registered via
+        # construction-time `tools` are processed -- the sanctioned way to
+        # build and index into a composite value (a list/tuple/set/dict is
+        # never written directly into a value/return string). Registered via
         # the normal register_tool() path (toolify()'d, dispatched through
         # the ordinary get_tool()/tool.invoke() path like any other tool --
-        # no bypass sentinel). description is built here, not hardcoded on
-        # the function itself, so the forbidden-name list renders directly
-        # on the tool's own actions_context() block instead of costing
-        # dedicated system-prompt real estate.
-        self.register_tool(
-            call_python_builtin,
-            description=(
-                "Call an approved Python builtin by name -- the sanctioned "
-                "way to run real computation, since arguments.value/return "
-                "expressions may never contain a function or method call. "
-                "Forbidden builtin names: "
-                f"{', '.join(sorted(EXCLUDED_PY_BUILTINS))}."
-            ),
-        )
+        # no bypass sentinel), with no description override -- each
+        # function's own docstring is already complete
+        # (register_tool()'s own `description or tool.__doc__` fallback
+        # picks it up directly).
+        #
+        # Deliberately NOT auto-registered: agents.tools.call_python_builtin.
+        # It was originally the sanctioned computation escape hatch back when
+        # values were parsed Python expressions (a retired grammar); once
+        # values became plain JSON scalars plus '$name' sigils, its main
+        # remaining role was a general-purpose "call any Python builtin by
+        # name" backdoor, which live smoke-testing against weaker models
+        # (Gemma 3, a 4B local model) confirmed is a real liability, not a
+        # convenience: with no strong task-shaped reason to reach for it, it
+        # became a magnet for hallucinated misuse (invoking non-builtin
+        # names, or actual string *methods* like "str.format"/"str.join"
+        # that were never callable through it in the first place, when the
+        # task needed no computation at all -- plain '$name' interpolation
+        # already sufficed). DagAgent's own design intent is to orchestrate
+        # real, task-specific registered tools, not stand in for
+        # general-purpose scripting -- that's ScriptAgent's own niche. A
+        # caller who genuinely wants it available can still
+        # register_tool(call_python_builtin) themselves.
+        self.register_tool(make_sequence)
+        self.register_tool(make_dict)
+        self.register_tool(get_item)
 
         self._system_prompts["planner"] = DAG_PLANNER_PROMPT
 
@@ -1003,20 +1024,20 @@ class DagAgent(Agent):
 
         A continuation round: banner, then an assistant-role state message
         (this round's calls reconstructed in the model's own
-        ``call``/``assign_to``/``arguments`` vocabulary -- flat, no batch
+        ``call``/``arguments``/``result_name`` vocabulary -- flat, no batch
         grouping, see ``render_completed_as_json`` -- plus
         ``render_cache_snapshot``'s block; directive-free, reads as state
         not instruction), then a user instruction. ``task.continuation_note``
-        (framework-authored
-        only -- never a model-authored pause note, which no longer exists)
-        now carries a multi-line block: the failed batch's own rendered
-        source plus its labeled issue/failure list (see ``prepare()``/
-        ``_apply_batch_results()``). When present, it is prepended as its
-        own paragraph before the fixed instruction sentence, rather than
-        folded into one inline sentence -- it no longer fits a "previous
-        attempt failed: <reason>" framing now that it can span several
-        lines. Consulted and cleared back to ``None`` in the same read, so
-        a stale, already-addressed note can never leak into a later round.
+        has two producers -- a model's own ``remaining_work`` text from a
+        successful round, or a framework-authored failure explanation (a
+        multi-line block: the failed batch's own rendered source plus its
+        labeled issue/failure list, see ``prepare()``/
+        ``_apply_batch_results()``) -- never both for the same round
+        transition. When present, it is prepended as its own paragraph
+        before the fixed instruction sentence, rather than folded into one
+        inline sentence -- either producer's text can span several lines.
+        Consulted and cleared back to ``None`` in the same read, so a
+        stale, already-addressed note can never leak into a later round.
         The final-round warning is appended last when applicable.
         """
         if task.task_messages:
@@ -1045,6 +1066,14 @@ class DagAgent(Agent):
         }
 
         note = task.continuation_note
+        # TODO(Pass 4 smoke-test aid): same removal condition as the raw-
+        # output prints in _run_planning_retry_loop/_arun_planning_retry_loop
+        # -- prints *why* a forced continuation happened (a resolution or
+        # execution failure's real text), which those two prints alone don't
+        # surface (they only show what the model generated, not why a prior
+        # round's batch got rejected/failed).
+        if note is not None:
+            print(f"[DagAgent DEBUG] continuation_note:\n{note}")
         task.continuation_note = None
         fixed_instruction = (
             "Continue planning the rest of this task. Use the existing "
@@ -1062,46 +1091,47 @@ class DagAgent(Agent):
     # ------------------------------------------------------------------ #
     def _process_generation_output(
         self, raw_output: dict[str, Any], task: DagAgentTask,
-    ) -> tuple[list[list[DagToolCall]], bool] | str:
+    ) -> tuple[list[list[DagToolCall]], Optional[str]] | str:
         """
         Pure-computation validate callback for the planning retry loop:
-        parse, parse every value's own Python expression source, validate
-        semantics + remaining tool-call budget + the final-round defer
-        prohibition, and compile into batches. Returns the compiled result
-        on success, or a feedback string describing every problem found on
-        failure.
+        parse, validate semantics + remaining tool-call budget + the
+        final-round defer prohibition, and compile into batches. Returns
+        the compiled result on success, or a feedback string describing
+        every problem found on failure. On success (a genuinely validated
+        round, never a regen-repair retry attempt), also sets
+        ``task.continuation_note`` to the round's own ``remaining_work``
+        text -- the model's own reasoning about what's left survives into
+        its own next turn instead of being discarded.
 
         Unlike ``ScriptAgent``'s version, ``raw_output`` is already an
         ``output_structure``-validated dict -- every required key is
         schema-guaranteed present and type-correct, so there is no
-        shape-parse-failure branch here at all. ``parse_call_expressions``
-        (a second, separate, fallible pass over each value's own Python
-        source) and ``validate_calls`` are the two remaining sources of a
-        regen-repair-worthy issue -- both always run, even when the other
-        already found something, so a single round's feedback is as
-        complete as possible.
+        shape-parse-failure branch here at all. Every ``value``/``return``
+        is a plain JSON scalar (possibly a ``$name`` sigil string, resolved
+        later at prepare time) -- no separate parse pass exists for it,
+        unlike Pass 3b/3c's retired AST-expression grammar. ``validate_calls``
+        is the sole remaining source of a regen-repair-worthy issue.
         """
-        calls, more_planning_needed = parse_generation(raw_output)
-        parse_issues = parse_call_expressions(calls)
+        calls, remaining_work = parse_generation(raw_output)
 
         remaining_budget = (
             None if self._tool_calls_limit is None
             else self._tool_calls_limit - task.tool_calls_used
         )
         known_names = frozenset(task.cache) | frozenset(task.constant_values)
-        issues = parse_issues + validate_calls(
-            calls, more_planning_needed, remaining_budget, known_names
+        issues = validate_calls(
+            calls, remaining_work, remaining_budget, known_names
         )
 
         # validate_calls has no visibility into task/construction state, so
         # the final-round-can't-defer check stays here, mirroring exactly
         # where ScriptAgent's identical check lives (the agent method, not
         # the utils validator).
-        if self._is_final_round(task) and more_planning_needed:
+        if self._is_final_round(task) and remaining_work:
             issues.append(
                 "this was your final planning round -- you may not defer "
-                "further; produce a complete plan with "
-                "more_planning_needed=false."
+                "further; produce a complete plan with 'remaining_work' "
+                "left null."
             )
 
         if issues:
@@ -1117,11 +1147,12 @@ class DagAgent(Agent):
             start_batch_index=task.batch_counter,
         )
         task.batch_counter += len(pending)
-        return pending, more_planning_needed
+        task.continuation_note = remaining_work
+        return pending, remaining_work
 
     def _run_planning_retry_loop(
         self, *, task: DagAgentTask,
-    ) -> tuple[list[list[DagToolCall]], bool]:
+    ) -> tuple[list[list[DagToolCall]], Optional[str]]:
         """
         Render, call the engine (with ``output_structure``), record the
         attempt, validate/compile via ``_process_generation_output``, and
@@ -1180,7 +1211,7 @@ class DagAgent(Agent):
 
     async def _arun_planning_retry_loop(
         self, *, task: DagAgentTask,
-    ) -> tuple[list[list[DagToolCall]], bool]:
+    ) -> tuple[list[list[DagToolCall]], Optional[str]]:
         """Async mirror of ``_run_planning_retry_loop``: uses
         ``async_invoke`` for the engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
@@ -1235,8 +1266,8 @@ class DagAgent(Agent):
         ``1`` -- there's no separate zero-based special case to reason
         about.
 
-        A final round can no longer successfully defer: if it still sets
-        ``more_planning_needed: true`` anyway, ``_process_generation_output``
+        A final round can no longer successfully defer: if it still sets a
+        non-null ``remaining_work`` anyway, ``_process_generation_output``
         rejects that as a regen-repair issue instead of granting a
         continuation -- that path never starts a new round, so it needs no
         separate raise. A *forced* continuation (a resolution failure in
@@ -1253,8 +1284,8 @@ class DagAgent(Agent):
 
     def _finalize_without_continuation(self, task: DagAgentTask) -> DagAgentTask:
         """A drain with no deferral and no error -- the absence of a
-        ``return`` is NOT an invitation to keep planning, only
-        ``more_planning_needed: true`` is. Infers ``None`` if nothing was
+        ``return`` is NOT an invitation to keep planning, only a non-null
+        ``remaining_work`` is. Infers ``None`` if nothing was
         ever returned and marks the task complete. (``RETURN_ALIAS``'s own
         tail check in ``_apply_batch_results`` already sets
         ``task.generated_response`` for real when a ``return`` executes --
@@ -1300,8 +1331,8 @@ class DagAgent(Agent):
         failure (``prepare()``) or execution failure (``_apply_batch_results``)
         sets ``task.continue_planning`` directly, bypassing
         ``_process_generation_output``'s own final-round defer rejection
-        entirely (that check only ever sees a *model-signaled*
-        ``more_planning_needed: true``, never a framework-forced
+        entirely (that check only ever sees a *model-signaled* non-null
+        ``remaining_work``, never a framework-forced
         continuation) -- without this check, this
         hook would otherwise generate an unbounded number of rounds beyond
         ``planning_rounds_limit`` whenever every round happens to end in a
@@ -1327,9 +1358,9 @@ class DagAgent(Agent):
 
         task.planning_rounds_used += 1
 
-        pending, continue_planning = self._run_planning_retry_loop(task=task)
+        pending, remaining_work = self._run_planning_retry_loop(task=task)
         task.pending = pending
-        task.continue_planning = continue_planning
+        task.continue_planning = bool(remaining_work)
         task.task_messages.clear()
         return task
 
@@ -1354,9 +1385,9 @@ class DagAgent(Agent):
 
         task.planning_rounds_used += 1
 
-        pending, continue_planning = await self._arun_planning_retry_loop(task=task)
+        pending, remaining_work = await self._arun_planning_retry_loop(task=task)
         task.pending = pending
-        task.continue_planning = continue_planning
+        task.continue_planning = bool(remaining_work)
         task.task_messages.clear()
         return task
 
@@ -1407,7 +1438,7 @@ class DagAgent(Agent):
         # from ScriptAgent's own {**constant_values, **cache} order: a
         # constant now wins any collision instead of cache/history, per
         # the locked precedence decision (constants/task_result_* outrank
-        # plan-local assign_to names) -- moot in practice, since the
+        # plan-local result_name names) -- moot in practice, since the
         # reserved-prefix check makes the two keyspaces disjoint by
         # construction, but written in the correct-precedence order anyway.
         resolution_namespace = {**task.cache, **task.constant_values}
@@ -1560,7 +1591,7 @@ class DagAgent(Agent):
         task.resolved_args = []
 
         # This batch just drained the plan. If nothing asked for a
-        # continuation (no more_planning_needed) and nothing already
+        # continuation (no non-null 'remaining_work') and nothing already
         # completed it (no return above), finalize right here -- the
         # natural point `task.pending` actually reaches empty -- instead of
         # leaving it for a future `prepare()` call that `think()` would

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import builtins
-from typing import Any
+from typing import Any, Literal
 
 from ..tools import Tool
 from ..constants.agents import (
@@ -23,6 +23,9 @@ __all__ = [
     "builtin_call_tool",
     "attr_call_tool",
     "call_python_builtin",
+    "make_sequence",
+    "make_dict",
+    "get_item",
 ]
 
 
@@ -179,32 +182,96 @@ attr_call_tool = Tool(
 
 def call_python_builtin(name: str, *args: Any, **kwargs: Any) -> Any:
     """
-    DagAgent's sanctioned computation escape hatch -- its value-expression
-    grammar permits no function/method calls at all (see
-    utils.agents.reject_unsupported_forms(forbid_calls=True)), so real
-    computation happens here instead: a normal, budgeted, plan-visible
-    dispatched call, never smuggled into an expression value.
+    Call a Python builtin function by name and return its result.
 
-    Unlike ScriptAgent's builtin_call_tool/attr_call_tool, this is a plain,
-    ordinary Python function -- not a manually constructed Tool, and not
-    resolved through a bypass sentinel. DagAgent.__init__ auto-registers it
-    on every instance via the normal register_tool(...) path (toolify()'d,
-    dispatched through the ordinary get_tool()/tool.invoke() path like any
-    other registered tool).
+    "name" must be the exact name of an available Python builtin (e.g.
+    "len", "round", "sorted") -- never free-form text, and never another
+    expression to evaluate. Any remaining positional and keyword arguments
+    are passed through to that builtin exactly as given.
 
-    A plain *args/**kwargs splat is safe here -- deliberately not the
-    packed-tuple/dict signature builtin_call_tool/attr_call_tool's
-    dispatch bodies use. Those needed packing because their own fixed
-    identifying parameters (name+args+kwargs as one unit; obj/method_name)
-    sit in the same positional/keyword namespace as the real wrapped
-    call's own arguments, and a wrapped call's own keyword genuinely could
-    collide with "obj"/"method_name" in ordinary usage. This function has
-    only one fixed leading parameter (name, always the wire schema's first
-    positional argument), and no real Python builtin's own call needs a
-    keyword literally named "name" passed through it, so the same
-    collision risk doesn't apply.
+    Raises ValueError if "name" is not the name of an available builtin.
     """
+    # A plain *args/**kwargs splat is safe here -- deliberately not the
+    # packed-tuple/dict signature ScriptAgent's own builtin_call_tool/
+    # attr_call_tool dispatch bodies use. Those needed packing because their
+    # own fixed identifying parameters (name+args+kwargs as one unit;
+    # obj/method_name) sit in the same positional/keyword namespace as the
+    # real wrapped call's own arguments, and a wrapped call's own keyword
+    # genuinely could collide with "obj"/"method_name" in ordinary usage.
+    # This function has only one fixed leading parameter (name), and no
+    # real Python builtin's own call needs a keyword literally named "name"
+    # passed through it, so the same collision risk doesn't apply.
     if name in EXCLUDED_PY_BUILTINS or not hasattr(builtins, name):
         raise ValueError(f"python builtin {name!r} is not available here")
     fn = getattr(builtins, name)
     return fn(*args, **kwargs)
+
+
+def make_sequence(*items: Any, kind: Literal["list", "tuple", "set"]) -> list | tuple | set:
+    """
+    Build a list, tuple, or set from the given items.
+
+    "kind" selects the container type -- exactly "list", "tuple", or "set"
+    (case-sensitive) -- and must always be given as its own keyword
+    argument. Each remaining value becomes one element of the container,
+    in the order given, and must always be given positionally, never as a
+    keyword argument.
+
+    Raises ValueError if "kind" is not one of the three allowed values.
+    """
+    # kind is deliberately keyword-only (*items precedes it) -- live
+    # cross-provider smoke testing (OpenAI and Anthropic, independently, in
+    # different concrete ways) confirmed a (kind, *items) ordering is a real
+    # footgun, not just a theoretical one: naming kind by its own parameter
+    # name while leaving items positional collides under Python's own
+    # calling convention (the first positional value binds to kind, by
+    # left-to-right declared position, before the explicit keyword is ever
+    # applied) -- TypeError: got multiple values for argument 'kind'. Making
+    # kind keyword-only removes the ambiguity structurally: items can only
+    # ever be positional, kind can only ever be a keyword.
+    if kind == "list":
+        return list(items)
+    elif kind == "tuple":
+        return tuple(items)
+    elif kind == "set":
+        return set(items)
+    else:
+        raise ValueError(
+            f"make_sequence: kind must be 'list', 'tuple', or 'set'; got {kind!r}."
+        )
+
+
+def make_dict(**pairs: Any) -> dict:
+    """
+    Build a dict from the given keyword arguments.
+
+    Each keyword argument becomes one dict entry -- the keyword is the
+    key, its value is that key's value -- in the order given.
+    """
+    # Split into its own tool along calling-convention lines (**kwargs, not
+    # *args) rather than folding into one make_collection(kind, *items,
+    # **pairs) tool, since a single tool whose correct calling convention
+    # depends on a runtime kind value would reintroduce exactly the kind of
+    # implicit-contract ambiguity make_sequence's own kind/items ordering
+    # bug demonstrated live.
+    return dict(**pairs)
+
+
+def get_item(container: Any, key: Any) -> Any:
+    """
+    Return one element from a container -- container[key].
+
+    For a list or tuple, "key" is an integer index. For a dict, "key" is
+    one of its keys. (A set has no positional or key-based access at all,
+    so it cannot be used here.)
+
+    Raises whatever error the container itself raises for an invalid key
+    or index (e.g. IndexError, KeyError, TypeError).
+    """
+    # No defensive wrapping -- a KeyError/IndexError/TypeError this raises
+    # naturally surfaces as-is, per this codebase's "let natural exceptions
+    # surface" discipline. No get_attr sibling tool exists (kept the tool
+    # surface smaller; revisit only if live testing shows a real need) --
+    # get_item alone covers both list/tuple-by-index and dict-by-key access,
+    # the two shapes make_sequence/make_dict actually produce.
+    return container[key]
