@@ -41,7 +41,7 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping, Optional
 import pprint
 
-from .toolagent import ToolAgent
+from .json_tool_agent import JsonToolAgent
 from .prompts import ORCHESTRATOR_PROMPT
 from ..constants.agents import (
     STEP_FIELD,
@@ -66,7 +66,7 @@ from ..utils.agents import extract_dependencies
 # --------------------------------------------------------------------------- #
 # ReAct Agent
 # --------------------------------------------------------------------------- #
-class ReActAgent(ToolAgent):
+class ReActAgent(JsonToolAgent):
     """
     Iterative agent with reactive step-by-step planning (ReAct-style architecture).
 

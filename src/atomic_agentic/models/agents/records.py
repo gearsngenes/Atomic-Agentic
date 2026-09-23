@@ -26,7 +26,7 @@ from .blackboard_models import CodeStatement, DagToolCall
 __all__ = [
     "LLMRecord",
     "AgentRecord",
-    "ToolAgentRecord",
+    "JsonToolAgentRecord",
     "ScriptAgentRecord",
     "ScriptAgentToolUsage",
     "DagAgentRecord",
@@ -41,7 +41,7 @@ class LLMRecord:
     Agent invocation.
 
     An Agent invocation may involve one or more LLM generations (e.g. a
-    ToolAgent's planning loop). Each generation is preserved here so that
+    JsonToolAgent's planning loop). Each generation is preserved here so that
     future rendering, debugging, and accounting are not constrained by what
     an earlier pass chose to keep.
 
@@ -52,7 +52,7 @@ class LLMRecord:
         immediately before this LLM call — the delta that is new for this
         specific generation. The system message and rendered prior turns are
         excluded; they are already captured by the enclosing AgentRecord /
-        ToolAgentRecord.
+        JsonToolAgentRecord.
 
         For base Agent: a one-element tuple containing the current user
         prompt message. For PlanActAgent: the same — one new user message.
@@ -262,14 +262,14 @@ class AgentRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolAgentRecord(AgentRecord):
+class JsonToolAgentRecord(AgentRecord):
     """
-    Canonical memory record for one completed ToolAgent invocation.
+    Canonical memory record for one completed JsonToolAgent invocation.
 
-    In addition to the base AgentRecord lifecycle artifacts, a ToolAgentRecord
-    stores the half-open span of persisted blackboard entries produced by
-    the invocation. The ToolAgent renders that span into future LLM-facing
-    context when building messages.
+    In addition to the base AgentRecord lifecycle artifacts, a
+    JsonToolAgentRecord stores the half-open span of persisted blackboard
+    entries produced by the invocation. The JsonToolAgent renders that span
+    into future LLM-facing context when building messages.
     """
 
     blackboard_start: int | None = None
@@ -278,7 +278,7 @@ class ToolAgentRecord(AgentRecord):
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         return {
-            **super(ToolAgentRecord, self).to_dict(),
+            **super(JsonToolAgentRecord, self).to_dict(),
             "blackboard_start": self.blackboard_start,
             "blackboard_end": self.blackboard_end,
         }
@@ -341,8 +341,8 @@ class ScriptAgentToolUsage:
 class ScriptAgentRecord(AgentRecord):
     """
     Canonical memory record for one completed ScriptAgent invocation -- a
-    sibling to ToolAgentRecord, not a subclass (ScriptAgent is a new agent
-    family, not a ToolAgent subclass).
+    sibling to JsonToolAgentRecord, not a subclass (ScriptAgent is a new agent
+    family, not a JsonToolAgent subclass).
 
     Unlike the Task family, Record types in this codebase validate at
     construction (AgentRecord.__post_init__ already checks user_prompt/
@@ -352,7 +352,7 @@ class ScriptAgentRecord(AgentRecord):
 
     No more agent-level global blackboard for this family -- each record
     owns its own slots outright. There is no blackboard_start/
-    blackboard_end span to index into, unlike ToolAgentRecord (v1).
+    blackboard_end span to index into, unlike JsonToolAgentRecord (v1).
 
     Fields
     ------

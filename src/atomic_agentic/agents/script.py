@@ -66,7 +66,7 @@ def _render_docstring_block(description: str) -> str:
 class ScriptAgent(Agent):
     """
     Adaptive, one-shot-planning tool-invoking agent (sibling family to
-    ``ToolAgent``, not a subclass). Writes native-grammar, Python-style
+    ``JsonToolAgent``, not a subclass). Writes native-grammar, Python-style
     statements toward a task from a single generated plan. There is no
     separate decomposition, orchestration, or synthesis call, and no
     construction-time mode knob -- adaptivity is meant to be emergent from
@@ -146,7 +146,7 @@ class ScriptAgent(Agent):
         and register any construction-time ``tools``/``constants`` by
         delegating to ``register_tools``/``register_constants`` -- no
         validation duplicated here. ``extra_parameters`` is never forwarded
-        to ``super().__init__`` — matches ``ToolAgent.__init__``'s own
+        to ``super().__init__`` — matches ``JsonToolAgent.__init__``'s own
         precedent.
         """
         super().__init__(
@@ -829,7 +829,7 @@ class ScriptAgent(Agent):
         """
         Assemble a completed ``ScriptAgentRecord`` from a finished
         ``ScriptAgentTask``. No agent-level global blackboard to persist
-        into (unlike v1 ``ToolAgent``'s span-tracking
+        into (unlike v1 ``JsonToolAgent``'s span-tracking
         ``update_blackboard`` append) -- each record owns its own slots
         outright, so this is a direct field copy.
         """
@@ -933,7 +933,7 @@ class ScriptAgent(Agent):
 
     def _render_system_message(self, task: ScriptAgentTask) -> list[dict[str, str]]:
         """Renders the active system prompt against tool/constant context.
-        Mirrors ``ToolAgent._render_system_message``'s established shape
+        Mirrors ``JsonToolAgent._render_system_message``'s established shape
         exactly: a fresh, framework-controlled context dict, never merged
         with ``task.inputs`` (neither prompt uses an input-derived
         placeholder). No budget content is rendered here -- `tool_calls_limit`
@@ -950,10 +950,11 @@ class ScriptAgent(Agent):
     def _render_current_task_message(self, task: ScriptAgentTask) -> dict[str, str]:
         """Bare "what is the task" user message -- reused verbatim for
         round 1 and every continuation round's opening message. Mirrors
-        ``ToolAgent._render_task_banner``'s role (dedup a repeated banner
-        across every round) scoped to this family's own established
-        wording (no ``===== ... =====`` markers -- that's ToolAgent-family
-        styling, this family never used it). No "translate this into a
+        the old ``JsonToolAgent._render_task_banner``'s role (dedup a
+        repeated banner across every round) scoped to this family's own
+        established wording (no ``===== ... =====`` markers -- that's
+        JsonToolAgent-family styling, this family never used it). No
+        "translate this into a
         plan" framing -- ``ONESHOT_PLANNER_PROMPT``'s OBJECTIVE section
         already states that once; repeating it every round would be
         redundant."""

@@ -1,11 +1,11 @@
 # =============================================================================
-# ToolAgent prompts
+# JsonToolAgent prompts
 # =============================================================================
 # Used by:
 # - agents/planact.py, agents/react.py: PlanActAgent and ReActAgent default role prompts
 #
-# These prompts live beside the ToolAgent protocol constants because they define
-# the LLM-facing side of the same parser/runtime contract.
+# These prompts live beside the JsonToolAgent protocol constants because they
+# define the LLM-facing side of the same parser/runtime contract.
 
 from ..models.agents.prompts import PromptConfig
 

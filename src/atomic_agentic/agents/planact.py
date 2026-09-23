@@ -42,7 +42,7 @@ from typing import Any, Callable, Mapping, Optional
 
 import logging
 
-from .toolagent import ToolAgent
+from .json_tool_agent import JsonToolAgent
 from .prompts import PLANNER_PROMPT
 from ..constants.agents import (
     RETURN_TOOL_FULL_NAME,
@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 # PlanAct Agent
 # --------------------------------------------------------------------------- #
-class PlanActAgent(ToolAgent):
+class PlanActAgent(JsonToolAgent):
     """
     One-shot planner agent: generates entire plan upfront, executes in batches.
 

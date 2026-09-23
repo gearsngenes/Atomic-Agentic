@@ -10,7 +10,7 @@ from .llm import LLMModelData, TokenUsage
 __all__ = [
     "ToolUsageRecord",
     "AgentResult",
-    "ToolAgentResult",
+    "JsonToolAgentResult",
     "ThinkingAgentResult",
 ]
 
@@ -18,7 +18,7 @@ __all__ = [
 @dataclass(frozen=True, slots=True)
 class ToolUsageRecord:
     """
-    Aggregate usage record for one tool across one ToolAgent invocation.
+    Aggregate usage record for one tool across one JsonToolAgent invocation.
 
     Fields
     ------
@@ -26,7 +26,7 @@ class ToolUsageRecord:
         Full registered tool name (e.g. ``"Tool.math.add"``).
     call_count:
         Number of non-return executions of this tool during the invocation.
-        Always >= 1 for any entry present in a ToolAgentResult.
+        Always >= 1 for any entry present in a JsonToolAgentResult.
     """
 
     tool_name: str
@@ -117,9 +117,9 @@ class AgentResult(AtomicResult):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolAgentResult(AgentResult):
+class JsonToolAgentResult(AgentResult):
     """
-    Successful ToolAgent invocation result.
+    Successful JsonToolAgent invocation result.
 
     Extends ``AgentResult`` with per-tool call-count accounting and optional
     partial-failure records when the agent ran with ``fail_fast=False``.
@@ -153,7 +153,7 @@ class ToolAgentResult(AgentResult):
         """Validate and normalize the invocation's tool usage records."""
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             raise TypeError(
-                "ToolAgentResult.tool_usage must be a sequence of ToolUsageRecord "
+                "JsonToolAgentResult.tool_usage must be a sequence of ToolUsageRecord "
                 f"instances, got {type(value).__name__}."
             )
 
@@ -162,7 +162,7 @@ class ToolAgentResult(AgentResult):
         for index, record in enumerate(normalized):
             if not isinstance(record, ToolUsageRecord):
                 raise TypeError(
-                    "ToolAgentResult.tool_usage must contain only ToolUsageRecord "
+                    "JsonToolAgentResult.tool_usage must contain only ToolUsageRecord "
                     f"instances; item {index} is {type(record).__name__}."
                 )
 
@@ -175,7 +175,7 @@ class ToolAgentResult(AgentResult):
         """Validate and normalize the invocation's per-slot failure records."""
         if not isinstance(value, (tuple, list)):
             raise TypeError(
-                "ToolAgentResult.exception_records must be a sequence of "
+                "JsonToolAgentResult.exception_records must be a sequence of "
                 f"(int, Exception) tuples, got {type(value).__name__}."
             )
         normalized = tuple(value)
@@ -187,7 +187,7 @@ class ToolAgentResult(AgentResult):
                 or not isinstance(item[1], Exception)
             ):
                 raise TypeError(
-                    "ToolAgentResult.exception_records items must be "
+                    "JsonToolAgentResult.exception_records items must be "
                     f"(int, Exception) tuples; item {i} is invalid."
                 )
         return normalized

@@ -42,7 +42,7 @@ class BlackboardParseError(RuntimeError):
     domain error types superseding a bare RuntimeError (see LLMEngineError,
     MCPError) -- callers doing `except RuntimeError` upstream still catch
     these. Deliberately not rooted in ToolAgentError: ScriptAgent is a new
-    sibling family, not a ToolAgent subclass, so sharing ToolAgentError's
+    sibling family, not a JsonToolAgent subclass, so sharing ToolAgentError's
     lineage here would imply a relationship that doesn't exist (a
     sibling-not-subclass relationship, not an inheritance one).
 

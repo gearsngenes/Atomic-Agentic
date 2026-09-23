@@ -1,6 +1,6 @@
 from .base import Agent
 from .basic import BasicAgent
-from .toolagent import ToolAgent
+from .json_tool_agent import JsonToolAgent
 from .planact import PlanActAgent
 from .react import ReActAgent
 from .thinking import ThinkingAgent
@@ -9,7 +9,7 @@ from .dag import DagAgent
 
 __all__ = ["Agent",
            "BasicAgent",
-           "ToolAgent",
+           "JsonToolAgent",
            "ReActAgent",
            "PlanActAgent",
            "ThinkingAgent",

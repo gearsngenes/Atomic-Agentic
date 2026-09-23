@@ -89,12 +89,17 @@ def extract_json_object(raw_text: str, *, source_label: str) -> Any:
     """
     Extract the largest decodable JSON array/object from a possibly noisy string.
 
-    Promoted from ``ToolAgent._extract_from_json_string`` — shared by any
-    caller that needs to pull structured output out of free-form LLM text,
-    not just ``ToolAgent`` and its subclasses. Behavior is unchanged from
-    the original method except that the non-string-input case now raises a
-    plain ``TypeError`` (an internal-contract violation, not a
-    ``ToolAgent``-specific concern) instead of ``ToolAgentError``.
+    Originally promoted from the old ``ToolAgent._extract_from_json_string``
+    — shared by any caller that needs to pull structured output out of
+    free-form LLM text. That original method has since been removed
+    entirely (see `json-tool-agent-rename`'s lifecycle-slimming addendum —
+    ``output_structure`` strict mode makes free-text JSON extraction
+    unnecessary for the current ``JsonToolAgent`` family), but this
+    promoted utility remains available to any other caller that still
+    needs it. Behavior is unchanged from the original method except that
+    the non-string-input case raises a plain ``TypeError`` (an
+    internal-contract violation, not caller-specific) instead of
+    ``ToolAgentError``.
 
     This helper is intentionally shape-neutral:
     - It does not require the decoded value to be a list.

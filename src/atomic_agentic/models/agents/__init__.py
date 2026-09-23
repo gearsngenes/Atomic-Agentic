@@ -2,7 +2,7 @@ from .prompts import PromptConfig
 from .records import (
     AgentRecord,
     LLMRecord,
-    ToolAgentRecord,
+    JsonToolAgentRecord,
     ScriptAgentRecord,
     ScriptAgentToolUsage,
     DagAgentRecord,
@@ -11,7 +11,7 @@ from .records import (
 from .blackboard_models import BlackboardSlot, CodeStatement, ConstantSpec, DagToolCall
 from .tasks import (
     AgentTask,
-    ToolAgentTask,
+    JsonToolAgentTask,
     ScriptAgentTask,
     DagAgentTask,
     PlanActTask,
@@ -24,7 +24,7 @@ __all__ = [
     "PromptConfig",
     "AgentRecord",
     "LLMRecord",
-    "ToolAgentRecord",
+    "JsonToolAgentRecord",
     "ScriptAgentRecord",
     "ScriptAgentToolUsage",
     "DagAgentRecord",
@@ -34,7 +34,7 @@ __all__ = [
     "ConstantSpec",
     "DagToolCall",
     "AgentTask",
-    "ToolAgentTask",
+    "JsonToolAgentTask",
     "ScriptAgentTask",
     "DagAgentTask",
     "PlanActTask",

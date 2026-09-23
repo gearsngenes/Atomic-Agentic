@@ -348,7 +348,7 @@ class ParallelFlow(Workflow):
         """Synchronously execute all configured branches concurrently.
 
         Sync is the async path bridged, not a second implementation --
-        matches ToolAgent.act()'s own run_coro_sync(async gather) pattern.
+        matches DagAgent.act()'s own run_coro_sync(async gather) pattern.
         Branches without a native async_invoke override already run their
         real .invoke() inside a background thread by default
         (AtomicInvokable.async_invoke), so a separate thread-pool mechanism

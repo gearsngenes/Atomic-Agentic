@@ -148,7 +148,7 @@ class ThinkingAgent(BasicAgent):
             When set, ``_initialize_task`` raises ``AgentInvocationError``
             if a caller-supplied ``thinking_rounds`` exceeds it. Exists to
             bound cost/latency when this agent is registered as a tool
-            under an orchestrating ``ToolAgent``, whose planner LLM would
+            under an orchestrating ``JsonToolAgent``, whose planner LLM would
             otherwise be free to request any round count -- see
             ``_extra_description``, which is how that planner actually
             learns the cap. Mutable after construction via the
@@ -471,8 +471,8 @@ class ThinkingAgent(BasicAgent):
         return task.task_messages
 
     def _render_task_banner_text(self, task: ThinkingTask) -> str:
-        """``===== CURRENT TASK =====`` banner text, matching the
-        ``ToolAgent``/``_render_task_banner`` convention (``BasicAgent``
+        """``===== CURRENT TASK =====`` banner text, matching the old
+        ``JsonToolAgent``/``_render_task_banner`` convention (``BasicAgent``
         itself has no banner helper to inherit -- its single-message reply
         never needed one)."""
         return f"===== CURRENT TASK =====\n{task.user_prompt}\n===== END TASK ====="
@@ -550,7 +550,7 @@ class ThinkingAgent(BasicAgent):
         """Report this instance's ``thinking_rounds_limit`` to an
         orchestrating caller, only when one is set -- empty otherwise
         (nothing new to say beyond what the base description already
-        implies). This is what an orchestrating ``ToolAgent``'s planner
+        implies). This is what an orchestrating ``JsonToolAgent``'s planner
         LLM actually reads (via the composed ``description`` property)
         when deciding what value to pass as ``thinking_rounds`` --
         distinct from ``THINKING_ROUNDS_PARAM.description``

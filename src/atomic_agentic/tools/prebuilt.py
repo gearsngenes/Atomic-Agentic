@@ -3,8 +3,8 @@
 Prebuilt Tool Collections
 =========================
 
-This module exposes *prebuilt lists of Tools* that you can register on a ToolAgent
-(e.g., PlanActAgent / ReActAgent) via `batch_register(...)`.
+This module exposes *prebuilt lists of Tools* that you can register on a JsonToolAgent
+(e.g., PlanActAgent / ReActAgent) via `register_tools(...)`.
 
 Example
 -------

@@ -62,7 +62,7 @@ def _render_docstring_block(description: str) -> str:
 class DagAgent(Agent):
     """
     Adaptive, round-based structured-output tool-invoking agent (sibling
-    family to ``ToolAgent``, not a subclass -- mirrors ``ScriptAgent``'s own
+    family to ``JsonToolAgent``, not a subclass -- mirrors ``ScriptAgent``'s own
     precedent). Each round writes one batch-shaped plan of registered-tool
     calls via ``LLMEngine.output_structure`` in strict mode -- a real
     provider-native JSON schema (``constants.agents.DAG_OUTPUT_SCHEMA``),
@@ -150,7 +150,7 @@ class DagAgent(Agent):
         and register any construction-time ``tools``/``constants`` by
         delegating to ``register_tools``/``register_constants`` -- no
         validation duplicated here. ``extra_parameters`` is never forwarded
-        to ``super().__init__`` — matches ``ToolAgent.__init__``'s own
+        to ``super().__init__`` — matches ``JsonToolAgent.__init__``'s own
         precedent. ``make_sequence``, ``make_dict``, and ``get_item``
         (``agents/tools.py``) are auto-registered into every instance's
         toolbox unconditionally, before any construction-time ``tools`` are
@@ -869,8 +869,10 @@ class DagAgent(Agent):
         """
         Assemble a completed ``DagAgentRecord`` from a finished
         ``DagAgentTask``. No agent-level global blackboard to persist
-        into (unlike v1 ``ToolAgent``'s span-tracking
-        ``update_blackboard`` append) -- each record owns its own calls
+        into (unlike v1 ``JsonToolAgent``'s span-tracking
+        ``update_blackboard`` append -- since removed entirely, see
+        `json-tool-agent-rename`'s lifecycle-slimming addendum) -- each
+        record owns its own calls
         outright, so this is a direct field copy.
         """
         prev = turns[-1] if turns else None
@@ -973,7 +975,7 @@ class DagAgent(Agent):
 
     def _render_system_message(self, task: DagAgentTask) -> list[dict[str, str]]:
         """Renders the active system prompt against tool/constant context.
-        Mirrors ``ToolAgent._render_system_message``'s established shape
+        Mirrors ``JsonToolAgent._render_system_message``'s established shape
         exactly: a fresh, framework-controlled context dict, never merged
         with ``task.inputs`` (neither prompt uses an input-derived
         placeholder). No budget content is rendered here -- `tool_calls_limit`
@@ -989,10 +991,13 @@ class DagAgent(Agent):
     def _render_current_task_message(self, task: DagAgentTask) -> dict[str, str]:
         """Bare "what is the task" user message -- reused verbatim for
         round 1 and every continuation round's opening message. Mirrors
-        ``ToolAgent._render_task_banner``'s role (dedup a repeated banner
-        across every round) scoped to this family's own established
-        wording (no ``===== ... =====`` markers -- that's ToolAgent-family
-        styling, this family never used it). No "translate this into a
+        the old ``JsonToolAgent._render_task_banner``'s role (dedup a
+        repeated banner across every round -- that helper is since removed
+        from the shared base, see `json-tool-agent-rename`'s
+        lifecycle-slimming addendum; each JsonToolAgent subclass now owns
+        its own) scoped to this family's own established wording (no
+        ``===== ... =====`` markers -- that's JsonToolAgent-family styling,
+        this family never used it). No "translate this into a
         plan" framing -- ``DAG_PLANNER_PROMPT``'s OBJECTIVE section
         already states that once; repeating it every round would be
         redundant."""

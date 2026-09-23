@@ -9,7 +9,7 @@ from .records import AgentRecord, LLMRecord
 
 __all__ = [
     "AgentTask",
-    "ToolAgentTask",
+    "JsonToolAgentTask",
     "ScriptAgentTask",
     "DagAgentTask",
     "PlanActTask",
@@ -64,9 +64,9 @@ class AgentTask:
 
     generated_response : Any
         The record's produced-response equivalent — raw LLM text for
-        ``BasicAgent``, the executed return-tool value for ``ToolAgent`` and
-        its subclasses. ``NO_VAL`` until ``act`` sets it on the round that
-        completes the task.
+        ``BasicAgent``, the executed return-tool value for ``JsonToolAgent``
+        and its subclasses. ``NO_VAL`` until ``act`` sets it on the round
+        that completes the task.
 
     historic_messages : list[dict[str, str]]
         Rendered ``turns``, built lazily once per invoke by
@@ -95,9 +95,9 @@ class AgentTask:
 
 
 @dataclass(slots=True)
-class ToolAgentTask(AgentTask):
+class JsonToolAgentTask(AgentTask):
     """
-    ToolAgent-flavored task.
+    JsonToolAgent-flavored task.
 
     Fields
     ------
@@ -113,7 +113,7 @@ class ToolAgentTask(AgentTask):
     **Cached Placeholder** (``<<__cN__>>``)
         Resolvable iff ``0 <= N < len(self._blackboard)`` AND
         ``self._blackboard[N].is_executed() == True`` — resolved directly
-        against the owning ``ToolAgent``'s live, always-persisted
+        against the owning ``JsonToolAgent``'s live, always-persisted
         blackboard, not a task-local snapshot.
 
     **Step Placeholder** (``<<__sN__>>``)
@@ -173,8 +173,8 @@ class ToolAgentTask(AgentTask):
 @dataclass(slots=True)
 class ScriptAgentTask(AgentTask):
     """
-    ScriptAgent-flavored task -- a sibling to ToolAgentTask, not a subclass
-    (ScriptAgent is a new agent family, not a ToolAgent subclass, per this
+    ScriptAgent-flavored task -- a sibling to JsonToolAgentTask, not a subclass
+    (ScriptAgent is a new agent family, not a JsonToolAgent subclass, per this
     branch's established convention).
 
     No __post_init__ -- matches AgentTask's own family-wide convention of
@@ -318,7 +318,7 @@ class DagAgentTask(AgentTask):
     """
     DagAgent-flavored task -- a sibling to ScriptAgentTask, not a subclass
     (DagAgent is a new agent family, not a ScriptAgent subclass, matching
-    ScriptAgentTask's own precedent relative to ToolAgentTask).
+    ScriptAgentTask's own precedent relative to JsonToolAgentTask).
 
     Field-for-field structural copy of ScriptAgentTask, CodeStatement
     swapped for DagToolCall everywhere it appears -- no new fields. (An
@@ -383,7 +383,7 @@ class DagAgentTask(AgentTask):
 
 
 @dataclass(slots=True)
-class PlanActTask(ToolAgentTask):
+class PlanActTask(JsonToolAgentTask):
     """
     PlanActAgent-flavored task.
 
@@ -460,7 +460,7 @@ class ReActStepMeta:
 
 
 @dataclass(slots=True)
-class ReActTask(ToolAgentTask):
+class ReActTask(JsonToolAgentTask):
     """
     ReActAgent-flavored task. Tracks cursor and per-slot metadata for
     step-by-step reactive planning.
@@ -493,7 +493,7 @@ class ReActTask(ToolAgentTask):
         to pass the decision through directly the way a single fused
         method could.
 
-    ``retries_used`` is declared on ``ToolAgentTask`` (see that class) — its
+    ``retries_used`` is declared on ``JsonToolAgentTask`` (see that class) — its
     behavior originates here: incremented by ``_generate_next_step`` on each
     failed attempt; checked against ``self._generation_retries`` before
     permitting a retry.
@@ -559,7 +559,7 @@ class ThinkingTask(AgentTask):
         only because Python dataclass field ordering requires every field
         following ``AgentTask``'s own defaulted fields to carry one too —
         the real value is always passed explicitly at construction
-        (mirrors ``ToolAgentTask.tool_calls_used: int = 0``'s identical
+        (mirrors ``JsonToolAgentTask.tool_calls_used: int = 0``'s identical
         precedent). ``think()``/``async_think()`` read this field directly
         instead of any agent-level attribute — there is no construction-time
         equivalent left; the round budget is purely per-invocation now.

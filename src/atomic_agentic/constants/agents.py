@@ -56,14 +56,14 @@ THINKING_ROUNDS_PARAM: ParamSpec = ParamSpec(
 )
 
 # =============================================================================
-# ToolAgent LLM-output JSON fields
+# JsonToolAgent LLM-output JSON fields
 # =============================================================================
 # Used by:
 # - agents/planact.py, agents/react.py: generated step validation and BlackboardSlot creation
 # - models/agents/blackboard_models.py: BlackboardSlot.from_dict support
 #
-# These fields are centralized because ToolAgent prompt contracts and parser/
-# validator code need to agree on the same LLM-output protocol.
+# These fields are centralized because JsonToolAgent prompt contracts and
+# parser/validator code need to agree on the same LLM-output protocol.
 #
 # Important runtime contract:
 # - "tool" and "args" are the minimum required fields for executable tool calls.
@@ -123,15 +123,15 @@ REQUIRED_REACT_FIELDS = REQUIRED_BASE_STEP_FIELDS | frozenset(
 
 
 # =============================================================================
-# ToolAgent canonical return-tool identity
+# JsonToolAgent canonical return-tool identity
 # =============================================================================
 # Used by:
-# - agents/toolagent.py: construction and registration of the executable return_tool
-# - ToolAgent prompt finalization instructions requiring Tool.ToolAgents.return
+# - agents/json_tool_agent.py: construction and registration of the executable return_tool
+# - JsonToolAgent prompt finalization instructions requiring Tool.ToolAgents.return
 # - tests around planner/ReAct final return behavior
 #
 # Do not put the executable Tool instance here; only the identity literals that
-# must stay synchronized with ToolAgent prompt text.
+# must stay synchronized with JsonToolAgent prompt text.
 
 
 RETURN_TOOL_NAME = "return"

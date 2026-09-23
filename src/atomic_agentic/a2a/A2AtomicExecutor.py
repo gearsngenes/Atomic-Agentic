@@ -31,7 +31,7 @@ class A2AtomicExecutor(AgentExecutor):
     SKILL_ROUTING_KEY entry fails the task the same way an unknown skill id
     does. There is no natural-language/generic fallback here -- reachability
     for a foreign, non-AA-aware caller is a registration-time choice (wrap
-    the capability in an Agent/ToolAgent instead of a bare Tool), not new
+    the capability in an Agent/JsonToolAgent instead of a bare Tool), not new
     executor logic.
     """
 
