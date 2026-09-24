@@ -121,31 +121,39 @@ class JsonToolAgentResult(AgentResult):
     """
     Successful JsonToolAgent invocation result.
 
-    Extends ``AgentResult`` with per-tool call-count accounting and optional
-    partial-failure records when the agent ran with ``fail_fast=False``.
+    Extends ``AgentResult`` with per-tool call-count accounting and a
+    lightweight failure summary when the agent ran with ``fail_fast=False``.
 
     Fields
     ------
     tool_usage:
         Ordered tuple of per-tool usage records, ordered by first-call order
         within the invocation. May be empty if no non-return tools executed.
+        Re-derived (by the caller, e.g. ``PlanActAgent.build_result_from_record``)
+        from ``record.statements`` rather than a blackboard span -- same
+        field, new derivation source.
 
-    exception_records:
-        Tuple of ``(global_blackboard_index, exception)`` pairs for every
-        tool slot that failed during the run. Empty when ``fail_fast=True``
-        (failures raise immediately) or when all tools succeeded.
-        The index is the absolute position of the failed slot in the agent's
-        persistent blackboard after ``update_blackboard`` has run.
+    failed_call_count:
+        Count of calls whose dispatch actually raised this run. Replaces
+        the former ``exception_records: tuple[tuple[int, Exception], ...]``
+        -- the rich per-failure detail (identifier, tool, args, the actual
+        exception) already lives on ``record.failed_statements``, richer
+        than the old index+exception tuple ever was; this field is a cheap
+        "did anything fail, how much" summary only. ``0`` when
+        ``fail_fast=True`` (failures raise immediately) or when nothing
+        failed.
+
+    regenerations_used:
+        Threaded from ``record.regenerations_used`` verbatim.
     """
 
     tool_usage: tuple[ToolUsageRecord, ...]
-    exception_records: tuple[tuple[int, Exception], ...] = ()
+    failed_call_count: int = 0
+    regenerations_used: int = 0
 
     def __post_init__(self) -> None:
         normalized_tool_usage = self._normalize_tool_usage(self.tool_usage)
         object.__setattr__(self, "tool_usage", normalized_tool_usage)
-        normalized_exc = self._normalize_exception_records(self.exception_records)
-        object.__setattr__(self, "exception_records", normalized_exc)
         AgentResult.__post_init__(self)
 
     @staticmethod
@@ -168,38 +176,12 @@ class JsonToolAgentResult(AgentResult):
 
         return normalized
 
-    @staticmethod
-    def _normalize_exception_records(
-        value: Any,
-    ) -> tuple[tuple[int, Exception], ...]:
-        """Validate and normalize the invocation's per-slot failure records."""
-        if not isinstance(value, (tuple, list)):
-            raise TypeError(
-                "JsonToolAgentResult.exception_records must be a sequence of "
-                f"(int, Exception) tuples, got {type(value).__name__}."
-            )
-        normalized = tuple(value)
-        for i, item in enumerate(normalized):
-            if (
-                not isinstance(item, tuple)
-                or len(item) != 2
-                or not isinstance(item[0], int)
-                or not isinstance(item[1], Exception)
-            ):
-                raise TypeError(
-                    "JsonToolAgentResult.exception_records items must be "
-                    f"(int, Exception) tuples; item {i} is invalid."
-                )
-        return normalized
-
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
         data = AgentResult.to_dict(self)
         data["tool_usage"] = [r.to_dict() for r in self.tool_usage]
-        data["exception_records"] = [
-            {"blackboard_index": idx, "error": str(e)}
-            for idx, e in self.exception_records
-        ]
+        data["failed_call_count"] = self.failed_call_count
+        data["regenerations_used"] = self.regenerations_used
         return data
 
 

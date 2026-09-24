@@ -378,9 +378,84 @@ DAG_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
-# Matches a `$`-sigil reference inside a DagAgent-generated `value`/`return`
-# string: `$` followed by an identifier-legal name, captured as group 1.
-# Used two ways by utils/dag.py -- `DAG_REF_PATTERN.fullmatch(s)` (is the
+# PlanActAgent's own output_structure schema (agent-taxonomy `planact-
+# rewrite` design record) -- DAG_OUTPUT_SCHEMA's shape minus
+# `remaining_work` entirely: a one-shot planner has no continuation round
+# to defer to, so there is no field for it. `return` keeps DAG_OUTPUT_
+# SCHEMA's own full value union, `null` included -- presence and
+# nullability are separate concerns: `return` is unconditionally in
+# `required` (always present, exactly like DAG_OUTPUT_SCHEMA's own
+# `return`), but its *value* may still legitimately be `null` when the
+# task has nothing meaningful to hand back. Never a "come back later"
+# signal here, unlike `remaining_work`'s absence might suggest -- there is
+# no later.
+PLANACT_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "plan", "return"],
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": "Briefly describe the work this plan accomplishes.",
+        },
+        "plan": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["call", "arguments", "result_name"],
+                "properties": {
+                    "call": {"type": "string", "enum": []},
+                    "arguments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["name", "value"],
+                            "properties": {
+                                "name": {"type": ["string", "null"]},
+                                "value": {
+                                    "type": ["number", "boolean", "null", "string"],
+                                    "description": (
+                                        "A literal value (any JSON scalar), or a "
+                                        "string. A string that is *exactly* '$name' "
+                                        "(nothing else) refers to an earlier "
+                                        "result_name or a K_/task_result_ value, "
+                                        "substituted with its real value and type. "
+                                        "A '$name' appearing inside a longer string "
+                                        "is spliced in as text (stringified) at that "
+                                        "position. A '$name' that doesn't match "
+                                        "anything is left as literal text, sigil "
+                                        "included -- not an error. To build a "
+                                        "list/tuple/set or dict, call "
+                                        "make_sequence/make_dict instead of writing "
+                                        "a container here."
+                                    ),
+                                },
+                            },
+                        },
+                    },
+                    "result_name": {"type": ["string", "null"]},
+                },
+            },
+        },
+        "return": {
+            "type": ["number", "boolean", "null", "string"],
+            "description": (
+                "Follows the same rules as an argument's value (a literal, "
+                "or a '$name' reference/interpolation). Always required in "
+                "the response -- there is no continuation round to defer "
+                "to, so decide it now. 'null' is a legitimate answer when "
+                "the task genuinely has nothing to hand back; it does not "
+                "mean 'come back later'."
+            ),
+        },
+    },
+}
+
+# Matches a `$`-sigil reference inside a DagAgent- or PlanActAgent-generated
+# `value`/`return` string: `$` followed by an identifier-legal name,
+# captured as group 1. Used two ways by utils/dag.py -- `DAG_REF_PATTERN.fullmatch(s)` (is the
 # WHOLE string one reference?) and `DAG_REF_PATTERN.finditer(s)`/`.sub(s)`
 # (find/splice every embedded occurrence) -- one pattern serves both, no
 # anchors baked into the text itself (fullmatch anchors on its own, exactly
@@ -435,4 +510,6 @@ __all__ = [
     # DagAgent output_structure schema
     "DAG_OUTPUT_SCHEMA",
     "DAG_REF_PATTERN",
+    # PlanActAgent output_structure schema
+    "PLANACT_OUTPUT_SCHEMA",
 ]

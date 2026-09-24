@@ -29,7 +29,7 @@ __all__ = [
 ]
 
 
-def identity_pre(*, prompt: str) -> str:
+def identity_pre(prompt: str) -> str:
     """
     Default pre-invoke identity function.
 
@@ -49,7 +49,7 @@ identity_pre_tool = Tool(
 )
 
 
-def identity_post(*, result: Any) -> Any:
+def identity_post(result: Any) -> Any:
     """
     Default post-invoke identity function.
 

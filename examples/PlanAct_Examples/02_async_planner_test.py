@@ -12,8 +12,8 @@ llm_engine = OpenAIEngine(model="gpt-4o-mini")
 
 
 def testDelayPrint() -> None:
-    print("Called Print, now waiting 10 seconds...")
-    time.sleep(10)
+    print("Called Print, now waiting 3 seconds...")
+    time.sleep(3)
 
 
 async_tester = PlanActAgent(
@@ -24,19 +24,17 @@ async_tester = PlanActAgent(
     context_enabled=False,
 )
 
-# Register the callable (capture the fully-qualified tool id)
-async_tester.register(
+# Register the callable under an explicit alias.
+async_tester.register_tool(
     testDelayPrint,
-    name="DelayPrint",
-    description="delay for 10 seconds.",
+    alias="DelayPrint",
+    description="delay for 3 seconds.",
 )
 
 if __name__ == "__main__":
     choice = input("Run steps sequentially? (y/n): ").strip().lower()
-    sequentially = choice == "y"
-    prompt = (
-        f"Call 'DelayPrint' EXACTLY FIVE TIMES, but call them {"SEQUENTIALLY" if sequentially else "CONCURRENTLY"}.\n"
-    )
+    async_tester.tool_concurrency_limit = 1 if choice == "y" else None
+    prompt = "Call 'DelayPrint' exactly five times"
 
     start = time.time()
     async_tester.invoke({"prompt": prompt})

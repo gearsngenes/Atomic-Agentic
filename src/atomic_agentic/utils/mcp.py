@@ -234,7 +234,7 @@ def _build_mcp_tool_metadata(raw_tool: mcp_types.Tool) -> Dict[str, Any]:
                 ParamSpec(
                     name=name,
                     index=index,
-                    kind="KEYWORD_ONLY",
+                    kind=ParamSpec.POSITIONAL_OR_KEYWORD,
                     type=_json_schema_type_to_tuple(meta_schema),
                     default=default,
                     description=description,

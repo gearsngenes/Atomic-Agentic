@@ -8,6 +8,7 @@ from typing import Any, Iterable, Optional
 from ..constants.agents import (
     DAG_OUTPUT_SCHEMA,
     DAG_REF_PATTERN,
+    PLANACT_OUTPUT_SCHEMA,
     RETURN_ALIAS,
     RETURN_VALUE_FIELD,
     TASK_RESULT_PREFIX,
@@ -17,8 +18,10 @@ from ..models.agents.blackboard_models import DagToolCall
 
 __all__ = [
     "build_dag_schema",
+    "build_planact_schema",
     "parse_generation",
     "find_sigil_refs",
+    "find_cascade_failures",
     "resolve_sigil_value",
     "is_dispatched_call",
     "validate_calls",
@@ -43,6 +46,17 @@ def build_dag_schema(tool_names: Iterable[str]) -> dict[str, Any]:
     return schema
 
 
+def build_planact_schema(tool_names: Iterable[str]) -> dict[str, Any]:
+    """
+    Sibling to ``build_dag_schema`` -- identical pattern, built off
+    ``PLANACT_OUTPUT_SCHEMA`` instead: a fresh, per-call copy with
+    ``call``'s ``enum`` populated from the currently-registered toolset.
+    """
+    schema = deepcopy(PLANACT_OUTPUT_SCHEMA)
+    schema["properties"]["plan"]["items"]["properties"]["call"]["enum"] = sorted(tool_names)
+    return schema
+
+
 def parse_generation(payload: dict[str, Any]) -> tuple[list[DagToolCall], Optional[str]]:
     """
     Normalize ``output_structure``'s already-schema-validated payload into a
@@ -59,15 +73,33 @@ def parse_generation(payload: dict[str, Any]) -> tuple[list[DagToolCall], Option
 
     1. One ``DagToolCall`` is built per ``plan`` entry. The top-level
        ``summary`` field is never read -- decoding-order scaffold only.
-    2. ``remaining_work`` is read off the wire schema's ``remaining_work``
-       field and normalized once, here, to the single canonical shape every
+    2. ``remaining_work`` is read via ``payload.get("remaining_work")`` --
+       not a bare subscript -- since it's a genuinely optional key: absent
+       entirely from ``PLANACT_OUTPUT_SCHEMA`` (no continuation round
+       exists for a one-shot planner), always present in
+       ``DAG_OUTPUT_SCHEMA``. ``.get`` returns the identical value a bare
+       subscript would for ``DagAgent``'s own payload, and ``None`` for a
+       payload that never had the key at all -- behavior-preserving either
+       way. Normalized once, here, to the single canonical shape every
        downstream caller consumes: ``None`` stays ``None``; a string is
        stripped, and an all-whitespace/empty result also collapses to
        ``None``; a non-empty stripped string passes through as-is.
-    3. If the top-level ``return`` is not JSON ``null``, a trailing
-       ``RETURN_ALIAS`` call is synthesized and appended, carrying that
-       value under ``RETURN_VALUE_FIELD``. ``null`` means nothing is
-       returned this round; nothing is synthesized.
+    3. A trailing ``RETURN_ALIAS`` call is synthesized and appended,
+       carrying ``payload["return"]`` under ``RETURN_VALUE_FIELD``, unless
+       the round is actively deferring (``return`` is JSON ``null`` *and*
+       ``remaining_work`` is truthy -- the only combination
+       ``validate_calls`` still permits when nothing should be dispatched
+       as a return signal this round). A ``null`` return is not itself a
+       reason to skip synthesis: it's a legitimate finished value (the task
+       genuinely has nothing to hand back) whenever it isn't paired with a
+       real ``remaining_work`` note. For ``PLANACT_OUTPUT_SCHEMA`` payloads,
+       ``remaining_work`` is always ``None`` (no such field exists), so a
+       ``RETURN_ALIAS`` call is synthesized unconditionally -- correct,
+       since a one-shot planner has no deferral to skip it for.
+       ``payload["return"]`` stays a bare subscript, deliberately -- both
+       schemas require this key, so a missing/malformed value here is a
+       real schema-contract violation that should surface as a natural
+       ``KeyError``, not be defensively guarded against.
     """
     calls: list[DagToolCall] = []
     for entry in payload["plan"]:
@@ -87,7 +119,7 @@ def parse_generation(payload: dict[str, Any]) -> tuple[list[DagToolCall], Option
             )
         )
 
-    raw_remaining_work = payload["remaining_work"]
+    raw_remaining_work = payload.get("remaining_work")
     remaining_work: Optional[str] = (
         raw_remaining_work.strip() or None
         if isinstance(raw_remaining_work, str)
@@ -95,7 +127,7 @@ def parse_generation(payload: dict[str, Any]) -> tuple[list[DagToolCall], Option
     )
 
     raw_return = payload["return"]
-    if raw_return is not None:
+    if raw_return is not None or not remaining_work:
         calls.append(
             DagToolCall(
                 identifier=None,
@@ -123,6 +155,51 @@ def find_sigil_refs(value: Any) -> frozenset[str]:
     if not isinstance(value, str):
         return frozenset()
     return frozenset(m.group(1) for m in DAG_REF_PATTERN.finditer(value))
+
+
+def find_cascade_failures(
+    failed_identifiers: set[str],
+    pending: list[list[DagToolCall]],
+) -> set[str]:
+    """
+    Given the identifiers of calls that just failed, return the full
+    "poisoned" name set: ``failed_identifiers`` plus the ``result_name`` of
+    every call in ``pending`` that transitively references one of those
+    names (directly, or through a chain of intermediate poisoned calls).
+
+    Used by callers with no continuation round to fall back to (a one-shot
+    planner): unlike ``DagAgent``'s own failure handling, which simply
+    abandons everything and requests a fresh round, this lets independent
+    branches of the same plan keep running while only the calls that
+    actually depend on the failure are skipped.
+
+    The returned set is the caller's filter key, not a list of calls to
+    remove directly: to find every call that must be skipped (named or
+    not), the caller re-scans ``pending`` for any call whose ``args``/
+    ``kwargs`` reference a name in the returned set via
+    ``find_sigil_refs`` -- an unnamed call can be poisoned this way without
+    ever itself being added to the set (nothing can ``$``-reference an
+    unnamed result later, so it never needs to propagate further, only to
+    be skipped once). Never raises.
+    """
+    poisoned: set[str] = set(failed_identifiers)
+    changed = True
+    while changed:
+        changed = False
+        for batch in pending:
+            for call in batch:
+                if call.identifier is None or call.identifier in poisoned:
+                    continue
+                refs: set[str] = set()
+                for value in call.args:
+                    refs |= find_sigil_refs(value)
+                for value in call.kwargs.values():
+                    refs |= find_sigil_refs(value)
+                if refs & poisoned:
+                    poisoned.add(call.identifier)
+                    changed = True
+
+    return poisoned
 
 
 def is_dispatched_call(call: DagToolCall) -> bool:

@@ -97,39 +97,17 @@ class AgentTask:
 @dataclass(slots=True)
 class JsonToolAgentTask(AgentTask):
     """
-    JsonToolAgent-flavored task.
+    JsonToolAgent-flavored task -- narrowed to the one field genuinely
+    shared across every JsonToolAgent family regardless of execution shape
+    (batch-cursor vs. step-cursor). Everything else this class used to
+    carry (``running_blackboard``/``executed_steps``/``prepared_steps``/
+    ``valid_cache_indices``/``failed_cache_indices``/``tool_calls_used``)
+    was blackboard/placeholder-grammar-era and is removed outright, not
+    adapted -- see the `json-tool-agent-rename` design record's
+    lifecycle-slimming addendum for the base-class side of this same cut.
 
     Fields
     ------
-    running_blackboard : list[BlackboardSlot]
-        Plan-local slots (0-based indices) created during this invoke.
-        Populated by ``_initialize_task()``, planned by ``prepare()``, and
-        executed by ``act()``. If ``context_enabled=True``, executed slots
-        are persisted and merged into ``self._blackboard`` by
-        ``_build_record_from_task``.
-
-    Placeholder Semantics & Resolvability
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    **Cached Placeholder** (``<<__cN__>>``)
-        Resolvable iff ``0 <= N < len(self._blackboard)`` AND
-        ``self._blackboard[N].is_executed() == True`` — resolved directly
-        against the owning ``JsonToolAgent``'s live, always-persisted
-        blackboard, not a task-local snapshot.
-
-    **Step Placeholder** (``<<__sN__>>``)
-        Resolvable iff ``0 <= N < len(running_blackboard)`` AND
-        ``running_blackboard[N].is_executed() == True``.
-
-    executed_steps : set[int]
-        Running plan indices that have been executed.
-
-    prepared_steps : list[int]
-        Running plan indices ready for execution in the next batch. Must be
-        set by ``prepare()`` and consumed by ``act()``.
-
-    tool_calls_used : int
-        Count of non-return tool calls executed so far.
-
     llm_records : list[LLMRecord]
         Inherited from ``AgentTask``. Seeded at construction time —
         non-empty for subclasses that generate up front (e.g. PlanAct's
@@ -137,37 +115,18 @@ class JsonToolAgentTask(AgentTask):
         loop (e.g. ReAct's per-step planning) — and appended to as further
         generations occur.
 
-    valid_cache_indices : frozenset[int]
-        Cache-blackboard indices reachable in this conversation — entries
-        that are EXECUTED and belong to a record in the current ``turns``
-        chain. Computed once in ``_initialize_task`` from ``turns`` via
-        ``_compute_cache_index_sets``; empty when ``context_enabled=False``.
-
-    failed_cache_indices : frozenset[int]
-        Cache-blackboard indices that belong to this conversation but whose
-        slots have FAILED status. Disjoint with ``valid_cache_indices``.
-        Referenced during generation to produce targeted LLM feedback.
-
-    retries_used : int
-        Cumulative retry attempts consumed across all generation attempts in
-        this run. Both ``PlanActAgent`` (``_generate_plan``/
-        ``_agenerate_plan``) and ``ReActAgent`` (``_generate_next_step``/
-        ``_agenerate_next_step``) read and increment this field directly on
-        the task — neither keeps a separate local counter. Declared here
-        (rather than on ``ReActTask``) so it's available uniformly to every
-        subclass, including ``PlanActTask``.
+    regenerations_used : int
+        Cumulative regeneration attempts consumed across every generation
+        call this run -- irreducible; a rejected/regenerated draft leaves
+        no artifact anywhere else to derive this from (contrast
+        ``tool_calls_used``, declared per-subclass now since it's fully
+        derivable from whatever call-history fields that subclass's own
+        task shape carries). Renamed from the prior ``retries_used`` to
+        match ``DagAgentTask``'s own terminology, since this family's
+        generation model now mirrors DagAgent's (``output_structure`` +
+        regen-retry loop) rather than the old free-text-JSON retry loop.
     """
-    running_blackboard: list[BlackboardSlot] = field(default_factory=list)
-
-    executed_steps: set[int] = field(default_factory=set)
-    prepared_steps: list[int] = field(default_factory=list)
-
-    tool_calls_used: int = 0
-
-    valid_cache_indices: frozenset[int] = field(default_factory=frozenset)
-    failed_cache_indices: frozenset[int] = field(default_factory=frozenset)
-
-    retries_used: int = 0
+    regenerations_used: int = 0
 
 
 @dataclass(slots=True)
@@ -385,54 +344,76 @@ class DagAgentTask(AgentTask):
 @dataclass(slots=True)
 class PlanActTask(JsonToolAgentTask):
     """
-    PlanActAgent-flavored task.
+    PlanActAgent-flavored task -- ``DagAgentTask``'s batch-execution field
+    shape, minus every field that exists purely to support ``DagAgent``'s
+    multi-round continuation (``continue_planning``/``planning_rounds_used``/
+    ``continuation_note``/``batch_counter``) -- none of that applies to a
+    one-shot planner: ``think()`` runs exactly once, ever, per invoke.
+    ``DagToolCall`` in place of ``CodeStatement``, matching
+    ``DagAgentTask``'s own precedent for the same swap.
 
     Fields
     ------
-    generated_plan : Any
-        Holds the validated (but not yet compiled) plan — the
-        ``list[BlackboardSlot]`` ``think()``/``async_think()`` produce —
-        until ``prepare()``'s first call compiles it into
-        ``running_blackboard``/``batches``/``batch_index``. Unlike
-        ``ReActTask.generated_step``, never reset back to ``NO_VAL``: it's
-        this hook's own one-time-generation marker (``think()`` no-ops once
-        it's set), not a per-round handoff.
+    completed : list[DagToolCall]
+        Every call that executed successfully this run, in commit order
+        (the ``RETURN_ALIAS`` call included once it executes -- same
+        convention as ``DagAgentTask.completed``).
 
-    batches : list[list[int]]
-        Pre-compiled topologically-sorted batches. Each batch is a list of
-        plan-local indices that can execute concurrently. Compiled from
-        ``generated_plan`` during ``prepare()``'s first call via
-        ``_compile_batches_from_deps()``.
+    pending : list[list[DagToolCall]]
+        Dependency batches compiled once (via ``compile_batches``) from the
+        single generated plan. ``pending[0]`` is the next batch ``act()``
+        runs. A cascade-failure may remove calls from batches here without
+        popping them (see ``find_cascade_failures``) -- only ``act()``
+        pops a batch once it's been executed.
 
-        Example: ``[[0, 1], [2, 3], [4]]`` means:
-        - Batch 0: steps 0 and 1 execute together
-        - Batch 1: steps 2 and 3 execute together (after batch 0)
-        - Batch 2: step 4 executes (after batch 1; typically the return step)
+    cache : dict[str, Any]
+        identifier -> resolved value for every call in ``completed``, plus
+        ``task_result_i`` entries seeded once at ``_initialize_task``.
 
-    batch_index : int
-        Cursor pointing to the next batch to prepare. Starts at 0; incremented
-        after each batch is prepared. Task completes when
-        ``batch_index >= len(batches)`` and the return step has executed.
+    constant_values : dict[str, Any]
+        Registered-constant name -> value, populated once by
+        ``PlanActAgent._initialize_task``.
 
-    Workflow
-    ~~~~~~~~
-    1. ``think()`` generates and validates the whole plan, once, storing it
-       on ``generated_plan``; every later round's ``think()`` is a no-op.
-    2. ``prepare()``'s first call (``batches`` still empty) compiles
-       ``generated_plan`` into batches and sets ``batch_index=0``.
-    3. Each round after that:
-       - ``prepare()`` reads ``batches[batch_index]``, resolves placeholders
-         for that batch.
-       - ``act()`` runs the batch concurrently.
-       - ``batch_index`` incremented for the next round.
-    4. When ``batch_index >= len(batches)``, ``prepare()`` raises — in
-       practice this is never reached, since the final batch always
-       contains the return step, which sets ``task.complete = True`` and
-       ends the loop first.
+    resolved_args : list[dict[str, Any]]
+        Positionally matched to ``pending[0]``'s surviving calls -- the
+        resolved kwargs ``prepare()`` computed for the batch ``act()`` is
+        about to run.
+
+    failed_statements : list[DagToolCall]
+        Every call whose dispatch actually raised this run -- not
+        cascade-skipped calls, which are never attempted and never appear
+        here (see ``find_cascade_failures``'s own contract). Becomes
+        ``JsonToolAgentRecord.failed_statements`` verbatim at commit time.
+
+    No ``batch_counter`` field -- a single ``compile_batches`` call per
+    invoke needs no cross-round ``DagToolCall.batch_index`` uniqueness
+    tracking; a local variable in ``think()`` suffices.
     """
-    batches: list[list[int]] = field(default_factory=list)
-    batch_index: int = 0
-    generated_plan: Any = NO_VAL
+    completed: list[DagToolCall] = field(default_factory=list)
+    pending: list[list[DagToolCall]] = field(default_factory=list)
+    cache: dict[str, Any] = field(default_factory=dict)
+    constant_values: dict[str, Any] = field(default_factory=dict)
+    resolved_args: list[dict[str, Any]] = field(default_factory=list)
+    failed_statements: list[DagToolCall] = field(default_factory=list)
+
+    @property
+    def tool_calls_used(self) -> int:
+        """
+        Derived, not stored: every dispatched (non-``RETURN_ALIAS``) call in
+        ``completed``, plus every call that was actually attempted and
+        raised (``failed_statements``) -- ``completed``/``failed_statements``
+        are already the single source of truth, so a separate incrementing
+        counter would just be a second, driftable copy of the same fact.
+        Cascade-skipped calls (never dispatched at all) are correctly
+        excluded, since they never enter either list. As a side benefit,
+        this stays correct for free if a future plan-repair mechanism ever
+        adds a second generation round to this family.
+        """
+        from ...utils.dag import is_dispatched_call
+        return (
+            sum(1 for c in self.completed if is_dispatched_call(c))
+            + len(self.failed_statements)
+        )
 
 
 @dataclass(slots=True)

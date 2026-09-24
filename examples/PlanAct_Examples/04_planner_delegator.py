@@ -41,18 +41,19 @@ batch_haiku_planner = PlanActAgent(
     description="Orchestrates calls to the Haiku Writer Agent and prints outputs",
     llm_engine=llm_engine,
 )
-haiku_tool_id = batch_haiku_planner.register(haiku_agent)
+batch_haiku_planner.register_tool(haiku_agent)
+haiku_tool_id = haiku_agent.name  # effective id defaults to the bare agent name
 
 
 def print_haiku(haiku_topic: str, haiku: str) -> None:
     print(f"---\n**{haiku_topic}**\n{haiku}\n---")
 
 
-print_haiku_tool_id = batch_haiku_planner.register(
+batch_haiku_planner.register_tool(
     print_haiku,
-    name="print_haiku",
     description="Print a haiku with its topic as the title.",
 )
+print_haiku_tool_id = "print_haiku"  # effective id defaults to the bare function name
 
 # ----- Batch Math PlanAct Agent -----
 batch_math_planner = PlanActAgent(
@@ -61,18 +62,18 @@ batch_math_planner = PlanActAgent(
     description="Handles tasks involving math problems and printing solutions",
     llm_engine=llm_engine,
 )
-batch_math_planner.batch_register(BASIC_MATH_TOOLS)
-batch_math_planner.batch_register(EXPONENT_TOOLS)
+batch_math_planner.register_tools(BASIC_MATH_TOOLS)
+batch_math_planner.register_tools(EXPONENT_TOOLS)
 
 def print_math_solution(problem: str, solution: str) -> None:
     print(f"Question: {problem}\nAnswer: {solution}")
 
 
-print_math_tool_id = batch_math_planner.register(
+batch_math_planner.register_tool(
     print_math_solution,
-    name="print_math_solution",
     description="Print the math problem and its computed solution.",
 )
+print_math_tool_id = "print_math_solution"  # effective id defaults to the bare function name
 
 # ----- Super Planner (delegates to both planners) -----
 super_planner = PlanActAgent(
@@ -81,8 +82,10 @@ super_planner = PlanActAgent(
     description="Planner that decomposes and delegates tasks to sub-planners",
     llm_engine=llm_engine,
 )
-haiku_planner_tool_id = super_planner.register(batch_haiku_planner)
-math_planner_tool_id = super_planner.register(batch_math_planner)
+super_planner.register_tool(batch_haiku_planner)
+super_planner.register_tool(batch_math_planner)
+haiku_planner_tool_id = batch_haiku_planner.name
+math_planner_tool_id = batch_math_planner.name
 
 # ----- Run Example Batch Tasks -----
 haiku_prompts = [

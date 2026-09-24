@@ -55,7 +55,6 @@ from ..llm.base import LLMEngine
 from ..tools import toolify
 from ..mcp import MCPClientHub
 from ..a2a import A2AClientHub, PyA2AtomicClient
-from .tools import return_tool
 
 
 def _render_docstring_block(description: str) -> str:
@@ -128,7 +127,17 @@ class JsonToolAgent(Agent, ABC):
       skipped, independent branches still run to completion).
     - ``_render_system_message`` (shared, concrete): both families need
       identical ``TOOLS``/``CONSTANTS`` context injected into their active
-      prompt, so this one is not duplicated.
+      prompt, so this one is not duplicated. Deliberately carries no budget
+      content (``tool_calls_limit`` is never shown here, by either family) —
+      it's a per-invocation fact, not a standing instruction, so it belongs
+      in each family's own task-message banner instead of spending
+      system-prompt tokens on it every round.
+    - ``render_turn``/``_turn_position`` (shared, concrete): a completed
+      turn always renders the same way regardless of family — one line,
+      ``task_result_i: type = <value>`` — since it only ever touches
+      ``AgentRecord``'s own universal ``generated_response``/``prev``
+      fields, never anything family-specific. Mirrors ``DagAgent``'s
+      identical pair verbatim.
 
     What it does not own, by design: any agent-level persistent store,
     placeholder/reference-resolution grammar, retry loop, or record/result
@@ -138,7 +147,6 @@ class JsonToolAgent(Agent, ABC):
     result only, never a dump of the steps that produced it.
     """
     TOOLS_FIELD = "TOOLS"
-    LIMIT_FIELD = "TOOL_CALLS_LIMIT"
     CONSTANTS_FIELD = "CONSTANTS"
 
     _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
@@ -256,9 +264,6 @@ class JsonToolAgent(Agent, ABC):
         self._tool_calls_limit: Optional[int] = None
         self.tool_calls_limit = tool_calls_limit
 
-        # Always include canonical return tool (avoid collisions by skipping).
-        self.register_tool(return_tool, name_collision_policy="skip")
-
         if tools is not None:
             self.register_tools(tools)
         if constants is not None:
@@ -371,9 +376,8 @@ class JsonToolAgent(Agent, ABC):
         return self._toolbox.pop(tool_id, None) is not None
 
     def clear_tools(self) -> None:
-        """Remove all registered tools, then restore the mandatory return tool."""
+        """Remove all registered tools."""
         self._toolbox.clear()
-        self.register_tool(return_tool, name_collision_policy="skip")
 
     # ------------------------------------------------------------------ #
     # Constants Helpers
@@ -923,24 +927,63 @@ class JsonToolAgent(Agent, ABC):
         Render this ``JsonToolAgent``'s active system prompt with tool/constant
         context injected.
 
-        Overrides base ``Agent``'s ``task.inputs``-only rendering — neither
-        ``PLANNER_PROMPT`` nor ``ORCHESTRATOR_PROMPT`` ever uses an
-        input-derived placeholder, only ``{TOOLS}``/``{TOOL_CALLS_LIMIT}``/
-        ``{CONSTANTS}`` — so this builds that context directly instead of
-        merging with ``task.inputs``. Shared by every ``JsonToolAgent``
-        subclass; eliminates the identical ``render_context`` dict each one
-        built independently before this sub-pass.
+        Overrides base ``Agent``'s ``task.inputs``-only rendering — the
+        active prompt only ever uses ``{TOOLS}``/``{CONSTANTS}``, so this
+        builds that context directly instead of merging with
+        ``task.inputs``. Shared by every ``JsonToolAgent`` subclass.
+
+        Deliberately carries no budget content — ``tool_calls_limit`` is a
+        per-invocation fact, not a standing instruction, so both families
+        surface it in their own task-message banner instead (mirrors
+        ``DagAgent._render_system_message``'s identical choice not to spend
+        system-prompt tokens on it).
         """
         if task.system_prompt_name is None:
             return []
-        limit_text = "unlimited" if self._tool_calls_limit is None else str(self._tool_calls_limit)
         render_context = {
             self.TOOLS_FIELD: self.actions_context(),
-            self.LIMIT_FIELD: limit_text,
             self.CONSTANTS_FIELD: self.constants_context(),
         }
         rendered = self._system_prompts[task.system_prompt_name].render(render_context)
         return [{"role": "system", "content": rendered}]
+
+    def _turn_position(self, turn: AgentRecord) -> int:
+        """
+        Walk ``turn.prev`` backward to the conversation root, counting
+        hops. The root itself is position 0, its child is 1, etc. --
+        matches the turn's actual index in ``get_conversation()``'s full
+        list, computed fresh from existing structure (correct even when
+        ``task.turns`` is a ``records_window``-truncated tail, since this
+        always walks all the way to the true root regardless of window).
+
+        Shared, concrete -- mirrors ``DagAgent._turn_position`` verbatim;
+        touches only base ``AgentRecord.prev``, nothing family-specific.
+        """
+        position = 0
+        node = turn
+        while node.prev is not None:
+            node = node.prev
+            position += 1
+        return position
+
+    def render_turn(self, turn: AgentRecord) -> list[dict[str, str]]:
+        """
+        Labels a historic turn with its ``task_result_i`` address so a
+        model can reference it by name in a later plan -- base
+        ``Agent.render_turn`` renders the raw value with no such label.
+
+        Shared, concrete -- mirrors ``DagAgent.render_turn`` verbatim. A
+        completed turn always renders as its final result only, one line,
+        never a dump of the steps that produced it -- true regardless of
+        which ``JsonToolAgent`` family produced the turn, since this only
+        ever touches ``AgentRecord``'s own universal
+        ``generated_response``/``prev`` fields.
+        """
+        messages = super().render_turn(turn)
+        i = self._turn_position(turn)
+        label = f"task_result_{i}: {type(turn.generated_response).__name__} = "
+        messages[-1]["content"] = label + messages[-1]["content"]
+        return messages
 
     @abstractmethod
     def act(self, task: JsonToolAgentTask) -> JsonToolAgentTask:

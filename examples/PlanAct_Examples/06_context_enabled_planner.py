@@ -23,11 +23,10 @@ my_planner = PlanActAgent(
     description="Creates plans utilizing context memory",
     llm_engine=OpenAIEngine(model="gpt-4o-mini"),
     context_enabled=True,
-    peek_at_cache=True,
-    generation_retries=3,
+    regeneration_limit=3,
 )
 
-my_planner.batch_register(BASIC_MATH_TOOLS)
+my_planner.register_tools(BASIC_MATH_TOOLS)
 
 while True:
     query = input("Enter a planning task (or 'q' or 'exit' to quit): ")
@@ -38,7 +37,7 @@ while True:
     result = my_planner.invoke({"prompt": query})
     print(f"Result: {result.result}\n")
     from pprint import pprint
-    print("Blackboard:")
+    print("Executed calls:")
     record = my_planner.get_conversation()[-1]
-    pprint(my_planner.blackboard[record.blackboard_start:record.blackboard_end+1])
+    pprint(record.statements)
     print("-" * 40 + "\n")

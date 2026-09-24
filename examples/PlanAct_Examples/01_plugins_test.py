@@ -22,12 +22,12 @@ agent = PlanActAgent(
 )
 
 # Register tool lists
-agent.batch_register(EXPONENT_TOOLS)
-agent.batch_register(BASIC_MATH_TOOLS)
-agent.batch_register(CONSOLE_TOOLS)
+agent.register_tools(EXPONENT_TOOLS)
+agent.register_tools(BASIC_MATH_TOOLS)
+agent.register_tools(CONSOLE_TOOLS)
 
-# Register the pi constant
-agent.register_constant("PI", math.pi, "Mathematical constant `pi`")
+# Register the pi constant (value first, then alias/description)
+agent.register_constant(math.pi, alias="PI", description="Mathematical constant `pi`")
 
 # ──────────────────────────  TASK  ─────────────────────────────
 task_prompt = """
@@ -43,6 +43,6 @@ result = agent.invoke({"prompt": task_prompt})
 from pprint import pprint
 print("\n=== FINAL AGENT RESULT ===")
 pprint(result)
-print("BLACKBOARD AFTER MATH DEMO:")
-pprint(agent.blackboard)
+print("EXECUTED CALLS AFTER MATH DEMO:")
+pprint(agent.get_conversation()[-1].statements)
 agent.clear_memory()

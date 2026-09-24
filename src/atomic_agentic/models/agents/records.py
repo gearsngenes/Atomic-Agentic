@@ -266,22 +266,79 @@ class JsonToolAgentRecord(AgentRecord):
     """
     Canonical memory record for one completed JsonToolAgent invocation.
 
-    In addition to the base AgentRecord lifecycle artifacts, a
-    JsonToolAgentRecord stores the half-open span of persisted blackboard
-    entries produced by the invocation. The JsonToolAgent renders that span
-    into future LLM-facing context when building messages.
+    Field-for-field mirrors ``DagAgentRecord``'s own shape and validation
+    (see that class for the authoritative pattern) -- ``statements``/
+    ``failed_statements`` as ``DagToolCall`` tuples, no blackboard span of
+    any kind. Shared directly by ``JsonToolAgent`` subclasses;
+    ``PlanActAgent`` constructs this class directly, no ``PlanActRecord``
+    subclass needed (would add zero fields beyond what's here).
+
+    Fields
+    ------
+    statements : tuple[DagToolCall, ...]
+        Every call the task's ``completed`` accumulated this run
+        (``RETURN_ALIAS`` included, same convention as
+        ``DagAgentRecord.statements``).
+
+    failed_statements : tuple[DagToolCall, ...]
+        Every call whose dispatch actually raised this run.
+
+    regenerations_used : int
+        Total regeneration attempts consumed across this run's generation
+        call(s) -- carried over from ``task.regenerations_used`` verbatim
+        at commit time. New this pass -- neither this nor
+        ``DagAgentRecord`` surfaced this before; ``DagAgentRecord``'s own
+        version of this gap is left unaddressed (``DagAgent`` stays frozen
+        this release).
     """
 
-    blackboard_start: int | None = None
-    blackboard_end: int | None = None
+    statements: tuple[DagToolCall, ...] = ()
+    failed_statements: tuple[DagToolCall, ...] = ()
+    regenerations_used: int = 0
+
+    def __post_init__(self) -> None:
+        # Explicit two-argument super() -- same slotted-dataclass-subclass
+        # gotcha DagAgentRecord.__post_init__ already documents.
+        super(JsonToolAgentRecord, self).__post_init__()
+
+        if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
+            raise TypeError(
+                "JsonToolAgentRecord.statements must be a list or tuple of "
+                f"DagToolCall instances; got {type(self.statements).__name__!r}."
+            )
+        for index, call in enumerate(self.statements):
+            if not isinstance(call, DagToolCall):
+                raise TypeError(
+                    f"JsonToolAgentRecord.statements[{index}] must be a "
+                    f"DagToolCall instance; got {type(call).__name__!r}."
+                )
+
+        if isinstance(self.failed_statements, (str, bytes)) or not isinstance(
+            self.failed_statements, (list, tuple)
+        ):
+            raise TypeError(
+                "JsonToolAgentRecord.failed_statements must be a list or "
+                f"tuple of DagToolCall instances; got {type(self.failed_statements).__name__!r}."
+            )
+        for index, call in enumerate(self.failed_statements):
+            if not isinstance(call, DagToolCall):
+                raise TypeError(
+                    f"JsonToolAgentRecord.failed_statements[{index}] must be a "
+                    f"DagToolCall instance; got {type(call).__name__!r}."
+                )
+
+        object.__setattr__(self, "statements", tuple(self.statements))
+        object.__setattr__(self, "failed_statements", tuple(self.failed_statements))
 
     def to_dict(self) -> dict[str, Any]:
         """Return the explicit serialized dictionary representation."""
-        return {
-            **super(JsonToolAgentRecord, self).to_dict(),
-            "blackboard_start": self.blackboard_start,
-            "blackboard_end": self.blackboard_end,
-        }
+        d = super(JsonToolAgentRecord, self).to_dict()
+        d.update({
+            "statements": [s.to_dict() for s in self.statements],
+            "failed_statements": [s.to_dict() for s in self.failed_statements],
+            "regenerations_used": self.regenerations_used,
+        })
+        return d
 
 
 @dataclass(frozen=True, slots=True)
