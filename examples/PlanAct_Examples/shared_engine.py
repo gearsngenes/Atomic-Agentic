@@ -1,17 +1,23 @@
 """shared_engine.py
 
 One shared ``llm_engine`` for every example in this folder, so switching
-providers doesn't mean editing each example file by hand. Reuses the exact
-same provider/model choices as
-``test_code/script_agent_live_smoke_test.py`` -- one cheap/small default
+providers doesn't mean editing each example file by hand. Mirrors this
+repo's established pattern (``examples/ScriptAgent_Examples/shared_engine.py``,
+``examples/DagAgent_Examples`` if/when it exists) -- one cheap/small default
 model per provider.
 
-Provider selection: set the ``SCRIPT_AGENT_PROVIDER`` env var to one of
-``o``/``g``/``m``/``a``/``l``/``3``/``t`` (openai/gemini/mistral/anthropic/
-llamacpp-phi4/llamacpp-gemma3/litellm). If unset (or not a recognized
-value), falls back to an interactive prompt -- the same one the live smoke
-test uses -- so this also works untouched when just running an example by
-hand.
+Provider selection: set the ``PLANACT_AGENT_PROVIDER`` env var to one of
+``o``/``g``/``m``/``a``/``p``/``3``/``4``/``t`` (openai/gemini/mistral/
+anthropic/llamacpp-phi4/llamacpp-gemma3/llamacpp-granite4.1/litellm). If
+unset (or not a recognized value), falls back to an interactive prompt --
+so this also works untouched when just running an example by hand.
+
+Only the example's own core PlanActAgent under test should import this --
+any BasicAgent/PlanActAgent sub-agents an example builds as delegation
+targets (e.g. 03_agentic_story_builder.py's outliner/writer/reviewer,
+04_planner_delegator.py's haiku/math specialists) get their own separate,
+fixed engine instead, so switching the provider under test never also
+silently switches what the sub-agents run on.
 
 Usage in an example file (same directory, no path shim needed -- Python
 puts a script's own directory on ``sys.path[0]``)::
@@ -76,7 +82,7 @@ PROVIDER_MODELS: dict[str, tuple[type, dict]] = {
 
 
 def _pick_provider() -> str:
-    env_choice = (os.getenv("SCRIPT_AGENT_PROVIDER") or "").strip().lower()
+    env_choice = (os.getenv("PLANACT_AGENT_PROVIDER") or "").strip().lower()
     if env_choice in PROVIDER_MODELS:
         return env_choice
     return input(

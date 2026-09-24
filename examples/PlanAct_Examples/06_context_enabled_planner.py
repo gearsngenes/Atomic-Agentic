@@ -8,20 +8,18 @@ Updated to use PlanActAgent (formerly PlannerAgent).
 """
 import logging
 
-from dotenv import load_dotenv
-
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
-from atomic_agentic.llm import OpenAIEngine
 
-load_dotenv()
+from shared_engine import llm_engine
+
 logging.basicConfig(level=logging.INFO)
 
 my_planner = PlanActAgent(
     name="Context_Enabled_Planner",
     namespace="examples",
     description="Creates plans utilizing context memory",
-    llm_engine=OpenAIEngine(model="gpt-4o-mini"),
+    llm_engine=llm_engine,
     context_enabled=True,
     regeneration_limit=3,
 )

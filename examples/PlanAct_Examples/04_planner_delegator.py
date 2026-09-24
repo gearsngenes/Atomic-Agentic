@@ -10,23 +10,25 @@ Updated to use PlanActAgent (ReWOO-style: plan once, then execute).
 """
 import logging
 
-from dotenv import load_dotenv
-
 from atomic_agentic.agents import BasicAgent, PlanActAgent
 from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, EXPONENT_TOOLS
 from atomic_agentic.llm import OpenAIEngine
 
-load_dotenv()
+from shared_engine import llm_engine
+
 logging.basicConfig(level=logging.INFO)
 
-llm_engine = OpenAIEngine(model="gpt-4o-mini")
+# HaikuWriter is a sub-agent (delegation target), not the core agent under
+# test -- kept on its own fixed engine, separate from `llm_engine`, so
+# switching the provider under test never also silently switches it.
+sub_agent_llm = OpenAIEngine(model="gpt-4o-mini")
 
 # ----- Haiku Writer Agent -----
 haiku_agent = BasicAgent(
     name="HaikuWriter",
     namespace="examples",
     description="Writes Haiku when given a topic.",
-    llm_engine=llm_engine,
+    llm_engine=sub_agent_llm,
     role_prompt=(
         "You are a master of writing haiku. Given a topic, write a "
         "3-line haiku about it, following a 5-7-5 syllable structure. "
@@ -39,7 +41,7 @@ batch_haiku_planner = PlanActAgent(
     name="BatchHaikuPlanner",
     namespace="examples",
     description="Orchestrates calls to the Haiku Writer Agent and prints outputs",
-    llm_engine=llm_engine,
+    llm_engine=sub_agent_llm,
 )
 batch_haiku_planner.register_tool(haiku_agent)
 haiku_tool_id = haiku_agent.name  # effective id defaults to the bare agent name
@@ -60,7 +62,7 @@ batch_math_planner = PlanActAgent(
     name="BatchMathPlanner",
     namespace="examples",
     description="Handles tasks involving math problems and printing solutions",
-    llm_engine=llm_engine,
+    llm_engine=sub_agent_llm,
 )
 batch_math_planner.register_tools(BASIC_MATH_TOOLS)
 batch_math_planner.register_tools(EXPONENT_TOOLS)

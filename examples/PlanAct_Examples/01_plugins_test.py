@@ -1,18 +1,16 @@
-﻿from dotenv import load_dotenv
-import logging
+﻿import logging
 import math
 
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.tools.prebuilt import EXPONENT_TOOLS, BASIC_MATH_TOOLS, CONSOLE_TOOLS
-from atomic_agentic.llm import OpenAIEngine
 
-load_dotenv()
+from shared_engine import llm_engine
+
 logging.basicConfig(level=logging.INFO)
 
 print("Testing Task Decomposition and Printing capabilities")
 
 # ──────────────────────────  SET-UP  ───────────────────────────
-llm_engine = OpenAIEngine(model="gpt-4o-mini")
 agent = PlanActAgent(
     name="Test_PlanAct",
     namespace="examples",

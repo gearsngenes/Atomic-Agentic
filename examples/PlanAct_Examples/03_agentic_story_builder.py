@@ -1,14 +1,18 @@
-﻿from dotenv import load_dotenv
-from pathlib import Path
+﻿from pathlib import Path
 import logging
 
 from atomic_agentic.agents import BasicAgent, PlanActAgent
 from atomic_agentic.llm import OpenAIEngine
 
-load_dotenv()
+from shared_engine import llm_engine
+
 logging.basicConfig(level=logging.INFO)
 
-llm_engine = OpenAIEngine(model="gpt-4o-mini")
+# Sub-agents (outliner/writer/reviewer) stay on their own fixed engine,
+# separate from `llm_engine` -- switching the provider under test (the
+# PlanActAgent orchestrator below) should never also silently switch what
+# these delegation targets run on.
+sub_agent_llm = OpenAIEngine(model="gpt-4o-mini")
 
 OUTLINER_PROMPT = """
 You are the *Story Outliner*.
@@ -40,7 +44,7 @@ outliner = BasicAgent(
     name="StoryOutliner",
     namespace="examples",
     description="Generate a structured outline from a one-sentence idea.",
-    llm_engine=llm_engine,
+    llm_engine=sub_agent_llm,
     role_prompt=OUTLINER_PROMPT,
 )
 
@@ -56,7 +60,7 @@ writer = BasicAgent(
     name="StoryWriter",
     namespace="examples",
     description="Writes drafts based on the outline or reviewer notes.",
-    llm_engine=llm_engine,
+    llm_engine=sub_agent_llm,
     role_prompt=WRITER_PROMPT,
     context_enabled=True,
     pre_invoke=writer_pre,
@@ -69,7 +73,7 @@ reviewer = BasicAgent(
     name="DraftReviewer",
     namespace="examples",
     description="Reviews drafts and provides revision notes.",
-    llm_engine=llm_engine,
+    llm_engine=sub_agent_llm,
     role_prompt=REVIEWER_PROMPT,
     context_enabled=True,
     pre_invoke=reviewer_pre,
@@ -104,7 +108,8 @@ if __name__ == "__main__":
     task_prompt = (
         f"TASK: Write a story based on the following idea: {idea!r}\n"
         "Use the outliner to generate a structured outline, then write a first draft. "
-        f"Then for {loops} cycles, have the reviewer critique the draft and the writer apply the notes."
+        f"Then for {loops} cycles, have the reviewer critique the draft and the writer apply the notes. "
+        "Return the final draft once you finish the review-rewrite cycle."
     )
 
     print("\n⇢ Planning + execution …")

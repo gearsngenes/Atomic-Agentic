@@ -1,13 +1,6 @@
-﻿import os
-from dotenv import load_dotenv
+﻿from atomic_agentic.agents import PlanActAgent
 
-from atomic_agentic.agents import PlanActAgent
-from atomic_agentic.llm import OpenAIEngine
-
-load_dotenv()
-
-# LLM engine
-llm_engine = OpenAIEngine(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
+from shared_engine import llm_engine
 
 # PlanAct agent (ReWOO-style: one plan LLM call, then execute tools)
 agent = PlanActAgent(
