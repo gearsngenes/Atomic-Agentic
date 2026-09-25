@@ -67,6 +67,7 @@ from typing import Any, Callable, ClassVar, Optional
 
 from .json_tool_agent import JsonToolAgent
 from .prompts import PLANNER_PROMPT
+from .tools import get_item, make_dict, make_sequence
 from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD
 from ..core import AtomicInvokable
 from ..llm.base import LLMEngine
@@ -84,7 +85,7 @@ from ..utils.dag import (
     find_sigil_refs,
     is_dispatched_call,
     parse_generation,
-    render_completed_as_json,
+    render_failed_as_json,
     resolve_call_args,
     validate_calls,
 )
@@ -128,6 +129,15 @@ class PlanActAgent(JsonToolAgent):
 
     _ATOMIC_IMMUTABLE_TYPES: ClassVar[tuple[type, ...]] = (
         str, int, float, bool, complex, bytes, type(None),
+    )
+
+    # A class attribute (active before __init__ runs) -- the three
+    # composite-value-building utility tools this family's schema text
+    # tells the model to use. No return_tool entry -- PlanActAgent never
+    # registers a real return tool (its return value comes from the
+    # synthesized RETURN_ALIAS call instead).
+    _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset(
+        {"make_sequence", "make_dict", "get_item"}
     )
 
     def __init__(
@@ -180,6 +190,12 @@ class PlanActAgent(JsonToolAgent):
             constant_descriptions=constant_descriptions,
         )
         self._system_prompts["plan_first"] = PLANNER_PROMPT
+        # Seeded directly, bypassing register_tool -- all three are reserved
+        # (self._RESERVED_TOOL_NAMES), and register_tool now rejects any
+        # attempt to register something under a reserved id.
+        self._seed_reserved_tool(make_sequence, "make_sequence")
+        self._seed_reserved_tool(make_dict, "make_dict")
+        self._seed_reserved_tool(get_item, "get_item")
 
     # ------------------------------------------------------------------ #
     # Shared per-invocation helpers
@@ -399,10 +415,15 @@ class PlanActAgent(JsonToolAgent):
         """
         Generate and validate the whole plan, once. No-op on any later
         call -- a one-shot planner has nothing further to decide once
-        ``task.pending``/``task.completed`` exist (or the task is already
-        complete).
+        ``task.pending`` exists or the task is already complete.
+        ``task.completed`` alone can never independently distinguish this:
+        whenever ``task.pending`` drains to empty, either ``task.complete``
+        becomes ``True`` (the return call executed) or ``_check_plan_exhausted``
+        already raised -- ``act()`` never returns in an intermediate state
+        where ``completed`` is non-empty but ``pending``/``complete`` both
+        say "keep going" (matches ``DagAgent.think``'s identical guard).
         """
-        if task.pending or task.completed or task.complete:
+        if task.pending or task.complete:
             return task
 
         task.pending = self._run_planning_retry_loop(task=task)
@@ -411,7 +432,7 @@ class PlanActAgent(JsonToolAgent):
 
     async def async_think(self, task: PlanActTask) -> PlanActTask:
         """Async mirror of ``think``."""
-        if task.pending or task.completed or task.complete:
+        if task.pending or task.complete:
             return task
 
         task.pending = await self._arun_planning_retry_loop(task=task)
@@ -433,25 +454,33 @@ class PlanActAgent(JsonToolAgent):
            return unchanged (no ``continue_planning`` branch to check --
            if the return call never executed, ``act()``'s own final-batch
            check is what raises, not this method).
-        2. Resolve every call's args in ``task.pending[0]`` against
-           ``{**task.cache, **task.constant_values}``, collecting failures
-           rather than stopping at the first.
-        3. If any resolution issues:
+        2. For every call in ``task.pending[0]``: resolve its args against
+           ``{**task.cache, **task.constant_values}`` *and* bind them
+           against the target tool's real parameter contract
+           (``tool._args_kwargs_to_dict``) in the same ``try``/``except`` --
+           both are collected as one "could not resolve or bind" failure
+           category, rather than stopping at the first. Storing the
+           already-bound dict here (not a raw ``(positional, keyword)``
+           tuple) means the surviving-batch pass below never needs to
+           re-derive it or re-branch on ``RETURN_ALIAS``.
+        3. If any resolution/binding issues:
            - ``fail_fast=True``: raise ``ToolAgentError`` immediately,
              listing every issue.
-           - ``fail_fast=False``: for each call that failed to resolve, set
+           - ``fail_fast=False``: for each call that failed, set
              ``call.exception = ToolAgentError(<issue text>)`` and append it
              to ``task.failed_statements``; collect the identifiers of every
              such call; call ``find_cascade_failures`` against
-             ``task.pending[1:]`` to find every later-batch call that
-             transitively depends on one of them; remove every call (from
-             the *current* batch and every later batch) whose args/kwargs
-             reference a poisoned name -- cascade-skipped calls are never
-             added to ``completed``/``failed_statements`` (never attempted).
-        4. Resolve the surviving calls in this batch (already-resolved
-           values re-used, not re-computed) into ``task.resolved_args`` --
-           may be empty if the whole batch was cascade-affected; ``act()``
-           treats that as a legal no-op.
+             ``task.pending[1:]`` (later batches only -- the current batch's
+             own poisoned entries are handled separately, by the
+             ``resolved_by_index`` deletion loop just below) to find every
+             later-batch call that transitively depends on one of them;
+             drop every such call from those later batches -- cascade-
+             skipped calls are never added to ``completed``/
+             ``failed_statements`` (never attempted).
+        4. Collect the surviving calls' already-bound dicts (no
+           re-computation) into ``task.resolved_args`` -- may be empty if
+           the whole batch was cascade-affected; ``act()`` treats that as a
+           legal no-op.
         """
         if not task.pending:
             task.resolved_args = []
@@ -460,7 +489,7 @@ class PlanActAgent(JsonToolAgent):
         batch = task.pending[0]
         resolution_namespace = {**task.cache, **task.constant_values}
 
-        resolved_by_index: dict[int, tuple[list[Any], dict[str, Any]]] = {}
+        resolved_by_index: dict[int, dict[str, Any]] = {}
         issues: list[str] = []
         failed_identifiers: set[str] = set()
 
@@ -468,8 +497,13 @@ class PlanActAgent(JsonToolAgent):
             label = call.identifier if call.identifier is not None else "(unassigned)"
             try:
                 positional, keyword = resolve_call_args(call, resolution_namespace)
+                if call.tool == RETURN_ALIAS:
+                    bound = {RETURN_VALUE_FIELD: keyword[RETURN_VALUE_FIELD]}
+                else:
+                    tool = self.get_tool(call.tool)
+                    bound = tool._args_kwargs_to_dict(*positional, **keyword)
             except Exception as e:
-                issue = f"{label}: could not resolve argument value(s): {e!r}"
+                issue = f"{label}: could not resolve or bind argument(s): {e!r}"
                 issues.append(issue)
                 if not self._fail_fast:
                     call.exception = ToolAgentError(issue)
@@ -477,7 +511,7 @@ class PlanActAgent(JsonToolAgent):
                     if call.identifier is not None:
                         failed_identifiers.add(call.identifier)
                 continue
-            resolved_by_index[i] = (positional, keyword)
+            resolved_by_index[i] = bound
 
         if issues and self._fail_fast:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
@@ -487,10 +521,16 @@ class PlanActAgent(JsonToolAgent):
 
         if failed_identifiers:
             poisoned = find_cascade_failures(failed_identifiers, task.pending[1:])
-            self._drop_poisoned_calls(task.pending, poisoned)
+            self._drop_poisoned_calls(task.pending[1:], poisoned)
             # The current batch's own surviving entries may also reference
             # a poisoned name from a sibling failure within this same
-            # batch -- filter resolved_by_index accordingly.
+            # batch -- filter resolved_by_index accordingly. Given today's
+            # compile_batches/validate_calls invariants (a call depending on
+            # another can never land in the same batch as it -- the
+            # dependency forces a batch split first), this loop can't
+            # currently find a match; kept anyway as cheap insurance against
+            # a future compile_batches change reintroducing a same-batch
+            # dependency, rather than relying on that invariant silently.
             for i, call in enumerate(batch):
                 if i not in resolved_by_index:
                     continue
@@ -507,12 +547,7 @@ class PlanActAgent(JsonToolAgent):
         for i, call in enumerate(batch):
             if i not in resolved_by_index:
                 continue
-            positional, keyword = resolved_by_index[i]
-            if call.tool == RETURN_ALIAS:
-                resolved.append({RETURN_VALUE_FIELD: keyword[RETURN_VALUE_FIELD]})
-            else:
-                tool = self.get_tool(call.tool)
-                resolved.append(tool._args_kwargs_to_dict(*positional, **keyword))
+            resolved.append(resolved_by_index[i])
             surviving_batch.append(call)
 
         task.pending[0] = surviving_batch
@@ -666,7 +701,7 @@ class PlanActAgent(JsonToolAgent):
                 f"{type(self).__name__}.{self.name}: plan finished without "
                 "producing a return value -- the return call either failed "
                 "directly or depended on a call that failed. Failures:\n"
-                f"{render_completed_as_json(task.failed_statements)}"
+                f"{render_failed_as_json(task.failed_statements)}"
             )
 
     def act(self, task: PlanActTask) -> PlanActTask:

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ...constants.core import NO_VAL
-from .blackboard_models import BlackboardSlot, CodeStatement, DagToolCall
+from .blackboard_models import CodeStatement, DagToolCall
 from .records import AgentRecord, LLMRecord
 
 __all__ = [
@@ -14,7 +14,6 @@ __all__ = [
     "DagAgentTask",
     "PlanActTask",
     "ReActTask",
-    "ReActStepMeta",
     "ThinkingTask",
 ]
 
@@ -417,91 +416,115 @@ class PlanActTask(JsonToolAgentTask):
 
 
 @dataclass(slots=True)
-class ReActStepMeta:
-    """
-    Per-slot metadata for a single ReAct step.
-
-    Pairs the raw-result visibility counter with the one-sentence description
-    for the same slot.
-
-    Fields
-    ------
-    observable : int
-        Remaining prepare-turns during which this step's raw result is shown
-        as ``observable_result`` in the running-plan snapshot. Decremented
-        after each successful generation turn. ``0`` means not visible.
-
-    description : str
-        One-sentence intent summary rendered in the running-plan snapshot so
-        the LLM understands what the step was intended to do without needing
-        raw result visibility.
-    """
-    observable: int = 0
-    description: str = ""
-
-
-@dataclass(slots=True)
 class ReActTask(JsonToolAgentTask):
     """
-    ReActAgent-flavored task. Tracks cursor and per-slot metadata for
-    step-by-step reactive planning.
+    ReActAgent-flavored task: one registered-tool call generated, resolved,
+    and dispatched per round, via provider-native structured output
+    (``REACT_OUTPUT_SCHEMA``) -- the per-step sibling to ``PlanActTask``'s
+    one-shot multi-call plan.
+
+    No fixed-size preallocated board and no observability-decay window
+    (both dropped from the pre-rewrite shape, along with ``next_step_index``/
+    ``step_meta``) -- every round renders a full snapshot of ``completed``/
+    ``cache`` instead (``utils.dag.render_completed_as_json``/
+    ``render_cache_snapshot``, reused unmodified). No
+    ``pending: list[list[DagToolCall]]`` batch field either -- unlike
+    ``PlanActTask``, this family dispatches exactly one call per round,
+    never a concurrency batch. No ``__post_init__`` -- matches every other
+    ``*Task`` in this family: an in-flight, internal-only object, not a real
+    construction-time boundary.
 
     Fields
     ------
-    next_step_index : int
-        Cursor for the next plan-local ``running_blackboard`` slot to fill.
-        Starts at 0 and increments after each step is prepared.
+    completed : list[DagToolCall]
+        Every call actually dispatched and successful so far this run, in
+        commit order. Becomes ``JsonToolAgentRecord.statements`` verbatim
+        (normalized to a tuple) at commit time -- same convention as
+        ``PlanActTask.completed``.
 
-        Dual role:
-        1. Allocation cursor: determines which slot index gets the next
-           prepared step.
-        2. Dependency cutoff: any ``<<__sN__>>`` placeholder in newly
-           prepared args must satisfy ``N < next_step_index``.
+    failed_statements : list[DagToolCall]
+        Every call actually dispatched that raised, in the order observed.
+        A resolution failure (a ``$name`` reference that doesn't resolve, or
+        a resolved value's type mismatching the target tool's parameter
+        contract) never reaches this list at all under this family's
+        design -- both are caught and fed back for regeneration inside
+        ``think()``'s own retry loop, before a call is ever accepted as
+        this round's decision. Only a real dispatch failure (the tool
+        itself raised once actually invoked) lands here.
 
-    step_meta : list[ReActStepMeta]
-        Per-slot metadata for each slot in ``running_blackboard``. Always the
-        same length as ``running_blackboard``. Both fields are written by
-        ``prepare``/``async_prepare`` at the index of the slot being
-        prepared.
+    cache : dict[str, Any]
+        identifier -> resolved value for every call in ``completed``, plus
+        ``task_result_i`` entries seeded once at ``_initialize_task`` from
+        prior turns. Same role as ``PlanActTask.cache``.
 
-    generated_step : Any
-        Holds the ``(BlackboardSlot, int, str)`` tuple ``think()``/
-        ``async_think()`` produces each round (the freshly-generated,
-        not-yet-applied step, duration, and description), until
-        ``prepare()`` unpacks it and resets this back to ``NO_VAL``.
-        Needed because ``think()`` and ``prepare()`` are independent
-        top-level calls from the base loop — there's no local Python scope
-        to pass the decision through directly the way a single fused
-        method could.
+    constant_values : dict[str, Any]
+        Registered-constant name -> value, populated once by
+        ``ReActAgent._initialize_task`` and never touched again. Same role
+        as ``PlanActTask.constant_values``.
 
-    ``retries_used`` is declared on ``JsonToolAgentTask`` (see that class) — its
-    behavior originates here: incremented by ``_generate_next_step`` on each
-    failed attempt; checked against ``self._generation_retries`` before
-    permitting a retry.
+    generated_step : DagToolCall | None
+        The one call ``think()`` validated and resolved this round -- set
+        only once both ``utils.dag.validate_calls`` and
+        ``utils.dag.resolve_call_args`` succeed against it, ``None`` before
+        that and after ``act()`` consumes it. Retyped from the pre-rewrite
+        shape's ``Any = NO_VAL`` (which held a ``(BlackboardSlot, int,
+        str)`` tuple under the old duration/observability design) --
+        ``None`` is the idiomatic "not yet decided" value for a field
+        genuinely typed ``Optional[DagToolCall]``, so no ``NO_VAL``
+        sentinel is needed here.
 
-    Workflow
-    ~~~~~~~~
-    Each ``think``/``prepare``/``act`` round:
+    resolved_args : dict[str, Any] | None
+        The resolved keyword-argument dict for ``generated_step``
+        (``tool._args_kwargs_to_dict``-ready), computed inside ``think()``'s
+        own retry loop -- never a later ``prepare()`` step, since
+        ``prepare()`` is a documented no-op for this family (both
+        ``think()`` and ``prepare()`` operate on the same single call;
+        nothing is deferred to a later loop iteration the way a multi-batch
+        plan requires). Singular, not ``PlanActTask.resolved_args``'s
+        ``list[dict[str, Any]]`` -- there is no batch to index into.
 
-    1. ``think()`` (a single step):
-       - Validate cursor/step_meta bookkeeping (``_validate_react_prepare_state``).
-       - Build a fresh temporary copy of the static base messages.
-       - Append a running-plan snapshot and a step-request message.
-       - Request the next step from the LLM; validate it end-to-end.
-       - Stash the validated step onto ``task.generated_step``.
-    2. ``prepare()``:
-       - Unpack ``task.generated_step``, reset it to ``NO_VAL``.
-       - Cascade-check dependencies; resolve placeholders.
-       - Fill ``running_blackboard[idx]``; write ``step_meta[idx]``; set
-         ``prepared_steps=[idx]``; increment ``next_step_index``.
-    3. ``act()`` (base ``ToolAgent``, final):
-       - Run the prepared single-step batch; store the result in
-         ``running_blackboard[idx]``.
-    4. Continue until the return tool executes, setting ``task.complete``.
+    last_call_failed : bool
+        Set by ``act()``/``async_act()`` at the end of every round --
+        ``True`` on a tolerated (``fail_fast=False``) dispatch failure,
+        ``False`` on success. Exists because ``completed``/
+        ``failed_statements`` are two separate append-only lists with no
+        shared chronological index between them -- without this flag, a
+        later round's rendering can't tell whether the round that just
+        finished succeeded or failed, only that some historical failure
+        exists somewhere in ``failed_statements``. The failed call itself
+        is always ``task.failed_statements[-1]`` when this is ``True`` --
+        no duplicate reference stored.
     """
-    next_step_index: int = 0
-    step_meta: list[ReActStepMeta] = field(default_factory=list)
-    generated_step: Any = NO_VAL
+    completed: list[DagToolCall] = field(default_factory=list)
+    failed_statements: list[DagToolCall] = field(default_factory=list)
+    cache: dict[str, Any] = field(default_factory=dict)
+    constant_values: dict[str, Any] = field(default_factory=dict)
+    generated_step: Optional[DagToolCall] = None
+    resolved_args: Optional[dict[str, Any]] = None
+    last_call_failed: bool = False
+
+    @property
+    def tool_calls_used(self) -> int:
+        """
+        Derived, not stored -- ``completed``/``failed_statements`` are
+        already the single source of truth. Deliberately gates **both**
+        halves through ``is_dispatched_call``, a real, intentional
+        divergence from ``PlanActTask.tool_calls_used``'s bare
+        ``len(self.failed_statements)``: a call to ``return_tool`` is a
+        genuine dispatch in this family (never a synthesized,
+        non-dispatched ``RETURN_ALIAS`` sentinel the way ``PlanActTask``'s
+        return call is), so a *failed* return call should be exempt from
+        the budget count the same way a successful one already is, for
+        symmetry. Since a resolution failure never reaches
+        ``failed_statements`` at all under this family's design (see that
+        field's own docstring above), every entry here is guaranteed to be
+        a real dispatch attempt regardless.
+        """
+        from ...utils.dag import is_dispatched_call
+        return (
+            sum(1 for c in self.completed if is_dispatched_call(c))
+            + sum(1 for c in self.failed_statements if is_dispatched_call(c))
+        )
 
 
 @dataclass(slots=True)

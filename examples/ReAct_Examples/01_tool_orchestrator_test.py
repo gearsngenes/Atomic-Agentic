@@ -1,38 +1,42 @@
-﻿import logging
-import math
+"""01_tool_orchestrator_test.py
 
-from dotenv import load_dotenv
+ReActAgent iteratively orchestrating math + console tools to solve a
+multi-step arithmetic task: one tool call generated, resolved, and
+dispatched per round, reacting to each result before deciding the next.
+
+Analogous to PlanAct_Examples/00_plan_test.py, but no upfront plan is ever
+written -- each round's single best next call is decided fresh against
+everything completed so far this run.
+"""
+import logging
+import math
+from pprint import pprint
 
 from atomic_agentic.agents import ReActAgent
-from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.tools.prebuilt import CONSOLE_TOOLS, BASIC_MATH_TOOLS  # lists of Tool objects
+from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, CONSOLE_TOOLS
 
-load_dotenv()  # take environment variables from .env file (if exists)
+from shared_engine import llm_engine
 
 logging.basicConfig(level=logging.INFO)
 
-# 1) LLM engine (model/key via env)
-llm = OpenAIEngine(model="gpt-4o")
-
-# 2) ReAct-style Orchestrator (iterative tool-use)
 orchestrator = ReActAgent(
     name="MathOrchestrator",
     namespace="examples",
     description="Orchestrates math + console tools to solve multi-step arithmetic tasks.",
-    llm_engine=llm,
+    llm_engine=llm_engine,
     records_window=20,    # send-window (turns) to the model
     tool_calls_limit=15,  # max *non-return* tool calls per run
     context_enabled=True,
 )
 
-# 3) Register tool lists
-orchestrator.batch_register(BASIC_MATH_TOOLS)
-orchestrator.batch_register(CONSOLE_TOOLS)
+orchestrator.register_tools(BASIC_MATH_TOOLS)
+orchestrator.register_tools(CONSOLE_TOOLS)
 
-# 4) Register the pi constant
-orchestrator.register_constant("PI", math.pi, "Use ONLY THIS constant in place of a literal or float for any calculations that involve it.")
+orchestrator.register_constant(
+    math.pi, "PI",
+    "Use ONLY THIS constant in place of a literal or float for any calculations that involve it.",
+)
 
-# 4) Task (schema-first: mapping with 'prompt')
 task = """
 1) Compute the area of a circle with a radius of 5 [A(r) = pi * r^2].
 2) Compute the length of the hypotenuse of a triangle with legs a=3, b=4
@@ -46,5 +50,6 @@ Print each result as #) <question>: <answer> and print them IN THE ORDER GIVEN O
 final_result = orchestrator.invoke({"prompt": task})
 
 print(f"\nFinal Result: {final_result.result}")
-from pprint import pprint
-pprint(orchestrator.blackboard)
+
+print("\nExecuted calls:\n")
+pprint(orchestrator.get_conversation()[-1].statements)

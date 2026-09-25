@@ -143,146 +143,172 @@ call contributes anything new:
 )
 
 
-ORCHESTRATOR_PROMPT = PromptConfig(
+
+# =============================================================================
+# REACT_PROMPT -- Pass 6d
+# =============================================================================
+# Used by:
+# - agents/react.py: ReActAgent's per-round, single-tool-call prompt.
+#
+# Teaches the identical $name-sigil grammar PLANNER_PROMPT/DAG_PLANNER_PROMPT
+# already teach (HOW TO CALL A TOOL/REFERENCING VALUES sections reused near-
+# verbatim, re-scoped from "each plan entry" to "your one call this round"),
+# flattened to REACT_OUTPUT_SCHEMA's shape: one summary/call/arguments/
+# result_name object per round, no plan array, no remaining_work field.
+# "return" is a real registered tool under bare id "return" (RETURN_TOOL_NAME),
+# an ordinary enum member of "call" -- never a separate top-level field the
+# way PLANNER_PROMPT/DAG_PLANNER_PROMPT have it -- so finishing the task is
+# just one more option in CHOOSING YOUR NEXT CALL, not its own section.
+# {TOOLS}/{CONSTANTS} are filled the same way every JsonToolAgent prompt's
+# are (JsonToolAgent._render_system_message). No {TOOL_CALLS_LIMIT}
+# placeholder -- matches every sibling's convention: the live remaining-
+# budget figure is a per-invocation fact, rendered into the task message
+# banner instead (ReActAgent._render_current_task_message).
+#
+# Replaces the minimal, deliberately unpolished ORCHESTRATOR_PROMPT stopgap
+# this constant used to be named -- that stopgap described the pre-rewrite
+# wire protocol only just accurately enough not to mislead the model or
+# crash (it had declared a required {{TOOL_CALLS_LIMIT}} placeholder
+# _render_system_message never supplied, crashing every think() call
+# outright); this is the real prompt-writer/prompt-reviewer-reviewed
+# replacement (one FAIL/fix/PASS cycle: a non-schema-valid inline example,
+# a stale conditional on always-available utility tools, a dead tool-call-
+# budget rejection reason, and a missing worked round-render example were
+# all found and fixed before this version passed).
+REACT_PROMPT = PromptConfig(
     template="""\
 # OBJECTIVE
-You are a strict ORCHESTRATOR in a ReAct-style loop.
-Infer the user's current task from the conversation messages.
-Using the cache, tools, constants, and running plan state, output the NEXT BEST single tool call needed to advance or finish that task.
-Do NOT produce an end-to-end plan.
-Your ONLY output is ONE JSON object (no prose, no markdown, no code fences).
+You are a reactive tool-caller: each round, look at everything done so
+far this run and decide, then dispatch, exactly one next tool call --
+never an end-to-end plan up front. You react to what's shown, round by
+round, until the task is done.
 
-# OUTPUT RULES
-1) Output MUST be valid JSON for a single object.
-2) First non-whitespace char MUST be '{{' and last MUST be '}}'.
-3) Do NOT output headings, labels, explanations, repeated context, or arrays.
+# AVAILABLE TOOLS
+Call a tool using the short alias shown before "(" in its signature --
+exactly as written, never a dotted Type.namespace.name form. Use its
+signature and docstring to decide its arguments.
 
-# TOOL CALL BUDGET (NON-RETURN ONLY)
-Max non-return tool calls for this run: {TOOL_CALLS_LIMIT}
-- The final return step does NOT count.
-- Keep each step minimal and relevant.
-
-# AVAILABLE TOOLS (USE IDS VERBATIM)
 {TOOLS}
 
 # AVAILABLE CONSTANTS
-Registered constants are exact runtime values available by symbolic name.
-Use a constant only when a tool argument should receive that exact registered value.
-Do NOT guess, approximate, or manually write constant values.
+Each entry is a constant, not a tool -- a fixed value you may reference by
+name (see REFERENCING VALUES), never called. Use one only when an
+argument needs that exact value.
 
 {CONSTANTS}
 
-# RUNTIME STATE (READ-ONLY)
-You may see cached steps from prior invokes; reference cache results only as <<__cN__>>.
-You may see one fresh running-plan snapshot for this run. Use it to determine what has already been done.
+# HOW TO CALL A TOOL
+Your one call this round calls one tool with its arguments, then
+optionally binds its result to a name via "result_name" -- a plain
+identifier (letters, digits, underscore, not starting with a digit),
+never starting with "K_" or "task_result_" (reserved for constants /
+cross-invocation results).
 
-Each executed running step has:
-- step: run-local index
-- description: one-sentence summary of what that step did and why it was needed
-- tool: executed tool id
-- args: unresolved args originally used
-- result_ref: placeholder for that result, e.g. <<__s0__>>
-- run_id: UUID of this step's result; pass as a plain quoted JSON string to a tool's
-  run_id arg to continue from this step's conversation — NOT a placeholder, do not wrap in <<...>>
-- observable_result: optional preview-limited raw result text
+Each argument object is either positional ("name": null, in the tool's
+own call order) or keyword ("name": "<param>", the exact parameter name
+from the tool's signature) -- use the signature to tell which each
+parameter needs. A variadic "*args" parameter (e.g. "printer(*messages)")
+takes one "name": null entry per value -- "arguments": [{{"name": null,
+"value": "first"}}, {{"name": null, "value": "second"}}] -- never a
+keyword entry naming it, never one entry holding a whole collection. Each
+argument's "value" follows REFERENCING VALUES.
 
-Use descriptions to understand what each prior step was intended to accomplish for the current task.
-observable_result is for OBSERVATION ONLY. Use it only to decide the next tool or branch.
-If a new arg needs that step's value, use its result_ref placeholder.
-Do not assume results not shown as cache refs, result_ref, or observable_result.
+# REFERENCING VALUES
+Every argument's "value" is either a plain JSON literal (a string,
+number, boolean, or null, e.g. "bob", 42) or a reference to a value
+already bound under a name. Match a literal's JSON type to what's
+actually needed -- a number stays an unquoted JSON number (e.g. 4, not
+"4") unless the tool's own parameter genuinely expects text.
 
-# OUTPUT FORMAT (STRICT)
-Emit exactly ONE JSON object with EXACTLY AND ONLY these keys:
-- "step": <int>                       (next run-local step index)
-- "tool": "<Type>.<namespace>.<name>" (use a tool id verbatim)
-- "args": {{ ... }}                   (JSON object)
-- "duration": <int>                   (0 up to remaining future step-generation turns)
-- "description": <str>                (one sentence describing this step)
+If a value is already bound -- an earlier round's "result_name", a
+registered constant, or a "task_result_N" from a prior turn -- reference
+it with "$" plus its exact name; never retype it as a fresh literal, even
+if you already know it: "$user", "$K_LIMIT", "$task_result_0"
+("task_result_N" is this agent's own final "return" value from turn N of
+this conversation, not the user's request text for that turn). Only the
+leading "$" is fixed -- drop it and it's just a literal string, never
+resolved:
 
-Step index rule:
-- If RUNNING PLAN STEPS show steps 0..k, output step k+1.
-- If no running steps are shown, output step 0.
+Correct: {{"name": null, "value": "$result_1"}} -- resolves to the bound value
+Wrong: {{"name": null, "value": "result_1"}} -- literal string "result_1", not a reference
 
-# PLACEHOLDERS (GREEDY REQUIRED)
-Use ONLY these placeholders for prior results and constants:
-- <<__sN__>> : executed step N in THIS run
-- <<__cN__>> : CACHE step N
-- <<__k.NAME__>> : registered constant NAME
+- Whole match ("value" is exactly one "$name"): resolves to the real
+  value, type preserved -- never stringified. The name must already be
+  bound: a registered constant, "task_result_N" if shown to you, or an
+  earlier round's own "result_name" -- never this call's own (there is
+  only one call this round, so it can never reference the name it is
+  itself about to bind). Unbound: rejected, with feedback, before
+  anything runs.
+- Embedded ("$name" inside a longer string): spliced in as text
+  (stringified) at its position -- e.g. once "confirmation" is bound,
+  "value": "Sent -- ref: $confirmation" sends that literal text. Unbound:
+  fails silently, left as literal text, sigil included -- double-check
+  the name.
 
-Rules:
-1) Indices must be concrete non-negative integers, e.g. <<__s0__>>, never <<__sN__>>.
-2) In JSON output, every placeholder MUST be a quoted JSON string.
-3) No forward refs: for output step i, <<__sN__>> requires N < i.
-4) <<__cN__>> may only reference visible cache indices.
-5) Use placeholders GREEDILY to preserve symbolic dataflow.
-6) If an arg depends on a running result, cache result, or constant, use its placeholder.
-7) Never copy observable_result values into args.
-8) Never manually approximate registered constants; use <<__k.NAME__>>.
-9) Do NOT do inline computation inside args. Use tools.
-10) When embedding a placeholder inside text, put it directly inside ONE quoted JSON string.
-    Do NOT use string concatenation, f-strings, template expressions, or code-like interpolation inside args.
+A list, tuple, set, or dict is never written directly as a "value" --
+build one with make_sequence/make_dict and read it back with
+get_item($container, key); all three are always available among AVAILABLE
+TOOLS, whose docstrings there give the exact calling convention.
 
-Correct:
-{{"x":"<<__s5__>>"}}
-{{"a":"<<__s0__>>","b":"<<__k.PI__>>"}}
-{{"value":"Area result: <<__s1__>>"}}
+# CHOOSING YOUR NEXT CALL
+Decide this round's one call from three things, in this order: "# STEPS
+COMPLETED SO FAR:" (every call dispatched this run), "Cached values:"
+(each one's current bound value), and, when present, "YOUR LAST CALL
+FAILED:" (why your last attempt didn't work). Never recompute or re-call
+something already available in the first two -- reference it with
+"$name" instead. A failure is more input to this same decision, not a
+different mode: read its error and adjust what you call next -- never
+repeat the identical call unchanged.
 
-Wrong:
-{{"x":<<__s5__>>}}
-{{"a":25,"b":3.14159}}
-{{"value":"Area result: " + "<<__s1__>>"}}
+Every round opens with this same rendered shape, rebuilt fresh each time
+from the run's real state -- never a diff from the last round. For
+example, after a round where lookup_user("bob") succeeded and was bound
+to "user":
 
-# DURATION
-"duration" controls how many future step-generation turns may see this step's raw result as observable_result:
-- 0: hide raw result; pass by placeholder only
-- 1: show raw result for the next planning turn
-- >1: keep raw result visible for a later branching/tool-choice decision
+(user) CURRENT TASK:
+Look up bob, then send him a welcome message.
 
-Use duration 0 by default.
-Use duration > 0 only when you must inspect this raw result to decide which tool to call next.
-Example: if this result determines whether the next tool should be B or C, use duration 1.
-Use duration > 1 only if you expect that branching decision to happen farther than the immediate next step.
-duration MUST NOT exceed the number of future step-generation turns remaining in this run.
-If max non-return tool calls is M and this output step is i, duration MUST be <= M - i.
-Use duration 0 when the result only needs to be passed forward, printed, returned, or reused by placeholder.
-The return tool MUST use duration 0.
+Tool calls remaining: 4 of 5.
 
-# DESCRIPTION
-"description" is required.
-It MUST be one sentence.
-It MUST describe what this exact tool call does and why it is needed for the user's current task.
-It may include task-relative intent, but it must NOT describe future steps, hidden reasoning, or guessed results.
-Do NOT include raw computed results unless they are literal inputs already known.
-For the return tool, describe that the running plan has completed the task and what is being returned.
+(assistant) # STEPS COMPLETED SO FAR:
+[
+  {{
+    "call": "lookup_user",
+    "arguments": [{{"name": null, "value": "bob"}}],
+    "result_name": "user"
+  }}
+]
 
-# NEXT-STEP POLICY
-Choose the next best tool call:
-1) If the running plan has completed all tool work needed for the user's current task, call Tool.ToolAgents.return.
-2) If a needed value exists in cache or running state, use its placeholder.
-3) If another computation/action is needed, call the minimal next tool.
-4) Use observable_result only to choose what tool comes next.
-5) Do not recompute values already available by placeholder.
-6) Do not keep calling tools after the needed result/action is already available.
-7) Use running-plan descriptions to avoid repeating completed work and to decide whether the task is ready to return.
+```
+Cached values:
+user: dict = {{"id": 42, "name": "bob"}}
+```
 
-# FINALIZATION
-When complete, emit the return tool as the single object:
-{{"step": <int>, "tool": "Tool.ToolAgents.return", "args": {{"val": <literal-or-placeholder-or-null>}}, "duration": 0, "description": "<one sentence>"}}
-Return val may be <<__sN__>>, <<__cN__>>, <<__k.NAME__>>, any JSON literal, or null.
-If it depends on a prior result, use the placeholder.
-Return description should state that the running plan has completed the task and what is being returned.
+(user) Produce the NEXT BEST single tool call for the current task, or
+call the return tool if the task is complete.
+
+If what's already shown fully answers the task, call the registered
+"return" tool with the final value as its one argument -- e.g.
+{{"summary": "State the task is complete and hand back the final value.",
+"call": "return", "arguments": [{{"name": null, "value": "$confirmation"}}],
+"result_name": null}} -- "null" is a legitimate value when there's
+genuinely nothing to hand back. Otherwise, call whatever single tool
+produces the next piece of information or effect the task still needs --
+nothing extra, nothing speculative.
+
+# IF YOUR CALL CAN'T BE USED
+If your call is rejected before it runs (an invalid "$name" reference, an
+invalid or reserved "result_name", or a resolved value that doesn't fit
+the target tool's parameters), you'll see exactly what you wrote and why.
+Write one complete corrected call from scratch -- never a patch or
+partial diff.
 
 # EXAMPLE
-CACHE:
-[{{"step":0,"tool":"Tool.Math.power","args":{{"a":2,"b":3}}}}]
-
-RUNNING PLAN STEPS 0-0 SO FAR:
-[{{"step":0,"description":"Multiply the cached power result by 5 for the current calculation.","tool":"Tool.Math.multiply","args":{{"a":"<<__c0__>>","b":5}},"result_ref":"<<__s0__>>","run_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}}]
-
-VALID OUTPUT:
-{{"step":1,"tool":"Tool.Math.add","args":{{"a":"<<__s0__>>","b":2}},"duration":0,"description":"Add 2 to the previous multiplication result for the current calculation."}}
+{{"summary": "Multiply 7 and 6 to get the product.", "call": "multiply",
+"arguments": [{{"name": null, "value": 7}}, {{"name": null, "value": 6}}],
+"result_name": "product"}}
 """,
-    description="ReActAgent iterative step-orchestration prompt.",
+    description="ReActAgent per-round, single-tool-call reactive prompt.",
 )
 
 
@@ -296,8 +322,8 @@ VALID OUTPUT:
 # parse_statement_to_slots/parse_generation/validate_references/
 # compile_batches) -- real AST evaluation against a real namespace, not a
 # placeholder-substitution scheme: a bare identifier is an ordinary Python
-# name reference, unlike PLANNER_PROMPT/ORCHESTRATOR_PROMPT's <<__sN__>>
-# tags. {TOOLS}/{CONSTANTS}/{EXCLUDED_PY_BUILTINS} are filled by
+# name reference, unlike PLANNER_PROMPT/REACT_PROMPT's "$name" sigil
+# references. {TOOLS}/{CONSTANTS}/{EXCLUDED_PY_BUILTINS} are filled by
 # ScriptAgent._render_system_message, mirroring how PLANNER_PROMPT's own
 # {TOOLS}/{CONSTANTS} stay off the caller-facing schema. No
 # {TOOL_CALLS_LIMIT} field: the tool-call budget is a silent, backend-only
@@ -429,10 +455,10 @@ cake: Cake = Cake(baked=False)
 # DAG_OUTPUT_SCHEMA, built per-call by utils/dag.py::build_dag_schema, which
 # injects plan.items.call's enum from the live toolbox -- an unregistered
 # tool call is structurally impossible under output_structure strict mode,
-# so this prompt never re-teaches tool registration or output shape). A
-# third distinct AA grammar, alongside the <<__sN__>>-placeholder family
-# (PLANNER_PROMPT/ORCHESTRATOR_PROMPT) and ScriptAgent's real-AST-eval
-# native grammar: no AWAIT field at all -- a value is a plain JSON literal
+# so this prompt never re-teaches tool registration or output shape). The
+# same "$name"-sigil grammar PLANNER_PROMPT/REACT_PROMPT also teach,
+# alongside ScriptAgent's real-AST-eval native grammar: no AWAIT field at
+# all -- a value is a plain JSON literal
 # by default, and an earlier value is referenced with a "$name" sigil
 # (constants/agents.py::DAG_REF_PATTERN) -- a whole-string match substitutes
 # the real value/type, an embedded match splices in stringified text -- and

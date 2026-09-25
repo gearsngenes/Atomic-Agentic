@@ -124,10 +124,10 @@ class TestToolAgentConstruction:
         assert agent.system_prompts["plan_first"] is PLANNER_PROMPT
 
     def test_react_agent_registers_prompt_in_system_prompts(self) -> None:
-        from atomic_agentic.agents.prompts import ORCHESTRATOR_PROMPT
+        from atomic_agentic.agents.prompts import REACT_PROMPT
         agent = make_react_agent([])
         assert "reason_then_act" in agent.system_prompts
-        assert agent.system_prompts["reason_then_act"] is ORCHESTRATOR_PROMPT
+        assert agent.system_prompts["reason_then_act"] is REACT_PROMPT
 
     @pytest.mark.parametrize("value", [None, 0, 1, 5])
     def test_tool_calls_limit_accepts_none_and_non_negative_int(

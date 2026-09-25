@@ -184,7 +184,7 @@ Atomic-Agentic also supports autonomous **tool-calling agent classes**.
 ```python
 from atomic_agentic.agents import PlanActAgent
 from atomic_agentic.llm import OpenAIEngine
-from atomic_agentic.tools.prebuilt import MATH_TOOLS
+from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS
 
 engine = OpenAIEngine(model="gpt-4.1-mini")
 
@@ -195,15 +195,16 @@ agent = PlanActAgent(
     llm_engine=engine,
 )
 
-agent.batch_register(MATH_TOOLS)
+agent.register_tools(BASIC_MATH_TOOLS)
 
 result = agent.invoke({"prompt": "Compute (6*7) + 5. Return only the number."})
 print(result.result)
 ```
 
-**Note:** `PlanActAgent`/`ReActAgent` plan in JSON and are still fully
-supported, but are superseded by `ScriptAgent` below (they now emit a
-`FutureWarning` on construction naming it as the migration target).
+**Note:** `PlanActAgent` plans an entire batch of tool calls upfront, in
+one JSON-structured generation; `ReActAgent` decides and dispatches one
+tool call at a time instead, reacting to each result before choosing the
+next -- see `examples/ReAct_Examples/` for worked examples of the latter.
 
 ------------------------------------------------------------------------
 

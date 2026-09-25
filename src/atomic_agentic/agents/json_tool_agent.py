@@ -152,6 +152,17 @@ class JsonToolAgent(Agent, ABC):
     _TOOL_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace")
     _CONSTANT_COLLISION_POLICIES: ClassVar[tuple[str, ...]] = ("raise", "skip", "replace", "suffix")
 
+    #: Effective tool ids no subclass instance may ever register, remove, or
+    #: replace through the public API -- seeded only via ``_seed_reserved_tool``,
+    #: bypassing ``register_tool`` entirely. A class attribute (not instance
+    #: state) so it's active before ``__init__`` ever runs -- closes an
+    #: ordering gap an instance-level flag set only after ``super().__init__()``
+    #: would leave open (a caller's own construction-time ``tools=`` list is
+    #: processed inside ``super().__init__()`` itself, before a subclass gets a
+    #: chance to set anything post-super). Empty by default; each subclass that
+    #: needs reserved tools overrides this.
+    _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset()
+
     def __init__(
         self,
         name: str,
@@ -367,17 +378,59 @@ class JsonToolAgent(Agent, ABC):
     def remove_tool(self, tool_id: str) -> bool:
         """Remove the tool stored under ``tool_id``.
 
+        Raises
+        ------
+        ToolRegistrationError
+            If ``tool_id`` is reserved (see ``_RESERVED_TOOL_NAMES``) —
+            reserved tools can never be removed through this API, regardless
+            of whether they're actually present.
+
         Returns
         -------
         bool
             ``True`` if the tool was present and removed; ``False`` if it was
             not registered.
         """
+        if tool_id in self._RESERVED_TOOL_NAMES:
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: {tool_id!r} is reserved "
+                "and cannot be removed."
+            )
         return self._toolbox.pop(tool_id, None) is not None
 
     def clear_tools(self) -> None:
-        """Remove all registered tools."""
-        self._toolbox.clear()
+        """Remove every registered tool except reserved ones (see
+        ``_RESERVED_TOOL_NAMES``) — reserved tools are never cleared,
+        regardless of how they were seeded."""
+        self._toolbox = {
+            tid: tool for tid, tool in self._toolbox.items()
+            if tid in self._RESERVED_TOOL_NAMES
+        }
+
+    def _seed_reserved_tool(
+        self, tool: AtomicInvokable | Callable, name: str, description: Optional[str] = None,
+    ) -> None:
+        """
+        Directly insert ``tool`` into the toolbox under ``name``, bypassing
+        ``register_tool`` entirely — the one sanctioned way to populate a
+        reserved effective id (``register_tool``/``register_tools`` reject
+        any id in ``self._RESERVED_TOOL_NAMES`` outright). Callables are
+        toolified first, exactly like ``register_tool``'s own callable
+        branch; ``AtomicInvokable`` instances are stored as-is. Intended to
+        be called from a subclass's own ``__init__``, after
+        ``super().__init__()``, once per reserved name that subclass
+        declares.
+        """
+        if isinstance(tool, AtomicInvokable):
+            invokable = tool
+        else:
+            invokable = toolify(
+                component=tool,
+                name=name,
+                description=description or tool.__doc__,
+                namespace=self.name,
+            )
+        self._toolbox[name] = invokable
 
     # ------------------------------------------------------------------ #
     # Constants Helpers
@@ -700,6 +753,12 @@ class JsonToolAgent(Agent, ABC):
         self._validate_tool_alias(alias)
         effective_id = alias if alias is not None else invokable.name
 
+        if effective_id in self._RESERVED_TOOL_NAMES:
+            raise ToolRegistrationError(
+                f"{type(self).__name__}.{self.name}: {effective_id!r} is "
+                "reserved and cannot be registered through this API."
+            )
+
         if effective_id in self._toolbox:
             if policy == "raise":
                 raise ToolRegistrationError(
@@ -813,6 +872,17 @@ class JsonToolAgent(Agent, ABC):
                 raise ToolRegistrationError(
                     f"{type(self).__name__}.{self.name}: unsupported item type "
                     f"{type(item).__name__!r} at index {index}."
+                )
+
+        # Reserved-name check — checked once here across every candidate,
+        # regardless of which branch above produced it, and before the
+        # intra-batch dedup below (a reserved-name collision is always an
+        # error, never subject to name_collision_policy).
+        for effective_id, _ in candidates:
+            if effective_id in self._RESERVED_TOOL_NAMES:
+                raise ToolRegistrationError(
+                    f"{type(self).__name__}.{self.name}: {effective_id!r} is "
+                    "reserved and cannot be registered through this API."
                 )
 
         # Intra-batch dedup — always raises regardless of name_collision_policy.

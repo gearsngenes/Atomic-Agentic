@@ -55,71 +55,11 @@ THINKING_ROUNDS_PARAM: ParamSpec = ParamSpec(
     description="Number of thinking rounds ThinkingAgent runs before replying. Must be a concrete int >= 0; 0 skips thinking entirely and replies immediately."
 )
 
-# =============================================================================
-# JsonToolAgent LLM-output JSON fields
-# =============================================================================
-# Used by:
-# - agents/planact.py, agents/react.py: generated step validation and BlackboardSlot creation
-# - models/agents/blackboard_models.py: BlackboardSlot.from_dict support
-#
-# These fields are centralized because JsonToolAgent prompt contracts and
-# parser/validator code need to agree on the same LLM-output protocol.
-#
-# Important runtime contract:
-# - "tool" and "args" are the minimum required fields for executable tool calls.
-# - "step" is allowed but advisory. Runtime owns the authoritative step index.
-#   Prompts may still strongly instruct the LLM to include "step" because that
-#   improves output regularity, but parser/runtime code must tolerate omission.
-
-
-STEP_FIELD = "step"
-TOOL_FIELD = "tool"
-ARGS_FIELD = "args"
-AWAIT_FIELD = "await"
-DURATION_FIELD = "duration"
-DESCRIPTION_FIELD = "description"
-
+# RETURN_VALUE_FIELD is the kwargs key DagAgent/PlanActAgent use for their
+# synthesized RETURN_ALIAS call's resolved value (utils/dag.py's
+# parse_generation/resolve_call_args), and the parameter name return_tool's
+# own real signature uses (agents/tools.py's `_return(val)`).
 RETURN_VALUE_FIELD = "val"
-
-
-BASE_STEP_FIELDS = frozenset(
-    {
-        STEP_FIELD,
-        TOOL_FIELD,
-        ARGS_FIELD,
-    }
-)
-
-REQUIRED_BASE_STEP_FIELDS = frozenset(
-    {
-        TOOL_FIELD,
-        ARGS_FIELD,
-    }
-)
-
-
-PLAN_FIELDS = BASE_STEP_FIELDS | frozenset(
-    {
-        AWAIT_FIELD,
-    }
-)
-
-REQUIRED_PLAN_FIELDS = REQUIRED_BASE_STEP_FIELDS
-
-
-REACT_FIELDS = BASE_STEP_FIELDS | frozenset(
-    {
-        DURATION_FIELD,
-        DESCRIPTION_FIELD,
-    }
-)
-
-REQUIRED_REACT_FIELDS = REQUIRED_BASE_STEP_FIELDS | frozenset(
-    {
-        DURATION_FIELD,
-        DESCRIPTION_FIELD,
-    }
-)
 
 
 # =============================================================================
@@ -453,8 +393,66 @@ PLANACT_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
-# Matches a `$`-sigil reference inside a DagAgent- or PlanActAgent-generated
-# `value`/`return` string: `$` followed by an identifier-legal name,
+# ReActAgent's own output_structure schema (agent-taxonomy `reactagent-
+# models` design record) -- the flattened form of PLANACT_OUTPUT_SCHEMA's
+# per-`plan`-item shape: `call`/`arguments`/`result_name` promoted to the
+# top level directly, no `plan` array wrapper (exactly one call per round,
+# never a list of them) and no `remaining_work` field (a per-step family has
+# no continuation-round concept for a model to signal -- termination is
+# simply calling the registered return tool, an ordinary `call` value, not a
+# separate field). Field order matters (constrained decoding assigns zero
+# probability to a token generated for a field declared after the one that
+# would need it) -- `summary` first, same reasoning-before-decision
+# principle as DAG_OUTPUT_SCHEMA/PLANACT_OUTPUT_SCHEMA.
+REACT_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "call", "arguments", "result_name"],
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": (
+                "Briefly describe what this one step accomplishes and why "
+                "it's needed now."
+            ),
+        },
+        "call": {"type": "string", "enum": []},
+        "arguments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "value"],
+                "properties": {
+                    "name": {"type": ["string", "null"]},
+                    "value": {
+                        "type": ["number", "boolean", "null", "string"],
+                        "description": (
+                            "A literal value (any JSON scalar), or a "
+                            "string. A string that is *exactly* '$name' "
+                            "(nothing else) refers to an earlier "
+                            "result_name or a K_/task_result_ value, "
+                            "substituted with its real value and type. "
+                            "A '$name' appearing inside a longer string "
+                            "is spliced in as text (stringified) at that "
+                            "position. A '$name' that doesn't match "
+                            "anything is left as literal text, sigil "
+                            "included -- not an error. To build a "
+                            "list/tuple/set or dict, call "
+                            "make_sequence/make_dict instead of writing "
+                            "a container here."
+                        ),
+                    },
+                },
+            },
+        },
+        "result_name": {"type": ["string", "null"]},
+    },
+}
+
+# Matches a `$`-sigil reference inside a DagAgent-, PlanActAgent-, or
+# ReActAgent-generated `value`/`return` string: `$` followed by an
+# identifier-legal name,
 # captured as group 1. Used two ways by utils/dag.py -- `DAG_REF_PATTERN.fullmatch(s)` (is the
 # WHOLE string one reference?) and `DAG_REF_PATTERN.finditer(s)`/`.sub(s)`
 # (find/splice every embedded occurrence) -- one pattern serves both, no
@@ -487,21 +485,7 @@ __all__ = [
     "DUNDER_ATTRIBUTE_PATTERN",
     "UNSUPPORTED_EXPR_LABELS",
     "FINAL_ROUND_WARNING",
-    # LLM step fields
-    "STEP_FIELD",
-    "TOOL_FIELD",
-    "ARGS_FIELD",
-    "AWAIT_FIELD",
-    "DURATION_FIELD",
-    "DESCRIPTION_FIELD",
     "RETURN_VALUE_FIELD",
-    # LLM step schemas
-    "BASE_STEP_FIELDS",
-    "REQUIRED_BASE_STEP_FIELDS",
-    "PLAN_FIELDS",
-    "REQUIRED_PLAN_FIELDS",
-    "REACT_FIELDS",
-    "REQUIRED_REACT_FIELDS",
     # Canonical return tool
     "RETURN_TOOL_NAME",
     "RETURN_TOOL_NAMESPACE",
@@ -512,4 +496,6 @@ __all__ = [
     "DAG_REF_PATTERN",
     # PlanActAgent output_structure schema
     "PLANACT_OUTPUT_SCHEMA",
+    # ReActAgent output_structure schema
+    "REACT_OUTPUT_SCHEMA",
 ]

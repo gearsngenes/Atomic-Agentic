@@ -9,6 +9,7 @@ from ..constants.agents import (
     DAG_OUTPUT_SCHEMA,
     DAG_REF_PATTERN,
     PLANACT_OUTPUT_SCHEMA,
+    REACT_OUTPUT_SCHEMA,
     RETURN_ALIAS,
     RETURN_VALUE_FIELD,
     TASK_RESULT_PREFIX,
@@ -19,7 +20,9 @@ from ..models.agents.blackboard_models import DagToolCall
 __all__ = [
     "build_dag_schema",
     "build_planact_schema",
+    "build_react_schema",
     "parse_generation",
+    "parse_react_call",
     "find_sigil_refs",
     "find_cascade_failures",
     "resolve_sigil_value",
@@ -28,6 +31,7 @@ __all__ = [
     "compile_batches",
     "resolve_call_args",
     "render_completed_as_json",
+    "render_failed_as_json",
     "render_completed_as_code",
     "render_cache_snapshot",
 ]
@@ -54,6 +58,20 @@ def build_planact_schema(tool_names: Iterable[str]) -> dict[str, Any]:
     """
     schema = deepcopy(PLANACT_OUTPUT_SCHEMA)
     schema["properties"]["plan"]["items"]["properties"]["call"]["enum"] = sorted(tool_names)
+    return schema
+
+
+def build_react_schema(tool_names: Iterable[str]) -> dict[str, Any]:
+    """
+    Sibling to ``build_dag_schema``/``build_planact_schema`` -- identical
+    pattern, built off ``REACT_OUTPUT_SCHEMA`` instead. No restriction
+    parameter -- a caller wanting the enum narrowed to ``return`` only (the
+    budget-boundary case) passes a pre-narrowed ``tool_names`` iterable
+    itself (e.g. ``[RETURN_TOOL_NAME]``); this function always does exactly
+    one thing with whatever it's given.
+    """
+    schema = deepcopy(REACT_OUTPUT_SCHEMA)
+    schema["properties"]["call"]["enum"] = sorted(tool_names)
     return schema
 
 
@@ -137,6 +155,42 @@ def parse_generation(payload: dict[str, Any]) -> tuple[list[DagToolCall], Option
         )
 
     return calls, remaining_work
+
+
+def parse_react_call(payload: dict[str, Any]) -> DagToolCall:
+    """
+    Normalize ``REACT_OUTPUT_SCHEMA``'s already-schema-validated flat
+    payload into the one ``DagToolCall`` it describes. Pure shape
+    unpacking, no decoding of any kind (matches ``parse_generation``'s own
+    contract) -- every ``arguments[].value`` is carried through byte-for-
+    byte; a string may contain a ``$name`` sigil, resolved later at prepare
+    time (``resolve_call_args``), never here.
+
+    No malformed-shape failure mode -- every required key is schema-
+    guaranteed present and type-correct; this function never raises.
+
+    ``payload["summary"]`` is never read -- decoding-order scaffold only,
+    same treatment ``DAG_OUTPUT_SCHEMA``/``PLANACT_OUTPUT_SCHEMA``'s own
+    ``"summary"`` field already gets. No ``plan``-array loop (there is none
+    -- exactly one call per payload) and no ``RETURN_ALIAS`` synthesis
+    (``return`` is an ordinary, really-dispatched ``call`` value in this
+    family, never a separate top-level field to synthesize a sentinel call
+    from).
+    """
+    args: list[Any] = []
+    kwargs: dict[str, Any] = {}
+    for arg in payload["arguments"]:
+        if arg["name"] is None:
+            args.append(arg["value"])
+        else:
+            kwargs[arg["name"]] = arg["value"]
+
+    return DagToolCall(
+        identifier=payload["result_name"],
+        tool=payload["call"],
+        args=tuple(args),
+        kwargs=kwargs,
+    )
 
 
 def find_sigil_refs(value: Any) -> frozenset[str]:
@@ -492,6 +546,32 @@ def render_completed_as_json(calls: list[DagToolCall]) -> str:
     if not calls:
         return ""
     return json.dumps([call.serialize() for call in calls], indent=2)
+
+
+def render_failed_as_json(calls: list[DagToolCall]) -> str:
+    """
+    Render ``calls`` as a JSON array of leaner per-call dicts, identical
+    shape to ``render_completed_as_json``'s own wire-schema-vocabulary
+    reconstruction (via ``DagToolCall.serialize()``), plus one additional
+    key per entry: ``"error"``, the failed call's own
+    ``str(call.exception)``.
+
+    Exists specifically for a family (``ReActAgent``) whose
+    ``failed_statements`` persist into every future round's rendered
+    snapshot, unlike ``DagAgent``'s one-time ``continuation_note`` --
+    neither ``DagToolCall.serialize()`` nor ``render_completed_as_json``
+    carries exception text, and nothing else in this file does either.
+
+    Returns ``""`` for an empty ``calls`` list, matching
+    ``render_completed_as_json``'s own empty-input contract -- the caller
+    supplies its own fallback text.
+    """
+    if not calls:
+        return ""
+    return json.dumps(
+        [{**call.serialize(), "error": str(call.exception)} for call in calls],
+        indent=2,
+    )
 
 
 def render_completed_as_code(
