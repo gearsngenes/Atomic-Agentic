@@ -412,7 +412,7 @@ REACT_OUTPUT_SCHEMA: dict[str, Any] = {
         "summary": {
             "type": "string",
             "description": (
-                "Briefly describe what this one step accomplishes and why "
+                "Briefly describe what this one call accomplishes and why "
                 "it's needed now."
             ),
         },

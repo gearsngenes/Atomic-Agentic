@@ -82,10 +82,12 @@ Wrong: {{"name": null, "value": "result_1"}} -- literal string "result_1", not a
   the name.
 
 A list, tuple, set, or dict is never written directly as a "value" --
-build one with make_sequence/make_dict and read it back with
-get_item($container, key), if they appear in AVAILABLE TOOLS (their own
-docstrings there give the exact calling convention); otherwise these
-operations are not available.
+build one with make_sequence/make_dict (always available among AVAILABLE
+TOOLS, whose own docstrings there give the exact calling convention), then
+reference it whole by its bound name wherever the whole container is
+needed. There is no tool to pull a single element back out of one -- only
+build a container when the whole thing, not one piece of it, is what a
+later step actually needs.
 
 # INTERPRETING THE TASK
 Before writing "plan", decide which of these applies to the task:
@@ -175,6 +177,21 @@ call contributes anything new:
 # a stale conditional on always-available utility tools, a dead tool-call-
 # budget rejection reason, and a missing worked round-render example were
 # all found and fixed before this version passed).
+#
+# 2026-09-26 refinement pass (CHOOSING YOUR NEXT CALL only, everything else
+# byte-identical): a live multi-agent run showed the model fabricating a
+# plausible-sounding long text value as a fresh literal argument instead of
+# referencing an already-bound result by "$name" -- worse than plain non-
+# compliance, since the fabricated text wasn't even a real copy of anything
+# the model had fully seen (only a truncated Cached-values preview). Fixed
+# by: disclosing that a preview can be truncated while "$name" still
+# resolves the complete value; completing the lookup_user/"user" walkthrough
+# with the "$name"-as-ordinary-argument call it previously omitted; and one
+# sentence covering both "holds for long values too" and "holds even when
+# the task calls it passing along/forwarding/summarizing". One prompt-writer
+# draft, one prompt-reviewer PASS (recommended trimming a redundant
+# parenthetical for token-margin safety, applied). 1494 -> 1591 tokens
+# (tiktoken cl100k_base, raw template), 9 tokens under the 1600 ceiling.
 REACT_PROMPT = PromptConfig(
     template="""\
 # OBJECTIVE
@@ -246,19 +263,23 @@ Wrong: {{"name": null, "value": "result_1"}} -- literal string "result_1", not a
   the name.
 
 A list, tuple, set, or dict is never written directly as a "value" --
-build one with make_sequence/make_dict and read it back with
-get_item($container, key); all three are always available among AVAILABLE
-TOOLS, whose docstrings there give the exact calling convention.
+build one with make_sequence/make_dict (always available among AVAILABLE
+TOOLS, whose own docstrings there give the exact calling convention), then
+reference it whole by its bound name wherever the whole container is
+needed. There is no tool to pull a single element back out of one -- only
+build a container when the whole thing, not one piece of it, is what a
+later call actually needs.
 
 # CHOOSING YOUR NEXT CALL
 Decide this round's one call from three things, in this order: "# STEPS
 COMPLETED SO FAR:" (every call dispatched this run), "Cached values:"
-(each one's current bound value), and, when present, "YOUR LAST CALL
-FAILED:" (why your last attempt didn't work). Never recompute or re-call
-something already available in the first two -- reference it with
-"$name" instead. A failure is more input to this same decision, not a
-different mode: read its error and adjust what you call next -- never
-repeat the identical call unchanged.
+(each one's current bound value -- long values may show a truncated
+preview, but "$name" resolves the complete original), and, when
+present, "YOUR LAST CALL FAILED:" (why your last attempt didn't work).
+Never recompute or re-call something already available in the first two
+-- reference it with "$name" instead. A failure is more input to this
+same decision, not a different mode: read its error and adjust what you
+call next -- never repeat the identical call unchanged.
 
 Every round opens with this same rendered shape, rebuilt fresh each time
 from the run's real state -- never a diff from the last round. For
@@ -286,6 +307,13 @@ user: dict = {{"id": 42, "name": "bob"}}
 
 (user) Produce the NEXT BEST single tool call for the current task, or
 call the return tool if the task is complete.
+
+(assistant) {{"summary": "Send bob a welcome message.", "call":
+"welcome_user", "arguments": [{{"name": null, "value": "$user"}}],
+"result_name": null}}
+
+This holds for long values too, and even when the task calls it passing
+along, forwarding, or summarizing: still "$name", never a rewritten copy.
 
 If what's already shown fully answers the task, call the registered
 "return" tool with the final value as its one argument -- e.g.

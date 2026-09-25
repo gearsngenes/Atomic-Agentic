@@ -13,7 +13,7 @@ import math
 from pprint import pprint
 
 from atomic_agentic.agents import ReActAgent
-from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, CONSOLE_TOOLS
+from atomic_agentic.tools.prebuilt import BASIC_MATH_TOOLS, CONSOLE_TOOLS, EXPONENT_TOOLS
 
 from shared_engine import llm_engine
 
@@ -31,6 +31,7 @@ orchestrator = ReActAgent(
 
 orchestrator.register_tools(BASIC_MATH_TOOLS)
 orchestrator.register_tools(CONSOLE_TOOLS)
+orchestrator.register_tools(EXPONENT_TOOLS)  # power/sqrt -- the task below needs both
 
 orchestrator.register_constant(
     math.pi, "PI",

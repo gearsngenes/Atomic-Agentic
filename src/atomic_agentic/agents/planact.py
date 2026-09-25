@@ -67,7 +67,7 @@ from typing import Any, Callable, ClassVar, Optional
 
 from .json_tool_agent import JsonToolAgent
 from .prompts import PLANNER_PROMPT
-from .tools import get_item, make_dict, make_sequence
+from .tools import make_dict, make_sequence
 from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD
 from ..core import AtomicInvokable
 from ..llm.base import LLMEngine
@@ -131,13 +131,17 @@ class PlanActAgent(JsonToolAgent):
         str, int, float, bool, complex, bytes, type(None),
     )
 
-    # A class attribute (active before __init__ runs) -- the three
+    # A class attribute (active before __init__ runs) -- the two
     # composite-value-building utility tools this family's schema text
     # tells the model to use. No return_tool entry -- PlanActAgent never
     # registers a real return tool (its return value comes from the
-    # synthesized RETURN_ALIAS call instead).
+    # synthesized RETURN_ALIAS call instead). No get_item entry -- dropped
+    # (2026-09-26, user call): too niche relative to make_sequence/
+    # make_dict/return, and its presence in AVAILABLE TOOLS was observed
+    # distracting live generations in agent-orchestrating-agent examples
+    # toward container-shaped detours a flat call sequence didn't need.
     _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset(
-        {"make_sequence", "make_dict", "get_item"}
+        {"make_sequence", "make_dict"}
     )
 
     def __init__(
@@ -190,12 +194,11 @@ class PlanActAgent(JsonToolAgent):
             constant_descriptions=constant_descriptions,
         )
         self._system_prompts["plan_first"] = PLANNER_PROMPT
-        # Seeded directly, bypassing register_tool -- all three are reserved
+        # Seeded directly, bypassing register_tool -- both are reserved
         # (self._RESERVED_TOOL_NAMES), and register_tool now rejects any
         # attempt to register something under a reserved id.
         self._seed_reserved_tool(make_sequence, "make_sequence")
         self._seed_reserved_tool(make_dict, "make_dict")
-        self._seed_reserved_tool(get_item, "get_item")
 
     # ------------------------------------------------------------------ #
     # Shared per-invocation helpers

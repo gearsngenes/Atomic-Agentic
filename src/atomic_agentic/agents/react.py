@@ -42,7 +42,7 @@ from typing import Any, Callable, ClassVar, Optional
 
 from .json_tool_agent import JsonToolAgent
 from .prompts import REACT_PROMPT
-from .tools import get_item, make_dict, make_sequence, return_tool
+from .tools import make_dict, make_sequence, return_tool
 from ..constants.agents import RETURN_TOOL_NAME
 from ..core import AtomicInvokable
 from ..llm.base import LLMEngine
@@ -94,11 +94,16 @@ class ReActAgent(JsonToolAgent):
     )
 
     # A class attribute (active before __init__ runs) — return_tool plus the
-    # three composite-value-building utility tools this family's schema text
+    # two composite-value-building utility tools this family's schema text
     # tells the model to use. Reserved so no caller can register a different
-    # tool under any of these ids, or remove/replace them once seeded.
+    # tool under any of these ids, or remove/replace them once seeded. No
+    # get_item entry -- dropped (2026-09-26, user call): too niche relative
+    # to make_sequence/make_dict/return, and its presence in AVAILABLE TOOLS
+    # was observed distracting live generations in agent-orchestrating-agent
+    # examples toward container-shaped detours a flat call sequence didn't
+    # need.
     _RESERVED_TOOL_NAMES: ClassVar[frozenset[str]] = frozenset(
-        {RETURN_TOOL_NAME, "make_sequence", "make_dict", "get_item"}
+        {RETURN_TOOL_NAME, "make_sequence", "make_dict"}
     )
 
     def __init__(
@@ -156,7 +161,7 @@ class ReActAgent(JsonToolAgent):
             constant_aliases=constant_aliases,
             constant_descriptions=constant_descriptions,
         )
-        # Seeded directly, bypassing register_tool -- all four are reserved
+        # Seeded directly, bypassing register_tool -- all three are reserved
         # (self._RESERVED_TOOL_NAMES), and register_tool now rejects any
         # attempt to register something under a reserved id, including this
         # one. return_tool's own bare name already equals RETURN_TOOL_NAME;
@@ -165,7 +170,6 @@ class ReActAgent(JsonToolAgent):
         self._seed_reserved_tool(return_tool, RETURN_TOOL_NAME)
         self._seed_reserved_tool(make_sequence, "make_sequence")
         self._seed_reserved_tool(make_dict, "make_dict")
-        self._seed_reserved_tool(get_item, "get_item")
         self._system_prompts["reason_then_act"] = REACT_PROMPT
 
     # ------------------------------------------------------------------ #
