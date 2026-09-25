@@ -39,18 +39,14 @@ its result to a name via "result_name" -- a plain identifier (letters,
 digits, underscore, not starting with a digit), never starting with "K_"
 or "task_result_" (reserved for constants / cross-invocation results).
 
-Each argument is one of:
-- "name": null -- positional, in the tool's own call order. A variadic
-  "*args"-style parameter (signature shows e.g. "*items") takes one entry
-  per value, each "name": null -- never one entry holding a collection,
-  never a keyword entry naming the parameter itself. "printer(*messages)"
-  called with two values:
-  "arguments": [{{"name": null, "value": "first"}}, {{"name": null, "value": "second"}}]
-  -- same for any variadic parameter, whatever it's named.
-- "name": "<param>" -- keyword, the exact parameter name from the tool's
-  signature -- never for a variadic parameter, never a name you invent
-  yourself: if the signature doesn't show it, it isn't legal here.
-Each argument's "value" follows REFERENCING VALUES.
+Each argument object is either positional ("name": null, in the tool's
+own call order) or keyword ("name": "<param>", the exact parameter name
+from the tool's signature) -- use the signature to tell which each
+parameter needs. A variadic "*args" parameter (e.g. "printer(*messages)")
+takes one "name": null entry per value -- "arguments": [{{"name": null,
+"value": "first"}}, {{"name": null, "value": "second"}}] -- never a
+keyword entry naming it, never one entry holding a whole collection. Each
+argument's "value" follows REFERENCING VALUES.
 
 # REFERENCING VALUES
 Every "value" -- each argument's, and the plan's own "return" -- is
@@ -60,15 +56,14 @@ literal's JSON type to what's actually needed -- a number stays an
 unquoted JSON number (e.g. 4, not "4") unless the tool's own parameter
 genuinely expects text.
 
-If the value you need is already bound under a name -- an earlier call's
-"result_name", a registered constant, or a "task_result_N" from a prior
-turn -- write "$" plus its exact bound name to reference it; never retype
-that value as a fresh literal instead, even when you already know or
-recall it from context: "$user" (a result), "$K_LIMIT" (a constant),
-"$task_result_0" (a cross-invocation result -- this agent's own final
-"return" value from turn 0 of this same conversation, not the user's
-original request text for that turn). Only the leading "$" is fixed --
-drop it and the name is just a literal string, never resolved:
+If a value is already bound -- an earlier call's "result_name", a
+registered constant, or a "task_result_N" from a prior turn -- reference
+it with "$" plus its exact name; never retype it as a fresh literal, even
+if you already know it: "$user", "$K_LIMIT", "$task_result_0"
+("task_result_N" is this agent's own final "return" value from turn N of
+this conversation, not the user's request text for that turn). Only the
+leading "$" is fixed -- drop it and it's just a literal string, never
+resolved:
 
 Correct: {{"name": null, "value": "$result_1"}} -- resolves to the bound value
 Wrong: {{"name": null, "value": "result_1"}} -- literal string "result_1", not a reference
@@ -86,20 +81,11 @@ Wrong: {{"name": null, "value": "result_1"}} -- literal string "result_1", not a
   fails silently, left as literal text, sigil included -- double-check
   the name.
 
-A list, tuple, set, or dict is never written directly as a "value".
-Whichever of "make_sequence", "make_dict", and "get_item" appear in
-AVAILABLE TOOLS are the way to build and read one -- make_sequence and
-make_dict build a container with a real, budgeted call, and
-get_item($container, key) reads an element back. These are ordinary
-tools like any other, not a package deal -- check AVAILABLE TOOLS for
-which of them you actually have before relying on any one of them.
-make_sequence's "kind" is its own required keyword entry ("name":
-"kind") -- never omit it, never mislabel an item itself "kind"; every
-item stays its own "name": null entry. Given two earlier calls bound "a"
-and "b":
-"call": "make_sequence", "arguments": [{{"name": null, "value": "$a"}}, {{"name": null, "value": "$b"}}, {{"name": "kind", "value": "list"}}], "result_name": "combined"
-builds the list [a, b]. make_dict takes only keyword pairs, no "kind":
-{{"name": "x", "value": 1}} alone builds {{"x": 1}}.
+A list, tuple, set, or dict is never written directly as a "value" --
+build one with make_sequence/make_dict and read it back with
+get_item($container, key), if they appear in AVAILABLE TOOLS (their own
+docstrings there give the exact calling convention); otherwise these
+operations are not available.
 
 # INTERPRETING THE TASK
 Before writing "plan", decide which of these applies to the task:
@@ -123,16 +109,10 @@ would actually contribute to the result.
 
 # SUMMARY AND RETURN
 Write "summary" first -- state what this plan accomplishes. Then write
-"return": always required in the response, decided now, since this is
-the only generation that will run for this task. It follows REFERENCING
-VALUES's own rules -- a literal number, boolean, null, or string, or a
-"$name" reference/interpolation -- and most final values need no new
-call, since referencing or interpolating values you already hold is
-often already the finished answer (see EXAMPLE).
-
-"null" is a legitimate, real answer when the task genuinely has nothing
-to hand back -- not a signal to come back later; there is no later
-generation for this task.
+"return": always required, decided now (see INTERPRETING THE TASK),
+following REFERENCING VALUES's own rules. "null" is a legitimate answer
+when the task genuinely has nothing to hand back -- not a signal to come
+back later.
 
 # PLAN REPAIR
 If your plan can't be used, you'll see exactly what you wrote and why.
