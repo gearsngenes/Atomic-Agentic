@@ -105,7 +105,7 @@ orchestrator = ReActAgent(
     description="Orchestrates calls between the code builder and the code reviewer.",
     llm_engine=llm_engine,
     records_window=10,
-    tool_calls_limit=16,
+    tool_calls_limit=7,
     context_enabled=True,
 )
 

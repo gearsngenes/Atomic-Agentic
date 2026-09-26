@@ -102,8 +102,8 @@ if __name__ == "__main__":
         raise ValueError("loops must be > 0")
 
     # Enforce a tight tool-call budget for this run:
-    # outliner (1) + initial write (1) + loops * (reviewer + writer) (2 * loops) + return (1)
-    orch.tool_calls_limit = 2 * loops + 3
+    # outliner (1) + initial write (1) + 2 * loops
+    orch.tool_calls_limit = 2 * loops + 2
 
     task_prompt = (
         f"TASK: Write a story based on the following idea: {idea!r}\n"

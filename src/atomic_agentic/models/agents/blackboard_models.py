@@ -286,10 +286,16 @@ class DagToolCall:
         further use -- ``__post_init__`` step 1c, below -- since no legal
         identifier can start with ``$``, this is pure recovery from a model
         blending reference-syntax with definition-syntax, never a
-        collision with an intended name. Beyond that stripping, still
-        accepted here without complaint if not actually identifier-pattern-
-        legal or if it collides with a reserved ``K_*``/``task_result_*``
-        prefix -- ``utils.dag.validate_calls`` is what catches that, as a
+        collision with an intended name. A value that is empty after both
+        strips (the original was blank/whitespace-only, or was nothing but
+        a lone ``$``) collapses to ``None`` -- indistinguishable from never
+        having supplied a name at all, rather than surviving as ``""`` to
+        be rejected downstream as an *invalid* identifier. Beyond that,
+        still accepted here without complaint if not actually identifier-
+        pattern-legal, if it collides with a reserved ``K_*``/
+        ``task_result_*`` prefix, or if it is dunder-shaped (starts and
+        ends with ``__``, reserved for framework-assigned names) --
+        ``utils.dag.validate_calls`` is what catches that, as a
         regen-repair-eligible issue rather than a construction-time crash.
 
     tool : str
@@ -367,15 +373,20 @@ class DagToolCall:
                     "DagToolCall.identifier must be None or a string; got "
                     f"{type(self.identifier).__name__!r}."
                 )
-            self.identifier = self.identifier.strip()
+            stripped = self.identifier.strip()
             # 1c. Exactly one leading '$' is stripped, silently -- no legal
             # identifier can start with '$', so this is pure recovery from
             # a model blending reference-syntax ("$total") with
             # definition-syntax ("total"), never a collision with an
             # intended name. Not repeated: "$$total" becomes "$total",
             # still pattern-illegal, left for validate_calls to catch.
-            if self.identifier.startswith("$"):
-                self.identifier = self.identifier[1:].strip()
+            if stripped.startswith("$"):
+                stripped = stripped[1:].strip()
+            # 1d. Blank after both strips (originally "", whitespace-only,
+            # or a lone "$") collapses to None -- indistinguishable from no
+            # name supplied at all, rather than surviving as "" to be
+            # rejected downstream as an invalid identifier.
+            self.identifier = stripped or None
 
         # 2. tool must be a non-empty string. No further constraint here --
         # dotted full_names and the bare RETURN_ALIAS string are both legal;

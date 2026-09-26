@@ -502,6 +502,20 @@ class ReActAgent(JsonToolAgent):
         of any kind. Every successful call, including a call to
         ``return_tool``, is unwrapped and recorded identically -- there is
         no synthesized, never-dispatched sentinel in this family to skip.
+
+        Two identifier normalizations happen on a successful call, before
+        it's appended to ``task.completed``: a ``return_tool`` call's
+        identifier is always forced to ``None`` (matches ``RETURN_ALIAS``'s
+        own always-``None`` convention on ``PlanActAgent``/``DagAgent`` --
+        a ``return`` call ends the task, so there is no later round for any
+        name of its to ever be referenced in); any other call whose
+        identifier is still ``None`` and whose real result isn't ``None``
+        gets auto-named ``__r{N}__`` (``N`` = count of successful calls
+        so far), so a result the model forgot to name stays referenceable
+        instead of becoming permanently unrecoverable the moment this round
+        ends -- this family has no lookahead across rounds the way a
+        one-shot planner does, so "forgot to name it" would otherwise never
+        be repairable.
         """
         if isinstance(raw_result, BaseException):
             if self._fail_fast:
@@ -518,6 +532,11 @@ class ReActAgent(JsonToolAgent):
         else:
             call.result = raw_result
             unwrapped = raw_result.result
+
+            if call.tool == RETURN_TOOL_NAME:
+                call.identifier = None
+            elif call.identifier is None and unwrapped is not None:
+                call.identifier = f"__r{len(task.completed)}__"
 
             task.completed.append(call)
             if call.identifier is not None:

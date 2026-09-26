@@ -279,8 +279,11 @@ def validate_calls(
 
     For each call with a non-``None`` ``identifier``: it must be
     ``IDENTIFIER_PATTERN``-legal (checked first), and, only if it already is,
-    must not start with the reserved ``K_``/``task_result_`` prefixes.
-    Separately: the dispatched-call count against ``tool_calls_limit``
+    must not start with the reserved ``K_``/``task_result_`` prefixes, and
+    must not be dunder-shaped (start and end with ``__``) -- that shape is
+    reserved for framework-assigned names in general (e.g. ``ReActAgent``'s
+    own ``__r{N}__`` auto-naming), not one specific pattern. Separately: the
+    dispatched-call count against ``tool_calls_limit``
     (``RETURN_ALIAS`` excluded); a ``RETURN_ALIAS`` call present alongside a
     truthy ``remaining_work`` -- a contradiction, exactly one way to end a
     round is permitted; and a truthy ``remaining_work`` with zero dispatched
@@ -310,6 +313,16 @@ def validate_calls(
     concurrently-dispatched batch and silently resolve to the literal
     ``"$name"`` string instead of erroring.
 
+    The unresolved-reference issue message itself names what's actually
+    bound at that point, not just what didn't match: every currently-bound
+    name outside the ``K_*``/``task_result_*`` namespaces is enumerated in
+    full (this plan's/round's own bound names -- small, dynamic, and
+    exactly what a model blind-guesses at when it can't find something),
+    while the other two namespaces are only named as categories, since
+    they're already fully spelled out elsewhere in context (``AVAILABLE
+    CONSTANTS``, historic-turn ``task_result_N`` labels) -- repeating every
+    instance here would be redundant bloat, not help.
+
     Returns ``[]`` if every call is clean and the plan is within budget.
     """
     issues: list[str] = []
@@ -328,6 +341,12 @@ def validate_calls(
                 f"result_name {call.identifier!r} uses a reserved prefix "
                 "('K_' is reserved for constants, "
                 f"{TASK_RESULT_PREFIX!r} for cross-invocation results)."
+            )
+        elif call.identifier.startswith("__") and call.identifier.endswith("__"):
+            issues.append(
+                f"result_name {call.identifier!r} is reserved -- a name "
+                "starting and ending with '__' is reserved for "
+                "framework-assigned identifiers."
             )
 
     real_call_count = sum(1 for call in calls if is_dispatched_call(call))
@@ -372,12 +391,22 @@ def validate_calls(
 
         unresolved = sorted(name for name in refs if name not in available)
         if unresolved:
+            local_names = sorted(
+                name for name in available
+                if not name.startswith("K_") and not name.startswith(TASK_RESULT_PREFIX)
+            )
+            bound_desc = (
+                f"Currently bound this run: {local_names!r}. "
+                if local_names else "Nothing is bound yet this run. "
+            )
             issues.append(
                 f"{label}: reference(s) {unresolved!r} do not match any "
                 "earlier result_name, constant, or cross-invocation "
                 "result (only checked for a value that is *entirely* one "
                 "'$name' token -- a '$name' embedded in a longer string is "
-                "never flagged)."
+                f"never flagged). {bound_desc}A registered K_* constant or "
+                "an earlier turn's task_result_N is also valid if shown to "
+                "you."
             )
         if call.identifier is not None:
             available.add(call.identifier)

@@ -37,7 +37,7 @@ argument needs that exact value.
 Each plan entry calls one tool with its arguments, then optionally binds
 its result to a name via "result_name" -- a plain identifier (letters,
 digits, underscore, not starting with a digit), never starting with "K_"
-or "task_result_" (reserved for constants / cross-invocation results).
+or "task_result_", or shaped like "__name__" (all reserved).
 
 Each argument object is either positional ("name": null, in the tool's
 own call order) or keyword ("name": "<param>", the exact parameter name
@@ -67,6 +67,7 @@ resolved:
 
 Correct: {{"name": null, "value": "$result_1"}} -- resolves to the bound value
 Wrong: {{"name": null, "value": "result_1"}} -- literal string "result_1", not a reference
+The same holds for "return" itself: "$final_draft", never bare "final_draft".
 
 - Whole match ("value" is exactly one "$name"): resolves to the real
   value, type preserved -- never stringified. The name must already be
@@ -218,8 +219,8 @@ argument needs that exact value.
 Your one call this round calls one tool with its arguments, then
 optionally binds its result to a name via "result_name" -- a plain
 identifier (letters, digits, underscore, not starting with a digit),
-never starting with "K_" or "task_result_" (reserved for constants /
-cross-invocation results).
+never starting with "K_" or "task_result_", or shaped like "__name__"
+(all reserved).
 
 Each argument object is either positional ("name": null, in the tool's
 own call order) or keyword ("name": "<param>", the exact parameter name
