@@ -1,9 +1,9 @@
 """03_agentic_story_builder.py
 
-Mirrors PlanAct_Examples/03_agentic_story_builder.py, rebuilt on ScriptAgent.
+Mirrors PlanAct_Examples/03_agentic_story_builder.py, rebuilt on ScriptActAgent.
 
 Three BasicAgents (StoryOutliner/StoryWriter/DraftReviewer) are registered
-as tools verbatim -- nothing about them is ScriptAgent-specific. Where this
+as tools verbatim -- nothing about them is ScriptActAgent-specific. Where this
 pairs interestingly with 02_async_planner_test.py: 02 has five void calls
 with zero data dependency, so only the developer-level
 `tool_concurrency_limit` knob can force ordering there. Here, every step's
@@ -13,7 +13,7 @@ dependencies, which compile_batches already sequences correctly for free,
 no concurrency knob needed.
 
 Budget note: unlike PlanAct's JSON "return" step (a counted step),
-ScriptAgent's `return <expr>` is a language terminal, not a tool call --
+ScriptActAgent's `return <expr>` is a language terminal, not a tool call --
 it costs 0 against tool_calls_limit. So the budget here is
 `2*loops + 2` (outline + first draft + loops*(review + write)), one less
 than PlanAct's `2*loops + 3`.
@@ -26,7 +26,7 @@ optional/discoverable, it's just present in the args or not.
 from pathlib import Path
 import logging
 
-from atomic_agentic.agents import BasicAgent, ScriptAgent
+from atomic_agentic.agents import BasicAgent, ScriptActAgent
 from atomic_agentic.llm import OpenAIEngine
 
 from shared_engine import llm_engine
@@ -104,7 +104,7 @@ reviewer = BasicAgent(
     pre_invoke=reviewer_pre,
 )
 
-orch = ScriptAgent(
+orch = ScriptActAgent(
     name="StoryPlanner",
     namespace="examples",
     description="One-shot agent that orchestrates outliner/writer/reviewer.",
@@ -114,7 +114,7 @@ orch = ScriptAgent(
 )
 
 # Registered under each agent's own bare name -- no id capture needed, the
-# task prompt below refers to them by the exact same names ScriptAgent
+# task prompt below refers to them by the exact same names ScriptActAgent
 # shows the LLM in its own tool list.
 orch.register_tool(outliner)
 orch.register_tool(writer)
@@ -148,6 +148,6 @@ if __name__ == "__main__":
 
     out_dir = Path("examples/output_markdowns")
     out_dir.mkdir(exist_ok=True)
-    filepath = out_dir / "script_agent_story.md"
+    filepath = out_dir / "scriptact_agent_story.md"
     filepath.write_text(final_draft_md, encoding="utf-8")
     print(f"\n✓ Story saved to: {filepath.resolve()}")

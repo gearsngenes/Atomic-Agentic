@@ -6,7 +6,7 @@ same provider/model choices as
 ``test_code/script_agent_live_smoke_test.py`` -- one cheap/small default
 model per provider.
 
-Provider selection: set the ``SCRIPT_AGENT_PROVIDER`` env var to one of
+Provider selection: set the ``SCRIPTACT_AGENT_PROVIDER`` env var to one of
 ``o``/``g``/``m``/``a``/``l``/``3``/``t`` (openai/gemini/mistral/anthropic/
 llamacpp-phi4/llamacpp-gemma3/litellm). If unset (or not a recognized
 value), falls back to an interactive prompt -- the same one the live smoke
@@ -76,7 +76,7 @@ PROVIDER_MODELS: dict[str, tuple[type, dict]] = {
 
 
 def _pick_provider() -> str:
-    env_choice = (os.getenv("SCRIPT_AGENT_PROVIDER") or "").strip().lower()
+    env_choice = (os.getenv("SCRIPTACT_AGENT_PROVIDER") or "").strip().lower()
     if env_choice in PROVIDER_MODELS:
         return env_choice
     return input(

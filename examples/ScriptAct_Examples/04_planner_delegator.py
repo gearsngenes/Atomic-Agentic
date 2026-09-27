@@ -25,7 +25,7 @@ is a short literal arg (`premise="..."`/`question="..."`), never a large
 verbatim string block to reproduce -- a materially lower-risk delegation
 payload than handing sub-planners a whole precomputed task string.
 
-MathSpecialist is itself a nested ScriptAgent with its own math toolbox and
+MathSpecialist is itself a nested ScriptActAgent with its own math toolbox and
 its own tool_calls_limit/planning_rounds_limit -- that internal budget is
 completely invisible to the Delegator, which only ever sees one call per
 question no matter how many math tools it took inside.
@@ -42,7 +42,7 @@ import time
 import logging
 from typing import Any
 
-from atomic_agentic.agents import BasicAgent, ScriptAgent
+from atomic_agentic.agents import BasicAgent, ScriptActAgent
 from atomic_agentic.llm import OpenAIEngine
 from atomic_agentic.tools.prebuilt import EXPONENT_TOOLS, STAT_TOOLS
 
@@ -90,7 +90,7 @@ def math_post(answer: Any, question: str) -> Any:
     return answer
 
 
-math_specialist = ScriptAgent(
+math_specialist = ScriptActAgent(
     name="MathSpecialist",
     namespace="examples",
     description="Solves one math question and prints the question/answer pair, while returning the final result.",
@@ -106,7 +106,7 @@ math_specialist.register_tools(EXPONENT_TOOLS)
 
 # ──────────────────────────  DELEGATOR  ─────────────────────────────
 
-delegator = ScriptAgent(
+delegator = ScriptActAgent(
     name="Delegator",
     namespace="examples",
     description="Delegates each item in a batch to the appropriate specialist agent.",

@@ -10,7 +10,7 @@ from .records import AgentRecord, LLMRecord
 __all__ = [
     "AgentTask",
     "JsonToolAgentTask",
-    "ScriptAgentTask",
+    "ScriptActAgentTask",
     "DagAgentTask",
     "PlanActTask",
     "ReActTask",
@@ -129,11 +129,11 @@ class JsonToolAgentTask(AgentTask):
 
 
 @dataclass(slots=True)
-class ScriptAgentTask(AgentTask):
+class ScriptActAgentTask(AgentTask):
     """
-    ScriptAgent-flavored task -- a sibling to JsonToolAgentTask, not a subclass
-    (ScriptAgent is a new agent family, not a JsonToolAgent subclass, per this
-    branch's established convention).
+    ScriptActAgent-flavored task -- a sibling to JsonToolAgentTask, not a
+    subclass (ScriptActAgent is a new agent family, not a JsonToolAgent
+    subclass, per this branch's established convention).
 
     No __post_init__ -- matches AgentTask's own family-wide convention of
     zero constructor-time validation (an in-flight, internal-only object,
@@ -144,7 +144,7 @@ class ScriptAgentTask(AgentTask):
     completed : list[CodeStatement]
         Every slot that executed successfully so far this run, in commit
         order. Purely historical -- nothing here is ever mutated once a
-        slot lands in this list. Becomes ScriptAgentRecord.statements
+        slot lands in this list. Becomes ScriptActAgentRecord.statements
         verbatim (normalized to a tuple) at commit time. A slot whose
         dispatch raised is never appended here -- see failed_statements.
 
@@ -212,7 +212,7 @@ class ScriptAgentTask(AgentTask):
 
     constant_values : dict[str, Any]
         Registered-constant name -> value, populated exactly once by
-        ``ScriptAgent._initialize_task`` (deep-copied per constant except
+        ``ScriptActAgent._initialize_task`` (deep-copied per constant except
         for known atomic-immutable types) and never touched again after
         that. Every batch's resolution namespace reads this instead of
         re-deriving values from the agent's own ``self._constants`` each
@@ -254,7 +254,7 @@ class ScriptAgentTask(AgentTask):
         ``_apply_batch_results`` at the same point a failure is detected,
         with ``slot.exception`` set to the raised value first. Never
         cleared or mutated once appended. Becomes
-        ScriptAgentRecord.failed_statements verbatim (normalized to a
+        ScriptActAgentRecord.failed_statements verbatim (normalized to a
         tuple) at commit time.
     """
     completed: list[CodeStatement] = field(default_factory=list)

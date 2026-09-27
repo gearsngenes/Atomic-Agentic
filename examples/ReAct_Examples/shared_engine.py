@@ -3,7 +3,7 @@
 One shared ``llm_engine`` for every example in this folder, so switching
 providers doesn't mean editing each example file by hand. Mirrors this
 repo's established pattern (``examples/PlanAct_Examples/shared_engine.py``,
-``examples/ScriptAgent_Examples/shared_engine.py``) -- one cheap/small
+``examples/ScriptAct_Examples/shared_engine.py``) -- one cheap/small
 default model per provider.
 
 Provider selection: set the ``REACT_AGENT_PROVIDER`` env var to one of

@@ -35,16 +35,18 @@ class BlackboardParseError(RuntimeError):
     """Raised when parsing one raw statement into CodeStatement object(s)
     fails, or when the shared expression-parsing/rejection helpers in
     utils/agents.py (`evaluate_expr`, `reject_unsupported_forms`) reject an
-    expression -- used by both ScriptAgent's statement parsing and
-    DagAgent's value-expression parsing, not ScriptAgent-only.
+    expression -- used by both ScriptActAgent's statement parsing and
+    DagAgent's value-expression parsing, not ScriptActAgent-only.
 
     Subclasses RuntimeError to match this codebase's existing convention for
     domain error types superseding a bare RuntimeError (see LLMEngineError,
     MCPError) -- callers doing `except RuntimeError` upstream still catch
-    these. Deliberately not rooted in ToolAgentError: ScriptAgent is a new
-    sibling family, not a JsonToolAgent subclass, so sharing ToolAgentError's
-    lineage here would imply a relationship that doesn't exist (a
-    sibling-not-subclass relationship, not an inheritance one).
+    these. Deliberately not rooted in ToolAgentError: ScriptActAgent's own
+    native-statement grammar (shared with DagAgent) is a distinct parsing
+    mechanism from PlanActAgent/ReActAgent's output_structure-based
+    generation, so sharing ToolAgentError's lineage here for this
+    specific error would imply a closer relationship to that mechanism
+    than actually exists.
 
     Unifies every rejection category from parse_statement_to_slots under one
     catchable type: genuine ast.parse SyntaxErrors, illegal assignment

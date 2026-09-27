@@ -12,7 +12,7 @@ a designated sentinel, not a substring check -- substring risks a false
 positive on prose like "not approved because..."), returning a plain
 {"approved": bool, "feedback": str | None} dict instead of raw prose.
 
-This doesn't remove ScriptAgent's need for judgment -- the grammar still has
+This doesn't remove ScriptActAgent's need for judgment -- the grammar still has
 no `if`/`elif`/`else`, so the orchestrator still needs a `# PAUSE` after each
 review to decide stop-vs-continue. What it removes is ambiguity at that
 judgment point and ALL string-handling from the orchestrator's own generated
@@ -39,7 +39,7 @@ import json
 import logging
 from pathlib import Path
 
-from atomic_agentic.agents import BasicAgent, ScriptAgent
+from atomic_agentic.agents import BasicAgent, ScriptActAgent
 
 from shared_engine import llm_engine, OpenAIEngine
 
@@ -120,7 +120,7 @@ reviewer = BasicAgent(
 
 # ──────────────────────────  ORCHESTRATOR  ──────────────────────────
 
-orchestrator = ScriptAgent(
+orchestrator = ScriptActAgent(
     name="CodeOrchestrator",
     namespace="examples",
     description="Orchestrates a write/review loop between CodeWriter and CodeReviewer.",
@@ -151,14 +151,14 @@ if __name__ == "__main__":
     out_dir = Path("examples/output_markdowns")
     out_dir.mkdir(exist_ok=True)
 
-    filepath = out_dir / "ScriptAgent_Code.py"
+    filepath = out_dir / "ScriptActAgent_Code.py"
     filepath.write_text(result, encoding="utf-8")
     print(f"\n>> Final draft code saved to: {filepath.resolve()}")
 
-    filepath = out_dir / "ScriptAgent_Script.txt"
+    filepath = out_dir / "ScriptActAgent_Script.txt"
     filepath.write_text(record.render_as_code(), encoding="utf-8")
     print(f"\n>> Executed script saved to: {filepath.resolve()}")
 
-    filepath = out_dir / "ScriptAgent_Record.json"
+    filepath = out_dir / "ScriptActAgent_Record.json"
     filepath.write_text(json.dumps(record.to_dict(), indent=2, default=str), encoding="utf-8")
     print(f"\n>> Serialized record saved to: {filepath.resolve()}")

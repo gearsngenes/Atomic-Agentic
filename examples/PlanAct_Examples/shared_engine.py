@@ -2,7 +2,7 @@
 
 One shared ``llm_engine`` for every example in this folder, so switching
 providers doesn't mean editing each example file by hand. Mirrors this
-repo's established pattern (``examples/ScriptAgent_Examples/shared_engine.py``,
+repo's established pattern (``examples/ScriptAct_Examples/shared_engine.py``,
 ``examples/DagAgent_Examples`` if/when it exists) -- one cheap/small default
 model per provider.
 

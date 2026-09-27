@@ -63,15 +63,17 @@ RETURN_VALUE_FIELD = "val"
 
 
 # =============================================================================
-# JsonToolAgent canonical return-tool identity
+# ReActAgent canonical return-tool identity
 # =============================================================================
 # Used by:
-# - agents/json_tool_agent.py: construction and registration of the executable return_tool
-# - JsonToolAgent prompt finalization instructions requiring Tool.ToolAgents.return
+# - agents/react.py: construction and registration of the executable return_tool
+#   (PlanActAgent never registers this -- its return value comes from the
+#   synthesized RETURN_ALIAS call instead)
+# - REACT_PROMPT's finalization instructions requiring Tool.ToolAgents.return
 # - tests around planner/ReAct final return behavior
 #
 # Do not put the executable Tool instance here; only the identity literals that
-# must stay synchronized with JsonToolAgent prompt text.
+# must stay synchronized with REACT_PROMPT text.
 
 
 RETURN_TOOL_NAME = "return"
@@ -84,14 +86,15 @@ RETURN_TOOL_FULL_NAME = (
 )
 
 # =============================================================================
-# ScriptAgent code-statement reserved literals
+# ScriptActAgent code-statement reserved literals
 # =============================================================================
 # Used by:
 # - models/agents/blackboard_models.py: CodeStatement.tool default alias
 # - utils/script.py: parse_statement_to_slots hoisting/rhs_assign/return/
 #   task-result-reference logic
-# - agents/script.py: render_turn/_initialize_task cross-invocation result
-#   addressing (TASK_RESULT_PREFIX)
+# - agents/toolagent.py: ToolAgent.render_turn cross-invocation result
+#   addressing (TASK_RESULT_PREFIX); agents/scriptact.py: _initialize_task
+#   seeds the same addressing into task.cache
 #
 # Reserved namespaces: RHS_ASSIGN_ALIAS/RETURN_ALIAS/PY_BUILTIN_ALIAS/
 # ATTR_CALL_ALIAS can never be real registered tool aliases; SUB_NAME_PREFIX/
@@ -106,7 +109,9 @@ TASK_RESULT_PREFIX = "task_result_"
 PY_BUILTIN_ALIAS = "py_builtin"
 """Reserved CodeStatement.tool sentinel for a rewritten Python builtin call
 -- joins RHS_ASSIGN_ALIAS/RETURN_ALIAS as a name no real registered tool
-alias may ever equal (see agents/script.py's _validate_tool_alias). Unlike
+alias may ever equal (see agents/toolagent.py's ToolAgent._validate_tool_alias,
+extended by agents/scriptact.py's ScriptActAgent._validate_effective_tool_id).
+Unlike
 those two sentinels, a PY_BUILTIN_ALIAS slot dispatches through a real Tool
 (agents.tools.builtin_call_tool) instead of skipping dispatch entirely."""
 
@@ -136,7 +141,7 @@ EXCLUDED_PY_BUILTINS: frozenset[str] = frozenset(
         "anext", "aiter",
     }
 )
-"""Builtins excluded from ScriptAgent's py_builtin dispatch. Checked by both
+"""Builtins excluded from ScriptActAgent's py_builtin dispatch. Checked by both
 utils/script.py's rewrite_builtin_calls (parse-time eligibility) and
 agents/tools.py's _call_py_builtin (runtime enforcement -- the authoritative
 gate; the parse-time check exists so an excluded name gets a specific
@@ -160,7 +165,7 @@ PAUSE_PATTERN: re.Pattern[str] = re.compile(r"^\s*#\s*PAUSE\b", re.IGNORECASE | 
 # Matches a single markdown code fence wrapping the *entire* generation --
 # any (or no) language tag on the opening fence line (```python, ```py,
 # ```text, a bare ```, ...), not just ```python. Tried first by
-# utils/agents.py's strip_code_fence (ScriptAgent's own code-statement
+# utils/agents.py's strip_code_fence (ScriptActAgent's own code-statement
 # parsing), since a matched pair unambiguously marks everything between
 # them as the intended code.
 CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"^\s*```[^\n]*\n(.*?)\n?```\s*$", re.DOTALL)
@@ -175,7 +180,7 @@ TRAILING_CODE_FENCE_PATTERN: re.Pattern[str] = re.compile(r"\n[ \t]*```[ \t]*$")
 
 # Matches a dunder-shaped attribute name (`__class__`, `__globals__`, ...).
 # Rejected unconditionally by utils/agents.py's reject_unsupported_forms
-# (for a bare `ast.Attribute` anywhere in an expression -- ScriptAgent's
+# (for a bare `ast.Attribute` anywhere in an expression -- ScriptActAgent's
 # own code-statement grammar) and utils/script.py's _build_call_slot (for
 # a method-call's own method name, the one position
 # reject_unsupported_forms's own walk never scans) -- closes the classic
@@ -202,14 +207,14 @@ FINAL_ROUND_WARNING = (
 )
 """Appended (space-separated) to a continuation instruction when
 <agent>._is_final_round(task) is true -- shared verbatim by both
-ScriptAgent and DagAgent (each family's own _render_task_messages' round-1
+ScriptActAgent and DagAgent (each family's own _render_task_messages' round-1
 and continuation branches), so all four call sites can never drift in
 wording. Deliberately grammar-neutral -- earlier revisions said "Do not
-write # PAUSE", a ScriptAgent-specific instruction meaningless in
+write # PAUSE", a ScriptActAgent-specific instruction meaningless in
 DagAgent's own grammar (there is no "# PAUSE" marker or equivalent; a
 DagAgent round signals continuation via the remaining_work JSON
 field instead) -- "you may not defer further" already fully covers the
-same intent (deferring IS writing # PAUSE, for ScriptAgent) without
+same intent (deferring IS writing # PAUSE, for ScriptActAgent) without
 naming a mechanism that doesn't exist in DagAgent's own output schema."""
 
 # =============================================================================
@@ -469,7 +474,7 @@ __all__ = [
     # Framework-reserved parameters
     "RUN_ID_PARAM",
     "THINKING_ROUNDS_PARAM",
-    # ScriptAgent code-statement reserved literals
+    # ScriptActAgent code-statement reserved literals
     "RHS_ASSIGN_ALIAS",
     "SUB_NAME_PREFIX",
     "RETURN_ALIAS",

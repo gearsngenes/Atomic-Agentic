@@ -94,7 +94,7 @@ def extract_json_object(raw_text: str, *, source_label: str) -> Any:
     free-form LLM text. That original method has since been removed
     entirely (see `json-tool-agent-rename`'s lifecycle-slimming addendum —
     ``output_structure`` strict mode makes free-text JSON extraction
-    unnecessary for the current ``JsonToolAgent`` family), but this
+    unnecessary for the current ``PlanActAgent``/``ReActAgent`` family), but this
     promoted utility remains available to any other caller that still
     needs it. Behavior is unchanged from the original method except that
     the non-string-input case raises a plain ``TypeError`` (an
@@ -239,7 +239,7 @@ def extract_identifiers(
     Walk any ``ast.Name`` reference in ``source`` and return every referenced
     identifier, deduplicated in first-seen order (not a set: multiplicity
     isn't meaningful for a dependency list, but a list keeps a stable,
-    orderable contract). Used by ``ScriptAgent`` (``utils/script.py``) to
+    orderable contract). Used by ``ScriptActAgent`` (``utils/script.py``) to
     find a statement's real dependencies from its parsed argument tree.
 
     Accepts a single parsed expression node, a slot's ``kwargs`` dict, or a
@@ -277,7 +277,7 @@ def strip_code_fence(raw_text: str) -> str:
     Strip a markdown code fence wrapping generated text, if present --
     defensive against a model wrapping otherwise-valid output in a code
     fence despite being told not to. Generic to any language tag (or none)
-    on the opening fence line. Used by ``ScriptAgent``'s statement parsing
+    on the opening fence line. Used by ``ScriptActAgent``'s statement parsing
     (``utils/script.py``).
 
     Tries a fully matched pair first (``CODE_FENCE_PATTERN``) -- unambiguous,
@@ -298,7 +298,7 @@ def strip_code_fence(raw_text: str) -> str:
 def evaluate_expr(node: ast.expr, namespace: dict[str, Any]) -> Any:
     """
     Evaluate one parsed expression node against a namespace, with no
-    builtins available. Used by ``ScriptAgent`` (``utils/script.py``, safe
+    builtins available. Used by ``ScriptActAgent`` (``utils/script.py``, safe
     because every arg reaching this function is guaranteed Call-free by its
     hoisting rule) -- nothing reachable through ``namespace`` can itself be
     invoked.
@@ -320,7 +320,7 @@ def reject_unsupported_forms(node: ast.expr) -> None:
     either branch contains a ``Call``, an ``ast.Await`` anywhere, a
     comprehension/lambda (``UNSUPPORTED_EXPR_LABELS``) anywhere, or an
     ``ast.Attribute`` whose ``.attr`` matches ``DUNDER_ATTRIBUTE_PATTERN``
-    anywhere -- the exact set ``ScriptAgent`` (``utils/script.py``) needs.
+    anywhere -- the exact set ``ScriptActAgent`` (``utils/script.py``) needs.
 
     Raises before any hoisting/unparsing proceeds -- every check here is
     unconditional over the whole tree passed in, at any depth, regardless

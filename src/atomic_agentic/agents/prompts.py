@@ -1,11 +1,11 @@
 # =============================================================================
-# JsonToolAgent prompts
+# PlanActAgent/ReActAgent prompts
 # =============================================================================
 # Used by:
 # - agents/planact.py, agents/react.py: PlanActAgent and ReActAgent default role prompts
 #
-# These prompts live beside the JsonToolAgent protocol constants because they
-# define the LLM-facing side of the same parser/runtime contract.
+# These prompts live beside the PlanActAgent/ReActAgent protocol constants
+# because they define the LLM-facing side of the same parser/runtime contract.
 
 from ..models.agents.prompts import PromptConfig
 
@@ -162,8 +162,8 @@ call contributes anything new:
 # an ordinary enum member of "call" -- never a separate top-level field the
 # way PLANNER_PROMPT/DAG_PLANNER_PROMPT have it -- so finishing the task is
 # just one more option in CHOOSING YOUR NEXT CALL, not its own section.
-# {TOOLS}/{CONSTANTS} are filled the same way every JsonToolAgent prompt's
-# are (JsonToolAgent._render_system_message). No {TOOL_CALLS_LIMIT}
+# {TOOLS}/{CONSTANTS} are filled the same way every ToolAgent-family prompt's
+# are (ToolAgent._render_system_message). No {TOOL_CALLS_LIMIT}
 # placeholder -- matches every sibling's convention: the live remaining-
 # budget figure is a per-invocation fact, rendered into the task message
 # banner instead (ReActAgent._render_current_task_message).
@@ -342,18 +342,18 @@ partial diff.
 
 
 # =============================================================================
-# ScriptAgent prompts
+# ScriptActAgent prompts
 # =============================================================================
 # Used by:
-# - agents/script.py: ScriptAgent's one-shot planning prompt
+# - agents/scriptact.py: ScriptActAgent's one-shot planning prompt
 #
-# Teaches ScriptAgent's native Python-statement grammar (utils/script.py:
+# Teaches ScriptActAgent's native Python-statement grammar (utils/script.py:
 # parse_statement_to_slots/parse_generation/validate_references/
 # compile_batches) -- real AST evaluation against a real namespace, not a
 # placeholder-substitution scheme: a bare identifier is an ordinary Python
 # name reference, unlike PLANNER_PROMPT/REACT_PROMPT's "$name" sigil
 # references. {TOOLS}/{CONSTANTS}/{EXCLUDED_PY_BUILTINS} are filled by
-# ScriptAgent._render_system_message, mirroring how PLANNER_PROMPT's own
+# ScriptActAgent._render_system_message, mirroring how PLANNER_PROMPT's own
 # {TOOLS}/{CONSTANTS} stay off the caller-facing schema. No
 # {TOOL_CALLS_LIMIT} field: the tool-call budget is a silent, backend-only
 # backstop (validate_references) never rendered into this prompt.
@@ -470,7 +470,7 @@ batter: Batter = Batter()
 cake: Cake = Cake(baked=False)
 ```
 """,
-    description="ScriptAgent one-shot native-grammar planning prompt.",
+    description="ScriptActAgent one-shot native-grammar planning prompt.",
 )
 
 
@@ -486,20 +486,20 @@ cake: Cake = Cake(baked=False)
 # tool call is structurally impossible under output_structure strict mode,
 # so this prompt never re-teaches tool registration or output shape). The
 # same "$name"-sigil grammar PLANNER_PROMPT/REACT_PROMPT also teach,
-# alongside ScriptAgent's real-AST-eval native grammar: no AWAIT field at
+# alongside ScriptActAgent's real-AST-eval native grammar: no AWAIT field at
 # all -- a value is a plain JSON literal
 # by default, and an earlier value is referenced with a "$name" sigil
 # (constants/agents.py::DAG_REF_PATTERN) -- a whole-string match substitutes
 # the real value/type, an embedded match splices in stringified text -- and
 # batching is inferred purely from those sigil references
-# (utils/dag.py::compile_batches, a structural port of ScriptAgent's own).
+# (utils/dag.py::compile_batches, a structural port of ScriptActAgent's own).
 # Superseded design (Pass 3b/3c, retired 2026-09-21): value/return used to
 # be raw Python expression source parsed via ast.parse -- no expression
 # grammar (operators/f-strings/ternaries/attribute access) survives into
 # this prompt at all now. {TOOLS}/{CONSTANTS} are filled the same way
-# ONESHOT_PLANNER_PROMPT's are (ScriptAgent.actions_context()/
+# ONESHOT_PLANNER_PROMPT's are (ScriptActAgent.actions_context()/
 # constants_context(), reused verbatim). No {TOOL_CALLS_LIMIT} field --
-# matches ScriptAgent's own convention: the tool-call budget is a silent,
+# matches ScriptActAgent's own convention: the tool-call budget is a silent,
 # backend-only backstop (utils/dag.py::validate_calls), never rendered
 # into this prompt.
 

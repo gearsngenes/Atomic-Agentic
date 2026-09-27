@@ -10,23 +10,23 @@ builtin-support grammar path genuinely replaces what those tool lists used
 to provide for basic math, not just supplements them.
 
 After the run, prints the reconstructed source via
-ScriptAgentRecord.render_as_code() -- showing exactly what the agent
+ScriptActAgentRecord.render_as_code() -- showing exactly what the agent
 executed, not just its final answer.
 """
 import logging
 import math
 
-from atomic_agentic.agents import ScriptAgent
+from atomic_agentic.agents import ScriptActAgent
 
 from shared_engine import llm_engine
 
 logging.basicConfig(level=logging.INFO)
 
-print("Testing prebuilt tools with ScriptAgent's one-shot decomposition")
+print("Testing prebuilt tools with ScriptActAgent's one-shot decomposition")
 
 # ──────────────────────────  SET-UP  ───────────────────────────
-agent = ScriptAgent(
-    name="Test_ScriptAgent",
+agent = ScriptActAgent(
+    name="Test_ScriptActAgent",
     namespace="examples",
     description="Testing the prebuilt tool lists with one-shot planning + execution.",
     llm_engine=llm_engine,
@@ -37,7 +37,7 @@ agent = ScriptAgent(
 # No tool lists registered -- the task below is solvable via bare
 # arithmetic and Python builtins alone (see module docstring).
 
-# Register the pi constant (value first, alias second -- ScriptAgent's
+# Register the pi constant (value first, alias second -- ScriptActAgent's
 # register_constant signature is the reverse of v1 ToolAgent's).
 agent.register_constant(math.pi, alias="PI", description="Hardcodes the math constant to 3.14...")
 

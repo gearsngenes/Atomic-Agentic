@@ -1,7 +1,7 @@
 """
 PlanActAgent: One-Shot output_structure Planner with Concurrent Batch Execution
 
-This module provides ``PlanActAgent``, a concrete ``JsonToolAgent`` subclass
+This module provides ``PlanActAgent``, a concrete ``ToolAgent`` subclass
 that implements a **static planning** strategy: the LLM is queried once per
 invoke, via provider-native structured output (``LLMEngine.output_structure``,
 ``PLANACT_OUTPUT_SCHEMA``), to produce a complete plan of tool calls, which is
@@ -54,18 +54,17 @@ Contrast
 --------
 For adaptive, step-by-step iteration see ``agents/react.py`` (``ReActAgent``).
 For the shared tool/constant registry, execution knobs, and lifecycle
-contract see ``agents/json_tool_agent.py`` (``JsonToolAgent``).
+contract see ``agents/toolagent.py`` (``ToolAgent``).
 """
 
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 from datetime import datetime
 from typing import Any, Callable, ClassVar, Optional
 
-from .json_tool_agent import JsonToolAgent
+from .toolagent import ToolAgent
 from .prompts import PLANNER_PROMPT
 from .tools import make_dict, make_sequence
 from ..constants.agents import RETURN_ALIAS, RETURN_VALUE_FIELD
@@ -94,7 +93,7 @@ from ..utils.dag import (
 # --------------------------------------------------------------------------- #
 # PlanAct Agent
 # --------------------------------------------------------------------------- #
-class PlanActAgent(JsonToolAgent):
+class PlanActAgent(ToolAgent):
     """
     One-shot planner agent: generates an entire plan upfront via
     ``output_structure``, executes it in concurrent batches, never
@@ -126,10 +125,6 @@ class PlanActAgent(JsonToolAgent):
       call (directly, or by cascading through a dependency) ends the whole
       invocation -- there's no second round to repair it in.
     """
-
-    _ATOMIC_IMMUTABLE_TYPES: ClassVar[tuple[type, ...]] = (
-        str, int, float, bool, complex, bytes, type(None),
-    )
 
     # A class attribute (active before __init__ runs) -- the two
     # composite-value-building utility tools this family's schema text
@@ -167,11 +162,13 @@ class PlanActAgent(JsonToolAgent):
         constant_descriptions: Optional[list[Optional[str]]] = None,
     ) -> None:
         """
-        Every parameter forwards verbatim to ``JsonToolAgent.__init__`` --
-        no ``extra_parameters`` keyword, matching that base class's own
-        signature exactly (it accepts none). ``"plan_first"`` is the key
-        under which the built-in planning prompt is registered in
-        ``self._system_prompts``.
+        Every parameter except ``fail_fast`` forwards verbatim to
+        ``ToolAgent.__init__`` -- no ``extra_parameters`` keyword, matching
+        that base class's own signature exactly (it accepts none).
+        ``fail_fast`` has no shared home on ``ToolAgent`` (see the
+        ``fail_fast`` property below) -- validated and stored locally
+        instead. ``"plan_first"`` is the key under which the built-in
+        planning prompt is registered in ``self._system_prompts``.
         """
         super().__init__(
             name=name,
@@ -179,7 +176,6 @@ class PlanActAgent(JsonToolAgent):
             description=description,
             llm_engine=llm_engine,
             context_enabled=context_enabled,
-            fail_fast=fail_fast,
             tool_calls_limit=tool_calls_limit,
             regeneration_limit=regeneration_limit,
             tool_concurrency_limit=tool_concurrency_limit,
@@ -193,6 +189,13 @@ class PlanActAgent(JsonToolAgent):
             constant_aliases=constant_aliases,
             constant_descriptions=constant_descriptions,
         )
+
+        if not isinstance(fail_fast, bool):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: fail_fast must be a bool."
+            )
+        self._fail_fast = fail_fast
+
         self._system_prompts["plan_first"] = PLANNER_PROMPT
         # Seeded directly, bypassing register_tool -- both are reserved
         # (self._RESERVED_TOOL_NAMES), and register_tool now rejects any
@@ -200,22 +203,29 @@ class PlanActAgent(JsonToolAgent):
         self._seed_reserved_tool(make_sequence, "make_sequence")
         self._seed_reserved_tool(make_dict, "make_dict")
 
+    @property
+    def fail_fast(self) -> bool:
+        """
+        When ``True`` (default), the first tool call failure immediately
+        raises and aborts the run. When ``False``, execution cascades:
+        calls that depend, directly or transitively, on a failed call's
+        result are skipped rather than attempted; independent branches
+        still run to completion. Declared directly on this class -- not
+        shared with ``ReActAgent``, whose own ``fail_fast`` governs a
+        different granularity (a single per-round call, not a whole batch).
+        """
+        return self._fail_fast
+
+    def to_dict(self) -> dict[str, Any]:
+        """Extends ``ToolAgent.to_dict()`` with this class's own ``fail_fast``."""
+        d = super().to_dict()
+        d["fail_fast"] = self._fail_fast
+        return d
+
     # ------------------------------------------------------------------ #
     # Shared per-invocation helpers
     # ------------------------------------------------------------------ #
-    @classmethod
-    def _copy_for_task_namespace(cls, value: Any) -> Any:
-        """
-        Ported verbatim from ``DagAgent._copy_for_task_namespace`` -- own
-        private copy, not shared on ``JsonToolAgent``, matching this
-        release's Stage A/B duplication posture for family-specific
-        initialization helpers. Returns ``value`` unchanged if it's a known
-        atomic-immutable type; otherwise a deep copy, so a mutating call on
-        a cached/constant value can never reach the real, shared object.
-        """
-        if isinstance(value, cls._ATOMIC_IMMUTABLE_TYPES):
-            return value
-        return copy.deepcopy(value)
+    # _copy_for_task_namespace now inherited from ToolAgent unchanged.
 
     def _initialize_task(
         self,
@@ -252,7 +262,7 @@ class PlanActAgent(JsonToolAgent):
         The "what is the task" user message. Unlike ``DagAgent``'s own
         version, this one carries the ``tool_calls_limit`` text -- moved
         out of the system prompt entirely (see
-        ``JsonToolAgent._render_system_message``) since it's a
+        ``ToolAgent._render_system_message``) since it's a
         per-invocation fact, not a standing instruction, and showing it
         here avoids spending system-prompt tokens on it every construction
         even though this family only ever renders one round.

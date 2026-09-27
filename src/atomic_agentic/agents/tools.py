@@ -96,7 +96,7 @@ if _return_param_names != [RETURN_VALUE_FIELD]:
 
 def _call_py_builtin(name: str, args: tuple, kwargs: dict) -> Any:
     """
-    Dispatch body for ScriptAgent's approved-Python-builtin calls.
+    Dispatch body for ScriptActAgent's approved-Python-builtin calls.
 
     ``args``/``kwargs`` are the real target call's own positional/keyword
     arguments, passed as opaque packed values (a tuple and a dict) rather
@@ -119,18 +119,18 @@ def _call_py_builtin(name: str, args: tuple, kwargs: dict) -> Any:
 
 
 # Never registered into any agent's toolbox -- resolved directly by
-# ScriptAgent.prepare()/_gather_batch_results() via the PY_BUILTIN_ALIAS
+# ScriptActAgent.prepare()/_gather_batch_results() via the PY_BUILTIN_ALIAS
 # sentinel, never through get_tool(). No return_tool-style identity assert
 # needed: nothing references this Tool by a full_name string, only by
-# direct object reference from agents/script.py.
+# direct object reference from agents/scriptact.py.
 builtin_call_tool = Tool(
     function=_call_py_builtin,
     name=PY_BUILTIN_ALIAS,
-    namespace="script_agent",
+    namespace="scriptact_agent",
     description=(
-        "Internal ScriptAgent dispatcher for approved Python builtin calls. "
+        "Internal ScriptActAgent dispatcher for approved Python builtin calls. "
         "Never registered into any agent's toolbox -- resolved directly by "
-        "ScriptAgent.prepare()/_gather_batch_results() via the "
+        "ScriptActAgent.prepare()/_gather_batch_results() via the "
         "PY_BUILTIN_ALIAS sentinel, never through get_tool()."
     ),
 )
@@ -138,7 +138,7 @@ builtin_call_tool = Tool(
 
 def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> Any:
     """
-    Dispatch body for ScriptAgent's attribute/method-call slots
+    Dispatch body for ScriptActAgent's attribute/method-call slots
     (``obj.method(...)``).
 
     ``args``/``kwargs`` are the real target method's own positional/keyword
@@ -164,16 +164,16 @@ def _call_attr_method(obj: Any, method_name: str, args: tuple, kwargs: dict) -> 
 
 
 # Never registered into any agent's toolbox -- resolved directly by
-# ScriptAgent.prepare()/_gather_batch_results() via the ATTR_CALL_ALIAS
+# ScriptActAgent.prepare()/_gather_batch_results() via the ATTR_CALL_ALIAS
 # sentinel, never through get_tool(). Same treatment as builtin_call_tool.
 attr_call_tool = Tool(
     function=_call_attr_method,
     name=ATTR_CALL_ALIAS,
-    namespace="script_agent",
+    namespace="scriptact_agent",
     description=(
-        "Internal ScriptAgent dispatcher for attribute/method calls on a "
+        "Internal ScriptActAgent dispatcher for attribute/method calls on a "
         "value the plan already holds. Never registered into any agent's "
-        "toolbox -- resolved directly by ScriptAgent.prepare()/"
+        "toolbox -- resolved directly by ScriptActAgent.prepare()/"
         "_gather_batch_results() via the ATTR_CALL_ALIAS sentinel, never "
         "through get_tool()."
     ),
@@ -192,7 +192,7 @@ def call_python_builtin(name: str, *args: Any, **kwargs: Any) -> Any:
     Raises ValueError if "name" is not the name of an available builtin.
     """
     # A plain *args/**kwargs splat is safe here -- deliberately not the
-    # packed-tuple/dict signature ScriptAgent's own builtin_call_tool/
+    # packed-tuple/dict signature ScriptActAgent's own builtin_call_tool/
     # attr_call_tool dispatch bodies use. Those needed packing because their
     # own fixed identifying parameters (name+args+kwargs as one unit;
     # obj/method_name) sit in the same positional/keyword namespace as the

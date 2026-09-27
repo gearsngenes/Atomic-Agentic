@@ -35,12 +35,11 @@ Distinguishing features relative to ``PlanActAgent``/``DagAgent``:
 
 from __future__ import annotations
 
-import copy
 import json
 from datetime import datetime
 from typing import Any, Callable, ClassVar, Optional
 
-from .json_tool_agent import JsonToolAgent
+from .toolagent import ToolAgent
 from .prompts import REACT_PROMPT
 from .tools import make_dict, make_sequence, return_tool
 from ..constants.agents import RETURN_TOOL_NAME
@@ -68,7 +67,7 @@ from ..utils.dag import (
 # --------------------------------------------------------------------------- #
 # ReAct Agent
 # --------------------------------------------------------------------------- #
-class ReActAgent(JsonToolAgent):
+class ReActAgent(ToolAgent):
     """
     Iterative agent with reactive step-by-step planning (ReAct-style
     architecture): one call generated, resolved, and dispatched per round,
@@ -88,10 +87,6 @@ class ReActAgent(JsonToolAgent):
     - Step quality depends on the model's ability to select the next best
       action from the rendered history alone.
     """
-
-    _ATOMIC_IMMUTABLE_TYPES: ClassVar[tuple[type, ...]] = (
-        str, int, float, bool, complex, bytes, type(None),
-    )
 
     # A class attribute (active before __init__ runs) — return_tool plus the
     # two composite-value-building utility tools this family's schema text
@@ -129,17 +124,19 @@ class ReActAgent(JsonToolAgent):
         constant_descriptions: Optional[list[Optional[str]]] = None,
     ) -> None:
         """
-        Every parameter forwards verbatim to ``JsonToolAgent.__init__`` --
-        no ``extra_parameters`` keyword, matching that base class's own
-        signature exactly (it accepts none). Two defaults deliberately
-        diverge from ``JsonToolAgent``'s own: ``tool_calls_limit`` defaults
-        to ``25`` (not ``None`` -- this family has no second round-ceiling
-        knob the way ``DagAgent`` has ``planning_rounds_limit``, so an
-        unbounded default would have zero structural backstop), and
-        ``fail_fast`` defaults to ``False`` (not ``True`` -- redirecting on
-        failure is this family's entire reason for existing; a caller who
-        genuinely wants one failure to be fatal can still pass
-        ``fail_fast=True`` explicitly).
+        Every parameter except ``fail_fast`` forwards verbatim to
+        ``ToolAgent.__init__`` -- no ``extra_parameters`` keyword, matching
+        that base class's own signature exactly (it accepts none).
+        ``fail_fast`` has no shared home on ``ToolAgent`` (see the
+        ``fail_fast`` property below) -- validated and stored locally
+        instead. Two defaults deliberately diverge from ``ToolAgent``'s own:
+        ``tool_calls_limit`` defaults to ``25`` (not ``None`` -- this family
+        has no second round-ceiling knob the way ``ScriptActAgent`` has
+        ``planning_rounds_limit``, so an unbounded default would have zero
+        structural backstop), and ``fail_fast`` defaults to ``False`` (not
+        ``True`` -- redirecting on failure is this family's entire reason
+        for existing; a caller who genuinely wants one failure to be fatal
+        can still pass ``fail_fast=True`` explicitly).
         """
         super().__init__(
             name=name,
@@ -150,7 +147,6 @@ class ReActAgent(JsonToolAgent):
             tool_calls_limit=tool_calls_limit,
             regeneration_limit=regeneration_limit,
             tool_concurrency_limit=tool_concurrency_limit,
-            fail_fast=fail_fast,
             response_preview_limit=response_preview_limit,
             pre_invoke=pre_invoke,
             post_invoke=post_invoke,
@@ -161,6 +157,13 @@ class ReActAgent(JsonToolAgent):
             constant_aliases=constant_aliases,
             constant_descriptions=constant_descriptions,
         )
+
+        if not isinstance(fail_fast, bool):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: fail_fast must be a bool."
+            )
+        self._fail_fast = fail_fast
+
         # Seeded directly, bypassing register_tool -- all three are reserved
         # (self._RESERVED_TOOL_NAMES), and register_tool now rejects any
         # attempt to register something under a reserved id, including this
@@ -172,21 +175,29 @@ class ReActAgent(JsonToolAgent):
         self._seed_reserved_tool(make_dict, "make_dict")
         self._system_prompts["reason_then_act"] = REACT_PROMPT
 
+    @property
+    def fail_fast(self) -> bool:
+        """
+        A failure with ``fail_fast=True`` raises immediately, aborting the
+        run. With ``fail_fast=False`` (this family's own default) it is
+        recorded and the model sees it next round to redirect around --
+        this family's entire reason for existing. Declared directly on
+        this class -- not shared with ``PlanActAgent``, whose own
+        ``fail_fast`` governs a whole batch's cascade behavior, not a
+        single per-round call.
+        """
+        return self._fail_fast
+
+    def to_dict(self) -> dict[str, Any]:
+        """Extends ``ToolAgent.to_dict()`` with this class's own ``fail_fast``."""
+        d = super().to_dict()
+        d["fail_fast"] = self._fail_fast
+        return d
+
     # ------------------------------------------------------------------ #
     # Shared per-invocation helpers
     # ------------------------------------------------------------------ #
-    @classmethod
-    def _copy_for_task_namespace(cls, value: Any) -> Any:
-        """
-        Own private copy, not shared on ``JsonToolAgent`` (matches this
-        release's Stage A/B duplication posture; the lift is Pass 7's job).
-        Returns ``value`` unchanged if it's a known atomic-immutable type;
-        otherwise a deep copy, so a mutating call on a cached/constant
-        value can never reach the real, shared object.
-        """
-        if isinstance(value, cls._ATOMIC_IMMUTABLE_TYPES):
-            return value
-        return copy.deepcopy(value)
+    # _copy_for_task_namespace now inherited from ToolAgent unchanged.
 
     def _initialize_task(
         self,

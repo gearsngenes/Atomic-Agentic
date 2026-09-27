@@ -27,8 +27,8 @@ __all__ = [
     "LLMRecord",
     "AgentRecord",
     "JsonToolAgentRecord",
-    "ScriptAgentRecord",
-    "ScriptAgentToolUsage",
+    "ScriptActAgentRecord",
+    "ScriptActAgentToolUsage",
     "DagAgentRecord",
     "ThinkingAgentRecord",
 ]
@@ -342,9 +342,9 @@ class JsonToolAgentRecord(AgentRecord):
 
 
 @dataclass(frozen=True, slots=True)
-class ScriptAgentToolUsage:
+class ScriptActAgentToolUsage:
     """
-    Five orthogonal counts derived from one completed ``ScriptAgentRecord``'s
+    Five orthogonal counts derived from one completed ``ScriptActAgentRecord``'s
     ``statements``, for debugging/observability only -- never used to
     reconstruct or re-plan. ``registered_tool_calls`` + ``builtin_calls`` +
     ``attribute_calls`` is the same total already enforced (silently)
@@ -395,10 +395,10 @@ class ScriptAgentToolUsage:
 
 
 @dataclass(frozen=True, slots=True)
-class ScriptAgentRecord(AgentRecord):
+class ScriptActAgentRecord(AgentRecord):
     """
-    Canonical memory record for one completed ScriptAgent invocation -- a
-    sibling to JsonToolAgentRecord, not a subclass (ScriptAgent is a new agent
+    Canonical memory record for one completed ScriptActAgent invocation -- a
+    sibling to JsonToolAgentRecord, not a subclass (ScriptActAgent is a new agent
     family, not a JsonToolAgent subclass).
 
     Unlike the Task family, Record types in this codebase validate at
@@ -414,7 +414,7 @@ class ScriptAgentRecord(AgentRecord):
     Fields
     ------
     statements : tuple[CodeStatement, ...]
-        Every slot ScriptAgentTask.completed accumulated this run, carried
+        Every slot ScriptActAgentTask.completed accumulated this run, carried
         over at commit time (normalized to a tuple here, mirroring
         llm_records' existing list-or-tuple-in, tuple-stored normalization).
         A bare reasoning string the model wrote is never a slot in its own
@@ -424,7 +424,7 @@ class ScriptAgentRecord(AgentRecord):
 
     failed_statements : tuple[CodeStatement, ...]
         Every slot whose dispatch raised this run, carried over from
-        ScriptAgentTask.failed_statements at commit time (same
+        ScriptActAgentTask.failed_statements at commit time (same
         list-or-tuple-in, tuple-stored normalization as statements). Each
         entry's ``.exception`` is the raised value. The permanent record of
         what failed during this invocation -- unlike ``continuation_note``
@@ -442,18 +442,18 @@ class ScriptAgentRecord(AgentRecord):
         # CPython gotcha for slotted-dataclass inheritance chains; confirmed
         # live: bare super() raises "obj must be an instance or subtype of
         # type" here).
-        super(ScriptAgentRecord, self).__post_init__()
+        super(ScriptActAgentRecord, self).__post_init__()
 
         # 1. statements must be a list/tuple of CodeStatement instances.
         if isinstance(self.statements, (str, bytes)) or not isinstance(self.statements, (list, tuple)):
             raise TypeError(
-                "ScriptAgentRecord.statements must be a list or tuple of "
+                "ScriptActAgentRecord.statements must be a list or tuple of "
                 f"CodeStatement instances; got {type(self.statements).__name__!r}."
             )
         for index, slot in enumerate(self.statements):
             if not isinstance(slot, CodeStatement):
                 raise TypeError(
-                    f"ScriptAgentRecord.statements[{index}] must be a "
+                    f"ScriptActAgentRecord.statements[{index}] must be a "
                     f"CodeStatement instance; got {type(slot).__name__!r}."
                 )
 
@@ -463,13 +463,13 @@ class ScriptAgentRecord(AgentRecord):
             self.failed_statements, (list, tuple)
         ):
             raise TypeError(
-                "ScriptAgentRecord.failed_statements must be a list or tuple "
+                "ScriptActAgentRecord.failed_statements must be a list or tuple "
                 f"of CodeStatement instances; got {type(self.failed_statements).__name__!r}."
             )
         for index, slot in enumerate(self.failed_statements):
             if not isinstance(slot, CodeStatement):
                 raise TypeError(
-                    f"ScriptAgentRecord.failed_statements[{index}] must be a "
+                    f"ScriptActAgentRecord.failed_statements[{index}] must be a "
                     f"CodeStatement instance; got {type(slot).__name__!r}."
                 )
 
@@ -484,7 +484,7 @@ class ScriptAgentRecord(AgentRecord):
         Reconstruct this run's statements as source-formatted text, grouped
         by concurrent batch (``show_batches=True`` -- a standalone,
         human-only view; the live continuation-message path this mirrors,
-        ``ScriptAgent._render_task_messages``, deliberately never shows
+        ``ScriptActAgent._render_task_messages``, deliberately never shows
         batch grouping to the model itself). Named generically ("code",
         not "python") since the underlying grammar isn't guaranteed to
         stay Python-syntax-specific forever.
@@ -493,9 +493,9 @@ class ScriptAgentRecord(AgentRecord):
 
         return render_completed_as_python(self.statements, show_batches=True)
 
-    def tool_usage(self) -> ScriptAgentToolUsage:
+    def tool_usage(self) -> ScriptActAgentToolUsage:
         """
-        Compute a ``ScriptAgentToolUsage`` snapshot from ``self.statements``
+        Compute a ``ScriptActAgentToolUsage`` snapshot from ``self.statements``
         and ``self.failed_statements`` in one pass. Pure/derived -- not
         stored, recomputed on each call.
         """
@@ -537,7 +537,7 @@ class ScriptAgentRecord(AgentRecord):
             elif is_dispatched_slot(slot):
                 registered_tool_calls += 1
 
-        return ScriptAgentToolUsage(
+        return ScriptActAgentToolUsage(
             registered_tool_calls=registered_tool_calls,
             builtin_calls=builtin_calls,
             attribute_calls=attribute_calls,
@@ -549,7 +549,7 @@ class ScriptAgentRecord(AgentRecord):
         """Return the explicit serialized dictionary representation."""
         # Explicit two-argument super() -- same slotted-dataclass gotcha
         # __post_init__ documents above; bare super() raises here too.
-        d = super(ScriptAgentRecord, self).to_dict()
+        d = super(ScriptActAgentRecord, self).to_dict()
         d.update({
             "statements": [s.to_dict() for s in self.statements],
             "failed_statements": [s.to_dict() for s in self.failed_statements],
@@ -561,9 +561,9 @@ class ScriptAgentRecord(AgentRecord):
 class DagAgentRecord(AgentRecord):
     """
     Canonical memory record for one completed DagAgent invocation -- a
-    sibling to ScriptAgentRecord, not a subclass (DagAgent is a new agent
+    sibling to ScriptActAgentRecord, not a subclass (DagAgent is a new agent
     family). Each record owns its own calls outright, same as
-    ScriptAgentRecord -- no blackboard_start/blackboard_end span to index
+    ScriptActAgentRecord -- no blackboard_start/blackboard_end span to index
     into.
 
     Fields
@@ -572,7 +572,7 @@ class DagAgentRecord(AgentRecord):
         Every call DagAgentTask.completed accumulated this run, carried
         over at commit time (normalized to a tuple). Includes the
         RETURN_ALIAS call when the run terminated via return -- not
-        excluded, same as ScriptAgentRecord.statements includes its own
+        excluded, same as ScriptActAgentRecord.statements includes its own
         RETURN_ALIAS/CodeStatement entries today.
 
     failed_statements : tuple[DagToolCall, ...]
@@ -588,7 +588,7 @@ class DagAgentRecord(AgentRecord):
         # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
         # the class object to add __slots__, which invalidates the
         # zero-arg super()'s implicit __class__ closure cell (same
-        # slotted-dataclass-subclass gotcha ScriptAgentRecord.__post_init__
+        # slotted-dataclass-subclass gotcha ScriptActAgentRecord.__post_init__
         # already documents above).
         super(DagAgentRecord, self).__post_init__()
 
@@ -622,7 +622,7 @@ class DagAgentRecord(AgentRecord):
                 )
 
         # 3. normalize both to a tuple -- object.__setattr__ required, the
-        # dataclass is frozen (mirrors ScriptAgentRecord's identical
+        # dataclass is frozen (mirrors ScriptActAgentRecord's identical
         # normalization).
         object.__setattr__(self, "statements", tuple(self.statements))
         object.__setattr__(self, "failed_statements", tuple(self.failed_statements))
@@ -633,7 +633,7 @@ class DagAgentRecord(AgentRecord):
         produced by DagToolCall.serialize() -- the model's own
         call/arguments/result_name vocabulary, not to_dict()'s internal-field
         shape. Scoped to statements only, never failed_statements,
-        mirroring ScriptAgentRecord.render_as_code()'s own scope. No
+        mirroring ScriptActAgentRecord.render_as_code()'s own scope. No
         batch-grouping parameter needed (unlike render_as_code
         (show_batches=True)'s formatting need) -- each entry already
         carries its own batch_index, so a caller can group by that
@@ -644,7 +644,7 @@ class DagAgentRecord(AgentRecord):
     def render_as_code(self) -> str:
         """
         Reconstruct this run's statements as source-formatted text, grouped
-        by concurrent batch -- mirrors ScriptAgentRecord.render_as_code()
+        by concurrent batch -- mirrors ScriptActAgentRecord.render_as_code()
         exactly (same show_batches=True, standalone-human-inspection-only
         scope; DagAgent's own live continuation-message path never shows
         batch grouping to the model, matching that method's own rationale).
@@ -686,7 +686,7 @@ class ThinkingAgentRecord(AgentRecord):
         # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
         # the class object to add __slots__, which invalidates the
         # zero-arg super()'s implicit __class__ closure cell (same
-        # slotted-dataclass-subclass gotcha ScriptAgentRecord.__post_init__
+        # slotted-dataclass-subclass gotcha ScriptActAgentRecord.__post_init__
         # already documents above).
         super(ThinkingAgentRecord, self).__post_init__()
 

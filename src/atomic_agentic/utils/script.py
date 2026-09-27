@@ -663,7 +663,7 @@ def rewrite_builtin_calls(slots: list[CodeStatement]) -> list[str]:
     A slot is eligible when its ``tool`` isn't already a sentinel and names
     a real Python builtin. A registered tool can no longer share a name
     with a real, non-excluded builtin at all (enforced at registration time
-    by ``ScriptAgent._validate_tool_alias``), so there is no precedence
+    by ``ScriptActAgent._validate_tool_alias``), so there is no precedence
     rule to apply here -- a name reaching this function is either a
     registered tool (never a builtin) or not, mutually exclusive by
     construction. An eligible slot gets its builtin name spliced in as a
@@ -843,7 +843,7 @@ def compile_batches(
     ``start_batch_index`` plus that batch's own 0-based position among the
     batches this call produces -- the moment the batch closes. Lets a
     caller running multiple generation rounds in one invoke
-    (``ScriptAgentTask.batch_counter``) keep indices globally unique across
+    (``ScriptActAgentTask.batch_counter``) keep indices globally unique across
     rounds by passing the running total in as ``start_batch_index``.
     """
     batches: list[list[CodeStatement]] = []
@@ -908,12 +908,12 @@ def render_completed_as_python(
 
     ``show_batches`` (default ``False``) controls whether output is
     grouped under a ``# Batch N:`` header per concurrently-dispatched
-    batch. Model-facing callers (``ScriptAgent``'s own continuation-message
+    batch. Model-facing callers (``ScriptActAgent``'s own continuation-message
     building) must leave this ``False`` -- ``# Batch N:`` headers appearing
     in text shown to the model were found, empirically, to get echoed and
     fabricated back into later generations. The grouped form remains
     available, opt-in, for standalone human inspection
-    (``ScriptAgentRecord.render_as_code``), where there is no such risk.
+    (``ScriptActAgentRecord.render_as_code``), where there is no such risk.
     Consecutive slots sharing the same ``.batch_index`` are already
     contiguous in ``completed`` (a batch drains fully before the next one
     starts), so grouping only needs to detect index changes, not sort.

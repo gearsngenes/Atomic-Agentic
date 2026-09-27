@@ -1,18 +1,18 @@
 from .base import Agent
 from .basic import BasicAgent
-from .json_tool_agent import JsonToolAgent
+from .toolagent import ToolAgent
 from .planact import PlanActAgent
 from .react import ReActAgent
 from .thinking import ThinkingAgent
-from .script import ScriptAgent
+from .scriptact import ScriptActAgent
 from .dag import DagAgent
 
 __all__ = ["Agent",
            "BasicAgent",
-           "JsonToolAgent",
+           "ToolAgent",
            "ReActAgent",
            "PlanActAgent",
            "ThinkingAgent",
-           "ScriptAgent",
+           "ScriptActAgent",
            "DagAgent",
            ]
