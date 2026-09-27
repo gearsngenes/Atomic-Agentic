@@ -197,16 +197,18 @@ FINAL_ROUND_WARNING = (
     "task now; you may not defer further."
 )
 """Appended (space-separated) to a continuation instruction when
-<agent>._is_final_round(task) is true -- shared verbatim by both
-ScriptActAgent and DagAgent (each family's own _render_task_messages' round-1
-and continuation branches), so all four call sites can never drift in
-wording. Deliberately grammar-neutral -- earlier revisions said "Do not
-write # PAUSE", a ScriptActAgent-specific instruction meaningless in
-DagAgent's own grammar (there is no "# PAUSE" marker or equivalent; a
-DagAgent round signals continuation via the remaining_work JSON
-field instead) -- "you may not defer further" already fully covers the
-same intent (deferring IS writing # PAUSE, for ScriptActAgent) without
-naming a mechanism that doesn't exist in DagAgent's own output schema."""
+DagAgent._is_final_round(task) is true, in that class's own
+_render_task_messages continuation branch. DagAgent-only since the
+scriptact-repair-rework pass: ScriptActAgent dropped its own voluntary
+`# PAUSE`/_is_final_round mechanism entirely in favor of a strictly
+one-shot planner plus a bounded, framework-only repair-on-failure
+mechanism (see agents/scriptact.py) -- there is no more model-authored
+"final round" concept for it to warn about, so this constant is kept
+(DagAgent, frozen this release, still imports and uses it) but is no
+longer shared across two families. Deliberately grammar-neutral wording
+("you may not defer further" rather than a `# PAUSE`-specific phrasing)
+is a holdover from when it WAS shared -- harmless to keep as-is for
+DagAgent's own sake, just no longer load-bearing for that reason."""
 
 # =============================================================================
 # DagAgent output_structure schema

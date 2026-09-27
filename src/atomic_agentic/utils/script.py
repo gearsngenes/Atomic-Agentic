@@ -923,11 +923,12 @@ def render_cache_snapshot(
     Render the current value of every identifier bound by ``completed``
     this round, as its own fenced block, separate from the reconstructed
     code (``render_completed_as_python``) -- keeps per-statement lines free
-    of inline value noise while still giving a continuation round real
+    of inline value noise while still giving a repair round real
     visibility into what a prior dispatched call actually returned (the
     one thing a bare ``name = tool(...)`` statement can never reveal on
-    its own; a reactive, content-driven pause decision -- e.g. reading a
-    reviewer's actual verdict -- depends on this).
+    its own; writing correct fresh code around an existing binding --
+    e.g. reusing a reviewer's actual verdict instead of a fabricated one --
+    depends on this).
 
     Identifiers are taken from ``completed`` in first-occurrence order,
     each looked up fresh in ``cache`` (so a reassigned name shows its

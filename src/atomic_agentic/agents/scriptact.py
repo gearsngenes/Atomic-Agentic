@@ -669,16 +669,21 @@ class ScriptActAgent(ToolAgent):
     def prepare(self, task: ScriptActAgentTask) -> ScriptActAgentTask:
         """
         Resolve the next pending batch's args, or short-circuit completion
-        (or a granted repair) if nothing remains.
+        if nothing remains.
 
-        If ``task.pending`` is empty: reset ``task.resolved_args``, then
-        either leave the round as-is if ``task.needs_repair`` is already
-        set (nothing to prepare -- ``think()`` will regenerate the repair
-        round) or, otherwise, infer an implicit ``return None`` if no
-        executed ``return`` slot already set ``task.generated_response``
-        and mark the task complete -- covers both a genuinely empty
-        generation and the natural end-of-plan drain, so ``act()`` needs
-        only a bare no-op guard, not a second check.
+        If ``task.pending`` is empty: reset ``task.resolved_args`` and
+        finalize via ``_finalize_without_continuation`` -- infers an
+        implicit ``return None`` if no executed ``return`` slot already
+        set ``task.generated_response``, and marks the task complete.
+        Covers both a genuinely empty generation and the natural
+        end-of-plan drain, so ``act()`` needs only a bare no-op guard, not
+        a second check. There is no "leave it as-is, a repair round is
+        still pending" case to special-case here despite ``task.needs_repair``
+        existing as a field: ``think()`` always clears it the moment it
+        actually regenerates (see its own docstring), and always runs
+        before this method can see an empty ``task.pending`` again after a
+        repair round was granted -- so by the time this branch is ever
+        reached, ``needs_repair`` is guaranteed already ``False``.
 
         Otherwise: resolves every slot's args in ``task.pending[0]``,
         collecting every failure (not stopping at the first). Any collected
@@ -691,8 +696,6 @@ class ScriptActAgent(ToolAgent):
         """
         if not task.pending:
             task.resolved_args = []
-            if task.needs_repair:
-                return task
             return self._finalize_without_continuation(task)
 
         batch = task.pending[0]
@@ -887,13 +890,18 @@ class ScriptActAgent(ToolAgent):
         task.pending.pop(0)
         task.resolved_args = []
 
-        # This batch just drained the plan. If nothing needs repairing and
-        # nothing already completed it (no `return` above), finalize right
-        # here -- the natural point `task.pending` actually reaches empty --
-        # instead of leaving it for a future `prepare()` call that `think()`
-        # would otherwise reach first on the next loop iteration and
-        # regenerate an uninvited round.
-        if not task.pending and not task.complete and not task.needs_repair:
+        # This batch just drained the plan with no failure this call, and
+        # nothing already completed it (no `return` above) -- finalize
+        # right here, the natural point `task.pending` actually reaches
+        # empty, instead of leaving it for a future `prepare()` call that
+        # `think()` would otherwise reach first on the next loop iteration
+        # and regenerate an uninvited round. `task.needs_repair` is not
+        # checked here: on this (non-failure) path it is always already
+        # `False` -- either never set this invoke, or already cleared by
+        # `think()` before this batch's content was ever generated (see
+        # `think()`'s own docstring) -- so it could never actually gate
+        # this check.
+        if not task.pending and not task.complete:
             return self._finalize_without_continuation(task)
 
         return task

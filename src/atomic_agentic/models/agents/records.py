@@ -519,7 +519,21 @@ class ScriptActAgentRecord(AgentRecord):
         binop_count = 0
         rhs_assignment_count = 0
 
-        for slot in self.statements:
+        # One combined pass over both -- a slot's classification doesn't
+        # depend on whether it ultimately succeeded or failed. A
+        # RHS_ASSIGN_ALIAS slot can fail here too (not just a dispatched
+        # call): resolve_slot_args evaluates its `val` expression against
+        # already-bound names, so e.g. `avg = total / count` fails exactly
+        # like a real dispatched call whenever `count` resolves to `0` --
+        # it's just as real an rhs-assignment "use" as a successful one.
+        # RETURN_ALIAS is excluded from every count on both sides -- it's
+        # the plan's terminal, not a use of any of these five categories,
+        # matching the (unchanged) treatment a successful return already
+        # got before this pass. tool_calls_used counts a dispatched call
+        # whether it succeeded or raised, so this snapshot must too, or its
+        # own sum-equals-budget claim would be false whenever any call
+        # failed.
+        for slot in (*self.statements, *self.failed_statements):
             if slot.tool == PY_BUILTIN_ALIAS:
                 builtin_calls += 1
             elif slot.tool == ATTR_CALL_ALIAS:
@@ -531,21 +545,6 @@ class ScriptActAgentRecord(AgentRecord):
                     isinstance(node, ast.BinOp) for node in ast.walk(value)
                 ):
                     binop_count += 1
-            elif is_dispatched_slot(slot):
-                registered_tool_calls += 1
-
-        # failed_statements can only ever contain a dispatched slot (a
-        # registered tool, builtin, or attribute/method call) -- rhs_assign/
-        # return slots are never dispatched, so they can never fail here.
-        # Still counted against the three dispatched-call totals above:
-        # tool_calls_used counts a dispatched call whether it succeeded or
-        # raised, so this snapshot must too, or its own sum-equals-budget
-        # claim would be false whenever any call failed.
-        for slot in self.failed_statements:
-            if slot.tool == PY_BUILTIN_ALIAS:
-                builtin_calls += 1
-            elif slot.tool == ATTR_CALL_ALIAS:
-                attribute_calls += 1
             elif is_dispatched_slot(slot):
                 registered_tool_calls += 1
 

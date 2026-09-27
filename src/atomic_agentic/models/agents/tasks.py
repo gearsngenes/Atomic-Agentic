@@ -149,11 +149,11 @@ class ScriptActAgentTask(AgentTask):
         dispatch raised is never appended here -- see failed_statements.
 
     pending : list[list[CodeStatement]]
-        Every not-yet-executed dependency batch compiled so far for the
-        current plan -- not scoped to just the next pause. The whole
-        one-shot draft (or, after a replan, the whole freshly regenerated
-        tail) is parsed and batch-compiled in a single pass, so this can
-        span multiple pauses' worth of batches at once. The front batch
+        Every not-yet-executed dependency batch compiled from the current
+        generation -- the whole one-shot draft (or, after a granted repair,
+        the whole freshly regenerated tail) is parsed and batch-compiled in
+        a single pass, so this can hold several batches at once even though
+        there is only ever one generation per round. The front batch
         (``pending[0]``) is the next one act() runs; once it fully
         executes, its slots move into ``completed`` and it is popped from
         this list.

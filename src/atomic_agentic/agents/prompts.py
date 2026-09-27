@@ -444,8 +444,11 @@ argument that can't be resolved or doesn't fit the tool's parameters, or
 a call that raises, may open a bounded repair round -- a fresh generation
 seeded with everything that already ran.
 
-That round opens with an assistant message, verbatim, never yours:
-completed code, then bound values, then what just failed --
+That round restates the task, then shows what happened, verbatim, never
+yours: completed code, then bound values, then what just failed --
+
+(user) CURRENT TASK:
+Make batter, then bake a cake with it for 250 minutes.
 
 (assistant) # WORK COMPLETED SO FAR:
 batter = make_batter()

@@ -335,7 +335,7 @@ def reject_unsupported_forms(node: ast.expr) -> None:
                 "conditional expression branches must not contain tool "
                 "calls (wastes budget evaluating the untaken branch): "
                 f"{ast.unparse(candidate)!r} -- restructure as separate "
-                "statements or a pause."
+                "statements."
             )
 
         if isinstance(candidate, ast.Await):
