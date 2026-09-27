@@ -158,26 +158,30 @@ class ScriptActAgentTask(AgentTask):
         executes, its slots move into ``completed`` and it is popped from
         this list.
 
-    continue_planning : bool
-        Set by ``parse_generation`` (via ``think()``) when the round itself
-        asked to continue (a ``# PAUSE``, or a valid if-cutoff), or by
-        ``prepare()``/``_apply_batch_results()`` when a batch's args failed
-        to resolve or a real tool call failed. Read by ``prepare()``'s and
-        ``_apply_batch_results``'s own empty-``pending`` checks -- whichever
-        one actually drains ``pending`` to empty -- to tell "stopped, needs
-        a continuation" (leave the task incomplete for ``think()`` to
-        regenerate next) apart from "genuinely finished" (finalize via
-        ``_finalize_without_continuation`` right there, before ``think()``
-        ever gets a turn to regenerate an uninvited round).
+    needs_repair : bool
+        Set only by ``prepare()``/``_apply_batch_results()``, only on a
+        real resolution or execution failure that ``fail_fast``/
+        ``replanning_limit`` grants a repair round for -- there is no
+        model-authored way to set this anymore (no ``# PAUSE``, no
+        if-cutoff). Cleared by ``think()``/``async_think()``, right after
+        generating the granted repair round's fresh content -- the flag's
+        only job is telling ``prepare()``'s and ``_apply_batch_results``'s
+        own empty-``pending`` checks "stopped, needs a repair round" (leave
+        the task incomplete for ``think()`` to regenerate next) apart from
+        "genuinely finished" (finalize via ``_finalize_without_continuation``
+        right there); once that regeneration has actually happened, leaving
+        it set would permanently block both methods' natural-completion
+        checks for the rest of the invoke.
 
-    planning_rounds_used : int
-        Count of planning generations made so far this invoke, including
-        the first -- total-count semantics, not "extra chances beyond a
-        free first attempt" (contrast ``regenerations_used``, which
-        specifically counts second chances within one round).
-        Incremented unconditionally by ``think()``/``async_think()`` on
-        every real call, then checked against
-        ``self._planning_rounds_limit`` before requesting another.
+    repair_rounds_used : int
+        Count of framework-granted repair rounds so far this invoke --
+        never counts the free initial plan (contrast the old
+        ``planning_rounds_used``, which counted round 1 too). Incremented
+        only in ``prepare()``/``_apply_batch_results()``, at the exact
+        point a repair round is granted -- never in ``think()``, which has
+        no budget awareness at all anymore. Checked against
+        ``self._replanning_limit`` at those same two sites before granting
+        another.
 
     tool_calls_used : int
         Cumulative count of dispatched (non-``rhs_assign``/``return``)
@@ -188,20 +192,24 @@ class ScriptActAgentTask(AgentTask):
         happened, whether it succeeded or failed); never in ``prepare()``
         (a resolution failure means nothing was ever dispatched). Read by
         ``_process_generation_output`` to compute the remaining budget
-        passed into ``validate_references``.
+        passed into ``validate_references``, and by
+        ``_render_task_messages`` to show the model its own remaining
+        ``tool_calls_limit`` on a repair round.
 
-    continuation_note : Optional[str]
-        Framework-authored (never model-authored) reason text, set only by
-        ``prepare()``'s resolution-failure branch or
-        ``_apply_batch_results``'s execution-failure branch -- a
-        multi-line block combining the failed batch's own rendered source
-        (via ``render_completed_as_python``) with its labeled issue/failure
-        list, so the next continuation round sees both what it wrote and
-        specifically what went wrong with it. An explicit ``# PAUSE`` or
-        if-cutoff continuation never sets this (bare sentinel, no note of
-        any kind); consulted and cleared back to ``None`` in the same read
-        by ``_render_task_messages`` on the next generation, so a stale note
-        from an already-addressed failure never leaks into a later round.
+    repair_batch_start : int
+        Index into ``failed_statements`` marking where the batch that most
+        recently triggered (or attempted to trigger) a repair round began.
+        Set alongside ``needs_repair = True``, in the same
+        ``prepare()``/``_apply_batch_results()`` branch that extends
+        ``failed_statements`` with this round's failures. Consumed (read,
+        not cleared) by ``_render_task_messages`` to slice
+        ``failed_statements[repair_batch_start:]`` -- exactly this round's
+        fresh failures, not the whole accumulated history -- mirrors
+        ``ReActTask.last_call_failed``'s own "show what you're reacting to"
+        precedent. Replaces the old ``continuation_note`` field entirely;
+        there is no separately-maintained note string anymore, rendering
+        derives everything from this slice plus each slot's own
+        ``.exception``.
 
     cache : dict[str, Any]
         identifier -> resolved value for every slot in ``completed``, kept
@@ -247,13 +255,16 @@ class ScriptActAgentTask(AgentTask):
         whole invoke.
 
     failed_statements : list[CodeStatement]
-        Every slot whose dispatch raised, in the order the failure was
-        observed, across every round this invoke -- the permanent
-        counterpart to ``continuation_note``'s ephemeral text (which is
-        consulted and cleared on the very next render). Appended by
-        ``_apply_batch_results`` at the same point a failure is detected,
-        with ``slot.exception`` set to the raised value first. Never
-        cleared or mutated once appended. Becomes
+        Every slot that failed, in the order the failure was observed,
+        across every round this invoke -- populated by BOTH
+        ``prepare()`` (a resolution/binding failure, ``slot.exception`` set
+        to a synthesized ``ToolAgentError``, mirroring ``PlanActTask``'s
+        own resolution-failure pattern) and ``_apply_batch_results``
+        (a real dispatch failure, ``slot.exception`` set to the actual
+        raised value) -- unlike the old shape, where only
+        ``_apply_batch_results`` ever appended here. Never cleared or
+        mutated once appended; ``repair_batch_start`` marks where each
+        triggering batch's own slice begins. Becomes
         ScriptActAgentRecord.failed_statements verbatim (normalized to a
         tuple) at commit time.
     """
@@ -263,10 +274,10 @@ class ScriptActAgentTask(AgentTask):
     constant_values: dict[str, Any] = field(default_factory=dict)
     regenerations_used: int = 0
     resolved_args: list[dict[str, Any]] = field(default_factory=list)
-    continue_planning: bool = False
-    planning_rounds_used: int = 0
+    needs_repair: bool = False
+    repair_rounds_used: int = 0
     tool_calls_used: int = 0
-    continuation_note: Optional[str] = None
+    repair_batch_start: int = 0
     batch_counter: int = 0
     failed_statements: list[CodeStatement] = field(default_factory=list)
 

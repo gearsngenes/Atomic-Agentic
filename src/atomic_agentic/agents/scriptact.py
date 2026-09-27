@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import asyncio
 import builtins
 from typing import Any, Callable, Optional
@@ -21,12 +20,16 @@ from ..constants.core import NO_VAL
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
     EXCLUDED_PY_BUILTINS,
-    FINAL_ROUND_WARNING,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
 )
-from ..exceptions import BlackboardParseError, ToolAgentError, ToolRegistrationError
+from ..exceptions import (
+    BlackboardParseError,
+    ToolAgentError,
+    ToolInvocationError,
+    ToolRegistrationError,
+)
 from ..utils.core import run_coro_sync
 from ..utils.script import (
     compile_batches,
@@ -34,6 +37,7 @@ from ..utils.script import (
     parse_generation,
     render_cache_snapshot,
     render_completed_as_python,
+    render_failed_as_python,
     resolve_slot_args,
     rewrite_builtin_calls,
     validate_references,
@@ -42,47 +46,40 @@ from ..utils.script import (
 
 class ScriptActAgent(ToolAgent):
     """
-    Adaptive, one-shot-planning tool-invoking agent (renamed from
-    ``ScriptAgent`` -- now a direct ``ToolAgent`` sibling of
-    ``PlanActAgent``/``ReActAgent``, closing the naming asymmetry now that
-    all three sit at the same tier). Writes native-grammar, Python-style
-    statements toward a task from a single generated plan. There is no
-    separate decomposition, orchestration, or synthesis call, and no
-    construction-time mode knob -- adaptivity is meant to be emergent from
-    how many ``# PAUSE`` markers end up in one continuous plan, not picked
-    up front.
+    One-shot-planning tool-invoking agent (renamed from ``ScriptAgent`` --
+    now a direct ``ToolAgent`` sibling of ``PlanActAgent``/``ReActAgent``,
+    closing the naming asymmetry now that all three sit at the same tier).
+    Writes native-grammar, Python-style statements toward a task from a
+    single generated plan. There is no separate decomposition,
+    orchestration, or synthesis call, and no construction-time mode knob.
 
-    Checkpoint-triggered reactive continuation (Pass 2.3): a generation
-    always terminates at the first of a ``return``, an explicit
-    ``# PAUSE`` (a bare, complete sentinel -- no trailing note), or a
-    defensively-pruned ``if`` statement (the grammar still forbids
-    conditionals outright; a model that writes one anyway is handled by
-    silent truncation, not rejection, unless nothing real precedes it). A
-    resolution failure in ``prepare()`` or a real tool-execution failure in
-    ``act()`` are handled the same way -- none of these four cases raise
-    anymore. Whichever one occurs (other than ``return``) sets
-    ``task.continue_planning``, and ``think()`` re-invokes the same planner
-    for a fresh continuation, seeing a Python-source snapshot of the work
-    already done this invoke plus, only for a resolution/execution failure,
-    the real failure text (an explicit ``# PAUSE``/if-cutoff carries no
-    reason of its own to show) -- no separate judge/critic model. Also told
-    in-band when it has reached its final allowed planning round: writing
-    another ``# PAUSE`` there is rejected as a regen-repair issue rather
-    than granted as a continuation. `tool_calls_limit` is an optional,
-    fully independent budget on total dispatched calls (tools and builtins
-    counted identically) across every generation round in one invoke --
-    `None` (the default) means no such cap, relying on
-    `planning_rounds_limit` alone. `planning_rounds_limit` separately
-    bounds how many times the agent is permitted to plan in total --
-    the first generation counts as one, not a free attempt before the
-    budget starts -- defaulting to 25 (safe-by-default); an explicit
-    `None` opts into unbounded rounds. `regeneration_limit` (always a
-    plain `int`, never `None`, default 5) independently bounds how many
-    times a single round's malformed/invalid draft may be regenerated
-    before raising -- distinct from `planning_rounds_limit`, which governs
-    genuine incremental progress across rounds ("how many times may it
-    plan, starting from scratch"), not within-round mistake recovery
-    ("how many second chances does one attempt get").
+    Failure-triggered repair only (Pass 8): a generation always terminates
+    at the first of a ``return`` or a defensively-pruned ``if`` statement
+    (the grammar forbids conditionals outright; a model that writes one
+    anyway always has its generation rejected as a regen-repair issue, fed
+    back for a corrected full plan -- there is no silent-truncation
+    tolerance for it). There is no voluntary continuation mechanism of any
+    kind -- a model never decides to pause; the only way a second round can
+    ever start is a real resolution failure (``prepare()``) or execution
+    failure (``act()``). On either: ``fail_fast=True`` raises immediately,
+    at the failure site, naming what failed; ``fail_fast=False`` (default)
+    grants up to ``replanning_limit`` repair rounds first, each seeing a
+    Python-source snapshot of the work already done this invoke plus
+    exactly what failed and why in the triggering batch, and only raises
+    (the same way ``fail_fast=True`` would have) once that budget is
+    exhausted without recovering -- repair only ever buys a chance to avoid
+    raising, never a way to return degraded output instead. `tool_calls_limit`
+    is an optional, fully independent budget on total dispatched calls
+    (tools and builtins counted identically) across every generation round
+    in one invoke -- `None` (the default) means no such cap. `replanning_limit`
+    (always a plain `int`, never `None`, minimum `0`, default `2`) separately
+    bounds how many repair rounds may be granted -- the free initial plan
+    never counts against it. `regeneration_limit` (always a plain `int`,
+    never `None`, default 5) independently bounds how many times a single
+    round's malformed/invalid draft may be regenerated before raising --
+    distinct from `replanning_limit`, which governs genuine repair rounds
+    after a real failure, not within-round mistake recovery ("how many
+    second chances does one attempt get").
 
     Cross-invocation result addressing is implemented: a prior turn's
     result is seeded into `task.cache` and labeled in rendered history as
@@ -92,8 +89,10 @@ class ScriptActAgent(ToolAgent):
     Tool/constant registration, shared rendering, and the
     tool_calls_limit/tool_concurrency_limit/regeneration_limit knobs are
     all inherited from ``ToolAgent`` unchanged -- this class owns only its
-    own generation/execution grammar and the ``planning_rounds_limit`` knob,
-    which has no equivalent on the shared base.
+    own generation/execution grammar and the ``replanning_limit``/
+    ``fail_fast`` knobs, neither of which has an equivalent on the shared
+    base (``fail_fast`` is independently declared here, same pattern as
+    ``PlanActAgent``'s/``ReActAgent``'s own, different semantics).
     """
 
     def __init__(
@@ -106,7 +105,8 @@ class ScriptActAgent(ToolAgent):
         *,
         regeneration_limit: int = 5,
         tool_calls_limit: Optional[int] = None,
-        planning_rounds_limit: Optional[int] = 25,
+        replanning_limit: int = 2,
+        fail_fast: bool = False,
         tool_concurrency_limit: Optional[int] = None,
         response_preview_limit: Optional[int] = None,
         pre_invoke: Optional[AtomicInvokable | Callable[..., Any]] = None,
@@ -119,13 +119,18 @@ class ScriptActAgent(ToolAgent):
         constant_descriptions: Optional[list[Optional[str]]] = None,
     ) -> None:
         """
-        Public signature unchanged from the pre-rename ``ScriptAgent``.
-        ``super().__init__`` now reaches ``ToolAgent`` (tool/constant
-        registry init, regeneration_limit/tool_calls_limit/
-        tool_concurrency_limit validation+storage, construction-time
-        tools/constants registration all happen there) -- this ``__init__``
-        only handles what's genuinely local to this class:
-        ``planning_rounds_limit`` and the ``"planner"`` system prompt.
+        ``super().__init__`` reaches ``ToolAgent`` (tool/constant registry
+        init, regeneration_limit/tool_calls_limit/tool_concurrency_limit
+        validation+storage, construction-time tools/constants registration
+        all happen there) -- this ``__init__`` only handles what's
+        genuinely local to this class: ``replanning_limit``, ``fail_fast``,
+        and the ``"planner"`` system prompt. ``replanning_limit`` defaults
+        to ``2`` (not the old ``planning_rounds_limit``'s ``25`` -- a
+        repairs-only budget doesn't need anywhere near that many chances,
+        now that it no longer also has to cover the free initial plan).
+        ``fail_fast`` defaults to ``False`` -- repair is the normal path
+        this class exists to offer; ``True`` is the opt-out for strict
+        one-shot-or-die behavior.
         """
         super().__init__(
             name=name,
@@ -147,7 +152,13 @@ class ScriptActAgent(ToolAgent):
             constant_descriptions=constant_descriptions,
         )
 
-        self.planning_rounds_limit = planning_rounds_limit
+        self.replanning_limit = replanning_limit
+
+        if not isinstance(fail_fast, bool):
+            raise ToolAgentError(
+                f"{type(self).__name__}.{self.name}: fail_fast must be a bool."
+            )
+        self._fail_fast = fail_fast
 
         self._system_prompts["planner"] = ONESHOT_PLANNER_PROMPT
 
@@ -155,25 +166,49 @@ class ScriptActAgent(ToolAgent):
     # Construction-time / mutable knobs
     # ------------------------------------------------------------------ #
     @property
-    def planning_rounds_limit(self) -> Optional[int]:
-        """Max total planning generations (the first generation plus every
-        pause/if-cutoff/failure-triggered re-generation) permitted per
-        ``invoke()`` run -- how many times the agent is allowed to plan,
-        starting from scratch counts as one, not a count of "extra chances"
-        beyond a free first attempt. Defaults to ``25`` (safe-by-default,
-        matching common industry convention for this kind of round/
-        iteration cap). ``None`` means unlimited -- a deliberate,
-        non-default opt-in, not the default posture."""
-        return self._planning_rounds_limit
+    def replanning_limit(self) -> int:
+        """Max number of framework-granted repair rounds after the free
+        initial plan -- always a plain ``int``, never ``None``: an
+        unbounded repair budget on a failure that's already proven itself
+        unrecoverable once is a runaway-cost risk, not a legitimate use
+        case, now that continuation is never voluntary. Minimum ``0`` --
+        a real, legal value meaning "one-shot only, zero tolerance for
+        failure," not an edge case to special-case around. Mutable, like
+        ``tool_calls_limit``/``tool_concurrency_limit`` on ``ToolAgent``."""
+        return self._replanning_limit
 
-    @planning_rounds_limit.setter
-    def planning_rounds_limit(self, value: Optional[int]) -> None:
-        if value is not None and (type(value) is not int or value < 0):
+    @replanning_limit.setter
+    def replanning_limit(self, value: int) -> None:
+        if type(value) is not int or value < 0:
             raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: planning_rounds_limit "
-                f"must be None or an int >= 0; got {value!r}."
+                f"{type(self).__name__}.{self.name}: replanning_limit "
+                f"must be an int >= 0; got {value!r}."
             )
-        self._planning_rounds_limit = value
+        self._replanning_limit = value
+
+    @property
+    def fail_fast(self) -> bool:
+        """``True``: the first resolution or execution failure raises
+        immediately, at the failure site -- no repair attempted,
+        ``replanning_limit`` irrelevant in this mode. ``False`` (default):
+        up to ``replanning_limit`` repair rounds are attempted first; if
+        the budget is exhausted without recovering, raises the same way
+        ``True`` would have -- there is no silent partial-success path
+        either way. Read-only after construction, same shape as
+        ``PlanActAgent``'s/``ReActAgent``'s own independently-declared
+        ``fail_fast`` properties (no setter on either) -- different
+        semantics (this one governs repair-round budget exhaustion, not
+        batch cascade or single-call tolerance)."""
+        return self._fail_fast
+
+    def to_dict(self) -> dict[str, Any]:
+        """Extends ``ToolAgent.to_dict()`` with this class's own
+        ``fail_fast``/``replanning_limit`` -- ``ScriptActAgent`` had no
+        override at all before this pass."""
+        d = super().to_dict()
+        d["fail_fast"] = self._fail_fast
+        d["replanning_limit"] = self._replanning_limit
+        return d
 
     # ------------------------------------------------------------------ #
     # Tool registration -- naming-constraint hook override only
@@ -264,9 +299,9 @@ class ScriptActAgent(ToolAgent):
         later, so a mutation is visible for the rest of this invocation's
         own rounds but never reaches the real constant or a future
         invocation. No other field needs seeding -- completed/pending/
-        resolved_args/continue_planning/planning_rounds_used/
-        tool_calls_used/continuation_note/failed_statements all start at
-        their dataclass defaults."""
+        resolved_args/needs_repair/repair_rounds_used/tool_calls_used/
+        repair_batch_start/failed_statements all start at their dataclass
+        defaults."""
         task = ScriptActAgentTask(
             turns=turns, inputs=inputs, user_prompt=prompt, system_prompt_name="planner",
         )
@@ -280,15 +315,17 @@ class ScriptActAgent(ToolAgent):
 
     def _render_current_task_message(self, task: ScriptActAgentTask) -> dict[str, str]:
         """Bare "what is the task" user message -- reused verbatim for
-        round 1 and every continuation round's opening message. Mirrors
-        the old ``JsonToolAgent._render_task_banner``'s role (dedup a
-        repeated banner across every round) scoped to this family's own
-        established wording (no ``===== ... =====`` markers -- that's
-        JsonToolAgent-family styling, this family never used it). No
-        "translate this into a
-        plan" framing -- ``ONESHOT_PLANNER_PROMPT``'s OBJECTIVE section
-        already states that once; repeating it every round would be
-        redundant."""
+        round 1 and every repair round's opening message. Mirrors the old
+        ``JsonToolAgent._render_task_banner``'s role (dedup a repeated
+        banner across every round) scoped to this family's own established
+        wording (no ``===== ... =====`` markers -- that's JsonToolAgent-
+        family styling, this family never used it). No "translate this
+        into a plan" framing -- ``ONESHOT_PLANNER_PROMPT``'s OBJECTIVE
+        section already states that once; repeating it every round would
+        be redundant. Deliberately carries no ``tool_calls_limit`` text of
+        its own -- round 1 and a repair round need different wording
+        (total vs. remaining), so each of ``_render_task_messages``'s own
+        two branches appends its own variant after calling this."""
         return {"role": "user", "content": f"CURRENT TASK:\n{task.user_prompt}"}
 
     def _render_task_messages(self, task: ScriptActAgentTask) -> list[dict[str, str]]:
@@ -297,51 +334,48 @@ class ScriptActAgent(ToolAgent):
         organization (banner / assistant-authored state snapshot / user
         instruction) instead of cramming everything into one user message.
 
-        Branches on ``task.continue_planning`` rather than
-        ``task.completed`` -- ``continue_planning`` is the one flag
-        reliably ``True`` for every real continuation, including the edge
-        case where a resolution/execution failure hits on the very first
-        batch of round 1 (``prepare()``/``_apply_batch_results`` set it
-        directly, before anything ever lands in ``completed``); checking
-        ``completed`` alone would silently drop that failure's reason and
-        misrender it as a fresh round-1 call.
+        Branches on ``task.needs_repair`` rather than ``task.completed`` --
+        ``needs_repair`` is the one flag reliably ``True`` for every real
+        repair round, including the edge case where a resolution/execution
+        failure hits on the very first batch of round 1
+        (``prepare()``/``_apply_batch_results`` set it directly, before
+        anything ever lands in ``completed``); checking ``completed`` alone
+        would silently drop that failure's reason and misrender it as a
+        fresh round-1 call.
 
-        Round 1 (``continue_planning`` still ``False``): the banner plus a
-        trailing imperative ("Write a plan to accomplish this task now.")
-        -- mirrors the continuation branch's own closing instruction, so
-        round 1 isn't the one case with no explicit "go" signal right
-        before generation -- with the final-round warning appended inline
-        when ``self._is_final_round(task)`` (covers ``planning_rounds_limit
-        == 1``, where round 1 is immediately the only round permitted)
-        after that.
+        Round 1 (``needs_repair`` still ``False``): the banner plus a
+        trailing imperative ("Write a plan to accomplish this task now."),
+        with a ``tool_calls_limit``-total line appended when set (``None``
+        renders nothing).
 
-        A continuation round: banner, then an assistant-role state message
-        (reconstructed code -- flat, no batch grouping, see
-        ``render_completed_as_python``; plus ``render_cache_snapshot``'s
-        block; directive-free, reads as state not instruction), then a
-        user instruction. ``task.continuation_note`` (framework-authored
-        only -- never a model-authored pause note, which no longer exists)
-        now carries a multi-line block: the failed batch's own rendered
-        source plus its labeled issue/failure list (see ``prepare()``/
-        ``_apply_batch_results()``). When present, it is prepended as its
-        own paragraph before the fixed instruction sentence, rather than
-        folded into one inline sentence -- it no longer fits a "previous
-        attempt failed: <reason>" framing now that it can span several
-        lines. Consulted and cleared back to ``None`` in the same read, so
-        a stale, already-addressed note can never leak into a later round.
-        The final-round warning is appended last when applicable."""
+        A repair round: banner, then an assistant-role state message with
+        three sections -- the completed-work snapshot (reconstructed code,
+        flat, no batch grouping, via ``render_completed_as_python``), the
+        cache snapshot (``render_cache_snapshot``), and (new this pass)
+        exactly what failed in the triggering batch, sliced from
+        ``task.failed_statements[task.repair_batch_start:]`` and rendered
+        via ``render_failed_as_python`` -- never the whole accumulated
+        failure history, mirroring ``ReActTask.last_call_failed``'s own
+        "show what you're reacting to" precedent. Then a fixed user
+        instruction, with a ``tool_calls_limit``-*remaining* line appended
+        when set (recomputed fresh each round, since it depletes -- unlike
+        round 1's static total)."""
         if task.task_messages:
             return task.task_messages
 
         banner = self._render_current_task_message(task)
 
-        if not task.continue_planning:
+        if not task.needs_repair:
             content = (
                 banner["content"]
                 + "\n\nWrite a plan to accomplish this task now."
             )
-            if self._is_final_round(task):
-                content += " " + FINAL_ROUND_WARNING
+            if self.tool_calls_limit is not None:
+                plural = "s" if self.tool_calls_limit != 1 else ""
+                content += (
+                    f"\n\nYou may make at most {self.tool_calls_limit} "
+                    f"tool call{plural} total."
+                )
             task.task_messages = [{"role": "user", "content": content}]
             return task.task_messages
 
@@ -350,20 +384,24 @@ class ScriptActAgent(ToolAgent):
             task.completed, task.cache, self._response_preview_limit
         )
         cache_section = f"\n\n{cache_snapshot}" if cache_snapshot else ""
+        fresh_failures = task.failed_statements[task.repair_batch_start:]
+        failure_text = render_failed_as_python(fresh_failures)
+        failure_section = f"\n\n# THIS BATCH FAILED:\n{failure_text}" if failure_text else ""
         state_message = {
             "role": "assistant",
-            "content": f"# WORK COMPLETED SO FAR:\n{snapshot}{cache_section}",
+            "content": f"# WORK COMPLETED SO FAR:\n{snapshot}{cache_section}{failure_section}",
         }
 
-        note = task.continuation_note
-        task.continuation_note = None
-        fixed_instruction = (
-            "Continue planning the rest of this task. Use the existing "
-            "work done to guide you on what the next steps should be."
+        instruction = (
+            "Continue planning the rest of this task, fixing what failed "
+            "above. Use the existing work done to guide you on what the "
+            "next steps should be."
         )
-        instruction = f"{note}\n\n{fixed_instruction}" if note else fixed_instruction
-        if self._is_final_round(task):
-            instruction += " " + FINAL_ROUND_WARNING
+        if self.tool_calls_limit is not None:
+            remaining = self.tool_calls_limit - task.tool_calls_used
+            instruction += (
+                f" Tool calls remaining: {remaining} of {self.tool_calls_limit}."
+            )
 
         task.task_messages = [banner, state_message, {"role": "user", "content": instruction}]
         return task.task_messages
@@ -373,18 +411,17 @@ class ScriptActAgent(ToolAgent):
     # ------------------------------------------------------------------ #
     def _process_generation_output(
         self, raw_text: str, task: ScriptActAgentTask,
-    ) -> tuple[list[list[CodeStatement]], bool] | str:
+    ) -> list[list[CodeStatement]] | str:
         """
         Pure-computation validate callback for the planning retry loop:
-        parse, validate references + remaining tool-call budget + the
-        final-round pause prohibition, and compile into batches. Returns
-        the compiled result on success, or a feedback string describing
-        every problem found on failure -- a ``BlackboardParseError`` from
-        parsing is converted here, not propagated, so the retry loop can
-        inject it as corrective feedback.
+        parse, validate references + remaining tool-call budget, and
+        compile into batches. Returns the compiled result on success, or a
+        feedback string describing every problem found on failure -- a
+        ``BlackboardParseError`` from parsing is converted here, not
+        propagated, so the retry loop can inject it as corrective feedback.
         """
         try:
-            flat_slots, continue_planning = parse_generation(raw_text)
+            flat_slots = parse_generation(raw_text)
         except BlackboardParseError as e:
             return str(e)
 
@@ -420,13 +457,6 @@ class ScriptActAgent(ToolAgent):
             flat_slots, known_tools, known_constants, known_history, remaining_budget
         )
 
-        if self._is_final_round(task) and continue_planning:
-            issues.append(
-                "this was your final planning round -- you may not pause "
-                "again; produce a complete plan with no trailing # PAUSE, "
-                "ending in return."
-            )
-
         if issues:
             issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
             return issues_msg
@@ -437,11 +467,11 @@ class ScriptActAgent(ToolAgent):
             start_batch_index=task.batch_counter,
         )
         task.batch_counter += len(pending)
-        return pending, continue_planning
+        return pending
 
     def _run_planning_retry_loop(
         self, *, task: ScriptActAgentTask,
-    ) -> tuple[list[list[CodeStatement]], bool]:
+    ) -> list[list[CodeStatement]]:
         """
         Render, call the engine, record the attempt, validate/compile via
         ``_process_generation_output``, and retry with injected feedback on
@@ -450,8 +480,7 @@ class ScriptActAgent(ToolAgent):
         ``task.regenerations_used``) is exhausted. ``regeneration_limit``
         is always a plain ``int`` (never ``None``), so this check is a
         direct comparison -- no ``None``-guard needed, unlike
-        ``planning_rounds_limit``/``tool_calls_limit`` elsewhere in this
-        class.
+        ``tool_calls_limit`` elsewhere in this class.
         """
         additional_messages: list[dict[str, str]] = []
 
@@ -488,7 +517,7 @@ class ScriptActAgent(ToolAgent):
 
     async def _arun_planning_retry_loop(
         self, *, task: ScriptActAgentTask,
-    ) -> tuple[list[list[CodeStatement]], bool]:
+    ) -> list[list[CodeStatement]]:
         """Async mirror of ``_run_planning_retry_loop``: uses
         ``async_invoke`` for the engine call, otherwise identical."""
         additional_messages: list[dict[str, str]] = []
@@ -524,46 +553,16 @@ class ScriptActAgent(ToolAgent):
 
             return result
 
-    def _is_final_round(self, task: ScriptActAgentTask) -> bool:
-        """
-        True iff the round currently being generated is the last one
-        ``planning_rounds_limit`` permits -- computed on demand from
-        ``task.planning_rounds_used`` vs. ``self._planning_rounds_limit``,
-        never stored, so the render and validation sites that both consult
-        it can never see it drift out of sync. ``None`` limit means never
-        final (unlimited rounds). ``planning_rounds_used`` is already
-        incremented (by ``think()``/``async_think()``, unconditionally,
-        including for round 1) before this is ever consulted, so the
-        comparison alone correctly covers round 1 too when the limit is
-        ``1`` -- there's no separate zero-based special case to reason
-        about.
-
-        A final round can no longer successfully re-pause: if it still
-        writes ``# PAUSE`` anyway, ``_process_generation_output`` rejects
-        that as a regen-repair issue instead of granting a continuation --
-        that path never starts a new round, so it needs no separate raise.
-        A *forced* continuation (a resolution failure in ``prepare()`` or
-        an execution failure in ``_apply_batch_results``) is a different
-        path entirely and is not covered by this method at all -- see
-        ``think()``'s own explicit ``planning_rounds_used`` ceiling check,
-        which is what actually stops a forced continuation from starting a
-        round beyond the limit.
-        """
-        return (
-            self._planning_rounds_limit is not None
-            and task.planning_rounds_used >= self._planning_rounds_limit
-        )
-
     def _finalize_without_continuation(self, task: ScriptActAgentTask) -> ScriptActAgentTask:
-        """A drain with no ``# PAUSE`` and no error -- the absence of a
-        ``return`` is NOT an invitation to keep planning, only an explicit
-        ``# PAUSE`` is. Infers ``None`` if nothing was ever returned
-        and marks the task complete. Called from wherever ``task.pending``
-        actually reaches empty with ``continue_planning`` still ``False``:
-        ``prepare`` (an already-empty round, or a same-round empty
-        generation) and ``_apply_batch_results`` (the last batch of a
-        multi-round plan draining) -- never from ``think``, which only ever
-        reads ``continue_planning``, never decides based on it."""
+        """A clean drain with no failure and no repair needed -- the
+        absence of a ``return`` is not an invitation to keep planning.
+        Infers ``None`` if nothing was ever returned and marks the task
+        complete. Called from wherever ``task.pending`` actually reaches
+        empty with ``needs_repair`` still ``False``: ``prepare`` (an
+        already-empty round, or a same-round empty generation) and
+        ``_apply_batch_results`` (the last batch of a plan draining) --
+        never from ``think``, which only ever reads ``needs_repair``,
+        never decides based on it."""
         if task.generated_response is NO_VAL:
             task.generated_response = None
         task.complete = True
@@ -572,89 +571,50 @@ class ScriptActAgent(ToolAgent):
     def think(self, task: ScriptActAgentTask) -> ScriptActAgentTask:
         """
         Generate, validate, and compile the next segment of the plan --
-        either the unconditional first generation, or (once a prior round
-        set ``continue_planning``) a fresh continuation. No-op whenever
+        either the unconditional first generation, or (once a prior round's
+        failure was granted a repair) a fresh continuation. No-op whenever
         there is still pending work to drain, or the task is already fully
-        complete -- a pause/if-cutoff/failure-triggered continuation is
-        requested by re-entering this same hook, not a separate mechanism.
+        complete -- a repair round is requested by re-entering this same
+        hook, not a separate mechanism.
 
-        Never called for a drained, uninvited round: whichever of
-        ``prepare``/``_apply_batch_results`` actually empties
-        ``task.pending`` with ``continue_planning`` still ``False`` marks
-        ``task.complete`` there and then, so this hook's own top guard
-        already short-circuits before ever reaching the regeneration call
-        below -- no separate check needed here.
+        This hook has no budget awareness of any kind anymore: no ceiling
+        check, no round counter of its own. ``replanning_limit`` is checked
+        and ``task.repair_rounds_used`` is incremented entirely in
+        ``prepare()``/``_apply_batch_results()`` -- the same two places
+        that decide whether a repair round is granted in the first place --
+        so by the time this hook is ever re-entered, that decision has
+        already been made; it just generates.
 
-        ``task.planning_rounds_used`` increments unconditionally on every
-        real call to this hook, including the first -- ``planning_rounds_limit``
-        bounds the total number of planning generations permitted for this
-        invoke, not a count of continuations beyond a free first one. This
-        also means a ``prepare()`` resolution failure on the very first
-        batch of round 1 (which sets ``continue_planning`` before anything
-        has ever completed) is correctly counted the same as any other
-        round -- there is no separate signal to consult here, just a plain
-        increment every time this hook actually runs.
-
-        Before that increment: an explicit ceiling check. A resolution
-        failure (``prepare()``) or execution failure (``_apply_batch_results``)
-        sets ``task.continue_planning`` directly, bypassing
-        ``_process_generation_output``'s own final-round pause rejection
-        entirely (that check only ever sees a *model-authored* ``# PAUSE``,
-        never a framework-forced continuation) -- without this check, this
-        hook would otherwise generate an unbounded number of rounds beyond
-        ``planning_rounds_limit`` whenever every round happens to end in a
-        forced continuation rather than a clean pause/return. Raises the
-        same way ``regeneration_limit`` exhaustion already does elsewhere
-        in this class -- a real, terminal budget failure, not a regen-repair
-        issue to feed back to the model.
+        ``task.needs_repair`` is cleared here, after generation, not before
+        -- ``_render_task_messages`` (invoked by ``_run_planning_retry_loop``
+        below) still needs to see it ``True`` to render this round's repair
+        framing. Once a fresh round has actually been generated, the flag's
+        job is done: whatever ``prepare()``/``_apply_batch_results`` do with
+        this new content next is a normal round, not a still-pending repair
+        -- leaving it set would permanently block the natural-completion
+        checks in both of those methods (they read ``needs_repair`` to tell
+        "still mid-repair" apart from "genuinely finished") for the rest of
+        the invoke, the moment a single repair round is ever granted.
         """
         if task.pending or task.complete:
             return task
 
-        if (
-            self._planning_rounds_limit is not None
-            and task.planning_rounds_used >= self._planning_rounds_limit
-        ):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: planning round budget "
-                f"exhausted ({task.planning_rounds_used}/{self._planning_rounds_limit}) "
-                "-- the prior round ended in a forced continuation (a "
-                "resolution or execution failure), but no further planning "
-                "rounds are permitted."
-            )
-
-        task.planning_rounds_used += 1
-
-        pending, continue_planning = self._run_planning_retry_loop(task=task)
+        pending = self._run_planning_retry_loop(task=task)
         task.pending = pending
-        task.continue_planning = continue_planning
+        task.needs_repair = False
         task.task_messages.clear()
         return task
 
     async def async_think(self, task: ScriptActAgentTask) -> ScriptActAgentTask:
         """Async mirror of ``think``, using ``_arun_planning_retry_loop``. See
-        ``think()``'s own docstring for why the ceiling check below is
-        needed before the increment."""
+        ``think()``'s own docstring for why ``needs_repair`` is cleared here,
+        after generation."""
         if task.pending or task.complete:
             return task
 
-        if (
-            self._planning_rounds_limit is not None
-            and task.planning_rounds_used >= self._planning_rounds_limit
-        ):
-            raise ToolAgentError(
-                f"{type(self).__name__}.{self.name}: planning round budget "
-                f"exhausted ({task.planning_rounds_used}/{self._planning_rounds_limit}) "
-                "-- the prior round ended in a forced continuation (a "
-                "resolution or execution failure), but no further planning "
-                "rounds are permitted."
-            )
-
-        task.planning_rounds_used += 1
-
-        pending, continue_planning = await self._arun_planning_retry_loop(task=task)
+        pending = await self._arun_planning_retry_loop(task=task)
         task.pending = pending
-        task.continue_planning = continue_planning
+        task.needs_repair = False
         task.task_messages.clear()
         return task
 
@@ -674,11 +634,11 @@ class ScriptActAgent(ToolAgent):
     def prepare(self, task: ScriptActAgentTask) -> ScriptActAgentTask:
         """
         Resolve the next pending batch's args, or short-circuit completion
-        (or a needed continuation) if nothing remains.
+        (or a granted repair) if nothing remains.
 
         If ``task.pending`` is empty: reset ``task.resolved_args``, then
-        either leave the round as-is if ``task.continue_planning`` is
-        already set (nothing to prepare -- ``think()`` will regenerate next
+        either leave the round as-is if ``task.needs_repair`` is already
+        set (nothing to prepare -- ``think()`` will regenerate the repair
         round) or, otherwise, infer an implicit ``return None`` if no
         executed ``return`` slot already set ``task.generated_response``
         and mark the task complete -- covers both a genuinely empty
@@ -687,22 +647,22 @@ class ScriptActAgent(ToolAgent):
 
         Otherwise: resolves every slot's args in ``task.pending[0]``,
         collecting every failure (not stopping at the first). Any collected
-        issue no longer raises -- it abandons this batch and every batch
-        still queued after it (they may depend on bindings this batch was
-        supposed to produce), requires a continuation round, and surfaces
-        the real issue text as ``continuation_note`` for the next
-        generation to read. Nothing here was ever dispatched, so this does
-        not consume ``tool_calls_used``.
+        failure abandons this batch and every batch still queued after it
+        (they may depend on bindings this batch was supposed to produce).
+        With ``fail_fast=True``, or once ``replanning_limit`` repair rounds
+        are already spent, this raises immediately instead of granting
+        another repair -- no silent partial-success path. Nothing here was
+        ever dispatched, so this does not consume ``tool_calls_used``.
         """
         if not task.pending:
             task.resolved_args = []
-            if task.continue_planning:
+            if task.needs_repair:
                 return task
             return self._finalize_without_continuation(task)
 
         batch = task.pending[0]
         resolved: list[dict[str, Any]] = []
-        issues: list[str] = []
+        failed_slots: list[CodeStatement] = []
         # Constants are validated as known references (validate_references'
         # known_constants) and rendered to the model (constants_context()),
         # but their actual runtime values live in task.constant_values --
@@ -721,7 +681,10 @@ class ScriptActAgent(ToolAgent):
             try:
                 positional, keyword = resolve_slot_args(slot, resolution_namespace)
             except Exception as e:
-                issues.append(f"{label}: could not resolve argument value(s): {e!r}")
+                slot.exception = ToolAgentError(
+                    f"{label}: could not resolve argument value(s): {e!r}"
+                )
+                failed_slots.append(slot)
                 continue
 
             if slot.tool in (RHS_ASSIGN_ALIAS, RETURN_ALIAS):
@@ -749,21 +712,27 @@ class ScriptActAgent(ToolAgent):
                 else:
                     resolved.append(tool._args_kwargs_to_dict(*positional, **keyword))
             except Exception as e:
-                issues.append(
+                slot.exception = ToolAgentError(
                     f"{label}: argument(s) do not match {slot.tool!r}'s "
                     f"parameter contract: {e!r}"
                 )
+                failed_slots.append(slot)
 
-        if issues:
-            issues_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(issues))
-            task.continuation_note = (
-                "The following batch could not be resolved:\n"
-                f"{render_completed_as_python(batch)}"
-                f"\n\nIssues:\n{issues_msg}"
-            )
+        if failed_slots:
+            start = len(task.failed_statements)
+            task.failed_statements.extend(failed_slots)
+            if self._fail_fast or task.repair_rounds_used >= self._replanning_limit:
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: batch could not be "
+                    "resolved and no repair is available "
+                    f"({'fail_fast=True' if self._fail_fast else 'repair budget exhausted'}): "
+                    f"{render_failed_as_python(failed_slots)}"
+                )
+            task.repair_rounds_used += 1
+            task.repair_batch_start = start
             task.pending.clear()
             task.resolved_args = []
-            task.continue_planning = True
+            task.needs_repair = True
             return task
 
         task.resolved_args = resolved
@@ -813,7 +782,9 @@ class ScriptActAgent(ToolAgent):
         results, update completed/cache, handle a terminal ``return`` slot,
         pop the consumed batch -- or, if any real call in this batch
         failed, record whichever succeeded, abandon the rest of this round,
-        and require a continuation instead of raising.
+        and either grant a repair round or raise, per ``fail_fast``/
+        ``replanning_limit`` (same budget check as ``prepare()``'s own
+        resolution-failure branch).
 
         Every dispatched call in ``batch`` (registered tool or approved
         builtin, via ``is_dispatched_slot``) was actually dispatched via
@@ -824,18 +795,6 @@ class ScriptActAgent(ToolAgent):
         real_call_count = sum(1 for slot in batch if is_dispatched_slot(slot))
         task.tool_calls_used += real_call_count
 
-        def _failure_label(slot: CodeStatement) -> str:
-            # A py_builtin slot's real, model-written name lives in
-            # args[0], not slot.tool; an attr_call slot's lives in
-            # "obj.method" (args[0]/args[1]) -- report either instead of
-            # leaking the internal sentinel into model-facing failure
-            # feedback.
-            if slot.tool == PY_BUILTIN_ALIAS:
-                return repr(slot.args[0])
-            if slot.tool == ATTR_CALL_ALIAS:
-                return f"{ast.unparse(slot.args[0])}.{slot.args[1]}"
-            return repr(slot.tool)
-
         # A raised exception only ever appears here for a slot that was
         # actually dispatched (asyncio.gather(..., return_exceptions=True)
         # is the only source of a bare BaseException in raw_results) -- an
@@ -845,16 +804,12 @@ class ScriptActAgent(ToolAgent):
         # constant holding an exception object as data). Gating on
         # is_dispatched_slot prevents misclassifying that legitimate value
         # as an execution failure.
-        failures = [
-            f"{_failure_label(batch[idx])} (identifier={batch[idx].identifier!r}): {raw!r}"
-            for idx, raw in enumerate(raw_results)
-            if is_dispatched_slot(batch[idx]) and isinstance(raw, BaseException)
-        ]
+        failed_slots: list[CodeStatement] = []
 
         for slot, value in zip(batch, raw_results):
             if is_dispatched_slot(slot) and isinstance(value, BaseException):
                 slot.exception = value
-                task.failed_statements.append(slot)
+                failed_slots.append(slot)
                 continue
             task.completed.append(slot)
             # A dispatched tool call's raw_results entry is a full
@@ -870,16 +825,23 @@ class ScriptActAgent(ToolAgent):
             if slot.identifier is not None:
                 task.cache[slot.identifier] = unwrapped
 
-        if failures:
-            failures_msg = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(failures))
-            task.continuation_note = (
-                "The following batch encountered execution failures:\n"
-                f"{render_completed_as_python(batch)}"
-                f"\n\nFailures:\n{failures_msg}"
-            )
+        if failed_slots:
+            start = len(task.failed_statements)
+            task.failed_statements.extend(failed_slots)
+            if self._fail_fast or task.repair_rounds_used >= self._replanning_limit:
+                if len(failed_slots) == 1 and isinstance(failed_slots[0].exception, ToolInvocationError):
+                    raise failed_slots[0].exception
+                raise ToolAgentError(
+                    f"{type(self).__name__}.{self.name}: batch execution "
+                    "failed and no repair is available "
+                    f"({'fail_fast=True' if self._fail_fast else 'repair budget exhausted'}): "
+                    f"{render_failed_as_python(failed_slots)}"
+                )
+            task.repair_rounds_used += 1
+            task.repair_batch_start = start
             task.pending.clear()
             task.resolved_args = []
-            task.continue_planning = True
+            task.needs_repair = True
             return task
 
         for slot, kwargs in zip(batch, resolved):
@@ -890,13 +852,13 @@ class ScriptActAgent(ToolAgent):
         task.pending.pop(0)
         task.resolved_args = []
 
-        # This batch just drained the plan. If nothing asked for a
-        # continuation (no `# PAUSE`) and nothing already completed it
-        # (no `return` above), finalize right here -- the natural point
-        # `task.pending` actually reaches empty -- instead of leaving it for
-        # a future `prepare()` call that `think()` would otherwise reach
-        # first on the next loop iteration and regenerate an uninvited round.
-        if not task.pending and not task.complete and not task.continue_planning:
+        # This batch just drained the plan. If nothing needs repairing and
+        # nothing already completed it (no `return` above), finalize right
+        # here -- the natural point `task.pending` actually reaches empty --
+        # instead of leaving it for a future `prepare()` call that `think()`
+        # would otherwise reach first on the next loop iteration and
+        # regenerate an uninvited round.
+        if not task.pending and not task.complete and not task.needs_repair:
             return self._finalize_without_continuation(task)
 
         return task

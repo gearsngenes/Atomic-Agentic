@@ -31,7 +31,7 @@ agent = ScriptActAgent(
     description="Testing the prebuilt tool lists with one-shot planning + execution.",
     llm_engine=llm_engine,
     context_enabled=True,
-    planning_rounds_limit=2,
+    replanning_limit=2,
 )
 
 # No tool lists registered -- the task below is solvable via bare

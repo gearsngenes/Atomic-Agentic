@@ -97,7 +97,7 @@ math_specialist = ScriptActAgent(
     llm_engine=sub_agent_llm,
     context_enabled=False,
     tool_calls_limit=3,
-    planning_rounds_limit=1,
+    replanning_limit=1,
     pre_invoke=math_pre,
     post_invoke=math_post,
 )
@@ -112,7 +112,7 @@ delegator = ScriptActAgent(
     description="Delegates each item in a batch to the appropriate specialist agent.",
     llm_engine=llm_engine,
     context_enabled=True,
-    planning_rounds_limit=1,
+    replanning_limit=1,
 )
 delegator.register_tool(haiku_writer)
 delegator.register_tool(math_specialist)

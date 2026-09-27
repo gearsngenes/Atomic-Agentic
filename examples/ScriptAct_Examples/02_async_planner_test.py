@@ -41,7 +41,7 @@ async_tester = ScriptActAgent(
     description="Tests the ability to run independent statements concurrently.",
     llm_engine=llm_engine,
     context_enabled=True,
-    planning_rounds_limit=1,
+    replanning_limit=1,
 )
 
 async_tester.register_tool(

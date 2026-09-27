@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import ast
 import builtins
-import io
-import re
-import tokenize
 from typing import Any, Optional
 
 from ..constants.agents import (
@@ -12,7 +9,6 @@ from ..constants.agents import (
     DUNDER_ATTRIBUTE_PATTERN,
     EXCLUDED_PY_BUILTINS,
     KWARGS_UNPACK_KEY,
-    PAUSE_PATTERN,
     PY_BUILTIN_ALIAS,
     RETURN_ALIAS,
     RHS_ASSIGN_ALIAS,
@@ -32,6 +28,7 @@ __all__ = [
     "validate_references",
     "compile_batches",
     "render_completed_as_python",
+    "render_failed_as_python",
     "render_cache_snapshot",
 ]
 
@@ -493,164 +490,75 @@ def parse_statement_to_slots(statement: str, start_index: int = 0) -> list[CodeS
     return [*hoisted, final_slot]
 
 
-def _find_pause_marker(text: str) -> tuple[int, int] | None:
+def parse_generation(raw_text: str) -> list[CodeStatement]:
     """
-    Locate the first real ``# PAUSE`` comment in ``text`` via ``tokenize``
-    rather than a raw-text regex scan, so a legal (freely-interspersed,
-    triple-quoted-preferred) reasoning-note string that happens to contain
-    the text "# PAUSE" on one of its own lines can never be misread as the
-    real sentinel -- ``tokenize`` never emits a ``COMMENT`` token from
-    inside a ``STRING`` token, unlike a plain regex over raw text, which
-    has no concept of "am I inside a string literal."
+    Parse one whole generation (a fresh plan, or a repair-triggered
+    continuation -- both use this same grammar; there is no separate
+    "continuation mode") into a flat slot sequence.
 
-    Only a comment that is the sole content on its line (nothing but
-    whitespace precedes it) counts, matching ``PAUSE_PATTERN``'s original
-    line-anchored intent -- a trailing comment after real code on the same
-    line is not a marker, unchanged from before this rewrite.
+    No pause marker of any kind exists anymore -- the entire generation is
+    always parsed, statement by statement, with two special any-position
+    cases: a bare string-literal statement (a reasoning note -- inert,
+    never stored or dispatched, legal anywhere, not just first; genuinely
+    valid Python this grammar has no other use for, so there is nothing to
+    validate beyond "it's a string"), and an ``ast.If`` node, which now
+    **always** raises, feeding regen-repair -- conditionals are permanently
+    forbidden in this grammar with no silent-truncation tolerance left for
+    them (there is no longer a second terminal, model-authored continuation,
+    for a truncation to hand off to).
 
-    Returns the marker's ``(row, col)`` start position (1-indexed row,
-    ``tokenize``'s own convention), or ``None`` if no real marker exists
-    (including when ``text`` fails to tokenize at all -- a genuine
-    lexical error surfaces downstream via ``ast.parse``, exactly as it
-    would have regardless of this function).
-    """
-    lines = text.splitlines()
-    try:
-        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
-            if tok.type != tokenize.COMMENT or not PAUSE_PATTERN.match(tok.string):
-                continue
-            row, col = tok.start
-            if lines[row - 1][:col].strip():
-                continue
-            return tok.start
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        return None
-    return None
+    A ``return`` terminates immediately (whatever follows it, if anything,
+    is never even parsed) -- a later real call must never land in the same
+    batch as the return and execute anyway, and a second ``return`` must
+    never silently overwrite the first.
 
+    Falling off the end of the generation with neither a ``return`` nor an
+    ``ast.If`` simply means the plan is done as written -- the caller
+    (``ScriptActAgent._finalize_without_continuation``) infers ``None`` if
+    nothing was ever returned.
 
-def parse_generation(
-    raw_text: str,
-) -> tuple[list[CodeStatement], bool]:
-    """
-    Parse one whole generation (a fresh plan, or a pause-triggered
-    continuation) into a flat slot sequence and whether a further
-    continuation round is needed.
-
-    Pause-splitting happens before any AST parsing -- ``# PAUSE`` is a
-    comment, and ``ast.parse`` strips comments, so a marker's position
-    can't be recovered from a parsed tree. Located via ``_find_pause_marker``
-    (``tokenize``-based, not a raw-text regex scan -- a legal reasoning-note
-    string containing the text "# PAUSE" is never misread as the real
-    sentinel). Only the FIRST marker matters: a generation has at most one
-    meaningful pause, since reaching one always terminates it (mirroring
-    how a ``return`` already terminates it) -- everything at or after it is
-    discarded, only ``before`` (everything strictly preceding it) is ever
-    parsed.
-
-    ``before`` is parsed and dispatched statement-by-statement exactly as
-    always, with two special any-position cases: a bare string-literal
-    statement (a reasoning note -- inert, never stored or dispatched, legal
-    anywhere, not just first; genuinely valid Python this grammar has no
-    other use for, so there is nothing to validate beyond "it's a string"),
-    and an ``ast.If`` node. The latter is a defensive backstop, not a taught
-    convention -- the prompt tells the model never to write one -- so a
-    model that does anyway is handled by silently truncating there (exactly
-    like a ``return``) rather than failing the whole generation, UNLESS
-    nothing real has been produced yet (``flat_slots`` still empty), in
-    which case there is no confident partial work to fall back to and this
-    is treated as a genuine structural error instead, feeding regen-repair.
-    The identical "nothing real yet" check applies to an explicit pause
-    marker found with an empty ``before`` -- both represent the same waste
-    (a whole planning round spent for zero progress).
-
-    A ``return`` also terminates immediately (whatever follows it in
-    ``before``, if anything, is never even parsed) -- for the same reason
-    a later real call must never land in the same batch as the return and
-    execute anyway, and a second `return` must never silently overwrite the
-    first. If a pause marker was ALSO found anywhere in the raw text
-    (``len(parts) == 2``), this is a structural error, not silently
-    resolved in ``return``'s favor: a generation writing both terminals is
-    self-contradictory (observed live -- a model hedging between "return
-    this" and "pause to reconsider" in the same breath), and letting
-    ``return`` silently win discards the pause with zero signal, risking a
-    premature/unverified final answer. Raises, feeding regen-repair so the
-    model is told directly to pick exactly one.
-
-    Whatever follows a found marker is never inspected at all -- ``# PAUSE``
-    is a bare, complete sentinel; no trailing note is expected, taught, or
-    parsed. Whatever a model writes past the marker is discarded without
-    complaint, same as any other post-terminal content.
-
-    Returns ``(flat_slots, continue_planning)``. Raises
-    ``BlackboardParseError`` on any structural failure (propagated from
-    ``parse_statement_to_slots``, a genuine ``ast.parse`` syntax error in
-    ``before``, or one of the two "nothing real yet" cases above).
+    Returns the flat slot sequence (no longer a 2-tuple -- there is no
+    continuation signal left to report). Raises ``BlackboardParseError`` on
+    any structural failure (propagated from ``parse_statement_to_slots``, a
+    genuine ``ast.parse`` syntax error, or a conditional statement).
     """
     text = strip_code_fence(raw_text)
-    marker = _find_pause_marker(text)
-    if marker is None:
-        before = text
-    else:
-        row, col = marker
-        lines = text.splitlines(keepends=True)
-        before = "".join(lines[: row - 1]) + lines[row - 1][:col]
-    marker_found = marker is not None
 
     flat_slots: list[CodeStatement] = []
     hoist_index = 0
 
-    if before.strip():
-        try:
-            tree = ast.parse(before, mode="exec")
-        except SyntaxError as e:
-            raise BlackboardParseError(str(e)) from e
+    if not text.strip():
+        return flat_slots
 
-        for node in tree.body:
-            if (
-                isinstance(node, ast.Expr)
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)
-            ):
-                continue
+    try:
+        tree = ast.parse(text, mode="exec")
+    except SyntaxError as e:
+        raise BlackboardParseError(str(e)) from e
 
-            if isinstance(node, ast.If):
-                if not flat_slots:
-                    raise BlackboardParseError(
-                        "a plan cannot open with a conditional statement "
-                        "and no real work done yet; compute or check "
-                        "whatever the condition depends on first, as a "
-                        "real statement."
-                    )
-                return flat_slots, True
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
 
-            stmt_source = ast.unparse(node)
-            slots = parse_statement_to_slots(stmt_source, start_index=hoist_index)
-            flat_slots.extend(slots)
-            hoist_index += len(slots)
+        if isinstance(node, ast.If):
+            raise BlackboardParseError(
+                "conditional statements are not permitted in this grammar "
+                "-- compute both branches' own work directly, or "
+                "restructure without a conditional."
+            )
 
-            if slots and slots[-1].tool == RETURN_ALIAS:
-                if marker_found:
-                    raise BlackboardParseError(
-                        "a generation cannot contain both a return statement "
-                        "and a # PAUSE marker -- pick exactly one way to end: "
-                        "return a final value, or # PAUSE (with no return) to "
-                        "continue next round."
-                    )
-                return flat_slots, False
+        stmt_source = ast.unparse(node)
+        slots = parse_statement_to_slots(stmt_source, start_index=hoist_index)
+        flat_slots.extend(slots)
+        hoist_index += len(slots)
 
-    if not marker_found:
-        # No pause marker anywhere -- completes normally (or falls off the
-        # end with an inferred `None` result if no `return` ran).
-        return flat_slots, False
+        if slots and slots[-1].tool == RETURN_ALIAS:
+            return flat_slots
 
-    if not flat_slots:
-        raise BlackboardParseError(
-            "a pause cannot appear before any real work has been done; "
-            "write at least one real statement first, then pause only if "
-            "what follows still depends on something not yet known."
-        )
-
-    return flat_slots, True
+    return flat_slots
 
 
 def rewrite_builtin_calls(slots: list[CodeStatement]) -> list[str]:
@@ -897,6 +805,50 @@ def compile_batches(
     return batches
 
 
+def _render_slot_as_python(slot: CodeStatement) -> str:
+    """
+    Render one slot as its single-line Python-source reconstruction -- no
+    batch header, no exception text. Factored out of
+    ``render_completed_as_python`` so ``render_failed_as_python`` can reuse
+    the identical rendering without duplicating it; behavior for every
+    slot this was already applied to is unchanged.
+    """
+
+    def render_value(value: Any) -> str:
+        return ast.unparse(value) if isinstance(value, ast.expr) else repr(value)
+
+    if slot.tool == RETURN_ALIAS:
+        return f"return {render_value(slot.kwargs['val'])}"
+
+    prefix = f"{slot.identifier} = " if slot.identifier is not None else ""
+    if slot.tool == RHS_ASSIGN_ALIAS:
+        return f"{prefix}{render_value(slot.kwargs['val'])}"
+
+    # A py_builtin slot renders back as the original natural call syntax
+    # (`len(x)`), never the internal rewritten form (`py_builtin('len',
+    # x)`) -- unsplice the builtin name before falling into the same
+    # generic rendering as any real tool call. An attr_call slot gets the
+    # same treatment: `obj.method(args)`, not the internal (obj, "method",
+    # *args) shape.
+    if slot.tool == PY_BUILTIN_ALIAS:
+        call_name, call_args = slot.args[0], slot.args[1:]
+    elif slot.tool == ATTR_CALL_ALIAS:
+        call_name, call_args = f"{render_value(slot.args[0])}.{slot.args[1]}", slot.args[2:]
+    else:
+        call_name, call_args = slot.tool, slot.args
+
+    positional_tokens = [
+        f"*{render_value(entry.value)}" if isinstance(entry, ast.Starred) else render_value(entry)
+        for entry in call_args
+    ]
+    keyword_tokens = [
+        f"**{render_value(value)}" if name == KWARGS_UNPACK_KEY else f"{name}={render_value(value)}"
+        for name, value in slot.kwargs.items()
+    ]
+    args_source = ", ".join(positional_tokens + keyword_tokens)
+    return f"{prefix}{call_name}({args_source})"
+
+
 def render_completed_as_python(
     completed: list[CodeStatement],
     show_batches: bool = False,
@@ -927,10 +879,6 @@ def render_completed_as_python(
     afterward) but is handled defensively rather than crashing. Returns
     the joined lines, or ``""`` for an empty ``completed``.
     """
-
-    def render_value(value: Any) -> str:
-        return ast.unparse(value) if isinstance(value, ast.expr) else repr(value)
-
     lines: list[str] = []
     current_index: Optional[int] = None
     for slot in completed:
@@ -940,40 +888,30 @@ def render_completed_as_python(
             lines.append(f"# Batch {slot.batch_index}:")
             current_index = slot.batch_index
 
-        if slot.tool == RETURN_ALIAS:
-            lines.append(f"return {render_value(slot.kwargs['val'])}")
-            continue
-
-        prefix = f"{slot.identifier} = " if slot.identifier is not None else ""
-        if slot.tool == RHS_ASSIGN_ALIAS:
-            lines.append(f"{prefix}{render_value(slot.kwargs['val'])}")
-            continue
-
-        # A py_builtin slot renders back as the original natural call
-        # syntax (`len(x)`), never the internal rewritten form
-        # (`py_builtin('len', x)`) -- unsplice the builtin name before
-        # falling into the same generic rendering as any real tool call. An
-        # attr_call slot gets the same treatment: `obj.method(args)`, not
-        # the internal (obj, "method", *args) shape.
-        if slot.tool == PY_BUILTIN_ALIAS:
-            call_name, call_args = slot.args[0], slot.args[1:]
-        elif slot.tool == ATTR_CALL_ALIAS:
-            call_name, call_args = f"{render_value(slot.args[0])}.{slot.args[1]}", slot.args[2:]
-        else:
-            call_name, call_args = slot.tool, slot.args
-
-        positional_tokens = [
-            f"*{render_value(entry.value)}" if isinstance(entry, ast.Starred) else render_value(entry)
-            for entry in call_args
-        ]
-        keyword_tokens = [
-            f"**{render_value(value)}" if name == KWARGS_UNPACK_KEY else f"{name}={render_value(value)}"
-            for name, value in slot.kwargs.items()
-        ]
-        args_source = ", ".join(positional_tokens + keyword_tokens)
-        lines.append(f"{prefix}{call_name}({args_source})")
+        lines.append(_render_slot_as_python(slot))
 
     return "\n".join(lines)
+
+
+def render_failed_as_python(failed: list[CodeStatement]) -> str:
+    """
+    Mirrors ``utils/dag.py``'s ``render_failed_as_json`` shape exactly,
+    translated to this grammar's own source-line vocabulary: one line per
+    failed slot (via ``_render_slot_as_python``), each suffixed with its
+    own exception text. No batch-header grouping -- these are always all
+    from the one batch that most recently triggered a repair round, by
+    construction of the caller (``ScriptActAgent.prepare``/
+    ``_apply_batch_results``, which slice ``task.failed_statements`` down
+    to just that batch before ever calling this).
+
+    Returns ``""`` for an empty ``failed`` list, matching
+    ``render_completed_as_python``'s own empty-input contract.
+    """
+    if not failed:
+        return ""
+    return "\n".join(
+        f"{_render_slot_as_python(slot)}  # FAILED: {slot.exception!r}" for slot in failed
+    )
 
 
 def render_cache_snapshot(

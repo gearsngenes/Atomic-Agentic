@@ -353,10 +353,13 @@ partial diff.
 # placeholder-substitution scheme: a bare identifier is an ordinary Python
 # name reference, unlike PLANNER_PROMPT/REACT_PROMPT's "$name" sigil
 # references. {TOOLS}/{CONSTANTS}/{EXCLUDED_PY_BUILTINS} are filled by
-# ScriptActAgent._render_system_message, mirroring how PLANNER_PROMPT's own
+# ToolAgent._render_system_message (customized here via
+# ScriptActAgent._extra_system_context), mirroring how PLANNER_PROMPT's own
 # {TOOLS}/{CONSTANTS} stay off the caller-facing schema. No
-# {TOOL_CALLS_LIMIT} field: the tool-call budget is a silent, backend-only
-# backstop (validate_references) never rendered into this prompt.
+# {TOOL_CALLS_LIMIT} field in this template: validate_references still
+# enforces the budget as a hard backstop, but the model now sees it too,
+# via a separate per-round task message (_render_task_messages's own
+# total/remaining line), not this system-prompt template.
 
 ONESHOT_PLANNER_PROMPT = PromptConfig(
     template="""\
@@ -396,7 +399,7 @@ argument needs that exact value.
    themselves contain a call -- only the condition may. No other expression
    form -- comprehensions, generator expressions, or lambdas -- is
    permitted, called or not.
-2. No `if`/`elif`/`else`, no loop, no `def`/`class`; use `# PAUSE` instead.
+2. No `if`/`elif`/`else`, no loop, no `def`/`class`.
 3. Use pre-existing declared names -- constants, earlier results,
    `task_result_i` -- instead of hand-writing an equivalent value
    (`3.14159` is never `K_PI`); unnamed literals are still written
@@ -414,7 +417,7 @@ why -- write one complete plan from scratch, never a patch or diff,
 following every rule above.
 
 # OUTPUT FORMAT
-Ready to finish sample plan:
+Sample plan:
 ```python
 \"\"\"<reasoning>\"\"\"
 <var_i> = <tool_i>(...)
@@ -422,20 +425,10 @@ Ready to finish sample plan:
 return <var_n>
 ```
 
-Need to see a result first sample plan:
-```python
-\"\"\"<reasoning>\"\"\"
-<var_i> = <tool_i>(...)
-...
-# PAUSE
-```
-
-Ends one of three ways, never two together (a structural error, not a
-guess): `return <expression>` -- ready now; `# PAUSE` -- more work
-remains, depending on this generation's own call result, not known until
-it runs; or neither -- no return value needed, nothing left to do,
-treated as returning `None`. Stop the instant you write one -- never
-fabricate a further round, a `# Batch` header, or a value yourself.
+Ends one of two ways: `return <expression>` -- task done, returns that
+value; or neither -- nothing left to do, treated as returning `None`.
+Never fabricate a further round, a `# Batch` header, or a value yourself
+-- a repair round (see ON FAILURE) is never something you write.
 
 After the opening string: `name = <expression>` (`name` a bare identifier
 only, never tuple/attribute/subscript -- a call binds, anything else is
@@ -445,30 +438,33 @@ Arguments follow normal Python calling rules (`/`/`*` mark positional-only/
 keyword-only); a nested call is allowed and auto-splits into its own
 hoisted step -- never pre-name it yourself (see STRICT RULES).
 
-# PAUSE
-This grammar forbids `if`/`elif`/`else`; `# PAUSE` covers that gap, and
-can never open a plan/continuation -- write real work first. End your
-plan with it alone, a bare complete sentinel (nothing past it is read),
-when you reach a branching decision point and need to reflect on work
-done so far; most plans need zero, though a single task may need it more
-than once across rounds, if you're still waiting on more information
-each time. Anything you'll still need afterward must already have a
-name -- an unnamed value doesn't survive the pause.
+# ON FAILURE
+Recovery is framework-granted only, never something you request: an
+argument that can't be resolved or doesn't fit the tool's parameters, or
+a call that raises, may open a bounded repair round -- a fresh generation
+seeded with everything that already ran.
 
-A continuation isn't something you write: a fresh message shows completed
-code and bound values (`Cached values:`), then tells you to continue --
-or that this is your final round, in which case finish now with no
-further pause. For example:
+That round opens with an assistant message, verbatim, never yours:
+completed code, then bound values, then what just failed --
 
 (assistant) # WORK COMPLETED SO FAR:
 batter = make_batter()
-cake = bake_cake(batter=batter, minutes=25)
 
 ```
 Cached values:
 batter: Batter = Batter()
-cake: Cake = Cake(baked=False)
 ```
+
+# THIS BATCH FAILED:
+cake = bake_cake(batter=batter, minutes=250)  # FAILED: ToolInvocationError('Tool.kitchen.bake_cake: invocation failed: minutes out of range')
+
+-- only this batch, not the full failure history -- then a user
+instruction to continue, fixing what failed, using the work above as a
+guide.
+
+Never repeat a completed statement or resend the identical failed call --
+the exception and cached values say what's actually wrong; fix that
+(different arguments, a different approach, ...).
 """,
     description="ScriptActAgent one-shot native-grammar planning prompt.",
 )

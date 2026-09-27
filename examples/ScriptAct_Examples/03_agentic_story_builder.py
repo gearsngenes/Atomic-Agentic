@@ -110,7 +110,7 @@ orch = ScriptActAgent(
     description="One-shot agent that orchestrates outliner/writer/reviewer.",
     llm_engine=llm_engine,
     context_enabled=True,
-    planning_rounds_limit=1,
+    replanning_limit=1,
 )
 
 # Registered under each agent's own bare name -- no id capture needed, the

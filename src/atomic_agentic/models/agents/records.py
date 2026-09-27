@@ -427,9 +427,9 @@ class ScriptActAgentRecord(AgentRecord):
         ScriptActAgentTask.failed_statements at commit time (same
         list-or-tuple-in, tuple-stored normalization as statements). Each
         entry's ``.exception`` is the raised value. The permanent record of
-        what failed during this invocation -- unlike ``continuation_note``
-        (ephemeral, consulted and cleared each round), this list is never
-        cleared.
+        what failed during this invocation -- unlike ``repair_batch_start``
+        (a marker into this same list, consulted fresh each repair round),
+        this list is never cleared.
     """
 
     statements: tuple[CodeStatement, ...] = ()
