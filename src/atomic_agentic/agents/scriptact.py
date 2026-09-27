@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+from datetime import datetime
 from typing import Any, Callable, Optional
 
 from ..mcp.MCPClientHub import MCPClientHub
@@ -16,6 +17,7 @@ from ..llm.base import LLMEngine
 from ..models.agents.blackboard_models import CodeStatement
 from ..models.agents.records import AgentRecord, LLMRecord, ScriptActAgentRecord
 from ..models.agents.tasks import ScriptActAgentTask
+from ..models.results.agents import ScriptActAgentResult
 from ..constants.core import NO_VAL
 from ..constants.agents import (
     ATTR_CALL_ALIAS,
@@ -264,6 +266,39 @@ class ScriptActAgent(ToolAgent):
             prev=prev,
             statements=tuple(task.completed),
             failed_statements=tuple(task.failed_statements),
+            regenerations_used=task.regenerations_used,
+            repair_rounds_used=task.repair_rounds_used,
+        )
+
+    def build_result_from_record(
+        self,
+        record: ScriptActAgentRecord,
+        *,
+        result: Any,
+        started_at: datetime,
+        ended_at: datetime,
+    ) -> ScriptActAgentResult:
+        """
+        Construct this agent's ``ScriptActAgentResult`` envelope directly
+        from a completed ``ScriptActAgentRecord`` -- surfaces
+        ``regenerations_used``/``repair_rounds_used`` past the ephemeral
+        task, mirroring ``PlanActAgent.build_result_from_record``'s own
+        pattern for ``regenerations_used``. ``ScriptActAgent`` had no
+        override of this hook at all before now (a plain ``AgentResult``
+        was returned, with neither counter visible past the task).
+        """
+        llm_token_usage = tuple(r.llm_result.token_usage for r in record.llm_records)
+        llm_model_data = record.llm_records[-1].llm_result.model_data
+
+        return self._make_result(
+            result=result,
+            started_at=started_at,
+            ended_at=ended_at,
+            result_cls=ScriptActAgentResult,
+            llm_token_usage=llm_token_usage,
+            llm_model_data=llm_model_data,
+            regenerations_used=record.regenerations_used,
+            repair_rounds_used=record.repair_rounds_used,
         )
 
     # ------------------------------------------------------------------ #

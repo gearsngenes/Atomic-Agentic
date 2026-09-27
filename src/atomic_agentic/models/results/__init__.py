@@ -3,7 +3,13 @@ from __future__ import annotations
 from .atomic import AtomicResult
 from .commands import CommandResult
 from .structured import StructuredResult
-from .agents import AgentResult, JsonToolAgentResult, ThinkingAgentResult, ToolUsageRecord
+from .agents import (
+    AgentResult,
+    JsonToolAgentResult,
+    ScriptActAgentResult,
+    ThinkingAgentResult,
+    ToolUsageRecord,
+)
 from .llm import (
     AnthropicTokenUsage,
     GeminiTokenUsage,
@@ -51,6 +57,7 @@ __all__ = [
     "ToolUsageRecord",
     "AgentResult",
     "JsonToolAgentResult",
+    "ScriptActAgentResult",
     "ThinkingAgentResult",
     "WorkflowResult",
     "SequentialFlowResult",

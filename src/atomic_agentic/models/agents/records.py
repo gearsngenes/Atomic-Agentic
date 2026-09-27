@@ -430,10 +430,22 @@ class ScriptActAgentRecord(AgentRecord):
         what failed during this invocation -- unlike ``repair_batch_start``
         (a marker into this same list, consulted fresh each repair round),
         this list is never cleared.
+
+    regenerations_used : int
+        Total regeneration attempts consumed across this run's generation
+        call(s) -- carried over from ``task.regenerations_used`` verbatim
+        at commit time. Same meaning as ``JsonToolAgentRecord``'s own field.
+
+    repair_rounds_used : int
+        Total framework-granted repair rounds actually consumed this run --
+        carried over from ``task.repair_rounds_used`` verbatim at commit
+        time. ``0`` means the plan finished without ever needing one.
     """
 
     statements: tuple[CodeStatement, ...] = ()
     failed_statements: tuple[CodeStatement, ...] = ()
+    regenerations_used: int = 0
+    repair_rounds_used: int = 0
 
     def __post_init__(self) -> None:
         # Explicit two-argument super() -- @dataclass(slots=True) rebuilds
@@ -553,6 +565,8 @@ class ScriptActAgentRecord(AgentRecord):
         d.update({
             "statements": [s.to_dict() for s in self.statements],
             "failed_statements": [s.to_dict() for s in self.failed_statements],
+            "regenerations_used": self.regenerations_used,
+            "repair_rounds_used": self.repair_rounds_used,
         })
         return d
 

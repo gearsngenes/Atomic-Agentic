@@ -11,6 +11,7 @@ __all__ = [
     "ToolUsageRecord",
     "AgentResult",
     "JsonToolAgentResult",
+    "ScriptActAgentResult",
     "ThinkingAgentResult",
 ]
 
@@ -182,6 +183,47 @@ class JsonToolAgentResult(AgentResult):
         data["tool_usage"] = [r.to_dict() for r in self.tool_usage]
         data["failed_call_count"] = self.failed_call_count
         data["regenerations_used"] = self.regenerations_used
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptActAgentResult(AgentResult):
+    """
+    Successful ScriptActAgent invocation result.
+
+    Extends ``AgentResult`` with the two generation-budget counters a
+    caller needs to tell "finished cleanly" apart from "finished only after
+    spending some of its retry/repair budget" -- neither was surfaced past
+    the ephemeral ``ScriptActAgentTask`` before this, unlike
+    ``JsonToolAgentResult.regenerations_used`` for ``PlanActAgent``/
+    ``ReActAgent``. No ``tool_usage``/``failed_call_count`` here --
+    ``ScriptActAgentRecord.tool_usage()``/``len(record.failed_statements)``
+    already answer those directly off the record; this class is scoped to
+    exactly the two counters requested, not a full ``JsonToolAgentResult``
+    parity pass.
+
+    Fields
+    ------
+    regenerations_used:
+        Threaded from ``record.regenerations_used`` verbatim -- malformed/
+        invalid-generation retries consumed across this run's planning
+        generation(s), same meaning as ``JsonToolAgentResult``'s own field.
+
+    repair_rounds_used:
+        Threaded from ``record.repair_rounds_used`` verbatim -- framework-
+        granted repair rounds actually consumed after a resolution or
+        execution failure (see ``ScriptActAgent``'s ``replanning_limit``).
+        ``0`` means the plan finished without ever needing one.
+    """
+
+    regenerations_used: int = 0
+    repair_rounds_used: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the explicit serialized dictionary representation."""
+        data = AgentResult.to_dict(self)
+        data["regenerations_used"] = self.regenerations_used
+        data["repair_rounds_used"] = self.repair_rounds_used
         return data
 
 

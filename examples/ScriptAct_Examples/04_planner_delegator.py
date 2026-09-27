@@ -26,7 +26,7 @@ verbatim string block to reproduce -- a materially lower-risk delegation
 payload than handing sub-planners a whole precomputed task string.
 
 MathSpecialist is itself a nested ScriptActAgent with its own math toolbox and
-its own tool_calls_limit/planning_rounds_limit -- that internal budget is
+its own tool_calls_limit/replanning_limit -- that internal budget is
 completely invisible to the Delegator, which only ever sees one call per
 question no matter how many math tools it took inside.
 

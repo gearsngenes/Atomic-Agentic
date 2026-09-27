@@ -104,6 +104,14 @@ reviewer = BasicAgent(
     pre_invoke=reviewer_pre,
 )
 
+def planner_prestep(story_idea: str, loops: int) -> str:
+    task_prompt = (
+            f"Write a story based on the following idea: {idea!r}\n"
+            f"After outlining and drafting, critique and rewrite the draft {loops} times."
+            "Return the final draft as output."
+        )
+    return task_prompt
+
 orch = ScriptActAgent(
     name="StoryPlanner",
     namespace="examples",
@@ -111,6 +119,7 @@ orch = ScriptActAgent(
     llm_engine=llm_engine,
     context_enabled=True,
     replanning_limit=1,
+    pre_invoke=planner_prestep,
 )
 
 # Registered under each agent's own bare name -- no id capture needed, the
@@ -129,15 +138,8 @@ if __name__ == "__main__":
 
     orch.tool_calls_limit = 3 * loops
 
-    task_prompt = (
-        f"TASK: Write a story based on the following idea: {idea!r}\n"
-        "Create a structured outline, then write a first draft. "
-        f"Then for {loops} cycles, review and critique the draft then forward the notes to rewrite it."
-        "Return the final draft."
-    )
-
     print("\n⇢ Planning + execution …")
-    final_draft_md = str(orch.invoke({"prompt": task_prompt}).result)
+    final_draft_md = str(orch.invoke({"story_idea": idea, "loops": loops}).result)
 
     print("\n========== FINAL DRAFT ==========\n")
     print(final_draft_md)
